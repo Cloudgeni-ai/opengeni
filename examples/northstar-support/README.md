@@ -85,3 +85,13 @@ manager, and rate-limit both its session and tool endpoints. See
 [`docs/product-integration.md`](../../docs/product-integration.md),
 [`docs/session-mcp-servers.md`](../../docs/session-mcp-servers.md), and
 [`packages/sdk/README.md`](../../packages/sdk/README.md).
+
+The sidebar's **Connections** button opens `ConnectPanel` from
+`@opengeni/react/connect` with `presentation="catalog"`. Its host wrapper owns
+only the dialog, controller lifetime, and authorization navigation; provider
+readiness and setup come through the existing workspace API proxy.
+
+For custom layouts, `ConnectionCatalog` accepts `grouped={false}` to display
+capabilities individually. `ConnectionServiceRow` and `ConnectionOptionRow` are
+also exported separately; grouping changes presentation only, not connection
+identity, permissions, or setup callbacks.

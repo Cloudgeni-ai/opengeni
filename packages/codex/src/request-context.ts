@@ -60,12 +60,21 @@ export type CodexModelRequestEvent = {
   providerRequestId?: string;
   status?: number;
   willRetry?: boolean;
+  /** Only true for a successful response with substantive assistant/tool output. */
+  meaningfulOutput?: boolean;
 };
 
 export type CodexRequestOpaqueArtifacts = {
   requestId: string;
   fingerprints: readonly string[];
 };
+
+/**
+ * Durable execution fence invoked immediately before a provider request is
+ * dispatched. Errors are intentionally not classified here: the owning worker
+ * must receive typed lease-loss failures unchanged.
+ */
+export type CodexBeforeProviderDispatch = () => Promise<void> | void;
 
 export type CodexRequestPreparationPhase =
   | "transport_entry"
@@ -114,6 +123,11 @@ export type CodexRequestContext = {
   onModelRequestEvent?: (event: CodexModelRequestEvent) => Promise<void> | void;
   /** Exact opaque artifacts on the normalized wire request, never their ciphertext. */
   onRequestOpaqueArtifacts?: (artifacts: CodexRequestOpaqueArtifacts) => void;
+  /**
+   * Durable execution fence. Runs after request preparation and audit, and
+   * immediately before each actual provider dispatch, including auth retries.
+   */
+  beforeProviderDispatch?: CodexBeforeProviderDispatch;
   /** Stable request identity supplied by the owning durable execution. */
   nextRequestId?: () => string;
   /**

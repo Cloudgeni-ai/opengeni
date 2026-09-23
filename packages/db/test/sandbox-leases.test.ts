@@ -1,12 +1,16 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
+import { workspaceArchiveObjectKey, type WorkspaceArchiveObjectRef } from "@opengeni/contracts";
 import {
   acquireLease,
   acquireSandboxLeaseReaperHold,
   advanceWorkspaceGenerationForDirectRequest,
+  advanceWorkspaceGeneration,
+  SandboxWorkspaceMutationFencedError,
   adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
   claimTemporalScheduleCleanups,
@@ -29,6 +33,7 @@ import {
   claimSandboxCheckpointArtifactsForGc,
   claimSandboxSharedPreparation,
   persistDrainSnapshot as persistDrainSnapshotRaw,
+  persistWarmSnapshot,
   readLease,
   readSandboxSharedPreparation,
   readWorkspaceArchiveCapturePreflight,
@@ -101,6 +106,26 @@ function archiveDescriptor(archive: string, capturedAtMs: number) {
       fileCount: 1,
       totalFileBytes: bytes.length,
     },
+  };
+}
+
+function archiveObjectRef(
+  scope: { accountId: string; workspaceId: string; groupId: string },
+  descriptor: ReturnType<typeof archiveDescriptor>,
+  uploadId?: string,
+): WorkspaceArchiveObjectRef {
+  return {
+    schema: "sandbox_archive_object_v1",
+    // Construct explicitly so red tests exercise publication before the new
+    // optional uploadId generator is implemented.
+    key: workspaceArchiveObjectKey({
+      ...scope,
+      sandboxGroupId: scope.groupId,
+      revision: descriptor.revision,
+    }).replace(/\.tar$/, `${uploadId ? `.${uploadId}` : ""}.tar`),
+    sha256: descriptor.archiveSha256,
+    bytes: descriptor.archiveBytes,
+    backend: "s3-compatible",
   };
 }
 
@@ -413,6 +438,463 @@ async function seedLiveCanonicalAttempt(input: {
   });
   return { turnId, attemptId, holderId: `turn-attempt:${attemptId}` };
 }
+
+describe("archive object publication binding and disposition", () => {
+  test("warm capture reclamation migration replay preserves the exact function definition", async () => {
+    if (!available) return;
+    const definition = async () => {
+      const [row] = await admin`select pg_get_functiondef(
+        'opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint)'::regprocedure
+      ) as definition`;
+      return String(row!.definition);
+    };
+    const before = await definition();
+    expect(before).toContain("0491 bounded warm capture holder");
+    const migration = await readFile(
+      new URL("../drizzle/0491_warm_capture_holder_reclamation.sql", import.meta.url),
+      "utf8",
+    );
+    await admin.begin(async (tx) => {
+      await tx.unsafe(migration);
+    });
+    expect(await definition()).toBe(before);
+  }, 60_000);
+
+  async function fixture(liveness: "warm" | "draining") {
+    const ids = await freshWorkspace();
+    const sessionId = crypto.randomUUID();
+    const attempt = await seedLiveCanonicalAttempt({ ...ids, sessionId });
+    const scope = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    };
+    await acquireLease(db, {
+      ...scope,
+      kind: "turn",
+      holderId: attempt.holderId,
+      subjectId: sessionId,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    const instanceId = "archive-publication-fixture";
+    await commitWarmingToWarm(db, {
+      ...scope,
+      expectedEpoch: 0,
+      instanceId,
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal", sessionState: {} },
+      leaseTtlMs: 45_000,
+    });
+    if (liveness === "draining") {
+      await releaseLeaseHolder(db, {
+        ...scope,
+        kind: "turn",
+        holderId: attempt.holderId,
+        idleGraceMs: 0,
+      });
+    }
+    const source = (await readLease(db, ids.workspaceId, ids.groupId))!;
+    const captureId = crypto.randomUUID();
+    const claim = await claimWorkspaceArchiveCapture(db, {
+      ...scope,
+      captureId,
+      expectedEpoch: source.leaseEpoch,
+      expectedInstanceId: instanceId,
+      liveness,
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+      ...(liveness === "warm" ? { warmAttempt: { sessionId, ...attempt } } : {}),
+    });
+    if (claim.status !== "claimed") throw new Error(`archive fixture capture: ${claim.status}`);
+    const descriptor = archiveDescriptor(
+      Buffer.from("archive candidate bytes").toString("base64"),
+      1_900_000_000_000,
+    );
+    const input = {
+      ...scope,
+      sessionId,
+      ...attempt,
+      expectedLeaseId: source.id,
+      expectedEpoch: source.leaseEpoch,
+      expectedInstanceId: instanceId,
+      expectedWorkspaceGeneration: 0,
+      captureId,
+      providerRequestId: claim.claim.providerRequestId,
+      workspaceArchiveMeta: descriptor,
+      minIntervalMs: 0,
+      capturedAtMs: Date.parse(descriptor.capturedAt),
+    };
+    const publish = (ref: WorkspaceArchiveObjectRef, overrides = {}) =>
+      liveness === "warm"
+        ? persistWarmSnapshot(db, { ...input, workspaceArchiveRef: ref, ...overrides })
+        : persistDrainSnapshotRaw(db, { ...input, workspaceArchiveRef: ref, ...overrides });
+    return { ids, scope, source, input, descriptor, publish };
+  }
+
+  for (const sweep of ["workspace", "global"] as const) {
+    for (const settlement of ["settles", "expires"] as const) {
+      test(`closed turn's warm capture survives ${sweep} reclamation until it ${settlement}`, async () => {
+        if (!available) return;
+        const f = await fixture("warm");
+        await admin.begin(async (tx) => {
+          await tx`
+            update session_turn_attempts set state = 'closed', outcome = 'completed',
+              closed_at = now(), updated_at = now()
+            where id = ${f.input.attemptId}`;
+          await tx`
+            update session_turns set status = 'completed', active_attempt_id = null,
+              updated_at = now() where id = ${f.input.turnId}`;
+          // Even a dead owner's holder survives only this already-admitted
+          // bounded capture window; logical closure must not trigger takeover.
+          await tx`update sandbox_lease_holders
+            set last_heartbeat_at = now() - interval '3 minutes'
+            where lease_id = ${f.source.id} and holder_id = ${f.input.holderId}`;
+        });
+        const reap = async () => {
+          const input = {
+            viewerHolderTtlMs: 90_000,
+            turnHolderTtlMs: 90_000,
+            idleGraceMs: 900_000,
+          };
+          return sweep === "global"
+            ? await reapStaleLeaseHoldersGlobal(db, input)
+            : (await reapStaleLeaseHolders(db, { ...input, workspaceId: f.ids.workspaceId }))
+                .drained;
+        };
+        expect((await reap()).some((row) => row.sandboxGroupId === f.ids.groupId)).toBe(false);
+        expect(await readRow(f.ids.workspaceId, f.ids.groupId)).toMatchObject({
+          liveness: "warm",
+          refcount: 1,
+          turn_holders: 1,
+        });
+        expect((await readLease(db, f.ids.workspaceId, f.ids.groupId))?.archiveCapture?.id).toBe(
+          f.input.captureId,
+        );
+        // The retention exception is NOT permission to keep executing/touching
+        // a closed attempt. Ordinary authority and heartbeat fencing stay exact.
+        expect(
+          await touchLeaseHolder(db, {
+            ...f.scope,
+            kind: "turn",
+            holderId: f.input.holderId,
+          }),
+        ).toBe(false);
+        if (settlement === "settles") {
+          expect(
+            await releaseWorkspaceArchiveCapture(db, {
+              ...f.scope,
+              captureId: f.input.captureId,
+              expectedEpoch: f.source.leaseEpoch,
+              expectedInstanceId: f.source.instanceId!,
+            }),
+          ).toBe(true);
+          // With no capture, the closed holder is immediately reclaimable, but
+          // its ordinary idle grace is preserved instead of a forced drain.
+          expect((await reap()).some((row) => row.sandboxGroupId === f.ids.groupId)).toBe(false);
+          const after = await readRow(f.ids.workspaceId, f.ids.groupId);
+          expect(after).toMatchObject({ liveness: "draining", refcount: 0, turn_holders: 0 });
+          expect(after!.expires_at.getTime()).toBeGreaterThan(Date.now() + 800_000);
+        } else {
+          await admin`update sandbox_leases
+            set archive_capture_started_at = now() - interval '2 minutes',
+                archive_capture_deadline_at = now() - interval '1 minute'
+            where id = ${f.source.id}`;
+          expect((await reap()).some((row) => row.sandboxGroupId === f.ids.groupId)).toBe(true);
+          expect(await readRow(f.ids.workspaceId, f.ids.groupId)).toMatchObject({
+            liveness: "draining",
+            refcount: 0,
+            turn_holders: 0,
+          });
+          // Recovery, not the sweep, owns the physical operation and its claim.
+          expect((await readLease(db, f.ids.workspaceId, f.ids.groupId))?.archiveCapture?.id).toBe(
+            f.input.captureId,
+          );
+        }
+      }, 60_000);
+    }
+  }
+
+  test("a released drain retry cannot reuse a snapshot from before intervening writes", async () => {
+    if (!available) return;
+    const f = await fixture("draining");
+    await admin`
+      update sandbox_leases set resume_state = jsonb_set(resume_state,
+        '{sessionState,providerState}', jsonb_build_object('sandboxId', ${f.input.expectedInstanceId}::text))
+      where id = ${f.source.id}`;
+    expect(await releaseWorkspaceArchiveCapture(db, f.input)).toBe(true);
+    const resumed = await acquireLease(db, {
+      ...f.scope,
+      kind: "turn",
+      holderId: f.input.holderId,
+      subjectId: f.input.sessionId,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(resumed).toMatchObject({ role: "rearmed" });
+    // Model writes performed by the resumed holder before the next idle drain.
+    await admin`update sandbox_leases set workspace_generation = workspace_generation + 1 where id = ${f.source.id}`;
+    await releaseLeaseHolder(db, {
+      ...f.scope,
+      kind: "turn",
+      holderId: f.input.holderId,
+      idleGraceMs: 0,
+    });
+    const next = await claimWorkspaceArchiveCapture(db, {
+      ...f.scope,
+      // The same drain workflow retries with a new attempt and stable operation.
+      captureId: crypto.randomUUID(),
+      operationId: f.input.captureId,
+      expectedEpoch: f.source.leaseEpoch,
+      expectedInstanceId: f.input.expectedInstanceId,
+      liveness: "draining",
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+    });
+    expect(next.status).toBe("claimed");
+    if (next.status !== "claimed") throw new Error("expected fresh capture");
+    expect(next.claim.workspaceGeneration).toBe(1);
+    expect(next.claim.providerRequestId).not.toBe(f.input.providerRequestId);
+    // A genuinely stale callback must not release a different owner.
+    expect(await releaseWorkspaceArchiveCapture(db, f.input)).toBe(false);
+  }, 60_000);
+
+  for (const operation of ["acquire", "mutate"] as const) {
+    test(`expired capture bounds ${operation} retries without granting writer authority`, async () => {
+      if (!available) return;
+      const f = await fixture(operation === "acquire" ? "draining" : "warm");
+      await admin`
+        update sandbox_lease_holders set subject_id = ${f.input.sessionId}
+        where lease_id = ${f.source.id} and holder_id = ${f.input.holderId}`;
+      await admin`
+        update sandbox_leases
+        set archive_capture_started_at = now() - interval '2 minutes',
+            archive_capture_deadline_at = now() - interval '1 minute'
+        where id = ${f.source.id}`;
+      const controller = new AbortController();
+      const timer = setTimeout(
+        () => controller.abort(new Error("capture wait did not expire")),
+        2_000,
+      );
+      let clockCalls = 0;
+      const clock = spyOn(performance, "now").mockImplementation(() =>
+        ++clockCalls <= 2 ? 0 : 20_000,
+      );
+      try {
+        if (operation === "acquire") {
+          expect(
+            await acquireLease(db, {
+              ...f.scope,
+              kind: "turn",
+              holderId: "bounded-successor",
+              backend: "modal",
+              leaseTtlMs: 45_000,
+              captureWaitMs: 25,
+              waitSignal: controller.signal,
+            }),
+          ).toMatchObject({ role: "fenced", reason: "capture_in_progress" });
+        } else {
+          const rejection = await advanceWorkspaceGeneration(db, {
+            ...f.input,
+            executionGeneration: 1,
+            operation: "exec",
+            captureWaitMs: 25,
+            waitSignal: controller.signal,
+          }).catch((error: unknown) => error);
+          expect(rejection).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
+          expect(rejection).toMatchObject({ code: "capture_in_progress" });
+        }
+      } finally {
+        clock.mockRestore();
+        clearTimeout(timer);
+      }
+      const [lease] = await admin`
+        select archive_capture_id, workspace_generation,
+          (select count(*)::int from sandbox_lease_holders where lease_id = sandbox_leases.id
+            and holder_id = 'bounded-successor') as successor_holders
+        from sandbox_leases where id = ${f.source.id}`;
+      expect(lease).toMatchObject({
+        archive_capture_id: f.input.captureId,
+        workspace_generation: 0,
+        successor_holders: 0,
+      });
+    }, 60_000);
+  }
+
+  for (const liveness of ["warm", "draining"] as const) {
+    for (const mismatch of [
+      "accountId",
+      "workspaceId",
+      "groupId",
+      "revision",
+      "sha256",
+      "bytes",
+      "malformed",
+    ] as const) {
+      test(`${liveness} rejects archive ref ${mismatch} mismatch before publication`, async () => {
+        if (!available) return;
+        const f = await fixture(liveness);
+        const ref = archiveObjectRef(f.ids, f.descriptor);
+        if (mismatch === "accountId" || mismatch === "workspaceId" || mismatch === "groupId") {
+          ref.key = archiveObjectRef(
+            { ...f.ids, [mismatch]: crypto.randomUUID() },
+            f.descriptor,
+          ).key;
+        } else if (mismatch === "revision") {
+          ref.key = ref.key.replace("1900000000000", "1900000000001");
+        } else if (mismatch === "sha256") ref.sha256 = "b".repeat(64);
+        else if (mismatch === "bytes") ref.bytes += 1;
+        else ref.key = "malformed";
+        const before = await readLease(db, f.ids.workspaceId, f.ids.groupId);
+        // A malformed supplied ref must not silently fall back to valid inline bytes.
+        await expect(
+          f.publish(
+            ref,
+            mismatch === "malformed"
+              ? { workspaceArchive: Buffer.from("archive candidate bytes").toString("base64") }
+              : {},
+          ),
+        ).rejects.toThrow();
+        expect((await readLease(db, f.ids.workspaceId, f.ids.groupId))?.resumeState).toEqual(
+          before?.resumeState,
+        );
+      }, 60_000);
+    }
+
+    test(`${liveness} commits a unique candidate and identifies exact-ref replay without readback inference`, async () => {
+      if (!available) return;
+      const f = await fixture(liveness);
+      const ref = archiveObjectRef(f.ids, f.descriptor, crypto.randomUUID());
+      const first = await f.publish(ref);
+      expect(first).toMatchObject({
+        wrote: true,
+        archiveRevision: f.descriptor.revision,
+        candidateDisposition: "adopted",
+      });
+      // Simulate a lost acknowledgement: retry the exact submitted ref.
+      expect(await f.publish(ref)).toMatchObject({
+        wrote: liveness === "draining",
+        candidateDisposition: "already_referenced",
+      });
+      const otherRef = archiveObjectRef(f.ids, f.descriptor, crypto.randomUUID());
+      expect(await f.publish(otherRef)).toMatchObject({
+        wrote: liveness === "draining",
+        candidateDisposition: "unused",
+      });
+      const lease = await readLease(db, f.ids.workspaceId, f.ids.groupId);
+      expect(lease?.resumeState?.sessionState).toMatchObject({ workspaceArchiveRef: ref });
+      expect(lease?.resumeState?.sessionState).not.toHaveProperty("workspaceArchive");
+    }, 60_000);
+  }
+
+  test("cold-late unique candidate adopts once, exact replay stays referenced and a distinct replay is unused", async () => {
+    if (!available) return;
+    const f = await fixture("draining");
+    expect(
+      await confirmDrainCold(db, {
+        ...f.scope,
+        expectedEpoch: f.source.leaseEpoch,
+        expectedCaptureId: f.input.captureId,
+        providerMissingBeforeCapture: true,
+      }),
+    ).toMatchObject({ wentCold: true });
+    const ref = archiveObjectRef(f.ids, f.descriptor, crypto.randomUUID());
+    for (const overrides of [
+      { expectedLeaseId: crypto.randomUUID() },
+      { expectedEpoch: f.source.leaseEpoch + 1 },
+      { expectedWorkspaceGeneration: 1 },
+      { expectedInstanceId: "different-instance" },
+      { providerRequestId: crypto.randomUUID() },
+    ]) {
+      expect(await f.publish(ref, overrides)).toMatchObject({
+        wrote: false,
+        candidateDisposition: "unused",
+      });
+    }
+    expect(await f.publish(ref)).toMatchObject({ wrote: true, candidateDisposition: "adopted" });
+    expect(await f.publish(ref)).toMatchObject({
+      wrote: false,
+      candidateDisposition: "already_referenced",
+    });
+    expect(
+      await f.publish(archiveObjectRef(f.ids, f.descriptor, crypto.randomUUID())),
+    ).toMatchObject({ wrote: false, candidateDisposition: "unused" });
+    const lease = await readLease(db, f.ids.workspaceId, f.ids.groupId);
+    expect(lease?.recovery.lateArchiveCapture).toBeUndefined();
+    expect(lease?.resumeState?.sessionState).toMatchObject({ workspaceArchiveRef: ref });
+  }, 60_000);
+
+  test("concurrent duplicate drain uploads publish one physical candidate without changing wrote", async () => {
+    if (!available) return;
+    const f = await fixture("draining");
+    const candidates = [
+      archiveObjectRef(f.ids, f.descriptor, crypto.randomUUID()),
+      archiveObjectRef(f.ids, f.descriptor, crypto.randomUUID()),
+    ];
+    const outcomes = await Promise.all(candidates.map((ref) => f.publish(ref)));
+    expect(outcomes.map((result) => result.wrote)).toEqual([true, true]);
+    expect(outcomes.map((result) => result.candidateDisposition).sort()).toEqual([
+      "adopted",
+      "unused",
+    ]);
+    const winner =
+      candidates[outcomes.findIndex((result) => result.candidateDisposition === "adopted")];
+    expect(
+      (await readLease(db, f.ids.workspaceId, f.ids.groupId))?.resumeState?.sessionState,
+    ).toMatchObject({ workspaceArchiveRef: winner });
+  }, 60_000);
+
+  test("warm rotation preserves a legacy previous ref and replay recognizes it after capture fencing", async () => {
+    if (!available) return;
+    const f = await fixture("warm");
+    const legacy = archiveObjectRef(f.ids, f.descriptor);
+    expect(await f.publish(legacy)).toMatchObject({ wrote: true, candidateDisposition: "adopted" });
+    const captureId = crypto.randomUUID();
+    expect(
+      await claimWorkspaceArchiveCapture(db, {
+        ...f.scope,
+        captureId,
+        expectedEpoch: f.source.leaseEpoch,
+        expectedInstanceId: f.input.expectedInstanceId,
+        liveness: "warm",
+        captureTimeoutMs: 60_000,
+        minIntervalMs: 0,
+        warmAttempt: {
+          sessionId: f.input.sessionId,
+          turnId: f.input.turnId,
+          attemptId: f.input.attemptId,
+          holderId: f.input.holderId,
+        },
+      }),
+    ).toMatchObject({ status: "claimed" });
+    const descriptor = archiveDescriptor(
+      Buffer.from("newer archive bytes").toString("base64"),
+      1_900_000_000_001,
+    );
+    const unique = archiveObjectRef(f.ids, descriptor, crypto.randomUUID());
+    expect(
+      await f.publish(unique, {
+        captureId,
+        workspaceArchiveMeta: descriptor,
+        capturedAtMs: Date.parse(descriptor.capturedAt),
+      }),
+    ).toMatchObject({ wrote: true, candidateDisposition: "adopted" });
+    expect(
+      (await readLease(db, f.ids.workspaceId, f.ids.groupId))?.resumeState?.sessionState,
+    ).toMatchObject({ workspaceArchiveRef: unique, workspaceArchivePrevRef: legacy });
+    expect(await f.publish(legacy)).toMatchObject({
+      wrote: false,
+      candidateDisposition: "already_referenced",
+    });
+    // A wrong/closed attempt still cannot turn a referenced ref into cleanup
+    // authority just because the lifecycle write is rejected before its guard.
+    expect(await f.publish(legacy, { attemptId: crypto.randomUUID() })).toMatchObject({
+      wrote: false,
+      superseded: true,
+      candidateDisposition: "already_referenced",
+    });
+  }, 60_000);
+});
 
 describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
   test("(0-delete) workspace deletion atomically refuses live leases and returns durable schedule cleanup ids", async () => {
@@ -2655,7 +3137,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(admission).toMatchObject({ role: "rearmed", lease: { liveness: "warm" } });
   }, 60_000);
 
-  test("(3-claim) acquisition waits behind the exact teardown claim, then re-arms without an error", async () => {
+  test("(3-claim) acquisition honors the frozen teardown claim after the caller budget is lowered", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
@@ -2714,11 +3196,14 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       holderId: "claim-successor",
       backend: "modal",
       leaseTtlMs: 45_000,
-      captureWaitMs: 1_000,
+      // Simulate an old-config process during a rolling activation: its local
+      // wait is already exhausted while the child retains the larger durable
+      // capture deadline it froze before this call began.
+      captureWaitMs: 25,
     }).finally(() => {
       settled = true;
     });
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await new Promise((resolve) => setTimeout(resolve, 75));
     expect(settled).toBe(false);
     const [holderBeforeRelease] = await admin<{ count: number }[]>`
       select count(*)::int as count from sandbox_lease_holders h
@@ -4006,7 +4491,11 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(after?.liveness).toBe("draining");
     expect(after?.refcount).toBe(0);
     expect(after?.viewer_holders).toBe(0);
-    expect(after?.expires_at.getTime()).toBeLessThanOrEqual(Date.now());
+    // Lease expiry is stamped by Postgres; host/DB clocks may differ by milliseconds.
+    const [expiry] = await admin`
+      select expires_at <= clock_timestamp() as expired from sandbox_leases
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`;
+    expect(expiry?.expired).toBe(true);
     expect(drained).toContainEqual(
       expect.objectContaining({
         workspaceId: ids.workspaceId,
@@ -4578,7 +5067,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(beforeCallback?.recovery).toMatchObject({
       archive: { status: "available", current: { revision: priorDescriptor.revision } },
       restore: { status: "pending", selectedRevision: priorDescriptor.revision },
-      lateArchiveCapture: { providerRequestId: operationId },
+      lateArchiveCapture: { providerRequestId: claim.claim.providerRequestId },
     });
 
     expect(

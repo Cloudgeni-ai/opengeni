@@ -22,6 +22,7 @@ import {
   hasGitCredentialRepositorySelection,
   hasGitHubRepositorySelection,
   sandboxLifecycleTransitionWaitMs,
+  sandboxWarmRateMicrosPerSecond,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
@@ -42,6 +43,7 @@ import {
   SandboxImageConflictError,
   SandboxProviderReadLockUnavailableError,
   SandboxRigConflictError,
+  SandboxPaidComputeAdmissionError,
   withSandboxProviderReadLock,
   type Database,
   type LeaseSnapshot,
@@ -51,10 +53,12 @@ import {
   recordTenancyCompatibilityLaneUse,
   sandboxLeaseTelemetryKey,
   sandboxOperationMetricObserver,
+  sandboxCaptureWaitMetricObserver,
   type Observability,
 } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
+import type { ObjectStorage } from "@opengeni/storage";
 
 import {
   buildSelfhostedBackendSession,
@@ -65,9 +69,11 @@ import {
   NatsOpStreamTransport,
   SandboxResumeIdentityMismatchError,
   SandboxResumeIdentityUnavailableError,
+  RoutingActiveRouteChangedError,
   RoutingWorkspaceRootChangedError,
   SelfhostedWorkspaceRootChangedError,
   ChannelAConflictError,
+  ChannelAFileSystemRouteChangedError,
   ChannelANotFoundError,
   ChannelAUnsupportedError,
   ChannelAUnavailableError,
@@ -99,6 +105,7 @@ export type ChannelAServices = {
   db: Database;
   settings: Settings;
   bus: EventBus;
+  objectStorage?: ObjectStorage | null;
   observability?: Observability | undefined;
 };
 
@@ -527,6 +534,9 @@ async function withChannelAOperation<T>(
   const onSandboxOperation = services.observability
     ? sandboxOperationMetricObserver(services.observability)
     : undefined;
+  const onSandboxCaptureWait = services.observability
+    ? sandboxCaptureWaitMetricObserver(services.observability)
+    : undefined;
   const { accountId, workspaceId, session } = ctx;
 
   if (session.sandboxBackend === "none") {
@@ -612,11 +622,18 @@ async function withChannelAOperation<T>(
           codemodeTokenFileFromEnvironment(environment, session.id),
         )
       : credentialSession;
-    const fileSystemRoot = await routingSession.fileSystemRoot();
+    const fileSystemAuthority = await routingSession.fileSystemAuthority();
+    const fileSystemEpoch =
+      fileSystemAuthority.backendKind === "selfhosted"
+        ? fileSystemAuthority.activeEpoch
+        : (lease?.leaseEpoch ?? fileSystemAuthority.activeEpoch);
     const service = new SandboxChannelAService({
       session: scopedSession as ChannelASession,
-      workspaceRoot: fileSystemRoot,
-      leaseEpoch: lease?.leaseEpoch ?? session.activeEpoch,
+      workspaceRoot: fileSystemAuthority.root,
+      leaseEpoch: fileSystemEpoch,
+      ...(fileSystemAuthority.backendKind === "selfhosted"
+        ? { providerPathMode: "workspace-relative" as const, fileReadScope: "machine" as const }
+        : {}),
       emit,
     });
     const result = await fn({
@@ -716,6 +733,7 @@ async function withChannelAOperation<T>(
         operationResourcePolicySupported:
           enrollment.agentCapabilities.operationResourcePolicy === true,
         operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+        transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
         ...(settings.agentOpStreamEnabled === true &&
         enrollment?.opStream === true &&
         bus.getOpStreamConnection
@@ -741,6 +759,7 @@ async function withChannelAOperation<T>(
           settings,
           bus,
           ...(onSandboxOperation ? { onSandboxOperation } : {}),
+          ...(onSandboxCaptureWait ? { onSandboxCaptureWait } : {}),
           ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
         },
         {
@@ -775,7 +794,7 @@ async function withChannelAOperation<T>(
 
   // One session has one logical runtime across turns and every API-direct
   // surface. Without this, Terminal/Files/Browser/Computer/viewers could rearm
-  // a stale deployment image after the worker had resolved a newer Pack/Rig or
+
   // deployment image for the same durable sandbox group.
   const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session);
 
@@ -806,6 +825,10 @@ async function withChannelAOperation<T>(
       holderId,
       subjectId: session.id,
       backend: session.sandboxBackend,
+      warmBilling: {
+        mode: settings.sandboxWarmBillingMode,
+        rateMicrosPerSecond: sandboxWarmRateMicrosPerSecond(settings, session.sandboxBackend),
+      },
       os: session.sandboxOs,
       image: sandboxRuntime.image,
       rigVersionId: session.rigVersionId,
@@ -1003,6 +1026,9 @@ async function withChannelAOperation<T>(
           acquiredLease: acquired.lease,
           fallbackEnvelope: envelope,
           dataPlaneUrl: acquired.lease.dataPlaneUrl,
+          ...(services.objectStorage !== undefined
+            ? { objectStorage: services.objectStorage }
+            : {}),
         });
         established = result.established;
         leaseSnapshot = result.lease;
@@ -1045,6 +1071,7 @@ async function withChannelAOperation<T>(
           settings,
           bus,
           ...(onSandboxOperation ? { onSandboxOperation } : {}),
+          ...(onSandboxCaptureWait ? { onSandboxCaptureWait } : {}),
           ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
         },
         {
@@ -1189,6 +1216,8 @@ async function withChannelAOperation<T>(
  *  already-HTTPException unchanged. */
 export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unknown {
   if (error instanceof HTTPException) return error;
+  if (error instanceof SandboxPaidComputeAdmissionError)
+    return new HTTPException(402, { message: error.message, cause: error });
   if (isChannelARequestCancellation(error, waitSignal))
     return new HTTPException(499 as never, {
       message: "request cancelled",
@@ -1200,8 +1229,10 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
   )
     return new HTTPException(409, { message: error.message });
   if (
+    error instanceof RoutingActiveRouteChangedError ||
     error instanceof RoutingWorkspaceRootChangedError ||
-    error instanceof SelfhostedWorkspaceRootChangedError
+    error instanceof SelfhostedWorkspaceRootChangedError ||
+    error instanceof ChannelAFileSystemRouteChangedError
   )
     return new ApiHttpError(409, {
       code: "conflict",
@@ -1299,8 +1330,10 @@ export function channelAOperationFailureDiagnostic(
   if (
     error instanceof SandboxResumeIdentityMismatchError ||
     error instanceof SandboxResumeIdentityUnavailableError ||
+    error instanceof RoutingActiveRouteChangedError ||
     error instanceof RoutingWorkspaceRootChangedError ||
     error instanceof SelfhostedWorkspaceRootChangedError ||
+    error instanceof ChannelAFileSystemRouteChangedError ||
     (error instanceof HTTPException && error.status === 409)
   ) {
     return {

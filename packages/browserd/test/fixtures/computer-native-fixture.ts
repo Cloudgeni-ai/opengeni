@@ -25,7 +25,7 @@ async function handle(request: {
   if (request.method === "targets") await new Promise((resolve) => setTimeout(resolve, 20));
   if (request.method === "observe" && request.targetId === "missing") {
     write({
-      protocolVersion: 2,
+      protocolVersion: 3,
       requestId: request.requestId,
       status: "error",
       error: {
@@ -39,17 +39,17 @@ async function handle(request: {
   }
   if (request.method === "observe" && request.targetId === "malformed") {
     write({
-      protocolVersion: 2,
+      protocolVersion: 3,
       requestId: request.requestId,
       status: "ok",
       result: { invalid: true },
     });
     return;
   }
-  if (request.method === "capture") {
+  if (request.method === "capture" || request.method === "capture_still") {
     const attachment = Buffer.from("fixture-png");
     const response = {
-      protocolVersion: 2,
+      protocolVersion: 3,
       requestId: request.requestId,
       status: "ok",
       result: {
@@ -67,7 +67,7 @@ async function handle(request: {
     return;
   }
   write({
-    protocolVersion: 2,
+    protocolVersion: 3,
     requestId: request.requestId,
     status: "ok",
     result: result(request.method),
@@ -77,7 +77,7 @@ async function handle(request: {
 function result(method: string): unknown {
   if (method === "handshake") {
     return {
-      protocolVersion: 2,
+      protocolVersion: 3,
       helperVersion: "fixture-1",
       platform: "linux",
       capabilities: capabilities(),

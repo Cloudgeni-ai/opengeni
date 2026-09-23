@@ -4,16 +4,23 @@
 import { OpenGeniProvider } from "@opengeni/react";
 import type { WorkspaceControlEvent } from "@opengeni/sdk";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
 import { toast } from "sonner";
 
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { RailProvider } from "@/components/rail/rail-context";
 import { RailShell } from "@/components/rail/rail-shell";
-import {
-  WorkspaceManagementShell,
-  workspaceManagementLocation,
-} from "@/components/settings/workspace-settings-shell";
+import { workspaceManagementLocation } from "@/lib/workspace-management-location";
+import { OrganizationWorkspaceAdministrationBoundary } from "@/components/settings/organization-workspace-administration";
 import { Button } from "@/components/ui/button";
 import { WorkspaceTenantBoundary } from "@/components/workspace-tenant-boundary";
 import { WorkspaceUnavailableRoute } from "@/routes/workspace-unavailable";
@@ -32,6 +39,19 @@ import {
   type WorkspaceOperationIdentity,
 } from "@/lib/workspace-transition";
 import type { SlackUserLinkAccessRequest } from "@/types";
+
+const LazyWorkspaceManagementShell = lazy(() =>
+  import("@/components/settings/workspace-settings-shell").then((module) => ({
+    default: module.WorkspaceManagementShell,
+  })),
+);
+function WorkspaceManagementShell(props: ComponentProps<typeof LazyWorkspaceManagementShell>) {
+  return (
+    <Suspense fallback={<LoadingPanel label="Loading settings" />}>
+      <LazyWorkspaceManagementShell {...props} />
+    </Suspense>
+  );
+}
 
 type SlackAccessState = {
   request: SlackUserLinkAccessRequest | null;
@@ -66,11 +86,13 @@ export function WorkspaceShellRouteContent({
   context,
   navigate,
   onAuthorizedShellMount,
+  managementLocation = null,
 }: {
   workspaceId: string;
   context: AppContextValue;
   navigate: ReturnType<typeof useNavigate>;
   onAuthorizedShellMount?: () => void;
+  managementLocation?: ReturnType<typeof workspaceManagementLocation>;
 }) {
   const activeWorkspace = authorizedWorkspaceFromList({
     workspaceId,
@@ -354,6 +376,43 @@ export function WorkspaceShellRouteContent({
     workspaceId,
   ]);
 
+  if (!activeWorkspace && !hasNarrowSlackFlow && managementLocation?.kind === "settings") {
+    const unavailable = (
+      <WorkspaceUnavailableRoute
+        requestedWorkspaceId={workspaceId}
+        workspaces={context.workspaces}
+        accessContext={context.accessContext}
+        suppressAuthorizedFallback={context.invalidSlackLinkQueryWorkspaceId === workspaceId}
+      />
+    );
+    return (
+      <OrganizationWorkspaceAdministrationBoundary
+        client={context.client}
+        accessContext={context.accessContext}
+        accessKeyVersion={context.accessKeyVersion}
+        workspaceId={workspaceId}
+        unavailable={unavailable}
+      >
+        {(administration) => (
+          <WorkspaceManagementShell
+            workspaceId={workspaceId}
+            workspaceName={administration.workspace.name}
+            organizationName={administration.overview.organization.name}
+            organizationSettingsWorkspaceId={
+              context.workspaces.find(
+                (candidate) => candidate.accountId === administration.organizationId,
+              )?.id
+            }
+            organizationManagementOnly
+            location={managementLocation}
+          >
+            <Outlet />
+          </WorkspaceManagementShell>
+        )}
+      </OrganizationWorkspaceAdministrationBoundary>
+    );
+  }
+
   if (!activeWorkspace && !hasNarrowSlackFlow) {
     return (
       <WorkspaceUnavailableRoute
@@ -476,7 +535,6 @@ function AuthorizedWorkspaceShell({
   );
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
-  const workspaceName = activeWorkspace?.name ?? "Workspace";
   const organizationName = activeWorkspace
     ? orgLabel(activeWorkspace.accountId, context.accessContext.accountGrants)
     : "Organization";
@@ -498,7 +556,6 @@ function AuthorizedWorkspaceShell({
       ) : managementLocation ? (
         <WorkspaceManagementShell
           workspaceId={workspaceId}
-          workspaceName={workspaceName}
           organizationName={organizationName}
           location={managementLocation}
         >
@@ -516,7 +573,17 @@ function AuthorizedWorkspaceShell({
 export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
+  const location = useRouterState({ select: (state) => state.location });
   return (
-    <WorkspaceShellRouteContent workspaceId={workspaceId} context={context} navigate={navigate} />
+    <WorkspaceShellRouteContent
+      workspaceId={workspaceId}
+      context={context}
+      navigate={navigate}
+      managementLocation={workspaceManagementLocation(
+        location.pathname,
+        workspaceId,
+        location.search.section,
+      )}
+    />
   );
 }

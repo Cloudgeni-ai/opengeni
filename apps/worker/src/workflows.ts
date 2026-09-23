@@ -1,3 +1,4 @@
+export { knowledgeIndexingWorkflow } from "./workflows/knowledge-indexing";
 export { documentIndexWorkflow, type DocumentIndexWorkflowInput } from "./workflows/document-index";
 export {
   approvalDecision,

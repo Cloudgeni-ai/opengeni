@@ -3,6 +3,7 @@ import type {
   CodexAccount,
   CodexAccountsResponse,
   CodexRotationSettings,
+  SessionCodexAccountsResponse,
   SessionEvent,
 } from "@opengeni/sdk";
 import { useOpenGeni, type ClientOverride } from "../provider";
@@ -15,27 +16,49 @@ import {
 
 /** Events that change which Codex account a session runs on (or just ran). */
 export function isCodexAccountEvent(event: Pick<SessionEvent, "type">): boolean {
-  return event.type === "codex.account.switched";
+  return [
+    "codex.credential.selected",
+    "codex.account.switched",
+    "codex.account.selection.changed",
+    "codex.capacity.waiting",
+    "codex.capacity.resumed",
+    "codex.capacity.superseded",
+    "turn.completed",
+    "turn.failed",
+    "turn.cancelled",
+    "turn.requires_action",
+    "session.status.changed",
+  ].includes(event.type);
 }
 
 /**
  * The structural slice of the SDK client the Codex-accounts surface needs. Method
  * NAMES + SIGNATURES match `OpenGeniClient` so the real client satisfies it
  * directly; declared structurally (not a hard Pick) so a test/Geni client can
- * stand in. `getSession` reads the session's pin/last; `pinSessionCodexAccount`
+ * stand in. `listSessionCodexAccounts` reads the accepted selection and choices
+ * atomically; `pinSessionCodexAccount`
  * is the optional mutation (absent ⇒ the indicator hides the switch affordance).
  */
 export type CodexAccountsClientLike = {
   listCodexAccounts: (workspaceId: string) => Promise<CodexAccountsResponse>;
+  /** Required for session-scoped use; never fall back to another pool. */
+  listSessionCodexAccounts?: (
+    workspaceId: string,
+    sessionId: string,
+  ) => Promise<SessionCodexAccountsResponse>;
   getSession?: (
     workspaceId: string,
     sessionId: string,
-  ) => Promise<{ codexPinnedCredentialId?: string | null; codexLastCredentialId?: string | null }>;
+  ) => Promise<{
+    codexPinnedCredentialId?: string | null;
+    codexLastCredentialId?: string | null;
+    codexCurrentSelection?: { credentialId: string | null; waiting: boolean } | null;
+  }>;
   pinSessionCodexAccount?: (
     workspaceId: string,
     sessionId: string,
     target: string,
-  ) => Promise<{ pinned: string }>;
+  ) => Promise<{ pinned: string; appliedTo?: "waiting_turn" | "next_turn" }>;
   /** Optional (absent ⇒ the card hides live refresh): batched live /wham/usage refresh. */
   refreshCodexUsage?: (workspaceId: string) => Promise<{ usage: Record<string, unknown> }>;
 };
@@ -51,16 +74,21 @@ export type UseCodexAccountsOptions = ClientOverride &
 
 export type UseCodexAccountsResult = {
   accounts: CodexAccount[];
-  /** The workspace ACTIVE account (used when a session is unpinned). */
+  /** The ACTIVE account for the retry pool, or current workspace pool for new work. */
   activeAccountId: string | null;
   /** The session's PINNED account (null ⇒ following workspace active). */
   pinnedAccountId: string | null;
-  /** The account the next turn will run on: pin > workspace active. */
+  /** Current preference only; automatic allocation can choose another account. */
   effectiveAccountId: string | null;
+  currentSelection: { credentialId: string | null; waiting: boolean } | null;
+  /** The accepted account can differ from the choices for the next turn. */
+  currentAccount: CodexAccount | null;
+  switchAppliedTo: "waiting_turn" | "next_turn" | null;
   /** The account the session's last turn ACTUALLY ran on (the "Running on:" source). */
   lastAccountId: string | null;
   settings: CodexRotationSettings;
   loading: boolean;
+  error: Error | null;
   refresh: () => Promise<void>;
   /**
    * Trigger a LIVE batched /wham/usage refresh across all accounts, then re-read
@@ -85,6 +113,8 @@ const EMPTY_SETTINGS: CodexRotationSettings = {
 };
 
 type CodexAccountsState = {
+  currentAccount: CodexAccount | null;
+  currentSelection: { credentialId: string | null; waiting: boolean } | null;
   accounts: CodexAccount[];
   activeAccountId: string | null;
   settings: CodexRotationSettings;
@@ -93,6 +123,8 @@ type CodexAccountsState = {
 };
 
 const EMPTY_STATE: CodexAccountsState = {
+  currentAccount: null,
+  currentSelection: null,
   accounts: [],
   activeAccountId: null,
   settings: EMPTY_SETTINGS,
@@ -101,8 +133,8 @@ const EMPTY_STATE: CodexAccountsState = {
 };
 
 /**
- * The workspace's Codex accounts + the per-workspace active pointer + (when
- * session-scoped) the session pin and last-ran-on account. Composed like
+ * The workspace's Codex accounts, or session-authorized retry/next-turn choices
+ * and accepted current account. Composed like
  * `useMachines`: slow polling (the realtime work is done by the
  * `codex.account.switched` event trigger) + a `pin` mutation.
  * Dual-consumer safe via the structural `CodexAccountsClientLike` surface.
@@ -114,24 +146,27 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
   const sharedEvents = options.events;
 
   const load = useCallback(async (): Promise<CodexAccountsState> => {
-    const accountsP = codexClient.listCodexAccounts(workspaceId);
-    const sessionP =
-      sessionId && codexClient.getSession
-        ? codexClient.getSession(workspaceId, sessionId).catch(() => null)
-        : Promise.resolve(null);
-    const [acc, session] = await Promise.all([accountsP, sessionP]);
+    if (sessionId) {
+      if (!codexClient.listSessionCodexAccounts)
+        throw new Error("Session Codex account projection is unavailable");
+      return await codexClient.listSessionCodexAccounts(workspaceId, sessionId);
+    }
+    const acc = await codexClient.listCodexAccounts(workspaceId);
     return {
+      currentSelection: null,
+      currentAccount: null,
       accounts: acc.accounts,
       activeAccountId: acc.activeAccountId,
       settings: acc.settings,
-      pinnedAccountId: session?.codexPinnedCredentialId ?? null,
-      lastAccountId: session?.codexLastCredentialId ?? null,
+      pinnedAccountId: null,
+      lastAccountId: null,
     };
   }, [codexClient, workspaceId, sessionId]);
 
   const {
     data: loadedData,
     loading,
+    error,
     refresh,
   } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
@@ -140,6 +175,10 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
   const { run: runMutation, mutating: pinning, mutationError } = useMutationRunner();
   const { run: runUsageMutation, mutating: refreshingUsage } = useMutationRunner();
   const [pinningTarget, setPinningTarget] = useState<string | null>(null);
+  const [switchReceipt, setSwitchReceipt] = useState<{
+    sessionId: string;
+    appliedTo: "waiting_turn" | "next_turn";
+  } | null>(null);
 
   // Refresh only after the durable post-selection event. `turn.started` is
   // emitted before account selection settles and races this authoritative read.
@@ -161,8 +200,10 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
         return false;
       }
       setPinningTarget(target);
+      setSwitchReceipt(null);
       const result = await runMutation(async () => {
-        await codexClient.pinSessionCodexAccount!(workspaceId, sessionId, target);
+        const receipt = await codexClient.pinSessionCodexAccount!(workspaceId, sessionId, target);
+        setSwitchReceipt({ sessionId, appliedTo: receipt.appliedTo ?? "next_turn" });
         return true;
       });
       setPinningTarget(null);
@@ -187,10 +228,15 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
     return result === true;
   }, [codexClient, workspaceId, runUsageMutation, refresh]);
 
-  const data = loadedData ?? EMPTY_STATE;
+  // Reauthorization failure must remove a previously visible session pool.
+  const data = (sessionId && error ? null : loadedData) ?? EMPTY_STATE;
   const effectiveAccountId = data.pinnedAccountId ?? data.activeAccountId;
 
   return {
+    currentAccount: data.currentAccount,
+    currentSelection: data.currentSelection,
+    switchAppliedTo:
+      switchReceipt?.sessionId === sessionId ? (switchReceipt?.appliedTo ?? null) : null,
     accounts: data.accounts,
     activeAccountId: data.activeAccountId,
     pinnedAccountId: data.pinnedAccountId,
@@ -198,6 +244,7 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
     lastAccountId: data.lastAccountId,
     settings: data.settings,
     loading,
+    error,
     refresh,
     refreshUsage,
     refreshingUsage,

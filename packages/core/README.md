@@ -5,7 +5,7 @@
 It owns code that is not intrinsically HTTP or Temporal process bootstrapping:
 
 - access: `requireAccessContext`, `requireAccessGrant`, `requirePermission`
-- domain: session creation/follow-up, scheduled-task validation, environments, packs, capabilities, workspace members
+- domain: session creation/follow-up, scheduled-task validation, environments, capabilities, workspace members
 - billing/admission: `checkLimit`, `requireLimit`, `recordWorkspaceUsage`
 - dependencies: `AppDependencies`, `ApiRouteDeps`, `SessionWorkflowClient`
 

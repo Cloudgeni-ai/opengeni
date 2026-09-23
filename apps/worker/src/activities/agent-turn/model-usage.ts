@@ -15,11 +15,13 @@ import {
 } from "@opengeni/runtime";
 import {
   calculateGatewayReportedCostBreakdown,
+  calculateGatewayReportedProviderCostMicros,
   calculateModelUsageCostBreakdown,
   configuredModelPricingSchedules,
+  resolveModelProvider,
   responseSatisfiesLatencyMode,
-  OPENGENI_GATEWAY_MODELS,
   OPENGENI_GATEWAY_PROVIDER_ID,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
   type ModelUsageInput,
   type ModelProviderApi,
   type Settings,
@@ -123,10 +125,21 @@ export function createCompactionModelUsageEventState(
   return { usageCount: 0, claimedSourceKeys };
 }
 
+export const createSessionTitleModelUsageEventState = createCompactionModelUsageEventState;
+
 export function modelResponseContextSignal(
   state: ModelResponseEventState,
+  responseCountBeforeStream = 0,
 ): { revision: number; totalTokens: number } | null {
-  return state.contextSignal;
+  const signal = state.contextSignal;
+  // A compaction retry creates a new SDK request counter, but usage identities
+  // remain activity-wide. Never bind a pre-stream report to a reused request
+  // ordinal; translate only this stream's reports without mutating usage state.
+  if (!signal || signal.revision <= responseCountBeforeStream) return null;
+  return {
+    revision: signal.revision - responseCountBeforeStream,
+    totalTokens: signal.totalTokens,
+  };
 }
 
 export function assertModelResponseLatencyMode(input: {
@@ -191,6 +204,8 @@ export async function processModelResponseTerminalEvent(input: {
   latencyMode?: LatencyMode;
   metricProvider: string;
   externallyBilled: boolean;
+  chargesOpenGeniCredits?: boolean;
+  countsTowardTokenCap?: boolean;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
   emittedSourceKeys: Set<string>;
@@ -251,9 +266,14 @@ export async function processModelResponseTerminalEvent(input: {
         turnAttemptId: input.turnAttemptId,
         model: input.model,
         externallyBilled: input.externallyBilled,
+        ...(input.chargesOpenGeniCredits !== undefined
+          ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
+          : {}),
+        ...(input.countsTowardTokenCap !== undefined
+          ? { countsTowardTokenCap: input.countsTowardTokenCap }
+          : {}),
         usage: responseUsage.usage,
         normalizedUsage,
-        gatewayManaged: input.provider === OPENGENI_GATEWAY_PROVIDER_ID,
         gatewayBilling: responseUsage.gatewayBilling,
         sourceKey,
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
@@ -272,6 +292,8 @@ export async function processModelResponseTerminalEvent(input: {
         sourceKey,
         usage: responseUsage,
         normalizedUsage,
+        ...(billing ? { billingPath: billing.billingPath } : {}),
+        ...(billing?.upstreamProvider ? { upstreamProvider: billing.upstreamProvider } : {}),
         servingAccountHash: accountContext.servingAccountHash,
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
@@ -331,6 +353,7 @@ export async function processModelResponseTerminalEvent(input: {
 export async function processCompactionModelUsageEvent(input: {
   usage: ModelResponseUsage;
   state: CompactionModelUsageEventState;
+  sourceKind?: "compaction" | "session-title";
   dispatchId: string | null;
   settings: Settings;
   db: ActivityServices["db"];
@@ -345,6 +368,8 @@ export async function processCompactionModelUsageEvent(input: {
   providerApi: ModelProviderApi;
   model: string;
   externallyBilled: boolean;
+  chargesOpenGeniCredits?: boolean;
+  countsTowardTokenCap?: boolean;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
   emittedSourceKeys: Set<string>;
@@ -360,7 +385,7 @@ export async function processCompactionModelUsageEvent(input: {
   const sourceKey = modelUsageSourceKey({
     responseId: input.usage.responseId,
     dispatchId: input.dispatchId,
-    positionalKey: `compaction-${usageOrdinal}`,
+    positionalKey: `${input.sourceKind ?? "compaction"}-${usageOrdinal}`,
   });
   if (input.state.claimedSourceKeys.has(sourceKey)) {
     return { status: "duplicate", sourceKey };
@@ -388,9 +413,14 @@ export async function processCompactionModelUsageEvent(input: {
         turnAttemptId: input.turnAttemptId,
         model: input.model,
         externallyBilled: input.externallyBilled,
+        ...(input.chargesOpenGeniCredits !== undefined
+          ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
+          : {}),
+        ...(input.countsTowardTokenCap !== undefined
+          ? { countsTowardTokenCap: input.countsTowardTokenCap }
+          : {}),
         usage: input.usage.usage,
         normalizedUsage,
-        gatewayManaged: input.provider === OPENGENI_GATEWAY_PROVIDER_ID,
         gatewayBilling: input.usage.gatewayBilling,
         sourceKey,
         observability: input.observability,
@@ -408,6 +438,8 @@ export async function processCompactionModelUsageEvent(input: {
         sourceKey,
         usage: input.usage,
         normalizedUsage,
+        ...(billing ? { billingPath: billing.billingPath } : {}),
+        ...(billing?.upstreamProvider ? { upstreamProvider: billing.upstreamProvider } : {}),
         servingAccountHash: accountContext.servingAccountHash,
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
@@ -436,6 +468,15 @@ export async function processCompactionModelUsageEvent(input: {
   return { status: "processed", sourceKey, authoritative };
 }
 
+export async function processSessionTitleModelUsageEvent(
+  input: Omit<Parameters<typeof processCompactionModelUsageEvent>[0], "sourceKind">,
+): ReturnType<typeof processCompactionModelUsageEvent> {
+  return await processCompactionModelUsageEvent({
+    ...input,
+    sourceKind: "session-title",
+  });
+}
+
 export async function emitModelCallUsage(input: {
   observability: ActivityServices["observability"];
   publish: TurnEventPublisher | null;
@@ -449,6 +490,10 @@ export async function emitModelCallUsage(input: {
   sourceKey: string;
   usage: ModelResponseUsage | { usage?: unknown | null } | null;
   normalizedUsage?: ModelCallUsageNormalization;
+  /** Accepted billing authority persisted for Insights repair after a soft fact-write failure. */
+  billingPath?: ModelUsageBillingRecord["billingPath"];
+  /** Validated Gateway endpoint provider persisted for exact Insights repair. */
+  upstreamProvider?: string;
   // Prompt-cache research dimensions (log-only; NEVER on a metric label or a
   // durable event). The opaque serving-account tag and whether it changed since
   // the session's previous call — the account-switch hypothesis for cache misses.
@@ -480,6 +525,8 @@ export async function emitModelCallUsage(input: {
           providerApi: input.providerApi,
           model: input.model,
           sourceKey: input.sourceKey,
+          ...(input.billingPath ? { billingPath: input.billingPath } : {}),
+          ...(input.upstreamProvider ? { upstreamProvider: input.upstreamProvider } : {}),
           ...telemetry,
         },
       },
@@ -555,6 +602,8 @@ export type ModelUsageBillingRecord = {
   pricedCostMicros: number;
   /** Hypothetical provider-rate USD micros; never an OpenGeni charge. */
   estimatedProviderCostMicros: number | null;
+  /** Hypothetical OpenGeni credit price at the captured rate; never a debit. */
+  equivalentCreditCostMicros: number | null;
   pricingSource: "configured_list_price" | "gateway_reported" | null;
   normalizedUsage: ModelCallUsageNormalization;
   upstreamProvider?: string;
@@ -572,7 +621,8 @@ export async function recordModelUsageAndDebitCredits(
     turnAttemptId: string;
     model: string;
     externallyBilled: boolean;
-    gatewayManaged?: boolean;
+    chargesOpenGeniCredits?: boolean;
+    countsTowardTokenCap?: boolean;
     gatewayBilling?: ModelResponseUsage["gatewayBilling"];
     usage?: ModelUsageInput | ModelCallUsageInput | null;
     normalizedUsage?: ModelCallUsageNormalization;
@@ -589,17 +639,33 @@ export async function recordModelUsageAndDebitCredits(
   const inputTokens = sanitizedUsage.inputTokens ?? 0;
   const outputTokens = sanitizedUsage.outputTokens ?? 0;
   const totalTokens = sanitizedUsage.totalTokens ?? 0;
-  const gatewayBilling = input.gatewayManaged ? input.gatewayBilling : undefined;
+  const chargesOpenGeniCredits = input.chargesOpenGeniCredits ?? !input.externallyBilled;
+  const countsTowardTokenCap = input.countsTowardTokenCap ?? !input.externallyBilled;
+  const resolvedGatewayModel = input.gatewayBilling
+    ? resolveModelProvider(settings, input.model)
+    : undefined;
+  const gatewayProviderId = resolvedGatewayModel?.provider.id;
+  const gatewayBilling =
+    gatewayProviderId === OPENGENI_GATEWAY_PROVIDER_ID ||
+    gatewayProviderId === WORKSPACE_GATEWAY_PROVIDER_ID
+      ? input.gatewayBilling
+      : undefined;
+  const allowedProviders = resolvedGatewayModel?.model.requestPolicy?.gateway.only;
+  const unpinnedWorkspaceGatewayModel =
+    gatewayProviderId === WORKSPACE_GATEWAY_PROVIDER_ID && allowedProviders === undefined;
   if (gatewayBilling) {
-    const gatewayModel = Object.values(OPENGENI_GATEWAY_MODELS).find(
-      (candidate) => candidate.productId === input.model,
-    );
     if (
-      !gatewayModel ||
-      !(gatewayModel.providers as readonly string[]).includes(gatewayBilling.finalProvider)
+      !unpinnedWorkspaceGatewayModel &&
+      (!allowedProviders ||
+        !(allowedProviders as readonly string[]).includes(gatewayBilling.finalProvider))
     ) {
       throw new Error(
         `AI Gateway reported unapproved provider ${gatewayBilling.finalProvider} for ${input.model}`,
+      );
+    }
+    if (unpinnedWorkspaceGatewayModel && chargesOpenGeniCredits) {
+      throw new Error(
+        `Workspace Gateway custom model ${input.model} cannot charge OpenGeni credits without pinned pricing`,
       );
     }
   }
@@ -610,12 +676,19 @@ export async function recordModelUsageAndDebitCredits(
       ? input.model.slice("codex/".length)
       : null;
   const pricingBreakdown = gatewayBilling
-    ? calculateGatewayReportedCostBreakdown(
-        settings,
-        input.model,
-        gatewayBilling.inferenceCostUsd,
-        { inputTokens },
-      )
+    ? unpinnedWorkspaceGatewayModel
+      ? {
+          providerCostMicros: calculateGatewayReportedProviderCostMicros(
+            gatewayBilling.inferenceCostUsd,
+          ),
+          creditCostMicros: 0,
+        }
+      : calculateGatewayReportedCostBreakdown(
+          settings,
+          configuredPricingModel ?? input.model,
+          gatewayBilling.inferenceCostUsd,
+          { inputTokens },
+        )
     : configuredPricingModel
       ? calculateModelUsageCostBreakdown(settings, configuredPricingModel, sanitizedUsage, {
           latencyMode: input.latencyMode ?? "standard",
@@ -629,22 +702,38 @@ export async function recordModelUsageAndDebitCredits(
     : hasCompleteCoreTokenTelemetry
       ? (pricingBreakdown?.providerCostMicros ?? null)
       : null;
+  const equivalentCreditCostMicros =
+    pricingBreakdown && !unpinnedWorkspaceGatewayModel
+      ? gatewayBilling || hasCompleteCoreTokenTelemetry
+        ? pricingBreakdown.creditCostMicros
+        : null
+      : null;
   const pricingSource = gatewayBilling
     ? ("gateway_reported" as const)
     : estimatedProviderCostMicros !== null
       ? ("configured_list_price" as const)
       : null;
-  // An externally billed turn is paid outside OpenGeni, so it
-  // consumes ZERO OpenGeni credits and must never feed an OpenGeni cap. A
-  // codex/<slug> model has no entry in configuredModelPricing, so the normal path
-  // below would throw "Missing model pricing". We:
-  //   - do NOT emit the cap-feeding `model.tokens` event (ensureRunAllowed and
-  //     the API tokens:consume cap sum `model.tokens` with NO cost dimension, so
-  //     any row would count against maxMonthlyTokensPerWorkspace);
-  //   - record a `model.cost = 0` audit marker (harmless to the monthly cost cap);
-  //   - optionally calculate a non-charging provider estimate for Insights when
-  //     core token telemetry is complete, but never debit credits.
-  if (input.externallyBilled) {
+  // Provider settlement and workspace-facing cost are separate. Externally
+  // metered subscription/workspace turns remain exempt from the OpenGeni token
+  // cap, while a deployment-funded free model still records model.tokens. Every
+  // non-credit path records a zero-cost marker and never consults pricing for a
+  // debit.
+  if (countsTowardTokenCap && totalTokens > 0) {
+    await recordUsageEvent(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      eventType: "model.tokens",
+      quantity: totalTokens,
+      unit: "tokens",
+      sourceResourceType: "model_response",
+      sourceResourceId: `${input.turnId}:${input.sourceKey}`,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      turnAttemptId: input.turnAttemptId,
+      idempotencyKey: `usage:model.tokens:${input.turnId}:${input.sourceKey}`,
+    });
+  }
+  if (!chargesOpenGeniCredits) {
     await recordUsageEvent(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -662,24 +751,11 @@ export async function recordModelUsageAndDebitCredits(
       billingPath: "external",
       pricedCostMicros: 0,
       estimatedProviderCostMicros,
+      equivalentCreditCostMicros,
       pricingSource,
       normalizedUsage,
+      ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
     };
-  }
-  if (totalTokens > 0) {
-    await recordUsageEvent(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      eventType: "model.tokens",
-      quantity: totalTokens,
-      unit: "tokens",
-      sourceResourceType: "model_response",
-      sourceResourceId: `${input.turnId}:${input.sourceKey}`,
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      turnAttemptId: input.turnAttemptId,
-      idempotencyKey: `usage:model.tokens:${input.turnId}:${input.sourceKey}`,
-    });
   }
   const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   if (!shouldDebit || (totalTokens === 0 && !gatewayBilling)) {
@@ -687,6 +763,7 @@ export async function recordModelUsageAndDebitCredits(
       billingPath: "opengeni_credits",
       pricedCostMicros: 0,
       estimatedProviderCostMicros,
+      equivalentCreditCostMicros,
       pricingSource,
       normalizedUsage,
       ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
@@ -740,6 +817,7 @@ export async function recordModelUsageAndDebitCredits(
     billingPath: "opengeni_credits",
     pricedCostMicros: costMicros,
     estimatedProviderCostMicros,
+    equivalentCreditCostMicros,
     pricingSource,
     normalizedUsage,
     ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
@@ -777,6 +855,7 @@ export async function recordAuthoritativeModelCallFact(input: {
       billingPath: input.billing.billingPath,
       pricedCostMicros: input.billing.pricedCostMicros,
       estimatedProviderCostMicros: input.billing.estimatedProviderCostMicros,
+      equivalentCreditCostMicros: input.billing.equivalentCreditCostMicros,
       pricingSource: input.billing.pricingSource,
       inputTokens: telemetry.inputTokens,
       outputTokens: telemetry.outputTokens,
@@ -804,10 +883,15 @@ export function sanitizedModelUsageInput(normalized: ModelCallUsageNormalization
       ? { outputTokens: normalized.telemetry.outputTokens }
       : {}),
     ...(normalized.totalTokens !== null ? { totalTokens: normalized.totalTokens } : {}),
-    ...(normalized.telemetry.cachedTokens !== null
+    ...(normalized.telemetry.cachedTokens !== null || normalized.telemetry.cacheWriteTokens !== null
       ? {
           inputTokensDetails: {
-            cached_tokens: normalized.telemetry.cachedTokens,
+            ...(normalized.telemetry.cachedTokens === null
+              ? {}
+              : { cached_tokens: normalized.telemetry.cachedTokens }),
+            ...(normalized.telemetry.cacheWriteTokens === null
+              ? {}
+              : { cache_write_tokens: normalized.telemetry.cacheWriteTokens }),
           },
         }
       : {}),

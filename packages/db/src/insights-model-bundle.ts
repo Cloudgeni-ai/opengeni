@@ -116,6 +116,8 @@ function mapModelRows(value: unknown, label: string): ModelCallFactAggregateRow[
     pricedCostMicros: numberValue(row, "pricedCostMicros"),
     estimatedProviderCostMicros: numberValue(row, "estimatedProviderCostMicros"),
     estimatedProviderCostKnownCalls: numberValue(row, "estimatedProviderCostKnownCalls"),
+    equivalentCreditCostMicros: numberValue(row, "equivalentCreditCostMicros"),
+    equivalentCreditCostKnownCalls: numberValue(row, "equivalentCreditCostKnownCalls"),
   }));
 }
 
@@ -126,6 +128,8 @@ function mapRootRows(value: unknown, label: string): RootSessionDriverRow[] {
     pricedCostMicros: numberValue(row, "pricedCostMicros"),
     estimatedProviderCostMicros: numberValue(row, "estimatedProviderCostMicros"),
     estimatedProviderCostKnownCalls: numberValue(row, "estimatedProviderCostKnownCalls"),
+    equivalentCreditCostMicros: numberValue(row, "equivalentCreditCostMicros"),
+    equivalentCreditCostKnownCalls: numberValue(row, "equivalentCreditCostKnownCalls"),
     totalTokens: numberValue(row, "totalTokens"),
     cachedTokens: numberValue(row, "cachedTokens"),
     cacheInputTokens: numberValue(row, "cacheInputTokens"),
@@ -153,6 +157,8 @@ function mapBundle(value: unknown): WorkspaceInsightsModelBundle {
           costMicros: numberValue(row, "costMicros"),
           estimatedProviderCostMicros: numberValue(row, "estimatedProviderCostMicros"),
           estimatedProviderCostKnownCalls: numberValue(row, "estimatedProviderCostKnownCalls"),
+          equivalentCreditCostMicros: numberValue(row, "equivalentCreditCostMicros"),
+          equivalentCreditCostKnownCalls: numberValue(row, "equivalentCreditCostKnownCalls"),
           inputTokens: numberValue(row, "inputTokens"),
           outputTokens: numberValue(row, "outputTokens"),
           cachedTokens: numberValue(row, "cachedTokens"),
@@ -173,6 +179,8 @@ function mapBundle(value: unknown): WorkspaceInsightsModelBundle {
       pricedCostMicros: numberValue(row, "pricedCostMicros"),
       estimatedProviderCostMicros: numberValue(row, "estimatedProviderCostMicros"),
       estimatedProviderCostKnownCalls: numberValue(row, "estimatedProviderCostKnownCalls"),
+      equivalentCreditCostMicros: numberValue(row, "equivalentCreditCostMicros"),
+      equivalentCreditCostKnownCalls: numberValue(row, "equivalentCreditCostKnownCalls"),
       totalTokens: numberValue(row, "totalTokens"),
       cachedTokens: numberValue(row, "cachedTokens"),
       cacheInputTokens: numberValue(row, "cacheInputTokens"),
@@ -203,6 +211,7 @@ function mapBundle(value: unknown): WorkspaceInsightsModelBundle {
       totalTokens: nullableNumber(row, "totalTokens"),
       pricedCostMicros: numberValue(row, "pricedCostMicros"),
       estimatedProviderCostMicros: nullableNumber(row, "estimatedProviderCostMicros"),
+      equivalentCreditCostMicros: nullableNumber(row, "equivalentCreditCostMicros"),
       pricingSource: nullableString(row, "pricingSource"),
     })),
     promptContributions: {
@@ -261,6 +270,7 @@ export async function readWorkspaceInsightsModelBundle(
           fact.total_tokens,
           fact.priced_cost_micros,
           fact.estimated_provider_cost_micros,
+          fact.equivalent_credit_cost_micros,
           fact.pricing_source,
           fact.context_contributions,
           fact.occurred_at,
@@ -286,7 +296,8 @@ export async function readWorkspaceInsightsModelBundle(
           fact.reasoning_tokens,
           fact.total_tokens,
           fact.priced_cost_micros,
-          fact.estimated_provider_cost_micros
+          fact.estimated_provider_cost_micros,
+          fact.equivalent_credit_cost_micros
         from opengeni_private.visible_workspace_insights_model_call_facts(
           ${input.workspaceId},
           ${input.priorSince.toISOString()}::timestamp with time zone,
@@ -340,7 +351,11 @@ export async function readWorkspaceInsightsModelBundle(
           coalesce(sum(fact.estimated_provider_cost_micros), 0)::bigint
             as estimated_provider_cost_micros,
           count(fact.estimated_provider_cost_micros)::bigint
-            as estimated_provider_cost_known_calls
+            as estimated_provider_cost_known_calls,
+          coalesce(sum(fact.equivalent_credit_cost_micros), 0)::bigint
+            as equivalent_credit_cost_micros,
+          count(fact.equivalent_credit_cost_micros)::bigint
+            as equivalent_credit_cost_known_calls
         from current_visible fact
         group by fact.provider, fact.model, fact.billing_path
       ), prior_model_rows as (
@@ -368,7 +383,11 @@ export async function readWorkspaceInsightsModelBundle(
           coalesce(sum(fact.estimated_provider_cost_micros), 0)::bigint
             as estimated_provider_cost_micros,
           count(fact.estimated_provider_cost_micros)::bigint
-            as estimated_provider_cost_known_calls
+            as estimated_provider_cost_known_calls,
+          coalesce(sum(fact.equivalent_credit_cost_micros), 0)::bigint
+            as equivalent_credit_cost_micros,
+          count(fact.equivalent_credit_cost_micros)::bigint
+            as equivalent_credit_cost_known_calls
         from prior_visible fact
         group by fact.provider, fact.model, fact.billing_path
       ), current_series_rows as (
@@ -381,6 +400,10 @@ export async function readWorkspaceInsightsModelBundle(
             as estimated_provider_cost_micros,
           count(fact.estimated_provider_cost_micros)::bigint
             as estimated_provider_cost_known_calls,
+          coalesce(sum(fact.equivalent_credit_cost_micros), 0)::bigint
+            as equivalent_credit_cost_micros,
+          count(fact.equivalent_credit_cost_micros)::bigint
+            as equivalent_credit_cost_known_calls,
           coalesce(sum(fact.input_tokens), 0)::bigint as input_tokens,
           coalesce(sum(fact.output_tokens), 0)::bigint as output_tokens,
           coalesce(sum(fact.cached_tokens), 0)::bigint as cached_tokens,
@@ -408,6 +431,10 @@ export async function readWorkspaceInsightsModelBundle(
             as estimated_provider_cost_micros,
           count(fact.estimated_provider_cost_micros)::bigint
             as estimated_provider_cost_known_calls,
+          coalesce(sum(fact.equivalent_credit_cost_micros), 0)::bigint
+            as equivalent_credit_cost_micros,
+          count(fact.equivalent_credit_cost_micros)::bigint
+            as equivalent_credit_cost_known_calls,
           coalesce(sum(fact.total_tokens), 0)::bigint as total_tokens,
           coalesce(sum(fact.cached_tokens), 0)::bigint as cached_tokens,
           coalesce(sum(fact.input_tokens) filter (
@@ -433,6 +460,10 @@ export async function readWorkspaceInsightsModelBundle(
             as estimated_provider_cost_micros,
           count(fact.estimated_provider_cost_micros)::bigint
             as estimated_provider_cost_known_calls,
+          coalesce(sum(fact.equivalent_credit_cost_micros), 0)::bigint
+            as equivalent_credit_cost_micros,
+          count(fact.equivalent_credit_cost_micros)::bigint
+            as equivalent_credit_cost_known_calls,
           coalesce(sum(fact.total_tokens), 0)::bigint as total_tokens,
           coalesce(sum(fact.cached_tokens), 0)::bigint as cached_tokens,
           coalesce(sum(fact.input_tokens) filter (
@@ -454,6 +485,10 @@ export async function readWorkspaceInsightsModelBundle(
             as estimated_provider_cost_micros,
           count(fact.estimated_provider_cost_micros)::bigint
             as estimated_provider_cost_known_calls,
+          coalesce(sum(fact.equivalent_credit_cost_micros), 0)::bigint
+            as equivalent_credit_cost_micros,
+          count(fact.equivalent_credit_cost_micros)::bigint
+            as equivalent_credit_cost_known_calls,
           coalesce(sum(fact.total_tokens), 0)::bigint as total_tokens,
           coalesce(sum(fact.cached_tokens), 0)::bigint as cached_tokens,
           coalesce(sum(fact.input_tokens) filter (
@@ -491,6 +526,7 @@ export async function readWorkspaceInsightsModelBundle(
           fact.total_tokens,
           fact.priced_cost_micros,
           fact.estimated_provider_cost_micros,
+          fact.equivalent_credit_cost_micros,
           fact.pricing_source
         from current_visible fact
         left join selected_sessions session
@@ -504,20 +540,32 @@ export async function readWorkspaceInsightsModelBundle(
         from current_visible fact
       ), contribution_source_rows as (
         select
-          fact.id,
-          contribution->>'source' as source,
-          (contribution->>'items')::bigint as items,
-          (contribution->>'utf8Bytes')::bigint as utf8_bytes,
-          (contribution->>'estimatedTokens')::bigint as estimated_tokens
+          contribution.entry->>'source' as source,
+          (contribution.entry->>'items')::bigint as items,
+          (contribution.entry->>'utf8Bytes')::bigint as utf8_bytes,
+          (contribution.entry->>'estimatedTokens')::bigint as estimated_tokens,
+          -- The validated CHECK rejects duplicate named sources. Its SQL NULL
+          -- semantics still permit repeated null sources; count those only once
+          -- per fact without sorting all contribution rows by raw fact ID.
+          case when contribution.entry->>'source' is not null then true
+            else not exists (
+              select 1
+              from jsonb_array_elements(fact.context_contributions)
+                with ordinality earlier(entry, ordinal)
+              where earlier.ordinal < contribution.ordinal
+                and earlier.entry->>'source' is null
+            )
+          end as first_source
         from current_visible fact
-        cross join lateral jsonb_array_elements(fact.context_contributions) contribution
+        cross join lateral jsonb_array_elements(fact.context_contributions)
+          with ordinality contribution(entry, ordinal)
       ), contribution_rows as (
         select
           source,
           sum(items)::bigint as items,
           sum(utf8_bytes)::bigint as utf8_bytes,
           sum(estimated_tokens)::bigint as estimated_tokens,
-          count(distinct id)::bigint as calls
+          count(*) filter (where first_source)::bigint as calls
         from contribution_source_rows
         group by source
       )
@@ -539,7 +587,9 @@ export async function readWorkspaceInsightsModelBundle(
             'cacheKnownCalls', cache_known_calls,
             'pricedCostMicros', priced_cost_micros,
             'estimatedProviderCostMicros', estimated_provider_cost_micros,
-            'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls
+            'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls,
+            'equivalentCreditCostMicros', equivalent_credit_cost_micros,
+            'equivalentCreditCostKnownCalls', equivalent_credit_cost_known_calls
           ) order by provider, model, billing_path)
           from current_model_rows
         ), '[]'::jsonb),
@@ -560,7 +610,9 @@ export async function readWorkspaceInsightsModelBundle(
             'cacheKnownCalls', cache_known_calls,
             'pricedCostMicros', priced_cost_micros,
             'estimatedProviderCostMicros', estimated_provider_cost_micros,
-            'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls
+            'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls,
+            'equivalentCreditCostMicros', equivalent_credit_cost_micros,
+            'equivalentCreditCostKnownCalls', equivalent_credit_cost_known_calls
           ) order by provider, model, billing_path)
           from prior_model_rows
         ), '[]'::jsonb),
@@ -570,6 +622,8 @@ export async function readWorkspaceInsightsModelBundle(
             'costMicros', cost_micros,
             'estimatedProviderCostMicros', estimated_provider_cost_micros,
             'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls,
+            'equivalentCreditCostMicros', equivalent_credit_cost_micros,
+            'equivalentCreditCostKnownCalls', equivalent_credit_cost_known_calls,
             'inputTokens', input_tokens,
             'outputTokens', output_tokens,
             'cachedTokens', cached_tokens,
@@ -590,6 +644,8 @@ export async function readWorkspaceInsightsModelBundle(
             'pricedCostMicros', priced_cost_micros,
             'estimatedProviderCostMicros', estimated_provider_cost_micros,
             'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls,
+            'equivalentCreditCostMicros', equivalent_credit_cost_micros,
+            'equivalentCreditCostKnownCalls', equivalent_credit_cost_known_calls,
             'totalTokens', total_tokens,
             'cachedTokens', cached_tokens,
             'cacheInputTokens', cache_input_tokens
@@ -603,6 +659,8 @@ export async function readWorkspaceInsightsModelBundle(
             'pricedCostMicros', priced_cost_micros,
             'estimatedProviderCostMicros', estimated_provider_cost_micros,
             'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls,
+            'equivalentCreditCostMicros', equivalent_credit_cost_micros,
+            'equivalentCreditCostKnownCalls', equivalent_credit_cost_known_calls,
             'totalTokens', total_tokens,
             'cachedTokens', cached_tokens,
             'cacheInputTokens', cache_input_tokens
@@ -615,6 +673,8 @@ export async function readWorkspaceInsightsModelBundle(
             'pricedCostMicros', priced_cost_micros,
             'estimatedProviderCostMicros', estimated_provider_cost_micros,
             'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls,
+            'equivalentCreditCostMicros', equivalent_credit_cost_micros,
+            'equivalentCreditCostKnownCalls', equivalent_credit_cost_known_calls,
             'totalTokens', total_tokens,
             'cachedTokens', cached_tokens,
             'cacheInputTokens', cache_input_tokens,
@@ -651,6 +711,7 @@ export async function readWorkspaceInsightsModelBundle(
             'totalTokens', total_tokens,
             'pricedCostMicros', priced_cost_micros,
             'estimatedProviderCostMicros', estimated_provider_cost_micros,
+            'equivalentCreditCostMicros', equivalent_credit_cost_micros,
             'pricingSource', pricing_source
           ) order by occurred_at desc, id desc)
           from recent_rows

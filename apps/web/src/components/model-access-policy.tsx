@@ -1,5 +1,6 @@
+import { FormDisclosure } from "@/components/ui/form-disclosure";
 import type { WorkspaceModelAccessPolicy, WorkspaceModelCatalogModel } from "@opengeni/sdk";
-import { CheckIcon, Loader2Icon, LockKeyholeIcon, PlusIcon, XIcon } from "lucide-react";
+import { CheckIcon, Loader2Icon, PlusIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -94,6 +95,7 @@ export function ModelAccessPolicySection({
   canManage: boolean;
 }) {
   const client = useAppContext().client;
+  const [open, setOpen] = useState(false);
   const [models, setModels] = useState<WorkspaceModelCatalogModel[]>([]);
   const [draft, setDraft] = useState<ModelAccessPolicyDraft | null>(null);
   const [savedKey, setSavedKey] = useState("");
@@ -141,7 +143,18 @@ export function ModelAccessPolicySection({
     };
   }, [client, load, workspaceId]);
 
-  const groups = useMemo(() => groupedModels(models), [models]);
+  useEffect(() => {
+    const changed = () => {
+      void load();
+    };
+    window.addEventListener("model-connections-changed", changed);
+    return () => window.removeEventListener("model-connections-changed", changed);
+  }, [load]);
+
+  const groups = useMemo(
+    () => groupedModels(models.filter((model) => model.credentialReadiness.status === "ready")),
+    [models],
+  );
   const catalogIds = useMemo(() => new Set(models.map((model) => model.id)), [models]);
   const customIds = useMemo(
     () =>
@@ -163,7 +176,13 @@ export function ModelAccessPolicySection({
         selectedModelIds:
           mode === "unrestricted"
             ? new Set(models.map((model) => model.id))
-            : current.selectedModelIds,
+            : current.mode === "unrestricted"
+              ? new Set(
+                  models
+                    .filter((model) => model.credentialReadiness.status === "ready")
+                    .map((model) => model.id),
+                )
+              : current.selectedModelIds,
       };
     });
   }
@@ -221,20 +240,19 @@ export function ModelAccessPolicySection({
   const visiblePolicyAllowedCount = models.filter((model) => model.policyAllowed).length;
 
   return (
-    <section aria-labelledby="workspace-model-access-heading" className="grid min-w-0 gap-2">
-      <div className="flex items-start gap-2">
-        <LockKeyholeIcon className="mt-0.5 size-4 shrink-0 text-brand" />
-        <div className="min-w-0">
-          <h2 id="workspace-model-access-heading" className="text-sm font-medium">
-            Model access
-          </h2>
-          <p className="text-xs text-fg-subtle">
-            Choose which model IDs may serve turns in this workspace. This is enforced again when a
-            turn runs.
-          </p>
-        </div>
-      </div>
-
+    <FormDisclosure
+      title="Workspace restrictions"
+      summary={
+        draft?.mode === "unrestricted"
+          ? "No additional restrictions"
+          : "Additional limits across all connections"
+      }
+      open={open}
+      onOpenChange={setOpen}
+    >
+      <p className="text-xs text-fg-subtle">
+        These limits apply in addition to each connection’s model access.
+      </p>
       <div className="rounded-lg border border-border p-3">
         {error ? (
           <LoadErrorState
@@ -320,7 +338,7 @@ export function ModelAccessPolicySection({
                     className="mt-0.5 size-4 accent-brand"
                   />
                   <span>
-                    <span className="block text-sm font-medium">Allow all configured models</span>
+                    <span className="block text-sm font-medium">No additional restrictions</span>
                     <span className="block text-xs text-fg-subtle">
                       New models become available automatically when their credentials are ready.
                     </span>
@@ -336,7 +354,9 @@ export function ModelAccessPolicySection({
                     className="mt-0.5 size-4 accent-brand"
                   />
                   <span>
-                    <span className="block text-sm font-medium">Allow selected model IDs</span>
+                    <span className="block text-sm font-medium">
+                      Limit this workspace to selected models
+                    </span>
                     <span className="block text-xs text-fg-subtle">
                       Only the checked or explicitly entered IDs may run.
                     </span>
@@ -346,7 +366,9 @@ export function ModelAccessPolicySection({
                 {draft.mode === "selected" ? (
                   <div className="grid gap-3 border-t border-border/70 pt-3">
                     {groups.length === 0 ? (
-                      <p className="text-xs text-fg-subtle">No configured models are visible.</p>
+                      <p className="text-xs text-fg-subtle">
+                        Connect a subscription or gateway to choose its models.
+                      </p>
                     ) : (
                       groups.map(([providerLabel, providerModels]) => (
                         <fieldset key={providerLabel} className="grid gap-1.5">
@@ -473,8 +495,8 @@ export function ModelAccessPolicySection({
       </div>
       <ConfirmDialog
         open={pendingReplacementMode !== null}
-        onOpenChange={(open) => {
-          if (!open) setPendingReplacementMode(null);
+        onOpenChange={(isOpen) => {
+          if (!isOpen) setPendingReplacementMode(null);
         }}
         title="Replace the provider-level model policy?"
         description={
@@ -490,6 +512,6 @@ export function ModelAccessPolicySection({
           return true;
         }}
       />
-    </section>
+    </FormDisclosure>
   );
 }

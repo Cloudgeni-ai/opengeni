@@ -10,7 +10,6 @@ export default function PlatformActivityRow({
   t: displayName,
   b: BotIcon,
   m: Markdown,
-  r: truncate,
   j,
   s,
 }: {
@@ -20,7 +19,6 @@ export default function PlatformActivityRow({
   t: (name: string) => string;
   b: typeof import("lucide-react").BotIcon;
   m: typeof import("../components/markdown").Markdown;
-  r: typeof import("../lib/format").truncate;
   j: RowJsx;
   s: RowJsxs;
 }) {
@@ -35,7 +33,11 @@ export default function PlatformActivityRow({
             children: "Thought",
           }),
       running: item.streaming,
-      preview: truncate(item.text, 110),
+      compactPreview: item.text.replace(/\*\*|__|`/g, "").replace(/\s+/g, " "),
+      preview: j("span", {
+        className: "og-reasoning-preview",
+        children: j(Markdown, { streaming: item.streaming, children: item.text }),
+      }),
       children: j("div", {
         className: "text-og-base leading-6 text-og-fg-muted [&_strong]:text-og-fg-muted",
         children: j(Markdown, { streaming: item.streaming, children: item.text }),
@@ -65,10 +67,13 @@ export default function PlatformActivityRow({
   return j(ActivityDisclosure, {
     icon: j(BotIcon, { className: "size-3.5" }),
     iconTone: failed ? "failed" : running ? "running" : "muted",
-    title: startupPhaseTitle(item.phase, item.status, item.outcome),
+    title:
+      item.blockedReason === "rotation_in_progress"
+        ? "Waiting for sandbox rotation"
+        : startupPhaseTitle(item.phase, item.status, item.outcome),
     preview:
       item.phase === "model_preparation"
-        ? "Includes overlapping sandbox, rig, repository, and runtime setup shown below."
+        ? "Includes overlapping sandbox startup, custom environment setup, repository preparation, and runtime setup shown below."
         : undefined,
     running,
     failed,
@@ -135,7 +140,7 @@ function startupPhaseTitle(
     return `Sandbox ${outcome === "resumed" ? "reattached" : outcome}`;
   }
   if (status === "complete" && phase === "rig" && outcome === "skipped") {
-    return "Rig already ready";
+    return "Sandbox Environment already ready";
   }
   const statusIndex =
     status === "running" ? 0 : status === "failed" ? 1 : status === "cancelled" ? 2 : 3;
@@ -158,7 +163,12 @@ const STARTUP_PHASE_TITLES: Record<
     "Sandbox startup interrupted",
     "Sandbox ready",
   ],
-  rig: ["Setting up rig", "Rig setup failed", "Rig setup interrupted", "Rig ready"],
+  rig: [
+    "Setting up sandbox environment",
+    "Sandbox Environment setup failed",
+    "Sandbox Environment setup interrupted",
+    "Sandbox Environment ready",
+  ],
   repository: [
     "Preparing repository",
     "Repository preparation failed",

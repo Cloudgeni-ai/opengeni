@@ -8,6 +8,7 @@ import type {
   TimelineAnnotationSource,
   ToolAuthNeededPayload,
   ToolRef,
+  ToolDisplayMetadata,
 } from "@opengeni/sdk";
 
 /* ----------------------------------------------------------------------------
@@ -129,6 +130,7 @@ export type ToolCallItem = {
   turnId: string | null;
   callId: string | null;
   name: string;
+  display?: ToolDisplayMetadata;
   arguments: unknown;
   output: unknown;
   truncation?: ToolCallTruncation | null;
@@ -215,6 +217,7 @@ export type StartupPhaseItem = {
   durationMs: number | null;
   /** Sandbox origin and rig marker outcomes refine the settled label only. */
   outcome: "created" | "restored" | "resumed" | "skipped" | null;
+  blockedReason?: "rotation_in_progress" | undefined;
   occurredAt: string;
 };
 
@@ -227,6 +230,18 @@ export type StartupPhaseItem = {
  * `onMemoryClick` handler the row also deep-links to the record in its memory
  * pane; without one it is non-interactive rich content.
  */
+export type KnowledgeItem = {
+  kind: "knowledge";
+  id: string;
+  turnId: string | null;
+  status: "complete" | "failed";
+  outcome: "published" | "pending" | "rejected" | "archived" | "failed";
+  fileId?: string | undefined;
+  filename?: string | undefined;
+  entryId?: string | undefined;
+  occurredAt: string;
+};
+
 export type MemoryItem = {
   kind: "memory";
   id: string;
@@ -279,7 +294,14 @@ export type FleetDecisionItem = {
   policyVersion: "adaptive-shadow-v1";
   actualOutcome: "selected" | "waiting" | "none";
   actualCandidateKey: string | null;
-  actualReason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+  actualReason:
+    | "lease_reused"
+    | "pin"
+    | "rotation"
+    | "active"
+    | "all_capped"
+    | "allocator_disabled"
+    | "none";
   shadowOutcome: "selected" | "paced" | "none";
   shadowCandidateKey: string | null;
   shadowReason:
@@ -342,6 +364,8 @@ export type NoticeItem = {
   id: string;
   tone: "waiting" | "cancelled" | "failed" | "input";
   text: string;
+  /** A preserved turn-end outcome, not a claim about current session state. */
+  recordedOutcome?: true;
   /** Optional evidence kept inspectable without overwhelming the main rail. */
   details?: { label: string; value: unknown };
   action?: { label: string; url: string };
@@ -361,9 +385,22 @@ export type ContextCompactionItem = {
   estimatedTokensBefore: number | null;
   estimatedTokensAfter: number | null;
   skipReason: string | null;
+  /**
+   * Present only for a `summarization_failed` skip where the provider
+   * definitively rejected the compaction request. Content-free identifiers.
+   */
+  providerRejection: ContextCompactionProviderRejection | null;
   /** Provider implementation id for debug disclosure only. */
   implementation: string | null;
   occurredAt: string;
+};
+
+export type ContextCompactionProviderRejection = {
+  httpStatus: number;
+  type: string | null;
+  code: string | null;
+  param: string | null;
+  requestId: string | null;
 };
 
 export type MachineInputMember = {
@@ -371,6 +408,8 @@ export type MachineInputMember = {
   kind:
     | "scheduled_occurrence"
     | "goal_continuation"
+    | "background_command_result"
+    | "session_wait_timeout"
     | "agent_message"
     | "agent_steer_instruction"
     | "child_terminal_result"
@@ -414,12 +453,17 @@ export type AuthNeededItem = {
   turnId: string | null;
   /** The runtime surface that requested recovery, when the event is an MCP auth signal. */
   serverId: string | null;
+  /** Explicit recovery identity; never inferred from an opaque execution alias. */
+  canonicalServerId?: string | null;
+  connectionSubjectScope?: "workspace" | "subject" | null;
   /** Durable event family that produced this notice. */
   source?: "tool" | "credential" | "capability" | undefined;
   /** The connection's registrable domain, e.g. "linear.app". */
   providerDomain: string;
   /** The lapsed connection to reconnect, when the row survived. */
   connectionId: string | null;
+  /** Host-owned bindings must never be routed into OpenGeni's native reconnect flow. */
+  authoritySource?: ToolAuthNeededPayload["authoritySource"] | null | undefined;
   reason: ToolAuthNeededPayload["reason"] | null;
   /** Scopes the provider now needs; may inform the copy, never shown as a raw label. */
   scopes: string[];
@@ -438,6 +482,8 @@ export type TurnOutcome = "complete" | "failed" | "cancelled";
 
 export type TurnEndItem = {
   kind: "turn-end";
+  /** Keep an existing answer visible when a recorded input wait ends without final output. */
+  preserveWaitResponse?: true;
   id: string;
   turnId: string | null;
   outcome: TurnOutcome;
@@ -445,7 +491,7 @@ export type TurnEndItem = {
   occurredAt: string;
 };
 
-export type TimelineItem =
+export type TimelineItem = (
   | UserMessageItem
   | HumanInputItem
   | AgentMessageItem
@@ -462,8 +508,13 @@ export type TimelineItem =
   | MachineInputBatchItem
   | AuthNeededItem
   | MemoryItem
+  | KnowledgeItem
   | FleetDecisionItem
-  | TurnEndItem;
+  | TurnEndItem
+) & {
+  /** Durable identities, independent of renderer/reconciliation keys. */
+  sourceEvents?: readonly { eventId: string; sequence: number }[] | undefined;
+};
 
 /** Activity items cluster between chat messages (reasoning, tools, workers, sandbox, memory). */
 export type ActivityItem =
@@ -473,6 +524,7 @@ export type ActivityItem =
   | SandboxItem
   | StartupPhaseItem
   | MemoryItem
+  | KnowledgeItem
   | FleetDecisionItem;
 
 export type TimelineGroup =

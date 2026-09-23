@@ -19,8 +19,7 @@ const skillCapabilityId = "skill:release-operator-browser";
 const pluginKey = "example/research";
 const skillUrl = "https://github.com/acme/skills/tree/main/release-operator";
 const pluginUrl = "https://plugins.example.test/research.json";
-const packId = "infra-ops-browser";
-const packManifestDigest = "e".repeat(64);
+
 const apiContractRevision = OPENGENI_API_CONTRACT_REVISION;
 let webBaseUrl = "";
 
@@ -35,8 +34,6 @@ type UiState = {
   pluginInstallRequests: Record<string, unknown>[];
   skillRemoveRequests: Record<string, unknown>[];
   pluginRemoveRequests: Record<string, unknown>[];
-  packInstalled: boolean;
-  packUninstallRequests: Record<string, unknown>[];
 };
 
 describe("Bundles section browser acceptance", () => {
@@ -90,20 +87,28 @@ describe("Bundles section browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "light");
 
-      await page.getByRole("button", { name: "Import Skill" }).first().click();
+      await page.getByRole("button", { name: "New skill", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Import from URL", exact: true }).click();
       let dialog = page.getByRole("dialog");
       await dialog.getByLabel("GitHub or skills.sh URL").fill(skillUrl);
       await dialog.getByRole("button", { name: "Detect and preview" }).click();
-      await expectText(dialog, "Immutable Skill preview ready");
-      await expectText(dialog, "Pinned commit");
-      await expectText(dialog, "Review 2 immutable files");
+      await expectText(dialog, "Included files · 2");
+      await dialog.getByText("Included files · 2", { exact: true }).click();
+      await expectText(dialog, "SKILL.md");
+      expect(await dialog.getByRole("link", { name: "View source" }).getAttribute("href")).toBe(
+        skillUrl,
+      );
       await assertAccessibleAndBounded(page, '[role="dialog"]');
-      await dialog.getByRole("button", { name: "Install this Skill" }).click();
+      await dialog.getByRole("button", { name: "Install", exact: true }).click();
 
+      await expectVisible(
+        page.locator(".og-connection-installed").getByRole("button", { name: /release-operator/ }),
+      );
+      await openInstalledPackages(page);
       const skillRow = page.locator(`[data-integration-row="imported:${skillCapabilityId}"]`);
       await expectVisible(skillRow);
       await expectText(skillRow, "release-operator");
-      await expectText(skillRow, "Skill · Imported from source");
+      expect(await skillRow.getAttribute("aria-label")).toContain("imported from source");
       expect(state.skillInstallRequests).toHaveLength(1);
       expect(state.skillInstallRequests[0]).toMatchObject({
         url: skillUrl,
@@ -111,11 +116,12 @@ describe("Bundles section browser acceptance", () => {
         expectedContentSha256: "b".repeat(64),
       });
 
-      await page.getByRole("button", { name: "Install Plugin" }).first().click();
+      await page.getByRole("tab", { name: "Plugins", exact: true }).click();
+      await page.getByRole("button", { name: "Import plugin", exact: true }).click();
       dialog = page.getByRole("dialog");
       await dialog.getByLabel("Plugin manifest URL").fill(pluginUrl);
       await dialog.getByRole("button", { name: "Detect and preview" }).click();
-      await expectText(dialog, "Immutable Plugin bill of materials ready");
+      await expectText(dialog, "Plugin ready to review");
       await expectText(dialog, "Manifest digest");
       await expectText(dialog, "Choose an exact Connection for Linear");
 
@@ -129,25 +135,27 @@ describe("Bundles section browser acceptance", () => {
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await dialog.getByRole("button", { name: "Install this Plugin" }).click();
 
-      const pluginRow = page.locator(`[data-integration-row="plugin:${pluginKey}"]`);
+      const pluginRow = page.getByRole("button", { name: /Research suite.*Installed/ });
       await expectVisible(pluginRow);
       await expectText(pluginRow, "Research suite");
-      await expectText(pluginRow, "Plugin · Imported from source");
+      expect(await pluginRow.getAttribute("aria-label")).toContain("Installed");
       expect(state.pluginPreviewRequests).toHaveLength(2);
       expect(state.pluginInstallRequests).toHaveLength(1);
       expect(state.pluginInstallRequests[0]).toMatchObject({
         url: pluginUrl,
         bindings: { linear: { connectionId: financeConnectionId } },
       });
-      // One Bundles section, one search, and a row for every kind in it.
-      await expectVisible(page.getByRole("heading", { name: "Bundles" }));
-      const search = page.getByLabel("Search bundles");
+      // The shared search still filters the selected category without a second input.
+      await expectVisible(page.getByRole("tab", { name: "Plugins", exact: true, selected: true }));
+      const search = page.getByRole("searchbox", { name: "Search plugins", exact: true });
       await search.fill("research");
+      await page.getByRole("tab", { name: "Plugins", exact: true }).click();
       await expectVisible(pluginRow);
       await expectHidden(skillRow);
       await search.fill("");
+      await page.getByRole("tab", { name: "Skills", exact: true }).click();
       await expectVisible(skillRow);
-      await assertAccessibleAndBounded(page, '[aria-labelledby="bundles-heading"]');
+      await assertAccessibleAndBounded(page, 'section[aria-label="Skills and plugins"]');
       await page.screenshot({
         path: `${evidenceDir}install-desktop-light.png`,
         fullPage: true,
@@ -166,8 +174,9 @@ describe("Bundles section browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "dark");
 
-      const pluginRow = page.locator(`[data-integration-row="plugin:${pluginKey}"]`);
+      const pluginRow = page.getByRole("button", { name: /Research suite.*Installed/ });
       await openBundleSheet(page, `plugin:${pluginKey}`);
+      expect(state.pluginInstallRequests).toHaveLength(0);
       await page
         .locator('[data-integration-sheet="bundle-plugin-example/research"]')
         .getByRole("button", { name: "Review update" })
@@ -181,6 +190,7 @@ describe("Bundles section browser acceptance", () => {
       await expectVisible(dialog.getByRole("button", { name: "Update this Plugin" }));
       await dialog.screenshot({ path: `${evidenceDir}update-review-dialog-dark.png` });
       await dialog.getByRole("button", { name: "Update this Plugin" }).click();
+      expect(state.pluginInstallRequests).toHaveLength(1);
       expect(state.pluginInstallRequests.at(-1)).toMatchObject({
         expectedInstallationVersion: 2,
       });
@@ -192,15 +202,20 @@ describe("Bundles section browser acceptance", () => {
         .getByRole("button", { name: "Remove" })
         .click();
       dialog = page.getByRole("dialog");
-      await expectText(dialog, "3 components are in this Plugin. 1 will remain");
+      await expectText(dialog, "Will be removed");
+      await expectText(dialog, "Will stay");
+      await expectText(dialog, "Also installed separately.");
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await dialog.screenshot({ path: `${evidenceDir}remove-impact-dialog-dark.png` });
-      await dialog.getByRole("button", { name: "Remove Plugin" }).click();
+      await dialog.getByRole("button", { name: "Remove plugin", exact: true }).click();
       await expectHidden(pluginRow);
       expect(state.pluginRemoveRequests.at(-1)).toMatchObject({
         expectedInstallationVersion: 3,
+        expectedPreviewToken: "f".repeat(64),
       });
 
+      await page.getByRole("tab", { name: "Skills", exact: true }).click();
+      await openInstalledPackages(page);
       const skillRow = page.locator(`[data-integration-row="imported:${skillCapabilityId}"]`);
       await openBundleSheet(page, `imported:${skillCapabilityId}`);
       await page
@@ -239,26 +254,39 @@ describe("Bundles section browser acceptance", () => {
     try {
       await installApi(page, state);
       await openCapabilities(page);
+      await openInstalledPackages(page);
       await expectText(
-        page.locator('[aria-labelledby="bundles-heading"]'),
-        "Workspace administrators can install, update, and remove Bundles",
+        page.locator('section[aria-label="Skills and plugins"]'),
+        "Workspace administrators can install, update, and remove these items.",
       );
-      expect(await page.getByRole("button", { name: "Import Skill" }).first().isDisabled()).toBe(
-        true,
-      );
+      expect(await page.getByRole("button", { name: "New skill", exact: true }).count()).toBe(0);
+      await page.getByRole("tab", { name: "Plugins", exact: true }).click();
+      expect(
+        await page.getByRole("button", { name: "Import plugin", exact: true }).isDisabled(),
+      ).toBe(true);
       // A viewer who cannot act is told so, rather than shown buttons that do
       // nothing when pressed.
       await openBundleSheet(page, `plugin:${pluginKey}`);
-      const pluginSheet = page.locator('[data-integration-sheet="bundle-plugin-example/research"]');
+      const pluginSheet = page.getByRole("dialog");
       await expectText(
         pluginSheet,
         "Workspace administrators can install, update, and remove imported Skills and Plugins.",
       );
       expect(await pluginSheet.getByRole("button", { name: "Review update" }).count()).toBe(0);
+      expect(await pluginSheet.getByRole("button", { name: "Remove", exact: true }).count()).toBe(
+        0,
+      );
       await page.keyboard.press("Escape");
       await expectHidden(pluginSheet);
-      await assertAccessibleAndBounded(page, '[aria-labelledby="bundles-heading"]');
-      await page.locator('[aria-labelledby="bundles-heading"]').scrollIntoViewIfNeeded();
+      await page.waitForFunction(() =>
+        document.activeElement?.matches(".og-connection-installed button"),
+      );
+      expect(state.pluginInstallRequests).toHaveLength(0);
+      expect(state.pluginRemoveRequests).toHaveLength(0);
+      expect(state.skillInstallRequests).toHaveLength(0);
+      expect(state.skillRemoveRequests).toHaveLength(0);
+      await assertAccessibleAndBounded(page, 'section[aria-label="Plugins"]');
+      await page.locator('section[aria-label="Plugins"]').scrollIntoViewIfNeeded();
       await page.screenshot({
         path: `${evidenceDir}permission-mobile-dark.png`,
         fullPage: true,
@@ -267,65 +295,10 @@ describe("Bundles section browser acceptance", () => {
       await context.close();
     }
   }, 60_000);
-
-  // A Pack lists through the same uniform row as every other Bundle, and its
-  // two destructive verbs release ownership, so the whole chain - open the row,
-  // read the installed identity, uninstall, confirm - is exercised for real.
-  test("a Pack row opens its plan, names the installed identity, and uninstalls", async () => {
-    const state = readyState({ packInstalled: true });
-    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-    const page = await context.newPage();
-    try {
-      await installApi(page, state);
-      await openCapabilities(page);
-      await setTheme(page, "light");
-
-      const packRow = page.locator(`[data-integration-row="pack:${packId}"]`);
-      await expectVisible(packRow);
-      await expectText(packRow, "Pack · Registered in this workspace");
-      // Provenance is read from the catalog row, never assumed to be OpenGeni's.
-      expect((await packRow.textContent()) ?? "").not.toContain("Curated by OpenGeni");
-      expect(await packRow.locator("> button").getAttribute("aria-label")).toBe(
-        "Infrastructure operations. Pack, registered in this workspace. Installed",
-      );
-
-      await openBundleSheet(page, `pack:${packId}`);
-      const dialog = page.locator(`[data-pack-dialog="${packId}"]`);
-      await expectVisible(dialog);
-      // The version, role, category, and installed digest a repair turns on.
-      const identity = dialog.locator(`[data-pack-identity="${packId}"]`);
-      await expectText(identity, "v1.4.0");
-      await expectText(identity, "infrastructure");
-      await expectText(identity, "operations");
-      await expectText(identity, packManifestDigest.slice(0, 12));
-      await expectText(identity, "Pinned infrastructure automation capabilities.");
-      await expectText(dialog, "Ready to install");
-      await assertAccessibleAndBounded(page, `[data-pack-dialog="${packId}"]`);
-      await dialog.screenshot({ path: `${evidenceDir}pack-detail-dialog-light.png` });
-
-      // Unregistering a live installation is the one order that cannot work.
-      expect(await dialog.getByRole("button", { name: "Unregister" }).isDisabled()).toBe(true);
-
-      await dialog.getByRole("button", { name: "Uninstall" }).click();
-      // Two dialogs are mounted now; the confirmation is the one that names it.
-      const confirm = page
-        .getByRole("dialog")
-        .filter({ hasText: "Uninstall Infrastructure operations?" });
-      await expectText(confirm, "Retained by another Pack");
-      await confirm.getByRole("button", { name: "Uninstall Pack" }).click();
-      expect(state.packUninstallRequests).toHaveLength(1);
-      expect(state.packUninstallRequests[0]).toMatchObject({ expectedInstallationVersion: 4 });
-      await expectText(packRow, "Not installed");
-    } finally {
-      await context.close();
-    }
-  }, 90_000);
 });
 
 function readyState(
-  patch: Partial<
-    Pick<UiState, "canManage" | "skillInstalled" | "pluginInstalled" | "packInstalled">
-  > = {},
+  patch: Partial<Pick<UiState, "canManage" | "skillInstalled" | "pluginInstalled">> = {},
 ): UiState {
   return {
     canManage: true,
@@ -338,8 +311,7 @@ function readyState(
     pluginInstallRequests: [],
     skillRemoveRequests: [],
     pluginRemoveRequests: [],
-    packInstalled: false,
-    packUninstallRequests: [],
+
     ...patch,
   };
 }
@@ -348,11 +320,50 @@ async function openCapabilities(page: Page): Promise<void> {
   await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
     waitUntil: "networkidle",
   });
-  await expectVisible(page.getByRole("heading", { name: "Bundles" }));
+  await expectVisible(page.getByRole("tab", { name: "Skills", exact: true }));
+  await page.getByRole("tab", { name: "Skills", exact: true }).click();
+}
+
+async function openInstalledPackages(page: Page): Promise<void> {
+  const summary = page.getByText("Manage installed packages", { exact: true });
+  if (!(await summary.evaluate((node) => node.parentElement?.hasAttribute("open"))))
+    await summary.click();
 }
 
 async function openBundleSheet(page: Page, rowId: string): Promise<void> {
-  await page.locator(`[data-integration-row="${rowId}"] > button`).first().click();
+  if (rowId.startsWith("plugin:")) {
+    await page.getByRole("tab", { name: "Plugins", exact: true }).click();
+    const canManage = await page
+      .getByRole("button", { name: "Import plugin", exact: true })
+      .isEnabled();
+    await page.getByRole("button", { name: /Research suite.*Installed/ }).click();
+    await expectVisible(
+      page
+        .locator(".og-plugin-details")
+        .getByRole("heading", { name: "Research suite", exact: true }),
+    );
+    await expectText(page.getByRole("dialog"), "Reference MCP");
+    if (canManage) {
+      await expectVisible(
+        page.locator(".og-plugin-details").getByRole("button", { name: "Connect", exact: true }),
+      );
+    }
+    const manage = page.getByRole("button", { name: "Manage installation", exact: true });
+    if (canManage) await manage.scrollIntoViewIfNeeded();
+    await page.getByRole("dialog").screenshot({
+      path: `${evidenceDir}installed-plugin-overview-${canManage ? "manager" : "viewer"}.png`,
+    });
+    if (!canManage) {
+      expect(await manage.count()).toBe(0);
+      return;
+    }
+    await manage.focus();
+    await page.keyboard.press("Enter");
+    return;
+  }
+  await page.getByRole("tab", { name: "Skills", exact: true }).click();
+  await openInstalledPackages(page);
+  await page.locator(`button[data-integration-row="${rowId}"]`).first().click();
 }
 
 async function installApi(page: Page, state: UiState): Promise<void> {
@@ -372,41 +383,36 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === "/v1/access/me") return json(access(state.canManage));
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/model-catalog`) return json({ models: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/pr-review/registrations`)
+      return json({ registrations: [], repositories: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/pr-review/github`)
+      return json({ status: "unavailable", installations: [], missing: [], installUrl: null });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`)
+      return json({
+        provider: "skills_sh",
+        query: url.searchParams.get("q"),
+        items: [],
+        nextCursor: null,
+      });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`)
+      return json({ items: [], total: 0, nextOffset: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json(capabilityCatalog(state));
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`) {
+      return json({ items: [], total: 0, nextOffset: null });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`) {
+      return json({ items: [], nextCursor: null });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`) {
+      return json({ bindings: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       return json({ connections: connections() });
     }
-    if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
-      return json({
-        packs: [capabilityPack()],
-        installations: state.packInstalled ? [packInstallation()] : [],
-      });
-    }
-    if (
-      request.method() === "POST" &&
-      decodeURIComponent(url.pathname) ===
-        `/v1/workspaces/${workspaceId}/packs/${packId}/installation-preview`
-    ) {
-      return json(packInstallationPreview(state));
-    }
-    if (
-      request.method() === "GET" &&
-      decodeURIComponent(url.pathname) ===
-        `/v1/workspaces/${workspaceId}/packs/${packId}/uninstall-preview`
-    ) {
-      return json(packUninstallPreview());
-    }
-    if (
-      request.method() === "DELETE" &&
-      decodeURIComponent(url.pathname) ===
-        `/v1/workspaces/${workspaceId}/packs/${packId}/installation`
-    ) {
-      state.packUninstallRequests.push(request.postDataJSON() as Record<string, unknown>);
-      state.packInstalled = false;
-      return json({ packId, status: "uninstalled", retainedComponents: [skillCapabilityId] });
-    }
+
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {
@@ -424,8 +430,65 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (request.method() === "GET" && url.pathname === `/v1/workspaces/${workspaceId}/skills`) {
       return json({ skills: state.skillInstalled ? [installedSkillSummary(state)] : [] });
     }
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/v1/workspaces/${workspaceId}/skills/content`
+    ) {
+      return json({
+        skills: state.skillInstalled
+          ? [
+              {
+                id: skillCapabilityId,
+                stableKey: "release-operator",
+                title: "release-operator",
+                description: "Release safely with immutable operational instructions.",
+                scope: "workspace",
+                scopeVersion: 1,
+                status: "active",
+                activationMode: "workspace_managed",
+                activeRevisionId: "active",
+                revisionId: "active",
+                pendingRevisionIds: [],
+                contentHash: "b".repeat(64),
+                source: null,
+              },
+            ]
+          : [],
+        nextCursor: null,
+      });
+    }
     if (request.method() === "GET" && url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
       return json({ plugins: state.pluginInstalled ? [installedPlugin(state)] : [] });
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/v1/workspaces/${workspaceId}/plugins/details`
+    ) {
+      expect(url.searchParams.get("pluginKey")).toBe(pluginKey);
+      return json({
+        id: pluginKey.replace("/", ":"),
+        name: "research",
+        displayName: "Research suite",
+        description: "Research workflows with Linear and reusable Skills.",
+        longDescription: "Research workflows with Linear and reusable Skills.",
+        provider: "custom",
+        category: "plugins",
+        logoUrl: null,
+        darkLogoUrl: null,
+        sourceUrl: pluginUrl,
+        author: null,
+        version: "2.0.0",
+        skills: [{ name: "Research Skill", sourceUrl: skillUrl }],
+        mcpServers: [
+          {
+            name: "Reference MCP",
+            transport: "http",
+            endpoint: "https://reference.example.test/mcp",
+          },
+        ],
+        components: ["skills", "mcp", "integration"],
+        installation: "installed",
+      });
     }
     if (
       request.method() === "POST" &&
@@ -543,7 +606,9 @@ function access(canManage: boolean) {
         permissions,
       },
     ],
-    workspaceGrants: [{ workspaceId, accountId, subjectId, permissions }],
+    workspaceGrants: [
+      { workspaceId, accountId, subjectId, permissions, principalKind: "human_session" },
+    ],
     defaultAccountId: accountId,
     defaultWorkspaceId: workspaceId,
   };
@@ -574,9 +639,9 @@ function workspace() {
 }
 
 function capabilityCatalog(state: UiState) {
-  if (!state.skillInstalled) return { items: [packCatalogItem()], installations: [] };
+  if (!state.skillInstalled) return { items: [], installations: [] };
   return {
-    items: [installedSkillItem(), packCatalogItem()],
+    items: [installedSkillItem()],
     installations: [
       {
         id: "00000000-0000-4000-8000-000000000721",
@@ -639,148 +704,6 @@ function installedSkillItem() {
       contentSha256: "b".repeat(64),
       installedSkill: { source: "github" },
     },
-  };
-}
-
-/**
- * The Pack's catalog row. Its `source` is the fact the Bundles row reads for
- * provenance, so an admin-registered Pack must not be projected as built in.
- */
-function packCatalogItem() {
-  return {
-    id: `pack:${packId}`,
-    kind: "pack",
-    source: "manual",
-    name: "Infrastructure operations",
-    description: "Pinned infrastructure automation capabilities.",
-    category: "operations",
-    tags: ["infrastructure", "operations", "pack"],
-    homepageUrl: null,
-    endpointUrl: null,
-    installUrl: null,
-    authModel: null,
-    providerDomain: null,
-    surfaceType: null,
-    transport: null,
-    mcpUrl: null,
-    authKind: null,
-    credentialFacts: [],
-    tier: "community",
-    provenance: null,
-    logoAssetPath: null,
-    importBatchId: null,
-    stale: false,
-    staleAt: null,
-    tools: [],
-    runtime: { available: true, notes: null },
-    lifecycle: {
-      status: "available",
-      readiness: "ready",
-      detail: "available",
-      managedBy: "workspace",
-    },
-    actions: ["inspect"],
-    enabled: false,
-    enabledReason: null,
-    connectionRef: null,
-    metadata: { packId, version: "1.4.0" },
-  };
-}
-
-function capabilityPack() {
-  return {
-    id: packId,
-    name: "Infrastructure operations",
-    description: "Pinned infrastructure automation capabilities.",
-    role: "infrastructure",
-    category: "operations",
-    version: "1.4.0",
-    skills: [],
-    components: [
-      {
-        key: "skills/release-operator",
-        kind: "skill",
-        capabilityId: skillCapabilityId,
-        contentSha256: "b".repeat(64),
-        required: true,
-      },
-    ],
-    tools: [],
-    connectors: [],
-    knowledge: [],
-    scheduledTaskTemplates: [],
-    metadata: {},
-  };
-}
-
-function packInstallation() {
-  return {
-    id: "00000000-0000-4000-8000-000000000731",
-    accountId,
-    workspaceId,
-    packId,
-    status: "active",
-    version: 4,
-    manifestSnapshot: capabilityPack(),
-    manifestDigest: packManifestDigest,
-    selectedRigId: null,
-    installedBySubjectId: subjectId,
-    metadata: {},
-    enabledAt: "2026-08-11T00:00:00.000Z",
-    updatedAt: "2026-08-11T00:00:00.000Z",
-  };
-}
-
-function packInstallationPreview(state: UiState) {
-  return {
-    packId,
-    packVersion: "1.4.0",
-    manifestDigest: packManifestDigest,
-    installationVersion: state.packInstalled ? 4 : null,
-    action: state.packInstalled ? "update" : "install",
-    ready: true,
-    blockers: [],
-    components: [
-      {
-        key: "skills/release-operator",
-        kind: "skill",
-        capabilityId: skillCapabilityId,
-        required: true,
-        status: "ready",
-        expectedDigest: "b".repeat(64),
-        actualDigest: "b".repeat(64),
-        resolvedId: skillCapabilityId,
-        label: "release-operator",
-      },
-    ],
-    rig: {
-      required: false,
-      status: "not_required",
-      requestedRigId: null,
-      rigId: null,
-      rigVersionId: null,
-      name: null,
-      image: null,
-    },
-    variableSetId: null,
-    legacyInlineSkillCount: 0,
-    legacySandboxImage: null,
-  };
-}
-
-function packUninstallPreview() {
-  return {
-    packId,
-    installed: true,
-    installationVersion: 4,
-    components: [
-      {
-        key: "skills/release-operator",
-        kind: "skill",
-        capabilityId: skillCapabilityId,
-        retainedByOtherOwners: true,
-      },
-    ],
   };
 }
 
@@ -999,10 +922,35 @@ function pluginUninstallPreview(state: UiState) {
     installed: state.pluginInstalled,
     version: state.pluginInstalled ? "2.0.0" : null,
     installationVersion: state.pluginInstalled ? state.pluginInstallationVersion : null,
+    previewToken: "f".repeat(64),
     components: [
-      { capabilityId: "api:linear", kind: "integration", retainedByOtherOwners: false },
-      { capabilityId: skillCapabilityId, kind: "skill", retainedByOtherOwners: true },
-      { capabilityId: "mcp:reference", kind: "mcp", retainedByOtherOwners: false },
+      {
+        capabilityId: "api:linear",
+        name: "Linear",
+        kind: "integration",
+        retainedByOtherOwners: false,
+        disposition: "removed",
+        retentionReasons: [],
+        remainingOwners: [],
+      },
+      {
+        capabilityId: skillCapabilityId,
+        name: "Release operator",
+        kind: "skill",
+        retainedByOtherOwners: true,
+        disposition: "retained",
+        retentionReasons: ["other_owners"],
+        remainingOwners: [{ kind: "direct", name: "Direct installation" }],
+      },
+      {
+        capabilityId: "mcp:reference",
+        name: "Reference tools",
+        kind: "mcp",
+        retainedByOtherOwners: false,
+        disposition: "removed",
+        retentionReasons: [],
+        remainingOwners: [],
+      },
     ],
   };
 }
@@ -1079,7 +1027,15 @@ async function assertAccessibleAndBounded(page: Page, selector: string): Promise
 }
 
 async function expectVisible(locator: import("playwright").Locator): Promise<void> {
-  await locator.waitFor({ state: "visible", timeout: 15_000 });
+  try {
+    await locator.waitFor({ state: "visible", timeout: 15_000 });
+  } catch (error) {
+    const page = locator.page();
+    throw new Error(
+      `${String(error)}\nURL: ${page.url()}\nBODY: ${((await page.locator("body").textContent()) ?? "").slice(0, 4_000)}`,
+      { cause: error },
+    );
+  }
 }
 
 async function expectHidden(locator: import("playwright").Locator): Promise<void> {

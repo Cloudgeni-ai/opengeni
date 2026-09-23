@@ -8,6 +8,7 @@ export const ORGANIZATION_ADMIN_SECTIONS = [
   "overview",
   "knowledge",
   "models",
+  "integrations",
   "people",
   "recovery",
   "retention",
@@ -17,6 +18,7 @@ export const ORGANIZATION_ADMIN_SECTIONS = [
 
 export type OrganizationAdminSection = (typeof ORGANIZATION_ADMIN_SECTIONS)[number];
 export type OrganizationAdminResource =
+  | "integrations"
   | "overview"
   | "private-sessions"
   | "members"

@@ -6,32 +6,38 @@ import {
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   normalizeWorkspaceInstructionPolicyRoleKey,
   type WorkspaceInstructionPolicyKind,
+  type WorkspaceInstructionPolicyHead,
   type WorkspaceInstructionPolicyOnboardingProposal,
   type WorkspaceInstructionPolicyScope,
   type WorkspaceStateGovernanceDriftStatus,
   type WorkspaceStateResponse,
 } from "@opengeni/sdk";
-import { Link } from "@tanstack/react-router";
-import { ArrowLeftIcon, BrainCircuitIcon, ChevronDownIcon } from "lucide-react";
-import { type FormEvent, type ReactNode, useEffect, useState } from "react";
+import { lazyRouteComponent } from "@tanstack/react-router";
+import { ChevronDownIcon } from "lucide-react";
+import { type FormEvent, type ReactNode, Suspense, useEffect, useRef, useState } from "react";
 
-import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
-import { ContentPage } from "@/components/ui/content-layout";
+import { EmptyState, LoadErrorState } from "@/components/common";
+import { AgentKnowledgePage } from "@/components/knowledge/agent-knowledge-page";
 import { Notice } from "@/components/ui/notice";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { activeGlobalWorkspaceInstructionHead } from "@/lib/workspace-instructions";
+import { createWorkspaceInstructionSave } from "@/lib/workspace-instruction-save";
 
-import { BrainOverview } from "./agent-brain-overview";
+import { KnowledgePanel } from "./memory";
+
 import { AgentKnowledgePrompt } from "./agent-brain-prompt";
 import {
   useCompanyProfileInventory,
   useWorkspaceInstructionPolicyOnboardingProposals,
   useWorkspaceStateInventory,
 } from "./workspace-state-loader";
-import { PreferenceRegistryAdministration } from "./preference-registry-admin";
+import { KnowledgeSkills } from "@/components/knowledge/knowledge-skills";
+import { PluginSearch } from "@/components/capabilities/capability-catalog-sections";
+
+const KnowledgeFilesPanel = lazyRouteComponent(() => import("./documents"), "KnowledgeFilesPanel");
 
 function formatDate(value: string | null): string {
   if (!value) return "No activity";
@@ -641,7 +647,7 @@ export function OnboardingProposalInventory({
   return (
     <StateCard
       title="Onboarding proposals"
-      description="Create provenance-linked instruction-policy drafts only. Proposals never activate themselves and do not promote Documents or Memory into prompt authority."
+      description="Create provenance-linked instruction-policy drafts only. Proposals never activate themselves and do not promote Knowledge into prompt authority."
     >
       {canCreate ? (
         <form
@@ -1046,21 +1052,29 @@ export function AttemptGovernanceInventory({
   );
 }
 
-function FocusedInstructions({
+export function FocusedInstructions({
   state,
   workspaceId,
   personalWorkspace,
-  onWorkspaceStateReload,
+  onInstructionSaved,
 }: {
   state: WorkspaceStateResponse;
   workspaceId: string;
   personalWorkspace: boolean;
-  onWorkspaceStateReload: () => Promise<void>;
+  onInstructionSaved?: (head: WorkspaceInstructionPolicyHead) => void;
 }) {
   const context = useAppContext();
   const { client } = context;
   const canEdit = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
-  const activeHead = activeGlobalWorkspaceInstructionHead(state);
+  const [confirmedSave, setConfirmedSave] = useState<Awaited<
+    ReturnType<ReturnType<typeof createWorkspaceInstructionSave>["run"]>
+  > | null>(null);
+  const projectedHead = activeGlobalWorkspaceInstructionHead(state);
+  const activeHead =
+    confirmedSave && confirmedSave.head.activationVersion >= (projectedHead?.activationVersion ?? 0)
+      ? confirmedSave.head
+      : projectedHead;
+  const pendingSave = useRef<ReturnType<typeof createWorkspaceInstructionSave> | null>(null);
   const activeRevisionId = activeHead?.revisionId ?? null;
   const instructionConfigured =
     activeRevisionId !== null || state.policy.legacyRuntime.workspaceOverrideConfigured;
@@ -1072,6 +1086,13 @@ function FocusedInstructions({
 
   useEffect(() => {
     let cancelled = false;
+    // Activation already returned the durable head and draft content. Do not
+    // gate completion (or the next edit's baseline) on another inventory read.
+    if (confirmedSave?.head.revisionId === activeRevisionId) {
+      setContent(confirmedSave.content);
+      setLoadingContent(false);
+      return;
+    }
     setLoadingContent(true);
     setContent("");
     setMessage(null);
@@ -1098,6 +1119,7 @@ function FocusedInstructions({
     };
   }, [
     activeRevisionId,
+    confirmedSave,
     client,
     state.policy.legacyRuntime.workspaceOverrideConfigured,
     workspaceId,
@@ -1105,31 +1127,34 @@ function FocusedInstructions({
 
   const save = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    if (!canEdit || saving || !content.trim()) return;
+    if (!canEdit || saving || loadingContent || !content.trim()) return;
     setSaving(true);
     setMessage(null);
     setEditorError(null);
     try {
-      const draft = await client.createWorkspaceInstructionPolicyDraft(workspaceId, {
-        operationId: crypto.randomUUID(),
-        kind: "policy",
-        scope: "global",
-        roleKey: null,
-        content,
-        provenanceSource: "human",
-        provenanceSourceId: null,
-        supersedesRevisionId: activeHead?.revisionId ?? null,
-      });
-      await client.activateWorkspaceInstructionPolicyRevision(workspaceId, draft.id, {
-        operationId: crypto.randomUUID(),
-        expectedCurrentRevisionId: activeHead?.revisionId ?? null,
-        expectedActivationVersion: activeHead?.activationVersion ?? 0,
-        reason: "Updated by a workspace admin from Agent Knowledge",
-      });
-      await onWorkspaceStateReload();
+      if (!pendingSave.current?.matches(client, workspaceId, content, activeHead)) {
+        pendingSave.current = createWorkspaceInstructionSave(
+          client,
+          workspaceId,
+          content,
+          activeHead,
+        );
+      }
+      const saved = await pendingSave.current.run();
+      setConfirmedSave(saved);
+      onInstructionSaved?.(saved.head);
+      pendingSave.current = null;
       setMessage("Saved. New agent turns will use these workspace instructions.");
     } catch (error) {
-      setEditorError(error instanceof Error ? error.message : String(error));
+      const uncertain = error instanceof OpenGeniApiError && error.outcomeUnknown;
+      if (!uncertain) pendingSave.current = null;
+      setEditorError(
+        uncertain
+          ? "Could not confirm whether these instructions were saved. Your text is still here. Save again to retry."
+          : error instanceof Error
+            ? error.message
+            : String(error),
+      );
     } finally {
       setSaving(false);
     }
@@ -1160,9 +1185,9 @@ function FocusedInstructions({
         ) : (
           <p className="mt-3 text-xs leading-5 text-fg-muted">
             {personalWorkspace && !canEdit
-              ? "No personal workspace instruction is active. Editing becomes available with the personal-policy authority."
+              ? "No personal instructions have been set."
               : canEdit
-                ? "No workspace instruction is active yet. Tell OpenGeni what agents should always do, or add a concise instruction manually below."
+                ? "No instructions yet. Describe what agents should always do, or add instructions manually."
                 : "No workspace instruction is active yet. A workspace administrator can add one."}
           </p>
         )}
@@ -1194,9 +1219,8 @@ function FocusedInstructions({
               </label>
               <p className="text-xs leading-5 text-fg-subtle">
                 {personalWorkspace
-                  ? "These instructions are included automatically only for agents working in your personal workspace."
-                  : "These instructions are included automatically for agents working in this workspace."}{" "}
-                Changes are versioned and can be audited or rolled back.
+                  ? "Applies to agents in your personal workspace."
+                  : "Applies to every agent in this workspace."}
               </p>
               {!canEdit ? (
                 <p className="text-xs text-status-waiting">
@@ -1235,7 +1259,7 @@ function FocusedInstructions({
           }
         >
           {personalWorkspace
-            ? "You can see the instruction currently applied here. Personal Skills, Documents, and Memory are available now; editing this personal instruction needs the upcoming personal-policy authority."
+            ? "You can view the current instructions, but personal instruction editing is not available yet."
             : "You can see the instruction currently applied here. A workspace administrator can change it."}
         </Notice>
       )}
@@ -1246,59 +1270,64 @@ function FocusedInstructions({
 export function WorkspaceStateRoute({
   workspaceId,
   view,
+  fileId,
+  review,
 }: {
   workspaceId: string;
-  view?: "instructions" | "skills";
+  view?: "instructions" | "skills" | "files";
+  fileId?: string;
+  review?: boolean;
+}) {
+  const [skillsQuery, setSkillsQuery] = useState("");
+  return (
+    <AgentKnowledgePage
+      key={workspaceId}
+      workspaceId={workspaceId}
+      section={view ?? "knowledge"}
+      search={
+        view === "skills" ? (
+          <PluginSearch scope="skills" query={skillsQuery} onQueryChange={setSkillsQuery} />
+        ) : undefined
+      }
+    >
+      <Suspense fallback={<WorkspaceStateLoading />}>
+        {view === "files" ? (
+          <KnowledgeFilesPanel workspaceId={workspaceId} />
+        ) : view ? (
+          <WorkspaceBehaviorPanel workspaceId={workspaceId} view={view} skillsQuery={skillsQuery} />
+        ) : (
+          <KnowledgePanel
+            workspaceId={workspaceId}
+            review={review}
+            {...(fileId ? { fileId } : {})}
+          />
+        )}
+      </Suspense>
+    </AgentKnowledgePage>
+  );
+}
+
+function WorkspaceBehaviorPanel({
+  workspaceId,
+  view,
+  skillsQuery,
+}: {
+  workspaceId: string;
+  skillsQuery: string;
+  view: "instructions" | "skills";
 }) {
   const context = useAppContext();
   const { client } = context;
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
-  const { state, error, loading, reload } = useWorkspaceStateInventory(client, workspaceId);
+  const { state, error, loading, reload, acceptInstructionHead } = useWorkspaceStateInventory(
+    client,
+    workspaceId,
+  );
 
   return (
-    <ContentPage width="standard">
-      <PageHeader
-        icon={<BrainCircuitIcon className="size-4" />}
-        title={
-          view === "instructions"
-            ? personalWorkspace
-              ? "Personal workspace instructions"
-              : "Workspace instructions"
-            : view === "skills"
-              ? personalWorkspace
-                ? "Your Skills"
-                : "Skills"
-              : personalWorkspace
-                ? "Your Agent Knowledge"
-                : "Agent Knowledge"
-        }
-        description={
-          view === "instructions"
-            ? personalWorkspace
-              ? "View the always-on guidance currently applied in your personal workspace."
-              : "Set the concise, always-on guidance for agents in this workspace."
-            : view === "skills"
-              ? personalWorkspace
-                ? "Manage personal Skills that follow you, alongside other Skills available here."
-                : "Create reusable instructions agents can fetch when relevant."
-              : personalWorkspace
-                ? "Your private instructions, Skills, documents, and Memory, together with company knowledge you can access."
-                : "The instructions, skills, documents, and memories available to agents in this workspace."
-        }
-      />
-      <div className="mt-6">
-        {view ? (
-          <Link
-            to="/workspaces/$workspaceId/state"
-            params={{ workspaceId }}
-            search={{}}
-            className="mb-4 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
-          >
-            <ArrowLeftIcon className="size-3" />
-            Back to Agent Knowledge
-          </Link>
-        ) : null}
+    <>
+      <div>
         {loading && !state ? <WorkspaceStateLoading /> : null}
         {error && !state ? (
           <LoadErrorState
@@ -1318,30 +1347,23 @@ export function WorkspaceStateRoute({
             ) : null}
             {view === "instructions" ? (
               <FocusedInstructions
+                key={workspaceId}
                 state={state}
                 workspaceId={workspaceId}
                 personalWorkspace={personalWorkspace}
-                onWorkspaceStateReload={reload}
+                onInstructionSaved={acceptInstructionHead}
               />
             ) : null}
             {view === "skills" ? (
-              <PreferenceRegistryAdministration
-                workspaceId={workspaceId}
-                onWorkspaceStateReload={reload}
-                compact
-                personalWorkspace={personalWorkspace}
-              />
-            ) : null}
-            {!view ? (
-              <BrainOverview
-                state={state}
+              <KnowledgeSkills
                 workspaceId={workspaceId}
                 personalWorkspace={personalWorkspace}
+                query={skillsQuery}
               />
             ) : null}
           </div>
         ) : null}
       </div>
-    </ContentPage>
+    </>
   );
 }

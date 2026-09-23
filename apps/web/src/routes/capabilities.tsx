@@ -1,24 +1,26 @@
-// Plugins: the workspace integrations marketplace. A single scrollable
-// page with exactly three sections: Integrations, Connectors, and Bundles.
-// Integrations (Slack, GitHub, Google
-// Drive, Jira and Confluence, Outlook Mail/Calendar/Contacts, OneDrive) are
-// built and run by OpenGeni and render through one row and one detail sheet
-// each; a provider with several accounts (Outlook, extra Drive accounts)
-// still gets exactly one row, with every account listed in its sheet's
-// Connected accounts block. Connectors are MCP servers from the catalog plus
-// workspace-defined Custom APIs: a curated Featured strip, then a large
-// search, kind filters, an "Enabled" strip the user manages daily, a Custom
-// APIs list, and a logo tile grid over the full catalog (1,000+ items,
-// rendered incrementally). Credentialed MCP servers connect through the
-// connections spine (OAuth redirect or an API-key form) in a right-hand detail
-// sheet, never by hand-editing enable headers. Bundles are Skills, Plugins,
-// and Packs: a named collection of tools and instructions rather than a live
-// connection, so they get their own section, their own search, and one uniform
-// row (see `bundles-section.tsx`) instead of three unheaded blocks. Nothing
-// with kind skill, plugin, or pack ever reaches the Connectors Enabled/Browse
-// projections.
-import { usePacks, useRigs, useVariableSets } from "@opengeni/react";
-import { PlugIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
+import type { SkillSummary } from "@opengeni/sdk";
+import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
+import { ConnectionCatalog, McpConnectionCard } from "@opengeni/react/connect";
+import "@opengeni/react/connect.css";
+import { ConnectionLogo } from "@opengeni/react/connect";
+import {
+  catalogServiceIdentity,
+  mergeConnectionServices,
+  partitionConnectionServices,
+} from "@/components/capabilities/connection-services";
+import { capabilityStateChip } from "@/lib/capabilities";
+import { CatalogHeader, CatalogActionContext } from "@/components/capabilities/catalog-header";
+import { InstalledStrip } from "@/components/capabilities/installed-strip";
+import { performCapabilityAction } from "@/components/capabilities/perform-capability-action";
+
+// Capabilities has one overview and dedicated Connections, Skills, and Plugins
+// tabs. Connections group provider accounts and use the normal connection
+// authorization flow. Imported Skills and Plugins retain their own lifecycle
+// controls; they are not projected into the connector catalog.
+
+import { PlugIcon, PlusIcon } from "lucide-react";
+
+import { CapabilitiesLegacyRedirect } from "@/routes/capabilities-legacy-redirect";
 import {
   Fragment,
   Suspense,
@@ -34,12 +36,10 @@ import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
 import { BundlesSection } from "@/components/capabilities/bundles-section";
-import {
-  CapabilityBrowseSection,
-  CapabilityDiscoveryControls,
-  EnabledCapabilitiesSection,
-} from "@/components/capabilities/capability-catalog-sections";
-import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { SkillsPanel } from "./skills-panel";
+import { skillReleaseMessage } from "@/components/capabilities/skill-release-message";
+import { PluginSearch } from "@/components/capabilities/capability-catalog-sections";
 import { capabilityLogoSource } from "@/components/capabilities/capability-logo-source";
 import {
   CapabilityDetailSheet,
@@ -56,16 +56,8 @@ import {
   initialCustomApiFlowState,
 } from "@/components/capabilities/custom-api-flow";
 import { CustomApiSection } from "@/components/capabilities/custom-api-section";
-import {
-  FeaturedConnectorsStrip,
-  featuredConnectors,
-} from "@/components/capabilities/featured-connectors";
-import { IntegrationRow } from "@/components/capabilities/integration-row";
+import { featuredConnectors } from "@/components/capabilities/featured-connectors";
 import { IntegrationSheet } from "@/components/capabilities/integration-sheet";
-import {
-  QuickConnectDialog,
-  type QuickConnectRequest,
-} from "@/components/capabilities/quick-connect-dialog";
 import { useApiIntegrationOAuthCallback } from "@/components/capabilities/use-api-integration-accounts";
 import { useCapabilitiesCatalog } from "@/components/capabilities/use-capabilities-catalog";
 import { useAtlassianIntegration } from "@/components/capabilities/use-atlassian-integration";
@@ -85,21 +77,16 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
 import {
-  apiKeyConnectionRef,
-  apiKeyCredential,
   capabilityConnectPlan,
-  capabilityCounts,
   capabilityErrorToast,
   capabilityInputFromForm,
-  capabilityQuickConnectPlan,
   connectionHealth,
-  connectionToReuseForApiKey,
-  createInputFromCatalogItem,
   filterCapabilityCatalogItems,
   isConnectorCatalogItem,
   isMissingCredentialsError,
   normalizeProviderDomain,
   oauthConnectionRef,
+  catalogConnectionAccountSelection,
   oauthConnectionOwnership,
   oauthResumeAction,
   registryResultsForQuery,
@@ -107,17 +94,14 @@ import {
   type CapabilityFilter,
   type CapabilityFormState,
   type ConnectionHealth,
-  type RequiredHeaderField,
   type SheetSelection,
 } from "@/lib/capabilities";
-import { listViewState } from "@/lib/load-state";
-import { mcpOAuthCallbackFailureMessage, startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
+import { mcpOAuthCallbackFailureMessage } from "@/lib/mcp-oauth";
 import {
   personalGitHubOAuthFailureMessage,
   personalGitHubOAuthReturn,
 } from "@/lib/personal-github-oauth";
 import { hasWorkspacePermission } from "@/lib/permissions";
-import { cn } from "@/lib/utils";
 import { request } from "@/api";
 
 // Custom API creation is a fundamentally different "define a new connector
@@ -129,17 +113,17 @@ const CustomApiSetupDialog = lazy(async () => {
   return { default: module.CustomApiSetupDialog };
 });
 
-import type { IntegrationViewModel } from "@/components/capabilities/integration-view-model";
+import {
+  catalogStatusForChip,
+  type IntegrationViewModel,
+} from "@/components/capabilities/integration-view-model";
 
 import type {
   AccessContext,
   ApiIntegrationInstallationSummary,
   CapabilityCatalogItem,
-  CapabilityPack,
   ConnectionMetadata,
   ConnectionOwnership,
-  PackInstallationPreview,
-  PackUninstallPreview,
   SkillUninstallPreview,
 } from "@/types";
 
@@ -152,34 +136,24 @@ export function canManageApiIntegrations(
   return hasWorkspacePermission(accessContext, workspaceId, "capabilities:manage");
 }
 
-/**
- * Whether the `?section=packs` deep link should scroll the Bundles section into
- * view on this render.
- *
- * It must wait for the catalog: on first commit Browse is a skeleton, and
- * resolving a 1000+ item catalog then inserts thousands of pixels above the
- * Bundles section, leaving a reader who followed the link stranded in the
- * middle of the Browse grid. It must also fire exactly once, so a later
- * loading/settled cycle (a refresh) never yanks the page back.
- */
-export function shouldScrollToDeepLinkedBundles(
-  initialSection: "packs" | undefined,
-  loading: boolean,
-  alreadyScrolled: boolean,
-): boolean {
-  return initialSection === "packs" && !loading && !alreadyScrolled;
+type CapabilitiesRouteProps = {
+  workspaceId: string;
+  initialSection?: "skills";
+  slackLinkToken?: string;
+  legacyRedirect?: boolean;
+};
+
+export function CapabilitiesRoute(props: CapabilitiesRouteProps) {
+  return props.legacyRedirect ? (
+    <CapabilitiesLegacyRedirect workspaceId={props.workspaceId} section={props.initialSection} />
+  ) : (
+    <CapabilitiesBody {...props} />
+  );
 }
 
-export function CapabilitiesRoute({
-  workspaceId,
-  initialSection,
-  slackLinkToken,
-}: {
-  workspaceId: string;
-  initialSection?: "packs";
-  slackLinkToken?: string;
-}) {
+function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: CapabilitiesRouteProps) {
   const context = useAppContext();
+
   const client = context.client;
   const onRuntimeChanged = useCallback(
     () => void context.refreshWorkspaceMcpServers(workspaceId),
@@ -204,19 +178,24 @@ export function CapabilitiesRoute({
     loadError,
     refresh,
   } = catalogData;
+  const [catalogActionTarget, setCatalogActionTarget] = useState<HTMLDivElement | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   // Connectors-only discovery: the chips offer exactly the kinds that grid can
-  // show. `?section=packs` no longer selects a kind filter - Packs are Bundles
+
   // now, so it scrolls that section into view instead.
-  const [filter, setFilter] = useState<CapabilityFilter>("all");
+  const [filter] = useState<CapabilityFilter>("all");
+  const [activeTab, setActiveTab] = useState(initialSection === "skills" ? "skills" : "all");
   const [query, setQuery] = useState("");
+  const hasQuery = query.trim().length > 0;
+  const searchingAll = activeTab === "all";
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const browseLoadMoreRef = useRef<HTMLDivElement | null>(null);
 
   // Detail/connect sheet. We store the id (+ registry flag + a snapshot for
   // registry items not yet in the catalog), NOT the item object: the rendered
   // item is derived from the LIVE `items` list by id, so any mutation + refresh
-  // (strip disable, pack disable, background reload) re-derives the sheet instead
+
   // of leaving it on a stale snapshot that could re-enable what was just disabled.
   const [selected, setSelected] = useState<SheetSelection | null>(null);
   const sheetOpenerRef = useRef<HTMLElement | null>(null);
@@ -224,15 +203,35 @@ export function CapabilitiesRoute({
   // closing it returns focus to that row instead of dropping it on the body.
   const integrationOpenerRef = useRef<HTMLElement | null>(null);
   const capabilityFocusFallbackRef = useRef<HTMLDivElement | null>(null);
-  // `/workspaces/:id/packs` redirects here with `?section=packs`. Packs are
+
   // Bundles now, so that deep link scrolls the Bundles section into view
   // instead of selecting a kind filter the Connectors grid no longer offers.
   const bundlesRef = useRef<HTMLDivElement | null>(null);
-  const bundlesScrolled = useRef(false);
+  const [skillsRevision, setSkillsRevision] = useState(0);
+  const [canonicalSkills, setCanonicalSkills] = useState<SkillSummary[]>([]);
+  const openSkillRef = useRef<((id: string) => void) | null>(null);
+  const importSkillRef = useRef<(() => void) | null>(null);
+
+  const catalogToolbar = useMemo(
+    () => ({
+      target: catalogActionTarget,
+      activeTitle: searchingAll
+        ? ""
+        : activeTab === "connections"
+          ? "Connections"
+          : activeTab === "skills"
+            ? "Skills"
+            : "Plugins",
+    }),
+    [catalogActionTarget, searchingAll, activeTab],
+  );
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   // Which integration's detail sheet is open (one sheet, one open id).
-  const [openIntegration, setOpenIntegration] = useState<string | null>(null);
+  const [openIntegration, setOpenIntegration] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("integration") === "slack" || params.has("slack") ? "slack" : null;
+  });
   const [skillRemoval, setSkillRemoval] = useState<{
     item: CapabilityCatalogItem;
     preview: SkillUninstallPreview;
@@ -259,32 +258,16 @@ export function CapabilitiesRoute({
     removesDefinition: boolean;
   } | null>(null);
 
-  // The one shared quick-connect dialog: only `api_key` and unreviewed
-  // `oauth2` connectors ever need it. `none` and reviewed `oauth2` connect
-  // directly from the row/tile icon with no screen of ours.
-  const [quickConnectRequest, setQuickConnectRequest] = useState<QuickConnectRequest | null>(null);
-
   // Public MCP registry search (only offered when the catalog has no matches).
   const [registryBusy, setRegistryBusy] = useState(false);
   const [registryResults, setRegistryResults] = useState<CapabilityCatalogItem[]>([]);
   const [registrySearched, setRegistrySearched] = useState<string | null>(null);
 
-  const packs = usePacks({ workspaceId });
-  const rigs = useRigs({ workspaceId });
-  const variableSets = useVariableSets({ workspaceId });
-
   // The Connectors surface owns exactly MCP servers and API connectors. Skills,
-  // Plugins, and Packs are Bundles: they are scoped out here (not merely
+
   // filtered by the chips) so no Enabled, Browse, or search result can ever
   // contain one, and so the chip counts describe what this grid can show.
   const connectorItems = useMemo(() => items.filter(isConnectorCatalogItem), [items]);
-  const counts = useMemo(() => capabilityCounts(connectorItems), [connectorItems]);
-  const catalogView = listViewState({
-    loading,
-    error: loadError,
-    count: connectorItems.length,
-  });
-
   const filtered = useMemo(
     () => filterCapabilityCatalogItems(connectorItems, filter, query),
     [connectorItems, filter, query],
@@ -299,23 +282,10 @@ export function CapabilitiesRoute({
     () => (showFeatured ? featuredConnectors(filtered) : []),
     [filtered, showFeatured],
   );
-  const featuredIds = useMemo(() => new Set(featured.map((item) => item.id)), [featured]);
   // One placement per integration: a featured tile carries its own Enabled
   // badge, so an enabled featured item stays in the strip and is excluded from
   // the Enabled section; everything else enabled lives in the Enabled section
   // and Browse shows only the rest of the catalog.
-  const enabledItems = useMemo(
-    () => filtered.filter((item) => item.enabled && !featuredIds.has(item.id)),
-    [filtered, featuredIds],
-  );
-  const browseItems = useMemo(
-    () =>
-      sortConnectorsForPresentation(
-        filtered.filter((item) => !item.enabled && !featuredIds.has(item.id)),
-      ),
-    [filtered, featuredIds],
-  );
-  const visibleBrowse = browseItems.slice(0, visibleCount);
   // Custom APIs answer the same search as every other connector: a query that
   // matches nothing here must not still list every workspace-defined API.
   const visibleCustomApiInstances = useMemo(
@@ -419,16 +389,138 @@ export function CapabilitiesRoute({
     outlookContacts,
     oneDrive,
   ];
+  const connectionServices = mergeConnectionServices([
+    ...integrations.map(({ model }) => ({
+      id: model.id,
+      name: model.name,
+      logo: (
+        <ConnectionLogo
+          src={"logoSrc" in model.mark ? model.mark.logoSrc : null}
+          name={model.name}
+          size={40}
+        />
+      ),
+      options: [
+        {
+          id: model.id,
+          name:
+            model.id === "slack"
+              ? slack.catalogName
+              : model.id === "atlassian"
+                ? "Knowledge sync"
+                : model.name,
+          description: model.description,
+          status: model.chip.label,
+          state: catalogStatusForChip(model.chip),
+          connected: model.chip.label === "Connected" || model.chip.label === "Needs attention",
+          onOpen: () => {
+            integrationOpenerRef.current =
+              document.activeElement instanceof HTMLElement ? document.activeElement : null;
+            if (
+              model.id === "slack" &&
+              model.footer.kind === "setup" &&
+              !model.footer.disabled &&
+              !model.footer.busy &&
+              !model.notice
+            ) {
+              model.footer.onSetup();
+            } else {
+              setOpenIntegration(model.id);
+            }
+          },
+        },
+      ],
+    })),
+    ...sortConnectorsForPresentation(connectorItems).map((item) => ({
+      ...catalogServiceIdentity(item.id, item.name, item.providerDomain),
+      logo: <ConnectionLogo src={logoUrl(item)} name={item.name} size={40} />,
+      options: [
+        {
+          id: item.id,
+          name:
+            catalogServiceIdentity(item.id, item.name, item.providerDomain).id === "slack"
+              ? "Your account"
+              : "Agent tools",
+          description:
+            catalogServiceIdentity(item.id, item.name, item.providerDomain).id === "slack"
+              ? "Let OpenGeni read and send Slack messages as you."
+              : (item.description ?? undefined),
+          status: capabilityStateChip(
+            item,
+            connectionHealth(item, connections ?? [], connectionsLoaded),
+          ).label,
+          state: catalogStatusForChip(
+            capabilityStateChip(item, connectionHealth(item, connections ?? [], connectionsLoaded)),
+          ),
+          connected: item.enabled,
+          onOpen: () => openItem(item),
+        },
+      ],
+    })),
+  ]);
+  const { featuredServices, remainingServices } = partitionConnectionServices(
+    connectionServices,
+    showFeatured,
+    featured,
+    integrations.map(({ model }) => model.id),
+    connectorItems,
+  );
   const openIntegrationModel =
     integrations.find((adapter) => adapter.model.id === openIntegration)?.model ?? null;
   // The item the sheet renders, always from the live catalog. Registry items
   // aren't in `items` until persisted, so they fall back to their snapshot; a
   // non-registry selection with no live row resolves to null and the effect
   // below closes the sheet rather than render a ghost.
-  const selectedItem: CapabilityCatalogItem | null = useMemo(
+  const [authInspection, setAuthInspection] = useState<{
+    id: string;
+    url: string;
+    kind: "oauth2" | "none" | "unknown";
+  } | null>(null);
+  const rawSelectedItem: CapabilityCatalogItem | null = useMemo(
     () => resolveSheetItem(selected, items),
     [selected, items],
   );
+  const inspectUrl = rawSelectedItem?.mcpUrl ?? rawSelectedItem?.endpointUrl;
+  const selectedItemId = rawSelectedItem?.id;
+  const needsAuthInspection =
+    rawSelectedItem?.kind === "mcp" &&
+    !rawSelectedItem.enabled &&
+    capabilityConnectPlan(rawSelectedItem).mode === "setup_required" &&
+    Boolean(inspectUrl);
+  useEffect(() => {
+    if (!needsAuthInspection || !selectedItemId || !inspectUrl) return;
+    let active = true;
+    const id = selectedItemId;
+    setAuthInspection(null);
+    void client.inspectMcpAuthentication(workspaceId, inspectUrl).then(
+      (result) => {
+        if (active) setAuthInspection({ id, url: inspectUrl, kind: result.kind });
+      },
+      () => {
+        if (active) setAuthInspection({ id, url: inspectUrl, kind: "unknown" });
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [client, workspaceId, selectedItemId, inspectUrl, needsAuthInspection]);
+  const inspection =
+    authInspection?.id === rawSelectedItem?.id && authInspection?.url === inspectUrl
+      ? authInspection
+      : null;
+  const selectedItem =
+    rawSelectedItem && needsAuthInspection
+      ? {
+          ...rawSelectedItem,
+          authKind:
+            inspection?.kind === "oauth2"
+              ? ("oauth2" as const)
+              : inspection?.kind === "none"
+                ? ("none" as const)
+                : null,
+          metadata: { ...rawSelectedItem.metadata, authDiscovery: inspection?.kind ?? "checking" },
+        }
+      : rawSelectedItem;
   const selectedHealth: ConnectionHealth = selectedItem
     ? connectionHealth(selectedItem, connections ?? [], connectionsLoaded)
     : { state: "none" };
@@ -499,15 +591,31 @@ export function CapabilitiesRoute({
   // Reset the incremental window whenever the result set changes.
   useEffect(() => setVisibleCount(PAGE_SIZE), [filter, query]);
 
-  // Honour the `?section=packs` deep link exactly once, after the catalog has
-  // settled. Scrolling on first commit lands in the wrong place: Browse is
-  // still a skeleton then, and resolving a 1000+ item catalog inserts thousands
-  // of pixels above the Bundles section afterwards.
   useEffect(() => {
-    if (!shouldScrollToDeepLinkedBundles(initialSection, loading, bundlesScrolled.current)) return;
-    bundlesScrolled.current = true;
-    bundlesRef.current?.scrollIntoView({ block: "start" });
-  }, [initialSection, loading]);
+    const target = browseLoadMoreRef.current;
+    if (
+      !target ||
+      searchingAll ||
+      activeTab !== "connections" ||
+      visibleCount >= remainingServices.length ||
+      typeof IntersectionObserver === "undefined"
+    )
+      return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry?.isIntersecting) return;
+        observer.disconnect();
+        setVisibleCount((count) => Math.min(count + PAGE_SIZE, remainingServices.length));
+      },
+      { root: capabilityFocusFallbackRef.current, rootMargin: "0px 0px 300px 0px" },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [activeTab, searchingAll, visibleCount, remainingServices.length]);
+
+  // settled. Scrolling on first commit lands in the wrong place: Browse is
+  // still a skeleton then, and resolving and rendering the first client-side
+  // 48-item window inserts the Browse grid above the Bundles section afterwards.
 
   // Close the sheet if a live-bound selection vanished from the catalog after a
   // refresh (deleted/unregistered elsewhere) - never leave a ghost open. A
@@ -530,11 +638,6 @@ export function CapabilitiesRoute({
   // still matching the live query so an old search never renders against a new
   // one (invalidation without a clearing effect that flashes stale tiles first).
   const visibleRegistry = registryResultsForQuery(query, registrySearched, registryResults);
-
-  function refreshAll() {
-    void refresh();
-    void packs.refresh();
-  }
 
   // `snapshotFallback` defaults to `registry` (a registry result renders from its
   // snapshot until persisted); the add-custom flow passes it explicitly for a
@@ -740,410 +843,35 @@ export function CapabilitiesRoute({
     }
   }
 
-  // --- Connectors quick-connect fast path --------------------------------------
-  // The row/tile icon click: `none` and reviewed `oauth2` act immediately with
-  // no screen of ours; `api_key` and unreviewed `oauth2` open the one shared
-  // quick-connect dialog. Reuses the exact same connect mutations `handleAction`
-  // uses for the full sheet, just without requiring the sheet to be open first.
-
-  function capabilityQuickConnectAction(item: CapabilityCatalogItem): (() => void) | undefined {
-    const plan = capabilityQuickConnectPlan(item);
-    // No fast path: "dedicated" lifecycles (Skills, Plugins, first-party
-    // Fiken/social), "social_oauth", and any api-key connector needing more
-    // than one header - the full sheet owns those.
-    if (!plan) return undefined;
-    if (plan.mode === "enable") {
-      return () => void quickEnable(item);
-    }
-    if (plan.mode === "oauth") {
-      return plan.confirm
-        ? () =>
-            setQuickConnectRequest({
-              authKind: "oauth2_unreviewed",
-              itemName: item.name,
-              providerDomain: plan.providerDomain,
-              onConnect: () => quickOAuth(item, plan.providerDomain, plan.mcpUrl, plan.ownership),
-            })
-        : () => void quickOAuth(item, plan.providerDomain, plan.mcpUrl, plan.ownership);
-    }
-    return () =>
-      setQuickConnectRequest({
-        authKind: "api_key",
-        itemName: item.name,
-        providerDomain: plan.providerDomain,
-        fieldLabel: plan.field.label,
-        onConnect: (value) =>
-          quickApiKey(item, plan.providerDomain, plan.field, plan.ownership, value),
-      });
-  }
-
-  async function quickEnable(item: CapabilityCatalogItem) {
-    setBusyId(item.id);
-    try {
-      const persisted = await persistIfRegistry(item, false);
-      await client.enableCapability(workspaceId, persisted.id);
-      await refresh();
-      onRuntimeChanged();
-      toast.success(`Enabled ${item.name}`);
-    } catch (error) {
-      const { title, description } = capabilityErrorToast(error, "Couldn't enable this connector");
-      toast.error(title, { description });
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function quickOAuth(
-    item: CapabilityCatalogItem,
-    providerDomain: string,
-    mcpUrl: string | null,
-    ownership: ConnectionOwnership,
-  ) {
-    setBusyId(item.id);
-    try {
-      const persisted = await persistIfRegistry(item, false);
-      const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(persisted.id)}`;
-      const response = await startMcpOAuthWithTimeout(client, workspaceId, {
-        ...(mcpUrl ? { mcpUrl } : {}),
-        ...(providerDomain ? { providerDomain } : {}),
-        ownership,
-        returnPath,
-      });
-      if (!response.authorizationUrl) {
-        throw new Error("The provider did not return an authorization link.");
-      }
-      window.location.assign(response.authorizationUrl);
-    } catch (error) {
-      setBusyId(null);
-      const { title, description } = capabilityErrorToast(error, "Couldn't start the connection");
-      toast.error(title, { description });
-      throw error;
-    }
-  }
-
-  async function quickApiKey(
-    item: CapabilityCatalogItem,
-    providerDomain: string,
-    field: RequiredHeaderField,
-    ownership: ConnectionOwnership,
-    value: string,
-  ) {
-    if (!value) throw new Error(`Enter ${field.label.toLowerCase()}.`);
-    setBusyId(item.id);
-    try {
-      const persisted = await persistIfRegistry(item, false);
-      // The credential is stored under the WIRE header name the broker injects,
-      // never the human label ("API key" is not even a legal header token).
-      const credential = apiKeyCredential(field, value);
-      const reuseId = connectionToReuseForApiKey(
-        persisted,
-        connections ?? [],
-        providerDomain,
-        ownership,
-      );
-      const connection = reuseId
-        ? await client.updateConnection(workspaceId, reuseId, {
-            credential,
-            status: "active",
-          })
-        : await client.createConnection(workspaceId, {
-            providerDomain,
-            kind: "api_key",
-            ownership,
-            credential,
-          });
-      await client.enableCapability(workspaceId, persisted.id, {
-        connectionRef: apiKeyConnectionRef(ownership, connection.id, connection.providerDomain),
-      });
-      await refresh();
-      onRuntimeChanged();
-      toast.success(`Connected ${item.name}`);
-    } catch (error) {
-      const { title, description } = capabilityErrorToast(error, "Couldn't connect this connector");
-      toast.error(title, { description });
-      throw error;
-    } finally {
-      setBusyId(null);
-    }
-  }
-
   // --- Connect flows ---------------------------------------------------------
 
-  // Registry items aren't persisted; create the catalog row before connecting so
-  // enable/OAuth have a real capability id to reference.
-  async function persistIfRegistry(
-    item: CapabilityCatalogItem,
-    registry: boolean,
-  ): Promise<CapabilityCatalogItem> {
-    if (!registry) return item;
-    const created = await client.createCapability(workspaceId, createInputFromCatalogItem(item));
-    return created;
-  }
-
   async function handleAction(action: ConnectAction) {
-    // Act on the LIVE item (derived from the catalog by id), never the stored
-    // snapshot - a mutation elsewhere may have changed it since the sheet opened.
-    if (!selected || !selectedItem) return;
-    const item = selectedItem;
-    setBusyId(item.id);
+    if (!selected || !selectedItem || busyId !== null) return;
+    setBusyId(selectedItem.id);
     setSheetError(null);
     try {
-      // The plan is derived from the current catalog/registry item (it carries
-      // authKind/mcpUrl/providerDomain); connect calls use the persisted id.
-      const plan = capabilityConnectPlan(item);
-
-      if (action.type === "install_skill") {
-        if (!canManageSkills) {
-          throw new Error("Workspace administrator permission is required to install Skills.");
-        }
-        const libraryId = metadataString(item.metadata.libraryId);
-        const expectedVersion = metadataString(item.metadata.version);
-        const expectedContentSha256 = metadataString(item.metadata.contentSha256);
-        if (!libraryId || !expectedVersion || !expectedContentSha256) {
-          throw new Error(
-            "This Skill is missing its reviewed library identity. Refresh and try again.",
-          );
-        }
-        const installationVersion = installedSkillVersion(item);
-        await client.installLibrarySkill(workspaceId, libraryId, {
-          expectedVersion,
-          expectedContentSha256,
-          ...(installationVersion !== null
-            ? { expectedInstallationVersion: installationVersion }
-            : {}),
-        });
-        await refresh();
-        onRuntimeChanged();
-        toast.success(item.enabled ? `Updated ${item.name}` : `Installed ${item.name}`, {
-          description: `Pinned to reviewed Skill version ${expectedVersion}.`,
-        });
-        setSelected(null);
-        return;
-      }
-
-      if (action.type === "remove_skill") {
-        if (!canManageSkills) {
-          throw new Error("Workspace administrator permission is required to remove Skills.");
-        }
-        const preview = await client.previewSkillUninstall(workspaceId, item.id);
-        if (!preview.installed || preview.installationVersion === null || !preview.directOwner) {
-          throw new Error("This Skill is no longer directly installed. Refresh and try again.");
-        }
-        setSkillRemoval({ item, preview });
-        return;
-      }
-
-      if (action.type === "disconnect") {
-        if (item.kind !== "mcp" || !item.actions.includes("disconnect")) {
-          throw new Error(`${item.name} must be managed through its dedicated controls.`);
-        }
-        await client.disableCapability(workspaceId, item.id);
-        await refresh();
-        onRuntimeChanged();
-        toast.success(`Disabled ${item.name}`);
-        setSelected(null);
-        return;
-      }
-
-      if (action.type === "social_oauth" && plan.mode === "social_oauth") {
-        const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(item.id)}`;
-        const response = await client.startSocialOAuth(workspaceId, {
-          provider: action.provider,
-          ownership: action.ownership,
-          returnPath,
-        });
-        if (!response.authorizationUrl) {
-          throw new Error("The provider did not return an authorization link.");
-        }
-        window.location.assign(response.authorizationUrl);
-        return;
-      }
-
-      if (action.type === "disconnect_social") {
-        await client.disconnectSocialConnection(workspaceId, action.connectionId);
-        await refresh();
-        toast.success(`Disconnected ${item.name}`);
-        setSelected(null);
-        return;
-      }
-
-      // First-party Fiken connect / token replacement. The install route
-      // verifies the token against Fiken before storing it, so a bad paste
-      // fails here with a specific message instead of at first tool use.
-      if (action.type === "fiken_api_token") {
-        await client.installFikenConnection(workspaceId, {
-          apiToken: action.apiToken,
-          ...(action.connectionId ? { connectionId: action.connectionId } : {}),
-        });
-        await refresh();
-        onRuntimeChanged();
-        toast.success(`Connected ${item.name}`);
-        setSelected(null);
-        return;
-      }
-
-      // Full-page redirect into Fiken's consent screen; the API callback
-      // stores the workspace connection and returns to this page with a
-      // `fiken` query param handled by the return effect below.
-      if (action.type === "fiken_oauth") {
-        const response = await client.startFikenOAuth(workspaceId, {
-          ...(action.connectionId ? { connectionId: action.connectionId } : {}),
-        });
-        if (!response.authorizationUrl) {
-          throw new Error("Fiken did not return an authorization link.");
-        }
-        window.location.assign(response.authorizationUrl);
-        return;
-      }
-
-      if (action.type === "fiken_disconnect") {
-        await client.deleteConnection(workspaceId, action.connectionId);
-        await refresh();
-        onRuntimeChanged();
-        toast.success(`Disconnected ${item.name}`);
-        setSelected(null);
-        return;
-      }
-
-      // Reconnect an already-enabled item whose credential lapsed. When the
-      // connection row survives, OAuth reuses it (pass connectionId) and the
-      // return handler just refreshes; when it was deleted (null id), OAuth
-      // mints a fresh row and the return handler re-enables against it. API-key
-      // reactivates the surviving row in place, or mints + re-enables if gone.
-      if (action.type === "reconnect_oauth") {
-        // Trust the installation's connectionRef.kind (the sheet already chose this
-        // branch from it), not the catalog plan - on drift plan.mode can read
-        // "enable", so fall back to the ref's domain and the item's own MCP URL.
-        const providerDomain =
-          plan.mode === "oauth"
-            ? plan.providerDomain
-            : (item.connectionRef?.providerDomain ?? null);
-        const mcpUrl =
-          plan.mode === "oauth" ? plan.mcpUrl : (item.mcpUrl ?? item.endpointUrl ?? null);
-        const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(item.id)}`;
-        const response = await startMcpOAuthWithTimeout(client, workspaceId, {
-          ...(mcpUrl ? { mcpUrl } : {}),
-          ...(providerDomain ? { providerDomain } : {}),
-          // Reuse the existing row when it survives; a null id means the row was
-          // deleted, so OAuth mints a fresh connection and the return handler
-          // re-enables against it.
-          ...(action.connectionId ? { connectionId: action.connectionId } : {}),
-          ownership: action.ownership,
-          returnPath,
-        });
-        if (!response.authorizationUrl) {
-          throw new Error("The provider did not return an authorization link.");
-        }
-        window.location.assign(response.authorizationUrl);
-        return;
-      }
-
-      if (action.type === "reconnect_api_key") {
-        if (action.connectionId) {
-          // The existing row went inactive - rewrite its credential and
-          // reactivate it in place; the installation ref already points at it.
-          await client.updateConnection(workspaceId, action.connectionId, {
-            credential: { headers: action.headers },
-            status: "active",
-          });
-        } else {
-          // The row was deleted - mint a fresh connection and re-enable the
-          // installation against it (enable upserts the installation config). Domain
-          // comes from the plan, or the installation's ref when the catalog drifted.
-          const providerDomain =
-            plan.mode === "api_key"
-              ? plan.providerDomain
-              : (item.connectionRef?.providerDomain ?? "");
-          const connection = await client.createConnection(workspaceId, {
-            providerDomain,
-            kind: "api_key",
-            ownership: action.ownership,
-            credential: { headers: action.headers },
-          });
-          await client.enableCapability(workspaceId, item.id, {
-            connectionRef: apiKeyConnectionRef(
-              action.ownership,
-              connection.id,
-              connection.providerDomain,
-            ),
-          });
-        }
-        await refresh();
-        onRuntimeChanged();
-        toast.success(`Reconnected ${item.name}`);
-        setSelected(null);
-        return;
-      }
-
-      if (item.kind !== "mcp") {
-        throw new Error(`${item.name} must be installed through its dedicated controls.`);
-      }
-      const persisted = await persistIfRegistry(item, selected.registry);
-
-      if (action.type === "oauth" && plan.mode === "oauth") {
-        const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(persisted.id)}`;
-        const response = await startMcpOAuthWithTimeout(client, workspaceId, {
-          ...(plan.mcpUrl ? { mcpUrl: plan.mcpUrl } : {}),
-          ...(plan.providerDomain ? { providerDomain: plan.providerDomain } : {}),
-          ownership: action.ownership,
-          returnPath,
-        });
-        if (!response.authorizationUrl) {
-          throw new Error("The provider did not return an authorization link.");
-        }
-        // Full-page redirect into the provider's consent screen; we return to
-        // returnPath and resume in the OAuth-return effect below.
-        window.location.assign(response.authorizationUrl);
-        return;
-      }
-
-      if (action.type === "api_key" && plan.mode === "api_key") {
-        // Reuse only a connection with the selected ownership rather than creating
-        // a duplicate on retry; workspace and personal rows never cross-reuse.
-        const reuseId = connectionToReuseForApiKey(
-          item,
-          connections ?? [],
-          plan.providerDomain,
-          action.ownership,
-        );
-        const connection = reuseId
-          ? await client.updateConnection(workspaceId, reuseId, {
-              credential: { headers: action.headers },
-              status: "active",
-            })
-          : await client.createConnection(workspaceId, {
-              providerDomain: plan.providerDomain,
-              kind: "api_key",
-              ownership: action.ownership,
-              credential: { headers: action.headers },
-            });
-        // Build the enable ref from the connection row the API returns, never the
-        // catalog domain - the API may canonicalize providerDomain, and the row
-        // is the authoritative match the enable path validates against.
-        await client.enableCapability(workspaceId, persisted.id, {
-          connectionRef: apiKeyConnectionRef(
-            action.ownership,
-            connection.id,
-            connection.providerDomain,
-          ),
-        });
-        await refresh();
-        onRuntimeChanged();
-        toast.success(`Connected and enabled ${persisted.name}`);
-        setSelected(null);
-        return;
-      }
-
-      // Plain enable (no credentials).
-      await client.enableCapability(workspaceId, persisted.id);
-      await refresh();
-      if (persisted.kind === "mcp") onRuntimeChanged();
-      toast.success(`Enabled ${persisted.name}`);
-      setSelected(null);
+      await performCapabilityAction(
+        {
+          client,
+          workspaceId,
+          item: selectedItem,
+          registry: selected.registry,
+          connections: connectionsLoadFailed ? null : connections,
+          canManageSkills,
+          refresh,
+          onRuntimeChanged,
+          onComplete: () => setSelected(null),
+          onSkillRemoval: setSkillRemoval,
+          connectReturnUrl: window.location.href,
+          returnPathFor: (id) =>
+            `${window.location.pathname}?connect_item=${encodeURIComponent(id)}`,
+          redirect: (url) => window.location.assign(url),
+        },
+        action,
+      );
     } catch (error) {
+      await refresh();
       const copy = capabilityErrorToast(error, "Something went wrong");
-      // In-sheet human copy; the raw missing-credentials 422 becomes a prompt to
-      // connect rather than an error string.
       setSheetError(
         isMissingCredentialsError(error)
           ? "This integration needs credentials before it can be enabled."
@@ -1166,9 +894,10 @@ export function CapabilitiesRoute({
       onRuntimeChanged();
       toast.success(`Removed ${skillRemoval.item.name}`, {
         description:
-          result.status === "retained_by_other_owners"
-            ? "Another Plugin or Pack still owns this Skill, so it remains available."
-            : "The Skill is no longer active in this workspace.",
+          skillReleaseMessage(result.skillReleases) ??
+          (result.status === "retained_by_other_owners"
+            ? "Another Plugin still owns this Skill, so it remains available."
+            : "The Skill is no longer active in this workspace."),
       });
       setSkillRemoval(null);
       setSelected(null);
@@ -1237,7 +966,7 @@ export function CapabilitiesRoute({
       toast.error("Connection failed", { description: reason ?? undefined });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, items]);
+  }, [loading, items, setQuery]);
 
   // Resume an OAuth round-trip. The callback lands back on this path with
   // ?integration_oauth=success|error; we read it once, strip it from the URL,
@@ -1283,7 +1012,7 @@ export function CapabilitiesRoute({
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, items]);
+  }, [loading, items, setQuery]);
 
   // An agent recommendation deep-links to the same human-reviewed setup sheet
   // as a marketplace click. Loading the live catalog again prevents an old
@@ -1308,7 +1037,7 @@ export function CapabilitiesRoute({
       setQuery(capabilityId.replace(/^[^:]+:/, ""));
       toast.error("That recommended capability is no longer available");
     }
-  }, [loading, items]);
+  }, [loading, items, setQuery]);
 
   // Deep-link from an in-session reconnect card for an api-key connection:
   // ?reconnect_domain=<domain> opens the connect sheet for the enabled item on
@@ -1341,7 +1070,7 @@ export function CapabilitiesRoute({
       setQuery(domain);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, items]);
+  }, [loading, items, setQuery]);
 
   async function resumeOAuthConnect(
     itemId: string | null,
@@ -1407,7 +1136,12 @@ export function CapabilitiesRoute({
       const resolvedOwnership =
         ownership ?? (returnedConnection?.subjectId === null ? "workspace" : "personal");
       await client.enableCapability(workspaceId, item!.id, {
-        connectionRef: oauthConnectionRef(resolvedOwnership, connectionId!, refDomain),
+        connectionRef: oauthConnectionRef(
+          resolvedOwnership,
+          connectionId!,
+          refDomain,
+          catalogConnectionAccountSelection(item!),
+        ),
       });
       await refresh();
       onRuntimeChanged();
@@ -1437,37 +1171,6 @@ export function CapabilitiesRoute({
     }
   }
 
-  // --- Enabled-strip removal/disconnect (no sheet needed) --------------------
-  async function removeFromStrip(item: CapabilityCatalogItem) {
-    setBusyId(item.id);
-    try {
-      if (item.kind === "skill") {
-        if (!canManageSkills) {
-          throw new Error("Workspace administrator permission is required to remove Skills.");
-        }
-        const preview = await client.previewSkillUninstall(workspaceId, item.id);
-        if (!preview.installed || preview.installationVersion === null || !preview.directOwner) {
-          throw new Error("This Skill is no longer directly installed. Refresh and try again.");
-        }
-        setSkillRemoval({ item, preview });
-        return;
-      }
-      if (item.kind !== "mcp" || !item.actions.includes("disconnect")) {
-        throw new Error(`${item.name} must be managed through its dedicated controls.`);
-      }
-      await client.disableCapability(workspaceId, item.id);
-      await refresh();
-      onRuntimeChanged();
-      toast.success(`Disconnected ${item.name}`);
-    } catch (error) {
-      const copy = capabilityErrorToast(error, "Couldn't disable");
-      toast.error(copy.title, { description: copy.description });
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  // --- Add custom ------------------------------------------------------------
   async function submitAddCustom(form: CapabilityFormState) {
     const input = capabilityInputFromForm(form);
     if (!input) return;
@@ -1529,137 +1232,6 @@ export function CapabilitiesRoute({
     }
   }
 
-  // --- Packs actions ---------------------------------------------------------
-  async function registerPackManifest(manifestDraft: string): Promise<boolean> {
-    let manifest: unknown;
-    try {
-      manifest = JSON.parse(manifestDraft);
-    } catch {
-      toast.error("Manifest must be valid JSON");
-      return false;
-    }
-    try {
-      const registered = await client.registerPack(
-        workspaceId,
-        manifest as Parameters<typeof client.registerPack>[1],
-      );
-      await Promise.all([packs.refresh(), refresh()]);
-      toast.success(`Registered ${registered.pack.name} v${registered.pack.version}`);
-      return true;
-    } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to register pack");
-      toast.error(copy.title, { description: copy.description });
-      return false;
-    }
-  }
-
-  async function previewPackInstallation(
-    pack: CapabilityPack,
-    selection: { rigId?: string; variableSetId?: string },
-  ): Promise<PackInstallationPreview | null> {
-    setBusyId(`pack:${pack.id}`);
-    try {
-      return await client.previewPackInstallation(workspaceId, pack.id, selection);
-    } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to review pack installation");
-      toast.error(copy.title, { description: copy.description });
-      return null;
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function installPack(
-    pack: CapabilityPack,
-    preview: PackInstallationPreview,
-    selection: { rigId?: string; variableSetId?: string },
-    idempotencyKey: string,
-  ): Promise<boolean> {
-    setBusyId(`pack:${pack.id}`);
-    try {
-      await client.installPack(workspaceId, pack.id, {
-        expectedManifestDigest: preview.manifestDigest,
-        idempotencyKey,
-        ...selection,
-        ...(preview.installationVersion !== null
-          ? { expectedInstallationVersion: preview.installationVersion }
-          : {}),
-      });
-      await Promise.all([packs.refresh(), refresh()]);
-      onRuntimeChanged();
-      toast.success(
-        preview.action === "install"
-          ? `Installed ${pack.name}`
-          : preview.action === "update"
-            ? `Updated ${pack.name}`
-            : `Repaired ${pack.name}`,
-      );
-      return true;
-    } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to install pack");
-      toast.error(copy.title, { description: copy.description });
-      return false;
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function previewPackUninstall(pack: CapabilityPack): Promise<PackUninstallPreview | null> {
-    setBusyId(`pack:${pack.id}`);
-    try {
-      return await client.previewPackUninstall(workspaceId, pack.id);
-    } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to review pack uninstall");
-      toast.error(copy.title, { description: copy.description });
-      return null;
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function uninstallPack(
-    pack: CapabilityPack,
-    preview: PackUninstallPreview,
-    idempotencyKey: string,
-  ): Promise<boolean> {
-    if (preview.installationVersion === null) return false;
-    setBusyId(`pack:${pack.id}`);
-    try {
-      await client.uninstallPack(workspaceId, pack.id, {
-        expectedInstallationVersion: preview.installationVersion,
-        idempotencyKey,
-      });
-      await Promise.all([packs.refresh(), refresh()]);
-      onRuntimeChanged();
-      toast.success(`Uninstalled ${pack.name}`);
-      return true;
-    } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to uninstall pack");
-      toast.error(copy.title, { description: copy.description });
-      return false;
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function unregisterPack(pack: CapabilityPack): Promise<boolean> {
-    setBusyId(`pack:${pack.id}`);
-    try {
-      await client.deletePack(workspaceId, pack.id);
-      await Promise.all([packs.refresh(), refresh()]);
-      toast.success(`Unregistered ${pack.name}`);
-      return true;
-    } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to unregister pack");
-      toast.error(copy.title, { description: copy.description });
-      return false;
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  const packBusyId = busyId?.startsWith("pack:") ? busyId.slice("pack:".length) : null;
-
   return (
     // The app shell (RailShell) hands each route a fixed-height overflow-hidden
     // flex column, so the PAGE never body-scrolls - the route must own its own
@@ -1670,250 +1242,387 @@ export function CapabilitiesRoute({
       ref={capabilityFocusFallbackRef}
       data-workspace-scroll-owner="self-managed"
       role="region"
-      aria-label="Plugins"
+      aria-label="Capabilities"
       tabIndex={-1}
       className="min-h-0 flex-1 overflow-y-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-inset"
     >
       <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
         <PageHeader
           icon={<PlugIcon className="size-4" />}
-          title="Plugins"
-          description="Connect apps, MCP servers, skills, and packs for agents in this workspace."
-          actions={
-            <>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="text-fg-muted transition-none disabled:opacity-100"
-                onClick={refreshAll}
-                disabled={loading || packs.loading}
-              >
-                <RefreshCwIcon className={cn((loading || packs.loading) && "animate-spin")} />
-                Refresh
-              </Button>
-              <Button type="button" onClick={() => setAddOpen(true)}>
-                <PlusIcon />
-                Add MCP server
-              </Button>
-            </>
-          }
+          title="Capabilities"
+          description="Connect your favorite tools and extend OpenGeni's capabilities."
         />
 
-        <section className="mt-8 space-y-3" aria-labelledby="integrations-heading">
-          <div>
-            <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-              First-party integrations
-            </p>
-            <h2 id="integrations-heading" className="mt-1 text-base font-semibold text-fg">
-              Apps
-            </h2>
-            <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
-              Purpose-built connections with OpenGeni-managed accounts, sync, events, or provider
-              actions - not generic catalog connectors.
-            </p>
-          </div>
-          <div className="grid gap-2" data-integration-list>
-            {integrations.map((adapter) => {
-              const quickConnect = integrationQuickConnect(adapter.model);
-              return (
-                <IntegrationRow
-                  key={adapter.model.id}
-                  model={adapter.model}
-                  onOpen={() => {
-                    const active = document.activeElement;
-                    integrationOpenerRef.current =
-                      active instanceof HTMLElement && active !== document.body ? active : null;
-                    setOpenIntegration(adapter.model.id);
-                  }}
-                  busy={integrationRowBusy(adapter.model)}
-                  {...(quickConnect ? { onQuickConnect: quickConnect } : {})}
+        <PluginSearch query={query} onQueryChange={setQuery} scope={activeTab} />
+        <CatalogActionContext.Provider value={catalogToolbar}>
+          <Tabs
+            className="capabilities-tabs"
+            value={activeTab}
+            onValueChange={(value) => {
+              setActiveTab(value);
+            }}
+          >
+            <div className="capabilities-tab-bar">
+              <TabsList variant="line" aria-label="Capability types">
+                <TabsTrigger value="all">All</TabsTrigger>
+                <TabsTrigger value="connections">Connections</TabsTrigger>
+                <TabsTrigger value="skills">Skills</TabsTrigger>
+                <TabsTrigger value="plugins">Plugins</TabsTrigger>
+              </TabsList>
+              <div ref={setCatalogActionTarget} className="capabilities-tab-action" />
+            </div>
+
+            <TabsContent value={activeTab} forceMount>
+              <div hidden={!searchingAll && activeTab !== "connections"}>
+                {!searchingAll ? (
+                  <CatalogHeader
+                    title="Connections"
+                    action={
+                      <Button type="button" onClick={() => setAddOpen(true)}>
+                        <PlusIcon />
+                        Add connection
+                      </Button>
+                    }
+                  />
+                ) : null}
+
+                <InstalledStrip
+                  title="Connected"
+                  items={
+                    hasQuery
+                      ? []
+                      : [
+                          ...integrations
+                            .filter(
+                              ({ model }) =>
+                                model.chip.label === "Connected" ||
+                                model.chip.label === "Needs attention",
+                            )
+                            .map(({ model }) => ({
+                              id: model.id,
+                              name: model.name,
+                              status: model.chip.label,
+                              logoSrc: "logoSrc" in model.mark ? model.mark.logoSrc : null,
+                              onOpen: () => {
+                                integrationOpenerRef.current =
+                                  document.activeElement instanceof HTMLElement
+                                    ? document.activeElement
+                                    : null;
+                                setOpenIntegration(model.id);
+                              },
+                            })),
+                          ...connectorItems
+                            .filter((item) => item.enabled)
+                            .map((item) => ({
+                              id: item.id,
+                              name: item.name,
+                              status: capabilityStateChip(
+                                item,
+                                connectionHealth(item, connections ?? [], connectionsLoaded),
+                              ).label,
+                              logoSrc: logoUrl(item),
+                              onOpen: () => openItem(item),
+                            })),
+                        ]
+                  }
                 />
-              );
-            })}
-          </div>
-        </section>
+                {!searchingAll && showFeatured && featuredServices.length > 0 ? (
+                  <section aria-label="Featured" className="mt-6">
+                    <h2 className="mb-2 text-sm font-semibold">Featured</h2>
+                    <ConnectionCatalog grouped={false} services={featuredServices} columns={2} />
+                  </section>
+                ) : null}
+                <section id="connectors-browse" aria-label="Browse connections" className="mt-6">
+                  <h2 className="mb-2 text-sm font-semibold">
+                    {hasQuery || searchingAll ? "Connections" : "Browse"}
+                  </h2>
+                  {loading && items.length === 0 ? (
+                    <p role="status" className="py-4 text-sm text-fg-muted">
+                      Loading connections…
+                    </p>
+                  ) : (
+                    <ConnectionCatalog
+                      grouped={false}
+                      columns={2}
+                      {...(searchingAll
+                        ? { resultLimit: 6, onShowMore: () => setActiveTab("connections") }
+                        : {})}
+                      services={
+                        searchingAll
+                          ? [...featuredServices, ...remainingServices]
+                          : remainingServices.slice(
+                              0,
+                              hasQuery ? remainingServices.length : visibleCount,
+                            )
+                      }
+                      query={query}
+                    />
+                  )}
+                  {hasQuery && !remainingServices.length && !featuredServices.length ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {!searchingAll ? (
+                        <Button variant="outline" size="sm" onClick={() => setActiveTab("all")}>
+                          Search all categories
+                        </Button>
+                      ) : null}
+                      <Button variant="ghost" size="sm" onClick={() => setQuery("")}>
+                        Clear search
+                      </Button>
+                    </div>
+                  ) : null}
+                  {!searchingAll && !hasQuery && remainingServices.length > visibleCount ? (
+                    <div
+                      ref={browseLoadMoreRef}
+                      className="mt-4 flex flex-col items-center gap-2 py-3"
+                    >
+                      <Button
+                        variant="outline"
+                        className="min-h-11 w-full border-border-strong bg-surface font-medium sm:w-auto sm:min-w-56"
+                        onClick={() =>
+                          setVisibleCount((count) =>
+                            Math.min(count + PAGE_SIZE, remainingServices.length),
+                          )
+                        }
+                      >
+                        Load more connections
+                      </Button>
+                      <p className="text-xs text-fg-muted">
+                        {visibleCount} of {remainingServices.length} connections
+                      </p>
+                    </div>
+                  ) : null}
+                </section>
+                <IntegrationSheet
+                  model={openIntegrationModel}
+                  open={openIntegrationModel !== null}
+                  restoreFocusRef={integrationOpenerRef}
+                  onOpenChange={(open) => {
+                    if (!open) setOpenIntegration(null);
+                  }}
+                />
+                {integrations.map((adapter) => (
+                  <Fragment key={adapter.model.id}>{adapter.dialogs}</Fragment>
+                ))}
 
-        <IntegrationSheet
-          model={openIntegrationModel}
-          open={openIntegrationModel !== null}
-          restoreFocusRef={integrationOpenerRef}
-          onOpenChange={(open) => {
-            if (!open) setOpenIntegration(null);
-          }}
-        />
-        {integrations.map((adapter) => (
-          <Fragment key={adapter.model.id}>{adapter.dialogs}</Fragment>
-        ))}
-
-        <QuickConnectDialog
-          request={quickConnectRequest}
-          onOpenChange={(open) => {
-            if (!open) setQuickConnectRequest(null);
-          }}
-        />
-
-        {/*
+                {/*
           One <section> per top-level surface. Featured, the discovery controls,
           Enabled, Custom APIs, and Browse are all Connectors, so they live
           inside this element rather than beside it: otherwise the accessibility
           tree says they belong to no section at all.
         */}
-        <section className="mt-10 space-y-3" aria-labelledby="connectors-heading">
-          <div>
-            <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-              Model Context Protocol
-            </p>
-            <h2 id="connectors-heading" className="mt-1 text-base font-semibold text-fg">
-              MCP servers &amp; APIs
-            </h2>
-            <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
-              Tools published by the service itself. Connect one and its tools become available to
-              agents in this workspace. Featured are the ones most teams start with. Custom APIs
-              (below) are workspace-defined connectors from an OpenAPI or GraphQL spec.
-            </p>
-          </div>
+                {!searchingAll &&
+                (filter === "all" || filter === "api") &&
+                visibleCustomApiInstances.length > 0 ? (
+                  <CustomApiSection
+                    instances={visibleCustomApiInstances}
+                    connections={connections}
+                    canManage={canManageApiIntegrationInstances}
+                    busyKey={customApiBusyKey}
+                    onConnect={openCustomApi}
+                    onUpdate={(instance) => editCustomApi(instance, "update")}
+                    onReconnect={(instance) => editCustomApi(instance, "reconnect")}
+                    onRemove={(instance) => void previewRemoveCustomApi(instance)}
+                  />
+                ) : null}
 
-          {showFeatured ? (
-            <div className="mt-4">
-              <FeaturedConnectorsStrip
-                items={featured}
-                logoUrl={logoUrl}
-                onOpen={openItem}
-                health={(item) => connectionHealth(item, connections ?? [], connectionsLoaded)}
-                onQuickConnect={capabilityQuickConnectAction}
-              />
-            </div>
-          ) : null}
-
-          <CapabilityDiscoveryControls
-            query={query}
-            filter={filter}
-            counts={counts}
-            onQueryChange={setQuery}
-            onFilterChange={setFilter}
-          />
-
-          <div className="mt-8 space-y-10">
-            <EnabledCapabilitiesSection
-              items={enabledItems}
-              busyId={busyId}
-              connectionHealth={(item) =>
-                connectionHealth(item, connections ?? [], connectionsLoaded)
-              }
-              logoUrl={logoUrl}
-              onOpen={openItem}
-              onDisable={(item) => void removeFromStrip(item)}
-            />
-
-            {(filter === "all" || filter === "api") &&
-            (query.trim().length === 0 || visibleCustomApiInstances.length > 0) ? (
-              <CustomApiSection
-                instances={visibleCustomApiInstances}
-                connections={connections}
-                canManage={canManageApiIntegrationInstances}
-                busyKey={customApiBusyKey}
-                onConnect={openCustomApi}
-                onUpdate={(instance) => editCustomApi(instance, "update")}
-                onReconnect={(instance) => editCustomApi(instance, "reconnect")}
-                onRemove={(instance) => void previewRemoveCustomApi(instance)}
-              />
-            ) : null}
-
-            <CapabilityBrowseSection
-              filter={filter}
-              query={query}
-              catalogView={catalogView}
-              loadError={loadError}
-              enabledCount={enabledItems.length}
-              browseItems={browseItems}
-              visibleBrowse={visibleBrowse}
-              registryBusy={registryBusy}
-              registrySearched={registrySearched}
-              registryResults={visibleRegistry}
-              logoUrl={logoUrl}
-              health={(item) => connectionHealth(item, connections ?? [], connectionsLoaded)}
-              onRetry={() => void refresh()}
-              onOpen={openItem}
-              onOpenRegistry={(item) => openItem(item, true)}
-              onSearchRegistry={() => void searchRegistry()}
-              onLoadMore={() =>
-                setVisibleCount((count) => Math.min(count + PAGE_SIZE, browseItems.length))
-              }
-              onQuickConnect={capabilityQuickConnectAction}
-            />
-          </div>
-        </section>
-
-        <div ref={bundlesRef}>
-          <BundlesSection
-            client={client}
-            workspaceId={workspaceId}
-            connections={connections}
-            canManage={canManageSkills}
-            items={items}
-            logoUrl={logoUrl}
-            busyCatalogId={busyId}
-            onOpenCatalogItem={openItem}
-            packs={packs}
-            variableSets={variableSets.variableSets.map((variableSet) => ({
-              id: variableSet.id,
-              name: variableSet.name,
-            }))}
-            rigs={rigs.rigs.map((rig) => ({
-              id: rig.id,
-              name: rig.name,
-              image: rig.activeVersion?.image ?? null,
-              available: rig.activeVersion !== null,
-              verified: rig.activeVersionHealth?.checkHealth === "passing",
-            }))}
-            busyPackId={packBusyId}
-            onRegisterPack={registerPackManifest}
-            onPreviewPackInstall={previewPackInstallation}
-            onInstallPack={installPack}
-            onPreviewPackUninstall={previewPackUninstall}
-            onUninstallPack={uninstallPack}
-            onUnregisterPack={unregisterPack}
-            onChanged={async () => {
-              await refresh();
-              onRuntimeChanged();
-            }}
-          />
-          {packs.installationFor("pr-review")?.status === "active" ? (
-            <div className="mt-6">
-              <PrReviewSetupCard
-                client={client}
-                workspaceId={workspaceId}
-                canManage={
-                  canManageApiIntegrationInstances &&
-                  hasWorkspacePermission(context.accessContext, workspaceId, "secrets:write")
-                }
-              />
-            </div>
-          ) : null}
-        </div>
+                {hasQuery && !searchingAll ? (
+                  <div className="mt-4">
+                    <p className="mb-3 text-xs leading-5 text-fg-muted">
+                      Can’t find your connection?{" "}
+                      <button
+                        type="button"
+                        className="rounded-sm font-medium text-fg underline decoration-current/30 underline-offset-4 hover:decoration-current focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-wait disabled:opacity-60"
+                        disabled={registryBusy}
+                        onClick={() => void searchRegistry()}
+                      >
+                        {registryBusy
+                          ? "Searching registry…"
+                          : "Search the broader public MCP registry"}
+                      </button>
+                    </p>
+                    {visibleRegistry.length ? (
+                      <ConnectionCatalog
+                        grouped={false}
+                        columns={2}
+                        services={visibleRegistry.map((item) => ({
+                          id: item.id,
+                          name: item.name,
+                          logo: <ConnectionLogo src={logoUrl(item)} name={item.name} size={40} />,
+                          options: [
+                            {
+                              id: item.id,
+                              name: "Agent tools",
+                              description: item.description ?? undefined,
+                              status: "Available",
+                              connected: false,
+                              state: "available",
+                              onOpen: () => openItem(item, true),
+                            },
+                          ],
+                        }))}
+                      />
+                    ) : registrySearched === query.trim() ? (
+                      <p className="text-sm text-fg-muted">
+                        No compatible remote MCP servers found. Servers that require a local install
+                        aren’t included.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                {loadError ? (
+                  <p role="alert">
+                    {loadError.message}
+                    <button type="button" onClick={() => void refresh()}>
+                      Retry
+                    </button>
+                  </p>
+                ) : null}
+              </div>
+              <div
+                className={searchingAll ? "capability-search-section" : undefined}
+                hidden={activeTab !== "skills"}
+              >
+                <SkillsPanel
+                  refreshRevision={skillsRevision}
+                  onSkillsChange={setCanonicalSkills}
+                  openSkillRef={openSkillRef}
+                  key={workspaceId}
+                  workspaceId={workspaceId}
+                  query={query}
+                  onImportSkill={() => importSkillRef.current?.()}
+                  onFindSkill={() => {
+                    const search =
+                      capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>(
+                        'input[type="search"]',
+                      );
+                    search?.scrollIntoView({ block: "center", behavior: "smooth" });
+                    search?.focus({ preventScroll: true });
+                  }}
+                />
+              </div>
+              <div
+                ref={bundlesRef}
+                className={searchingAll ? "capability-search-section" : undefined}
+                hidden={!searchingAll && activeTab === "connections"}
+              >
+                <BundlesSection
+                  overviewSkills={canonicalSkills
+                    .filter((skill) =>
+                      `${skill.title} ${skill.stableKey} ${skill.description ?? ""}`
+                        .toLowerCase()
+                        .includes(query.trim().toLowerCase()),
+                    )
+                    .map((skill) => ({
+                      id: skill.id,
+                      name: skill.title || skill.stableKey,
+                      status: skill.pendingRevisionIds.length
+                        ? "attention"
+                        : skill.activeRevisionId
+                          ? "added"
+                          : "unavailable",
+                      statusLabel: skill.pendingRevisionIds.length
+                        ? "Pending changes"
+                        : skill.activeRevisionId
+                          ? "Installed"
+                          : "Inactive",
+                      ...(skill.description ? { description: skill.description } : {}),
+                      onOpen: () => {
+                        setActiveTab("skills");
+                        openSkillRef.current?.(skill.id);
+                      },
+                    }))}
+                  discoveryEnabled={activeTab !== "connections"}
+                  {...(searchingAll
+                    ? { onShowCategory: (category: "skills" | "plugins") => setActiveTab(category) }
+                    : {})}
+                  onSearchSkills={() => {
+                    const search =
+                      capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>(
+                        'input[type="search"]',
+                      );
+                    search?.scrollIntoView({ block: "center", behavior: "smooth" });
+                    search?.focus({ preventScroll: true });
+                  }}
+                  importSkillRef={importSkillRef}
+                  section={searchingAll ? "all" : activeTab === "skills" ? "skills" : "plugins"}
+                  query={query}
+                  client={client}
+                  workspaceId={workspaceId}
+                  connections={connections}
+                  canManage={canManageSkills}
+                  items={items}
+                  logoUrl={logoUrl}
+                  busyCatalogId={busyId}
+                  onOpenCatalogItem={(item) => openItem(item, false, true)}
+                  onChanged={async () => {
+                    setSkillsRevision((value) => value + 1);
+                    await refresh();
+                    onRuntimeChanged();
+                  }}
+                />
+                {activeTab === "plugins" ? (
+                  <div className="mt-6">
+                    <PrReviewSetupCard
+                      client={client}
+                      workspaceId={workspaceId}
+                      canManage={
+                        canManageApiIntegrationInstances &&
+                        hasWorkspacePermission(context.accessContext, workspaceId, "secrets:write")
+                      }
+                    />
+                  </div>
+                ) : null}
+              </div>
+            </TabsContent>
+          </Tabs>
+        </CatalogActionContext.Provider>
       </div>
 
-      <CapabilityDetailSheet
-        item={selectedItem}
-        health={selectedHealth}
-        logoSrc={selectedItem ? logoUrl(selectedItem) : null}
-        open={selectedItem !== null}
-        restoreFocusRef={sheetOpenerRef}
-        restoreFocusFallbackRef={capabilityFocusFallbackRef}
-        onOpenChange={(open) => {
-          if (!open) {
+      {rawSelectedItem?.kind === "mcp" &&
+      rawSelectedItem.authKind === "oauth2" &&
+      !rawSelectedItem.enabled ? (
+        <McpConnectionCard
+          client={client}
+          workspaceId={workspaceId}
+          capabilityId={rawSelectedItem.id}
+          name={rawSelectedItem.name}
+          returnUrl={window.location.href}
+          dialogOnly
+          onConfigured={refresh}
+          onClose={() => {
             setSelected(null);
             setSheetError(null);
-          }
-        }}
-        busy={busyId === selectedItem?.id}
-        errorMessage={sheetError}
-        socialConnections={selectedSocialConnections}
-        canManageSocial={canManageSocial}
-        canManageSkills={canManageSkills}
-        onAction={handleAction}
-      />
+            queueMicrotask(() => {
+              const target = sheetOpenerRef.current?.isConnected
+                ? sheetOpenerRef.current
+                : capabilityFocusFallbackRef.current;
+              target?.focus();
+            });
+          }}
+        />
+      ) : (
+        <CapabilityDetailSheet
+          workspaceId={workspaceId}
+          item={selectedItem}
+          health={selectedHealth}
+          logoSrc={selectedItem ? logoUrl(selectedItem) : null}
+          open={selectedItem !== null}
+          restoreFocusRef={sheetOpenerRef}
+          restoreFocusFallbackRef={capabilityFocusFallbackRef}
+          onOpenChange={(open) => {
+            if (!open) {
+              setSelected(null);
+              setSheetError(null);
+            }
+          }}
+          busy={busyId === selectedItem?.id}
+          errorMessage={sheetError}
+          socialConnections={selectedSocialConnections}
+          canManageSocial={canManageSocial}
+          canManageSkills={canManageSkills}
+          onAction={handleAction}
+        />
+      )}
 
       <ConfirmDialog
         open={skillRemoval !== null}
@@ -1921,7 +1630,7 @@ export function CapabilitiesRoute({
           if (!open) setSkillRemoval(null);
         }}
         title={skillRemoval ? `Remove Skill “${skillRemoval.item.name}”?` : "Remove Skill?"}
-        description="This removes only the direct workspace installation. Plugin and Pack ownership is preserved, and no Connection or credential is deleted."
+        description="This removes only the direct workspace installation. Skills used by Plugins are kept. Connections and credentials are unchanged."
         confirmLabel="Remove Skill"
         cancelAutoFocus
         onConfirm={removeSelectedSkill}
@@ -1936,6 +1645,10 @@ export function CapabilitiesRoute({
       </ConfirmDialog>
 
       <AddCustomDialog
+        onCustomApi={(protocol) => {
+          setAddOpen(false);
+          dispatchCustomApi({ type: "new", draft: { protocol, advanced: true } });
+        }}
         open={addOpen}
         onOpenChange={setAddOpen}
         busy={busyId === "add"}
@@ -2002,17 +1715,4 @@ export function integrationQuickConnect(
   if (chip.tone !== "idle" || footer.kind !== "setup") return undefined;
   if (footer.disabled === true || footer.busy === true) return undefined;
   return footer.onSetup;
-}
-
-function metadataString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
-function installedSkillVersion(item: CapabilityCatalogItem): number | null {
-  const installedSkill = item.metadata.installedSkill;
-  if (!installedSkill || typeof installedSkill !== "object" || Array.isArray(installedSkill)) {
-    return null;
-  }
-  const value = (installedSkill as Record<string, unknown>).installationVersion;
-  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
 }

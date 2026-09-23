@@ -35,6 +35,25 @@ import {
 } from "playwright";
 
 import { createApp } from "../../apps/api/src/app";
+import { withAccountMenuAxeDiagnostics } from "./browser-account-axe-diagnostics";
+import { createAccountReadDiagnostics } from "./browser-account-read-diagnostics";
+import { observeReloadCapabilities } from "./browser-account-reload-barrier";
+import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
+import {
+  observeCapabilityResume,
+  consumeCapabilityResumeRead,
+  evaluateCapabilityResumeRead,
+  type CapabilityResumeEvidence,
+} from "./browser-account-capability-resume";
+import {
+  createCapabilityDiagnostics,
+  capabilityMatcherDiagnostics,
+} from "./browser-account-capability-diagnostics";
+import {
+  sanitizeRaceProjection,
+  sanitizeRaceRequest,
+  sanitizeRaceResult,
+} from "./browser-account-race-diagnostics";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
@@ -75,6 +94,8 @@ type PendingFiniteRead = {
 };
 
 type BrowserProblems = {
+  capabilityDiagnostics: ReturnType<typeof createCapabilityDiagnostics>;
+  crossTabReloadStartedAt?: number;
   acceptedRequestTerminals: Array<{
     observedAt: number;
     pathnameAndSearch: string;
@@ -252,6 +273,14 @@ const DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES = new Set([
 // cancel only the exact paged session-list GET dispatched by that same phase.
 const DOCUMENT_SESSION_PAGE_CANCELLATION_PHASES = DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES;
 
+// The rail's review badge issues one bounded, read-only POST search when a
+// workspace document mounts. A deliberate whole-document replacement can
+// cancel only that exact same-phase read before headers, just like the catalog
+// and paged-session hooks above. Resets and cross-phase actor transitions stay
+// governed by the stricter ledgers below.
+const DOCUMENT_KNOWLEDGE_REVIEW_CANCELLATION_PHASES =
+  DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES;
+
 const DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
   ["late-old-epoch-primary-settled-before-old-release", new Set(["late-old-epoch-alpha-to-beta"])],
   ["slot-revocation-reauthentication", new Set(["cross-slot-deep-link"])],
@@ -313,6 +342,7 @@ type ActorMutationAcceptance = {
 };
 
 type BrowserRequestFailureInput = {
+  crossTabReloadStartedAt?: number | undefined;
   acceptedActorTransitions?: readonly ActorMutationAcceptance[];
   actorEpoch: string | null;
   dispatchPhase: string;
@@ -402,11 +432,17 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
       input.failure,
     );
   const isActorOwnedRead =
-    input.method === "GET" &&
-    (pathname === "/v1/auth/get-session" ||
-      pathname === "/v1/auth/session-set" ||
-      pathname === "/v1/workspaces" ||
-      pathname.startsWith("/v1/workspaces/"));
+    (input.method === "GET" &&
+      (pathname === "/v1/auth/get-session" ||
+        pathname === "/v1/auth/session-set" ||
+        pathname === "/v1/workspaces" ||
+        (pathname === "/v1/billing" &&
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+            requestUrl.searchParams.get("accountId") ?? "",
+          )) ||
+        pathname.startsWith("/v1/workspaces/"))) ||
+    (input.method === "POST" &&
+      /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(pathname));
   const allowedDispatchPhases = SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES.get(
     input.responsePhase,
   );
@@ -418,6 +454,34 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     allowedDispatchPhases?.has(input.dispatchPhase) === true;
   const startedAt = input.startedAt;
   const failedAt = input.failedAt;
+  const reloadStartedAt = input.crossTabReloadStartedAt;
+  const isExactNeutralRaceAbort =
+    /^(?:(?:net::)?ERR_ABORTED|NS_BINDING_ABORTED|NS_ERROR_ABORT)$/u.test(input.failure.trim()) ||
+    (input.engine === "webkit" && input.failure.trim() === "Load request cancelled");
+  const isExpectedNeutralRaceReloadCancellation =
+    isExactNeutralRaceAbort &&
+    input.method === "GET" &&
+    pathname === "/v1/auth/session-set" &&
+    input.actorEpoch === null &&
+    input.sessionSetAuthorityHash !== null &&
+    input.dispatchPhase === "cross-tab-select-race" &&
+    input.responsePhase === "cross-tab-select-race" &&
+    typeof startedAt === "number" &&
+    typeof failedAt === "number" &&
+    typeof reloadStartedAt === "number" &&
+    Number.isFinite(startedAt) &&
+    Number.isFinite(failedAt) &&
+    Number.isFinite(reloadStartedAt) &&
+    failedAt >= reloadStartedAt &&
+    failedAt - reloadStartedAt <= 10_000 &&
+    input.acceptedActorTransitions?.some(
+      (transition) =>
+        transition.path === "/v1/auth/session-set/select" &&
+        transition.actorEpoch !== null &&
+        transition.sessionSetAuthorityHash === input.sessionSetAuthorityHash &&
+        startedAt <= transition.acceptedAt &&
+        transition.acceptedAt <= reloadStartedAt,
+    ) === true;
   const isAcceptedActorTransitionCancellation =
     isCancellation &&
     isActorOwnedRead &&
@@ -473,6 +537,16 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     DOCUMENT_SESSION_PAGE_CANCELLATION_PHASES.has(input.responsePhase) &&
     /^\/v1\/workspaces\/[0-9a-f-]+\/sessions$/u.test(pathname) &&
     requestUrl.searchParams.get("view") === "page";
+  const isExpectedDocumentKnowledgeReviewCancellation =
+    isCancellation &&
+    !isConnectionReset &&
+    input.method === "POST" &&
+    input.actorEpoch !== null &&
+    input.dispatchPhase === input.responsePhase &&
+    DOCUMENT_KNOWLEDGE_REVIEW_CANCELLATION_PHASES.has(input.responsePhase) &&
+    /^\/v1\/workspaces\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/knowledge\/entries\/search$/iu.test(
+      pathname,
+    );
   const isExpectedDocumentBootstrapCancellation =
     isCancellation &&
     !isConnectionReset &&
@@ -492,10 +566,12 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     /^\/assets\/realtime-[A-Za-z0-9_-]+\.js$/u.test(pathname);
   if (
     isExpectedScopedActorReadCancellation ||
+    isExpectedNeutralRaceReloadCancellation ||
     isAcceptedActorTransitionCancellation ||
     isExpectedLogoutAllBoundedStreamCancellation ||
     isExpectedEvidenceCatalogCancellation ||
     isExpectedDocumentSessionPageCancellation ||
+    isExpectedDocumentKnowledgeReviewCancellation ||
     isExpectedDocumentBootstrapCancellation ||
     isExpectedWebKitReauthenticationChunkCancellation
   ) {
@@ -689,6 +765,13 @@ function actorTransitionResponseDispatchPhaseMatches(input: {
     : input.dispatchPhase === input.expectedPhase;
 }
 
+function isActorTransitionRead(method: string, pathname: string): boolean {
+  return (
+    method === "GET" ||
+    (method === "POST" && /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(pathname))
+  );
+}
+
 let owned: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let edge: ReturnType<typeof Bun.serve> | null = null;
@@ -697,6 +780,10 @@ let edgeCookieSummary = "not-observed";
 let completionResponseLoss: CompletionResponseLoss | null = null;
 const actorMutationAcceptances: ActorMutationAcceptance[] = [];
 const observedBrowserProblems = new WeakMap<Page, BrowserProblems>();
+let companionReadDiagnostics: {
+  page: Page;
+  ledger: ReturnType<typeof createAccountReadDiagnostics>;
+} | null = null;
 let alpha: AccountFixture;
 let beta: AccountFixture;
 
@@ -774,6 +861,7 @@ async function authSessionCount(email: string): Promise<number> {
 
 function observeBrowser(page: Page): BrowserProblems {
   const problems: BrowserProblems = {
+    capabilityDiagnostics: createCapabilityDiagnostics(),
     acceptedRequestTerminals: [],
     activeStreams: new Map(),
     boundedHttp1StreamDispatches: 0,
@@ -805,11 +893,24 @@ function observeBrowser(page: Page): BrowserProblems {
   page.on("request", (request) => {
     const requestUrl = new URL(request.url());
     const pathname = requestUrl.pathname;
+    if (companionReadDiagnostics?.page === page) {
+      companionReadDiagnostics.ledger.start("browser", request, request.method(), pathname);
+    }
     const actorEpoch = request.headers()[MANAGED_AUTH_ACTOR_EPOCH_HEADER] ?? null;
     const startedAt = performance.now();
     const requestSessionSetAuthorityHash = request
       .headerValue("cookie")
       .then(sessionSetAuthorityHash, () => null);
+    problems.capabilityDiagnostics.request(
+      request,
+      problems.phase,
+      request.url(),
+      request.method(),
+      actorEpoch,
+    );
+    void requestSessionSetAuthorityHash.then((authorityHash) => {
+      problems.capabilityDiagnostics.authority(request, problems.phase, authorityHash);
+    });
     if (actorEpoch !== null) problems.actorDispatches.push({ actorEpoch, startedAt });
     if (pathname.endsWith("/stream") || pathname.includes("/live-events/stream")) {
       if (requestUrl.searchParams.get("transport") === "http1-bounded") {
@@ -824,7 +925,9 @@ function observeBrowser(page: Page): BrowserProblems {
     // the strict failure ledger. This tracker prevents a full-document goto
     // from tearing down background finite reads from the just-selected actor.
     const isFiniteApiRead =
-      request.method() === "GET" &&
+      (request.method() === "GET" ||
+        (request.method() === "POST" &&
+          /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(pathname))) &&
       pathname.startsWith("/v1/") &&
       !pathname.endsWith("/stream") &&
       !pathname.includes("/live-events/stream");
@@ -853,6 +956,10 @@ function observeBrowser(page: Page): BrowserProblems {
   });
   page.on("response", (response) => {
     const request = response.request();
+    problems.capabilityDiagnostics.response(request, problems.phase, response.status());
+    if (companionReadDiagnostics?.page === page) {
+      companionReadDiagnostics.ledger.response("browser", request, response.status());
+    }
     const pathname = new URL(response.url()).pathname;
     const retiredTerminalProblem = retiredFiniteReadTerminalProblem(
       problems.retiredFiniteReadTombstones.get(request),
@@ -887,7 +994,7 @@ function observeBrowser(page: Page): BrowserProblems {
         pathname.endsWith("/attention") &&
         new Set(["logout-one", "logout-all-response-loss-replay"]).has(problems.phase)) ||
       (response.status() === 409 &&
-        request.method() === "GET" &&
+        isActorTransitionRead(request.method(), pathname) &&
         pathname.startsWith("/v1/workspaces/") &&
         problems.phase === "cross-tab-select-race");
     if (recordsActorTransition) {
@@ -906,6 +1013,10 @@ function observeBrowser(page: Page): BrowserProblems {
     }
   });
   page.on("requestfinished", (request) => {
+    problems.capabilityDiagnostics.terminal(request, problems.phase, "finished");
+    if (companionReadDiagnostics?.page === page) {
+      companionReadDiagnostics.ledger.finish("browser", request, "finished");
+    }
     const finishedAt = performance.now();
     const finishedUrl = new URL(request.url());
     const finishedFiniteRead = problems.pendingFiniteReads.get(request);
@@ -948,6 +1059,7 @@ function observeBrowser(page: Page): BrowserProblems {
       // every other browser error strict.
       if (!isExpectedHttpConsoleError(rendered, problems.phase)) {
         problems.consoleErrors.push(`[${problems.phase}] ${rendered}`);
+        problems.capabilityDiagnostics.console(problems.phase, source, message.text());
       }
     }
   });
@@ -957,6 +1069,10 @@ function observeBrowser(page: Page): BrowserProblems {
     problems.pageErrors.push(message);
   });
   page.on("requestfailed", (request) => {
+    problems.capabilityDiagnostics.terminal(request, problems.phase, "failed");
+    if (companionReadDiagnostics?.page === page) {
+      companionReadDiagnostics.ledger.finish("browser", request, "failed");
+    }
     const failedAt = performance.now();
     const dispatch = requestPhases.get(request);
     const failure = request.failure()?.errorText ?? "unknown";
@@ -993,6 +1109,7 @@ function observeBrowser(page: Page): BrowserProblems {
     }
     const check = (async () => {
       const problem = requestFailureProblem({
+        crossTabReloadStartedAt: problems.crossTabReloadStartedAt,
         acceptedActorTransitions: actorMutationAcceptances,
         actorEpoch: dispatch?.actorEpoch ?? null,
         dispatchPhase: dispatch?.phase ?? "unknown",
@@ -1040,6 +1157,7 @@ function observeBrowser(page: Page): BrowserProblems {
 
 function setBrowserPhase(problems: BrowserProblems, phase: string): void {
   problems.phase = phase;
+  problems.capabilityDiagnostics.boundary(phase, "phase");
 }
 
 async function waitForFiniteReadQuiescence(
@@ -1304,13 +1422,15 @@ async function expectNoBrowserProblems(problems: BrowserProblems): Promise<void>
 async function expectAndConsumeConsoleErrors(
   page: Page,
   problems: BrowserProblems,
-  allowed: string[],
-  required: string[] = allowed,
+  allowed: string[] | (() => Promise<string[]>),
+  required?: string[],
 ): Promise<void> {
   // Console delivery trails the response event by a task. Consume only the
   // exact fail-closed requests intentionally induced by the current window;
   // every later or additional browser error remains subject to the final gate.
+  const capabilityGateId = problems.capabilityDiagnostics.beginGate(problems.phase);
   await page.waitForTimeout(1_000);
+  const allowedMessages = typeof allowed === "function" ? await allowed() : allowed;
   const counts = Object.fromEntries(
     [...new Set(problems.consoleErrors)].map((message) => [
       message,
@@ -1318,18 +1438,22 @@ async function expectAndConsumeConsoleErrors(
     ]),
   );
   const allowedCounts = Object.fromEntries(
-    [...new Set(allowed)].map((message) => [
+    [...new Set(allowedMessages)].map((message) => [
       message,
-      allowed.filter((candidate) => candidate === message).length,
+      allowedMessages.filter((candidate) => candidate === message).length,
     ]),
   );
+  problems.capabilityDiagnostics.countedGate(problems.phase, capabilityGateId);
   expect({
     excess: Object.fromEntries(
       Object.entries(counts).filter(([message, count]) => count > (allowedCounts[message] ?? 0)),
     ),
-    missing: required.filter((message) => !problems.consoleErrors.includes(message)),
+    missing: (required ?? allowedMessages).filter(
+      (message) => !problems.consoleErrors.includes(message),
+    ),
   }).toEqual({ excess: {}, missing: [] });
   problems.consoleErrors.splice(0);
+  problems.capabilityDiagnostics.clearedGate(problems.phase, capabilityGateId);
 }
 
 async function expectAndConsumePageErrors(
@@ -1611,6 +1735,7 @@ async function expectAndConsumeActorTransitionResponse(
     status: number;
     statusLabel: string;
     allowedConsoleErrors?: readonly string[];
+    allowedPageErrors?: readonly string[] | (() => string[]);
     workspaceId?: string;
     timing?: { kind: "direct-race-fence"; settledAt: number };
   },
@@ -1625,11 +1750,15 @@ async function expectAndConsumeActorTransitionResponse(
     expect(responseEvidence).toEqual(
       expect.objectContaining({
         actorEpoch: input.actorEpoch,
-        method: input.method,
         responsePhase: input.phase,
         status: input.status,
       }),
     );
+    expect(
+      response.method === input.method ||
+        (input.timing?.kind === "direct-race-fence" &&
+          isActorTransitionRead(response.method, response.pathname)),
+    ).toBe(true);
     const dispatchPhaseValid = actorTransitionResponseDispatchPhaseMatches({
       dispatchPhase: response.dispatchPhase,
       expectedPhase: input.phase,
@@ -1685,7 +1814,92 @@ async function expectAndConsumeActorTransitionResponse(
     [...exactConsoleErrors, ...(input.allowedConsoleErrors ?? [])],
     requestedEngine === "firefox" ? [] : exactConsoleErrors,
   );
+  consumeAllowedPageErrors(problems, input.allowedPageErrors);
   problems.actorTransitionResponses.splice(0);
+}
+
+function isFirefoxNativeAbortPageError(message: string, phase: string): boolean {
+  // Firefox reports the native AbortError as a pageerror when the live-events
+  // stream is torn down by a raced actor change. Chromium reports the same
+  // expected abort as `net::ERR_CONNECTION_RESET` on that stream. Gecko's
+  // DOMException message includes a trailing space in some versions.
+  return (
+    message === `[${phase}] The operation was aborted.` ||
+    message === `[${phase}] The operation was aborted. `
+  );
+}
+
+function consumeAllowedPageErrors(
+  problems: Pick<BrowserProblems, "pageErrors" | "pageErrorEvidence">,
+  allowed: readonly string[] | (() => string[]) | undefined,
+): void {
+  if (allowed === undefined) return;
+  const allowedMessages = [...(typeof allowed === "function" ? allowed() : allowed)];
+  if (allowedMessages.length === 0) return;
+  // Identical abort strings are not a set: one allowlisted copy removes one
+  // ledger entry from each array independently. A second same-phase abort
+  // stays red unless the validated race produced a second expected count.
+  const remainingPageErrors = [...allowedMessages];
+  problems.pageErrors = problems.pageErrors.filter((message) => {
+    const index = remainingPageErrors.indexOf(message);
+    if (index === -1) return true;
+    remainingPageErrors.splice(index, 1);
+    return false;
+  });
+  const remainingEvidence = [...allowedMessages];
+  problems.pageErrorEvidence = problems.pageErrorEvidence.filter((evidence) => {
+    const index = remainingEvidence.indexOf(evidence.message);
+    if (index === -1) return true;
+    remainingEvidence.splice(index, 1);
+    return false;
+  });
+}
+
+function firefoxLiveEventsAbortPageErrorsForValidatedRace(
+  problems: Pick<
+    BrowserProblems,
+    "acceptedRequestTerminals" | "actorTransitionResponses" | "pageErrorEvidence"
+  >,
+  input: {
+    acceptedAt: number;
+    pathname: string;
+    phase: string;
+    settledAt: number;
+  },
+): string[] {
+  // Firefox's pageerror is the generic AbortError text with no URL. Correlate
+  // by the validated old-workspace live-events stream race (exact pathname 409
+  // or, if that 409 never landed, one same-phase request terminal) and consume
+  // only that many matching pageerrors inside the acceptance window.
+  const matchingResponses = problems.actorTransitionResponses.filter(
+    (response) => response.pathname === input.pathname,
+  );
+  const matchingTerminals = problems.acceptedRequestTerminals.filter(
+    (terminal) =>
+      terminal.responsePhase === input.phase &&
+      (terminal.pathnameAndSearch === input.pathname ||
+        terminal.pathnameAndSearch.startsWith(`${input.pathname}?`)),
+  );
+  const expectedCount =
+    matchingResponses.length > 0 ? matchingResponses.length : matchingTerminals.length > 0 ? 1 : 0;
+  if (expectedCount === 0) return [];
+  const windowStart = Math.min(
+    ...[
+      input.acceptedAt,
+      ...matchingResponses.map((response) => response.startedAt),
+      ...matchingTerminals.map((terminal) => terminal.observedAt),
+    ].filter((value) => Number.isFinite(value)),
+  );
+  const windowEnd = input.settledAt + 1_000;
+  return problems.pageErrorEvidence
+    .filter(
+      (evidence) =>
+        isFirefoxNativeAbortPageError(evidence.message, input.phase) &&
+        evidence.observedAt >= windowStart &&
+        evidence.observedAt <= windowEnd,
+    )
+    .slice(0, expectedCount)
+    .map((evidence) => evidence.message);
 }
 
 async function expectNoAxeViolations(page: Page, include?: string): Promise<void> {
@@ -1859,6 +2073,8 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
     }
     await page.getByLabel("Organization name").fill(account.organizationName);
     await page.getByRole("button", { name: "Create organization" }).click();
+    await page.getByRole("heading", { name: "Choose how to power your chats" }).waitFor();
+    await page.getByRole("button", { name: "Skip for now" }).click();
     await page.waitForURL(
       /\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\/|$)/iu,
       { timeout: 30_000 },
@@ -2136,45 +2352,60 @@ async function selectAccount(
   current: AccountFixture,
   target: AccountFixture,
 ): Promise<void> {
-  let lastGestureError: unknown;
-  let clicked = false;
-  for (let attempt = 0; attempt < 3 && !clicked; attempt += 1) {
+  const targetWorkspace = new RegExp(`/workspaces/${target.workspaceId}(?:/|$)`);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const targetTriggerVisible = await accountMenuTrigger(page, target.displayName)
+      .isVisible()
+      .catch(() => false);
+    if (targetTriggerVisible && targetWorkspace.test(page.url())) return;
+    if (targetTriggerVisible) {
+      try {
+        await page.waitForURL(targetWorkspace, { timeout: 12_000 });
+        return;
+      } catch (error) {
+        lastError = error;
+        await page.keyboard.press("Escape").catch(() => undefined);
+        await page.waitForTimeout(150);
+        continue;
+      }
+    }
+    let clicked = false;
     try {
       const menu = await openAccountMenu(page, current.displayName);
       const slot = menu.getByRole("menuitem", {
         name: new RegExp(target.displayName),
       });
       await slot.hover({ timeout: 5_000 });
+      // Current-slot "Use this account" is disabled. Clicking `.last()` can
+      // hit that inert item when WebKit keeps a previous submenu mounted.
       await page
-        .getByRole("menuitem", { name: "Use this account" })
-        .last()
+        .getByRole("menuitem", { name: "Use this account", disabled: false })
         .click({ timeout: 5_000 });
       clicked = true;
     } catch (error) {
-      lastGestureError = error;
+      lastError = error;
       await page.keyboard.press("Escape").catch(() => undefined);
       await page.waitForTimeout(100);
     }
+    if (!clicked) continue;
+    try {
+      await Promise.all([
+        accountMenuTrigger(page, target.displayName).waitFor({ timeout: 12_000 }),
+        page.waitForURL(targetWorkspace, { timeout: 12_000 }),
+      ]);
+      return;
+    } catch (error) {
+      lastError = error;
+      await page.keyboard.press("Escape").catch(() => undefined);
+      await page.waitForTimeout(150);
+    }
   }
-  if (!clicked) {
-    throw new Error(`account selection gesture did not settle for ${target.displayName}`, {
-      cause: lastGestureError,
-    });
-  }
-  try {
-    await Promise.all([
-      accountMenuTrigger(page, target.displayName).waitFor({ timeout: 30_000 }),
-      page.waitForURL(new RegExp(`/workspaces/${target.workspaceId}(?:/|$)`), {
-        timeout: 30_000,
-      }),
-    ]);
-  } catch (error) {
-    const projection = await sessionSet(page);
-    throw new Error(
-      `account selection did not reach ${target.displayName}: url=${page.url()} projection=${JSON.stringify({ actorEpoch: projection.actorEpoch, generation: projection.generation, selected: projection.slots.find((slot) => slot.id === projection.selectedSlotId)?.displayName ?? null, slots: projection.slots.map(({ displayName, state }) => ({ displayName, state })) })} body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2_000))}`,
-      { cause: error },
-    );
-  }
+  const projection = await sessionSet(page);
+  throw new Error(
+    `account selection did not reach ${target.displayName}: url=${page.url()} projection=${JSON.stringify({ actorEpoch: projection.actorEpoch, generation: projection.generation, selected: projection.slots.find((slot) => slot.id === projection.selectedSlotId)?.displayName ?? null, slots: projection.slots.map(({ displayName, state }) => ({ displayName, state })) })} body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2_000))}`,
+    { cause: lastError },
+  );
 }
 
 async function sessionSet(page: Page): Promise<ManagedAuthSessionSetProjection> {
@@ -2222,7 +2453,7 @@ async function sessionSet(page: Page): Promise<ManagedAuthSessionSetProjection> 
 }
 
 async function raceSelect(page: Page, projection: ManagedAuthSessionSetProjection, slotId: string) {
-  return await page.evaluate(
+  const result = await page.evaluate(
     async ({
       projection: acceptedProjection,
       slotId: selectedSlotId,
@@ -2245,7 +2476,18 @@ async function raceSelect(page: Page, projection: ManagedAuthSessionSetProjectio
           slotId: selectedSlotId,
         }),
       });
-      return response.status;
+      const payload = await response.json().catch(() => null);
+      const managedAuthCode = payload?.error?.details?.managedAuthCode;
+      return {
+        status: response.status,
+        managedAuthCode:
+          typeof managedAuthCode === "string" && /^[a-z_]{1,80}$/u.test(managedAuthCode)
+            ? managedAuthCode
+            : null,
+        expectedGeneration: acceptedProjection.generation,
+        expectedActorEpoch: acceptedProjection.actorEpoch,
+        responseActorEpoch: response.headers.get("x-opengeni-actor-epoch"),
+      };
     },
     {
       projection,
@@ -2255,6 +2497,55 @@ async function raceSelect(page: Page, projection: ManagedAuthSessionSetProjectio
       contractRevision: MANAGED_AUTH_SESSION_SET_API_CONTRACT_REVISION,
     },
   );
+  return sanitizeRaceResult(result);
+}
+
+// Observe admission overlap without introducing a wait or changing race semantics.
+// Keep only allowlisted metadata; never retain headers, bodies, or query strings.
+const pendingAccountApiRequests = new Map<
+  Request,
+  { method: string; pathname: string; actorEpoch: string | null; authorityHash: string | null }
+>();
+const selectAdmissionDiagnostics: Array<{
+  authorityHash: string | null;
+  pending: Array<{
+    method: string;
+    pathname: string;
+    actorEpoch: string | null;
+    authorityHash: string | null;
+  }>;
+}> = [];
+
+async function observeAccountApiRequest(
+  request: Request,
+  dispatch: () => Response | Promise<Response>,
+) {
+  const readDiagnostics = companionReadDiagnostics?.ledger;
+  readDiagnostics?.start("server", request, request.method, new URL(request.url).pathname);
+  const metadata = sanitizeRaceRequest({
+    method: request.method,
+    pathname: new URL(request.url).pathname,
+    actorEpoch: request.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER),
+    authorityHash: sessionSetAuthorityHash(request.headers.get("cookie")),
+  });
+  if (metadata.pathname === "/v1/auth/session-set/select") {
+    selectAdmissionDiagnostics.push({
+      authorityHash: metadata.authorityHash,
+      pending: [...pendingAccountApiRequests.values()],
+    });
+  }
+  pendingAccountApiRequests.set(request, metadata);
+  try {
+    const response = await dispatch();
+    readDiagnostics?.response("server", request, response.status);
+    readDiagnostics?.finish("server", request, "handler-resolved");
+    return response;
+  } catch (failure) {
+    readDiagnostics?.finish("server", request, "handler-rejected");
+    throw failure;
+  } finally {
+    pendingAccountApiRequests.delete(request);
+  }
 }
 
 async function launchAccountBrowser(engine: EngineName): Promise<Browser> {
@@ -2448,8 +2739,10 @@ async function captureResponsiveEvidenceInBrowser(
   );
   expect(menuTargetSizes.length).toBeGreaterThan(0);
   expect(menuTargetSizes.every(({ height, width }) => height >= 44 && width >= 44)).toBe(true);
-  await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
-  await expectNoAxeViolations(touchPage, '[data-slot="dropdown-menu-content"]');
+  await withAccountMenuAxeDiagnostics(touchPage, async () => {
+    await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
+    await expectNoAxeViolations(touchPage, '[data-slot="dropdown-menu-content"]');
+  });
   await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
   await expectAccountMenuEvidenceVisible(touchPage, alpha.displayName);
   const touchScreenshot = await touchPage.screenshot({
@@ -2493,6 +2786,89 @@ async function delayedWorkspaceResponse(page: Page, oldActorEpoch: string) {
     release,
     dispose: () => page.unroute("**/v1/workspaces", handler),
   };
+}
+
+async function captureAccountConvergenceFailure(input: {
+  page: Page;
+  problems: BrowserProblems;
+  engine: EngineName;
+  reloadOutcome: string;
+  failure: unknown;
+}): Promise<void> {
+  const { page, problems, engine } = input;
+  const prefix = `${EVIDENCE_DIR}/${engine}-late-old-epoch-convergence-failure`;
+  // Snapshot the existing ledger before any browser evaluation. Do not reread
+  // session-set authority here: that probe can itself change the observation.
+  const evidence = {
+    runId: RUN_ID,
+    engine,
+    capturedAt: performance.now(),
+    url: page.url(),
+    closed: page.isClosed(),
+    reloadOutcome: input.reloadOutcome,
+    failure: String(input.failure),
+    phase: problems.phase,
+    pendingFiniteReads: [...problems.pendingFiniteReads.values()].map((read) => ({
+      description: read.description,
+      actorEpoch: read.actorEpoch,
+      dispatchPhase: read.dispatchPhase,
+      method: read.method,
+      pathname: read.pathname,
+      responseSeen: read.responseSeen,
+      startedAt: read.startedAt,
+    })),
+    activeStreams: [...problems.activeStreams.values()],
+    actorDispatches: problems.actorDispatches.slice(-20),
+    actorFenceResponses: problems.actorFenceResponses.slice(-20),
+    actorTransitionResponses: problems.actorTransitionResponses
+      .slice(-20)
+      .map(({ request: _request, ...response }) => response),
+    acceptedRequestTerminals: problems.acceptedRequestTerminals.slice(-20),
+    acceptedActorTransitions: actorMutationAcceptances.slice(-20),
+    consoleErrors: problems.consoleErrors.slice(-20),
+    pageErrors: problems.pageErrorEvidence.slice(-20),
+    failedRequests: problems.failedRequests.slice(-20),
+    retirementChecks: problems.retirementChecks.slice(-20),
+    retiredFiniteReads: problems.retiredFiniteReads.slice(-20),
+  };
+  // Persist useful evidence even if the page has closed or evaluation fails.
+  await writeFile(`${prefix}.json`, `${JSON.stringify(evidence, null, 2)}\n`);
+  const surface = await page
+    .evaluate(() => {
+      const visible = (element: Element) => {
+        const bounds = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return (
+          bounds.width > 0 &&
+          bounds.height > 0 &&
+          style.visibility !== "hidden" &&
+          style.display !== "none"
+        );
+      };
+      return {
+        url: location.href,
+        readyState: document.readyState,
+        accountTriggers: [...document.querySelectorAll('button[aria-label*="Account menu"]')].map(
+          (element) => ({
+            label: element.getAttribute("aria-label"),
+            expanded: element.getAttribute("aria-expanded"),
+            visible: visible(element),
+          }),
+        ),
+        visibleStatus: [...document.querySelectorAll('[role="alert"], [role="status"], h1, h2')]
+          .filter(visible)
+          .map((element) => element.textContent?.slice(0, 1_000))
+          .slice(0, 20),
+        visibleText: document.body.innerText.slice(0, 4_000),
+      };
+    })
+    .catch((error: unknown) => ({ captureError: String(error) }));
+  await writeFile(`${prefix}.json`, `${JSON.stringify({ ...evidence, surface }, null, 2)}\n`);
+  await page
+    .screenshot({ path: `${prefix}.png`, fullPage: true, timeout: 5_000 })
+    .catch((error: unknown) =>
+      console.error("Account convergence screenshot unavailable:", String(error)),
+    );
 }
 
 beforeAll(async () => {
@@ -2585,7 +2961,7 @@ beforeAll(async () => {
           completionResponseLoss.firstBody ??= requestBody;
           completionResponseLoss.attempts += 1;
           completionResponseLoss.exactBodies.push(firstBody === null || firstBody === requestBody);
-          const response = await api.fetch(request);
+          const response = await observeAccountApiRequest(request, () => api.fetch(request));
           completionResponseLoss.statuses.push(response.status);
           if (completionResponseLoss.acceptedAt === null && response.ok) {
             completionResponseLoss.acceptedAt = performance.now();
@@ -2625,7 +3001,7 @@ beforeAll(async () => {
             .join(",");
           edgeCookieSummary += `;caseEqual:${lowerCookieHeader === upperCookieHeader}`;
         }
-        const response = await api.fetch(request);
+        const response = await observeAccountApiRequest(request, () => api.fetch(request));
         if (
           response.ok &&
           (new Set([
@@ -2672,6 +3048,71 @@ afterAll(async () => {
 }, 180_000);
 
 describe("provider-neutral browser account acceptance", () => {
+  test("actor transition reads include only the exact read-only POST search", () => {
+    const path = "/v1/workspaces/workspace/knowledge/entries/search";
+    expect(isActorTransitionRead("POST", path)).toBe(true);
+    expect(isActorTransitionRead("GET", path)).toBe(true);
+    for (const [method, pathname] of [
+      ["DELETE", path],
+      ["PATCH", path],
+      ["POST", `${path}/other`],
+      ["POST", "/v1/workspaces/workspace/knowledge/entries/review"],
+      ["POST", "/v1/workspaces/workspace/sessions"],
+    ]) {
+      expect(isActorTransitionRead(method!, pathname!)).toBe(false);
+    }
+  });
+  test("neutral race cancellations require the exact accepted select and explicit reload window", () => {
+    const input: BrowserRequestFailureInput = {
+      actorEpoch: null,
+      dispatchPhase: "cross-tab-select-race",
+      responsePhase: "cross-tab-select-race",
+      failure: "NS_BINDING_ABORTED",
+      method: "GET",
+      url: `${publicOrigin}/v1/auth/session-set`,
+      sessionSetAuthorityHash: "a".repeat(64),
+      startedAt: 100,
+      failedAt: 400,
+      crossTabReloadStartedAt: 300,
+      acceptedActorTransitions: [
+        {
+          path: "/v1/auth/session-set/select",
+          actorEpoch: "new",
+          sessionSetAuthorityHash: "a".repeat(64),
+          acceptedAt: 200,
+        },
+      ],
+    };
+    expect(requestFailureProblem(input)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...input,
+        engine: "webkit",
+        failure: "Load request cancelled",
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...input,
+        engine: "chromium",
+        failure: "Load request cancelled",
+      }),
+    ).not.toBeNull();
+    for (const changed of [
+      { failure: "NS_ERROR_NET_RESET" },
+      { method: "POST" },
+      { sessionSetAuthorityHash: null },
+      { crossTabReloadStartedAt: undefined },
+      { crossTabReloadStartedAt: 500 },
+      { startedAt: 250 },
+      { failedAt: 20_000 },
+      { acceptedActorTransitions: [] },
+      { responsePhase: "settled" },
+      { sessionSetAuthorityHash: "b".repeat(64) },
+    ])
+      expect(requestFailureProblem({ ...input, ...changed })).not.toBeNull();
+  });
+
   test("the strict browser ledger only permits scoped old-actor read cancellations", () => {
     const oldActorRead = {
       actorEpoch: "old-actor-epoch",
@@ -2683,6 +3124,26 @@ describe("provider-neutral browser account acceptance", () => {
       url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(oldActorRead)).toBeNull();
+    const billingRead = {
+      ...oldActorRead,
+      url: `${publicOrigin}/v1/billing?accountId=00000000-0000-0000-0000-000000000001`,
+    };
+    expect(requestFailureProblem(billingRead)).toBeNull();
+    expect(requestFailureProblem({ ...billingRead, method: "POST" })).toContain("POST");
+    expect(requestFailureProblem({ ...billingRead, actorEpoch: null })).toContain("actor=missing");
+    expect(requestFailureProblem({ ...billingRead, url: `${publicOrigin}/v1/billing` })).toContain(
+      "/v1/billing",
+    );
+    expect(
+      requestFailureProblem({
+        ...billingRead,
+        dispatchPhase: "initialization",
+        responsePhase: "initialization",
+      }),
+    ).toContain("/v1/billing");
+    expect(requestFailureProblem({ ...billingRead, failure: "NS_ERROR_NET_RESET" })).toContain(
+      "/v1/billing",
+    );
     expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_ABORT" })).toBeNull();
     expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_NET_RESET" })).toContain(
       "/sessions",
@@ -2956,6 +3417,37 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions?view=array`,
       }),
     ).toContain("/sessions");
+    const documentKnowledgeReviewRead = {
+      ...oldActorRead,
+      actorEpoch: "current-actor",
+      dispatchPhase: "primary-set-sign-in",
+      method: "POST",
+      responsePhase: "primary-set-sign-in",
+      url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/knowledge/entries/search`,
+    } satisfies BrowserRequestFailureInput;
+    expect(requestFailureProblem(documentKnowledgeReviewRead)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...documentKnowledgeReviewRead,
+        dispatchPhase: "second-tab-bootstrap",
+        responsePhase: "second-tab-bootstrap",
+      }),
+    ).toBeNull();
+    for (const changed of [
+      { failure: "net::ERR_CONNECTION_RESET" },
+      { method: "GET" },
+      { actorEpoch: null },
+      { responsePhase: "second-tab-bootstrap" },
+      {
+        dispatchPhase: "responsive-accessibility-evidence",
+        responsePhase: "responsive-accessibility-evidence",
+      },
+      {
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/knowledge/entries/review`,
+      },
+    ]) {
+      expect(requestFailureProblem({ ...documentKnowledgeReviewRead, ...changed })).not.toBeNull();
+    }
     const crossTabBootstrapRead = {
       ...oldActorRead,
       actorEpoch: null,
@@ -3565,6 +4057,131 @@ describe("provider-neutral browser account acceptance", () => {
     ).toBe(false);
   });
 
+  test("the strict browser ledger consumes Firefox's native live-events abort pageerror", () => {
+    const phase = "cross-tab-select-race";
+    const liveEventsPath = "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream";
+    const trailingAbort = `[${phase}] The operation was aborted. `;
+    const canonicalAbort = `[${phase}] The operation was aborted.`;
+    const unrelated = `[${phase}] TypeError: unexpected`;
+    const laterPhaseAbort = `[late-old-epoch-setup-beta-to-alpha] The operation was aborted. `;
+    expect(isFirefoxNativeAbortPageError(trailingAbort, phase)).toBe(true);
+    expect(isFirefoxNativeAbortPageError(canonicalAbort, phase)).toBe(true);
+    expect(isFirefoxNativeAbortPageError(unrelated, phase)).toBe(false);
+    expect(isFirefoxNativeAbortPageError(laterPhaseAbort, phase)).toBe(false);
+
+    const acceptedAt = 100;
+    const settledAt = 200;
+    const inWindow = 150;
+    const outsideWindow = settledAt + 1_000 + 1;
+    const matchingLiveEventsResponse = {
+      actorEpoch: "epoch-a",
+      dispatchPhase: phase,
+      endedAt: 180,
+      method: "GET",
+      pathname: liveEventsPath,
+      request: {},
+      responsePhase: phase,
+      startedAt: 90,
+      status: 409,
+    };
+    const matchingSessionsResponse = {
+      ...matchingLiveEventsResponse,
+      pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions",
+    };
+
+    const problems = {
+      acceptedRequestTerminals: [] as BrowserProblems["acceptedRequestTerminals"],
+      actorTransitionResponses: [matchingLiveEventsResponse, matchingSessionsResponse],
+      pageErrors: [trailingAbort, unrelated, canonicalAbort, laterPhaseAbort, trailingAbort],
+      pageErrorEvidence: [
+        { message: trailingAbort, observedAt: inWindow },
+        { message: unrelated, observedAt: inWindow + 1 },
+        { message: canonicalAbort, observedAt: inWindow + 2 },
+        { message: laterPhaseAbort, observedAt: inWindow + 3 },
+        { message: trailingAbort, observedAt: outsideWindow },
+      ],
+    };
+    consumeAllowedPageErrors(problems, () =>
+      firefoxLiveEventsAbortPageErrorsForValidatedRace(problems, {
+        acceptedAt,
+        pathname: liveEventsPath,
+        phase,
+        settledAt,
+      }),
+    );
+    expect(problems.pageErrors).toEqual([
+      unrelated,
+      canonicalAbort,
+      laterPhaseAbort,
+      trailingAbort,
+    ]);
+    expect(problems.pageErrorEvidence).toEqual([
+      { message: unrelated, observedAt: inWindow + 1 },
+      { message: canonicalAbort, observedAt: inWindow + 2 },
+      { message: laterPhaseAbort, observedAt: inWindow + 3 },
+      { message: trailingAbort, observedAt: outsideWindow },
+    ]);
+
+    const noRace = {
+      acceptedRequestTerminals: [] as BrowserProblems["acceptedRequestTerminals"],
+      actorTransitionResponses: [matchingSessionsResponse],
+      pageErrors: [trailingAbort],
+      pageErrorEvidence: [{ message: trailingAbort, observedAt: inWindow }],
+    };
+    consumeAllowedPageErrors(noRace, () =>
+      firefoxLiveEventsAbortPageErrorsForValidatedRace(noRace, {
+        acceptedAt,
+        pathname: liveEventsPath,
+        phase,
+        settledAt,
+      }),
+    );
+    expect(noRace.pageErrors).toEqual([trailingAbort]);
+    expect(noRace.pageErrorEvidence).toEqual([{ message: trailingAbort, observedAt: inWindow }]);
+
+    const terminalOnly = {
+      acceptedRequestTerminals: [
+        {
+          observedAt: inWindow,
+          pathnameAndSearch: `${liveEventsPath}?transport=http1`,
+          responsePhase: phase,
+          terminal: "failed" as const,
+        },
+      ],
+      actorTransitionResponses: [] as BrowserProblems["actorTransitionResponses"],
+      pageErrors: [trailingAbort, canonicalAbort],
+      pageErrorEvidence: [
+        { message: trailingAbort, observedAt: inWindow },
+        { message: canonicalAbort, observedAt: inWindow + 1 },
+      ],
+    };
+    consumeAllowedPageErrors(terminalOnly, () =>
+      firefoxLiveEventsAbortPageErrorsForValidatedRace(terminalOnly, {
+        acceptedAt,
+        pathname: liveEventsPath,
+        phase,
+        settledAt,
+      }),
+    );
+    expect(terminalOnly.pageErrors).toEqual([canonicalAbort]);
+    expect(terminalOnly.pageErrorEvidence).toEqual([
+      { message: canonicalAbort, observedAt: inWindow + 1 },
+    ]);
+
+    const duplicate = {
+      pageErrors: [trailingAbort, trailingAbort],
+      pageErrorEvidence: [
+        { message: trailingAbort, observedAt: inWindow },
+        { message: trailingAbort, observedAt: inWindow + 1 },
+      ],
+    };
+    consumeAllowedPageErrors(duplicate, [trailingAbort]);
+    expect(duplicate.pageErrors).toEqual([trailingAbort]);
+    expect(duplicate.pageErrorEvidence).toEqual([
+      { message: trailingAbort, observedAt: inWindow + 1 },
+    ]);
+  });
+
   test("the strict browser ledger bounds native HTTP/1 stream seams by URL, cause, and time", () => {
     const boundedLiveUrl = `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?transport=http1-bounded`;
     expect(isBoundedHttp1StreamRequest("GET", boundedLiveUrl)).toBe(true);
@@ -3723,6 +4340,40 @@ describe("provider-neutral browser account acceptance", () => {
     }
   });
 
+  test("repeated finite review reads finish without native transport cancellation", async () => {
+    const reviewAccount = await createActualUser({
+      displayName: "Review Reader",
+      email: `review-reader-${RUN_ID}@example.test`,
+      organizationName: "Review Reader Organization",
+    });
+    const browser = await launchAccountBrowser(requestedEngine as EngineName);
+    try {
+      const page = await browser.newPage();
+      const problems = observeBrowser(page);
+      setBrowserPhase(problems, "primary-set-sign-in");
+      await signIn(page, reviewAccount);
+      await waitForFiniteReadQuiescence(problems);
+      setBrowserPhase(problems, "stable-finite-review-reads");
+      // Exercise repeated real SDK reads in a stable document. Each iteration
+      // must reach a native terminal before another poll; no routing, fetch
+      // replacement, navigation, or cancellation exemption is involved.
+      for (let i = 0; i < 100; i++) {
+        const pending = page.waitForResponse((response) =>
+          response.url().endsWith("/knowledge/entries/search"),
+        );
+        await page.evaluate(() =>
+          window.dispatchEvent(new Event("opengeni:knowledge-review-updated")),
+        );
+        const response = await pending;
+        expect(response.status()).toBe(200);
+        await waitForFiniteReadQuiescence(problems);
+      }
+      await expectNoBrowserProblems(problems);
+    } finally {
+      await browser.close();
+    }
+  }, 180_000);
+
   test("real users add, race, switch, re-authenticate, deep-link, and revoke without stale tenant state", async () => {
     if (!owned) throw new Error("database fixture unavailable");
     const engine = requestedEngine as EngineName;
@@ -3730,13 +4381,29 @@ describe("provider-neutral browser account acceptance", () => {
     const context = await browser.newContext({
       viewport: { width: 1440, height: 960 },
     });
-    const otherBrowserSet = await browser.newContext({
+    // Keep the independent account set out of the shared-tab journey's native
+    // connection pool, as for responsive evidence. The two racing tabs still
+    // share one context and browser; no request assertions are relaxed.
+    const independentBrowser = await launchAccountBrowser(engine);
+    const otherBrowserSet = await independentBrowser.newContext({
       viewport: { width: 1024, height: 768 },
     });
     const page = await context.newPage();
     const secondTab = await context.newPage();
     const otherPage = await otherBrowserSet.newPage();
     const pageProblems = observeBrowser(page);
+    let capabilityResumeObserver: Awaited<ReturnType<typeof observeCapabilityResume>> | undefined;
+    let reloadCapabilityObserver: ReturnType<typeof observeReloadCapabilities> | undefined;
+    let capabilityResumeEvidence: CapabilityResumeEvidence | undefined;
+    let capabilityMatcherEvidence: ReturnType<typeof capabilityMatcherDiagnostics> | undefined;
+    const consumedCapabilityResumeRequests = new Set<string>();
+    const draftRequests: Array<{ method: string; pathname: string }> = [];
+    page.on("request", (request) => {
+      const pathname = new URL(request.url()).pathname;
+      if (pathname.endsWith("/new-session-draft")) {
+        draftRequests.push({ method: request.method(), pathname });
+      }
+    });
     const secondTabProblems = observeBrowser(secondTab);
     const otherProblems = observeBrowser(otherPage);
 
@@ -3824,6 +4491,18 @@ describe("provider-neutral browser account acceptance", () => {
         await captureResponsiveEvidence(context, engine);
       }
 
+      // Responsive/focus work can let a background POST search start after the
+      // earlier bootstrap checkpoint. POSTs retain actor mutation leases even
+      // for read-only search, so that unrelated request can correctly reject
+      // BOTH selects. Establish the intended two-mutation race precondition
+      // again; keep both selects concurrent and the one-winner assertion exact.
+      await waitForFiniteReadQuiescenceAcross([pageProblems, secondTabProblems]);
+
+      const stopRaceAuthorityObservation = await Promise.all(
+        [page, secondTab].map((observedPage) =>
+          observeChromiumNeutralSessionSetRequestAuthority(observedPage, publicOrigin),
+        ),
+      );
       setBrowserPhase(pageProblems, "cross-tab-select-race");
       setBrowserPhase(secondTabProblems, "cross-tab-select-race");
       projection = await sessionSet(page);
@@ -3833,11 +4512,31 @@ describe("provider-neutral browser account acceptance", () => {
         sessionSet(page),
         sessionSet(secondTab),
       ]);
+      selectAdmissionDiagnostics.length = 0;
       const raced = await Promise.all([
         raceSelect(page, pageProjection, betaSlot.id),
         raceSelect(secondTab, tabProjection, betaSlot.id),
       ]);
-      expect(raced.sort()).toEqual([200, 409]);
+      const racedStatuses = raced.map(({ status }) => status).sort();
+      if (racedStatuses[0] !== 200 || racedStatuses[1] !== 409) {
+        const currentProjections = await Promise.all(
+          [page, secondTab].map(async (observedPage) => {
+            try {
+              const current = await sessionSet(observedPage);
+              return sanitizeRaceProjection(current);
+            } catch {
+              return { unavailable: true };
+            }
+          }),
+        );
+        console.error(
+          "Account selection race diagnostics",
+          JSON.stringify({ raced, admissions: selectAdmissionDiagnostics, currentProjections }),
+        );
+      }
+      expect(racedStatuses).toEqual([200, 409]);
+      pageProblems.crossTabReloadStartedAt = performance.now();
+      secondTabProblems.crossTabReloadStartedAt = pageProblems.crossTabReloadStartedAt;
       await Promise.all([
         page.reload({ waitUntil: "domcontentloaded" }),
         secondTab.reload({ waitUntil: "domcontentloaded" }),
@@ -3881,6 +4580,16 @@ describe("provider-neutral browser account acceptance", () => {
                   `[cross-tab-select-race] Failed to load resource: net::ERR_CONNECTION_RESET @ /v1/workspaces/${alpha.workspaceId}/live-events/stream`,
                 ]
               : [],
+          allowedPageErrors:
+            engine === "firefox"
+              ? () =>
+                  firefoxLiveEventsAbortPageErrorsForValidatedRace(observedProblems, {
+                    acceptedAt: racedSelectAcceptedAt,
+                    pathname: `/v1/workspaces/${alpha.workspaceId}/live-events/stream`,
+                    phase: "cross-tab-select-race",
+                    settledAt: racedSelectionSettledAt,
+                  })
+              : undefined,
         });
       }
       const racedSelectionAcceptance = actorMutationAcceptances
@@ -3901,6 +4610,7 @@ describe("provider-neutral browser account acceptance", () => {
           oldWorkspaceId: alpha.workspaceId,
         }),
       ]);
+      await Promise.all(stopRaceAuthorityObservation.map((stop) => stop()));
 
       setBrowserPhase(pageProblems, "late-old-epoch-setup-beta-to-alpha");
       setBrowserPhase(secondTabProblems, "late-old-epoch-setup-beta-to-alpha");
@@ -3930,9 +4640,31 @@ describe("provider-neutral browser account acceptance", () => {
       await waitForFiniteReadQuiescenceAcross([pageProblems, secondTabProblems]);
       const oldProjection = await sessionSet(secondTab);
       const delay = await delayedWorkspaceResponse(secondTab, oldProjection.actorEpoch);
-      const reload = secondTab.reload({ waitUntil: "domcontentloaded" }).catch(() => null);
-      const intentionallyHeldRequest = await delay.intercepted;
-      await waitForCompanionFiniteReadQuiescence(secondTabProblems, intentionallyHeldRequest);
+      const companionDiagnostics = createAccountReadDiagnostics();
+      companionReadDiagnostics = { page: secondTab, ledger: companionDiagnostics };
+      let reloadOutcome = "pending";
+      const reload = secondTab.reload({ waitUntil: "domcontentloaded" }).then(
+        (response) => {
+          reloadOutcome = `domcontentloaded (HTTP ${response?.status() ?? "no response"})`;
+          return response;
+        },
+        (error: unknown) => {
+          reloadOutcome = `rejected: ${String(error)}`;
+          return null;
+        },
+      );
+      try {
+        const intentionallyHeldRequest = await delay.intercepted;
+        companionDiagnostics.markHeld(intentionallyHeldRequest);
+        await waitForCompanionFiniteReadQuiescence(secondTabProblems, intentionallyHeldRequest);
+      } catch (cause) {
+        throw new Error(
+          `companion read lifecycle evidence: ${JSON.stringify(companionDiagnostics.snapshot())}`,
+          { cause },
+        );
+      } finally {
+        companionReadDiagnostics = null;
+      }
       setBrowserPhase(pageProblems, "late-old-epoch-alpha-to-beta");
       setBrowserPhase(secondTabProblems, "late-old-epoch-alpha-to-beta");
       await selectAccount(page, alpha, beta);
@@ -3941,9 +4673,22 @@ describe("provider-neutral browser account acceptance", () => {
       delay.release();
       await reload;
       await delay.dispose();
-      await accountMenuTrigger(secondTab, beta.displayName).waitFor({
-        timeout: 30_000,
-      });
+      try {
+        await accountMenuTrigger(secondTab, beta.displayName).waitFor({
+          timeout: 30_000,
+        });
+      } catch (failure) {
+        await captureAccountConvergenceFailure({
+          page: secondTab,
+          problems: secondTabProblems,
+          engine,
+          reloadOutcome,
+          failure,
+        }).catch((error: unknown) =>
+          console.error("Account convergence evidence unavailable:", String(error)),
+        );
+        throw failure;
+      }
       const confirmedTabBetaAfterDelayAt = performance.now();
       const betaSelectionAcceptance = actorMutationAcceptances
         .filter(({ path }) => path === "/v1/auth/session-set/select")
@@ -3960,8 +4705,50 @@ describe("provider-neutral browser account acceptance", () => {
       expect(secondTab.url()).not.toContain(alpha.workspaceId);
 
       setBrowserPhase(pageProblems, "cross-slot-deep-link");
-      await selectAccount(page, beta, alpha);
+      const draftRequestStart = draftRequests.length;
+      const targetDraftPath = `/v1/workspaces/${alpha.workspaceId}/new-session-draft`;
+      const targetDraftRequests = () =>
+        draftRequests
+          .slice(draftRequestStart)
+          .filter(({ pathname }) => pathname === targetDraftPath);
+      const capabilityUrl = `**/v1/workspaces/${alpha.workspaceId}/session-tenancy/capabilities`;
+      let releaseCapabilities!: () => void;
+      const capabilitiesReleased = new Promise<void>((resolve) => {
+        releaseCapabilities = resolve;
+      });
+      let capabilitiesIntercepted!: () => void;
+      const capabilitiesPending = new Promise<void>((resolve) => {
+        capabilitiesIntercepted = resolve;
+      });
+      const holdCapabilities = async (route: Route) => {
+        capabilitiesIntercepted();
+        await capabilitiesReleased;
+        await route.continue();
+      };
+      await page.route(capabilityUrl, holdCapabilities);
+      try {
+        await selectAccount(page, beta, alpha);
+        await capabilitiesPending;
+        // Deliberately outlast the autosave debounce while visibility is unknown.
+        // Hydrating early would acknowledge a temporary workspace-visible value,
+        // then autosave the passive Personal projection as a user edit.
+        await page.waitForTimeout(600);
+        expect(targetDraftRequests()).toEqual([]);
+        const hydrated = page.waitForResponse(
+          (response) =>
+            new URL(response.url()).pathname === targetDraftPath &&
+            response.request().method() === "GET" &&
+            response.status() === 200,
+        );
+        releaseCapabilities();
+        await hydrated;
+      } finally {
+        releaseCapabilities();
+        await page.unroute(capabilityUrl, holdCapabilities);
+      }
       await waitForFiniteReadQuiescence(pageProblems);
+      await page.waitForTimeout(600);
+      expect(targetDraftRequests().filter(({ method }) => method !== "GET")).toEqual([]);
       await page.goto(`${publicOrigin}/sessions/${beta.sessionId}`, {
         waitUntil: "domcontentloaded",
       });
@@ -3993,6 +4780,11 @@ describe("provider-neutral browser account acceptance", () => {
           `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${alpha.workspaceId}/sessions/${beta.sessionId}`,
           `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
           `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+          // As on the full-document slot-revocation transition below, development
+          // StrictMode can mount these bounded reads twice. Only these exact
+          // post-selection fail-closed endpoints get the second receipt budget.
+          `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+          `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
         ],
         engine === "chromium" || engine === "webkit"
@@ -4013,6 +4805,17 @@ describe("provider-neutral browser account acceptance", () => {
           select auth_session_id from managed_auth_login_slots where id = ${alphaSlot.id}
         )`;
       const slotRevocationReloadStartedAt = performance.now();
+      const resumeCapabilityUrl = `${publicOrigin}/v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`;
+      // Firefox does not emit these native HTTP console errors. Preserve its
+      // existing strict ledgers; this barrier joins Chromium/WebKit delivery.
+      if (engine !== "firefox") {
+        reloadCapabilityObserver = observeReloadCapabilities(page, {
+          url: resumeCapabilityUrl,
+          actorEpoch: projectionBeforeSlotRevocation.actorEpoch,
+          actorEpochHeader: MANAGED_AUTH_ACTOR_EPOCH_HEADER,
+          phase: () => pageProblems.phase,
+        });
+      }
       await page.reload({ waitUntil: "domcontentloaded" });
       await accountMenuTrigger(page, beta.displayName).waitFor();
       await retirePendingReadsAfterConfirmedDocumentReplacement(page, pageProblems, {
@@ -4021,6 +4824,33 @@ describe("provider-neutral browser account acceptance", () => {
         replacementStartedAt: slotRevocationReloadStartedAt,
         workspaceId: beta.workspaceId,
       });
+      // A replacement document and a later re-authentication are separate
+      // mounts. Consume the exact denied metadata reads from the reload now,
+      // rather than accumulating both transitions in one allowance window.
+      await expectAndConsumeConsoleErrors(
+        page,
+        pageProblems,
+        async () => {
+          await reloadCapabilityObserver?.wait();
+          return [
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+          ];
+        },
+        [],
+      );
+      reloadCapabilityObserver?.dispose();
+      pageProblems.capabilityDiagnostics.boundary(pageProblems.phase, "resume-arm-begin");
+      capabilityResumeObserver = await observeCapabilityResume(page, {
+        url: resumeCapabilityUrl,
+        phase: () => pageProblems.phase,
+        actorEpochHeader: MANAGED_AUTH_ACTOR_EPOCH_HEADER,
+        hashAuthority: sessionSetAuthorityHash,
+      });
+      pageProblems.capabilityDiagnostics.boundary(pageProblems.phase, "resume-arm-end");
       const reauthMenu = await openAccountMenu(page, beta.displayName);
       const alphaReauthSlot = reauthMenu.getByRole("menuitem", {
         name: new RegExp(alpha.displayName),
@@ -4038,16 +4868,50 @@ describe("provider-neutral browser account acceptance", () => {
       await expectAndConsumeConsoleErrors(
         page,
         pageProblems,
-        [
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
-          ...optionalWebKitReauthenticationReloadError(pageProblems, engine),
-        ],
+        async () => {
+          const authorityHash = sessionSetAuthorityHash(await browserCookieHeader(context));
+          pageProblems.capabilityDiagnostics.boundary(pageProblems.phase, "resume-seal-begin");
+          const evidence = await capabilityResumeObserver!.finish();
+          pageProblems.capabilityDiagnostics.boundary(pageProblems.phase, "resume-seal-end");
+          capabilityResumeEvidence = evidence;
+          // A controlled resume reproduces this extra read in Chromium too.
+          // Original CI causation remains unknown; only actual lifecycle and
+          // authenticated request evidence can authorize this one extra error.
+          const expectedResume = {
+            url: resumeCapabilityUrl,
+            actorEpoch: projection.actorEpoch,
+            authorityHash,
+            phase: pageProblems.phase,
+          };
+          capabilityMatcherEvidence = capabilityMatcherDiagnostics(
+            expectedResume,
+            evaluateCapabilityResumeRead(
+              evidence,
+              expectedResume,
+              consumedCapabilityResumeRequests,
+            ),
+          );
+          const resumedRequest = consumeCapabilityResumeRead(
+            evidence,
+            expectedResume,
+            consumedCapabilityResumeRequests,
+          );
+          return [
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+            ...(resumedRequest !== null
+              ? [
+                  `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+                ]
+              : []),
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+            ...optionalWebKitReauthenticationReloadError(pageProblems, engine),
+          ];
+        },
         [],
       );
       await expectAndConsumePageErrors(
@@ -4359,8 +5223,44 @@ describe("provider-neutral browser account acceptance", () => {
         )}\n`,
       );
     } finally {
+      const diagnosticWrites = [
+        writeFile(
+          `${EVIDENCE_DIR}/${engine}-capability-diagnostics.json`,
+          `${JSON.stringify(
+            {
+              resumeSnapshot: capabilityResumeEvidence
+                ? { status: "available", clock: "browser-unix-ms" }
+                : { status: "unavailable", reason: "finish-not-reached" },
+              matcher: capabilityMatcherEvidence ?? { status: "unavailable" },
+              primary: pageProblems.capabilityDiagnostics.snapshot(),
+              secondTab: secondTabProblems.capabilityDiagnostics.snapshot(),
+              independent: otherProblems.capabilityDiagnostics.snapshot(),
+            },
+            null,
+            2,
+          )}\n`,
+        ),
+      ];
+      if (capabilityResumeEvidence) {
+        diagnosticWrites.push(
+          writeFile(
+            `${EVIDENCE_DIR}/${engine}-capability-resume.json`,
+            `${JSON.stringify(capabilityResumeEvidence, null, 2)}\n`,
+          ),
+        );
+      }
+      // Diagnostic write failures must not replace the assertion failure or
+      // prevent browser cleanup. No diagnostic I/O occurs before gate counting.
+      if (
+        (await Promise.allSettled(diagnosticWrites)).some((result) => result.status === "rejected")
+      ) {
+        console.warn("Capability diagnostic evidence could not be fully persisted.");
+      }
+      await capabilityResumeObserver?.dispose();
+      reloadCapabilityObserver?.dispose();
       await context.close().catch(() => undefined);
       await otherBrowserSet.close().catch(() => undefined);
+      await independentBrowser.close().catch(() => undefined);
       await browser.close().catch(() => undefined);
     }
   }, 600_000);

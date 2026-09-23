@@ -30,10 +30,28 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
+import {
+  captureRetainedRouterOutput,
+  createProviderCommandRetainer,
+} from "@opengeni/db/retained-provider-commands";
+import {
+  backgroundCommandActivityForSessions,
+  getSessionBackgroundCommand,
+  listSessionBackgroundCommands,
+} from "../../../packages/db/src/session-background-commands";
 import { getSettings, type Settings } from "@opengeni/config";
 import {
   acquireLease,
+  retainedProviderCommandPersistence,
+  appendSessionEvents,
+  authorizeHistoricalSandboxCheckpointRecovery,
+  registerSandboxCheckpointArtifact,
+  enrollUnobservableCommandIdleDrain,
+  reapStaleLeaseHoldersGlobal,
   advanceWorkspaceGeneration,
+  advanceWorkspaceGenerationForDirectRequest,
+  advanceWorkspaceGenerationForRetainedProcess,
+  verifyRetainedProcessMutationSettlement,
   beginSandboxRematerialization,
   claimWorkspaceArchiveCapture,
   claimSessionWorkForAttempt,
@@ -41,6 +59,7 @@ import {
   confirmDrainCold,
   createSession,
   createDb,
+  deferRetainedProcessReconciliation,
   getRetainedProcess,
   initializeSessionStartAtomically,
   mutateSessionControlInTransaction,
@@ -211,7 +230,11 @@ async function freshWorkspace(): Promise<{
   return { accountId: a!.id, workspaceId: w!.id, groupId: crypto.randomUUID() };
 }
 
-async function freshWarmSnapshotAttempt(ids: { accountId: string; workspaceId: string }): Promise<{
+async function freshWarmSnapshotAttempt(ids: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId?: string;
+}): Promise<{
   sessionId: string;
   turnId: string;
   executionGeneration: number;
@@ -229,6 +252,7 @@ async function freshWarmSnapshotAttempt(ids: { accountId: string; workspaceId: s
     reasoningEffort: "medium",
     latencyMode: "standard",
     sandboxBackend: "none",
+    sandboxGroupId: ids.sandboxGroupId,
   });
   await initializeSessionStartAtomically(db, {
     accountId: ids.accountId,
@@ -257,6 +281,36 @@ async function freshWarmSnapshotAttempt(ids: { accountId: string; workspaceId: s
     sandboxGroupId: session.sandboxGroupId,
     holderId: sandboxLeaseHolderIdForAttempt(attemptId),
   };
+}
+
+async function verifyPendingQuiescenceBlocks(
+  ids: { accountId: string; workspaceId: string },
+  attempt: Awaited<ReturnType<typeof freshWarmSnapshotAttempt>>,
+  check: () => Promise<void>,
+): Promise<void> {
+  const [receipt] = await admin`insert into session_command_receipts (
+    account_id,workspace_id,actor_type,actor_subject_id,action,target_session_id,
+    target_turn_id,operation_key,canonical_request_hash) values (
+    ${ids.accountId},${ids.workspaceId},'human','quiescence-fixture','session.queue.steer',
+    ${attempt.sessionId},${attempt.turnId},${crypto.randomUUID()},'quiescence-fixture') returning id`;
+  const [interruption] = await admin`insert into session_attempt_interruptions (
+    account_id,workspace_id,session_id,operation_id,attempt_id,kind,control_revision,state)
+    values (${ids.accountId},${ids.workspaceId},${attempt.sessionId},${receipt!.id},
+      ${attempt.attemptId},'steer',1,'settled') returning id`;
+  await check();
+  await admin`delete from session_attempt_interruptions where id = ${interruption!.id}`;
+  await admin`delete from session_command_receipts where id = ${receipt!.id}`;
+  await admin`update session_turn_attempts set outcome = 'interrupted_recoverable' where id = ${attempt.attemptId}`;
+  const [event] = await appendSessionEvents(db, ids.workspaceId, attempt.sessionId, [
+    {
+      type: "turn.recovery.requested",
+      turnId: attempt.turnId,
+      turnAttemptId: attempt.attemptId,
+    },
+  ]);
+  await check();
+  await admin`delete from session_events where id = ${event!.id}`;
+  await admin`update session_turn_attempts set outcome = 'completed' where id = ${attempt.attemptId}`;
 }
 
 type LeaseFixture = {
@@ -302,7 +356,7 @@ async function insertLease(
 async function insertHolder(
   ids: { accountId: string; workspaceId: string },
   leaseId: string,
-  kind: "turn" | "viewer",
+  kind: "turn" | "viewer" | "direct",
   holderId: string,
   heartbeatAgoMs: number,
   subjectId?: string,
@@ -1078,7 +1132,12 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const workspaceId = "22222222-2222-4222-8222-222222222222";
     const sandboxGroupId = "33333333-3333-4333-8333-333333333333";
     const archive = Buffer.from("left-bytes").toString("base64");
-    const meta = archiveDescriptor(archive, 1_900_000_000_000);
+    // Keep the locator and descriptor valid together so this exercises the
+    // independent inline-byte comparison, not descriptor/ref validation.
+    const meta = archiveDescriptor(
+      Buffer.from("right-bytes").toString("base64"),
+      1_900_000_000_000,
+    );
     await expect(
       persistWarmSnapshotRaw(db, {
         accountId,
@@ -1101,7 +1160,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
             sandboxGroupId,
             revision: meta.revision,
           }),
-          sha256: "0".repeat(64),
+          sha256: meta.archiveSha256,
           bytes: meta.archiveBytes,
           backend: "s3-compatible",
         },
@@ -1279,6 +1338,152 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(captured).toBe(1);
     expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
   }, 60_000);
+
+  for (const backend of ["local", "docker"] as const) {
+    test(`(1b-recovery-host) ${backend} capture failure preserves admission fencing and exact successor lineage through publication`, async () => {
+      if (!available) return;
+      const ids = await freshWorkspace();
+      const instanceId = `box-${backend}-capture-failure`;
+      const epoch = 15;
+      await insertLease(ids, {
+        liveness: "draining",
+        leaseEpoch: epoch,
+        expiresInMs: -1_000,
+        instanceId,
+        backend,
+        resumeBackendId: backend,
+        resumeState: {
+          backendId: backend,
+          sessionState: {
+            providerState:
+              backend === "local" ? { workspaceRootPath: instanceId } : { containerId: instanceId },
+          },
+        },
+      });
+      const target = {
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        instanceId,
+        leaseEpoch: epoch,
+      };
+      const input = {
+        target,
+        timeoutClass: "fast" as const,
+        snapshotTimeoutMs: 60_000,
+        captureTimeoutMs: 120_000,
+      };
+      let providerLive = true;
+      let captureCalls = 0;
+      let stopCalls = 0;
+      let providerRequestId: string | undefined;
+      let priorCaptureId: string | undefined;
+      let successorCaptureId: string | undefined;
+      const assertAdmissionFenced = async () => {
+        const arrival = await acquireLease(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.groupId,
+          kind: "viewer",
+          holderId: `viewer-${backend}-during-capture`,
+          backend,
+          leaseTtlMs: 60_000,
+        });
+        expect(arrival).toMatchObject({ role: "fenced", reason: "capture_in_progress" });
+      };
+      const terminateBox: TerminateBoxFn = async (
+        _settings,
+        lease,
+        _observability,
+        persistArchive,
+        requestId,
+        disposition,
+      ) => {
+        expect(providerLive).toBe(true);
+        expect(lease.instanceId).toBe(instanceId);
+        expect(lease.leaseEpoch).toBe(epoch);
+        const current = await readLease(db, ids.workspaceId, ids.groupId);
+        expect(current?.liveness).toBe("draining");
+        await assertAdmissionFenced();
+        if (captureCalls === 0) {
+          expect(disposition).toBe("capture_required");
+          providerRequestId = requestId;
+          priorCaptureId = current?.archiveCapture?.id;
+          expect(priorCaptureId).toBeTruthy();
+          expect(current?.archiveCapture).toMatchObject({
+            providerRequestId: requestId,
+            takeoverSafe: true,
+            providerReplaySafe: false,
+          });
+          captureCalls += 1;
+          throw new Error("synthetic host capture failed before publication");
+        }
+        expect(requestId).toBe(providerRequestId);
+        expect(current?.archiveCapture?.providerRequestId).toBe(providerRequestId);
+        if (captureCalls === 1) {
+          expect(disposition).toBe("capture_required");
+          successorCaptureId = current?.archiveCapture?.id;
+          expect(successorCaptureId).toBeTruthy();
+          expect(successorCaptureId).not.toBe(priorCaptureId);
+          captureCalls += 1;
+          const archive = Buffer.from(`${backend} verified successor archive`).toString("base64");
+          expect(
+            (await persistArchive(archive, archiveDescriptor(archive, Date.now()))).wrote,
+          ).toBe(true);
+          const published = await readLease(db, ids.workspaceId, ids.groupId);
+          expect(published?.archiveCapture?.publishedAt).toBeTruthy();
+          expect(published?.archiveComplete).toBe(true);
+          await assertAdmissionFenced();
+          // Publication succeeded but teardown did not. Its durable claim must
+          // survive this interruption, too; never manually remove the fence.
+          throw new Error("synthetic interruption after verified publication");
+        }
+        expect(disposition).toBe("archive_published");
+        expect(current?.archiveCapture?.id).toBe(successorCaptureId);
+        expect(current?.archiveCapture?.publishedAt).toBeTruthy();
+        stopCalls += 1;
+        providerLive = false;
+        return { terminated: true, providerMissingBeforeCapture: false };
+      };
+      const { drainSandboxLease } = createSandboxLeaseActivities(reaperServices(), {
+        terminateBox,
+        probeDrainableProvider: async () => {
+          throw new Error("readiness is not capture settlement proof");
+        },
+      });
+      await expect(
+        drainSandboxLease({ ...input, operationId: crypto.randomUUID() }),
+      ).rejects.toThrow("synthetic host capture failed before publication");
+      const failed = await readLease(db, ids.workspaceId, ids.groupId);
+      expect(failed).toMatchObject({
+        liveness: "draining",
+        instanceId,
+        leaseEpoch: epoch,
+        archiveComplete: false,
+        archiveCapture: { id: priorCaptureId, providerRequestId, publishedAt: null },
+      });
+      expect(providerLive).toBe(true);
+      expect(stopCalls).toBe(0);
+      await assertAdmissionFenced();
+
+      await expect(
+        drainSandboxLease({ ...input, operationId: crypto.randomUUID() }),
+      ).rejects.toThrow("synthetic interruption after verified publication");
+      expect(providerLive).toBe(true);
+      expect(stopCalls).toBe(0);
+      await assertAdmissionFenced();
+      expect(await drainSandboxLease({ ...input, operationId: crypto.randomUUID() })).toEqual({
+        status: "terminated",
+      });
+      expect(captureCalls).toBe(2);
+      expect(stopCalls).toBe(1);
+      expect(providerLive).toBe(false);
+      expect(await readLease(db, ids.workspaceId, ids.groupId)).toMatchObject({
+        liveness: "cold",
+        archiveCapture: null,
+        archiveComplete: true,
+      });
+    }, 60_000);
+  }
 
   test("(1b-recovery-directory) Modal directory capture waits for predecessor cleanup before retry", async () => {
     if (!available) return;
@@ -1790,6 +1995,97 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
   }, 60_000);
 
+  test("(1b-capture-cadence) failed captures retain durable periodic cadence without holding admission", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 14,
+      expiresInMs: 600_000,
+      instanceId: "box-capture-cadence",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-capture-cadence" } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+    const identity = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 14,
+      expectedInstanceId: "box-capture-cadence",
+    };
+    const input = {
+      ...identity,
+      liveness: "warm" as const,
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 900_000,
+      warmAttempt: {
+        sessionId: attempt.sessionId,
+        turnId: attempt.turnId,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+      },
+    };
+    const captureId = crypto.randomUUID();
+    expect(await claimWorkspaceArchiveCapture(db, { ...input, captureId })).toMatchObject({
+      status: "claimed",
+    });
+    // Provider failure: release the exact claim without publishing an archive.
+    expect(await releaseWorkspaceArchiveCapture(db, { ...identity, captureId })).toBe(true);
+    const [record] =
+      await admin`select archive_capture_last_attempt_at, archive_capture_id, archive_generation from sandbox_leases where id=${leaseId}`;
+    expect(record?.archive_capture_last_attempt_at).not.toBeNull();
+    expect(record?.archive_capture_id).toBeNull();
+    expect(record?.archive_generation).toBeNull();
+    expect(
+      await claimWorkspaceArchiveCapture(db, { ...input, captureId: crypto.randomUUID() }),
+    ).toEqual({ status: "throttled" });
+    // This decision lives in PostgreSQL, not a worker-local retry timer. Neither
+    // throttling nor a stale release may re-establish a capture lock or clock.
+    expect(
+      await releaseWorkspaceArchiveCapture(db, { ...identity, captureId: crypto.randomUUID() }),
+    ).toBe(false);
+    const [afterStale] =
+      await admin`select archive_capture_last_attempt_at, archive_capture_id from sandbox_leases where id=${leaseId}`;
+    expect(afterStale?.archive_capture_last_attempt_at).toEqual(
+      record?.archive_capture_last_attempt_at,
+    );
+    expect(afterStale?.archive_capture_id).toBeNull();
+    // Forced recovery bypasses cadence, never an active capture owner.
+    const forcedId = crypto.randomUUID();
+    expect(
+      await claimWorkspaceArchiveCapture(db, { ...input, minIntervalMs: 0, captureId: forcedId }),
+    ).toMatchObject({ status: "claimed" });
+    expect(
+      await claimWorkspaceArchiveCapture(db, {
+        ...input,
+        minIntervalMs: 0,
+        captureId: crypto.randomUUID(),
+      }),
+    ).toEqual({ status: "capture_in_progress" });
+    expect(await releaseWorkspaceArchiveCapture(db, { ...identity, captureId: forcedId })).toBe(
+      true,
+    );
+    // Advance only this throwaway fixture clock; a new periodic owner can run.
+    await admin`update sandbox_leases set archive_capture_last_attempt_at=now()-interval '16 minutes' where id=${leaseId}`;
+    const nextId = crypto.randomUUID();
+    expect(await claimWorkspaceArchiveCapture(db, { ...input, captureId: nextId })).toMatchObject({
+      status: "claimed",
+    });
+    expect(await releaseWorkspaceArchiveCapture(db, { ...identity, captureId: nextId })).toBe(true);
+    expect(
+      await claimWorkspaceArchiveCapture(db, { ...input, captureId: crypto.randomUUID() }),
+    ).toEqual({ status: "throttled" });
+  }, 180_000);
+
   test("(1b-capture-gate) provider capture durably fences holders and mutations until exact publication", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
@@ -1931,7 +2227,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       holderId: "viewer-waits-for-provider-pause",
       backend: "modal",
       leaseTtlMs: 60_000,
-      captureWaitMs: 1_000,
+      // The active child froze a 60s claim before this lower-config caller
+      // arrived. The persisted deadline, not this now-short local budget, owns
+      // how long an opted-in lifecycle waiter may keep observing.
+      captureWaitMs: 25,
     }).finally(() => {
       acquireWaitSettled = true;
     });
@@ -1964,11 +2263,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedEpoch: 14,
       expectedInstanceId: "box-capture-gate",
       operation: "waitsForExactCapture",
-      captureWaitMs: 1_000,
+      captureWaitMs: 25,
     }).finally(() => {
       waitSettled = true;
     });
-    await Bun.sleep(50);
+    await Bun.sleep(75);
     expect(waitSettled).toBe(false);
     expect(acquireWaitSettled).toBe(false);
     const mutationWaitController = new AbortController();
@@ -2007,6 +2306,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         expectedInstanceId: "box-capture-gate",
       }),
     ).toBe(true);
+    // Capture release racing the waiter's UPDATE/diagnostic must not manufacture
+    // lease_fenced while the same epoch, instance and holder remain current.
     const admission = await waitingAdmission;
     expect(admission.workspaceGeneration).toBe(1);
     const acquiredAfterCapture = await waitingAcquire;
@@ -2312,10 +2613,24 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
     const settings = testSettings({
       sandboxSnapshotIntervalMs: 1,
-      sandboxSnapshotTimeoutMs: 5_000,
+      sandboxSnapshotTimeoutMs: 25,
     });
+    const captureMeasurements: Array<{
+      backend: string;
+      outcome: string;
+      durationSeconds: number;
+    }> = [];
     const capture = maybePersistWarmWorkspaceSnapshot(
-      { db, settings },
+      {
+        db,
+        settings,
+        sandboxMetrics: {
+          onWorkspaceCapture: (measurement) => {
+            captureMeasurements.push(measurement);
+            throw new Error("metrics must not affect capture settlement");
+          },
+        },
+      },
       {
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
@@ -2358,11 +2673,23 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       return admission;
     })();
     await Bun.sleep(75);
+    expect(await capture).toBe(false);
+    let capturePhysicallySettled = false;
+    void capture.settled.then(() => {
+      capturePhysicallySettled = true;
+    });
+    await Bun.sleep(0);
+    expect(capturePhysicallySettled).toBe(false);
+    expect(captureMeasurements).toHaveLength(0);
     expect(providerReadCalls).toBe(0);
     expect(providerCommandCalls).toBe(0);
 
     finishPersist?.(new TextEncoder().encode("tar-test-archive"));
-    expect(await capture).toBe(true);
+    await capture.settled;
+    expect(capturePhysicallySettled).toBe(true);
+    expect(captureMeasurements).toHaveLength(1);
+    expect(captureMeasurements[0]).toMatchObject({ backend: "modal", outcome: "completed" });
+    expect(captureMeasurements[0]!.durationSeconds).toBeGreaterThanOrEqual(0.075);
     expect(await read).toBe("read-after-capture");
     expect(providerReadCalls).toBe(1);
     const admission = await command;
@@ -3127,6 +3454,940 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     }
   }, 60_000);
 
+  for (const supervision of ["native", "null", "unknown", "string"] as const) {
+    test(`supervised ${supervision} command never enters legacy containment or stale capture teardown`, async () => {
+      if (!available) throw new Error("Real PostgreSQL required for supervision containment");
+      const ids = await freshWorkspace();
+      const attempt = await freshWarmSnapshotAttempt(ids);
+      ids.groupId = attempt.sandboxGroupId;
+      const instanceId = "box-supervised-containment";
+      const leaseId = await insertLease(ids, {
+        liveness: "warm",
+        refcount: 1,
+        turnHolders: 1,
+        leaseEpoch: 12,
+        expiresInMs: 600_000,
+        instanceId,
+        backend: "modal",
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: { providerState: { sandboxId: instanceId } },
+        },
+      });
+      await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+      const admission = await advanceWorkspaceGeneration(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        ...attempt,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 12,
+        expectedInstanceId: instanceId,
+        operation: "supervisedContainment",
+        routeKind: "home",
+        routeTargetId: null,
+        routeEpoch: 0,
+      });
+      const processId = crypto.randomUUID();
+      const retain = createProviderCommandRetainer(retainWorkspaceMutationProcess, () => null);
+      await retain(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        processId,
+        providerSessionId: 42,
+        admissionId: admission.id,
+        admittedWorkspaceGeneration: admission.workspaceGeneration,
+        operation: "supervisedContainment",
+        providerBinding: MODAL_PROVIDER_BINDING,
+        backgroundCommand: { commandId: processId, command: "supervised command" },
+        owner: {
+          kind: "turn",
+          ...attempt,
+          expectedEpoch: 12,
+          expectedInstanceId: instanceId,
+          routeKind: "home",
+          routeTargetId: null,
+          routeEpoch: 0,
+        },
+        providerCommand: {
+          kind: "modal-router-v1",
+          sandboxId: instanceId,
+          taskId: "task",
+          execId: crypto.randomUUID(),
+          supervision: {
+            protocol: "native-subreaper-v1",
+            invocationId: crypto.randomUUID(),
+            nonce: "a".repeat(64),
+            controlPath: `/tmp/opengeni-supervision/${crypto.randomUUID()}.sock`,
+          },
+          streams: {
+            stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+            stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+          },
+        },
+      });
+      await admin`delete from sandbox_lease_holders where lease_id=${leaseId} and kind='turn'`;
+      await admin`update sandbox_leases set refcount=1,turn_holders=0 where id=${leaseId}`;
+      await admin`update session_turn_attempts set state='closed',outcome='completed',
+        closed_at=now()-interval '2 minutes',quiesced_at=now()-interval '2 minutes' where id=${attempt.attemptId}`;
+      await admin`update sandbox_retained_processes set started_at=now()-interval '2 minutes',
+        last_reconcile_outcome='provider_error',reconcile_attempts=5 where id=${processId}`;
+      await admin`update session_background_commands set state='stopping',
+        cancel_requested_at=now()-interval '2 minutes',cancel_requested_by='test:stop' where id=${processId}`;
+      if (supervision !== "native") {
+        // Simulate old/corrupt data. Current writers reject these descriptors;
+        // readers must still fence on presence rather than parser success.
+        await admin.begin(async (tx) => {
+          await tx`set constraints all immediate`;
+          await tx`alter table sandbox_retained_processes disable trigger supervised_command_guard`;
+          await tx`update sandbox_retained_processes set provider_command=provider_command ||
+            ${tx.json({ supervision: supervision === "null" ? null : supervision === "string" ? "malformed" : { protocol: "future-v99" } })}::jsonb where id=${processId}`;
+          await tx`alter table sandbox_retained_processes enable trigger supervised_command_guard`;
+        });
+      }
+      const scope = {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+      };
+      expect(await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 1 })).toBeNull();
+      // Model enrollment from an older worker/rollout, not fresh authority.
+      // Current DB writers must reject it even if application checks are skipped.
+      await expect(
+        Promise.resolve(admin`update sandbox_leases set liveness='draining',
+        unobservable_command_drain_ids=array[${processId}::uuid] where id=${leaseId}`),
+      ).rejects.toThrow("Supervised command blocks");
+      const oldLeaseWrite = async (
+        write: (tx: postgres.TransactionSql) => PromiseLike<unknown>,
+      ) => {
+        await admin.begin(async (tx) => {
+          await tx`set constraints all immediate`;
+          await tx`alter table sandbox_leases disable trigger supervised_command_capture_guard`;
+          await write(tx);
+          await tx`alter table sandbox_leases enable trigger supervised_command_capture_guard`;
+        });
+      };
+      await oldLeaseWrite(
+        (tx) => tx`update sandbox_leases set liveness='draining',
+        unobservable_command_drain_ids=array[${processId}::uuid] where id=${leaseId}`,
+      );
+      expect(await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 1 })).toBeNull();
+      const captureId = crypto.randomUUID();
+      const capture = {
+        ...scope,
+        expectedEpoch: 12,
+        expectedInstanceId: instanceId,
+        liveness: "draining" as const,
+      };
+      expect(await readWorkspaceArchiveCapturePreflight(db, capture)).toBeNull();
+      expect(
+        await claimWorkspaceArchiveCapture(db, {
+          ...capture,
+          captureId,
+          captureTimeoutMs: 120_000,
+          minIntervalMs: 0,
+        }),
+      ).toEqual({ status: "mutation_in_progress" });
+      const operationId = crypto.randomUUID();
+      const providerRequestId = crypto.randomUUID();
+      await oldLeaseWrite(
+        (tx) => tx`update sandbox_leases set archive_capture_id=${captureId},
+        archive_capture_operation_id=${operationId},archive_capture_provider_request_id=${providerRequestId},
+        archive_capture_attempt=1,archive_capture_generation=workspace_generation,
+        archive_capture_started_at=now()-interval '2 minutes',archive_capture_deadline_at=now()-interval '1 minute',
+        archive_capture_takeover_safe=true where id=${leaseId}`,
+      );
+      expect(
+        await replaceWorkspaceArchiveCaptureAfterProof(db, {
+          ...scope,
+          expectedEpoch: 12,
+          expectedInstanceId: instanceId,
+          priorCaptureId: captureId,
+          captureId: crypto.randomUUID(),
+          operationId,
+          attempt: 2,
+          captureTimeoutMs: 120_000,
+        }),
+      ).toBeNull();
+      const persist = {
+        ...scope,
+        expectedEpoch: 12,
+        expectedInstanceId: instanceId,
+        expectedWorkspaceGeneration: admission.workspaceGeneration,
+        captureId,
+        providerRequestId,
+      };
+      expect(
+        (await persistDrainSnapshotRaw(db, { ...persist, workspaceArchive: null })).wrote,
+      ).toBe(false);
+      expect(
+        (
+          await persistDrainSnapshotRaw(db, {
+            ...persist,
+            workspaceArchive: Buffer.from("must not publish").toString("base64"),
+            workspaceArchiveMeta: archiveDescriptor(
+              Buffer.from("must not publish").toString("base64"),
+              Date.now(),
+            ),
+          })
+        ).wrote,
+      ).toBe(false);
+      // Already-published retry bypasses persistArchive: must fence BEFORE the
+      // provider seam, with command/admission/holder and archive unchanged.
+      await expect(
+        Promise.resolve(admin`update sandbox_leases set archive_capture_published_at=now()
+        where id=${leaseId}`),
+      ).rejects.toThrow("Supervised command blocks");
+      await oldLeaseWrite(
+        (tx) =>
+          tx`update sandbox_leases set archive_capture_published_at=now() where id=${leaseId}`,
+      );
+      const spy = makeTerminateSpy();
+      const { drainSandboxLease } = createSandboxLeaseActivities(reaperServices(), {
+        terminateBox: spy.fn,
+      });
+      const result = await drainSandboxLease({
+        target: {
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.groupId,
+          instanceId,
+          leaseEpoch: 12,
+        },
+        timeoutClass: "fast",
+        snapshotTimeoutMs: 60_000,
+        captureTimeoutMs: 120_000,
+        operationId: crypto.randomUUID(),
+      });
+      expect(result.status).not.toBe("terminated");
+      expect(spy.calls).toHaveLength(0);
+      expect(spy.persisted).toHaveLength(0);
+      const [process] = await admin`select state,supervision_receipt,supervision_output_captured
+        from sandbox_retained_processes where id=${processId}`;
+      expect(process).toMatchObject({
+        state: "active",
+        supervision_receipt: null,
+        supervision_output_captured: false,
+      });
+      const [parent] =
+        await admin`select settled_at from sandbox_workspace_mutation_admissions where id=${admission.id}`;
+      expect(parent!.settled_at).toBeNull();
+      expect((await readLease(db, ids.workspaceId, ids.groupId))?.archiveGeneration).toBeNull();
+      if (supervision === "native") {
+        // Proof-backed native settlement still permits the ordinary drain.
+        const processScope = {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId,
+        };
+        const persistence = retainedProviderCommandPersistence(db, processScope);
+        const command = await persistence.load();
+        if (command?.kind !== "modal-router-v1" || !command.supervision)
+          throw new Error("Missing native fixture");
+        await persistence.recordSupervisionReceipt({
+          protocol: "native-subreaper-v1",
+          invocationId: command.supervision.invocationId,
+          receiptId: crypto.randomUUID(),
+          leaderExitCode: 0,
+        });
+        const terminal = structuredClone(command);
+        for (const stream of [terminal.streams.stdout, terminal.streams.stderr]) {
+          stream.eof = true;
+          stream.exitCode = 0;
+        }
+        await captureRetainedRouterOutput(db, processScope, {
+          expected: command,
+          command: terminal,
+          stdout: "",
+          stderr: "",
+        });
+        const retained = await getRetainedProcess(db, processScope);
+        expect(
+          (
+            await settleRetainedProcess(db, {
+              ...processScope,
+              expected: retainedProcessSettlementIdentity(retained!),
+              outcome: "exited",
+              exitCode: 0,
+              reason: "provider_exit_banner",
+              idleGraceMs: 1,
+            })
+          ).settled,
+        ).toBe(true);
+        // Discard only the deliberately injected, byte-less test claim; the
+        // ordinary drain now creates and publishes its own verified capture.
+        await admin`update sandbox_leases set archive_capture_published_at=null,
+          unobservable_command_drain_ids=null where id=${leaseId}`;
+        expect(
+          await releaseWorkspaceArchiveCapture(db, {
+            ...scope,
+            captureId,
+            expectedEpoch: 12,
+            expectedInstanceId: instanceId,
+          }),
+        ).toBe(true);
+        expect(
+          (
+            await drainSandboxLease({
+              target: {
+                workspaceId: ids.workspaceId,
+                sandboxGroupId: ids.groupId,
+                instanceId,
+                leaseEpoch: 12,
+              },
+              timeoutClass: "fast",
+              snapshotTimeoutMs: 60_000,
+              captureTimeoutMs: 120_000,
+              operationId: crypto.randomUUID(),
+            })
+          ).status,
+        ).toBe("terminated");
+        expect(spy.calls).toHaveLength(1);
+        expect(spy.persisted).toContainEqual({ group: ids.groupId, wrote: true });
+      }
+    }, 180_000);
+  }
+
+  for (const [lateExit, stoppingErrors] of [
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ] as const) {
+    test(`idle unobservable commands use the existing drain; late exit=${lateExit}, stopping errors=${stoppingErrors}`, async () => {
+      if (!available) throw new Error("Real PostgreSQL required for idle drain regression");
+      const ids = await freshWorkspace();
+      const attempt = await freshWarmSnapshotAttempt(ids);
+      ids.groupId = attempt.sandboxGroupId;
+      const instanceId = "box-unknown-idle";
+      const leaseId = await insertLease(ids, {
+        liveness: "warm",
+        refcount: 1,
+        turnHolders: 1,
+        leaseEpoch: 12,
+        expiresInMs: 600_000,
+        instanceId,
+        backend: "modal",
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: { providerState: { sandboxId: instanceId } },
+        },
+      });
+      await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+      const admission = await advanceWorkspaceGeneration(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        ...attempt,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 12,
+        expectedInstanceId: instanceId,
+        operation: "unknownIdleCommand",
+        routeKind: "home",
+        routeTargetId: null,
+        routeEpoch: 0,
+      });
+      const processId = crypto.randomUUID();
+      await retainWorkspaceMutationProcess(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        processId,
+        providerSessionId: 41,
+        admissionId: admission.id,
+        admittedWorkspaceGeneration: admission.workspaceGeneration,
+        operation: "unknownIdleCommand",
+        providerBinding: MODAL_PROVIDER_BINDING,
+        backgroundCommand: { commandId: processId, command: "legacy background command" },
+        owner: {
+          kind: "turn",
+          turnId: attempt.turnId,
+          executionGeneration: attempt.executionGeneration,
+          attemptId: attempt.attemptId,
+          holderId: attempt.holderId,
+          sandboxGroupId: ids.groupId,
+          expectedEpoch: 12,
+          expectedInstanceId: instanceId,
+          routeKind: "home",
+          routeTargetId: null,
+          routeEpoch: 0,
+        },
+      });
+      const scope = {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        idleGraceMs: 1,
+      };
+      await admin`update sandbox_retained_processes set
+        last_reconcile_outcome = 'quarantined_process_observation_unavailable',
+        started_at = now() - interval '2 minutes',
+      reconcile_after = now() + interval '24 hours' where id = ${processId}`;
+      const commandScope = {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+      };
+      expect((await listSessionBackgroundCommands(db, commandScope))[0]?.observationStatus).toBe(
+        "unavailable",
+      );
+      expect(
+        (await getSessionBackgroundCommand(db, { ...commandScope, commandId: processId }))
+          ?.observationStatus,
+      ).toBe("unavailable");
+      expect(
+        (
+          await backgroundCommandActivityForSessions(db, {
+            ...commandScope,
+            sessionIds: [attempt.sessionId],
+          })
+        ).get(attempt.sessionId),
+      ).toMatchObject({ count: 1, unavailableCount: 1 });
+      if (stoppingErrors) {
+        await admin`update sandbox_retained_processes set last_reconcile_outcome = 'provider_error',
+          reconcile_attempts = 5 where id = ${processId}`;
+        await admin`update session_background_commands set state = 'stopping',
+          cancel_requested_at = now() - interval '2 minutes', cancel_requested_by = 'test:stop-request'
+          where id = ${processId}`;
+      }
+      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'turn'`;
+      // A live attempt without a holder is still protected.
+      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
+      closed_at = now(), quiesced_at = now() where id = ${attempt.attemptId}`;
+      await insertHolder(ids, leaseId, "viewer", "viewer-idle-regression", 0, attempt.sessionId);
+      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'viewer'`;
+      await admin`update sandbox_leases set refcount = 1, turn_holders = 0, viewer_holders = 0 where id = ${leaseId}`;
+      const sibling = await freshWarmSnapshotAttempt({ ...ids, sandboxGroupId: ids.groupId });
+      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
+      closed_at = now(), quiesced_at = null where id = ${sibling.attemptId}`;
+      expect(
+        await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 60_000 }),
+      ).toBeNull();
+      await admin`update session_turn_attempts set quiesced_at = null, closed_at = now() - interval '2 minutes'
+      where id in (${sibling.attemptId}, ${attempt.attemptId})`;
+      if (stoppingErrors) {
+        // Explicit cancellation cannot substitute for physical owner quiescence.
+        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+        await admin`update session_turn_attempts set quiesced_at = now() - interval '2 minutes'
+          where id = ${attempt.attemptId}`;
+      }
+      await verifyPendingQuiescenceBlocks(ids, sibling, async () => {
+        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      });
+      const child = await advanceWorkspaceGenerationForRetainedProcess(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        processId,
+        operation: "pollUnknownCommand",
+      });
+      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      await verifyRetainedProcessMutationSettlement(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        processId,
+        operation: "pollUnknownCommand",
+        admission: child,
+        outcome: "resolved",
+      });
+      if (stoppingErrors) {
+        await admin`update sandbox_retained_processes set reconcile_attempts = 4 where id = ${processId}`;
+        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+        await admin`update sandbox_retained_processes set reconcile_attempts = 5 where id = ${processId}`;
+        await admin`update session_background_commands set state = 'running', cancel_requested_at = null,
+          cancel_requested_by = null
+          where id = ${processId}`;
+        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+        await admin`update session_background_commands set state = 'stopping', cancel_requested_at = now(),
+          cancel_requested_by = 'test:stop-request'
+          where id = ${processId}`;
+        expect(
+          await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 60_000 }),
+        ).toBeNull();
+        await admin`update session_background_commands set cancel_requested_at = now() - interval '2 minutes'
+          where id = ${processId}`;
+      }
+      if (!lateExit) {
+        const ordinaryIds = await freshWorkspace();
+        await insertLease(ordinaryIds, {
+          liveness: "draining",
+          refcount: 0,
+          leaseEpoch: 1,
+          expiresInMs: -60_000,
+          instanceId: "ordinary-drain",
+        });
+        const trigger = `idle_drain_failure_${crypto.randomUUID().replaceAll("-", "")}`;
+        await admin.unsafe(`create function ${trigger}() returns trigger language plpgsql as $$
+          begin if new.id = '${leaseId}'::uuid then raise exception 'injected enrollment failure'; end if; return new; end $$`);
+        await admin.unsafe(`create trigger ${trigger} before update of unobservable_command_checked_at
+          on sandbox_leases for each row execute function ${trigger}()`);
+        const failures: unknown[] = [];
+        try {
+          const inventory = await reapStaleLeaseHoldersGlobal(db, {
+            viewerHolderTtlMs: 60_000,
+            idleGraceMs: REAPER_SETTINGS.sandboxIdleGraceMs,
+            onUnobservableCommandDrainError: (error) => {
+              failures.push(error);
+            },
+          });
+          expect(inventory.some((row) => row.sandboxGroupId === ordinaryIds.groupId)).toBe(true);
+          expect(failures).toHaveLength(1);
+          expect(inventory.some((row) => row.sandboxGroupId === ids.groupId)).toBe(false);
+        } finally {
+          await admin.unsafe(`drop trigger ${trigger} on sandbox_leases`);
+          await admin.unsafe(`drop function ${trigger}()`);
+          await admin`delete from sandbox_leases where workspace_id = ${ordinaryIds.workspaceId}`;
+        }
+      }
+      const target = (
+        await reapStaleLeaseHoldersGlobal(db, {
+          viewerHolderTtlMs: 60_000,
+          idleGraceMs: REAPER_SETTINGS.sandboxIdleGraceMs,
+        })
+      ).find((row) => row.sandboxGroupId === ids.groupId);
+      expect(target).not.toBeNull();
+      expect(
+        (
+          await getRetainedProcess(db, {
+            workspaceId: ids.workspaceId,
+            sessionId: attempt.sessionId,
+            processId,
+          })
+        )?.state,
+      ).toBe("active");
+      const failedCapture = createSandboxLeaseActivities(reaperServices(), {
+        terminateBox: async () => {
+          throw new Error("snapshot unavailable");
+        },
+      });
+      await expect(
+        failedCapture.drainSandboxLease({
+          target: target!,
+          timeoutClass: "fast",
+          snapshotTimeoutMs: 60_000,
+          captureTimeoutMs: 120_000,
+          operationId: crypto.randomUUID(),
+        }),
+      ).rejects.toThrow("snapshot unavailable");
+      expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("draining");
+      expect(
+        (
+          await getRetainedProcess(db, {
+            workspaceId: ids.workspaceId,
+            sessionId: attempt.sessionId,
+            processId,
+          })
+        )?.state,
+      ).toBe("active");
+      const [held] = await admin<{ count: number }[]>`select count(*)::integer as count
+      from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'process'`;
+      expect(held?.count).toBe(1);
+      if (lateExit) {
+        const process = await getRetainedProcess(db, {
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId,
+        });
+        await settleRetainedProcess(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId,
+          expected: retainedProcessSettlementIdentity(process!),
+          outcome: "exited",
+          exitCode: 17,
+          reason: "provider completion after enrollment",
+          idleGraceMs: 1,
+        });
+      }
+      const spy = makeTerminateSpy();
+      const { drainSandboxLease } = createSandboxLeaseActivities(reaperServices(), {
+        terminateBox: spy.fn,
+      });
+      const result = await drainSandboxLease({
+        target: target!,
+        timeoutClass: "fast",
+        snapshotTimeoutMs: 60_000,
+        captureTimeoutMs: 120_000,
+        operationId: crypto.randomUUID(),
+      });
+      expect(result.status).toBe("terminated");
+      expect(spy.persisted).toContainEqual({ group: ids.groupId, wrote: true });
+      expect(
+        (await getSessionBackgroundCommand(db, { ...commandScope, commandId: processId }))
+          ?.observationStatus,
+      ).toBeUndefined();
+      expect(
+        (
+          await backgroundCommandActivityForSessions(db, {
+            ...commandScope,
+            sessionIds: [attempt.sessionId],
+          })
+        ).size,
+      ).toBe(0);
+      expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
+      expect(
+        (
+          await getRetainedProcess(db, {
+            workspaceId: ids.workspaceId,
+            sessionId: attempt.sessionId,
+            processId,
+          })
+        )?.state,
+      ).toBe(lateExit ? "exited" : "lost");
+    }, 180_000);
+  }
+
+  test("deadline rotation saves files with both stubborn and unobservable legacy commands", async () => {
+    if (!available) throw new Error("Real PostgreSQL required for deadline capture regression");
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const instanceId = "box-stubborn-deadline-command";
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 12,
+      expiresInMs: 600_000,
+      instanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: instanceId } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+    const admission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 12,
+      expectedInstanceId: instanceId,
+      operation: "stubbornDeadlineCommand",
+      routeKind: "home",
+      routeTargetId: null,
+      routeEpoch: 0,
+    });
+    const processId = crypto.randomUUID();
+    await retainWorkspaceMutationProcess(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      processId,
+      providerSessionId: 41,
+      admissionId: admission.id,
+      admittedWorkspaceGeneration: admission.workspaceGeneration,
+      operation: "stubbornDeadlineCommand",
+      providerBinding: MODAL_PROVIDER_BINDING,
+      backgroundCommand: { commandId: processId, command: "legacy command ignoring Ctrl-C" },
+      owner: {
+        kind: "turn",
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 12,
+        expectedInstanceId: instanceId,
+        routeKind: "home",
+        routeTargetId: null,
+        routeEpoch: 0,
+      },
+    });
+    const secondAdmission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 12,
+      expectedInstanceId: instanceId,
+      operation: "unobservableDeadlineCommand",
+      routeKind: "home",
+      routeTargetId: null,
+      routeEpoch: 0,
+    });
+    const secondProcessId = crypto.randomUUID();
+    await retainWorkspaceMutationProcess(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      processId: secondProcessId,
+      providerSessionId: 42,
+      admissionId: secondAdmission.id,
+      admittedWorkspaceGeneration: secondAdmission.workspaceGeneration,
+      operation: "unobservableDeadlineCommand",
+      providerBinding: MODAL_PROVIDER_BINDING,
+      backgroundCommand: { commandId: secondProcessId, command: "legacy PTY render" },
+      owner: {
+        kind: "turn",
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 12,
+        expectedInstanceId: instanceId,
+        routeKind: "home",
+        routeTargetId: null,
+        routeEpoch: 0,
+      },
+    });
+    await admin`update sandbox_leases set rotation_requested_at = now() - interval '3 minutes',
+      rotation_reason = 'provider_deadline',
+      provider_created_at = now() - interval '30 minutes',
+      provider_deadline_at = now() + interval '30 minutes'
+      where id = ${leaseId}`;
+    await admin`update sandbox_retained_processes set
+      started_at = now(), reconcile_attempts = 1,
+      last_reconcile_outcome = 'provider_running',
+      cancellation_requested_at = now() - interval '3 minutes', cancellation_reason = 'provider_deadline',
+      deadline_cancellation_requested_at = now() - interval '3 minutes'
+      where id = ${processId}`;
+    await admin`update sandbox_retained_processes set
+      started_at = now(), reconcile_attempts = 1,
+      last_reconcile_outcome = 'quarantined_process_observation_unavailable',
+      cancellation_requested_at = now() - interval '3 minutes', cancellation_reason = 'provider_deadline',
+      deadline_cancellation_requested_at = now() - interval '3 minutes'
+      where id = ${secondProcessId}`;
+    const scope = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      idleGraceMs: 15 * 60_000,
+    };
+    // A live owner remains a writer, even after the command stop window.
+    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+    await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'turn'`;
+    await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
+      closed_at = now() - interval '3 minutes', quiesced_at = now() - interval '3 minutes'
+      where id = ${attempt.attemptId}`;
+    // The command itself still gets the full stop window.
+    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+    // Deadline capture must not depend on an observer reason or a crashed claim.
+    const strandedClaimId = crypto.randomUUID();
+    await admin`update sandbox_retained_processes
+      set last_reconcile_outcome = 'future_provider_observer_state',
+          reconcile_claim_id = ${strandedClaimId},
+          reconcile_claimed_at = now() - interval '3 minutes',
+          reconcile_after = now() + interval '2 minutes'
+      where id = ${secondProcessId}`;
+    await admin`update sandbox_retained_processes
+      set started_at = now() - interval '3 minutes' where id in (${processId}, ${secondProcessId})`;
+    const strandedProcess = await getRetainedProcess(db, {
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      processId: secondProcessId,
+    });
+    expect(strandedProcess).not.toBeNull();
+    expect(await enrollUnobservableCommandIdleDrain(db, scope)).not.toBeNull();
+    const target = (
+      await reapStaleLeaseHoldersGlobal(db, {
+        viewerHolderTtlMs: 60_000,
+        idleGraceMs: scope.idleGraceMs,
+      })
+    ).find((row) => row.sandboxGroupId === ids.groupId);
+    expect(target).toBeDefined();
+    expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("draining");
+    expect(
+      (
+        await getRetainedProcess(db, {
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId,
+        })
+      )?.state,
+    ).toBe("active");
+    const spy = makeTerminateSpy();
+    const { drainSandboxLease } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: spy.fn,
+    });
+    const result = await drainSandboxLease({
+      target: target!,
+      timeoutClass: "fast",
+      snapshotTimeoutMs: 60_000,
+      captureTimeoutMs: 120_000,
+      operationId: crypto.randomUUID(),
+    });
+    expect(result.status).toBe("terminated");
+    expect(spy.persisted).toContainEqual({ group: ids.groupId, wrote: true });
+    expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
+    expect(
+      (
+        await getRetainedProcess(db, {
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId,
+        })
+      )?.state,
+    ).toBe("lost");
+    expect(
+      await deferRetainedProcessReconciliation(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        processId: secondProcessId,
+        expected: retainedProcessSettlementIdentity(strandedProcess!),
+        claimId: strandedClaimId,
+        outcome: "provider_running",
+        retryAfterMs: 1,
+      }),
+    ).toBe(false);
+    expect(
+      (
+        await getRetainedProcess(db, {
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId: secondProcessId,
+        })
+      )?.state,
+    ).toBe("lost");
+  }, 180_000);
+
+  test("deadline rotation can enroll a returned direct request's retained command", async () => {
+    if (!available) throw new Error("Real PostgreSQL required for deadline capture regression");
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const instanceId = "box-direct-deadline-command";
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      leaseEpoch: 12,
+      expiresInMs: 600_000,
+      instanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: instanceId } },
+      },
+    });
+    const requestId = crypto.randomUUID();
+    const holderId = `direct:${requestId}`;
+    await insertHolder(ids, leaseId, "direct", holderId, 0, attempt.sessionId);
+    const admission = await advanceWorkspaceGenerationForDirectRequest(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      requestId,
+      holderId,
+      initiatorSubjectId: "direct-deadline-test",
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 12,
+      expectedInstanceId: instanceId,
+      routeTargetId: null,
+      routeEpoch: 0,
+      operation: "directDeadlineCommand",
+    });
+    const processId = crypto.randomUUID();
+    await retainWorkspaceMutationProcess(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      processId,
+      providerSessionId: 43,
+      admissionId: admission.id,
+      admittedWorkspaceGeneration: admission.workspaceGeneration,
+      operation: "directDeadlineCommand",
+      providerBinding: MODAL_PROVIDER_BINDING,
+      owner: {
+        kind: "direct",
+        requestId,
+        holderId,
+        initiatorSubjectId: "direct-deadline-test",
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 12,
+        expectedInstanceId: instanceId,
+        routeTargetId: null,
+        routeEpoch: 0,
+      },
+    });
+    await admin`update sandbox_leases set rotation_requested_at = now() - interval '3 minutes',
+      rotation_reason = 'provider_deadline',
+      provider_created_at = now() - interval '30 minutes',
+      provider_deadline_at = now() + interval '30 minutes'
+      where id = ${leaseId}`;
+    await admin`update sandbox_retained_processes set
+      started_at = now() - interval '3 minutes', reconcile_attempts = 1,
+      last_reconcile_outcome = 'provider_running',
+      cancellation_requested_at = now() - interval '3 minutes', cancellation_reason = 'provider_deadline',
+      deadline_cancellation_requested_at = now() - interval '3 minutes'
+      where id = ${processId}`;
+    await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
+      closed_at = now() - interval '3 minutes', quiesced_at = now() - interval '3 minutes'
+      where id = ${attempt.attemptId}`;
+    const scope = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      idleGraceMs: 15 * 60_000,
+    };
+    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+    await releaseLeaseHolder(db, {
+      ...scope,
+      kind: "direct",
+      holderId,
+    });
+    const target = await enrollUnobservableCommandIdleDrain(db, scope);
+    expect(target).not.toBeNull();
+    const spy = makeTerminateSpy();
+    const { drainSandboxLease } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: spy.fn,
+    });
+    expect(
+      (
+        await drainSandboxLease({
+          target: target!,
+          timeoutClass: "fast",
+          snapshotTimeoutMs: 60_000,
+          captureTimeoutMs: 120_000,
+          operationId: crypto.randomUUID(),
+        })
+      ).status,
+    ).toBe("terminated");
+  }, 180_000);
+
+  test("deadline-command inventory function replays without widening public authority", async () => {
+    if (!available) throw new Error("Real PostgreSQL required for containment migration");
+    const definition = async () => {
+      const [row] = await admin`select pg_get_functiondef(
+        'opengeni_private.list_unobservable_command_drain_candidates(integer)'::regprocedure
+      ) as definition`;
+      return String(row!.definition);
+    };
+    const before = await definition();
+    expect(before).toContain("process.reconcile_attempts >= 5");
+    expect(before).toContain("command.cancel_requested_at IS NOT NULL");
+    expect(before).toContain(
+      "process.deadline_cancellation_requested_at < now() - interval '2 minutes'",
+    );
+    expect(before).toContain("THEN lease.provider_deadline_at END NULLS LAST");
+    const migration = await Bun.file(
+      new URL(
+        "../../../packages/db/drizzle/0508_deadline_command_workspace_capture.sql",
+        import.meta.url,
+      ),
+    ).text();
+    await admin.begin(async (tx) => {
+      await tx.unsafe(migration.slice(migration.indexOf("DO $install$")));
+    });
+    expect(await definition()).toBe(before);
+    const [permission] = await admin`select coalesce(bool_or(acl.grantee = 0
+        and acl.privilege_type = 'EXECUTE'), false) as public_execute
+      from pg_proc p cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+      where p.oid = 'opengeni_private.list_unobservable_command_drain_candidates(integer)'::regprocedure`;
+    expect(permission!.public_execute).toBe(false);
+  }, 60_000);
+
   test("(1b-retained-race) yielded success is tracked once before stale-route rejection and remains settleable", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
@@ -3761,7 +5022,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(blockedPreview.status).toBe("blocked");
     expect(blockedPreview.blockers).toContain("workspace_generation_mismatch");
     expect(blockedPreview.database).toMatchObject({
-      role: "opengeni_app",
+      role: new URL(shared!.appUrl).username,
       roleSuperuser: false,
       roleBypassRls: false,
       transactionReadOnly: true,
@@ -3951,7 +5212,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       await admin.unsafe(
         `create role ${quotedBypassRole} with login nosuperuser bypassrls nocreaterole nocreatedb noreplication inherit password '${roleCredential}'`,
       );
-      await admin.unsafe(`grant opengeni_app to ${quotedBypassRole}`);
+      await admin`grant ${admin(new URL(shared!.appUrl).username)} to ${admin(bypassRole)}`;
       const [bypassPosture] = await admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
         select rolsuper, rolbypassrls from pg_roles where rolname = ${bypassRole}`;
       expect(bypassPosture).toEqual({ rolsuper: false, rolbypassrls: true });
@@ -4064,6 +5325,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
 
     const possibleWriterAttemptId = crypto.randomUUID();
     await admin.begin(async (tx) => {
+      // The attempt-admission trigger runs under the FORCE-RLS owner. Raw
+      // fixture writes need the same tenant and protocol context as setRlsContext.
+      await tx`select set_config('opengeni.account_id', ${ids.accountId}, true),
+        set_config('opengeni.workspace_id', ${ids.workspaceId}, true),
+        set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
       await tx`
         update sessions
         set active_turn_id = ${attempt.turnId}, status = 'running'
@@ -5806,4 +7072,289 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       drainReason: "provider_deadline",
     });
   }, 60_000);
+
+  for (const native of [false, true]) {
+    test(`historical checkpoint recovery preserves the audited gap; native=${native}`, async () => {
+      if (!available) throw new Error("Real PostgreSQL required");
+      const ids = await freshWorkspace();
+      const attempt = await freshWarmSnapshotAttempt(ids);
+      ids.groupId = attempt.sandboxGroupId;
+      const archive = Buffer.from(
+        native
+          ? `MODAL_SANDBOX_FS_SNAPSHOT_V1\n${JSON.stringify({ snapshot_id: "im-historical-recovery", workspace_persistence: "snapshot_filesystem" })}`
+          : "historical-archive",
+      ).toString("base64");
+      const tarDescriptor = archiveDescriptor(archive, 1_900_000_000_000);
+      const descriptor = native
+        ? {
+            version: 2 as const,
+            kind: "provider_snapshot" as const,
+            revision: `wa2:1900000000000:${tarDescriptor.archiveSha256}`,
+            archiveSha256: tarDescriptor.archiveSha256,
+            archiveBytes: tarDescriptor.archiveBytes,
+            capturedAt: tarDescriptor.capturedAt,
+            provider: "modal_snapshot_filesystem" as const,
+            snapshotId: "im-historical-recovery",
+            workspacePersistence: "snapshot_filesystem",
+          }
+        : tarDescriptor;
+      // Deferred checkpoint validators run as the non-bypass owner under FORCE
+      // RLS, even when invoked by admin. Keep tenant scope through COMMIT so
+      // native artifact checks see the exact fixture instead of an invisible row.
+      const mutateFixture = (write: (tx: postgres.TransactionSql) => PromiseLike<unknown>) =>
+        admin.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${ids.accountId}, true),
+            set_config('opengeni.workspace_id', ${ids.workspaceId}, true)`;
+          await write(tx);
+        });
+      const leaseId = await insertLease(ids, {
+        liveness: "cold",
+        backend: "modal",
+        refcount: 0,
+        leaseEpoch: 1,
+        instanceId: null,
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: {
+            workspaceArchive: archive,
+            workspaceArchiveMeta: descriptor,
+          },
+        },
+      });
+      if (native) {
+        const binding = {
+          version: 1,
+          serverUrl: "https://modal.test",
+          workspaceName: "historical-recovery",
+          environment: "main",
+        };
+        const artifact = await registerSandboxCheckpointArtifact(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.groupId,
+          sourceLeaseId: leaseId,
+          sourceLeaseEpoch: 1,
+          sourceInstanceId: "gone-provider",
+          sourceWorkspaceGeneration: 0,
+          providerBinding: binding,
+          providerBindingKey: JSON.stringify(binding),
+          workspaceArchive: archive,
+          workspaceArchiveMeta: descriptor,
+        });
+        await mutateFixture(async (tx) => {
+          await tx`update sandbox_leases set archive_generation = 0, current_checkpoint_artifact_id = ${artifact.id} where id = ${leaseId}`;
+          await tx`update sandbox_checkpoint_artifacts set state = 'current' where id = ${artifact.id}`;
+        });
+      }
+      await mutateFixture(
+        (tx) =>
+          tx`update sandbox_leases set workspace_generation = 3, archive_generation = 0 where id = ${leaseId}`,
+      );
+      const scope = {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+      };
+      const authorization = {
+        ...scope,
+        expectedEpoch: 1,
+        expectedWorkspaceGeneration: 3,
+        expectedArchiveGeneration: 0,
+        selectedRevision: descriptor.revision,
+        operationId: crypto.randomUUID(),
+        subjectId: "operator@example.test",
+        reason: "Recover the preserved checkpoint; subsequent writes are unavailable",
+        acceptHistoricalCheckpoint: true as const,
+      };
+      expect(await authorizeHistoricalSandboxCheckpointRecovery(db, authorization)).toEqual({
+        authorized: false,
+      });
+      await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
+      closed_at = now() - interval '2 minutes', quiesced_at = null where id = ${attempt.attemptId}`;
+      await verifyPendingQuiescenceBlocks(ids, attempt, async () => {
+        expect(await authorizeHistoricalSandboxCheckpointRecovery(db, authorization)).toEqual({
+          authorized: false,
+        });
+      });
+      expect(
+        await authorizeHistoricalSandboxCheckpointRecovery(db, {
+          ...authorization,
+          expectedWorkspaceGeneration: 4,
+        }),
+      ).toEqual({ authorized: false });
+      await admin`update sandbox_leases set liveness = 'warming' where id = ${leaseId}`;
+      expect(
+        await beginSandboxRematerialization(db, {
+          ...scope,
+          expectedEpoch: 1,
+          rematerializationId: crypto.randomUUID(),
+        }),
+      ).toMatchObject({
+        status: "blocked",
+        code: "archive_generation_mismatch",
+      });
+      await admin`update sandbox_leases set liveness = 'cold' where id = ${leaseId}`;
+      expect(await authorizeHistoricalSandboxCheckpointRecovery(db, authorization)).toEqual({
+        authorized: true,
+      });
+      for (const mutation of [
+        "epoch",
+        "generation",
+        "pointer",
+        "revision",
+        "receipt-group",
+      ] as const) {
+        // Native revision mismatch is rejected by the existing SQL artifact fence.
+        if (native && mutation === "revision") continue;
+        if (mutation === "epoch")
+          await admin`update sandbox_leases set lease_epoch = 2 where id = ${leaseId}`;
+        if (mutation === "generation")
+          await mutateFixture(
+            (tx) => tx`update sandbox_leases set workspace_generation = 4 where id = ${leaseId}`,
+          );
+        if (mutation === "pointer")
+          await mutateFixture(
+            (tx) => tx`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{opengeniHistoricalArchiveRecoveryId}', to_jsonb(${crypto.randomUUID()}::text)) where id = ${leaseId}`,
+          );
+        if (mutation === "revision")
+          await mutateFixture(
+            (tx) => tx`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{sessionState,workspaceArchiveMeta,revision}', to_jsonb('wa1:1900000000001:changed'::text)) where id = ${leaseId}`,
+          );
+        if (mutation === "receipt-group")
+          await admin`update audit_events set target_id = ${crypto.randomUUID()} where id = ${authorization.operationId}`;
+        expect(
+          await acquireLease(db, {
+            ...scope,
+            kind: "viewer",
+            holderId: "recovery-negative",
+            backend: "modal",
+            leaseTtlMs: 60_000,
+          }),
+        ).toMatchObject({ role: "blocked" });
+        await mutateFixture(
+          (tx) => tx`update sandbox_leases set lease_epoch = 1, workspace_generation = 3,
+          resume_state = jsonb_set(resume_state, '{opengeniHistoricalArchiveRecoveryId}',
+          to_jsonb(${authorization.operationId}::text)) where id = ${leaseId}`,
+        );
+        await mutateFixture(
+          (tx) => tx`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{sessionState,workspaceArchiveMeta,revision}', to_jsonb(${descriptor.revision}::text)) where id = ${leaseId}`,
+        );
+        await admin`update audit_events set target_id = ${ids.groupId} where id = ${authorization.operationId}`;
+      }
+      expect(await authorizeHistoricalSandboxCheckpointRecovery(db, authorization)).toEqual({
+        authorized: true,
+      });
+      const elected = await acquireLease(db, {
+        ...scope,
+        kind: "viewer",
+        holderId: "recovery-verification",
+        backend: "modal",
+        leaseTtlMs: 60_000,
+      });
+      const rematerializationId = crypto.randomUUID();
+      const epoch = elected.lease.leaseEpoch;
+      if (native) {
+        // The immutable source generation cannot be rebound to a newer archive
+        // generation. Exercise the deferred fence without disabling any guard.
+        await expect(
+          mutateFixture(
+            (tx) => tx`update sandbox_leases set archive_generation = 1 where id = ${leaseId}`,
+          ),
+        ).rejects.toThrow("current checkpoint artifact does not match its exact lease scope");
+        expect(await readLease(db, ids.workspaceId, ids.groupId)).toMatchObject({
+          archiveGeneration: 0,
+        });
+      }
+      expect(
+        await beginSandboxRematerialization(db, {
+          ...scope,
+          expectedEpoch: epoch,
+          rematerializationId,
+        }),
+      ).toMatchObject({ status: "started" });
+      expect(
+        await recordWarmingSandboxCreated(db, {
+          ...scope,
+          expectedEpoch: epoch,
+          rematerializationId,
+          instanceId: "verified-recovery-box",
+          resumeBackendId: "modal",
+          resumeState: {
+            backendId: "modal",
+            sessionState: {
+              providerState: { sandboxId: "verified-recovery-box" },
+            },
+          },
+          leaseTtlMs: 60_000,
+        }),
+      ).toMatchObject({ recorded: true });
+      await markSandboxRestoreVerifying(db, {
+        ...scope,
+        expectedEpoch: epoch,
+        rematerializationId,
+      });
+      const committed = await commitWarmingToWarm(db, {
+        ...scope,
+        expectedEpoch: epoch,
+        instanceId: "verified-recovery-box",
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: {
+            providerState: { sandboxId: "verified-recovery-box" },
+          },
+        },
+        rematerialization: {
+          id: rematerializationId,
+          verifiedRevision: descriptor.revision,
+        },
+        leaseTtlMs: 60_000,
+      });
+      expect(committed.committed).toBe(true);
+      expect(committed.lease).toMatchObject({
+        workspaceGeneration: 3,
+        archiveGeneration: 0,
+        archiveComplete: false,
+      });
+      const [receipt] =
+        await admin`select metadata from audit_events where id = ${authorization.operationId}`;
+      expect(receipt?.metadata).toMatchObject({
+        workspaceGeneration: 3,
+        archiveGeneration: 0,
+        selectedRevision: descriptor.revision,
+      });
+      await releaseLeaseHolder(db, {
+        ...scope,
+        kind: "viewer",
+        holderId: "recovery-verification",
+        idleGraceMs: 1,
+      });
+      await admin`update sandbox_leases set expires_at = now() - interval '1 second' where id = ${leaseId}`;
+      const draining = await readLease(db, ids.workspaceId, ids.groupId);
+      const spy = makeTerminateSpy();
+      const recoveryDrain = await createSandboxLeaseActivities(reaperServices(), {
+        terminateBox: spy.fn,
+      }).drainSandboxLease({
+        target: {
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.groupId,
+          instanceId: "verified-recovery-box",
+          leaseEpoch: draining!.leaseEpoch,
+        },
+        timeoutClass: "fast",
+        snapshotTimeoutMs: 60_000,
+        captureTimeoutMs: 120_000,
+        operationId: crypto.randomUUID(),
+      });
+      expect(recoveryDrain).toMatchObject({ status: "terminated" });
+      expect(await readLease(db, ids.workspaceId, ids.groupId)).toMatchObject({
+        archiveGeneration: 3,
+        archiveComplete: true,
+      });
+    }, 180_000);
+  }
 });

@@ -5,7 +5,12 @@ import type { CodexAccountOverview } from "@opengeni/sdk";
 import { act, type ComponentProps } from "react";
 import { createRoot } from "react-dom/client";
 
-import { CodexDeviceCodePanel, ResetCreditInventory } from "./codex-connection";
+import {
+  CodexDeviceCodePanel,
+  CompactUsageMeter,
+  ResetCreditInventory,
+  UsageBar,
+} from "./codex-connection";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -35,6 +40,53 @@ function setClipboard(writeText: (value: string) => Promise<void>): void {
     value: () => false,
   });
 }
+
+describe("Codex remaining allowance meters", () => {
+  for (const remaining of [100, 90, 10, 0]) {
+    test(`labels and fills both Models meters with ${remaining}% remaining`, async () => {
+      const window = {
+        used: 100 - remaining,
+        limit: 100,
+        percent: 100 - remaining,
+        remaining,
+        resetAt: null,
+        resetAfterSeconds: null,
+        limitWindowSeconds: 18000,
+      };
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      try {
+        await act(async () =>
+          root.render(
+            <>
+              <UsageBar label="5h" window={window} now={0} />
+              <CompactUsageMeter label="5h" window={window} />
+            </>,
+          ),
+        );
+        const bars = container.querySelectorAll<HTMLElement>('[role="progressbar"]');
+        expect(bars.length).toBe(2);
+        for (const bar of bars) {
+          expect(bar.getAttribute("aria-label")).toBe("5h remaining");
+          expect(bar.getAttribute("aria-valuenow")).toBe(String(remaining));
+          expect(bar.getAttribute("aria-valuetext")).toBe(`${remaining}% remaining`);
+          const fill = bar.firstElementChild as HTMLElement;
+          expect(fill.style.width).toBe(`${remaining}%`);
+          expect(fill.classList.contains("bg-status-waiting")).toBe(remaining <= 10);
+        }
+        expect(
+          container.textContent?.match(new RegExp(`${remaining}% remaining`, "g"))?.length,
+        ).toBe(2);
+        expect(container.textContent?.includes("limit reached")).toBe(remaining === 0);
+        expect(container.textContent).not.toContain("% used");
+      } finally {
+        await act(async () => root.unmount());
+        container.remove();
+      }
+    });
+  }
+});
 
 const defaultPanelProps = {
   userCode: "ABCD-1234",

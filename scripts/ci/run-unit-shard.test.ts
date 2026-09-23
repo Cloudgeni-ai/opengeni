@@ -8,11 +8,33 @@ import {
   explicitUnitTestPaths,
   planUnitTestProcesses,
   runBoundedTestProcesses,
+  resolveUnitTestSelection,
   sourceMutatesSharedPostgresRole,
   sourceRequiresExclusiveSharedPostgres,
   sourceUsesExplicitTestConcurrency,
   sourceUsesWallClockPerformanceAssertion,
 } from "./run-unit-shard";
+import { discoverTestFiles } from "./workspace";
+
+describe("local unit selection", () => {
+  test("uses the same complete unit inventory as CI without admitting prepared runtime tests", () => {
+    const selection = resolveUnitTestSelection(process.cwd(), ["--all"]);
+    expect(selection).toEqual({ selected: discoverTestFiles().unit, index: 0, count: 1 });
+    expect(selection.selected).toContain("packages/db/test/connections.test.ts");
+    expect(selection.selected).toContain(
+      "apps/web/src/routes/workspace-settings-deletion.test.tsx",
+    );
+    expect(selection.selected).not.toContain("apps/api/test/native-report-delivery.test.ts");
+    const manifest = JSON.parse(readFileSync("package.json", "utf8"));
+    expect(manifest.scripts["test:unit"]).toBe("bun scripts/ci/run-unit-shard.ts --all");
+  });
+
+  test("rejects ambiguous full and shard selection", () => {
+    expect(() => resolveUnitTestSelection(process.cwd(), ["--all", "--shard", "0"])).toThrow(
+      "--all cannot be combined",
+    );
+  });
+});
 
 describe("bounded unit process execution", () => {
   test("runs every task exactly once within the configured process bound", async () => {

@@ -1,6 +1,7 @@
 import {
   materializeRigVersionForAttempt,
   getWorkspaceModelPolicy,
+  getFilesForSubject,
   getWorkspace,
   resolveCompanyBrainContextSelection,
   getGeneratedVideoArtifact,
@@ -20,13 +21,9 @@ import {
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 import { settingsWithResolvedModelContext, type Settings } from "@opengeni/config";
+import { projectReasoningConfigurations, supportsReasoningConfiguration } from "@opengeni/codex";
 import { settingsWithSessionMcpServersForRun } from "../capabilities";
 import { resolveRigProviderImageForRun } from "@opengeni/core";
-import {
-  resolveWorkspacePackRuntime,
-  resolveWorkspaceInstalledSkillRuntime,
-  settingsWithPackSandboxImage,
-} from "../packs";
 import { createModelHistoryAttachmentProjector } from "../run-input";
 import type {
   TurnActivityServices as ActivityServices,
@@ -87,8 +84,6 @@ export type GovernanceModelDeps = {
 
 export type GovernanceModelOk = {
   runtimePreparationStartedAt: number;
-  packRuntime: Awaited<ReturnType<typeof resolveWorkspacePackRuntime>>;
-  installedSkillRuntime: Awaited<ReturnType<typeof resolveWorkspaceInstalledSkillRuntime>>;
   rigVersion:
     | NonNullable<Awaited<ReturnType<typeof materializeRigVersionForAttempt>>>["version"]
     | null;
@@ -99,9 +94,7 @@ export type GovernanceModelOk = {
   structuredWorkspacePolicyActive: boolean;
   workspaceMemory: string | null | undefined;
   buildCompanyBrainContributionReceiptFor: (
-    skillActivations: Parameters<
-      typeof buildCompanyBrainContributionReceipt
-    >[0]["skillActivations"],
+    skillCatalogText: string,
   ) => ReturnType<typeof buildCompanyBrainContributionReceipt>;
   logicalSandboxSettings: Settings;
   verifiedRigProviderImageId: string | undefined;
@@ -195,19 +188,15 @@ export async function prepareGovernanceAndModel(
     attemptId: input.attemptId,
     executionGeneration: turn.executionGeneration,
   };
-  // Independent workspace reads after the personal-resource fence. Pack,
-  // installed skills, frozen rig, governance snapshots, and model policy do
+  // Independent workspace reads after the personal-resource fence. The
+  // frozen rig, governance snapshots, and model policy do
   // not depend on each other. Company-brain selection still waits on the
   // snapshots below so its receipt stays exact.
   const [
-    packRuntime,
-    installedSkillRuntime,
     rigMaterialization,
     [workspace, companyProfileSnapshot, instructionPolicySnapshot, preferenceSnapshot],
     workspaceModelPolicy,
   ] = await Promise.all([
-    resolveWorkspacePackRuntime(db, input.workspaceId),
-    resolveWorkspaceInstalledSkillRuntime(db, input.workspaceId),
     session.rigId && session.rigVersionId
       ? (async () =>
           await materializeRigVersionForAttempt(db, {
@@ -254,16 +243,13 @@ export async function prepareGovernanceAndModel(
     },
     {
       includeCompanyProfile: companyProfileIncluded,
+      sharedSkillReader: true,
     },
   );
   const structuredWorkspacePolicyActive =
     hasActiveWorkspaceInstructionPolicy(instructionPolicySnapshot);
   const workspaceMemory = contextSelection.workspaceMemory;
-  const buildCompanyBrainContributionReceiptFor = (
-    skillActivations: Parameters<
-      typeof buildCompanyBrainContributionReceipt
-    >[0]["skillActivations"],
-  ) =>
+  const buildCompanyBrainContributionReceiptFor = (skillCatalogText: string) =>
     buildCompanyBrainContributionReceipt({
       contextSelectionReceiptId: contextSelection.receipt.id,
       attemptId: input.attemptId,
@@ -276,7 +262,8 @@ export async function prepareGovernanceAndModel(
       companyProfile: companyProfileSnapshot,
       companyProfileIncluded,
       workspaceMemory,
-      skillActivations,
+      skillActivations: [],
+      skillCatalogText,
     });
   try {
     // Portable operator compaction runs before tool/skill preparation, so its
@@ -284,20 +271,13 @@ export async function prepareGovernanceAndModel(
     // no runtime skill catalog. Later compaction paths replace this summary
     // after the complete skill activation set is resolved.
     eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
-      buildCompanyBrainContributionReceiptFor([]),
+      buildCompanyBrainContributionReceiptFor(""),
     );
   } catch {
     // Contribution telemetry must never change model execution semantics.
   }
   // A Rig is always a setup/check layer over the deployment platform sandbox.
-  // The pre-v2 Pack image path remains only for rig-less compatibility sessions.
-  const logicalSandboxSettings = rigVersion
-    ? capabilitySettings
-    : settingsWithPackSandboxImage(
-        capabilitySettings,
-        packRuntime.sandboxImage,
-        packRuntime.sandboxProviderImages,
-      );
+  const logicalSandboxSettings = capabilitySettings;
   const providerImageSelection = await resolveRigProviderImageForRun(
     logicalSandboxSettings,
     rigVersion,
@@ -309,9 +289,8 @@ export async function prepareGovernanceAndModel(
       ? (providerImageSelection.imageId ?? undefined)
       : undefined;
   const baseRunSettings = {
-    // IMAGE PRECEDENCE: a Rig uses the deployment platform base; a rig-less
-    // pre-v2 Pack may retain its compatibility image. A matching verified
-    // provider-native ID is then applied only to fresh creation without
+    // A Rig uses the deployment platform base. A matching verified
+    // provider-native ID is applied only to fresh creation without
     // changing the logical lease image.
     ...providerImageSettings,
     openaiModel: turn.model,
@@ -367,13 +346,28 @@ export async function prepareGovernanceAndModel(
           return object.bytes;
         }
       : undefined,
+    (fileIds) =>
+      getFilesForSubject(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: fileAuthoritySubjectId,
+        fileIds,
+      }),
   );
+  const useReasoningUpdates =
+    runSettings.reasoningConfigurationUpdatesEnabled &&
+    providerApi === "responses" &&
+    (resolvedModel?.provider.id === "codex" || resolvedModel?.provider.id === "openai") &&
+    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort);
   const modelHistoryProjector = async (
     items: Array<Record<string, unknown>>,
     projectionOptions?: Parameters<typeof attachmentProjector>[1],
   ) =>
     projectModelInputForCapabilities(
-      await attachmentProjector(items, projectionOptions),
+      projectReasoningConfigurations(
+        await attachmentProjector(items, projectionOptions),
+        useReasoningUpdates,
+      ),
       modelInputPolicy,
     );
   const generatedImageHistoryProjector = async (
@@ -463,8 +457,6 @@ export async function prepareGovernanceAndModel(
   return {
     ok: {
       runtimePreparationStartedAt,
-      packRuntime,
-      installedSkillRuntime,
       rigVersion,
       rigName,
       agentHumanInputEnabled,

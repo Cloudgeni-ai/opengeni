@@ -1,7 +1,8 @@
+import { withLatestStartedSessionPolicy } from "./session-execution-policy";
 import { createHash } from "node:crypto";
 
 import { LatencyMode, ReasoningEffort, type SessionRealtimeMode } from "@opengeni/contracts";
-import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
 import {
@@ -1147,26 +1148,8 @@ async function admitRealtimeDelegationInTransaction(
   if (!session || session.accountId !== accountId || session.status === "cancelled") {
     throw new SessionRealtimeConflictError("REALTIME_NOT_FOUND", "Session not found");
   }
-  const sessionReasoning = ReasoningEffort.parse(session.reasoningEffort);
-  const sessionLatency = LatencyMode.parse(session.latencyMode);
-  const [latestStarted] = await db
-    .select({
-      model: schema.sessionTurns.model,
-      reasoningEffort: schema.sessionTurns.reasoningEffort,
-      latencyMode: schema.sessionTurns.latencyMode,
-    })
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, input.workspaceId),
-        eq(schema.sessionTurns.sessionId, input.sessionId),
-        sql`${schema.sessionTurns.startedAt} is not null`,
-      ),
-    )
-    .orderBy(desc(schema.sessionTurns.startedAt), desc(schema.sessionTurns.createdAt))
-    .limit(1);
-  const latestReasoning = ReasoningEffort.safeParse(latestStarted?.reasoningEffort);
-  const latestLatency = LatencyMode.safeParse(latestStarted?.latencyMode);
+  const [policy] = await withLatestStartedSessionPolicy(db, input.workspaceId, [session]);
+  if (!policy) throw new Error("Realtime delegation session disappeared");
   const provenance = {
     source: "realtime_provider_delegation",
     realtimeId: input.realtimeId,
@@ -1199,10 +1182,10 @@ async function admitRealtimeDelegationInTransaction(
     },
     mirrorToRealtime: false,
     resources: [],
-    model: latestStarted?.model ?? session.model,
-    reasoningEffort: latestReasoning.success ? latestReasoning.data : sessionReasoning,
-    latencyMode: latestLatency.success ? latestLatency.data : sessionLatency,
-    reasoningEffortFallback: sessionReasoning,
+    model: policy.model,
+    reasoningEffort: ReasoningEffort.parse(policy.reasoningEffort),
+    latencyMode: LatencyMode.parse(policy.latencyMode),
+    reasoningEffortFallback: ReasoningEffort.parse(session.reasoningEffort),
     turnMetadata: {
       realtimeDelegation: { ...provenance, inputTranscript },
     },

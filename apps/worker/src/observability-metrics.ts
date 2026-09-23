@@ -16,6 +16,7 @@ import {
   type RuntimeMetricsHooks,
   type SelfhostedOpObservation,
   type SelfhostedOpObserver,
+  type ToolPreparationPhaseMeasurement,
 } from "@opengeni/runtime";
 
 export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
@@ -34,6 +35,10 @@ export type SessionRecoveryBacklog = {
   quiescence_missing: number;
   projection_stale: number;
 };
+export type ContextCompactionPendingSummary = {
+  pendingCount: number;
+  oldestStartedAt: Date | null;
+};
 
 export type TemporalTurnTaskQueueStats = {
   approximateBacklogCount?: unknown;
@@ -49,6 +54,7 @@ const turnTrackers = new WeakMap<Observability, TurnLifecycleMetrics>();
 const modelRequestTrackers = new WeakMap<Observability, ModelRequestLifecycleMetrics>();
 const creditBalanceGaugeAccounts = new WeakMap<Observability, Set<string>>();
 const modelCacheCounterTotals = new WeakMap<Observability, Map<string, number>>();
+const initializedContextCompactionMetrics = new WeakSet<Observability>();
 
 // A worker process reaching one trillion tokens in one provider/cache counter is
 // already far outside an ordinary scrape lifetime. Refuse further increments
@@ -61,6 +67,18 @@ const WORKER_DEATH_RECOVERY_OUTCOMES: readonly WorkerDeathRecoveryOutcome[] = [
   "exhausted",
 ];
 const WORKER_DEATH_TIMEOUT_TYPES = ["heartbeat", "schedule_to_start"] as const;
+const CONTEXT_COMPACTION_TRIGGERS = ["auto", "operator", "proactive", "overflow"] as const;
+
+export type ContextCompactionTrigger = (typeof CONTEXT_COMPACTION_TRIGGERS)[number];
+
+const CONTEXT_COMPACTION_STARTS_METRIC = {
+  name: "opengeni_context_compaction_starts_total",
+  help: "Total durable context compaction starts, by trigger.",
+} as const;
+const CONTEXT_COMPACTIONS_METRIC = {
+  name: "opengeni_context_compactions_total",
+  help: "Total completed context compactions, by trigger.",
+} as const;
 
 export function observabilityEventLogger(observability: Observability): EventLogger {
   return {
@@ -102,6 +120,10 @@ export function runtimeMetricsHooksForObservability(
 ): RuntimeMetricsHooks {
   return {
     onModelCall: ({ provider, outcome, durationSeconds }) => {
+      completedOperationSpan(observability, "worker.model.call", durationSeconds, {
+        provider,
+        outcome,
+      });
       observability.incrementCounter({
         name: "opengeni_model_calls_total",
         help: "Total model calls by provider and outcome.",
@@ -155,6 +177,20 @@ export function runtimeMetricsHooksForObservability(
         labels: { outcome, port: String(port) },
       });
     },
+    onWorkspaceCapture: ({ backend, outcome, durationSeconds }) => {
+      if (!Number.isFinite(durationSeconds) || durationSeconds < 0) return;
+      const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+      completedOperationSpan(observability, "worker.workspace_capture", durationSeconds, {
+        backend: safeBackend,
+        outcome,
+      });
+      observability.observeHistogram({
+        name: "opengeni_workspace_capture_duration_seconds",
+        help: "Physical warm workspace capture and publication duration, including late settlement after caller timeout.",
+        labels: { backend: safeBackend, outcome },
+        value: durationSeconds,
+      });
+    },
     onWorkspaceArchiveObject: ({ outcome, backend }) => {
       observability.incrementCounter({
         name: "opengeni_workspace_archive_object_total",
@@ -163,6 +199,7 @@ export function runtimeMetricsHooksForObservability(
       });
     },
     onMcpToolCall: ({ outcome, durationSeconds }) => {
+      completedOperationSpan(observability, "worker.mcp.tool_call", durationSeconds, { outcome });
       observability.incrementCounter({
         name: "opengeni_mcp_tool_calls_total",
         help: "Total physical MCP tool calls by bounded structural outcome.",
@@ -346,6 +383,29 @@ export function initializeWorkerOutcomeMetrics(observability: Observability): vo
   }
 }
 
+/**
+ * Publish every bounded compaction lifecycle series before the first event.
+ * The zero counters make the closed trigger catalog explicit before a scrape.
+ * Alerting uses the separate durable control-worker projection below; these
+ * process-local counters are lifecycle-rate diagnostics only.
+ */
+export function initializeContextCompactionMetrics(observability: Observability): void {
+  if (initializedContextCompactionMetrics.has(observability)) return;
+  for (const trigger of CONTEXT_COMPACTION_TRIGGERS) {
+    observability.incrementCounter({
+      ...CONTEXT_COMPACTION_STARTS_METRIC,
+      labels: { trigger },
+      amount: 0,
+    });
+    observability.incrementCounter({
+      ...CONTEXT_COMPACTIONS_METRIC,
+      labels: { trigger },
+      amount: 0,
+    });
+  }
+  initializedContextCompactionMetrics.add(observability);
+}
+
 export function recordWorkerDeathRecoveryMetrics(
   observability: Observability,
   input: {
@@ -373,7 +433,7 @@ export function recordWorkerDeathRecoveryMetrics(
 }
 
 export class TurnLifecycleMetrics {
-  private readonly turns = new Map<string, { startedAt: number; lastProgressAt: number }>();
+  private readonly attempts = new Map<string, { startedAt: number; lastProgressAt: number }>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -384,42 +444,46 @@ export class TurnLifecycleMetrics {
     } = {},
   ) {}
 
-  start(turnId: string): void {
+  start(input: { attemptId: string }): void {
     const now = this.now();
-    this.turns.set(turnId, { startedAt: now, lastProgressAt: now });
+    this.attempts.set(input.attemptId, { startedAt: now, lastProgressAt: now });
     this.ensureTimer();
     this.refreshGauges();
   }
 
-  progress(turnId: string): void {
-    const turn = this.turns.get(turnId);
-    if (!turn) return;
-    turn.lastProgressAt = this.now();
+  progress(input: { attemptId: string }): void {
+    const attempt = this.attempts.get(input.attemptId);
+    if (!attempt) return;
+    attempt.lastProgressAt = this.now();
   }
 
-  finish(turnId: string, outcome: TurnOutcome | null, durationSeconds?: number): void {
-    const startedAt = this.turns.get(turnId)?.startedAt;
+  finish(input: {
+    attemptId: string;
+    outcome: TurnOutcome | null;
+    durationSeconds?: number;
+  }): void {
+    const startedAt = this.attempts.get(input.attemptId)?.startedAt;
     if (startedAt !== undefined) {
-      this.turns.delete(turnId);
+      this.attempts.delete(input.attemptId);
     }
-    if (outcome) {
+    if (input.outcome) {
       const observedDuration =
-        durationSeconds ??
+        input.durationSeconds ??
         (startedAt === undefined ? 0 : Math.max(0, (this.now() - startedAt) / 1000));
       this.observability.incrementCounter({
         name: "opengeni_turns_total",
         help: "Total agent turns by terminal outcome.",
-        labels: { outcome },
+        labels: { outcome: input.outcome },
       });
       this.observability.observeHistogram({
         name: "opengeni_turn_duration_seconds",
         help: "Agent turn duration in seconds by terminal outcome.",
-        labels: { outcome },
+        labels: { outcome: input.outcome },
         value: observedDuration,
       });
     }
     this.refreshGauges();
-    if (this.turns.size === 0) {
+    if (this.attempts.size === 0) {
       this.stopTimer();
     }
   }
@@ -427,42 +491,42 @@ export class TurnLifecycleMetrics {
   refreshGauges(): void {
     this.observability.setGauge({
       name: "opengeni_turns_inflight",
-      help: "Current number of in-flight agent turns in this worker process.",
-      value: this.turns.size,
+      help: "Current number of in-flight physical agent-turn attempts in this worker process.",
+      value: this.attempts.size,
     });
     this.observability.setGauge({
       name: "opengeni_turn_oldest_inflight_age_seconds",
-      help: "Age in seconds of the oldest in-flight agent turn in this worker process.",
+      help: "Age in seconds of the oldest in-flight physical agent-turn attempt in this worker process.",
       value: this.oldestInflightAgeSeconds(),
     });
     this.observability.setGauge({
       name: "opengeni_turn_oldest_no_progress_age_seconds",
-      help: "Seconds since durable progress for the least recently progressing in-flight turn.",
+      help: "Seconds since durable progress for the least recently progressing in-flight physical agent-turn attempt.",
       value: this.oldestNoProgressAgeSeconds(),
     });
   }
 
   stop(): void {
-    this.turns.clear();
+    this.attempts.clear();
     this.refreshGauges();
     this.stopTimer();
   }
 
   private oldestInflightAgeSeconds(): number {
-    if (this.turns.size === 0) {
+    if (this.attempts.size === 0) {
       return 0;
     }
     let oldest = Number.POSITIVE_INFINITY;
-    for (const { startedAt } of this.turns.values()) {
+    for (const { startedAt } of this.attempts.values()) {
       oldest = Math.min(oldest, startedAt);
     }
     return Math.max(0, (this.now() - oldest) / 1000);
   }
 
   private oldestNoProgressAgeSeconds(): number {
-    if (this.turns.size === 0) return 0;
+    if (this.attempts.size === 0) return 0;
     let leastRecentProgress = Number.POSITIVE_INFINITY;
-    for (const { lastProgressAt } of this.turns.values()) {
+    for (const { lastProgressAt } of this.attempts.values()) {
       leastRecentProgress = Math.min(leastRecentProgress, lastProgressAt);
     }
     return Math.max(0, (this.now() - leastRecentProgress) / 1000);
@@ -830,6 +894,96 @@ export function startSessionRecoveryMonitor(input: {
   };
 }
 
+export function recordContextCompactionPendingGauges(
+  observability: Observability,
+  summary: ContextCompactionPendingSummary,
+  nowMs = Date.now(),
+): void {
+  const oldestStartedAtMs = summary.oldestStartedAt?.getTime();
+  const oldestPendingAgeSeconds =
+    oldestStartedAtMs === undefined || !Number.isFinite(oldestStartedAtMs)
+      ? 0
+      : Math.max(0, (nowMs - oldestStartedAtMs) / 1_000);
+  observability.setGauge({
+    name: "opengeni_context_compaction_pending",
+    help: "Current exact active attempts whose latest automatic compaction landmark is still started.",
+    value: nonnegativeFinite(summary.pendingCount),
+  });
+  observability.setGauge({
+    name: "opengeni_context_compaction_oldest_pending_age_seconds",
+    help: "Age in seconds of the oldest durably pending automatic compaction, or zero when none are pending.",
+    value: oldestPendingAgeSeconds,
+  });
+}
+
+export function startContextCompactionPendingMonitor(input: {
+  observability: Observability;
+  read: () => Promise<ContextCompactionPendingSummary>;
+  intervalMs?: number;
+  now?: () => number;
+}): { close: () => Promise<void> } {
+  const intervalMs = input.intervalMs ?? 60_000;
+  const now = input.now ?? Date.now;
+  const startedAt = now();
+  let lastSuccessAt: number | null = null;
+  let lastReadSucceeded = false;
+  let stopped = false;
+  let running: Promise<void> | null = null;
+  const recordStatus = () => {
+    const observedAt = now();
+    const successAgeMs = observedAt - (lastSuccessAt ?? startedAt);
+    const set = (name: string, help: string, value: number) =>
+      input.observability.setGauge({ name, help, value });
+    set(
+      "opengeni_context_compaction_monitor_last_read_success",
+      "Whether the latest durable context-compaction aggregate read completed successfully.",
+      lastReadSucceeded ? 1 : 0,
+    );
+    set(
+      "opengeni_context_compaction_monitor_last_success_timestamp_seconds",
+      "Unix timestamp of the latest successful durable context-compaction aggregate read, or zero before one succeeds.",
+      lastSuccessAt === null ? 0 : lastSuccessAt / 1_000,
+    );
+    set(
+      "opengeni_context_compaction_monitor_fresh",
+      "Whether durable context-compaction pending gauges have a successful read within three monitor intervals.",
+      lastReadSucceeded && lastSuccessAt !== null && successAgeMs <= intervalMs * 3 ? 1 : 0,
+    );
+  };
+  const refresh = () => {
+    recordStatus();
+    if (stopped || running) return;
+    running = input
+      .read()
+      .then((summary) => {
+        recordContextCompactionPendingGauges(input.observability, summary, now());
+        lastSuccessAt = now();
+        lastReadSucceeded = true;
+        recordStatus();
+      })
+      .catch((error) => {
+        lastReadSucceeded = false;
+        recordStatus();
+        input.observability.warn("context compaction monitor: durable aggregate read failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = null;
+      });
+  };
+  refresh();
+  const timer = setInterval(refresh, intervalMs);
+  timer.unref?.();
+  return {
+    close: async () => {
+      stopped = true;
+      clearInterval(timer);
+      await running;
+    },
+  };
+}
+
 export function recordSandboxLeaseGauges(
   observability: Observability,
   counts: Partial<Record<SandboxLeaseLiveness, number>>,
@@ -1023,6 +1177,7 @@ export function recordSandboxRotationBacklogGauges(
     turnBlocked: number;
     directBlocked: number;
     processBlocked: number;
+    interactionBlocked: number;
   },
 ): void {
   const values = {
@@ -1031,6 +1186,7 @@ export function recordSandboxRotationBacklogGauges(
     turn_blocked: backlog.turnBlocked,
     direct_blocked: backlog.directBlocked,
     process_blocked: backlog.processBlocked,
+    interaction_blocked: backlog.interactionBlocked,
   } as const;
   for (const [kind, value] of Object.entries(values)) {
     observability.setGauge({
@@ -1146,6 +1302,8 @@ export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
   "provider_binding_missing",
   "provider_binding_mismatch",
   "provider_binding_adopted",
+  "process_observation_unavailable",
+  "quarantined_process_observation_unavailable",
   "quarantined_binding_missing",
   "quarantined_binding_mismatch",
   "defer_failed",
@@ -1228,6 +1386,7 @@ export type TurnStartupPhase =
   | "tool_optional_connect"
   | "tool_attempt_catalog_build"
   | "tool_attempt_catalog_persist"
+  | "tool_workspace_gateway_catalog_build"
   | "post_tool_preparation"
   | "agent_construction"
   | "post_agent_preparation"
@@ -1247,7 +1406,7 @@ export type TurnStartupPhase =
   | "history_generated_image_materialization"
   | "history_position_load"
   | "owned_sandbox_setup"
-  | "provider_dispatch"
+  | "runtime_stream_initialization"
   | "model_request_preparation"
   | "model_sdk_serialization"
   | "model_prepare_sandbox_agent_preparation"
@@ -1276,6 +1435,9 @@ export type TurnStartupPhase =
   | "model_prepare_runner_before_mcp_tools"
   | "model_prepare_mcp_tools_snapshot"
   | "model_prepare_mcp_tools_before_input_filter"
+  | "model_prepare_mcp_tools_before_repository_skill_discovery"
+  | "model_prepare_repository_skill_discovery"
+  | "model_prepare_repository_skill_discovery_before_input_filter"
   | "model_prepare_input_filter_base"
   | "model_prepare_input_filter_genesis"
   | "model_prepare_input_filter_host"
@@ -1350,7 +1512,8 @@ export function turnStartupCountBucket(count: number | null): TurnStartupCountBu
 }
 
 /**
- * Measure the critical path from a durable turn start to provider dispatch.
+ * Measure startup operations, including nested and parallel work. These are
+ * not additive critical-path intervals; use milestones for elapsed latency.
  * Every label is a closed or configuration-derived enum; high-cardinality turn,
  * session, credential, connection, file, and model identifiers are forbidden.
  */
@@ -1364,8 +1527,19 @@ export function recordTurnStartupPhase(
     durationSeconds: number;
     count?: number | null;
     cache?: TurnStartupCache;
+    /** Trace-only lookup for the completed claim while its execution root is still open. */
+    executionCorrelationId?: string;
   },
 ): void {
+  completedOperationSpan(observability, `worker.prepare.${input.phase}`, input.durationSeconds, {
+    provider: input.provider,
+    backend: input.backend,
+    outcome: input.outcome,
+    ...(input.phase === "claim_and_policy" &&
+    /^turn_[0-9a-f]{32}$/.test(input.executionCorrelationId ?? "")
+      ? { correlationId: input.executionCorrelationId }
+      : {}),
+  });
   observability.observeHistogram({
     name: "opengeni_turn_startup_phase_duration_seconds",
     help: "Turn startup phase duration before the model response stream begins.",
@@ -1380,6 +1554,77 @@ export function recordTurnStartupPhase(
     },
     value: Math.max(0, input.durationSeconds),
   });
+}
+
+/** Background MCP preparation must not inflate startup phase distributions. */
+export function recordToolPreparationPhase(
+  observability: Observability,
+  input: ToolPreparationPhaseMeasurement & { provider: string; backend: string },
+): void {
+  if (input.execution === "blocking") {
+    recordTurnStartupPhase(observability, {
+      ...input,
+      phase: `tool_${input.phase}`,
+    });
+    return;
+  }
+  completedOperationSpan(
+    observability,
+    `worker.tool_prepare.${input.phase}`,
+    input.durationSeconds,
+    {
+      provider: input.provider,
+      backend: input.backend,
+      outcome: input.outcome,
+    },
+  );
+  observability.observeHistogram({
+    name: "opengeni_tool_background_preparation_duration_seconds",
+    help: "Nonblocking MCP preparation operations; may overlap startup and later execution.",
+    buckets: TURN_STARTUP_PHASE_BUCKETS,
+    labels: {
+      phase: input.phase,
+      provider: input.provider,
+      backend: input.backend,
+      outcome: input.outcome,
+    },
+    value: Math.max(0, input.durationSeconds),
+  });
+}
+
+/** Completed measurements become siblings under the scoped physical attempt.
+ * They never establish ambient ancestry for work which has already finished. */
+function completedOperationSpan(
+  observability: Observability,
+  name: string,
+  durationSeconds: number,
+  attributes: {
+    outcome: string;
+    provider?: string;
+    backend?: string;
+    correlationId?: string | undefined;
+  },
+): void {
+  if (!Number.isFinite(durationSeconds) || durationSeconds < 0) return;
+  try {
+    const failed = [
+      "failed",
+      "error",
+      "provider_declared_error",
+      "auth_needed",
+      "outcome_uncertain",
+      "timeout",
+      "thrown_transport_error",
+      "thrown_protocol_error",
+    ].includes(attributes.outcome);
+    observability
+      .startSpan(name, attributes, { startTimeMs: Date.now() - durationSeconds * 1_000 })
+      .end({
+        ...(failed ? { error: true } : {}),
+      });
+  } catch {
+    // Observers cannot change the completed model/tool/phase outcome.
+  }
 }
 
 /**
@@ -1749,15 +1994,14 @@ export function recordSessionEventPublishLatency(
   });
 }
 
-// Context tokens per response span a wide range; buckets track the pressure toward
-// a model's window so "sessions are running hot but never compacting" is queryable.
+// Context tokens per response span a wide range; buckets retain context-pressure
+// diagnostics while compaction alerting follows the durable model-aware start.
 const MODEL_INPUT_TOKENS_BUCKETS = [
   1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 150_000, 200_000, 300_000, 500_000, 1_000_000,
 ];
 
-/** Observed input (context) tokens per model response — the context-pressure
- *  signal. Paired with `opengeni_context_compactions_total`, it makes the
- *  "compaction never firing while contexts run hot" failure mode expressible. */
+/** Observed input (context) tokens per model response for context-pressure
+ *  dashboards and provider diagnostics. */
 export function recordModelInputTokens(
   observability: Observability,
   provider: string,
@@ -1776,15 +2020,24 @@ export function recordModelInputTokens(
   });
 }
 
-/** A context compaction actually fired, by trigger (operator | overflow | proactive
- *  | auto). The rate of this — against the input-tokens histogram above — is how an
- *  operator sees compaction working (or silently not). */
-export function recordContextCompaction(observability: Observability, trigger: string): void {
-  observability.incrementCounter({
-    name: "opengeni_context_compactions_total",
-    help: "Total context compactions performed, by trigger.",
-    labels: { trigger },
-  });
+/** A context compaction successfully completed, by bounded trigger. */
+export function recordContextCompaction(
+  observability: Observability,
+  trigger: ContextCompactionTrigger,
+): void {
+  observability.incrementCounter({ ...CONTEXT_COMPACTIONS_METRIC, labels: { trigger } });
+}
+
+/**
+ * A durable context-compaction start, recorded only after the attempt-fenced
+ * `compaction.started` transaction commits. This is the model-aware threshold
+ * signal; it does not guess from a static token count shared by unlike models.
+ */
+export function recordContextCompactionStarted(
+  observability: Observability,
+  trigger: ContextCompactionTrigger,
+): void {
+  observability.incrementCounter({ ...CONTEXT_COMPACTION_STARTS_METRIC, labels: { trigger } });
 }
 
 const MODEL_CONTEXT_CONTRIBUTION_TOKEN_BUCKETS = [1, 8, 32, 128, 512, 2_048, 8_192];

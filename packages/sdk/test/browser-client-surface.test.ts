@@ -11,6 +11,7 @@ const legacyBrowserUnusedMethods = [
   "addDocument",
   "advanceExternalBrowserAuthRun",
   "applyGoalRevision",
+  "browseAtlassianSources",
   "captureComputerTarget",
   "codexAccountUsage",
   "codexDisconnect",
@@ -28,10 +29,8 @@ const legacyBrowserUnusedMethods = [
   "getEnvironment",
   "getLatestEventResult",
   "getLatestStartedTurn",
-  "getPack",
   "getPreferenceRegistryFullContent",
   "getPreferenceRegistrySummary",
-  "getRetainedArtifact",
   "getRetainedArtifactContent",
   "getScheduledTask",
   "getSessionRetainedArtifactContent",
@@ -40,12 +39,13 @@ const legacyBrowserUnusedMethods = [
   "gitShow",
   "githubConnectUrl",
   "importLegacyWorkspaceInstructionPolicyDraft",
+  // Retain the existing public SDK method after the browser's duplicate
+  // override-settings navigation was removed in #2490.
+  "listAgentLearningOverrides",
   "listDocuments",
   "listGoalRevisionPage",
   "listGoalRevisions",
-  "listPackInstallations",
   "listTranscriptionRecordings",
-  "listWorkspaceInstructionPolicies",
   "moveDocument",
   "openExternalBrowserAuthFlow",
   "pauseGoal",
@@ -54,13 +54,20 @@ const legacyBrowserUnusedMethods = [
   "revokeUserResourceGrant",
   "rollbackGoalRevision",
   "rollbackWorkspaceInstructionPolicyRevision",
-  "rollbackWorkspaceLearningPolicyRevision",
-  "searchDocuments",
+  "setAtlassianLifecycle",
+  "startApiIntegrationOAuth",
+  "startOpenGeniSlackBotInstall",
+  "startPersonalGitHubOAuth",
   "supergrokStatus",
   "undoGovernedLearningActivation",
   "updateOrganizationWorkspaceSettings",
   "verifyPersonalGitHubRepositorySelections",
 ];
+
+// The agent's browser still capture uses the same authenticated, bounded SDK
+// response transport as the existing computer capture method. It is intentionally
+// available to runtime callers even though the web UI does not call it.
+const agentInteractionMethods = ["captureBrowserTarget"];
 
 function countIdentifier(source: string, identifier: string): number {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -101,6 +108,8 @@ describe("browser client runtime surface", () => {
 
     expect(browserSource).toContain("@opengeni/sdk/browser");
     expect(browserSource).not.toContain("@opengeni/sdk/core");
-    expect(browserUnusedMethods).toEqual(legacyBrowserUnusedMethods);
+    expect(browserUnusedMethods).toEqual(
+      [...legacyBrowserUnusedMethods, ...agentInteractionMethods].sort(),
+    );
   });
 });

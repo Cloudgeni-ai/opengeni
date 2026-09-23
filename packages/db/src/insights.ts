@@ -1,3 +1,4 @@
+import { withLatestStartedSessionPolicy } from "./session-execution-policy";
 import { and, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Database } from "./database";
@@ -29,6 +30,8 @@ export type ModelCallFactAggregateRow = {
   pricedCostMicros: number;
   estimatedProviderCostMicros: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditCostMicros: number;
+  equivalentCreditCostKnownCalls: number;
 };
 
 export type InsightsDayBucket = {
@@ -60,6 +63,8 @@ export type RootSessionDriverRow = {
   pricedCostMicros: number;
   estimatedProviderCostMicros: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditCostMicros: number;
+  equivalentCreditCostKnownCalls: number;
   totalTokens: number;
   cachedTokens: number;
   cacheInputTokens: number;
@@ -70,6 +75,8 @@ export type ScheduleFactAggregate = {
   pricedCostMicros: number;
   estimatedProviderCostMicros: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditCostMicros: number;
+  equivalentCreditCostKnownCalls: number;
   totalTokens: number;
   cachedTokens: number;
   cacheInputTokens: number;
@@ -134,6 +141,7 @@ export type RecentModelCallRow = {
   totalTokens: number | null;
   pricedCostMicros: number;
   estimatedProviderCostMicros: number | null;
+  equivalentCreditCostMicros: number | null;
   pricingSource: string | null;
 };
 
@@ -360,6 +368,8 @@ export async function aggregateModelCallFacts(
         pricedCostMicros: sql<number>`coalesce(sum(${modelCallFacts.pricedCostMicros}) filter (where ${modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
         estimatedProviderCostMicros: sql<number>`coalesce(sum(${modelCallFacts.estimatedProviderCostMicros}), 0)`,
         estimatedProviderCostKnownCalls: sql<number>`count(${modelCallFacts.estimatedProviderCostMicros})::int`,
+        equivalentCreditCostMicros: sql<number>`coalesce(sum(${modelCallFacts.equivalentCreditCostMicros}), 0)`,
+        equivalentCreditCostKnownCalls: sql<number>`count(${modelCallFacts.equivalentCreditCostMicros})::int`,
       })
       .from(source)
       .where(and(...clauses))
@@ -381,6 +391,8 @@ export async function aggregateModelCallFacts(
       pricedCostMicros: Number(row.pricedCostMicros),
       estimatedProviderCostMicros: Number(row.estimatedProviderCostMicros),
       estimatedProviderCostKnownCalls: Number(row.estimatedProviderCostKnownCalls),
+      equivalentCreditCostMicros: Number(row.equivalentCreditCostMicros),
+      equivalentCreditCostKnownCalls: Number(row.equivalentCreditCostKnownCalls),
     }));
   });
 }
@@ -389,6 +401,8 @@ export type ModelCallFactSeriesAggregate = {
   costMicros: number;
   estimatedProviderCostMicros: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditCostMicros: number;
+  equivalentCreditCostKnownCalls: number;
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
@@ -436,6 +450,8 @@ async function aggregateModelCallFactsByBucket(
         costMicros: sql<number>`coalesce(sum(${modelCallFacts.pricedCostMicros}) filter (where ${modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
         estimatedProviderCostMicros: sql<number>`coalesce(sum(${modelCallFacts.estimatedProviderCostMicros}), 0)`,
         estimatedProviderCostKnownCalls: sql<number>`count(${modelCallFacts.estimatedProviderCostMicros})::int`,
+        equivalentCreditCostMicros: sql<number>`coalesce(sum(${modelCallFacts.equivalentCreditCostMicros}), 0)`,
+        equivalentCreditCostKnownCalls: sql<number>`count(${modelCallFacts.equivalentCreditCostMicros})::int`,
         inputTokens: sql<number>`coalesce(sum(${modelCallFacts.inputTokens}), 0)`,
         outputTokens: sql<number>`coalesce(sum(${modelCallFacts.outputTokens}), 0)`,
         cachedTokens: sql<number>`coalesce(sum(${modelCallFacts.cachedTokens}), 0)`,
@@ -457,6 +473,8 @@ async function aggregateModelCallFactsByBucket(
           costMicros: Number(row.costMicros),
           estimatedProviderCostMicros: Number(row.estimatedProviderCostMicros),
           estimatedProviderCostKnownCalls: Number(row.estimatedProviderCostKnownCalls),
+          equivalentCreditCostMicros: Number(row.equivalentCreditCostMicros),
+          equivalentCreditCostKnownCalls: Number(row.equivalentCreditCostKnownCalls),
           inputTokens: Number(row.inputTokens),
           outputTokens: Number(row.outputTokens),
           cachedTokens: Number(row.cachedTokens),
@@ -630,6 +648,8 @@ export async function aggregateRootSessionDrivers(
         pricedCostMicros: sql<number>`coalesce(sum(${modelCallFacts.pricedCostMicros}) filter (where ${modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
         estimatedProviderCostMicros: sql<number>`coalesce(sum(${modelCallFacts.estimatedProviderCostMicros}), 0)`,
         estimatedProviderCostKnownCalls: sql<number>`count(${modelCallFacts.estimatedProviderCostMicros})::int`,
+        equivalentCreditCostMicros: sql<number>`coalesce(sum(${modelCallFacts.equivalentCreditCostMicros}), 0)`,
+        equivalentCreditCostKnownCalls: sql<number>`count(${modelCallFacts.equivalentCreditCostMicros})::int`,
         totalTokens: sql<number>`coalesce(sum(${modelCallFacts.totalTokens}), 0)`,
         cachedTokens: sql<number>`coalesce(sum(${modelCallFacts.cachedTokens}), 0)`,
         cacheInputTokens: sql<number>`coalesce(sum(${modelCallFacts.inputTokens}) filter (where ${modelCallFacts.cachedTokens} is not null and ${modelCallFacts.inputTokens} is not null), 0)`,
@@ -659,6 +679,8 @@ export async function aggregateRootSessionDrivers(
       pricedCostMicros: Number(row.pricedCostMicros),
       estimatedProviderCostMicros: Number(row.estimatedProviderCostMicros),
       estimatedProviderCostKnownCalls: Number(row.estimatedProviderCostKnownCalls),
+      equivalentCreditCostMicros: Number(row.equivalentCreditCostMicros),
+      equivalentCreditCostKnownCalls: Number(row.equivalentCreditCostKnownCalls),
       totalTokens: Number(row.totalTokens),
       cachedTokens: Number(row.cachedTokens),
       cacheInputTokens: Number(row.cacheInputTokens),
@@ -735,6 +757,9 @@ export async function listRecentModelCalls(
         estimatedProviderCostMicros: sql<
           number | null
         >`${modelCallFacts.estimatedProviderCostMicros}`,
+        equivalentCreditCostMicros: sql<
+          number | null
+        >`${modelCallFacts.equivalentCreditCostMicros}`,
         pricingSource: sql<string | null>`${modelCallFacts.pricingSource}`,
       })
       .from(source)
@@ -762,6 +787,10 @@ export async function listRecentModelCalls(
       estimatedProviderCostMicros: insightsNullableNumber(
         row.estimatedProviderCostMicros,
         "estimated provider cost",
+      ),
+      equivalentCreditCostMicros: insightsNullableNumber(
+        row.equivalentCreditCostMicros,
+        "equivalent credit cost",
       ),
     }));
   });
@@ -886,6 +915,8 @@ export async function aggregateScheduleFacts(
         pricedCostMicros: sql<number>`coalesce(sum(${modelCallFacts.pricedCostMicros}) filter (where ${modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
         estimatedProviderCostMicros: sql<number>`coalesce(sum(${modelCallFacts.estimatedProviderCostMicros}), 0)`,
         estimatedProviderCostKnownCalls: sql<number>`count(${modelCallFacts.estimatedProviderCostMicros})::int`,
+        equivalentCreditCostMicros: sql<number>`coalesce(sum(${modelCallFacts.equivalentCreditCostMicros}), 0)`,
+        equivalentCreditCostKnownCalls: sql<number>`count(${modelCallFacts.equivalentCreditCostMicros})::int`,
         totalTokens: sql<number>`coalesce(sum(${modelCallFacts.totalTokens}), 0)`,
         cachedTokens: sql<number>`coalesce(sum(${modelCallFacts.cachedTokens}), 0)`,
         cacheInputTokens: sql<number>`coalesce(sum(${modelCallFacts.inputTokens}) filter (where ${modelCallFacts.cachedTokens} is not null and ${modelCallFacts.inputTokens} is not null), 0)`,
@@ -906,6 +937,8 @@ export async function aggregateScheduleFacts(
         pricedCostMicros: Number(row.pricedCostMicros),
         estimatedProviderCostMicros: Number(row.estimatedProviderCostMicros),
         estimatedProviderCostKnownCalls: Number(row.estimatedProviderCostKnownCalls),
+        equivalentCreditCostMicros: Number(row.equivalentCreditCostMicros),
+        equivalentCreditCostKnownCalls: Number(row.equivalentCreditCostKnownCalls),
         totalTokens: Number(row.totalTokens),
         cachedTokens: Number(row.cachedTokens),
         cacheInputTokens: Number(row.cacheInputTokens),
@@ -1024,6 +1057,8 @@ export async function listFloorSessions(
         directControlState: schema.sessions.directControlState,
         nestedAgentDepth: schema.sessions.nestedAgentDepth,
         model: schema.sessions.model,
+        reasoningEffort: schema.sessions.reasoningEffort,
+        latencyMode: schema.sessions.latencyMode,
         sandboxBackend: schema.sessions.sandboxBackend,
         updatedAt: schema.sessions.updatedAt,
         createdAt: schema.sessions.createdAt,
@@ -1032,7 +1067,7 @@ export async function listFloorSessions(
       .where(eq(schema.sessions.workspaceId, workspaceId))
       .orderBy(desc(schema.sessions.updatedAt))
       .limit(limit);
-    return rows;
+    return await withLatestStartedSessionPolicy(scopedDb, workspaceId, rows);
   });
 }
 
@@ -1106,7 +1141,7 @@ export async function backfillModelCallFactsFromSessionEvents(
 
   let considered = 0;
   let upserted = 0;
-  let cursorOccurredAt = input.since;
+  let cursorOccurredAt = input.since.toISOString();
   let cursorId = "00000000-0000-0000-0000-000000000000";
 
   while (considered < limit) {
@@ -1122,6 +1157,7 @@ export async function backfillModelCallFactsFromSessionEvents(
           turnAttemptId: schema.sessionEvents.turnAttemptId,
           payload: schema.sessionEvents.payload,
           occurredAt: schema.sessionEvents.occurredAt,
+          cursorOccurredAt: sql<string>`${schema.sessionEvents.occurredAt}::text`,
         })
         .from(schema.sessionEvents)
         .where(
@@ -1132,7 +1168,7 @@ export async function backfillModelCallFactsFromSessionEvents(
             lt(schema.sessionEvents.occurredAt, until),
             sql`${schema.sessionEvents.turnId} is not null`,
             // Keyset on (occurred_at, id) so same-millisecond bursts cannot be skipped.
-            sql`(${schema.sessionEvents.occurredAt}, ${schema.sessionEvents.id}) > (${cursorOccurredAt}, ${cursorId}::uuid)`,
+            sql`(${schema.sessionEvents.occurredAt}, ${schema.sessionEvents.id}) > (${cursorOccurredAt}::timestamptz, ${cursorId}::uuid)`,
           ),
         )
         .orderBy(schema.sessionEvents.occurredAt, schema.sessionEvents.id)
@@ -1141,7 +1177,7 @@ export async function backfillModelCallFactsFromSessionEvents(
     if (page.length === 0) break;
     considered += page.length;
     const last = page[page.length - 1]!;
-    cursorOccurredAt = last.occurredAt;
+    cursorOccurredAt = last.cursorOccurredAt;
     cursorId = last.id;
 
     const batchUpserted = await withRlsContext(db, context, async (scopedDb) => {
@@ -1158,6 +1194,15 @@ export async function backfillModelCallFactsFromSessionEvents(
         const providerApi = typeof payload.providerApi === "string" ? payload.providerApi : null;
         const model = typeof payload.model === "string" ? payload.model : null;
         if (!sourceKey || !provider || !providerApi || !model) continue;
+        const upstreamProvider =
+          typeof payload.upstreamProvider === "string" &&
+          /^[a-z0-9][a-z0-9-]{0,63}$/.test(payload.upstreamProvider)
+            ? payload.upstreamProvider
+            : null;
+        const durableBillingPath =
+          payload.billingPath === "external" || payload.billingPath === "opengeni_credits"
+            ? payload.billingPath
+            : null;
 
         const sourceResourceId = `${event.turnId}:${sourceKey}`;
         const [cost] = await scopedDb
@@ -1183,11 +1228,15 @@ export async function backfillModelCallFactsFromSessionEvents(
           )
           .limit(1);
 
-        // External turns always write model.cost=0 and never model.tokens.
-        // Credits turns with totalTokens=0 write neither — keep those as credits.
+        // New usage events carry the accepted billing authority because a
+        // deployment-funded free call legitimately writes both model.tokens
+        // and model.cost=0. Older events predate that field: their external
+        // subscription/workspace calls wrote cost=0 without tokens, while
+        // zero-token credits calls wrote neither.
         const pricedCostMicros = cost ? Number(cost.quantity) : 0;
         const billingPath =
-          cost != null && pricedCostMicros === 0 && !tokenRow ? "external" : "opengeni_credits";
+          durableBillingPath ??
+          (cost != null && pricedCostMicros === 0 && !tokenRow ? "external" : "opengeni_credits");
 
         const [turn] = await scopedDb
           .select({
@@ -1239,7 +1288,7 @@ export async function backfillModelCallFactsFromSessionEvents(
             turnId: event.turnId,
             turnAttemptId: event.turnAttemptId,
             sourceKey,
-            provider,
+            provider: upstreamProvider ?? provider,
             providerApi,
             model,
             billingPath,

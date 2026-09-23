@@ -1,0 +1,21 @@
+:root { font-family: system-ui, sans-serif; color: #152824; background: #f3f5f0; color-scheme: light; }
+body { margin: 0; }
+main { max-width: 52rem; margin: auto; padding: clamp(1rem, 4vw, 3rem); }
+h1 { font-size: clamp(2rem, 6vw, 3.5rem); letter-spacing: -.045em; line-height: 1.1; }
+h2 { font-size: 1.3rem; }
+header { margin-bottom: 2rem; }
+.eyebrow { font-size: .75rem; letter-spacing: .1em; font-weight: 650; }
+aside { padding: 1rem; background: #e5ece2; border-radius: .5rem; margin-bottom: 1.5rem; }
+button, select { font: inherit; min-height: 2.75rem; border: 1px solid #72827a; border-radius: .375rem; color: inherit; background: transparent; padding: .5rem .75rem; cursor: pointer; }
+label { display: grid; gap: .5rem; }
+input, textarea { box-sizing: border-box; width: 100%; min-height: 2.75rem; font: inherit; color: inherit; background: transparent; border: 1px solid #72827a; border-radius: .375rem; padding: .5rem .75rem; }
+input[type="checkbox"], input[type="radio"] { width: auto; min-height: auto; }
+textarea { min-height: 6rem; resize: vertical; }
+fieldset { min-width: 0; border: 0; padding: 0; display: grid; gap: 1rem; margin-block: 1rem; }
+fieldset legend { font-weight: 650; margin-bottom: .75rem; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+li > button, [role="group"] > button { margin: .25rem .5rem .25rem 0; }
+section { padding-block: 1rem; }
+iframe { width: 100%; min-height: 32rem; border: 1px solid #72827a; }
+:focus-visible { outline: 2px solid #225e47; outline-offset: 3px; }
+@media (max-width: 480px) { iframe { min-height: 24rem; } button { max-width: 100%; overflow-wrap: anywhere; } }

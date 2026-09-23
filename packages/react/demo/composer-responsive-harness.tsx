@@ -1,4 +1,9 @@
-import type { ClientModel, EffectiveSessionControl } from "@opengeni/sdk";
+import type {
+  ClientModel,
+  EffectiveSessionControl,
+  LatencyMode,
+  ReasoningEffort,
+} from "@opengeni/sdk";
 import type { SessionRealtimeControllerSnapshot } from "@opengeni/sdk/realtime";
 import {
   ChatComposer,
@@ -18,6 +23,7 @@ const initialWidth = Number(params.get("width") ?? 320);
 const initialDensity = params.get("density") === "compact" ? "compact" : "default";
 const initialTheme = params.get("theme") === "light" ? "light" : "dark";
 const initialVoiceActive = params.get("voice") === "active";
+const hostBranding = params.get("branding") === "host";
 const widths = [280, 320, 360, 420, 640, 768] as const;
 const client = new MockOpenGeniClient();
 
@@ -145,6 +151,8 @@ function ResponsiveComposerHarness() {
   const [voiceActive, setVoiceActive] = useState(initialVoiceActive);
   const [value, setValue] = useState("A long prompt remains editable while the panel resizes.");
   const [model, setModel] = useState(models[0]!.id);
+  const [effort, setEffort] = useState<ReasoningEffort>("medium");
+  const [latencyMode, setLatencyMode] = useState<LatencyMode>("fast");
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const composer = useMemo<ComposerState>(
@@ -281,13 +289,47 @@ function ResponsiveComposerHarness() {
               transcription={{}}
               controlsStart={
                 <ModelPolicyPicker
-                  models={models}
+                  models={
+                    hostBranding
+                      ? [
+                          ...models,
+                          {
+                            ...models[0]!,
+                            id: "host/example",
+                            provider: "openai",
+                            source: "opengeni",
+                            label: "Host model",
+                            cost: "credits",
+                          },
+                        ]
+                      : models
+                  }
+                  groupPresentation={
+                    hostBranding
+                      ? {
+                          opengeni_credits: {
+                            label: "Acme Assist",
+                            description: "Provided by your workspace",
+                            icon: (
+                              <svg viewBox="0 0 16 16" aria-hidden="true">
+                                <path fill="currentColor" d="M8 1 15 15H1ZM8 6l-3 7h6Z" />
+                              </svg>
+                            ),
+                          },
+                          codex_subscription: {
+                            label: "Your connected plan",
+                            description: null,
+                            icon: null,
+                          },
+                        }
+                      : undefined
+                  }
                   model={model}
-                  effort="medium"
-                  latencyMode="fast"
+                  effort={effort}
+                  latencyMode={latencyMode}
                   onModelChange={setModel}
-                  onEffortChange={() => {}}
-                  onLatencyModeChange={() => {}}
+                  onEffortChange={setEffort}
+                  onLatencyModeChange={setLatencyMode}
                 />
               }
               actionsStart={

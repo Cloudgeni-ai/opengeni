@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 # Resolve the infrastructure backend used by scripts/dev-stack.sh.
 
+opengeni_load_dev_environment() {
+  # An invocation's backend choice is authority, not a default that a copied
+  # .env.example may silently replace. Other dotenv behavior is unchanged.
+  local backend_was_set="${OPENGENI_DEV_BACKEND+x}"
+  local invocation_backend="${OPENGENI_DEV_BACKEND-}"
+  set -a
+  # shellcheck disable=SC1090
+  . "$1"
+  set +a
+  if [ "$backend_was_set" = x ]; then
+    export OPENGENI_DEV_BACKEND="$invocation_backend"
+  fi
+}
+
 opengeni_docker_usable() {
   command -v docker >/dev/null 2>&1 || return 1
 
@@ -8,15 +22,18 @@ opengeni_docker_usable() {
   # a restricted sandbox. Bound the server probe so automatic startup cannot
   # hang on a dead desktop daemon or forwarded socket.
   local probe_timeout="${OPENGENI_DOCKER_PROBE_TIMEOUT_SECONDS:-3}"
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "${probe_timeout}s" \
-      env DOCKER_CLIENT_TIMEOUT="$probe_timeout" COMPOSE_HTTP_TIMEOUT="$probe_timeout" \
-      docker info >/dev/null 2>&1
-  else
-    DOCKER_CLIENT_TIMEOUT="$probe_timeout" \
-      COMPOSE_HTTP_TIMEOUT="$probe_timeout" \
-      docker info >/dev/null 2>&1
-  fi
+  # macOS does not ship GNU timeout. Bun is already the launcher prerequisite;
+  # use its process deadline on every supported host, not advisory Docker envs.
+  OPENGENI_DOCKER_PROBE_SECONDS="$probe_timeout" bun -e '
+    const seconds = Number(process.env.OPENGENI_DOCKER_PROBE_SECONDS);
+    if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 60) process.exit(1);
+    try {
+      const result = Bun.spawnSync(["docker", "info"], {
+        stdout: "ignore", stderr: "ignore", timeout: seconds * 1000,
+      });
+      process.exit(result.exitCode === 0 ? 0 : 1);
+    } catch { process.exit(1); }
+  ' >/dev/null 2>&1
 }
 
 opengeni_resolve_dev_backend() {

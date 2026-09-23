@@ -1,16 +1,19 @@
-import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import type { SessionVariableSetPickerSharedState } from "./session-variable-set-picker";
+import { useSessionVariableSetPickerState } from "@/lib/use-session-variable-set-picker-state";
 
 const variableSetId = "11111111-1111-4111-8111-111111111111";
-const updateSessionVariableSets = mock(async () => undefined);
+const personalVariableSetId = "44444444-4444-4444-8444-444444444444";
+const updateSessionVariableSets = mock(async (): Promise<void> => {});
 
 mock.module("@opengeni/react", () => ({
   useVariableSets: () => ({
     variableSets: [
+      { id: personalVariableSetId, name: "Personal credentials", scope: "user", variables: [] },
       {
         id: variableSetId,
         name: "Deploy credentials",
@@ -25,7 +28,10 @@ mock.module("@opengeni/react", () => ({
 }));
 
 mock.module("@/context", () => ({
-  useAppContext: () => ({ client: { updateSessionVariableSets } }),
+  useAppContext: () => ({
+    client: { updateSessionVariableSets },
+    accessContext: { subjectId: "picker-test-user" },
+  }),
 }));
 
 mock.module("@/components/ui/dropdown-menu", () => ({
@@ -49,6 +55,8 @@ const sessionFixture = {
   workspaceId: "33333333-3333-4333-8333-333333333333",
   variableSetIds: [] as string[],
   variableSetId: null,
+  status: "idle" as const,
+  activeTurnId: null,
   tenancy: {
     visibility: "workspace" as const,
     authorityEpoch: 1,
@@ -57,14 +65,16 @@ const sessionFixture = {
   },
 };
 
-function ResponsivePickerPair(props: { onReloadSession: () => Promise<void> }) {
-  const [sharedState, setSharedState] = useState<SessionVariableSetPickerSharedState>({
-    saving: false,
-    committedSelection: null,
-  });
+function ResponsivePickerPair(props: {
+  onReloadSession: () => Promise<void>;
+  session?: Parameters<typeof SessionVariableSetPicker>[0]["session"];
+}) {
+  const [sharedState, setSharedState] = useSessionVariableSetPickerState(
+    props.session ?? sessionFixture,
+  );
   const picker = (triggerClassName: string) => (
     <SessionVariableSetPicker
-      session={sessionFixture}
+      session={props.session ?? sessionFixture}
       canControl
       canAttach
       canUse
@@ -87,6 +97,22 @@ function flush() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+async function addDeploySet(container: HTMLElement) {
+  await act(async () =>
+    [...container.querySelectorAll("button")]
+      .find((button) => button.textContent?.includes("Add variable sets"))!
+      .click(),
+  );
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('[aria-label="Enable Deploy credentials"]')!.click(),
+  );
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[aria-label="Back to selected variable sets"]')!
+      .click(),
+  );
+}
+
 beforeAll(() => {
   GlobalRegistrator.register();
   (
@@ -99,7 +125,284 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
+beforeEach(() => {
+  window.localStorage.clear();
+  updateSessionVariableSets.mockClear();
+});
+
 describe("SessionVariableSetPicker", () => {
+  test("off/save/reopen preserves the shortlist, and X Undo Cancel restore it", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let session = { ...sessionFixture, variableSetIds: [variableSetId, personalVariableSetId] };
+    function Panel() {
+      const [sharedState, setSharedState] = useSessionVariableSetPickerState(session);
+      return (
+        <SessionVariableSetPicker
+          session={session}
+          canControl
+          canAttach
+          canUse
+          canList
+          embedded
+          sharedState={sharedState}
+          setSharedState={setSharedState}
+          onReloadSession={async () => {}}
+        />
+      );
+    }
+    const click = async (label: string) =>
+      act(async () =>
+        container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!.click(),
+      );
+    const action = async (text: string) =>
+      act(async () => {
+        [...container.querySelectorAll("button")]
+          .find((button) => button.textContent === text)!
+          .click();
+        await flush();
+      });
+    try {
+      await act(async () => root.render(<Panel />));
+      await click("Enable Personal credentials");
+      expect(
+        container
+          .querySelector('[aria-label="Move Personal credentials later"]')
+          ?.hasAttribute("disabled"),
+      ).toBe(true);
+      await action("Save");
+      expect(updateSessionVariableSets).toHaveBeenCalledWith(session.workspaceId, session.id, {
+        variableSetIds: [variableSetId],
+      });
+      session = { ...session, variableSetIds: [variableSetId] };
+      await act(async () => root.render(<Panel />));
+      await act(async () => root.render(<Panel key="reopen" />));
+      expect(
+        container
+          .querySelector('[aria-label="Enable Personal credentials"]')
+          ?.getAttribute("aria-checked"),
+      ).toBe("false");
+      expect(container.textContent!.indexOf("Personal credentials")).toBeLessThan(
+        container.textContent!.indexOf("Deploy credentials"),
+      );
+      await click("Remove Personal credentials");
+      expect(container.textContent).not.toContain("Personal credentials");
+      await action("Undo");
+      expect(container.textContent).toContain("Personal credentials");
+      await click("Enable Personal credentials");
+      await click("Move Personal credentials later");
+      await click("Remove Deploy credentials");
+      await action("Cancel");
+      expect(
+        container
+          .querySelector('[aria-label="Enable Personal credentials"]')
+          ?.getAttribute("aria-checked"),
+      ).toBe("false");
+      expect(container.textContent!.indexOf("Personal credentials")).toBeLessThan(
+        container.textContent!.indexOf("Deploy credentials"),
+      );
+      expect(updateSessionVariableSets).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("late save completion cannot overwrite a different workspace/chat", async () => {
+    let finish!: () => void;
+    updateSessionVariableSets.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const reload = mock(async () => {});
+    try {
+      await act(async () => root.render(<ResponsivePickerPair onReloadSession={reload} />));
+      await addDeploySet(container);
+      await act(async () =>
+        [...container.querySelectorAll("button")]
+          .find((button) => button.textContent === "Save")!
+          .click(),
+      );
+      await act(async () =>
+        root.render(
+          <ResponsivePickerPair
+            session={{ ...sessionFixture, id: "other-chat", workspaceId: "other-workspace" }}
+            onReloadSession={reload}
+          />,
+        ),
+      );
+      await act(async () => {
+        finish();
+        await flush();
+      });
+      expect(reload).not.toHaveBeenCalled();
+      expect(container.textContent).not.toContain("The update committed");
+      expect(container.querySelector('[aria-label="Enable Deploy credentials"]')).toBeNull();
+      expect(
+        [...container.querySelectorAll("button")].find((button) =>
+          button.textContent?.includes("Add variable sets"),
+        )?.disabled,
+      ).toBe(false);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("unblocks Send after the picker closes before refreshed props arrive", async () => {
+    updateSessionVariableSets.mockClear();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const reloadSession = mock(async () => undefined);
+    function Composer(props: { session: typeof sessionFixture }) {
+      const [sharedState, setSharedState] = useSessionVariableSetPickerState(props.session);
+      const [open, setOpen] = useState(true);
+      return (
+        <>
+          <button disabled={sharedState.saving || sharedState.committedSelection !== null}>
+            Send
+          </button>
+          {open ? (
+            <SessionVariableSetPicker
+              session={props.session}
+              canControl
+              canAttach
+              canUse
+              canList
+              embedded
+              sharedState={sharedState}
+              setSharedState={setSharedState}
+              onReloadSession={reloadSession}
+              onClose={() => setOpen(false)}
+            />
+          ) : null}
+        </>
+      );
+    }
+    try {
+      await act(async () => root.render(<Composer session={sessionFixture} />));
+      await addDeploySet(container);
+      await act(async () => {
+        [...container.querySelectorAll("button")].find((b) => b.textContent === "Save")!.click();
+        await flush();
+      });
+      expect(updateSessionVariableSets).toHaveBeenCalledTimes(1);
+      expect(reloadSession).toHaveBeenCalledTimes(1);
+      expect(container.querySelector("select")).toBeNull();
+      const send = container.querySelector("button")!;
+      expect(send.textContent).toBe("Send");
+      expect(send.disabled).toBe(true);
+      // An unrelated render with stale session data must not release the guard.
+      await act(async () => root.render(<Composer session={{ ...sessionFixture }} />));
+      expect(send.disabled).toBe(true);
+      await act(async () =>
+        root.render(<Composer session={{ ...sessionFixture, variableSetIds: [variableSetId] }} />),
+      );
+      expect(send.disabled).toBe(false);
+      expect(container.querySelector("select")).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("blocks personal detach when live status changes before activeTurnId refreshes", async () => {
+    updateSessionVariableSets.mockClear();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const session = { ...sessionFixture, variableSetIds: [variableSetId, personalVariableSetId] };
+    const reloadSession = mock(async () => undefined);
+    const render = (status: Parameters<typeof SessionVariableSetPicker>[0]["session"]["status"]) =>
+      root.render(
+        <ResponsivePickerPair session={{ ...session, status }} onReloadSession={reloadSession} />,
+      );
+    try {
+      await act(async () => render("idle"));
+      const remove = container.querySelector<HTMLButtonElement>(
+        '[aria-label="Remove Personal credentials"]',
+      )!;
+      await act(async () => remove.click());
+      const save = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Save",
+      )!;
+      expect(save.disabled).toBe(false);
+      for (const status of [
+        "running",
+        "queued",
+        "recovering",
+        "requires_action",
+        "waiting_capacity",
+      ] as const) {
+        await act(async () => render(status));
+        expect(save.disabled).toBe(true);
+        expect(container.textContent).toContain("after the current and queued work finishes");
+        await act(async () => save.click());
+        expect(updateSessionVariableSets).not.toHaveBeenCalled();
+      }
+      await act(async () => render("idle"));
+      expect(save.disabled).toBe(false);
+      await act(async () => {
+        save.click();
+        await flush();
+      });
+      expect(updateSessionVariableSets).toHaveBeenCalledWith(session.workspaceId, session.id, {
+        variableSetIds: [variableSetId],
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      updateSessionVariableSets.mockClear();
+    }
+  });
+
+  test("embedded read-only panel keeps navigation and cancel available", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const close = mock(() => undefined);
+    function Panel() {
+      const [sharedState, setSharedState] = useState<SessionVariableSetPickerSharedState>({
+        saving: false,
+        committedSelection: null,
+      });
+      return (
+        <SessionVariableSetPicker
+          session={sessionFixture}
+          canControl={false}
+          canAttach={false}
+          canUse={false}
+          canList={false}
+          sharedState={sharedState}
+          setSharedState={setSharedState}
+          onReloadSession={async () => {}}
+          embedded
+          leading={<button>Back</button>}
+          onClose={close}
+        />
+      );
+    }
+    try {
+      await act(async () => root.render(<Panel />));
+      expect(container.textContent).toContain("Back");
+      expect(container.textContent).toContain("Session control permission is required");
+      const buttons = [...container.querySelectorAll("button")];
+      expect(buttons.find((b) => b.textContent === "Save")?.disabled).toBe(true);
+      await act(async () => buttons.find((b) => b.textContent === "Cancel")?.click());
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("shares first-attachment refresh recovery across responsive picker surfaces", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -111,12 +414,7 @@ describe("SessionVariableSetPicker", () => {
     try {
       await act(async () => root.render(<ResponsivePickerPair onReloadSession={reloadSession} />));
 
-      const select = container.querySelectorAll("select")[0];
-      if (!select) throw new Error("Variable Set select missing");
-      await act(async () => {
-        select.value = variableSetId;
-        select.dispatchEvent(new Event("change", { bubbles: true }));
-      });
+      await addDeploySet(container);
       const save = [...container.querySelectorAll("button")].find(
         (button) => button.textContent?.trim() === "Save",
       );

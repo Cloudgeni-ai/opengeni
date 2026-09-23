@@ -1,5 +1,461 @@
 # @opengeni/react
 
+## 7.1.0
+
+### Minor Changes
+
+- bf744ed: Add optional model-policy picker group labels, icons and description overrides for host branding, shared by menu, trigger, accessibility and search without changing model or billing behavior.
+
+### Patch Changes
+
+- 701ea95: Preserve the original shell command when adopting background processes, so running command rows and completion notices show the command instead of execCommand. Keep long command rows ellipsized and expose their saved preview on hover and expansion.
+- e9c4379: Resolve published-file Markdown links through host navigation, expose message presentation in SessionConversation, and document exact retained-file link/embed syntax.
+- d92af11: Keep original command text through ambiguous launch recovery and persist it separately from bounded previews. Preserve whitespace, mark clipped previews with an ellipsis, and show complete commands on expansion and hover.
+- a463199: Increase browser conversation retention from 8 MiB / 10,000 events to 160 MiB / 200,000 events, reducing eviction during history navigation without changing fetch sizes or folding behavior. Account for appended event bytes incrementally instead of serializing retained history on every live batch.
+- 2f8bc58: Use bounded readable MCP tool aliases while preserving exact account routing and historical approval rehydration. Retain action and account display metadata in native and Codemode timeline events and approval cards without changing execution or approval identity. Legacy opaque calls resolve only against the current authorized tool catalog.
+- dd3387f: Preserve Markdown paragraphs and embedded media when host link callbacks change, preventing selection jumps and video preview restarts.
+- a463199: Repair workspace control revisions behind their retained event frontier, preventing historical control replay on each fresh browser load. Reject subsequent revision rollback without altering pause state, timers, or historical events. Stop refreshing last-started model metadata for unrelated control changes.
+- Updated dependencies [d92af11]
+- Updated dependencies [86c710a]
+- Updated dependencies [2f8bc58]
+  - @opengeni/sdk@7.1.0
+
+## 7.0.0
+
+### Major Changes
+
+- 1bfb6a4: Remove Packs and their Workflow templates from the application, public clients,
+  runtime, and active database schema. Plugins, Skills, Connections, sandbox
+  environments, Knowledge, scheduled tasks, and event automations remain independent.
+
+  PR Review now has its own setup authority and fixed automation template. Generic
+  automation routes cannot mutate review-owned sources or triggers. The API contract
+  revision changes; deploy matching server and client versions together.
+
+  Migration 0482 is a destructive maintenance cutover: drain all API and worker
+  database clients, settle Pack-related operations and queued Pack automation work,
+  then apply migrations and provision roles before starting only matching binaries.
+  It removes Pack data without a compatibility layer or data-preservation migration.
+  Historical events mixing Pack and independent automation work block the cutover
+  for explicit operator resolution; independent execution history is never silently deleted.
+  Customized, shared, and re-scoped Skills, Connections, and session history are
+  preserved; source-only Skills lose their active distribution owner.
+
+### Minor Changes
+
+- 3b73fc0: Add server-authoritative session-page sorting by last activity, creation date, or durable name and explicit active, archived, or all archive status. Pagination cursors bind these choices, and clients reject servers that do not acknowledge requested ordering or archive filtering.
+
+  The stock sidebar offers compact Status, Group by, Sort by, and Show empty groups controls with workspace- and subject-scoped persisted preferences.
+
+- 1c924ed: Add authorized, resumable literal search of saved user and completed assistant
+  messages, including unloaded history. Workspace search can return one
+  representative match per session; in-session Find returns every occurrence with
+  stable event identity and original-text UTF-16 offsets. Requests and browser
+  result batches remain bounded, with explicit continuation and provisional counts.
+
+  Expose bounded exact-sequence history navigation and message highlighting for
+  React hosts. The web console connects a contextual session-search dialog to
+  full-history Find, preserves search state across navigation, and keeps ended
+  conversations readable. Tool output, reasoning and unfinished delta-only
+  assistant messages are outside the initial searchable scope. Exact Markdown
+  matches use a labeled source excerpt that stays in place when Find closes;
+  readers can explicitly restore the formatted message.
+
+- c66ba31: Unify interactive and trusted-backend OAuth setup on native workspace connections
+  with optional canonical-user ownership, persisted lifecycle bindings, native
+  credential refresh, and captured execution authority.
+
+  Remove the superseded host binding, delegation, and credential-resolver API/SDK
+  surfaces and runtime configuration. Migrate integrations to ordinary OAuth
+  connections before upgrading; retired host selections are rejected rather than
+  translated or silently replaced. Apply the matching database migrations and role
+  provisioning with the runtime. Historical records remain preserved. See
+  `docs/remote-mcp-credentials.md` for the cutover contract.
+
+  Share connection setup, provider identity, loading states, conversation cards,
+  composer, and activity surfaces between the console and React SDK. Preserve
+  personal-account consent and native sharing authority, and keep interaction-only
+  connection and command panels outside the initial session bundle.
+
+### Patch Changes
+
+- cf9249d: Keep document typing and paste after a trailing newline, ignore IME composition Enter, and show spreadsheet General numbers without binary residue while leaving stored values and formula-bar source unchanged.
+- 4258aeb: Show browsable public Skill results before a search and align Skill and Plugin catalog grids across desktop and mobile.
+
+  Give connection setup a clear primary authorization action and quieter recovery controls, with shared responsive styling.
+
+  Reuse plugin and skill discovery results briefly across tab visits with client/workspace/query isolation, align installed shortcuts, and remove duplicate catalog headings and search affordances.
+
+  Keep All available in Capabilities navigation and cap its ordered category previews at six results, with explicit navigation to the full filtered category.
+
+- c64a94f: Support simultaneous authorized personal and workspace MCP account attachments with immutable account-qualified routing, sender isolation, and scheduled execution binding. Move attachment controls inside Connectors with readable ownership labels; keep account setup on the Capabilities page.
+- d5dba2a: Respect composer delivery readiness even when attachments are ready. File-only messages remain supported when the delivery owner reports them ready to send.
+- 667a90f: Keep available connection services usable when another catalogue fails or stalls, handle synchronous transport failures, and discard stale discovery results after scope changes.
+
+  Keep the console's Gmail logo fallback independent of the complete service registry so it does not bundle unused provider icons.
+
+- 47a37c8: Align the optional voice-model drill-in header and spacing with the composer's resource menus while preserving model availability and payment-source selection.
+- 348e54d: Use Sandbox Environment terminology in user-facing controls, errors, tool descriptions, and runtime guidance. Existing rig routes, tool names, IDs, permissions, and stored definitions remain unchanged.
+- aa09567: Preserve explicit host MCP delegation selections through durable composer Send and Steer admission, including exact retries after an uncertain response. Keep existing owner, generation, visibility, revocation and replay checks; omitted selections do not inherit authority.
+- 9de8e51: Route missing integration setup through provider-neutral catalog discovery and the shared human authorization card, with an explicit next action for every eligible catalog integration. Continue account selection and installation through owner authorization without an extra launch click, and open repository configuration in a separate tab.
+- f3920a7: Add a compact accessible mobile slide selector so presentation editors can jump to any slide when the desktop rail is hidden below `sm`, without changing desktop rail virtualization or keyboard selection.
+- 132b945: Add organization-owned integration acquisition policy with a discoverable catalog,
+  revisioned administration API and SDK, and organization settings. Enforce selected
+  provider and custom-protocol permissions on supported setup and installation paths
+  at preparation and persistence boundaries.
+
+  Preserve ordinary ownership and authorization, exact completed-request replay,
+  unchanged reconciliation, cancellation and other reducing operations. Existing
+  connection execution and credential refresh are not revoked by this policy.
+  Deployment-configured tools and embedding-host session-local MCP configuration
+  retain their existing admission rules; this is not a network or execution allowlist.
+
+  Apply the organization integration policy migration and matching role provisioning
+  with the matching runtime before enabling the setting. Older runtimes do not enforce
+  the new acquisition policy. See `docs/organization-integration-policy.md` for the
+  administration, identity, persistence and recovery contract.
+
+- 1cb688d: Add explicit permanent Skill removal review bindings and truthful removal receipts.
+  Deletion approval is bound to the exact removal proposal; existing save approvals
+  cannot authorize irreversible deletion. Review surfaces distinguish removal from
+  activation and preserve conversations.
+- 621201d: Distinguish queued sessions from running agents and expose durable dispatch wait
+  evidence in session detail reads, including retry timing and recorded errors.
+- f7e41e7: Show unavailable saved changes previews inside the affected Changes view instead of displaying capture-error notifications when a session opens. Preserve the existing explicit live-workspace action and the live-only Staged view.
+- 9d9b94b: Allow plugin discovery to choose an initial registry while preserving all registry filters. The OpenGeni web catalog initially selects OpenAI.
+- 6b32304: Reuse the shared activity row and running-command animation for incomplete previews, replacing the standalone loading card while preserving completion and interruption behavior.
+- c9e2743: Accept an explicit null skill-review reference on structured human-input questions, matching the contracts wire type without changing API runtime validation.
+- 0bf014d: Add a session-authorized Codex account projection. Capacity retry choices follow
+  the waiting turn's accepted subscription pool after source changes, including
+  Disabled. Running turns keep their accepted account label while next-turn
+  choices and workspace settings continue to use the current source.
+- c4a2775: Unify provider and MCP service discovery in the embedded connection panel. Preserve Gmail branding for personal accounts without workspace installation references, bundle Outlook branding, share service logo loading, and clarify ownership and tool-selection copy.
+- b88890f: Show a neutral pulsing dot and command count on the session activity button, with reduced-motion support. Open command details directly when background commands are present.
+- Updated dependencies [6d0a4de]
+- Updated dependencies [c64a94f]
+- Updated dependencies [3b73fc0]
+- Updated dependencies [1c924ed]
+- Updated dependencies [c31a951]
+- Updated dependencies [f90d628]
+- Updated dependencies [3fa175e]
+- Updated dependencies [132b945]
+- Updated dependencies [779b16b]
+- Updated dependencies [1cb688d]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [621201d]
+- Updated dependencies [1bfb6a4]
+- Updated dependencies [1641006]
+- Updated dependencies [c9e2743]
+- Updated dependencies [7e2436a]
+- Updated dependencies [0bf014d]
+- Updated dependencies [c66ba31]
+- Updated dependencies [0ea365c]
+  - @opengeni/sdk@7.0.0
+  - @opengeni/connect@0.3.0
+
+## 6.1.0
+
+### Minor Changes
+
+- 85cafd0: Add a shared workspace/session artifact catalog over existing Sites, editable artifacts, generated images, and published files. Keep file bytes and content authorization in their existing domains, expose bounded filtered discovery through the SDK, and retain explicit sandbox-file publication provenance. The web Artifacts library includes type/search/sort controls, grid/list views, retained image previews, and file viewers that do not wake compute. Published images use the shared chat image/lightbox presentation; ordinary HTML file downloads remain non-executable.
+
+### Patch Changes
+
+- 71ca29b: Preserve the current history window when loading later activity fails, expose the original error, and offer explicit timeline retry without repeated observer requests. Ignore late failures from a previous session or navigation lifetime.
+- Updated dependencies [85cafd0]
+  - @opengeni/sdk@6.1.0
+
+## 6.0.0
+
+### Major Changes
+
+- efeaa9c: Replace autonomous Memory and reviewed Knowledge authoring with structured Knowledge entries, exact revisions, evidence, groups and nonblocking review. Add centralized Agent learning defaults with chat and scheduled-task overrides, private original-file ownership, canonical source preparation and rebuildable retrieval. Retire legacy Memory/learning mutation APIs and SDK methods; migration 0461 requires a drained maintenance cutover and the matching runtime. See docs/knowledge.md and docs/deployment.md.
+
+### Minor Changes
+
+- 750060c: Support inline HTML visualizations, retained images, and embedded Sites in chat. Add a plain HTML Site client, preserve application request headers through the shared bridge, document visualization workflows, and use Image 2.5 Sunburst for Codex image generation.
+- 46a0267: Load authoritative goals on mount when reusing a shared event feed. Add optional native loading messages for accessible status, slow waits, and details controls, preserving English defaults. Expose SessionChrome's successful queue-checkout composer focus handoff.
+
+### Patch Changes
+
+- 48c624f: Show discovered desktop targets immediately so slow or failed semantic inspection cannot block the live view or switching windows and screens.
+- d5582c1: Accept restarted frame sequences after a fresh desktop attachment so automatic renewal does not freeze the last image. Preserve frame ordering within a stream and reject detached sockets.
+- 49d43e6: Show desktop connection errors and Reconnect after an established stream fails or socket retries are exhausted, and let Refresh desktops retry a failed stream.
+- Updated dependencies [50ac837]
+- Updated dependencies [ad9dc2f]
+- Updated dependencies [750060c]
+- Updated dependencies [da4a85f]
+- Updated dependencies [efeaa9c]
+  - @opengeni/sdk@6.0.0
+
+## 5.2.0
+
+### Minor Changes
+
+- c1ad490: Allow hosts to localize user-message disclosure actions through direct component props and the default timeline composition. Each label falls back independently to English, while message expansion, accessible controls, and scroll anchoring retain their existing behavior.
+
+## 5.1.1
+
+### Patch Changes
+
+- 0507f91: Retry timed-out composer draft reads with backoff and clear their warning after a successful refresh, including when the draft revision is unchanged. Keep draft-read failures separate from Send, Steer, and control failures, and identify draft sync timeouts in the composer message.
+
+## 5.1.0
+
+### Minor Changes
+
+- d40bd9b: Replace startup timing rows with a quiet animated genie and rotating loading copy. Retain timing evidence in diagnostics, support a browser-local detail preference, and keep failures visible. Add a replayable loading studio.
+
+### Patch Changes
+
+- 4e2b59d: Keep loading animation options self-contained in public declarations so NodeNext consumers do not need to resolve the renderer's internal type imports. Supported animation options and runtime behavior are unchanged.
+- 4e2b59d: Route plugin discovery types and endpoint compatibility through the public SDK boundary, using a narrow contracts entry without schema-runtime imports.
+- 9968ae5: Allow host rendering of DeviceAuthorization while retaining shared clipboard state and URL validation. Restore the native Codex and SuperGrok subscription sign-in panels without changing embedded defaults or integration setup.
+- 488a69b: Expose bounded current-failure evidence on session detail reads so recovery diagnostics do not depend on timeline pagination. Show recorded consecutive retry streaks without inventing lifetime totals, and distinguish Codex account assignment, affinity/lease reuse, and actual switches without changing allocation policy.
+
+  Read session status and its replay cursor coherently, decode bounded diagnostics through the lossless storage codec, and record account transitions atomically against the current assignment with attempt-keyed replay and compatible switch reasons.
+
+- 5ef34cf: Allow hosts to open a workbench tab with `openTabRequest`. The stock console routes Site links into the session artifact panel and retains a session return link when expanding Sites or editors full-page.
+- Updated dependencies [4e2b59d]
+- Updated dependencies [4e2b59d]
+- Updated dependencies [488a69b]
+- Updated dependencies [935af4e]
+- Updated dependencies [d08dbb6]
+  - @opengeni/sdk@5.1.0
+
+## 5.0.5
+
+### Patch Changes
+
+- @opengeni/sdk@5.0.5
+
+## 5.0.4
+
+### Patch Changes
+
+- 3d9ab25: Keep wide markdown tables stable while subsequent message text streams by preserving their layout observer and remeasuring content without resetting the expanded width.
+
+## 5.0.3
+
+### Patch Changes
+
+- @opengeni/sdk@5.0.3
+
+## 5.0.2
+
+### Patch Changes
+
+- 05957ee: Keep the workbench's initial tab unresolved while a signed capture manifest is loading, so pending capture metadata cannot permanently select Files instead of Changes. Preserve host overrides, settled empty/error fallbacks, and the user's later tab selection.
+
+## 5.0.1
+
+### Patch Changes
+
+- be17b8e: Remove the SDK Skill loader capability and use eager sandbox-free Skill reading
+  with a turn-prepared descriptor index. Keep on-demand checkout and repository
+  Skill discovery separate, and render Skill tool calls consistently in the timeline.
+
+## 5.0.0
+
+### Minor Changes
+
+- f8be7df: Allow hosts to render inline connection setup for timeline authentication requests. Add an optional safe return path to Fiken OAuth so setup can return to the originating conversation.
+- cffd21b: Add organization-scoped external users, explicit native identity linking, shared
+  white-label Connect flows and Site lifecycle/bridge surfaces. Add opt-in durable
+  host-MCP delegation and renewal while preserving simple short-lived credentials,
+  existing schedule authority and approval behavior. Share native/embedded device
+  polling and setup components, and synchronize developer integration Skills with
+  the installable Product Integration Pack.
+
+  Database migrations 0437–0457 require the documented maintenance/cutover procedure;
+  older API and worker writers must not be restarted after activation. Provider
+  OAuth applications and host resolvers remain deployment configuration, not
+  automatic external provisioning. No package is published by this changeset.
+
+### Patch Changes
+
+- Updated dependencies [cffd21b]
+- Updated dependencies [f8be7df]
+- Updated dependencies [cffd21b]
+  - @opengeni/sdk@5.0.0
+  - @opengeni/connect@0.2.0
+
+## 4.0.2
+
+### Patch Changes
+
+- 39adecb: Let top-level assistant tables expand into available chat panel space while keeping surrounding text at its normal reading width. Tables remain contained when a side panel opens or the conversation is narrow, and keep horizontal scrolling when content still cannot fit.
+- 1b0f4f2: Expose unavailable background command observations separately from command lifecycle state, and render that uncertainty in command and session status.
+- 87fbd92: Preserve full session messages and tool output through database paging, compact
+  event delivery, SSE, browser rendering, and copying. Remove browser per-event
+  preview truncation while retaining history pagination and backpressure. Events
+  larger than a page or loaded-window byte target are delivered intact on their own.
+- Updated dependencies [1b0f4f2]
+  - @opengeni/sdk@4.0.2
+
+## 4.0.1
+
+### Patch Changes
+
+- 068be26: Complete a Skill save in the same transaction as its one verified human chat decision. Show the full immutable Skill folder, preserve exact scope and revision checks, and refuse delegated, stale, or mismatched approval. Autonomous saves activate directly; declining a proposal preserves existing active guidance.
+- d1cb266: Keep automatic history filling from evicting the latest reply or cycling between older and newer pages. Preserve explicit history navigation and stable jumps back to latest. Retain provider message identity so assistant chunks interleaved with tool activity remain one message without merging distinct replies.
+- Updated dependencies [068be26]
+- Updated dependencies [2fa33e4]
+  - @opengeni/sdk@4.0.1
+
+## 4.0.0
+
+### Major Changes
+
+- c915b0f: Remove the separate `@opengeni/react/chat` component. Use the existing
+  `SessionConversation` or compose the timeline and composer for the full agent
+  experience. The server-side `@opengeni/sdk/chat` wrapper and adapters remain
+  unchanged; their protocol requires a custom or compatible frontend.
+
+### Minor Changes
+
+- 9827c25: Add message action slots and an optional source message boundary for managed-human forks. The web UI places turn feedback and Fork from here beside Copy and the timestamp. Message forks preserve existing authorization and idempotency, copy only the selected canonical history prefix, and reject ambiguous, compacted, or incomplete boundaries.
+
+  Migration 0429 requires draining the API and both worker pools and provisioning the updated runtime routine contract before starting the new binary.
+
+### Patch Changes
+
+- 0c5e2fd: Group composer timeline annotations into one count chip, pin numbered badges on the quoted source text, and keep Add note available for long highlights that end in message chrome. Dense and long notes stay in a viewport-clamped review list, overlapping badges pack onto distinct in-viewport points instead of stacking, Enter moves to the next empty note, and sent cards collapse instead of growing without bound.
+- 231b103: Apply explicit Codex account switches and unpins to capacity-blocked turns, preserving the same turn and history through recovery. Display current account selection separately from future preferences and report when a switch requests a capacity recheck.
+- 9d36a0f: Keep the latest streamed answer visible outside collapsed steps when an input wait ends a turn without final output.
+- Updated dependencies [231b103]
+- Updated dependencies [9827c25]
+- Updated dependencies [5904fd1]
+- Updated dependencies [14dd6fe]
+  - @opengeni/sdk@4.0.0
+
+## 3.8.0
+
+### Minor Changes
+
+- b1d3673: Add the `@opengeni/sdk/chat` facade (`OpenGeni`, `Chat`, `createChatHandler`, Vercel AI SDK and OpenAI adapters) and the `@opengeni/react/chat` drop-in component. Sessions gain `agentAccess`, an opaque `endUser` label, and `memoryScope`, enforced in the session-authorization seam so one workspace per customer can hold isolated, per-user, or shared chats. Organization API keys gain `access: "read"` and `GET /v1/organizations/:id/sessions`. Close the tool-widening paths: child tool selection, agent tool-policy updates, scheduled-task sessions, and the Codemode SDK proxy can no longer exceed the creating session.
+
+  Private-memory identities use bounded hashes of exact source/user tuples. Correction, archival, and replacement enforce the private writable scope. Chat reload restores unresolved approvals and questions, and the chat component uses the complete human-input form with multiple selections and Other answers.
+
+  Session-scoped discovery preserves the embedding host's allowlist. Responses streams emit the complete message/content lifecycle with stable per-response IDs, including incomplete settlement for human waits and cancellation. Streaming text preserves the same paragraph separators as the final reply.
+
+- 107aa14: Support standard SDK/React conversations in Sites and sandbox previews, direct
+  HTML/source uploads, exact deployment package pins, and embedded layout/queue
+  defaults. Refresh exhausted Grok capacity after external resets.
+
+### Patch Changes
+
+- 0ca6728: Label child-result receipts without claiming task completion, explain pending input, and let hosts open the exact child from incoming and delivered updates.
+- fa2b99a: Preserve workflow wake retries until pending input is admitted, while future waits stay parked at their deadline, and expose current session waits and waiting descendant counts. Refresh wait status on live events and retain the status projection sequence so newer session reads cannot be overwritten by older events.
+- 1fc0889: Group deployment-provided models under OpenGeni regardless of upstream provider. Badge only explicitly free models, keep paid rows compact, and preserve separate workspace, organization, and subscription connections with accurate payment descriptions.
+- e271780: Replace nested model selection with a searchable list grouped by payment source. Select models immediately, keep thinking and speed controls visible in the picker footer, and preserve supported settings when switching models. Prioritize model names in compact composer controls.
+- 952331e: Restore click-to-expand previews for ready image attachments after their composer remounts, while keeping signed preview URL creation lazy.
+- ecffc88: Use the selected appearance for message-detail backgrounds instead of the operating system theme.
+- 8be8a72: Show failed live-file wake requests with a retry that renegotiates the workspace, instead of leaving a permanent waking spinner. Preview complete PNG, JPEG, GIF, and WebP files without enabling binary editing or waking machines during passive capture browsing.
+- ba890d1: Keep selected models in their provider groups, consolidate subscription descriptions, and simplify reasoning controls. Show image compatibility warnings only when a draft contains images.
+- 730b78b: Identify the goal explicitly in compact status chips so its state is distinct from the session status.
+- e9d092a: Resolve goal landmark icons when rendered so circular production chunks cannot leave continuation rows permanently unavailable.
+- ca2b4e2: Offer the session-chrome queue when chrome is idle and at least one authoritative prompt is waiting. Closing it dismisses that session until occupancy drains; a different session on the same chrome instance may still offer. A live Send stays a paint-only chip receipt.
+- 3673900: Preserve reading position during session history pagination, keep folded history loading, and prevent false retries across stream reconnects.
+- 3a29372: Keep embedded conversation foreground and background theme-matched. Support filtering published Sites by creating or publishing session for the session Artifacts panel.
+- eeb5500: Label preserved wait outcomes with their recorded date and time and expose them as static notes, keeping historical agent text distinct from current session state.
+- 0f3dc9a: Keep an unpinned timeline reader in place when older history prepends into a compact tail. Restoring the row offset no longer looks like a scroll back to the live tip, so the view does not snap to the bottom after loading earlier messages.
+- fe73da9: Keep hidden composer height measurement out of document overflow after responsive resizing. Allow session chrome hosts to identify an active goal blocked by failed session execution without changing the goal state.
+- d8a70ec: Unify first-party and integration tools behind one workspace gateway for MCP, model execution, Codemode, SDK, and browser clients; require host-confirmed SDK approval for human-gated model calls, keep Codemode claims live through gateway preparation, and deduplicate reclaimed tool-created events; add opt-in resource-bound MCP OAuth; ship governed self-contained HTML Sites with retained source, version rollback, an exact-version direct-call tool allowlist, and a native Site-authoring Skill; and default Modal self-hosts to OpenGeni's public digest-pinned desktop runtime image.
+- f0f1e17: Keep a durable wait reason visible after a tool-only turn settles, including legacy goal holds, while preserving collapsed step detail and recovering missing or partial terminal responses from authoritative turn output.
+- Updated dependencies [4536385]
+- Updated dependencies [fa2b99a]
+- Updated dependencies [fa12951]
+- Updated dependencies [d06450c]
+- Updated dependencies [d9dbd5d]
+- Updated dependencies [1c4b707]
+- Updated dependencies [cc1bfe0]
+- Updated dependencies [3db0b05]
+- Updated dependencies [c90f3fc]
+- Updated dependencies [0c39126]
+- Updated dependencies [0c39126]
+- Updated dependencies [4708cfb]
+- Updated dependencies [575af5b]
+- Updated dependencies [6de9fe3]
+- Updated dependencies [cda46e8]
+- Updated dependencies [b1d3673]
+- Updated dependencies [2fb17fd]
+- Updated dependencies [3a29372]
+- Updated dependencies [107aa14]
+- Updated dependencies [d8a70ec]
+- Updated dependencies [0a81cc8]
+  - @opengeni/sdk@3.8.0
+
+## 3.7.0
+
+### Patch Changes
+
+- 6b65383: Replace goal-scoped long waits with self-only session-level `wait_for_input`, add provider-neutral `command_wait`, and deliver terminal background-command proof as exactly-once durable agent input with workflow wakes for nonterminal sessions while preserving event-only audit for terminal sessions.
+- 6f84c02: Make durable Codex credential leasing unconditional, preserve rotation-off as an active-account-only capacity policy, and recover definitive credential failures through same-turn failover or durable capacity waiting.
+- Updated dependencies [6b65383]
+- Updated dependencies [6f84c02]
+  - @opengeni/sdk@3.7.0
+
+## 3.6.0
+
+### Patch Changes
+
+- d63ee0f: Keep Connected Machine file links in the target's canonical filesystem namespace, including Windows drive and UNC roots, and reject stale file requests with a retryable route conflict.
+- fab39d2: Keep lazy session-history reads sub-second on large sessions by fitting each browser window and its continuation lookahead into one byte- and count-bounded database query instead of walking the page through sequential reads. Fresh and foreground tail loads may use one additional bounded page to preserve a complete turn boundary, and foreground replacement keeps the prior timeline visible until the new window is ready.
+- Updated dependencies [d63ee0f]
+- Updated dependencies [b420912]
+  - @opengeni/sdk@3.6.0
+
+## 3.5.1
+
+### Patch Changes
+
+- Updated dependencies [8b42f58]
+- Updated dependencies [0214875]
+- Updated dependencies [e2a668b]
+- Updated dependencies [9c45eae]
+  - @opengeni/sdk@3.5.1
+
+## 3.5.0
+
+### Patch Changes
+
+- 633f9bf: Reconcile sustained hidden-tab sessions by measuring their durable event gap: replay tiny gaps normally, append semantically small compact catch-ups in one paint, and reload the latest tail only for large or complex backlogs.
+- Updated dependencies [32b9de4]
+- Updated dependencies [8f81b57]
+  - @opengeni/sdk@3.5.0
+
+## 3.4.2
+
+### Patch Changes
+
+- b88a194: Stabilize timeline annotation interactions when lazy UI effects settle under load.
+
+## 3.4.1
+
+### Patch Changes
+
+- a8da2c5: Stabilize release admission checks under loaded CI runners.
+
+## 3.4.0
+
+### Minor Changes
+
+- 2d0fad4: Add deployment-defined model catalogs and cost policy, workspace-managed Gateway and OpenRouter credentials plus custom models, a separate deployment-managed OpenRouter rail, live catalog refresh, the `list_models` agent tool, and model-picker/API/SDK support for the new catalog surfaces.
+- 9fe5c5b: Add organization-scoped Vercel AI Gateway and OpenRouter BYOK/custom models for shared workspaces while preserving independent workspace connections.
+
+### Patch Changes
+
+- c356468: Add explicit host authority provenance for opaque MCP connection references so embedding hosts can resolve any binding identity, including UUID values, without native delegation, catalog, attachment reauthorization, or reconnect flows reinterpreting it. Preserve the legacy non-UUID host-binding lane during rolling upgrades, retain host provenance after successful credential resolution, make auth-needed events inert in legacy browsers, and gate newly marked refs behind a default-off two-phase fleet activation.
+- dd98677: Fail browser uploads before any network request with a typed `secure_context_required` error when HTTPS-only Web Crypto is unavailable, and surface actionable HTTPS guidance directly on failed attachment cards.
+- 9af1666: Keep backward session-history pagination advancing across oversized legacy events by applying the canonical bounded read projection instead of failing the page, and report when a forensic response is no longer byte-for-byte exact.
+- Updated dependencies [2d0fad4]
+- Updated dependencies [9fe5c5b]
+- Updated dependencies [c356468]
+- Updated dependencies [dd98677]
+- Updated dependencies [9af1666]
+  - @opengeni/sdk@3.4.0
+
 ## 3.3.2
 
 ### Patch Changes

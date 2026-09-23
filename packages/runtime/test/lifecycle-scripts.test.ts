@@ -1119,6 +1119,41 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     }
   });
 
+  test("abbreviated commit fetch explains the remedy while a hexadecimal branch remains valid", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-ref-"));
+    try {
+      const origin = makeOrigin(root);
+      const sha = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+      }).trim();
+      const short = sha.slice(0, 8);
+      const home = join(root, "home");
+      mkdirSync(home);
+      const target = join(root, "checkout");
+      const resource = {
+        kind: "repository" as const,
+        uri: "https://github.com/opengeni/test-fixture.git",
+        ref: short,
+      };
+      const missing = runScript(cloneScriptWithTarget(target, `file://${origin}`, resource), {
+        HOME: home,
+      });
+      expect(missing.status).not.toBe(0);
+      expect(missing.output).toContain("couldn't find remote ref");
+      expect(missing.output).toContain("full commit SHA");
+      expect(existsSync(target)).toBe(false);
+      expect(readdirSync(root).filter((entry) => entry.startsWith("checkout.tmp."))).toEqual([]);
+      execFileSync("git", ["-C", origin, "branch", short]);
+      const valid = runScript(cloneScriptWithTarget(target, `file://${origin}`, resource), {
+        HOME: home,
+      });
+      expect(valid.status).toBe(0);
+      expect(readFileSync(join(target, "README.md"), "utf8")).toBe("hello\n");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("clone failure (bad ref/uri) exits non-zero and leaks no tmp clone", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-clone-"));
     try {

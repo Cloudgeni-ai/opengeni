@@ -102,6 +102,32 @@ describe("worker fleet dashboard scope", () => {
     ).toBe(false);
   });
 
+  test("shows durable compaction starts beside successful completions", async () => {
+    const dashboard = JSON.parse(
+      await readFile(new URL("./worker-fleet.json", import.meta.url), "utf8"),
+    );
+    const panels = dashboard.panels as Array<{
+      title?: string;
+      targets?: Array<{ refId?: string; expr?: string; legendFormat?: string }>;
+    }>;
+    const panel = panels.find(
+      (candidate) => candidate.title === "Compaction starts and completions by trigger (per 15m)",
+    );
+
+    expect(panel?.targets).toEqual([
+      expect.objectContaining({
+        refId: "A",
+        expr: 'sum by (trigger) (increase(opengeni_context_compactions_total{namespace="$namespace",environment="$environment",release="$release"}[15m]))',
+        legendFormat: "{{trigger}} completed",
+      }),
+      expect.objectContaining({
+        refId: "B",
+        expr: 'sum by (trigger) (increase(opengeni_context_compaction_starts_total{namespace="$namespace",environment="$environment",release="$release"}[15m]))',
+        legendFormat: "{{trigger}} started",
+      }),
+    ]);
+  });
+
   test("gates backlog panels with freshness from the same scrape instance", async () => {
     const dashboard = JSON.parse(
       await readFile(new URL("./worker-fleet.json", import.meta.url), "utf8"),
@@ -112,7 +138,7 @@ describe("worker fleet dashboard scope", () => {
     }>;
     const byTitle = new Map(panels.map((panel) => [panel.title, panel]));
     const backlogExpression = byTitle
-      .get("Turns inflight vs eligible backlog (fleet total)")
+      .get("Worker attempts inflight vs eligible turn backlog (fleet total)")
       ?.targets?.find((target) => target.refId === "B")?.expr;
     const oldestExpression = byTitle.get("Oldest eligible turn backlog age")?.targets?.[0]?.expr;
 
@@ -139,6 +165,22 @@ describe("worker fleet dashboard scope", () => {
         .filter((sample) => sample.fresh === 1 && sample.lastSuccessAgeSeconds < 45)
         .map((sample) => ({ instance: sample.instance, backlog: sample.backlog })),
     ).toEqual([{ instance: "fresh-zero", backlog: 0 }]);
+
+    const attemptPanel = byTitle.get(
+      "Worker attempts inflight vs eligible turn backlog (fleet total)",
+    ) as
+      | {
+          description?: string;
+          targets?: Array<{ refId?: string; legendFormat?: string }>;
+        }
+      | undefined;
+    expect(attemptPanel?.description).toContain("physical runAgentTurn attempts");
+    expect(attemptPanel?.targets?.find((target) => target.refId === "A")?.legendFormat).toBe(
+      "inflight attempts",
+    );
+    expect(byTitle.get("Oldest inflight worker attempt age (max)")?.description).toContain(
+      "physical runAgentTurn attempt",
+    );
   });
 });
 

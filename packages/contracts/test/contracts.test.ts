@@ -7,9 +7,6 @@ import {
   CreateBillingPortalResponse,
   CapabilityCatalogResponse,
   evaluateWorkspaceModelPolicy,
-  CapabilityPack,
-  InstallPackRequest,
-  PreviewPackInstallationRequest,
   ClientConfig,
   ClientModel,
   WorkspaceModelCatalogResponse,
@@ -29,7 +26,6 @@ import {
   CreateSessionRequest,
   DocumentSearchRequest,
   DocumentSearchResponse,
-  EnablePackRequest,
   ErrorEnvelope,
   GitCredentialBindingId,
   gitCredentialBindingIdForRepository,
@@ -39,7 +35,6 @@ import {
   gitRemoteUriAliases,
   KnowledgeMemorySearchRequest,
   KnowledgeSearchResponse,
-  MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
   MODEL_CONTEXT_LABEL,
   SESSION_GOAL_CONTEXT_LABEL,
@@ -54,6 +49,7 @@ import {
   OrganizationInvitation,
   RequestHumanInputToolInput,
   RepositoryResourceRef,
+  CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
   TURN_EXECUTION_POLICY_METADATA_KEY,
   ResourceRef,
   SessionBusMessage,
@@ -69,7 +65,6 @@ import {
   SteerSessionMessageRequest,
   SubmitHumanInputResponseRequest,
   TerminalPtyExitedPayload,
-  UninstallPackRequest,
   DraftTimelineAnnotations,
   SubmittedTimelineAnnotations,
   renderTimelineAnnotationsForModel,
@@ -90,11 +85,14 @@ import {
   ToolAuthNeededPayload,
   CredentialAuthNeededPayload,
   defaultRepositoryMountPath,
+  CodexCredentialPolicySnapshotV1,
+  metadataWithCodexCredentialPolicySnapshotV1,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
   normalizeRepositoryTransportUri,
   normalizeResourceMountPath,
   readTurnExecutionPolicyV1,
+  readCodexCredentialPolicySnapshotV1,
   resourceMountPath,
   resourceMountPathCollisionKey,
   sandboxShellPath,
@@ -132,7 +130,14 @@ describe("API key descriptions", () => {
       name: "Product backend",
       description: "Provisions tenants",
       expiresAt: "2027-01-01T00:00:00+00:00",
+      access: "full",
     });
+    expect(CreateOrganizationApiKeyRequest.parse({ name: "reader", access: "read" }).access).toBe(
+      "read",
+    );
+    expect(
+      CreateOrganizationApiKeyRequest.safeParse({ name: "backend", access: "write" }).success,
+    ).toBe(false);
     expect(
       CreateOrganizationApiKeyRequest.safeParse({ name: "backend", permissions: [] }).success,
     ).toBe(false);
@@ -388,6 +393,84 @@ describe("contracts", () => {
     expect(metadata[TURN_EXECUTION_POLICY_METADATA_KEY]).toEqual(turnExecutionPolicy);
   });
 
+  test("reads and merges a bounded Codex allocator policy snapshot without disturbing metadata", () => {
+    const snapshot = CodexCredentialPolicySnapshotV1.parse({
+      schemaVersion: 1,
+      activeCredentialId: "credential-active",
+      rotationEnabled: false,
+      rotationStrategy: "sharded",
+      source: "workspace",
+      pinnedCredentialId: null,
+      pinSource: null,
+      lastCredentialId: "credential-last",
+    });
+    const metadata = metadataWithCodexCredentialPolicySnapshotV1(
+      { dispatchRevision: 3, recovery: { generation: 2 } },
+      snapshot,
+    );
+
+    expect(metadata.dispatchRevision).toBe(3);
+    expect(metadata.recovery).toEqual({ generation: 2 });
+    expect(readCodexCredentialPolicySnapshotV1(metadata)).toEqual({
+      kind: "valid",
+      policy: snapshot,
+    });
+    expect(metadata[CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY]).toEqual(snapshot);
+  });
+
+  test("requires Codex policy pins to carry a matching pin source", () => {
+    const base = {
+      schemaVersion: 1 as const,
+      activeCredentialId: null,
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+      source: "workspace" as const,
+      lastCredentialId: null,
+    };
+    expect(() =>
+      CodexCredentialPolicySnapshotV1.parse({
+        ...base,
+        pinnedCredentialId: "credential-pinned",
+        pinSource: null,
+      }),
+    ).toThrow("pinnedCredentialId and pinSource must both be null or both be present");
+    expect(() =>
+      CodexCredentialPolicySnapshotV1.parse({
+        ...base,
+        pinnedCredentialId: null,
+        pinSource: "policy",
+      }),
+    ).toThrow("pinnedCredentialId and pinSource must both be null or both be present");
+    expect(
+      CodexCredentialPolicySnapshotV1.parse({
+        ...base,
+        pinnedCredentialId: "credential-pinned",
+        pinSource: "manual",
+      }),
+    ).toMatchObject({ pinnedCredentialId: "credential-pinned", pinSource: "manual" });
+  });
+
+  test("treats only an absent Codex snapshot key as legacy and rejects malformed values", () => {
+    expect(readCodexCredentialPolicySnapshotV1(null)).toEqual({ kind: "absent" });
+    expect(readCodexCredentialPolicySnapshotV1({ dispatchRevision: 3 })).toEqual({
+      kind: "absent",
+    });
+    expect(() =>
+      readCodexCredentialPolicySnapshotV1({
+        [CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY]: {
+          schemaVersion: 1,
+          activeCredentialId: null,
+          rotationEnabled: true,
+          rotationStrategy: "sharded",
+          pinnedCredentialId: null,
+          pinSource: null,
+          lastCredentialId: null,
+          unexpected: "reject-me",
+        },
+      }),
+    ).toThrow("Malformed Codex credential policy snapshot metadata");
+  });
+
   test("treats only an absent policy key as legacy and reports malformed paths without values", () => {
     for (const malformed of [null, undefined, { ...turnExecutionPolicy, extra: true }]) {
       expect(() =>
@@ -600,6 +683,7 @@ describe("contracts", () => {
   test("models provider-neutral MCP bindings with exact selected repository scope", () => {
     const binding = McpServerConnectionRef.parse({
       connectionId: "host:github:one",
+      authoritySource: "host",
       provider: "github",
       providerDomain: "github.com",
       kind: "app_install",
@@ -609,6 +693,13 @@ describe("contracts", () => {
       ],
     });
     expect(binding.selectedResources?.map((resource) => resource.id)).toEqual(["101", "202"]);
+    expect(binding.authoritySource).toBe("host");
+    expect(() =>
+      McpServerConnectionRef.parse({
+        authoritySource: "host",
+        providerDomain: "host.example",
+      }),
+    ).toThrow("host authority requires connectionId");
     expect(() =>
       McpServerConnectionRef.parse({
         connectionId: "azure-one",
@@ -634,11 +725,32 @@ describe("contracts", () => {
         serverId: "provider-tools",
         providerDomain: "provider.example",
         connectionId: "host:connection:42",
+        authoritySource: "host",
         provider: "gitlab",
         reason: "unsupported_auth",
+        hostReason: "resource_scope_unavailable",
         selectedResources: [{ kind: "repository", id: "project-42" }],
       }).connectionId,
     ).toBe("host:connection:42");
+    expect(
+      ToolAuthNeededPayload.parse({
+        serverId: "provider-tools",
+        providerDomain: "provider.example",
+        connectionId: "host:connection:42",
+        authoritySource: "host",
+        reason: "unsupported_auth",
+        hostReason: "refresh_failed",
+      }).authoritySource,
+    ).toBe("host");
+    expect(
+      ToolAuthNeededPayload.safeParse({
+        serverId: "provider-tools",
+        providerDomain: "provider.example",
+        connectionId: "host:connection:42",
+        authoritySource: "host",
+        reason: "refresh_failed",
+      }).success,
+    ).toBe(false);
     expect(
       CredentialAuthNeededPayload.parse({
         credentialClass: "run",
@@ -845,7 +957,7 @@ describe("contracts", () => {
     expect(
       CreateSessionRequest.safeParse({
         startMode: "realtime",
-        connectionAuthorities: [
+        connectionAccounts: [
           {
             serverId: "example",
             connectionId: "00000000-0000-4000-8000-000000000001",
@@ -882,7 +994,6 @@ describe("contracts", () => {
           ],
         },
         {
-          name: "RELEASE",
           files: [
             {
               path: "SKILL.md",
@@ -905,15 +1016,41 @@ describe("contracts", () => {
         skills: [
           {
             name: "release",
-            files: [{ path: "SKILL.md", content: "# One\n" }],
+            files: [
+              {
+                path: "SKILL.md",
+                content: "---\nname: release\ndescription: Prepare a release.\n---\n# One\n",
+              },
+            ],
           },
           {
-            name: "RELEASE",
-            files: [{ path: "SKILL.md", content: "# Two\n" }],
+            name: "release",
+            files: [
+              {
+                path: "SKILL.md",
+                content: "---\nname: release\ndescription: Prepare a release.\n---\n# Two\n",
+              },
+            ],
           },
         ],
       }),
     ).toThrow("conflicting session skill definitions");
+  });
+
+  test("accepts only unique installed Skill selections", () => {
+    const capabilityId = "skill:session-selected/implementation@abc";
+    expect(
+      CreateSessionRequest.parse({
+        initialMessage: "implement the integration",
+        installedSkillIds: [capabilityId],
+      }).installedSkillIds,
+    ).toEqual([capabilityId]);
+    expect(
+      CreateSessionRequest.safeParse({
+        initialMessage: "implement the integration",
+        installedSkillIds: [capabilityId, capabilityId],
+      }).success,
+    ).toBe(false);
   });
 
   test("accepts only a UUID as a caller-preallocated session id", () => {
@@ -1162,6 +1299,7 @@ describe("contracts", () => {
           url: "https://gitlab-tools.example/mcp",
           connectionRef: {
             connectionId: "cloud-connection:gitlab:42",
+            authoritySource: "host",
             providerDomain: "gitlab.example",
             kind: "oauth2",
           },
@@ -1171,6 +1309,7 @@ describe("contracts", () => {
     expect(hostPayload.mcpServers[0]?.connectionRef?.connectionId).toBe(
       "cloud-connection:gitlab:42",
     );
+    expect(hostPayload.mcpServers[0]?.connectionRef?.authoritySource).toBe("host");
     expect(() =>
       CreateSessionRequest.parse({
         initialMessage: "bad url",
@@ -2005,18 +2144,6 @@ describe("contracts", () => {
     ).toThrow();
   });
 
-  test("accepts pack enable and marketing daily analysis defaults", () => {
-    expect(EnablePackRequest.parse({})).toEqual({ metadata: {} });
-    const payload = MarketingDailyAnalysisTaskRequest.parse({
-      connectionIds: ["00000000-0000-4000-8000-000000000020"],
-      timeZone: "Europe/Oslo",
-    });
-    expect(payload.hour).toBe(9);
-    expect(payload.minute).toBe(0);
-    expect(payload.runMode).toBe("new_session_per_run");
-    expect(payload.overlapPolicy).toBe("skip");
-  });
-
   test("accepts social connector and post payloads", () => {
     const connection = CreateSocialConnectionRequest.parse({
       provider: "linkedin",
@@ -2058,12 +2185,27 @@ describe("contracts", () => {
             mcpServerId: "example",
             transport: "streamable-http",
           },
+          enabled: true,
+          connectionRef: {
+            authoritySource: "host",
+            connectionId: "host:example:42",
+            providerDomain: "example.com",
+            kind: "delegated",
+            subjectScope: "subject",
+          },
         },
       ],
       installations: [],
     });
     expect(catalog.items[0]?.runtime.mcpServerId).toBe("example");
-    expect(catalog.items[0]?.enabled).toBe(false);
+    expect(catalog.items[0]?.enabled).toBe(true);
+    expect(catalog.items[0]?.connectionRef).toEqual({
+      authoritySource: "host",
+      connectionId: "host:example:42",
+      providerDomain: "example.com",
+      kind: "delegated",
+      subjectScope: "subject",
+    });
   });
 
   test("rejects empty user message command", () => {
@@ -2133,6 +2275,28 @@ describe("contracts", () => {
       note: "remember",
     };
     expect(SubmittedTimelineAnnotations.safeParse([annotation, annotation]).success).toBe(false);
+  });
+
+  test("accepts null skill review for ordinary questions without accepting malformed review references", () => {
+    const question = {
+      id: "choice",
+      kind: "single_select",
+      prompt: "Choose a format",
+      options: [{ id: "text", label: "Text" }],
+    };
+    for (const skillReview of [null, undefined]) {
+      const input = RequestHumanInputToolInput.parse({
+        questions: [{ ...question, skillReview }],
+      });
+      expect(input.questions[0]?.skillReview).toBe(skillReview);
+    }
+    for (const skillReview of [{}, "review", { skillId: "not-a-reference" }]) {
+      expect(
+        RequestHumanInputToolInput.safeParse({
+          questions: [{ ...question, skillReview }],
+        }).success,
+      ).toBe(false);
+    }
   });
 
   test("validates structured human-input questions and typed client responses", () => {
@@ -2488,7 +2652,7 @@ describe("contracts", () => {
 
   test("mergeToolRefs: strict beats optional for the same server", () => {
     // A server that is both optional and strict must end up STRICT. This keeps
-    // explicit strict selections fail-loud when they collide with optional pack
+    // explicit strict selections fail-loud when they collide with optional Skill
     // refs or auto-attached capability MCP defaults.
     expect(
       mergeToolRefs(
@@ -2518,241 +2682,6 @@ describe("contracts", () => {
         [{ kind: "mcp", id: "cap-notebook", optional: true }],
       ),
     ).toEqual([{ kind: "mcp", id: "cap-notebook", eager: true }]);
-  });
-});
-
-describe("capability pack runtime manifest fields", () => {
-  const baseManifest = {
-    id: "infra-runtime",
-    name: "Infra runtime",
-    description: "Infrastructure operations pack.",
-    role: "infrastructure",
-    category: "infrastructure",
-    version: "0.1.0",
-  };
-  const skill = {
-    name: "infra-ops",
-    files: [
-      {
-        path: "SKILL.md",
-        content: "---\nname: infra-ops\ndescription: Operate infra.\n---\n# Infra ops\n",
-      },
-      { path: "references/runbook.md", content: "Runbook." },
-    ],
-  };
-
-  test("packs without runtime fields keep their existing shape", () => {
-    const pack = CapabilityPack.parse(baseManifest);
-    expect(pack.sandboxImage).toBeUndefined();
-    expect(pack.sandboxProviderImages).toBeUndefined();
-    expect(pack.skills).toEqual([]);
-  });
-
-  test("accepts a sandbox image ref and inline skills", () => {
-    const pack = CapabilityPack.parse({
-      ...baseManifest,
-      sandboxImage:
-        "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      skills: [skill],
-    });
-    expect(pack.sandboxImage).toContain("@sha256:");
-    expect(pack.skills).toHaveLength(1);
-    expect(pack.skills[0]?.files.map((file) => file.path)).toEqual([
-      "SKILL.md",
-      "references/runbook.md",
-    ]);
-  });
-
-  test("binds a digest-pinned logical image to an immutable Modal image ID", () => {
-    const pack = CapabilityPack.parse({
-      ...baseManifest,
-      sandboxImage:
-        "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      sandboxProviderImages: {
-        modal: { imageId: "im-1234567890123456789012" },
-      },
-    });
-    expect(pack.sandboxProviderImages?.modal?.imageId).toBe("im-1234567890123456789012");
-  });
-
-  test("rejects a Modal image ID without digest-pinned logical provenance", () => {
-    for (const sandboxImage of [undefined, "example.com/infra-sandbox:latest"]) {
-      expect(() =>
-        CapabilityPack.parse({
-          ...baseManifest,
-          ...(sandboxImage ? { sandboxImage } : {}),
-          sandboxProviderImages: {
-            modal: { imageId: "im-1234567890123456789012" },
-          },
-        }),
-      ).toThrow();
-    }
-  });
-
-  test("requires every skill to include a top-level SKILL.md", () => {
-    expect(() =>
-      CapabilityPack.parse({
-        ...baseManifest,
-        skills: [
-          {
-            name: "infra-ops",
-            files: [{ path: "references/runbook.md", content: "Runbook." }],
-          },
-        ],
-      }),
-    ).toThrow();
-  });
-
-  test("rejects unsafe skill file paths", () => {
-    for (const path of [
-      "../escape.md",
-      "/absolute.md",
-      "a//b.md",
-      "./SKILL.md",
-      "refs/../SKILL.md",
-      "refs\\windows.md",
-    ]) {
-      expect(() =>
-        CapabilityPack.parse({
-          ...baseManifest,
-          skills: [
-            {
-              name: "infra-ops",
-              files: [
-                { path: "SKILL.md", content: "x" },
-                { path, content: "x" },
-              ],
-            },
-          ],
-        }),
-      ).toThrow();
-    }
-  });
-
-  test("rejects skill names that are not a single safe path segment", () => {
-    for (const name of ["infra/ops", "..", ".hidden", "-leading", ""]) {
-      expect(() =>
-        CapabilityPack.parse({
-          ...baseManifest,
-          skills: [{ name, files: [{ path: "SKILL.md", content: "x" }] }],
-        }),
-      ).toThrow();
-    }
-  });
-
-  test("rejects duplicate skill names and duplicate file paths", () => {
-    expect(() =>
-      CapabilityPack.parse({
-        ...baseManifest,
-        skills: [skill, { ...skill, description: "duplicate" }],
-      }),
-    ).toThrow();
-    expect(() =>
-      CapabilityPack.parse({
-        ...baseManifest,
-        skills: [
-          {
-            name: "infra-ops",
-            files: [
-              { path: "SKILL.md", content: "a" },
-              { path: "SKILL.md", content: "b" },
-            ],
-          },
-        ],
-      }),
-    ).toThrow();
-  });
-
-  test("pins component references and explicit Rig requirements", () => {
-    const pack = CapabilityPack.parse({
-      ...baseManifest,
-      components: [
-        {
-          key: "skills/terraform",
-          kind: "skill",
-          capabilityId: "skill:terraform",
-          contentSha256: "a".repeat(64),
-        },
-        {
-          key: "integrations/github",
-          kind: "integration",
-          capabilityId: "integration:github",
-          instanceKey: "primary",
-          revisionId: "revision-1",
-          contentSha256: "b".repeat(64),
-          required: false,
-        },
-      ],
-      rig: {
-        rigId: "11111111-1111-4111-8111-111111111111",
-        requireVerified: true,
-      },
-    });
-    expect(pack.components.map((component) => component.required)).toEqual([true, false]);
-    expect(pack.rig).toEqual({
-      rigId: "11111111-1111-4111-8111-111111111111",
-      required: true,
-      requireVerified: true,
-    });
-  });
-
-  test("rejects duplicate and inline-generated component keys", () => {
-    expect(() =>
-      CapabilityPack.parse({
-        ...baseManifest,
-        components: [
-          {
-            key: "skills/terraform",
-            kind: "skill",
-            capabilityId: "skill:a",
-            contentSha256: "a".repeat(64),
-          },
-          {
-            key: "skills/terraform",
-            kind: "skill",
-            capabilityId: "skill:b",
-            contentSha256: "b".repeat(64),
-          },
-        ],
-      }),
-    ).toThrow();
-    expect(() =>
-      CapabilityPack.parse({
-        ...baseManifest,
-        components: [
-          {
-            key: "inline-skill/infra-ops",
-            kind: "skill",
-            capabilityId: "skill:external",
-            contentSha256: "c".repeat(64),
-          },
-        ],
-        skills: [skill],
-      }),
-    ).toThrow();
-  });
-
-  test("bounds Pack identities and validates lifecycle request fences", () => {
-    expect(() => CapabilityPack.parse({ ...baseManifest, id: "Uppercase" })).toThrow();
-    expect(() => CapabilityPack.parse({ ...baseManifest, id: "x".repeat(101) })).toThrow();
-    expect(
-      PreviewPackInstallationRequest.parse({
-        rigId: "11111111-1111-4111-8111-111111111111",
-      }),
-    ).toEqual({ rigId: "11111111-1111-4111-8111-111111111111" });
-    expect(
-      InstallPackRequest.parse({
-        expectedManifestDigest: "d".repeat(64),
-        expectedInstallationVersion: 3,
-        idempotencyKey: "22222222-2222-4222-8222-222222222222",
-      }),
-    ).toMatchObject({ expectedInstallationVersion: 3 });
-    expect(
-      UninstallPackRequest.parse({
-        expectedInstallationVersion: 4,
-        idempotencyKey: "33333333-3333-4333-8333-333333333333",
-      }),
-    ).toMatchObject({ expectedInstallationVersion: 4 });
   });
 });
 

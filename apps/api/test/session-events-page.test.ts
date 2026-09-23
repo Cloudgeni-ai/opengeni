@@ -262,7 +262,7 @@ describe("session event byte-bounded HTTP pages", () => {
     expect(invalidResultMode.status).toBe(400);
   });
 
-  test("returns exact oversized forensic payloads without widening ordinary full reads", async () => {
+  test("returns exact oversized payloads for both forensic and ordinary full reads", async () => {
     if (!available) return;
     const { workspaceId, sessionId, authorization } = await fixture();
     const [session] = await admin<Array<{ accountId: string }>>`
@@ -305,11 +305,58 @@ describe("session event byte-bounded HTTP pages", () => {
     expect(ordinaryFull.status).toBe(200);
     const ordinaryBody = (await ordinaryFull.json()) as Array<{ type: string; payload: unknown }>;
     expect(ordinaryBody).toHaveLength(2);
-    expect(ordinaryBody[1]?.payload).not.toEqual(outputPayload);
-    expect(sessionEventPayloadTruncation(ordinaryBody[1]?.payload)?.surface).toBe(
-      "http_projection",
-    );
+    expect(ordinaryBody[1]?.payload).toEqual(outputPayload);
+    expect(sessionEventPayloadTruncation(ordinaryBody[1]?.payload)).toBeNull();
     expect(ordinaryFull.headers.get("X-OpenGeni-Forensic-Exact")).toBe("false");
+  });
+
+  test("delivers an oversized chat message intact and resumes after its exact cursor", async () => {
+    if (!available) return;
+    const { workspaceId, sessionId, authorization } = await fixture();
+    const [session] = await admin<
+      Array<{ accountId: string }>
+    >`select account_id as "accountId" from sessions where id = ${sessionId}`;
+    const text = `HEAD-${"p".repeat(3 * 1024 * 1024)}-TAIL`;
+    await admin`
+      insert into session_events (
+        account_id, workspace_id, session_id, sequence, type, payload
+      ) values (
+        ${session!.accountId}, ${workspaceId}, ${sessionId}, 1,
+        'agent.message.completed',
+        ${admin.json({
+          id: "legacy-page-stranding-output",
+          text,
+        })}
+      ), (
+        ${session!.accountId}, ${workspaceId}, ${sessionId}, 2,
+        'turn.completed', ${admin.json({ result: "after-projected-row" })}
+      )`;
+
+    const response = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?mode=forensic&payloadMode=full&after=0&limit=2&compact=true`,
+      { headers: { authorization } },
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Array<{ sequence: number; payload: unknown }>;
+    expect(body).toHaveLength(1);
+    expect(body[0]?.sequence).toBe(1);
+    expect((body[0]!.payload as { text: string }).text).toBe(text);
+    expect(sessionEventPayloadTruncation(body[0]?.payload)).toBeNull();
+    expect(response.headers.get("X-OpenGeni-Forensic-Exact")).toBe("false");
+    expect(response.headers.get("X-OpenGeni-Next-After")).toBe("1");
+    expect(response.headers.get("X-OpenGeni-Has-More")).toBe("true");
+    expect(Number(response.headers.get("X-OpenGeni-Page-Bytes"))).toBeGreaterThan(1024 * 1024);
+    expect(response.headers.get("X-OpenGeni-Page-Max-Bytes")).toBe(
+      response.headers.get("X-OpenGeni-Page-Bytes"),
+    );
+    const next = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?payloadMode=full&after=1&limit=2&compact=true`,
+      { headers: { authorization } },
+    );
+    expect(next.status).toBe(200);
+    const nextBody = (await next.json()) as Array<{ sequence: number }>;
+    expect(nextBody.map((event) => event.sequence)).toEqual([2]);
+    expect(next.headers.get("X-OpenGeni-Has-More")).toBe("false");
   });
 
   test("compact pages expose exact bytes and advance through coalescedUntil", async () => {
@@ -329,7 +376,7 @@ describe("session event byte-bounded HTTP pages", () => {
     }
 
     const first = await app.request(
-      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?after=9&limit=40&compact=true`,
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?mode=forensic&payloadMode=full&after=9&limit=40&compact=true`,
       { headers: { authorization } },
     );
     expect(first.status).toBe(200);
@@ -349,6 +396,8 @@ describe("session event byte-bounded HTTP pages", () => {
     );
     expect(first.headers.get("X-OpenGeni-Page-Truncated")).toBe("true");
     expect(first.headers.get("X-OpenGeni-Next-After")).toBe("49");
+    expect(first.headers.get("X-OpenGeni-Covered-Last")).toBe("49");
+    expect(first.headers.get("X-OpenGeni-Forensic-Exact")).toBe("false");
 
     const second = await app.request(
       `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?after=49&limit=40&compact=true`,

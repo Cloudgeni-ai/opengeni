@@ -28,6 +28,14 @@ RUN apt-get update \
 
 WORKDIR /src/agent
 ARG TARGETPLATFORM
+# Multi-Arch:same headers must have identical versions. Security mirrors can
+# publish architectures at different times; use bookworm's matching header pair
+# in this build-only stage, without changing the runtime image's packages.
+RUN set -eux; \
+    dpkg --add-architecture "$(xx-info debian-arch)"; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      linux-libc-dev/bookworm "linux-libc-dev:$(xx-info debian-arch)/bookworm"
 RUN xx-apt-get install -y --no-install-recommends xx-c-essentials
 COPY agent .
 # Cache mounts keep the crates.io registry and the per-target build directory
@@ -45,6 +53,14 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     mkdir -p /out; \
     install -m 0755 "target/${rust_target}/release/opengeni-computer-native" /out/opengeni-computer-native; \
     xx-verify /out/opengeni-computer-native
+
+# The command supervisor shares the existing native cross-toolchain and target
+# ABI verification. It has no runtime beyond libc and never routes user output
+# through its authenticated control protocol.
+RUN set -eux; \
+    xx-clang -std=c11 -O2 -Wall -Wextra -Werror \
+      native/command-supervisor/supervisor.c -o /out/opengeni-command-supervisor; \
+    xx-verify /out/opengeni-command-supervisor
 
 FROM oven/bun:${BUN_VERSION} AS bun-runtime
 
@@ -79,7 +95,10 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/browser-extension/package.json apps/browser-extension/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
+COPY examples/chat-quickstart/package.json examples/chat-quickstart/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
+COPY examples/embedded-product/package.json examples/embedded-product/package.json
+COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
@@ -90,6 +109,7 @@ COPY packages/capabilities/package.json packages/capabilities/package.json
 COPY packages/codemode/package.json packages/codemode/package.json
 COPY packages/codex/package.json packages/codex/package.json
 COPY packages/config/package.json packages/config/package.json
+COPY packages/connect/package.json packages/connect/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/db/package.json packages/db/package.json
@@ -106,6 +126,7 @@ COPY packages/runtime/package.json packages/runtime/package.json
 COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/storage/package.json packages/storage/package.json
 COPY packages/testing/package.json packages/testing/package.json
+COPY packages/tool-gateway/package.json packages/tool-gateway/package.json
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
 # The cache mount only holds Bun's download cache; the exact lock-resolved
@@ -116,26 +137,45 @@ RUN --mount=type=cache,id=opengeni-sandbox-bun-source,target=/root/.bun/install/
     bun install --frozen-lockfile
 COPY . .
 
+# Unreleased local work only. Deployed Sites install exact registry versions.
+ARG OPENGENI_LOCAL_SITE_PACKAGES=false
+RUN if [ "$OPENGENI_LOCAL_SITE_PACKAGES" = true ]; then \
+      bun run --cwd packages/react build:css && \
+      bun scripts/pack-sandbox-site-packages.ts /out/codemode-runtime/site-packages; \
+    fi
+
 # Install the exact lock-resolved Codemode package closure for ordinary Bun
 # programs. The CLI and imported module therefore share source, catalog rules,
 # and transport behavior without resolving mutable registry versions at runtime.
 RUN set -eux; \
     runtime=/out/codemode-runtime; \
+    install -d -m 0755 "$runtime/node_modules/@opengeni/connect"; \
+    install -m 0644 packages/connect/package.json "$runtime/node_modules/@opengeni/connect/package.json"; \
+    cp -a packages/connect/src "$runtime/node_modules/@opengeni/connect/src"; \
     install -d -m 0755 "$runtime/node_modules/@opengeni/codemode" \
                         "$runtime/node_modules/@opengeni/contracts" \
+                        "$runtime/node_modules/@opengeni/sdk" \
+                        "$runtime/node_modules/@opengeni/tool-gateway" \
                         "$runtime/node_modules/@noble"; \
     install -m 0644 packages/codemode/package.json "$runtime/node_modules/@opengeni/codemode/package.json"; \
     cp -a packages/codemode/src "$runtime/node_modules/@opengeni/codemode/src"; \
     install -m 0644 packages/contracts/package.json "$runtime/node_modules/@opengeni/contracts/package.json"; \
     cp -a packages/contracts/src "$runtime/node_modules/@opengeni/contracts/src"; \
-    cp -aL packages/codemode/node_modules/ajv "$runtime/node_modules/ajv"; \
-    ajv_modules="$(dirname "$(readlink -f packages/codemode/node_modules/ajv)")"; \
+    install -m 0644 packages/sdk/package.json "$runtime/node_modules/@opengeni/sdk/package.json"; \
+    cp -a packages/sdk/src "$runtime/node_modules/@opengeni/sdk/src"; \
+    install -m 0644 packages/tool-gateway/package.json "$runtime/node_modules/@opengeni/tool-gateway/package.json"; \
+    cp -a packages/tool-gateway/src "$runtime/node_modules/@opengeni/tool-gateway/src"; \
+    cp -aL packages/tool-gateway/node_modules/ajv "$runtime/node_modules/ajv"; \
+    ajv_modules="$(dirname "$(readlink -f packages/tool-gateway/node_modules/ajv)")"; \
     for dependency in fast-deep-equal fast-uri json-schema-traverse require-from-string; do \
       cp -aL "$ajv_modules/$dependency" "$runtime/node_modules/$dependency"; \
     done; \
     cp -aL packages/contracts/node_modules/zod "$runtime/node_modules/zod"; \
+    cp -aL packages/contracts/node_modules/yaml "$runtime/node_modules/yaml"; \
     cp -aL packages/contracts/node_modules/@noble/hashes "$runtime/node_modules/@noble/hashes"; \
-    test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"
+    test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"; \
+    test -f "$runtime/node_modules/@opengeni/sdk/src/site.ts"; \
+    test -f "$runtime/node_modules/@opengeni/tool-gateway/src/index.ts"
 
 RUN cd packages/ogtool && bun run build
 
@@ -176,6 +216,11 @@ RUN set -eux; \
     } > /out/SHA256SUMS
 
 COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
+COPY --from=computer-native-build /out/opengeni-command-supervisor /out/opengeni-command-supervisor
+RUN printf '%s  %s\n' \
+      "$(sha256sum /out/opengeni-command-supervisor | awk '{print $1}')" \
+      /usr/local/bin/opengeni-command-supervisor \
+      >> /out/SHA256SUMS
 RUN printf '%s  %s\n' \
       "$(sha256sum /out/opengeni-computer-native | awk '{print $1}')" \
       /usr/local/lib/opengeni/opengeni-computer-native \
@@ -432,6 +477,7 @@ COPY --from=browserd-build /out/opengeni-browserd /usr/local/bin/opengeni-browse
 COPY --from=browserd-build /out/agent-browser /usr/local/lib/opengeni/agent-browser
 COPY --from=browserd-build /out/lightpanda /usr/local/lib/opengeni/lightpanda
 COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
+COPY --from=browserd-build /out/opengeni-command-supervisor /usr/local/bin/opengeni-command-supervisor
 COPY --from=browserd-build /out/lightpanda-LICENSE /usr/local/share/licenses/lightpanda/LICENSE
 COPY --from=browserd-build /out/lightpanda-0.3.5-source.tar.gz /usr/local/share/source/lightpanda-0.3.5.tar.gz
 COPY --from=browserd-build /out/SHA256SUMS /usr/local/share/opengeni/browserd-SHA256SUMS
@@ -445,6 +491,8 @@ COPY docker/desktop/opengeni-terminal-down.sh /usr/local/bin/opengeni-terminal-d
 COPY docker/desktop/opengeni-browserd-up.sh     /usr/local/bin/opengeni-browserd-up
 COPY docker/desktop/opengeni-browserd-down.sh   /usr/local/bin/opengeni-browserd-down
 RUN set -eux; \
+    ln -s /opt/opengeni/codemode-runtime/node_modules /node_modules; \
+    if [ -d /opt/opengeni/codemode-runtime/site-packages ]; then ln -s /opt/opengeni/codemode-runtime/site-packages /opt/opengeni/site-packages; fi; \
     chmod 0755 /usr/local/bin/opengeni-git-askpass \
                /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down \
                /usr/local/bin/opengeni-browserd-up /usr/local/bin/opengeni-browserd-down \
@@ -455,7 +503,7 @@ RUN set -eux; \
     ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \
     node --check /opt/opengeni/ogtool/bin/ogtool.cjs; \
     test -n "$(ogtool --version)"; \
-    bun -e 'const module = await import("@opengeni/codemode"); if (typeof module.CodemodeClient !== "function" || typeof module.openGeni !== "object") process.exit(1)'; \
+    bun -e 'const codemode = await import("@opengeni/codemode"); const site = await import("@opengeni/sdk/site"); if (typeof codemode.CodemodeClient !== "function" || typeof codemode.openGeni !== "object" || typeof site.createOpenGeniSiteClient !== "function") process.exit(1)'; \
     bash -n /usr/local/bin/opengeni-terminal-up; \
     bash -n /usr/local/bin/opengeni-terminal-down; \
     bash -n /usr/local/bin/opengeni-browserd-up; \

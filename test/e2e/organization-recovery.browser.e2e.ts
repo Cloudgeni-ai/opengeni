@@ -94,6 +94,7 @@ const recoveryReadActorEpochs: Array<{
 const externalRequests: string[] = [];
 const browserProblems: string[] = [];
 let custodianTwoSuspended = false;
+let expectingUnavailableRecovery = false;
 const fakeProvider = new InMemoryOrganizationRecoveryNotificationTransport();
 
 function workflowStub(): SessionWorkflowClient {
@@ -358,6 +359,14 @@ function observeRecoveryPage(page: Page, actor: ActorKey): void {
     ) {
       return;
     }
+    if (
+      expectingUnavailableRecovery &&
+      actor === "custodian-1" &&
+      response.request().method() === "GET" &&
+      response.status() === 404 &&
+      url.pathname === `/v1/organizations/${organizationId}/recovery`
+    )
+      return;
     if (url.pathname.includes("/recovery") && response.status() >= 400) {
       browserProblems.push(`${actor}: recovery response ${response.status()} ${url.pathname}`);
     } else if (
@@ -761,6 +770,24 @@ afterAll(async () => {
 describe("organization recovery same-origin Chromium acceptance", () => {
   test("completes enrollment, cancellation, quorum, cooling, fake delivery, and execution by keyboard", async () => {
     if (!owned || !ownerClient) throw new Error("acceptance harness unavailable");
+    // Before enrollment an ordinary member receives the intentional,
+    // non-enumerating API denial. It is a product state, not a broken page.
+    const memberPage = actorBrowsers.get("custodian-1")!.page;
+    expectingUnavailableRecovery = true;
+    try {
+      await memberPage.goto(
+        `${publicOrigin}/workspaces/${workspaceId}/organization?section=recovery`,
+        { waitUntil: "domcontentloaded" },
+      );
+      await memberPage
+        .getByText("Recovery is unavailable for this account.", { exact: true })
+        .waitFor();
+      expect(await memberPage.getByText("Couldn't load organization recovery").count()).toBe(0);
+      expect(await memberPage.getByText("Policy: not configured").count()).toBe(0);
+      expect(await memberPage.getByRole("button", { name: "Save custody policy" }).count()).toBe(0);
+    } finally {
+      expectingUnavailableRecovery = false;
+    }
     const ownerPage = await openRecovery("owner");
     await ownerPage.getByText("Policy: not configured").waitFor();
     await ownerPage.getByText("Exact promotion consequence").waitFor();
@@ -862,8 +889,12 @@ describe("organization recovery same-origin Chromium acceptance", () => {
     const execute = custodianOnePage.getByRole("button", {
       name: "Execute promotion",
     });
+    const promotedToast = custodianOnePage
+      .locator('[data-sonner-toast][data-type="success"]')
+      .filter({ hasText: "Target promoted to co-owner." });
     await execute.focus();
     await custodianOnePage.keyboard.press("Enter");
+    await promotedToast.waitFor();
     await custodianOnePage.getByText(/executed · revision/u).waitFor();
     await custodianOnePage.getByText("including organization administration and").waitFor();
     await custodianOnePage.getByText("billing management").waitFor();
@@ -897,10 +928,7 @@ describe("organization recovery same-origin Chromium acceptance", () => {
       operationState: "executed",
     });
 
-    await custodianOnePage.locator("[data-sonner-toast]").first().waitFor({
-      state: "hidden",
-      timeout: 10_000,
-    });
+    await promotedToast.waitFor({ state: "hidden", timeout: 10_000 });
     await axe(custodianOnePage);
     await bounded(custodianOnePage, 1440);
     await custodianOnePage.screenshot({
@@ -919,6 +947,9 @@ describe("organization recovery same-origin Chromium acceptance", () => {
           !("accountId" in body),
       ),
     ).toBe(true);
+    custodianTwoPage.removeAllListeners();
+    await custodianTwoPage.context().close();
+    actorBrowsers.delete("custodian-2");
     expect(browserProblems).toEqual([]);
   }, 300_000);
 

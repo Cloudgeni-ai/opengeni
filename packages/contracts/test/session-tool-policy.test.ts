@@ -4,6 +4,7 @@ import {
   SessionEffectiveToolPolicy,
   SessionToolPolicy,
   UpdateSessionToolPolicyRequest,
+  WorkspaceSessionToolDefaultsPatch,
 } from "../src";
 
 describe("session tool policy contracts", () => {
@@ -40,6 +41,43 @@ describe("session tool policy contracts", () => {
         expectedVersion: 3,
       }),
     ).toThrow();
+  });
+
+  test("accepts bounded connector exclusions without changing default reset semantics", () => {
+    const request = {
+      mode: "workspace_default" as const,
+      excludedMcpServerIds: ["slack"],
+      expectedVersion: 1,
+    };
+    expect(UpdateSessionToolPolicyRequest.parse(request)).toEqual(request);
+    expect(() =>
+      UpdateSessionToolPolicyRequest.parse({
+        ...request,
+        excludedMcpServerIds: Array(65).fill("slack"),
+      }),
+    ).toThrow();
+    expect(() =>
+      UpdateSessionToolPolicyRequest.parse({
+        ...request,
+        excludedMcpServerIds: ["https://slack.example"],
+      }),
+    ).toThrow();
+    expect(
+      SessionToolPolicy.parse({
+        mode: "workspace_default",
+        inheritedFromSessionId: null,
+        excludedMcpServerIds: ["slack"],
+      }).excludedMcpServerIds,
+    ).toEqual(["slack"]);
+  });
+
+  test("workspace connector inheritance patches preserve independent override fields", () => {
+    expect(WorkspaceSessionToolDefaultsPatch.parse({ inheritConnectedMcpServers: true })).toEqual({
+      inheritConnectedMcpServers: true,
+    });
+    expect(WorkspaceSessionToolDefaultsPatch.parse({ inheritConnectedMcpServers: null })).toEqual({
+      inheritConnectedMcpServers: null,
+    });
   });
 
   test("accepts the durable policy modes and rejects invalid inheritance", () => {

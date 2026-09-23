@@ -1,0 +1,159 @@
+import { afterAll, expect, test } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+
+import { fakeClient, WORKSPACE_ID } from "../../../../../packages/react/test/fake-client";
+
+{
+  GlobalRegistrator.register();
+  (
+    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
+}
+const { OpenGeniProvider } = await import("@opengeni/react");
+const { CodexAccountIndicator } = await import("./codex-account-indicator");
+afterAll(() => GlobalRegistrator.unregister());
+
+test("running accepted account remains labeled while the switcher offers only the new pool", async () => {
+  const client = Object.assign(fakeClient({}), {
+    listSessionCodexAccounts: async () => ({
+      accounts: [
+        { id: "next", label: "New workspace account", status: "active", allocatorEnabled: true },
+      ],
+      currentAccount: {
+        id: "accepted",
+        label: "Accepted organization account",
+        status: "active",
+        allocatorEnabled: true,
+      },
+      currentSelection: { credentialId: "accepted", waiting: false },
+      pinnedAccountId: null,
+      lastAccountId: "accepted",
+      activeAccountId: "next",
+      settings: { rotationEnabled: true, rotationStrategy: "sharded", activeCredentialId: "next" },
+    }),
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
+          <CodexAccountIndicator
+            workspaceId={WORKSPACE_ID}
+            sessionId="running"
+            model="codex/gpt-5.6-sol"
+            events={[]}
+          />
+        </OpenGeniProvider>,
+      ),
+    );
+    const trigger = container.querySelector("button")!;
+    expect(trigger.getAttribute("aria-label")).toContain(
+      "Current account · Accepted organization account",
+    );
+    await act(async () =>
+      trigger.dispatchEvent(
+        new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false }),
+      ),
+    );
+    const choices = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map(
+      (row) => row.textContent,
+    );
+    expect(choices.some((choice) => choice?.includes("New workspace account"))).toBe(true);
+    expect(choices.some((choice) => choice?.includes("Accepted organization account"))).toBe(false);
+    expect(document.body.textContent).toContain("Use for next turn");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("shows the blocked account instead of a healthy default and permits repeating Auto", async () => {
+  const calls: string[] = [];
+  const client = Object.assign(fakeClient({}), {
+    listCodexAccounts: async () => {
+      throw new Error("workspace pool must not drive a session retry picker");
+    },
+    listSessionCodexAccounts: async () => ({
+      pinnedAccountId: null,
+      lastAccountId: null,
+      currentAccount: null,
+      currentSelection: { credentialId: "blocked", waiting: true },
+      accounts: [
+        {
+          id: "blocked",
+          label: "Blocked account",
+          fiveHour: { percent: 100, remaining: 0 },
+          weekly: { percent: 10, remaining: 90 },
+          status: "active",
+          plan: "pro",
+          allocatorEnabled: true,
+        },
+        {
+          id: "healthy",
+          label: "Healthy default",
+          status: "active",
+          plan: "pro",
+          allocatorEnabled: true,
+        },
+      ],
+      activeAccountId: "healthy",
+      settings: {
+        rotationEnabled: true,
+        rotationStrategy: "sharded",
+        activeCredentialId: "healthy",
+      },
+    }),
+    pinSessionCodexAccount: async (_workspace: string, _session: string, target: string) => {
+      calls.push(target);
+      return { pinned: target, appliedTo: "waiting_turn" };
+    },
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
+          <CodexAccountIndicator
+            workspaceId={WORKSPACE_ID}
+            sessionId="session"
+            model="codex/gpt-5.6-sol"
+            events={[]}
+          />
+        </OpenGeniProvider>,
+      ),
+    );
+    const trigger = container.querySelector("button")!;
+    expect(trigger.getAttribute("aria-label")).toContain("Waiting for capacity · Blocked account");
+    await act(async () =>
+      trigger.dispatchEvent(
+        new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false }),
+      ),
+    );
+    expect(document.body.textContent).toContain("Retry with");
+    const bars = document.querySelectorAll<HTMLElement>('[role="progressbar"]');
+    expect(bars.length).toBe(2);
+    expect(bars[0]!.getAttribute("aria-valuetext")).toBe("0% remaining");
+    expect(bars[1]!.getAttribute("aria-valuetext")).toBe("90% remaining");
+    expect((bars[1]!.firstElementChild as HTMLElement).style.width).toBe("90%");
+    const blockedOption = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (el) => el.textContent?.includes("Blocked account"),
+    );
+    expect(blockedOption?.textContent).toContain("0% remaining");
+    const auto = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) =>
+      el.textContent?.includes("Auto"),
+    );
+    expect(auto).toBeDefined();
+    await act(async () => auto!.click());
+    expect(calls).toEqual(["auto"]);
+    expect(document.body.textContent).toContain("Selection saved. Capacity is being rechecked.");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

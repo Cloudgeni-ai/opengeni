@@ -14,6 +14,8 @@ import {
   type WorkspaceTreeFingerprint,
 } from "@opengeni/contracts";
 import { withSandboxProviderCapture } from "./provider-operation-gate";
+import type { VerifiedHostWorkspaceArchive } from "./archive-spool";
+import { captureHostWorkspaceArchive, fingerprintHostWorkspace } from "./host-archive-spool";
 
 export {
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
@@ -35,6 +37,55 @@ export type VerifiedWorkspaceArchive = {
   kind: "tar" | "provider_snapshot";
   nativeSnapshot?: NativeSnapshotRef;
 };
+
+export type VerifiedWorkspaceArchivePayload =
+  | VerifiedWorkspaceArchive
+  | VerifiedHostWorkspaceArchive;
+
+/** Host-backed portable archives can go directly to object storage without an
+ * intermediate whole-document string or buffer. Existing inline/provider APIs
+ * retain their compatibility path when disk-backed publication is unavailable. */
+export async function captureWorkspaceArchiveForStorage(
+  session: unknown,
+  capturedAtMs: number,
+  options: WorkspaceArchiveCaptureOptions,
+  objectStorageAvailable: boolean,
+): Promise<VerifiedWorkspaceArchivePayload> {
+  const target = session as WorkspaceSession;
+  const root = hostBackedWorkspaceRoot(target);
+  if (
+    process.platform !== "linux" ||
+    !root ||
+    !objectStorageAvailable ||
+    options.strategy === "portable_tar"
+  ) {
+    return await captureVerifiedWorkspaceArchive(session, capturedAtMs, options);
+  }
+  return await withSandboxProviderCapture(session, async () => {
+    const { spool, workspace } = await captureHostWorkspaceArchive(
+      root,
+      workspaceFingerprintExcludes(target),
+    );
+    return {
+      kind: "host_spool" as const,
+      spool,
+      descriptor: {
+        version: 1 as const,
+        revision: `wa1:${String(capturedAtMs).padStart(13, "0")}:${spool.sha256}`,
+        archiveSha256: spool.sha256,
+        archiveBytes: spool.byteSize,
+        capturedAt: new Date(capturedAtMs).toISOString(),
+        workspace,
+      },
+    };
+  });
+}
+
+export async function disposeWorkspaceArchive(
+  archive: VerifiedWorkspaceArchivePayload | undefined,
+): Promise<void> {
+  if (archive?.kind === "host_spool") await archive.spool.dispose();
+}
 
 export type WorkspaceArchiveIntegrityCode =
   | "archive_metadata_missing"
@@ -789,7 +840,9 @@ export async function verifyRestoredWorkspace(
               "selected host-backed workspace archive was restored by a non-host-backed provider",
             );
           }
-          return fingerprintHostBackedWorkspace(root, workspaceFingerprintExcludes(target));
+          return process.platform === "linux"
+            ? fingerprintHostWorkspace(root, workspaceFingerprintExcludes(target))
+            : fingerprintHostBackedWorkspace(root, workspaceFingerprintExcludes(target));
         })()
       : await fingerprintRemoteWorkspace(target);
   if (!fingerprintsEqual(actual, descriptor.workspace)) {

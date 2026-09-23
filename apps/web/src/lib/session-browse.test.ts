@@ -12,6 +12,8 @@ import {
   sessionCreatorLabelMap,
   sessionCreatorLabel,
   sessionCreatorOptions,
+  sortSessionForest,
+  compareSessionBrowse,
 } from "./sessions-group";
 
 const NOW = new Date("2026-08-14T12:00:00.000Z");
@@ -30,6 +32,33 @@ function session(overrides: Partial<Session> & { id: string }): Session {
 }
 
 describe("session browse projections", () => {
+  test("matches server name normalization, Unicode byte order and microsecond date ties", () => {
+    const a = session({ id: "a", title: " Alpha ", createdAt: "2026-08-14T08:00:00.000002Z" });
+    const b = session({ id: "b", title: "alpha", createdAt: "2026-08-14T08:00:00.000001Z" });
+    expect(compareSessionBrowse(a, b, "name")).toBeLessThan(0);
+    expect(compareSessionBrowse(a, b, "createdAt")).toBeLessThan(0);
+    expect(
+      compareSessionBrowse(
+        session({ id: "a", title: "\uE000" }),
+        session({ id: "b", title: "😀" }),
+        "name",
+      ),
+    ).toBeLessThan(0);
+  });
+  test("sort is independent of grouping and preserves descendants", () => {
+    const a = session({ id: "a", title: "Zulu", createdAt: "2026-08-13T12:00:00Z" });
+    const b = session({ id: "b", title: "Alpha", createdAt: "2026-08-12T12:00:00Z" });
+    const child = session({ id: "c", title: "Child", parentSessionId: "a" });
+    const forest = groupSessionsForBrowse([a, b, child], "none", { now: NOW });
+    expect(forest.running).toEqual([]);
+    const named = sortSessionForest(forest, "name");
+    expect(named.grouped[0]!.sessions.map((node) => node.session.id)).toEqual(["b", "a"]);
+    expect(named.grouped[0]!.sessions[1]!.children[0]!.session.id).toBe("c");
+    expect(
+      sortSessionForest(forest, "createdAt").grouped[0]!.sessions.map((node) => node.session.id),
+    ).toEqual(["a", "b"]);
+    expect(compareSessionBrowse(a, b, "name")).toBeGreaterThan(0);
+  });
   test("filters the selected date field without confusing creation and activity", () => {
     const recentlyActive = session({ id: "recently-active" });
     const recentlyCreated = session({

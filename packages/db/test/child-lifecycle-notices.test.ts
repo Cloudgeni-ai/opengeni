@@ -4,6 +4,8 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import {
   acceptSessionApprovalDecision,
   acceptSessionHumanInputResponse,
+  adoptConnectedMachineSessionBackgroundCommand,
+  addSessionSystemUpdate,
   addSessionSystemUpdateWithSourceMutation,
   applySessionTurnSettlement,
   armCodexCapacityWait,
@@ -24,16 +26,18 @@ import {
   createDb,
   createSession,
   getSessionSystemUpdateOutboxByDedupeKey,
-  holdSessionGoalContinuationWithEvent,
+  waitForSessionInputWithEvent,
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
   listSessionEvents,
   markSessionSystemUpdateOutboxDeliveredInTransaction,
+  markSessionWorkflowWakeDelivered,
   materializeGoalContinuation,
   mutateSessionControlInTransaction,
   peekSessionWork,
   recordSessionGoalProgressWithEvent,
   sessionSystemUpdateOutboxKindPayload,
+  settleConnectedMachineSessionBackgroundCommand,
   withWorkspaceSessionActivityRls,
   type SessionSystemUpdateOutboxDelivery,
 } from "../src/index";
@@ -132,6 +136,258 @@ async function startSession(
 }
 
 type Started = Awaited<ReturnType<typeof startSession>>;
+
+async function startCommand(grant: Grant, started: Started) {
+  const command = {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId: started.session.id,
+    commandId: crypto.randomUUID(),
+    controlWorkspaceId: grant.workspaceId,
+    enrollmentId: crypto.randomUUID(),
+    connectionInstanceId: crypto.randomUUID(),
+    opId: crypto.randomUUID(),
+  };
+  await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+    ...command,
+    turnId: started.turn.id,
+    attemptId: started.attemptId,
+    executionGeneration: started.turn.executionGeneration,
+    command: "printf finished",
+  });
+  return command;
+}
+
+test.each([
+  { timing: "before", exitCode: 0 },
+  { timing: "after", exitCode: 0 },
+  { timing: "before", exitCode: 7 },
+  { timing: "after", exitCode: 7 },
+  { timing: "before", exitCode: null },
+  { timing: "after", exitCode: null },
+])(
+  "command completion stays durable without waking an idle non-waiting session %j",
+  async ({ timing, exitCode }) => {
+    const grant = await workspace();
+    const started = await startSession(grant, { message: "work" });
+    const command = await startCommand(grant, started);
+    if (timing === "after") await settleIdle(grant, started);
+    const wakeBefore =
+      await shared.admin`select wake_revision from session_workflow_wake_outbox where session_id=${started.session.id}`;
+    const result = await settleConnectedMachineSessionBackgroundCommand(client.db, {
+      ...command,
+      outcome: exitCode === null ? "lost" : "exited",
+      exitCode,
+      reason: exitCode === null ? "provider_lost" : "op_exit",
+    });
+    expect(result?.command.state).toBe(exitCode === null ? "lost" : "exited");
+    const wakeAfter =
+      await shared.admin`select wake_revision from session_workflow_wake_outbox where session_id=${started.session.id}`;
+    expect([...wakeAfter]).toEqual([...wakeBefore]);
+    if (timing === "before") await settleIdle(grant, started);
+    const events = await listSessionEvents(client.db, grant.workspaceId, started.session.id);
+    expect(events.some((event) => event.type === "session.command.finished")).toBe(true);
+    expect(await peekSessionWork(client.db, grant.workspaceId, started.session.id)).toEqual({
+      kind: "idle",
+    });
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: started.session.id,
+      workflowId: `session-${started.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("unclaimed");
+    expect(wakeBefore[0]).toBeDefined();
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: started.session.id,
+        temporalWorkflowId: `session-${started.session.id}`,
+        wakeRevision: Number(wakeBefore[0]!.wake_revision),
+      }),
+    ).toEqual({ action: "acknowledged" });
+    const pending = await shared.admin`
+    select state from session_system_updates
+    where session_id=${started.session.id} and source_id=${command.commandId}`;
+    expect(pending).toMatchObject([{ state: "pending" }]);
+  },
+);
+
+test.each([false, true])(
+  "a command backlog beyond the batch limit cannot block a later agent message (incompatible=%s)",
+  async (incompatible) => {
+    const grant = await workspace();
+    const started = await startSession(grant, { message: "start background work" });
+    const commands = [];
+    for (let i = 0; i < 150; i++) commands.push(await startCommand(grant, started));
+    await settleIdle(grant, started);
+    for (const command of commands) {
+      await settleConnectedMachineSessionBackgroundCommand(client.db, {
+        ...command,
+        outcome: "exited",
+        exitCode: 0,
+        reason: "op_exit",
+      });
+    }
+    const message = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: started.session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: crypto.randomUUID(),
+      summary: "Actionable peer result",
+      xaiProviderAccountAuthoritySnapshot: incompatible
+        ? { version: 1, scope: "organization" }
+        : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+      payload: {
+        type: "agent_message",
+        text: "Actionable peer result",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!message.added) throw new Error("message was not added");
+    const receivingAttemptId = crypto.randomUUID();
+    expect(await peekSessionWork(client.db, grant.workspaceId, started.session.id)).toEqual({
+      kind: "runnable",
+    });
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: started.session.id,
+      workflowId: `session-${started.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: receivingAttemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("peer result was not claimed");
+    const [delivered] =
+      await shared.admin`select state, delivered_turn_id from session_system_updates where id=${message.update.id}`;
+    expect(delivered).toMatchObject({ state: "delivered", delivered_turn_id: claim.turn.id });
+    await settleIdle(grant, { ...started, turn: claim.turn, attemptId: receivingAttemptId });
+    expect(await peekSessionWork(client.db, grant.workspaceId, started.session.id)).toEqual({
+      kind: "idle",
+    });
+    const [remaining] =
+      await shared.admin`select count(*)::int as count from session_system_updates where session_id=${started.session.id} and kind='background_command_result' and state='pending'`;
+    expect(remaining?.count).toBeGreaterThan(0);
+    if (incompatible) expect(remaining?.count).toBe(150);
+  },
+);
+
+test.each(["before", "during", "after"])(
+  "command completion %s wait registration resumes exactly one waiting turn",
+  async (timing) => {
+    const grant = await workspace();
+    const started = await startSession(grant, { message: "work" });
+    const command = await startCommand(grant, started);
+    const complete = () =>
+      settleConnectedMachineSessionBackgroundCommand(client.db, {
+        ...command,
+        outcome: "exited",
+        exitCode: 0,
+        reason: "op_exit",
+      });
+    if (timing === "before") await complete();
+    await waitForSessionInputWithEvent(client.db, grant.workspaceId, started.session.id, {
+      reason: "waiting for command",
+      timeoutSeconds: 600,
+      command: {
+        accountId: grant.accountId,
+        actor: {
+          type: "agent_attempt",
+          attemptId: started.attemptId,
+          sessionId: started.session.id,
+          turnId: started.turn.id,
+          executionGeneration: started.turn.executionGeneration,
+        },
+        operationKey: crypto.randomUUID(),
+      },
+    });
+    if (timing === "during") await complete();
+    await settleIdle(grant, started);
+    if (timing === "after") await complete();
+    expect(await peekSessionWork(client.db, grant.workspaceId, started.session.id)).toEqual({
+      kind: "runnable",
+    });
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: started.session.id,
+      workflowId: `session-${started.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+    const delivered = await shared.admin`
+      select state from session_system_updates
+      where session_id=${started.session.id} and source_id=${command.commandId}`;
+    expect(delivered).toMatchObject([{ state: "delivered" }]);
+  },
+);
+
+test("command-only claim rechecks wait expiry after peek", async () => {
+  const grant = await workspace();
+  const started = await startSession(grant, { message: "work" });
+  const command = await startCommand(grant, started);
+  await waitForSessionInputWithEvent(client.db, grant.workspaceId, started.session.id, {
+    reason: "waiting for command",
+    timeoutSeconds: 600,
+    command: {
+      accountId: grant.accountId,
+      operationKey: crypto.randomUUID(),
+      actor: {
+        type: "agent_attempt",
+        sessionId: started.session.id,
+        turnId: started.turn.id,
+        attemptId: started.attemptId,
+        executionGeneration: started.turn.executionGeneration,
+      },
+    },
+  });
+  await settleIdle(grant, started);
+  await settleConnectedMachineSessionBackgroundCommand(client.db, {
+    ...command,
+    outcome: "exited",
+    exitCode: 0,
+    reason: "op_exit",
+  });
+  expect(await peekSessionWork(client.db, grant.workspaceId, started.session.id)).toEqual({
+    kind: "runnable",
+  });
+  await shared.admin`update sessions set input_wait_until=now()-interval '1 second' where id=${started.session.id}`;
+  const reopened = createDb(shared.appUrl);
+  try {
+    const claim = await claimSessionWorkForAttempt(reopened.db, grant.workspaceId, {
+      sessionId: started.session.id,
+      workflowId: `session-${started.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim).toMatchObject({ action: "unclaimed", reason: "no-work" });
+    expect(await peekSessionWork(reopened.db, grant.workspaceId, started.session.id)).toMatchObject(
+      { kind: "input-wait", disposition: "timeout" },
+    );
+    expect(
+      await settleConnectedMachineSessionBackgroundCommand(reopened.db, {
+        ...command,
+        outcome: "exited",
+        exitCode: 0,
+        reason: "op_exit",
+      }),
+    ).toBeNull();
+    const rows =
+      await shared.admin`select state from session_system_updates where session_id=${started.session.id} and source_id=${command.commandId}`;
+    expect([...rows]).toEqual([{ state: "pending" }]);
+  } finally {
+    await reopened.close();
+  }
+});
 
 const questions = [
   {
@@ -687,34 +943,41 @@ describe("child lifecycle notices", () => {
     ).toBeNull();
   });
 
-  test("a current goal_wait hold is ended only by immediate-class pending input", async () => {
+  test("a no-goal session wait is ended only by immediate-class child input", async () => {
     const grant = await workspace();
-    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const parent = await startSession(grant, { goal: false, message: "orchestrate" });
     const child = await startSession(grant, {
       parent,
       message: "work",
       goal: true,
     });
-    await holdSessionGoalContinuationWithEvent(client.db, grant.workspaceId, parent.session.id, {
-      reason: "waiting for the worker",
-      untilSeconds: 600,
-      command: {
-        accountId: grant.accountId,
-        actor: {
-          type: "agent_attempt",
-          attemptId: parent.attemptId,
-          sessionId: parent.session.id,
-          turnId: parent.turn.id,
-          executionGeneration: parent.turn.executionGeneration,
+    const waiting = await waitForSessionInputWithEvent(
+      client.db,
+      grant.workspaceId,
+      parent.session.id,
+      {
+        reason: "waiting for the worker",
+        timeoutSeconds: 600,
+        command: {
+          accountId: grant.accountId,
+          actor: {
+            type: "agent_attempt",
+            attemptId: parent.attemptId,
+            sessionId: parent.session.id,
+            turnId: parent.turn.id,
+            executionGeneration: parent.turn.executionGeneration,
+          },
+          operationKey: crypto.randomUUID(),
         },
-        operationKey: crypto.randomUUID(),
       },
-    });
+    );
     await settleIdle(grant, parent);
     expect(await peekSessionWork(client.db, grant.workspaceId, parent.session.id)).toEqual({
-      kind: "idle",
+      kind: "input-wait",
+      disposition: "held",
+      waitTurnId: parent.turn.id,
+      deadlineAt: waiting.deadlineAt,
     });
-    expect((await materialize(grant, parent.session.id)).action).toBe("held");
 
     // A deferred child_progress leaves the hold in place.
     const progress = await recordSessionGoalProgressWithEvent(
@@ -746,9 +1009,11 @@ describe("child lifecycle notices", () => {
       ))!,
     );
     expect(await peekSessionWork(client.db, grant.workspaceId, parent.session.id)).toEqual({
-      kind: "idle",
+      kind: "input-wait",
+      disposition: "held",
+      waitTurnId: parent.turn.id,
+      deadlineAt: waiting.deadlineAt,
     });
-    expect((await materialize(grant, parent.session.id)).action).toBe("held");
 
     // An immediate child_requires_action ends it: the parent becomes runnable.
     await freezeChild(grant, child);
@@ -767,7 +1032,6 @@ describe("child lifecycle notices", () => {
     expect(await peekSessionWork(client.db, grant.workspaceId, parent.session.id)).toEqual({
       kind: "runnable",
     });
-    expect((await materialize(grant, parent.session.id)).action).toBe("queue");
     const events = await listSessionEvents(client.db, grant.workspaceId, parent.session.id);
     expect(events.filter((event) => event.type === "system.update.pending")).toHaveLength(2);
   });

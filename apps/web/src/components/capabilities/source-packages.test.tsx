@@ -46,9 +46,9 @@ describe("source import review", () => {
       />,
     );
     try {
-      expect(rendered.container.textContent).toContain("Immutable Plugin bill of materials ready");
+      expect(rendered.container.textContent).toContain("Plugin ready to review");
       expect(rendered.container.textContent).toContain("Manifest digest");
-      expect(rendered.container.textContent).toContain("Component bill of materials");
+      expect(rendered.container.textContent).toContain("Included components");
       expect(rendered.container.textContent).toContain("Workspace Linear");
       expect(rendered.container.textContent).toContain("Choose an exact Connection");
 

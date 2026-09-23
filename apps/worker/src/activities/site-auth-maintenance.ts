@@ -10,6 +10,7 @@ import {
   canonicalConfiguredModel,
   createAndStartSessionWithOutcome,
   recordWorkspaceUsage,
+  resolveCatalogSettings,
 } from "@opengeni/core";
 import {
   claimSiteAuthMaintenance,
@@ -127,23 +128,22 @@ async function dispatchMaintenanceSession(
     assertModelPolicy: typeof assertWorkspaceModelPolicyAllows;
   },
 ): Promise<void> {
-  const model = canonicalConfiguredModel(service.settings, service.settings.openaiModel);
+  const catalogSettings = (
+    await resolveCatalogSettings(service.db, service.catalogSourceSettings ?? service.settings)
+  ).settings;
+  const catalogService = { ...service, settings: catalogSettings };
+  const model = canonicalConfiguredModel(catalogSettings, catalogSettings.openaiModel);
   if (!model) throw new Error("site auth maintenance has no configured model");
-  await dependencies.assertModelPolicy(
-    service.db,
-    service.settings,
-    maintenance.workspaceId,
-    model,
-  );
-  const denial = await dependencies.admit(service, {
+  await dependencies.assertModelPolicy(service.db, catalogSettings, maintenance.workspaceId, model);
+  const denial = await dependencies.admit(catalogService, {
     accountId: maintenance.accountId,
     workspaceId: maintenance.workspaceId,
     model,
     requestedAgentRuns: 1,
   });
   if (denial) throw new Error(`site auth maintenance admission denied: ${denial}`);
-  const reasoningEffort = service.settings.openaiReasoningEffort;
-  const turnExecutionPolicy = resolveTurnExecutionPolicyV1(service.settings, {
+  const reasoningEffort = catalogSettings.openaiReasoningEffort;
+  const turnExecutionPolicy = resolveTurnExecutionPolicyV1(catalogSettings, {
     modelId: model,
     requestedModelId: null,
     modelSource: "deployment",
@@ -180,7 +180,7 @@ async function dispatchMaintenanceSession(
     model,
     reasoningEffort,
     turnExecutionPolicy,
-    sandboxBackend: service.settings.sandboxBackend,
+    sandboxBackend: catalogSettings.sandboxBackend,
     metadata: {
       role: "site_auth_maintenance",
       [SITE_AUTH_MAINTENANCE_CONNECTION_CONTEXT_KEY]: maintenance.siteAuthConnectionId,
@@ -205,7 +205,7 @@ async function dispatchMaintenanceSession(
   });
   try {
     await dependencies.recordUsage(
-      { db: service.db, settings: service.settings },
+      { db: service.db, settings: catalogSettings },
       {
         accountId: maintenance.accountId,
         workspaceId: maintenance.workspaceId,

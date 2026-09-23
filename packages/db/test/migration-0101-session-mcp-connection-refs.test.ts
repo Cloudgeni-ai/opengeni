@@ -69,6 +69,7 @@ describe("0101 session MCP connection refs (real PostgreSQL)", () => {
 
       const connectionRef = {
         connectionId: "cloud-connection:azure-devops:42",
+        authoritySource: "host",
         providerDomain: "dev.azure.com",
         kind: "delegated",
       };

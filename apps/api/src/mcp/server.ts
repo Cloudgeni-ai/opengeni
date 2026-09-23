@@ -1,6 +1,30 @@
+import {
+  getAttemptToolCatalog,
+  createChannel,
+  listChannels,
+  getChannel,
+  updateChannel,
+  reorderChannels,
+  deleteChannel,
+  setSessionChannel,
+} from "@opengeni/db";
 import { createHash, randomUUID } from "node:crypto";
+import { mintEnrollToken } from "../sandbox/enrollment";
+import { capabilityAccountReadiness } from "./capability-account-readiness";
+import {
+  prepareWorkspaceArtifactUpload,
+  prepareWorkspaceArtifactPublication,
+  workspaceArtifactDownloads,
+} from "../site-uploads";
 import {
   CreateScheduledTaskRequest,
+  CreateSessionRequest,
+  GoalSpec,
+  SessionGoalReportRequirements,
+  SessionGoalReportDeliveries,
+  boundSessionMcpText as capSessionDiscoveryText,
+  compactSessionMcpListRow,
+  sessionMcpIncludesRelatedWork,
   FIRST_PARTY_MCP_TOOL_NAMES,
   defaultRepositoryMountPath,
   SESSION_EVENT_RAW_DELTA_TYPES,
@@ -14,7 +38,6 @@ import {
   stableJson,
   compactSessionEventResult,
   sessionEventLatestClassToSemanticClass,
-  MemorySlackPublicationDistribution,
   SessionMcpCredentialUpdateInput,
   ToolAuthNeededPayload,
   VariableSetVariableName,
@@ -30,10 +53,13 @@ import {
   type SessionAuthorizationSurface,
   type Session,
   type WorkspaceMemoryPromptMode,
+  type WorkspaceArtifactMutationResponse,
   type ScheduledTask,
   UpdateScheduledTaskRequest,
   normalizeWorkspaceArtifactSlug,
   WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
+  WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX,
+  WORKSPACE_ARTIFACT_SOURCE_MAX_FILES,
   SESSION_GOAL_PROGRESS_MAX_BYTES,
   SESSION_GOAL_RATIONALE_MAX_BYTES,
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
@@ -67,8 +93,10 @@ import {
   encryptVariableSetValue,
   getSession,
   getSessionGoal,
+  getSessionMcpMonitoringSummary,
   getSessionQueueSnapshot,
   getSessionTurn,
+  getSessionTurnMcpAccountBindings,
   getOrCreatePreferenceRegistrySnapshot,
   getPreferenceRegistryFullContent,
   getVariableSet,
@@ -92,18 +120,15 @@ import {
   readVariableSetSecretAtomically,
   recordSyncedSocialPosts,
   listVariableSets,
-  MEMORY_CORRECT_TOOL_DESCRIPTION,
-  MEMORY_SAVE_TOOL_DESCRIPTION,
-  MEMORY_SEARCH_TOOL_DESCRIPTION,
   requireScheduledTask,
   requireSession,
-  searchWorkspaceMemories,
+  type MemoryAgentScope,
   serializeEffectiveSessionControl,
   setSessionGoalStatusWithEvent,
   recordSessionGoalProgressWithEvent,
-  holdSessionGoalContinuationWithEvent,
-  SESSION_GOAL_HOLD_MAX_SECONDS,
-  SESSION_GOAL_HOLD_MIN_SECONDS,
+  waitForSessionInputWithEvent,
+  SESSION_INPUT_WAIT_MAX_SECONDS,
+  SESSION_INPUT_WAIT_MIN_SECONDS,
   setVariableSetVariable,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
@@ -114,6 +139,7 @@ import {
   listWorkspaceArtifacts,
   publishWorkspaceArtifactVersion,
   rollbackWorkspaceArtifact,
+  setWorkspaceArtifactStatus,
   archiveTaskNote,
   createTaskNote,
   listTaskNotes,
@@ -123,11 +149,7 @@ import {
   acceptSessionHumanInputResponse,
   HumanInputResponseValidationError,
 } from "@opengeni/db";
-import {
-  appendAndPublishEvents,
-  appendAndPublishTurnEventsFenced,
-  publishDurableSessionEvents,
-} from "@opengeni/events";
+import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
 import {
   createSignedState,
@@ -143,26 +165,30 @@ import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/ser
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
+import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
+import { registerKnowledgeEntryTools } from "./knowledge-entries";
+import {
+  FIRST_PARTY_TOOL_AUTHORIZATION,
+  type FirstPartyToolAuthorization,
+} from "./first-party-tool-permissions";
 import {
   hasLiteralPermission,
   hasPermission,
   authorizedSocialConnectionsForGrant,
   authorizedAtlassianConnectionsForGrant,
   buildCapabilityCatalog,
-  correctWorkspaceMemoryWithSlackPublication,
   nativeConnectionCapabilityRecommendations,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
+  resolveWorkspaceCatalogSettings,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
-  saveWorkspaceMemoryWithSlackPublication,
   searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
-import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
+import { recordWorkspaceUsage, requireLimit, workflowIdForSession } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { retryWhileMissing } from "@opengeni/storage";
 import {
   githubBindingStatus,
   listWorkspaceGitHubInstallationBindings,
@@ -170,6 +196,12 @@ import {
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
+import {
+  projectWorkspaceArtifactDetailProvenance,
+  projectWorkspaceArtifactMutationProvenance,
+  projectWorkspaceArtifactVersionProvenance,
+  redactWorkspaceArtifactListProvenance,
+} from "../workspace-artifact-provenance";
 import {
   assertSocialConnectionProvider,
   socialMentionsLive,
@@ -204,6 +236,7 @@ import {
   validateScheduledTaskMachineTarget,
   validateScheduledTaskTarget,
   updateScheduledTaskForApi,
+  triggerScheduledTaskForGrant,
   validatedScheduledTaskUpdate,
 } from "@opengeni/core";
 import {
@@ -232,12 +265,24 @@ import {
   type RunOnOp,
 } from "@opengeni/core";
 import {
+  readSessionBackgroundCommandOutput,
+  COMMAND_OUTPUT_MAX_BYTES,
+} from "@opengeni/db/session-background-commands";
+import {
+  readCommandWithWait,
+  COMMAND_READ_MAX_WAIT_SECONDS,
+  COMMAND_WAIT_DEFAULT_SECONDS,
+} from "./command-read";
+import {
   boundSessionEventCompactResult,
   boundSessionEventMcpPage,
   boundSessionDetailMcp,
+  boundSessionCompactDetailMcp,
   boundRigDetailMcp,
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
+import { completeChildReadSequences } from "./child-read-evidence";
+import { acknowledgeConsumedChildEvents } from "@opengeni/db";
 import {
   SESSION_WAIT_COMPLETION_EVENT_TYPES,
   SESSION_WAIT_DEFAULT_SECONDS,
@@ -271,9 +316,7 @@ import {
 } from "../integrations/atlassian";
 import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
-import { registerCompanyBrainGovernedWriteTools } from "./company-brain-governed-writes";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
-import { registerRememberTools } from "./remember";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
@@ -284,6 +327,13 @@ export type McpServerOptions = {
   requestOrigin?: string | null;
   workspaceMemoryEnabled?: boolean | undefined;
   workspaceMemoryPromptMode?: WorkspaceMemoryPromptMode | undefined;
+  /**
+   * The bound session's typed Memory selector (migration 0427), resolved by
+   * the route from the session row. `off` registers no Memory tools; `user`
+   * and `session` read the workspace layer plus their own private layer and
+   * save into that private layer. Omitted/null keeps the workspace layer.
+   */
+  sessionMemory?: MemoryAgentScope | null | undefined;
 };
 
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
@@ -323,6 +373,45 @@ function orchestrationFailureCode(tool: OrchestrationToolName, error: HTTPExcept
                 ? "unavailable"
                 : "rejected";
   return `${tool}_${suffix}`.slice(0, ORCHESTRATION_FAILURE_CODE_MAX_LENGTH);
+}
+
+function sessionCreateValidationFailureResult(error: z4.ZodError) {
+  // Only call with issues from the raw request preflight, never downstream errors.
+  // Paths may contain caller-controlled record keys, and custom issue messages
+  // may contain values. Only publish canonical field names and fixed type labels.
+  const details = error.issues.slice(0, 5).map((issue) => {
+    const [field, goalField] = issue.path;
+    let path =
+      typeof field === "string" && Object.hasOwn(CreateSessionRequest.out.shape, field)
+        ? field
+        : "request";
+    if (
+      field === "goal" &&
+      typeof goalField === "string" &&
+      Object.hasOwn(GoalSpec.shape, goalField)
+    ) {
+      path += `.${goalField}`;
+    }
+    const expected =
+      issue.code === "invalid_type" &&
+      ["string", "number", "boolean", "object", "array", "int"].includes(issue.expected)
+        ? `expected ${issue.expected === "int" ? "integer" : issue.expected}`
+        : "failed schema validation";
+    return `${path} ${expected}`;
+  });
+  const envelope = {
+    error: {
+      code: "session_create_invalid_request",
+      message: boundedOrchestrationFailureMessage(
+        `Invalid session create request: ${details.join("; ") || "request failed schema validation"}${error.issues.length > 5 ? "; additional fields failed validation" : ""}.`,
+      ),
+    },
+  };
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
+    structuredContent: envelope,
+    isError: true as const,
+  };
 }
 
 function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknown) {
@@ -407,247 +496,6 @@ function orchestrationFailureResult(tool: OrchestrationToolName, error: unknown)
     isError: true as const,
   };
 }
-
-type FirstPartyToolAuthorization = {
-  sessionRequired?: true;
-  allOf?: readonly Permission[];
-  anyOf?: readonly Permission[];
-};
-
-/**
- * Authorization is deliberately complete and separate from visibility. The
- * `satisfies Record` check makes every catalog addition choose an explicit
- * registration predicate before it can compile.
- */
-const FIRST_PARTY_TOOL_AUTHORIZATION = {
-  set_session_title: { sessionRequired: true, allOf: ["sessions:control"] },
-  goal_set: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_update: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_progress: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_wait: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_complete: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
-  memory_search: { sessionRequired: true, allOf: ["documents:search"] },
-  memory_save: { sessionRequired: true, allOf: ["documents:search"] },
-  memory_correct: { sessionRequired: true, allOf: ["documents:search"] },
-  preference_registry_summary: {
-    sessionRequired: true,
-    allOf: ["workspace:read"],
-  },
-  preference_registry_get: { sessionRequired: true, allOf: ["workspace:read"] },
-  task_notes_list: { sessionRequired: true, allOf: ["sessions:read"] },
-  task_note_save: { sessionRequired: true, allOf: ["sessions:control"] },
-  task_note_archive: { sessionRequired: true, allOf: ["sessions:control"] },
-  task_note_replace: { sessionRequired: true, allOf: ["sessions:control"] },
-  work_claim_upsert: { sessionRequired: true, allOf: ["sessions:control"] },
-  work_claim_release: { sessionRequired: true, allOf: ["sessions:control"] },
-  knowledge_propose: { sessionRequired: true, allOf: ["documents:search"] },
-  knowledge_correct: { sessionRequired: true, allOf: ["documents:search"] },
-  task_note_promote_knowledge: {
-    sessionRequired: true,
-    allOf: ["documents:search", "sessions:control"],
-  },
-  task_note_promote_instruction_policy: {
-    sessionRequired: true,
-    allOf: ["documents:search", "sessions:control", "workspace:read"],
-  },
-  task_note_promote_preference: {
-    sessionRequired: true,
-    allOf: ["documents:search", "sessions:control", "workspace:read"],
-  },
-  instruction_policy_propose: {
-    sessionRequired: true,
-    allOf: ["documents:search", "workspace:read"],
-  },
-  preference_propose: {
-    sessionRequired: true,
-    allOf: ["documents:search", "workspace:read"],
-  },
-  // Explicit user-directed remember composes task-note evidence with the
-  // governed promotion path, so it needs the union of both permission sets.
-  remember: {
-    sessionRequired: true,
-    allOf: ["documents:search", "sessions:control", "workspace:read"],
-  },
-  remember_confirm: {
-    sessionRequired: true,
-    allOf: ["documents:search", "sessions:control", "workspace:read"],
-  },
-  company_profile_propose: {
-    sessionRequired: true,
-    allOf: ["sessions:control", "workspace:read"],
-  },
-  company_profile_confirm: {
-    sessionRequired: true,
-    allOf: ["sessions:control", "workspace:read"],
-  },
-  sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
-  sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
-  sandbox_swap: { sessionRequired: true, allOf: ["sessions:control"] },
-  run_on: { sessionRequired: true, allOf: ["sessions:control"] },
-  sandbox_provision: { sessionRequired: true, allOf: ["sessions:control"] },
-  connected_machine_remove: { allOf: ["enrollments:manage"] },
-  rig_list: { allOf: ["rigs:use"] },
-  rig_get: { allOf: ["rigs:use"] },
-  rig_propose_change: { allOf: ["rigs:use"] },
-  rig_verify: { allOf: ["rigs:use"] },
-  rig_promote: { allOf: ["rigs:manage"] },
-  sessions_list: { allOf: ["sessions:read"] },
-  session_get: { allOf: ["sessions:read"] },
-  session_events: { allOf: ["sessions:read"] },
-  // Blocking wait inside a running turn: the live attempt's own session is the
-  // self target, so the tool exists only for session-scoped grants.
-  session_wait: { sessionRequired: true, allOf: ["sessions:read"] },
-  session_create: { allOf: ["sessions:create"] },
-  session_send_message: { allOf: ["sessions:control"] },
-  session_pause: { allOf: ["sessions:control"] },
-  session_resume: { allOf: ["sessions:control"] },
-  session_steer: { sessionRequired: true, allOf: ["sessions:control"] },
-  // A live attempt may answer another session's structured human-input
-  // request (never a tool approval, which stays human-only).
-  session_human_input_respond: { sessionRequired: true, allOf: ["sessions:control"] },
-  set_other_session_title: { allOf: ["sessions:control"] },
-  interaction_discover: { sessionRequired: true, allOf: ["sessions:read"] },
-  browser_open: { sessionRequired: true, allOf: ["sessions:control"] },
-  browser_tabs: { sessionRequired: true, allOf: ["sessions:control"] },
-  browser_observe: { sessionRequired: true, allOf: ["sessions:read"] },
-  browser_act: { sessionRequired: true, allOf: ["sessions:control"] },
-  browser_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
-  browser_debug: { sessionRequired: true, allOf: ["sessions:read"] },
-  browser_auth: { sessionRequired: true, allOf: ["sessions:control"] },
-  interaction_request_human: {
-    sessionRequired: true,
-    allOf: ["sessions:control"],
-  },
-  browser_identity: { sessionRequired: true, allOf: ["sessions:control"] },
-  browser_publish: { sessionRequired: true, allOf: ["sessions:control"] },
-  browser_lifecycle: { sessionRequired: true, allOf: ["sessions:control"] },
-  computer_open: { sessionRequired: true, allOf: ["sessions:control"] },
-  computer_targets: { sessionRequired: true, allOf: ["sessions:read"] },
-  computer_observe: { sessionRequired: true, allOf: ["sessions:read"] },
-  computer_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
-  computer_act: { sessionRequired: true, allOf: ["sessions:control"] },
-  computer_lifecycle: { sessionRequired: true, allOf: ["sessions:control"] },
-  variable_set_list: { allOf: ["variable-sets:list", "secrets:list"] },
-  environment_list: { allOf: ["variable-sets:list", "secrets:list"] },
-  variable_set_get_variable: {
-    sessionRequired: true,
-    allOf: ["variable-sets:read", "secrets:read"],
-  },
-  variable_set_set_variable: {
-    allOf: ["variable-sets:write", "secrets:write"],
-  },
-  environment_set_variable: { allOf: ["variable-sets:write", "secrets:write"] },
-  capability_catalog_search: {
-    sessionRequired: true,
-    allOf: ["workspace:read"],
-  },
-  capability_authorization_request: {
-    sessionRequired: true,
-    allOf: ["workspace:read"],
-  },
-  github_connect_link: { allOf: ["github:use"] },
-  github_repositories_list: { allOf: ["github:use"] },
-  social_connections_list: { allOf: ["connections:read"] },
-  social_posts_recent: { allOf: ["connections:read"] },
-  social_daily_analysis_context: { allOf: ["connections:read"] },
-  social_search_live: { allOf: ["connections:read"] },
-  social_mentions_live: { allOf: ["connections:read"] },
-  social_thread_fetch: { allOf: ["connections:read"] },
-  // Writes the social_posts store, so it takes the write scope like the REST
-  // equivalent (POST /social/posts is workspace:admin).
-  social_posts_sync: { allOf: ["connections:write"] },
-  // Publishes under the user's identity: connections:write keeps it out of the
-  // default agent permission set, unlike the read-only social tools above.
-  social_post_reply: { allOf: ["connections:write"] },
-  x_accounts_list: { allOf: ["connections:read"] },
-  x_search_live: { allOf: ["connections:read"] },
-  x_mentions_live: { allOf: ["connections:read"] },
-  x_thread_fetch: { allOf: ["connections:read"] },
-  x_posts_sync: { allOf: ["connections:write"] },
-  x_post_reply: { allOf: ["connections:write"] },
-  reddit_accounts_list: { allOf: ["connections:read"] },
-  reddit_search_live: { allOf: ["connections:read"] },
-  reddit_mentions_live: { allOf: ["connections:read"] },
-  reddit_thread_fetch: { allOf: ["connections:read"] },
-  reddit_posts_sync: { allOf: ["connections:write"] },
-  reddit_post_reply: { allOf: ["connections:write"] },
-  scheduled_tasks_list: {
-    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
-  },
-  scheduled_tasks_get: {
-    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
-  },
-  scheduled_tasks_create: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_tasks_update: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_tasks_pause: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_tasks_resume: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_tasks_trigger: { allOf: ["scheduled_tasks:run"] },
-  scheduled_tasks_delete: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_task_runs_list: {
-    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
-  },
-  slack_bot_list_channels: { allOf: ["connections:read"] },
-  slack_bot_search: { allOf: ["connections:read"] },
-  slack_bot_channel_history: { allOf: ["connections:read"] },
-  slack_bot_thread_replies: { allOf: ["connections:read"] },
-  slack_bot_list_users: { allOf: ["connections:read"] },
-  slack_bot_list_files: { allOf: ["connections:read"] },
-  slack_bot_file_info: { allOf: ["connections:read"] },
-  slack_bot_file_content: { allOf: ["connections:read"] },
-  slack_bot_post_message: { allOf: ["connections:read"] },
-  slack_bot_delete_message: { allOf: ["connections:read"] },
-  fiken_companies_list: { allOf: ["connections:read"] },
-  fiken_contacts_list: { allOf: ["connections:read"] },
-  fiken_products_list: { allOf: ["connections:read"] },
-  fiken_invoices_list: { allOf: ["connections:read"] },
-  fiken_invoice_get: { allOf: ["connections:read"] },
-  fiken_bank_accounts_list: { allOf: ["connections:read"] },
-  fiken_purchases_list: { allOf: ["connections:read"] },
-  fiken_sales_list: { allOf: ["connections:read"] },
-  // Writes into the workspace's real accounting ledger surface take the write
-  // scope, keeping them out of the default agent permission set.
-  fiken_contact_create: { allOf: ["connections:write"] },
-  fiken_invoice_draft_create: { allOf: ["connections:write"] },
-  atlassian_sources_list: { allOf: ["connections:read"] },
-  atlassian_search: { allOf: ["connections:read"] },
-  atlassian_get: { allOf: ["connections:read"] },
-  artifacts_list: { sessionRequired: true, allOf: ["artifacts:read"] },
-  artifacts_get_source: { sessionRequired: true, allOf: ["artifacts:read"] },
-  artifacts_create: { sessionRequired: true, allOf: ["artifacts:publish"] },
-  artifacts_publish: { sessionRequired: true, allOf: ["artifacts:publish"] },
-  artifacts_rollback: { sessionRequired: true, allOf: ["artifacts:publish"] },
-  sandbox_file_publish: {
-    sessionRequired: true,
-    allOf: ["files:read", "files:upload"],
-  },
-  editable_artifact_list: { sessionRequired: true, allOf: ["artifacts:read"] },
-  editable_artifact_create: {
-    sessionRequired: true,
-    allOf: ["artifacts:publish"],
-  },
-  editable_artifact_import: {
-    sessionRequired: true,
-    allOf: ["artifacts:publish", "files:read"],
-  },
-  editable_artifact_get: { sessionRequired: true, allOf: ["artifacts:read"] },
-  editable_artifact_inspect: {
-    sessionRequired: true,
-    allOf: ["artifacts:read"],
-  },
-  editable_artifact_apply: {
-    sessionRequired: true,
-    allOf: ["artifacts:publish"],
-  },
-  editable_artifact_export: {
-    sessionRequired: true,
-    allOf: ["artifacts:read"],
-  },
-  editable_artifact_export_status: {
-    sessionRequired: true,
-    allOf: ["artifacts:read", "files:upload"],
-  },
-} satisfies Record<FirstPartyMcpToolName, FirstPartyToolAuthorization>;
 
 const FIRST_PARTY_MCP_TOOL_NAME_SET = new Set<string>(FIRST_PARTY_MCP_TOOL_NAMES);
 
@@ -764,13 +612,20 @@ export function buildOpenGeniMcpServer(
     typeof grant.metadata?.["sessionId"] === "string"
       ? (grant.metadata["sessionId"] as string)
       : null;
+  // A session-scoped grant carries its model-visible selection as a signed
+  // claim. When that claim is absent the grant was not minted for the ordinary
+  // first-party MCP surface (today only the sandbox Codemode bearer has that
+  // shape), so it resolves to no session tools rather than the deployment
+  // default catalog: an omitted claim must never widen.
+  const signedSelection = grant.metadata?.["firstPartyMcpTools"] as
+    | FirstPartyMcpToolName[]
+    | undefined;
   const selectedTools =
     sessionId !== null
       ? new Set(
-          allowedFirstPartyMcpToolsForSession(
-            deps.settings,
-            grant.metadata?.["firstPartyMcpTools"] as FirstPartyMcpToolName[] | undefined,
-          ),
+          signedSelection === undefined
+            ? []
+            : allowedFirstPartyMcpToolsForSession(deps.settings, signedSelection),
         )
       : null;
   const nestedAgentDepth = grant.metadata?.["nestedAgentDepth"];
@@ -805,20 +660,36 @@ export function buildOpenGeniMcpServer(
       },
     );
   }
-  // Goal tools require goals:manage (in the default first-party permission set).
-  if (sessionId !== null && can("goals:manage")) {
+  // PolicyMcpServer applies each tool's own permission contract. Register this
+  // mixed group for every session so session-level wait_for_input remains
+  // available with sessions:control even when goals:manage is intentionally
+  // absent.
+  if (sessionId !== null) {
     registerGoalTools(server, deps, grant, sessionId, json);
   }
-  if (sessionId !== null && options.workspaceMemoryEnabled === true) {
-    registerMemoryTools(
-      server,
-      deps,
-      grant,
-      sessionId,
-      json,
-      options.workspaceMemoryPromptMode ?? "retrieval_only",
-    );
+  // Agent learning controls authoring at the accepted-attempt write boundary.
+  // Reading existing Knowledge and Skills remains available when authoring is Off.
+  if (sessionId !== null) {
+    registerKnowledgeEntryTools(server, deps, grant, sessionId);
   }
+  server.registerTool(
+    "artifacts_list",
+    {
+      description:
+        "List the generic published artifacts in this workspace and their current versions.",
+      inputSchema: {},
+    },
+    async () => {
+      if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      }
+      return json(
+        redactWorkspaceArtifactListProvenance(
+          await listWorkspaceArtifacts(deps.db, grant.workspaceId),
+        ),
+      );
+    },
+  );
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerPreferenceRegistryTools(server, deps, grant, json);
     registerTaskNoteTools(server, deps, grant, sessionId, json);
@@ -826,19 +697,7 @@ export function buildOpenGeniMcpServer(
       registerWorkClaimTools(server, deps, grant, sessionId, json);
     }
     const attempt = exactAgentAttemptClaims(grant)!;
-    registerCompanyBrainGovernedWriteTools({
-      server,
-      db: deps.db,
-      attempt: {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        ...attempt,
-      },
-      authorize: async () => {
-        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
-      },
-      json,
-    });
+
     registerCompanyProfileAgentAdminTools({
       server,
       db: deps.db,
@@ -847,19 +706,6 @@ export function buildOpenGeniMcpServer(
         workspaceId: grant.workspaceId,
         ...attempt,
         agentSubjectId: grant.subjectId,
-      },
-      authorize: async () => {
-        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
-      },
-      json,
-    });
-    registerRememberTools({
-      server,
-      db: deps.db,
-      attempt: {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        ...attempt,
       },
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
@@ -918,6 +764,7 @@ export function buildOpenGeniMcpServer(
     sessionCreateVisible,
     json,
   );
+  registerProjectTools(server, deps, grant, can, json);
   registerVariableSetTools(server, deps, grant, can, sessionId, json);
   if (sessionId !== null && can("workspace:read")) {
     registerCapabilityDiscoveryTools(server, deps, grant, sessionId, json);
@@ -959,8 +806,7 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "social_connections_list",
       {
-        description:
-          "List connected social media accounts available to social media analysis packs.",
+        description: "List connected social media accounts available for analysis.",
         inputSchema: { limit: z4.number().int().positive().optional() },
       },
       async ({ limit }) =>
@@ -1163,7 +1009,7 @@ export function buildOpenGeniMcpServer(
 
     // Provider-scoped aliases are the canonical tools advertised by the X and
     // Reddit Integration cards. The legacy social_* names remain available to
-    // existing Packs/sessions, but these names bind the provider in the tool
+
     // identity and reject a near-identical Connection from the other adapter.
     for (const provider of ["x", "reddit"] as const) {
       const providerName = provider === "x" ? "X" : "Reddit";
@@ -1529,7 +1375,8 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "scheduled_tasks_create",
       {
-        description: "Create a scheduled task.",
+        description:
+          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog.",
         inputSchema: {
           name: z4.string(),
           schedule: z4.unknown(),
@@ -1540,7 +1387,7 @@ export function buildOpenGeniMcpServer(
           status: z4.string().optional(),
           // Explicit credential-free connection authority selections; declared
           // so MCP validation doesn't strip them before the contract parse.
-          connectionAuthorities: z4.array(z4.unknown()).optional(),
+          connectionAccounts: z4.array(z4.unknown()).optional(),
           variableSetId: z4.string().uuid().optional(),
           // Deprecated alias of variableSetId; declared so MCP validation doesn't
           // strip it before the contract parse maps it (rename back-compat).
@@ -1607,7 +1454,7 @@ export function buildOpenGeniMcpServer(
           status: z4.string().optional(),
           // Omitted preserves the frozen selections, [] clears them, and an
           // array replaces them; declared so MCP validation doesn't strip it.
-          connectionAuthorities: z4.array(z4.unknown()).optional(),
+          connectionAccounts: z4.array(z4.unknown()).optional(),
           variableSetId: z4.string().uuid().nullable().optional(),
           // Deprecated alias of variableSetId (rename back-compat); declared so MCP
           // validation doesn't strip it before the contract parse maps it.
@@ -1636,7 +1483,7 @@ export function buildOpenGeniMcpServer(
         if (!scheduledTaskUpdateChangesState(existing, update)) {
           return json(scheduledTaskReceipt("scheduled_tasks_update", existing, "unchanged", false));
         }
-        const task = await updateScheduledTaskForApi(deps.db, grant.workspaceId, id, update);
+        const task = await updateScheduledTaskForApi(deps.db, grant, id, update);
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
@@ -1659,7 +1506,7 @@ export function buildOpenGeniMcpServer(
           return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
         }
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
-        const task = await updateScheduledTaskForApi(deps.db, grant.workspaceId, id, {
+        const task = await updateScheduledTaskForApi(deps.db, grant, id, {
           status: "paused",
         });
         await syncUpdatedScheduledTask({
@@ -1694,7 +1541,7 @@ export function buildOpenGeniMcpServer(
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
         });
-        const task = await updateScheduledTaskForApi(deps.db, grant.workspaceId, id, update);
+        const task = await updateScheduledTaskForApi(deps.db, grant, id, update);
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
@@ -1718,7 +1565,7 @@ export function buildOpenGeniMcpServer(
       async ({ id, triggerId }) => {
         const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
         if (task.action.kind === "agent_turn") {
-          await validateScheduledTaskTarget({
+          const targetSession = await validateScheduledTaskTarget({
             db: deps.db,
             sessionAuthorization: deps.sessionAuthorization,
             authorizationSurface: "first_party_mcp",
@@ -1730,8 +1577,16 @@ export function buildOpenGeniMcpServer(
             agentConfig: task.agentConfig,
             missingTargetStatus: 404,
           });
+          const catalogSourceSettings = deps.catalogSourceSettings ?? deps.settings;
+          const catalogSettings = (
+            await resolveWorkspaceCatalogSettings(deps.db, catalogSourceSettings, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              ...(targetSession ? { retainedProductModelId: targetSession.model } : {}),
+            })
+          ).settings;
           await validateScheduledTaskMachineTarget({
-            settings: deps.settings,
+            settings: catalogSettings,
             db: deps.db,
             grant,
             runMode: task.runMode,
@@ -1752,7 +1607,7 @@ export function buildOpenGeniMcpServer(
             ? manualScheduledTaskTriggerUsageKey(grant.workspaceId, task.id, triggerToken)
             : `knowledge-source-sync:manual:${grant.workspaceId}:${task.id}:${triggerToken}`;
         const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);
-        await deps.workflowClient.triggerScheduledTask({
+        await triggerScheduledTaskForGrant(deps.db, grant, deps.workflowClient, {
           task,
           agentRunUsageIdempotencyKey,
           triggerWorkflowId,
@@ -1807,9 +1662,8 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id }) => {
         const { task, changed } = await deleteScheduledTaskWithDurableCleanup(deps, {
-          workspaceId: grant.workspaceId,
+          grant,
           taskId: id,
-          subjectId: grant.subjectId,
         });
         return json(
           mcpMutationReceipt({
@@ -1858,7 +1712,7 @@ function registerSandboxFileArtifactTool(
     "sandbox_file_publish",
     {
       description:
-        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Returns a permanent, authenticated artifact receipt; never invent or expose a sandbox: URL as the durable result.",
+        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a video, ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Present the returned artifact.artifactId as [Open file](artifact:<artifactId>), or ![Preview](artifact:<artifactId>) for inline image/video/audio/PDF previews. Replace <artifactId> with the exact returned ID and use a descriptive label. Never expose a sandbox: URL as the durable result.",
       inputSchema: {
         path: z4.string().min(1).max(4_096),
       },
@@ -2407,7 +2261,20 @@ function registerAtlassianTools(
     const authority = candidates[0]!;
     const metadata = AtlassianConnectionMetadata.safeParse(authority.connection.metadata);
     if (!metadata.success) throw new Error("Atlassian connection metadata is invalid");
+    const claims = exactAgentAttemptClaims(grant);
+    if (grant.principalKind === "agent_attempt" && !claims) {
+      throw new Error("Atlassian access requires the exact active agent attempt");
+    }
     return {
+      ...(claims
+        ? {
+            connectionUseContext: {
+              ...claims,
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+            },
+          }
+        : {}),
       connection: authority.connection,
       metadata: metadata.data,
       subjectId: authority.subjectId ?? grant.subjectId,
@@ -2424,7 +2291,10 @@ function registerAtlassianTools(
     async ({ connectionId }) => {
       const authority = await connectionFor(connectionId);
       const response = await browseAtlassianSources(deps, {
-        workspaceId: grant.workspaceId,
+        workspaceId: authority.connection.workspaceId,
+        ...(authority.connectionUseContext
+          ? { connectionUseContext: authority.connectionUseContext }
+          : {}),
         subjectId: authority.subjectId,
         connectionId: authority.connection.id,
       });
@@ -2457,7 +2327,10 @@ function registerAtlassianTools(
       return json({
         connectionId: authority.connection.id,
         results: await searchAtlassianLive(deps, {
-          workspaceId: grant.workspaceId,
+          workspaceId: authority.connection.workspaceId,
+          ...(authority.connectionUseContext
+            ? { connectionUseContext: authority.connectionUseContext }
+            : {}),
           subjectId: authority.subjectId,
           connectionId: authority.connection.id,
           query,
@@ -2483,7 +2356,10 @@ function registerAtlassianTools(
       const authority = await connectionFor(connectionId);
       return json(
         await getAtlassianLiveItem(deps, {
-          workspaceId: grant.workspaceId,
+          workspaceId: authority.connection.workspaceId,
+          ...(authority.connectionUseContext
+            ? { connectionUseContext: authority.connectionUseContext }
+            : {}),
           subjectId: authority.subjectId,
           connectionId: authority.connection.id,
           kind,
@@ -2563,11 +2439,17 @@ function registerGoalTools(
     SESSION_GOAL_PROGRESS_MAX_BYTES,
     "goal progress note",
   );
+  const inputWaitReasonSchema = boundedGoalToolString(2 * 1024, "session input wait reason").refine(
+    (value) => value.trim().length > 0,
+    {
+      message: "session input wait reason must not be blank",
+    },
+  );
   server.registerTool(
     "goal_set",
     {
       description:
-        "Create a goal when this session has none, or replace a completed goal with a new one. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
+        "Create a goal when this session has none, or replace a completed goal with a new one. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
       // `maxAutoContinuations` is deliberately not agent-facing: the ceiling is
       // API/scheduled-task pacing configuration, and an agent that set its own
       // cap used to silence its orchestration for hours. Continuation pacing is
@@ -2575,9 +2457,10 @@ function registerGoalTools(
       inputSchema: {
         text: goalText,
         successCriteria: successCriteriaSchema.optional(),
+        reportRequirements: SessionGoalReportRequirements.optional(),
       },
     },
-    async ({ text, successCriteria }) => {
+    async ({ text, successCriteria, reportRequirements }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
@@ -2591,15 +2474,24 @@ function registerGoalTools(
           ? (grant.metadata["turnId"] as string)
           : null;
       await assertGoalReactivationAllowed(deps, grant.workspaceId, sessionId, callerTurnId);
+      const context = exactAgentCommandContext(grant, sessionId);
       const { goal, replaced, events } = await upsertSessionGoalWithEvent(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId,
         text,
         successCriteria: successCriteria ?? null,
+        ...(reportRequirements !== undefined ? { reportRequirements } : {}),
         maxAutoContinuations: null,
         createdBy: "agent",
         actor: "agent",
+        commandActor: {
+          type: "agent_attempt",
+          sessionId: context.callerSessionId,
+          turnId: context.callerTurnId,
+          attemptId: context.callerAttemptId,
+          executionGeneration: context.callerExecutionGeneration,
+        },
       });
       if (events.length > 0) {
         await deps.bus.publish(grant.workspaceId, sessionId, events);
@@ -2687,13 +2579,14 @@ function registerGoalTools(
     "goal_progress",
     {
       description:
-        "Record concrete progress toward the unchanged active goal. This does not change goal text, success criteria, mutation policy, or objective revision. Do not use it merely to keep the continuation loop alive.",
+        "Record concrete progress toward the unchanged active goal. Optionally append reportRequirements for secondary user-facing reports discovered during other work; existing requirement IDs and titles cannot be changed or removed. This does not change goal text, success criteria, mutation policy, or objective revision. Do not use it merely to keep the continuation loop alive.",
       inputSchema: {
         progressNote: progressNoteSchema,
         idempotencyKey: z4.string().uuid(),
+        reportRequirements: SessionGoalReportRequirements.optional(),
       },
     },
-    async ({ progressNote, idempotencyKey }) => {
+    async ({ progressNote, idempotencyKey, reportRequirements }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       const context = exactAgentCommandContext(grant, sessionId);
       const { goal, events, operationId, replay } = await recordSessionGoalProgressWithEvent(
@@ -2702,6 +2595,7 @@ function registerGoalTools(
         sessionId,
         {
           progressNote,
+          ...(reportRequirements !== undefined ? { reportRequirements } : {}),
           command: {
             accountId: grant.accountId,
             actor: {
@@ -2721,38 +2615,38 @@ function registerGoalTools(
   );
 
   server.registerTool(
-    "goal_wait",
+    "wait_for_input",
     {
       description:
-        "Hold the active goal's automatic continuation while progress depends on child sessions or an external event. Use it instead of sleeping or polling sessions_list/session_get/session_events, and only after re-checking the child or external state once. Always end your turn right after calling it: you will be woken by a child result, an agent message, a human prompt, or at the deadline, and the goal stays active. The deadline (untilSeconds) is mandatory and capped at 7 days. Never use goal_wait instead of goal_pause when you are blocked on a human decision.",
+        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits instead of sleeping or repeatedly calling session_wait/command_wait. timeoutSeconds is a relative safety-wake duration; OpenGeni persists the first absolute deadline for the turn, and repeated calls do not extend it. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result, scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision.",
       inputSchema: {
-        reason: goalRationale,
-        untilSeconds: z4
+        reason: inputWaitReasonSchema.describe(
+          "Shown directly to the user. Write one short, natural sentence explaining what you are waiting for, with normal spacing. Exclude internal IDs, cursors, commit hashes, paths, and continuation instructions. Example: Waiting for the build and database checks to finish.",
+        ),
+        timeoutSeconds: z4
           .number()
           .int()
-          .min(SESSION_GOAL_HOLD_MIN_SECONDS)
-          .max(SESSION_GOAL_HOLD_MAX_SECONDS),
+          .min(SESSION_INPUT_WAIT_MIN_SECONDS)
+          .max(SESSION_INPUT_WAIT_MAX_SECONDS),
         idempotencyKey: z4.string().uuid().optional(),
       },
     },
-    async ({ reason, untilSeconds, idempotencyKey }) => {
-      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
+    async ({ reason, timeoutSeconds, idempotencyKey }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.control");
       const context = exactAgentCommandContext(grant, sessionId);
-      // Without a caller-supplied key the operation is idempotent per (goal
-      // target, turn, exact arguments): a replacement attempt replaying the
-      // same call receives the stored result instead of re-stamping the hold,
-      // while a genuinely new same-turn wait (different reason/deadline) is a
-      // new operation whose later hold wins.
       const operationKey =
         idempotencyKey ??
-        `goal-wait:${context.callerTurnId}:${createHash("sha256")
-          .update(JSON.stringify({ reason, untilSeconds }))
+        `wait-for-input:${context.callerTurnId}:${createHash("sha256")
+          .update(JSON.stringify({ reason, timeoutSeconds }))
           .digest("hex")
           .slice(0, 32)}`;
-      const { goal, events, operationId, replay, untilAt } =
-        await holdSessionGoalContinuationWithEvent(deps.db, grant.workspaceId, sessionId, {
+      const { events, operationId, replay, deadlineAt } = await waitForSessionInputWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        {
           reason,
-          untilSeconds,
+          timeoutSeconds,
           command: {
             accountId: grant.accountId,
             actor: {
@@ -2764,16 +2658,16 @@ function registerGoalTools(
             },
             operationKey,
           },
-        });
+        },
+      );
       await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
       return json({
-        status: "held",
-        goalId: goal.id,
-        untilAt,
+        status: "waiting_for_input",
+        deadlineAt,
         operationId,
         replay,
         nextAction:
-          "End your turn now; you will be woken by a child result, a message, a human prompt, or at untilAt.",
+          "The runtime yields this turn after the tool batch settles. Relevant input or the timeout deadline will start a new turn; the timeout does not cancel commands.",
       });
     },
   );
@@ -2782,16 +2676,23 @@ function registerGoalTools(
     "goal_complete",
     {
       description:
-        "Mark the session goal as completed. Requires concrete evidence (what was done and how it satisfies the success criteria). Completion prevents further continuation turns.",
-      inputSchema: { evidence: z4.string().min(1) },
+        "Mark the session goal as completed with concrete evidence. Every persisted report requirement must have a matching reportDeliveries entry containing a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection. Missing, stale, inaccessible or summary-only proof fails; inspect again after an edit. Omit reportDeliveries only when no reports were declared. Successful completion returns report artifact references and prevents further continuation turns.",
+      inputSchema: {
+        evidence: z4.string().min(1),
+        reportDeliveries: SessionGoalReportDeliveries.optional(),
+      },
     },
-    async ({ evidence }) => {
+    async ({ evidence, reportDeliveries }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
       if (!existing) {
         throw new Error("this session has no goal; use goal_set first");
       }
+      const context = exactAgentCommandContext(grant, sessionId);
+      const reportArtifactActor = editableArtifactActorForGrant(grant, "0000000000000001");
+      if (reportArtifactActor.kind !== "agent")
+        throw new Error("Goal completion requires exact agent authority");
       const { goal, events } = await setSessionGoalStatusWithEvent(
         deps.db,
         grant.workspaceId,
@@ -2799,6 +2700,15 @@ function registerGoalTools(
         {
           status: "completed",
           evidence,
+          ...(reportDeliveries !== undefined ? { reportDeliveries } : {}),
+          reportArtifactActor,
+          commandActor: {
+            type: "agent_attempt",
+            sessionId: context.callerSessionId,
+            turnId: context.callerTurnId,
+            attemptId: context.callerAttemptId,
+            executionGeneration: context.callerExecutionGeneration,
+          },
           event: { type: "goal.completed", evidence },
         },
       );
@@ -2806,8 +2716,8 @@ function registerGoalTools(
       if (events.length > 0) {
         await deps.bus.publish(grant.workspaceId, sessionId, events);
       }
-      return json(
-        mcpMutationReceipt({
+      return json({
+        ...mcpMutationReceipt({
           operation: "goal_complete",
           committed: true,
           outcome: changed ? "updated" : "unchanged",
@@ -2822,7 +2732,13 @@ function registerGoalTools(
           idempotency: { status: "not_supported" },
           nextAction: { tool: "session_get", arguments: { sessionId } },
         }),
-      );
+        reportDeliveries: SessionGoalReportDeliveries.parse(
+          goal.metadata.reportDeliveriesV1 ?? [],
+        ).map((delivery) => ({
+          ...delivery,
+          artifactReference: `[Open report](/workspaces/${grant.workspaceId}/artifacts/editable/${delivery.artifactId})`,
+        })),
+      });
     },
   );
 
@@ -2879,6 +2795,61 @@ function registerGoalTools(
       );
     },
   );
+  server.registerTool(
+    "goal_resume",
+    {
+      description:
+        "Resume this session's paused goal regardless of who paused it or why. Already active is a successful no-op. Preserves the objective and resets continuation counters.",
+      inputSchema: {},
+    },
+    async () => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
+      await requireSession(deps.db, grant.workspaceId, sessionId);
+      const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
+      if (!existing) {
+        throw new Error("this session has no goal; use goal_set first");
+      }
+      const { goal, events, workflowWakeRevision } = await setSessionGoalStatusWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        {
+          status: "active",
+          event: { type: "goal.resumed", actor: "agent" },
+        },
+      );
+      const changed = events.length > 0;
+      if (events.length > 0) {
+        await deps.bus.publish(grant.workspaceId, sessionId, events);
+      }
+      if (workflowWakeRevision !== null) {
+        await deps.workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId,
+          workflowId: workflowIdForSession(sessionId),
+          wakeRevision: workflowWakeRevision,
+        });
+      }
+      return json(
+        mcpMutationReceipt({
+          operation: "goal_resume",
+          committed: true,
+          outcome: changed ? "updated" : "unchanged",
+          changed,
+          resource: {
+            type: "session_goal",
+            id: goal.id,
+            version: goal.version,
+            state: goal.status,
+          },
+          timestamp: goal.updatedAt,
+          idempotency: { status: "not_supported" },
+          nextAction: { tool: "session_get", arguments: { sessionId } },
+        }),
+      );
+    },
+  );
 }
 
 type JsonResult = (value: unknown) => {
@@ -2913,42 +2884,44 @@ function registerWorkspaceArtifactTools(
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
-  const prepare = (html: string) => {
+  const canReadProvenanceSession = (sourceSessionId: string): Promise<boolean> =>
+    authorizeFirstPartySession(deps, grant, sourceSessionId, "session.read")
+      .then(() => true)
+      .catch((error) => {
+        if (error instanceof SessionAuthorizationDeniedError) return false;
+        throw error;
+      });
+  const mutation = async (response: WorkspaceArtifactMutationResponse) =>
+    await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
+  const prepare = (
+    html: string | undefined,
+    source?: { entrypoint: string; files: Array<{ path: string; content: string }> },
+    requestedTools?: Array<{ serverId: string; toolName: string }>,
+    uploadId?: string,
+  ) => {
     if (!deps.objectStorage) throw new Error("Object storage is not configured");
-    const bytes = new TextEncoder().encode(html);
-    if (bytes.byteLength < 1 || bytes.byteLength > WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES) {
-      throw new Error(
-        `Artifact HTML must be 1-${WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES} UTF-8 bytes`,
-      );
-    }
-    const contentSha256 = createHash("sha256").update(bytes).digest("hex");
-    const contentKey = `workspaces/${grant.workspaceId}/workspace-artifacts/blobs/${contentSha256}.html`;
-    return {
-      contentKey,
-      contentSha256,
-      sizeBytes: bytes.byteLength,
-      persistContent: async () => {
-        await deps.objectStorage!.putObject({
-          key: contentKey,
-          contentType: "text/html; charset=utf-8",
-          body: bytes,
-          sha256: contentSha256,
-        });
-      },
-    };
+    return prepareWorkspaceArtifactPublication(deps, grant, {
+      ...(html === undefined ? {} : { html }),
+      ...(uploadId ? { uploadId } : {}),
+      ...(source ? { source } : {}),
+      ...(requestedTools ? { requestedTools } : {}),
+    });
   };
   const provenance = (
     idempotencyKey: string,
-    sourceToolName: "artifacts_create" | "artifacts_publish" | "artifacts_rollback",
+    sourceToolName:
+      | "artifacts_create"
+      | "artifacts_publish"
+      | "artifacts_rollback"
+      | "artifacts_archive"
+      | "artifacts_restore",
   ) => {
     const claims = attempt();
     return {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       operationKey: `attempt:${createHash("sha256")
-        .update(
-          `${claims.sessionId}:${claims.turnId}:${claims.attemptId}:${claims.executionGeneration}:${idempotencyKey}`,
-        )
+        .update(`${claims.sessionId}:${claims.turnId}:${idempotencyKey}`)
         .digest("hex")}`,
       actorSubjectId: grant.subjectId,
       sourceSessionId: claims.sessionId,
@@ -2960,15 +2933,15 @@ function registerWorkspaceArtifactTools(
   };
 
   server.registerTool(
-    "artifacts_list",
+    "artifacts_prepare_upload",
     {
       description:
-        "List the generic published artifacts in this workspace and their current versions.",
+        "Get signed upload URLs for a Site's HTML and optional source JSON. Upload with curl or fetch, then pass uploadId to artifacts_create/artifacts_publish. No hashes or sizes needed. Source upload may be omitted for HTML-only Sites.",
       inputSchema: {},
     },
     async () => {
       await authorize();
-      return json(await listWorkspaceArtifacts(deps.db, grant.workspaceId));
+      return json(await prepareWorkspaceArtifactUpload(deps, grant));
     },
   );
 
@@ -2976,7 +2949,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_get_source",
     {
       description:
-        "Read an artifact's metadata and exact HTML source. Omit versionId for the current version.",
+        "Get artifact metadata, version id, and signed download URLs for HTML and optional source JSON. Download with curl or Bun. If source is null, edit the HTML instead. Omit versionId for the current version.",
       inputSchema: {
         artifactId: z4.string().uuid(),
         versionId: z4.string().uuid().optional(),
@@ -2985,21 +2958,27 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, versionId }) => {
       await authorize();
       if (!deps.objectStorage) throw new Error("Object storage is not configured");
-      const [detail, ref] = await Promise.all([
+      const [rawDetail, ref] = await Promise.all([
         getWorkspaceArtifact(deps.db, grant.workspaceId, artifactId),
         getWorkspaceArtifactContentRef(deps.db, grant.workspaceId, artifactId, versionId),
       ]);
-      const object = await retryWhileMissing(async () =>
-        deps.objectStorage!.getObjectBytes(ref.contentKey),
-      );
-      if (!object) throw new Error("Artifact content is unavailable");
-      const actualHash = createHash("sha256").update(object.bytes).digest("hex");
-      if (actualHash !== ref.version.contentSha256)
-        throw new Error("Artifact content failed integrity verification");
+      const sourceAuthorizations = new Map<string, Promise<boolean>>();
+      const canReadSourceSession = (sourceSessionId: string): Promise<boolean> => {
+        const existing = sourceAuthorizations.get(sourceSessionId);
+        if (existing) return existing;
+        const decision = canReadProvenanceSession(sourceSessionId);
+        sourceAuthorizations.set(sourceSessionId, decision);
+        return decision;
+      };
+      const [detail, projectedVersion] = await Promise.all([
+        projectWorkspaceArtifactDetailProvenance(rawDetail, canReadSourceSession),
+        projectWorkspaceArtifactVersionProvenance(ref.version, canReadSourceSession),
+      ]);
+      const downloads = await workspaceArtifactDownloads(deps.objectStorage, ref, "sandbox");
       return json({
         detail,
-        version: ref.version,
-        html: new TextDecoder().decode(object.bytes),
+        version: projectedVersion,
+        downloads,
       });
     },
   );
@@ -3017,24 +2996,60 @@ function registerWorkspaceArtifactTools(
           .regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/)
           .max(96)
           .optional(),
-        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES).optional(),
+        uploadId: z4.string().uuid().optional(),
+        source: z4
+          .object({
+            entrypoint: z4.string().min(1).max(256),
+            files: z4
+              .array(
+                z4.object({
+                  path: z4.string().min(1).max(256),
+                  content: z4.string(),
+                }),
+              )
+              .min(1)
+              .max(WORKSPACE_ARTIFACT_SOURCE_MAX_FILES),
+          })
+          .optional(),
+        requestedTools: z4
+          .array(
+            z4.object({
+              serverId: z4.string().min(1).max(256),
+              toolName: z4.string().min(1).max(512),
+            }),
+          )
+          .max(WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX)
+          .optional(),
         idempotencyKey: z4.string().min(1).max(200),
       },
     },
-    async ({ title, description, slug, html, idempotencyKey }) => {
+    async ({
+      title,
+      description,
+      slug,
+      html,
+      source,
+      requestedTools,
+      idempotencyKey,
+      uploadId,
+    }) => {
       await authorize();
       const artifactId = crypto.randomUUID();
       const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
       const resolvedSlug = slug ?? `${slugBase.slice(0, 87)}-${artifactId.slice(0, 8)}`;
       return json(
-        await createWorkspaceArtifact(deps.db, {
-          artifactId,
-          slug: resolvedSlug,
-          title,
-          description: description ?? null,
-          ...prepare(html),
-          ...provenance(idempotencyKey, "artifacts_create"),
-        }),
+        await mutation(
+          await createWorkspaceArtifact(deps.db, {
+            artifactId,
+            slug: resolvedSlug,
+            requestedSlug: slug ?? null,
+            title,
+            description: description ?? null,
+            ...(await prepare(html, source, requestedTools, uploadId)),
+            ...provenance(idempotencyKey, "artifacts_create"),
+          }),
+        ),
       );
     },
   );
@@ -3049,21 +3064,57 @@ function registerWorkspaceArtifactTools(
         expectedCurrentVersionId: z4.string().uuid(),
         title: z4.string().min(1).max(120).optional(),
         description: z4.string().max(2000).nullable().optional(),
-        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES).optional(),
+        uploadId: z4.string().uuid().optional(),
+        source: z4
+          .object({
+            entrypoint: z4.string().min(1).max(256),
+            files: z4
+              .array(
+                z4.object({
+                  path: z4.string().min(1).max(256),
+                  content: z4.string(),
+                }),
+              )
+              .min(1)
+              .max(WORKSPACE_ARTIFACT_SOURCE_MAX_FILES),
+          })
+          .optional(),
+        requestedTools: z4
+          .array(
+            z4.object({
+              serverId: z4.string().min(1).max(256),
+              toolName: z4.string().min(1).max(512),
+            }),
+          )
+          .max(WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX)
+          .optional(),
         idempotencyKey: z4.string().min(1).max(200),
       },
     },
-    async ({ artifactId, expectedCurrentVersionId, title, description, html, idempotencyKey }) => {
+    async ({
+      artifactId,
+      expectedCurrentVersionId,
+      title,
+      description,
+      html,
+      uploadId,
+      source,
+      requestedTools,
+      idempotencyKey,
+    }) => {
       await authorize();
       return json(
-        await publishWorkspaceArtifactVersion(deps.db, {
-          artifactId,
-          expectedCurrentVersionId,
-          ...(title !== undefined ? { title } : {}),
-          ...(description !== undefined ? { description } : {}),
-          ...prepare(html),
-          ...provenance(idempotencyKey, "artifacts_publish"),
-        }),
+        await mutation(
+          await publishWorkspaceArtifactVersion(deps.db, {
+            artifactId,
+            expectedCurrentVersionId,
+            ...(title !== undefined ? { title } : {}),
+            ...(description !== undefined ? { description } : {}),
+            ...(await prepare(html, source, requestedTools, uploadId)),
+            ...provenance(idempotencyKey, "artifacts_publish"),
+          }),
+        ),
       );
     },
   );
@@ -3084,13 +3135,71 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, versionId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
       return json(
-        await rollbackWorkspaceArtifact(deps.db, {
-          artifactId,
-          versionId,
-          expectedCurrentVersionId,
-          reason,
-          ...provenance(idempotencyKey, "artifacts_rollback"),
-        }),
+        await mutation(
+          await rollbackWorkspaceArtifact(deps.db, {
+            artifactId,
+            versionId,
+            expectedCurrentVersionId,
+            reason,
+            ...provenance(idempotencyKey, "artifacts_rollback"),
+          }),
+        ),
+      );
+    },
+  );
+
+  server.registerTool(
+    "artifacts_archive",
+    {
+      description:
+        "Unpublish an active workspace artifact without deleting its immutable versions or retained source.",
+      inputSchema: {
+        artifactId: z4.string().uuid(),
+        expectedCurrentVersionId: z4.string().uuid(),
+        reason: z4.string().min(1).max(4096),
+        idempotencyKey: z4.string().min(1).max(200),
+      },
+    },
+    async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
+      await authorize();
+      return json(
+        await mutation(
+          await setWorkspaceArtifactStatus(deps.db, {
+            artifactId,
+            status: "archived",
+            expectedCurrentVersionId,
+            reason,
+            ...provenance(idempotencyKey, "artifacts_archive"),
+          }),
+        ),
+      );
+    },
+  );
+
+  server.registerTool(
+    "artifacts_restore",
+    {
+      description:
+        "Republish an archived workspace artifact at its unchanged current immutable version.",
+      inputSchema: {
+        artifactId: z4.string().uuid(),
+        expectedCurrentVersionId: z4.string().uuid(),
+        reason: z4.string().min(1).max(4096),
+        idempotencyKey: z4.string().min(1).max(200),
+      },
+    },
+    async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
+      await authorize();
+      return json(
+        await mutation(
+          await setWorkspaceArtifactStatus(deps.db, {
+            artifactId,
+            status: "active",
+            expectedCurrentVersionId,
+            reason,
+            ...provenance(idempotencyKey, "artifacts_restore"),
+          }),
+        ),
       );
     },
   );
@@ -3448,9 +3557,6 @@ function registerPreferenceRegistryTools(
   );
 }
 
-const MemoryKindSchema = z4.enum(["preference", "semantic", "procedural", "decision", "episodic"]);
-const MemoryWriteKindSchema = z4.enum(["semantic", "decision", "episodic"]);
-
 function scheduledTaskReceipt(
   operation: string,
   task: ScheduledTask,
@@ -3516,10 +3622,6 @@ function scheduledTaskUpdateChangesState(
   if (update.metadata !== undefined && stableJson(update.metadata) !== stableJson(task.metadata)) {
     return true;
   }
-  // Personal-connection delegations are recomputed with agentConfig and can
-  // change even when the visible config is byte-identical (for example after a
-  // connection rotation), so preserve that refresh as a real mutation.
-  if (update.personalConnectionDelegations !== undefined) return true;
   return false;
 }
 
@@ -3541,294 +3643,6 @@ export function memorySlackPublicationActor(
   };
 }
 
-function memoryPreview(text: string): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length <= 120 ? normalized : `${normalized.slice(0, 119)}…`;
-}
-
-function registerMemoryTools(
-  server: McpServer,
-  deps: ApiRouteDeps,
-  grant: AccessGrant,
-  sessionId: string,
-  json: JsonResult,
-  promptMode: WorkspaceMemoryPromptMode,
-): void {
-  const publicationInputSchema = z4.object({
-    importance: z4.enum(["major", "normal", "minor"]),
-    audience: z4.literal("workspace"),
-    slackMode: z4.enum(["auto", "review", "never"]),
-    shareSummary: z4.string().trim().min(1).max(4_096),
-  });
-
-  server.registerTool(
-    "memory_search",
-    {
-      description: `${MEMORY_SEARCH_TOOL_DESCRIPTION} All existing Memory kinds are searchable. Legacy preference and procedure records are historical context, not active instructions; Skills and workspace instructions remain the behavioral authorities. When workspace Memory is enabled, use memory_save autonomously for durable facts, decisions, incidents, fixes, and outcomes, and memory_correct when an existing record is wrong or outdated.`,
-      inputSchema: {
-        query: z4.string().min(1),
-        kind: MemoryKindSchema.optional(),
-        limit: z4.number().int().positive().max(20).optional(),
-      },
-    },
-    async ({ query, kind, limit }) =>
-      json({
-        results: await searchWorkspaceMemories(
-          deps.db,
-          grant.workspaceId,
-          {
-            query,
-            ...(kind ? { kind } : {}),
-            ...(limit ? { limit } : {}),
-            agentPromptMode: promptMode,
-          },
-          deps.getDocumentServices().embedder,
-        ),
-      }),
-  );
-
-  // Memory writes are agent-only. Human creation and curation use the REST/UI
-  // surface; a non-attempt MCP principal may search but cannot mutate Memory.
-  if (exactAgentAttemptClaims(grant) === null) return;
-
-  server.registerTool(
-    "memory_save",
-    {
-      description: MEMORY_SAVE_TOOL_DESCRIPTION,
-      inputSchema: {
-        text: z4.string().min(1),
-        kind: MemoryWriteKindSchema,
-        confidence: z4.number().min(0).max(1).optional(),
-        replaces_id: z4.string().min(1).optional(),
-        slack_publication: publicationInputSchema.optional(),
-      },
-    },
-    async ({ text, kind, confidence, replaces_id, slack_publication }) => {
-      const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
-      const result = await saveWorkspaceMemoryWithSlackPublication(
-        deps.db,
-        {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId,
-          text,
-          kind,
-          ...(confidence !== undefined ? { confidence } : {}),
-          ...(replaces_id ? { replacesId: replaces_id } : {}),
-          origin: "agent",
-        },
-        slack_publication
-          ? {
-              distribution: MemorySlackPublicationDistribution.parse(slack_publication),
-              actor: memorySlackPublicationActor(actor, sessionId, grant.subjectLabel ?? null)
-                .actor,
-              ownerLabel: actor.initiator.label ?? grant.subjectLabel ?? null,
-            }
-          : null,
-        deps.getDocumentServices().embedder,
-      );
-      let timelineWarning: string | null = null;
-      try {
-        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-          {
-            type: "memory.saved",
-            payload: {
-              memoryId: result.memory.id,
-              kind: result.memory.kind,
-              preview: memoryPreview(result.memory.text),
-              deduped: result.deduped,
-              ...(result.superseded ? { supersededMemoryId: result.superseded.id } : {}),
-            },
-          },
-        ]);
-      } catch {
-        timelineWarning = "Memory committed, but its session timeline event could not be recorded.";
-        console.warn("workspace memory save: committed without session timeline event", {
-          errorClass: "MemoryTimelineOperationError",
-          errorCode: "memory_save_timeline_append_failed",
-          origin: "api",
-          workspaceId: grant.workspaceId,
-          sessionId,
-          memoryId: result.memory.id,
-        });
-      }
-      const changed = !result.deduped || result.updated || result.superseded !== null;
-      const outcome =
-        result.updated || result.superseded !== null
-          ? "updated"
-          : result.deduped
-            ? "unchanged"
-            : "created";
-      return json(
-        mcpMutationReceipt({
-          operation: "memory_save",
-          committed: true,
-          outcome,
-          changed,
-          resource: {
-            type: "knowledge_memory",
-            id: result.memory.id,
-            state: result.memory.status,
-          },
-          relatedResources: result.superseded
-            ? [
-                {
-                  type: "knowledge_memory",
-                  id: result.superseded.id,
-                  state: result.superseded.status,
-                },
-              ]
-            : undefined,
-          timestamp: result.memory.updatedAt,
-          idempotency: { status: "not_supported" },
-          warnings: [
-            ...(!result.embedded
-              ? ["Memory committed without a vector embedding; keyword search remains available."]
-              : []),
-            ...(timelineWarning ? [timelineWarning] : []),
-          ],
-          facts: {
-            deduped: result.deduped,
-            dedupeReason: result.dedupeReason,
-            updatedInPlace: result.updated,
-            embedded: result.embedded,
-            slackPublicationDecision: result.slackPublication.decision?.eligible
-              ? "eligible"
-              : (result.slackPublication.decision?.reason ?? "not_requested"),
-            slackPublicationId:
-              result.slackPublication.enqueue?.kind === "enqueued" ||
-              result.slackPublication.enqueue?.kind === "replayed"
-                ? result.slackPublication.enqueue.publication.id
-                : null,
-            slackPublicationState:
-              result.slackPublication.enqueue?.kind === "enqueued" ||
-              result.slackPublication.enqueue?.kind === "replayed"
-                ? result.slackPublication.enqueue.publication.state
-                : null,
-          },
-        }),
-      );
-    },
-  );
-
-  server.registerTool(
-    "memory_correct",
-    {
-      description: MEMORY_CORRECT_TOOL_DESCRIPTION,
-      inputSchema: {
-        id: z4.string().min(1),
-        reason: z4.string().min(1).optional(),
-        replacement_text: z4.string().min(1).optional(),
-        slack_publication: publicationInputSchema.optional(),
-      },
-    },
-    async ({ id, reason, replacement_text, slack_publication }) => {
-      const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
-      const result = await correctWorkspaceMemoryWithSlackPublication(
-        deps.db,
-        {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId,
-          id,
-          ...(reason ? { reason } : {}),
-          ...(replacement_text ? { replacementText: replacement_text } : {}),
-          origin: "agent",
-        },
-        slack_publication
-          ? {
-              distribution: MemorySlackPublicationDistribution.parse(slack_publication),
-              actor: memorySlackPublicationActor(actor, sessionId, grant.subjectLabel ?? null)
-                .actor,
-              ownerLabel: actor.initiator.label ?? grant.subjectLabel ?? null,
-            }
-          : null,
-        deps.getDocumentServices().embedder,
-      );
-      let timelineWarning: string | null = null;
-      try {
-        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-          {
-            type: "memory.corrected",
-            payload: {
-              memoryId: result.memory.id,
-              kind: result.memory.kind,
-              preview: memoryPreview(result.memory.text),
-              action: result.action,
-              ...(reason ? { reason: memoryPreview(reason) } : {}),
-              ...(result.replacement
-                ? {
-                    replacementMemoryId: result.replacement.id,
-                    replacementPreview: memoryPreview(result.replacement.text),
-                  }
-                : {}),
-            },
-          },
-        ]);
-      } catch {
-        timelineWarning =
-          "Memory correction committed, but its session timeline event could not be recorded.";
-        console.warn("workspace memory correction: committed without session timeline event", {
-          errorClass: "MemoryTimelineOperationError",
-          errorCode: "memory_correct_timeline_append_failed",
-          origin: "api",
-          workspaceId: grant.workspaceId,
-          sessionId,
-          memoryId: result.memory.id,
-        });
-      }
-      return json(
-        mcpMutationReceipt({
-          operation: "memory_correct",
-          committed: true,
-          outcome: "updated",
-          changed: true,
-          resource: {
-            type: "knowledge_memory",
-            id: result.memory.id,
-            state: result.memory.status,
-          },
-          relatedResources: result.replacement
-            ? [
-                {
-                  type: "knowledge_memory",
-                  id: result.replacement.id,
-                  state: result.replacement.status,
-                },
-              ]
-            : undefined,
-          timestamp: (result.replacement ?? result.memory).updatedAt,
-          idempotency: { status: "not_supported" },
-          warnings: timelineWarning ? [timelineWarning] : [],
-          facts: {
-            correctionAction: result.action,
-            slackPublicationDecision: result.slackPublication.decision?.eligible
-              ? "eligible"
-              : (result.slackPublication.decision?.reason ?? "not_requested"),
-            slackPublicationId:
-              result.slackPublication.enqueue?.kind === "enqueued" ||
-              result.slackPublication.enqueue?.kind === "replayed"
-                ? result.slackPublication.enqueue.publication.id
-                : null,
-            slackPublicationState:
-              result.slackPublication.enqueue?.kind === "enqueued" ||
-              result.slackPublication.enqueue?.kind === "replayed"
-                ? result.slackPublication.enqueue.publication.state
-                : null,
-          },
-        }),
-      );
-    },
-  );
-}
-
-// Fleet tools (M7 bring-your-own-compute). Session-scoped (they steer THIS
-// session's active-sandbox pointer + reach the workspace's enrolled machines),
-// registered only with the worker-signed sessionId claim + the selfhosted flag.
-// The agent uses these to list the fleet (its Modal box + enrolled machines),
-// attach/swap the active sandbox mid-conversation (heterogeneous, single-active,
-// epoch-fenced), run a one-off op on a specific machine without swapping, and
-// surface provisioning (enroll-a-machine) instructions to a human.
 function registerFleetTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -3969,7 +3783,7 @@ function registerFleetTools(
     "sandbox_provision",
     {
       description:
-        "Provision a new sandbox for the fleet. kind=selfhosted returns device-flow enrollment instructions to share with a HUMAN (install the agent + enroll their machine with loud whole-machine consent — the agent cannot self-consent). kind=modal creates a named Modal sandbox record, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so sandbox_swap to its id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
+        "Provision a new sandbox for the fleet. kind=selfhosted returns interactive device-flow instructions for a human to approve. For authorized headless enrollment, use connected_machine_enroll_token when available instead. kind=modal creates a named Modal sandbox record, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so sandbox_swap to its id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
       inputSchema: {
         kind: z4.enum(["selfhosted", "modal"]),
         name: z4.string().min(1).max(120).optional(),
@@ -3985,11 +3799,11 @@ function registerFleetTools(
   );
 }
 
-// Workspace-admin/operator surface for removing a connected machine. This is
+// Enrollment-management surface for creating tokens and removing machines. This is
 // deliberately separate from the session-scoped fleet tools: a worker can list,
 // attach, or run on a machine only with session authority, while removal requires
-// the explicit high-trust enrollments:manage permission and never accepts a
-// sandbox id. A Modal record therefore cannot be removed through this operation.
+// the explicit enrollments:manage permission. Removal accepts enrollment ids,
+// never sandbox ids; a Modal record cannot be removed through this operation.
 function registerConnectedMachineTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -3998,10 +3812,39 @@ function registerConnectedMachineTools(
   json: JsonResult,
 ): void {
   server.registerTool(
+    "connected_machine_enroll_token",
+    {
+      description:
+        "Create a short-lived Connected Machine enrollment token for this workspace using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Run the appropriate command on the intended machine through an already-authorized execution path, then verify it with sandboxes_list. No separate device approval is required. Screen control is optional and defaults off. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved.",
+      inputSchema: { allowScreenControl: z4.boolean().optional() },
+    },
+    async ({ allowScreenControl }) => {
+      if (sessionId) {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      }
+      const minted = await mintEnrollToken(deps, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        allowScreenControl: allowScreenControl ?? false,
+      });
+      if (!minted) throw new Error("enrollment credential plane is not configured");
+      const base = (deps.settings.publicBaseUrl ?? "https://app.opengeni.ai").replace(/\/+$/, "");
+      const unixQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+      const windowsQuote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+      return json({
+        ...minted,
+        workspaceId: grant.workspaceId,
+        allowScreenControl: allowScreenControl ?? false,
+        installCommandUnix: `curl -fsSL ${unixQuote(`${base}/install.sh`)} | OPENGENI_API_URL=${unixQuote(base)} OPENGENI_ENROLL_TOKEN=${unixQuote(minted.token)} sh`,
+        installCommandWindows: `$env:OPENGENI_API_URL=${windowsQuote(base)}; $env:OPENGENI_ENROLL_TOKEN=${windowsQuote(minted.token)}; irm ${windowsQuote(`${base}/install.ps1`)} | iex`,
+      });
+    },
+  );
+  server.registerTool(
     "connected_machine_remove",
     {
       description:
-        "Remove one enrolled self-hosted machine while it is offline. Access is revoked, future heartbeat/reconnect credentials are rejected, and session, route, lease, archive, and audit history is retained. Idle dependent sessions are detached atomically; machine-home sessions become compute-less (backend none) until another sandbox is selected. Active turns, live leases, and recovery work remain fail-closed blockers whose typed outcome explains what must settle before retrying. Pass the enrollmentId from the Machines surface, never a Modal sandbox id. Reconnecting later requires a fresh human-approved device-flow enrollment.",
+        "Remove one enrolled self-hosted machine while it is offline. Access is revoked, future heartbeat/reconnect credentials are rejected, and session, route, lease, archive, and audit history is retained. Idle dependent sessions are detached atomically; machine-home sessions become compute-less (backend none) until another sandbox is selected. Active turns, live leases, and recovery work remain fail-closed blockers whose typed outcome explains what must settle before retrying. Pass the enrollmentId from the Machines surface, never a Modal sandbox id. Reconnecting later requires fresh enrollment through device approval or an authorized enrollment token.",
       inputSchema: {
         enrollmentId: z4.string().uuid(),
         expectedUpdatedAt: z4.string().datetime({ offset: true }).optional(),
@@ -4088,7 +3931,7 @@ function registerRigTools(
     const rig = await requireRigForApi(deps.db, await resourceGrant(), rigId);
     if (rig.scope === "organization") {
       throw new Error(
-        "Organization rig mutation requires account-admin authority through the authenticated REST surface.",
+        "Organization sandbox environment mutation requires account-admin authority through the authenticated REST surface.",
       );
     }
     return rig;
@@ -4097,7 +3940,7 @@ function registerRigTools(
     server.registerTool(
       "rig_list",
       {
-        description: "List workspace rigs and their active versions.",
+        description: "List workspace sandbox environments and their active versions.",
         inputSchema: {},
       },
       async () => json({ rigs: await listRigs(deps.db, await resourceGrant()) }),
@@ -4107,7 +3950,7 @@ function registerRigTools(
       "rig_get",
       {
         description:
-          "Get one rig's bounded active definition plus compact historical version/change summaries. Historical setup scripts, checks, payloads, and verification logs are represented by counts/byte facts rather than copied into model context; use the access-controlled REST detail endpoints for exact retained definitions.",
+          "Get one sandbox environment's bounded active definition plus compact historical version/change summaries. Historical setup scripts, checks, payloads, and verification logs are represented by counts/byte facts rather than copied into model context; use the access-controlled REST detail endpoints for exact retained definitions.",
         inputSchema: {
           rigId: z4.string().uuid(),
           versionLimit: z4.number().int().positive().optional(),
@@ -4138,7 +3981,7 @@ function registerRigTools(
       "rig_propose_change",
       {
         description:
-          "Propose an additive rig setup command for clean verification. Use the exact command that already worked in this sandbox.",
+          "Propose an additive sandbox environment setup command for clean verification. Use the exact command that already worked in this sandbox.",
         inputSchema: {
           rigId: z4.string().uuid(),
           command: z4.string().min(1).max(8192),
@@ -4187,7 +4030,7 @@ function registerRigTools(
                 retryable: true,
               },
               warnings: [
-                "The rig change and verifying transition committed, but verification workflow start failed.",
+                "The sandbox environment change and verifying transition committed, but verification workflow start failed.",
               ],
               facts: { verificationAttempt: attempt },
               nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
@@ -4220,7 +4063,7 @@ function registerRigTools(
       "rig_verify",
       {
         description:
-          "Trigger rig verification. Pass changeId for a proposed change, or omit it to re-verify the active version's checks.",
+          "Trigger sandbox environment verification. Pass changeId for a proposed change, or omit it to re-verify the active version's checks.",
         inputSchema: {
           rigId: z4.string().uuid(),
           changeId: z4.string().uuid().optional(),
@@ -4290,7 +4133,7 @@ function registerRigTools(
           );
         }
         if (!rig.activeVersion) {
-          throw new Error("rig has no active version");
+          throw new Error("sandbox environment has no active version");
         }
         await deps.workflowClient.startRigVerification({
           workspaceId: rig.workspaceId,
@@ -4323,7 +4166,7 @@ function registerRigTools(
       "rig_promote",
       {
         description:
-          "Promote a verified definition_edit rig change to a new active immutable version. Requires rigs:manage.",
+          "Promote a verified definition_edit sandbox environment change to a new active immutable version. Requires rigs:manage.",
         inputSchema: {
           rigId: z4.string().uuid(),
           changeId: z4.string().uuid(),
@@ -4410,14 +4253,39 @@ function registerWorkspaceOrchestrationTools(
   sessionCreateVisible: boolean,
   json: JsonResult,
 ): void {
+  const acknowledgeReads = async (children: { sessionId: string; sequences: number[] }[]) => {
+    if (
+      !callerSessionId ||
+      !exactAgentAttemptClaims(grant) ||
+      !children.some((child) => child.sequences.length > 0)
+    )
+      return;
+    // Never use grant.subjectId, session creator, or the latest queue human.
+    // Reauthorize after the bounded read, including after a blocking wait.
+    const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, callerSessionId);
+    if (!actor.initiatingHumanSubjectId) return;
+    await acknowledgeConsumedChildEvents(deps.db, {
+      workspaceId: grant.workspaceId,
+      sessionId: callerSessionId,
+      subjectId: actor.initiatingHumanSubjectId,
+      children,
+    });
+  };
   if (can("sessions:read")) {
     server.registerTool(
       "sessions_list",
       {
-        description: `List compact high-level session status and advisory related-work evidence in this workspace. query searches semantic titles, active goals, and typed work claims; subject performs one exact provider-neutral claim lookup and ranks it ahead of text. Neither path searches initialMessage or grants access to a result. Claims are nonexclusive evidence, never locks or instructions. Relevance cursors are bound to normalized filters and a workspace activity-revision snapshot. Without search, the tool defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. includeLastMessage is opt-in and never previews a human/API prompt whose turn was never claimed (still queued, or deleted/edited/cancelled before any claim): waiting work is represented by queuedPromptCount until the turn is claimed. Rendered previews share a deterministic ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 aggregate budget, and omitted previews include a bounded session_events drill-down input (exact message type, direction=before, limit=1, monitoring summary). Use session_get only when ordinary target authorization allows it. The list never returns full session objects, instructions, resources, tools, files, or history.`,
+        description: `Discover sessions in this workspace. Default detail=compact returns id, title, status, goal summary/status when present, updatedAt, meaningful parent/pause information, total and nextCursor (null ends the page). Completed/paused goal status is retained; session_get supplies evidence and rationale. detail=full opts into the legacy bounded discovery rows and diagnostic pagination, not full session configuration. Plain compact browse does not read work claims. includeRelatedWork=true adds advisory evidence; query or subject always enables it, even with includeRelatedWork=false. query searches only titles, active goals and typed claims; subject is an exact provider-neutral claim lookup. Evidence preserves advisoryOnly/noAdditionalAccess: claims are nonexclusive, never locks, instructions or authority. Authorization precedes filtering, ranking, counts and cursors. Relevance cursors bind normalized filters and an activity snapshot. Without search the default is creation order; use orderBy=updatedAt and decimal updatedAfter/updatedThrough revision tokens for gap-free incremental monitoring, not timestamps. Pass nextCursor unchanged with the same filters. includeLastMessage opts into previews and nonzero queuedPromptCount; unclaimed human/API prompts are never previewed. Previews share a ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 budget; omitted previews carry a bounded session_events drill-down. Text/page loss facts appear only when loss occurs in compact mode. No instructions, resources, tools, files or history are returned; REST/UI defaults are unchanged.`,
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
+          detail: z4
+            .enum(["compact", "full"])
+            .optional()
+            .describe(
+              "compact (default) omits empty diagnostics but retains positive descendant attention counts and incomplete-tree loss facts; full restores the legacy bounded rows and pagination diagnostics.",
+            ),
+          includeRelatedWork: z4.boolean().optional(),
           includeLastMessage: z4.boolean().optional(),
           orderBy: z4.enum(["createdAt", "updatedAt", "relevance"]).optional(),
           updatedAfter: z4.string().max(64).optional(),
@@ -4438,7 +4306,22 @@ function registerWorkspaceOrchestrationTools(
             .max(8)
             .optional(),
           activeOnly: z4.boolean().optional(),
+          originSiteId: z4
+            .string()
+            .uuid()
+            .optional()
+            .describe(
+              "Conversations created through this Site, regardless of their project. Keep unchanged when paging.",
+            ),
           recentHours: z4.number().int().positive().max(WORK_DISCOVERY_RECENT_HOURS_MAX).optional(),
+          projectId: z4
+            .string()
+            .uuid()
+            .nullable()
+            .optional()
+            .describe(
+              "Filter by workspace project; null selects unfiled sessions. Keep unchanged when paging.",
+            ),
           rootSessionId: z4.string().uuid().optional(),
           parentSessionId: z4.string().uuid().nullable().optional(),
           subject: z4
@@ -4455,14 +4338,18 @@ function registerWorkspaceOrchestrationTools(
       async ({
         limit,
         cursor,
+        detail,
+        includeRelatedWork,
         includeLastMessage,
         orderBy: requestedOrderBy,
         updatedAfter,
         query,
         statuses,
         activeOnly,
+        originSiteId,
         recentHours,
         rootSessionId,
+        projectId,
         parentSessionId,
         subject,
         claimLimit,
@@ -4478,6 +4365,12 @@ function registerWorkspaceOrchestrationTools(
           authorizationScope?.kind === "scoped" ? "scoped" : "workspace";
         const decodedCursor = cursor ? decodeSessionDiscoveryCursor(cursor) : undefined;
         const relevanceRequested = Boolean(query?.trim() || subject);
+        const relatedWorkRequested = sessionMcpIncludesRelatedWork({
+          detail,
+          includeRelatedWork,
+          query,
+          subject,
+        });
         if (relevanceRequested && !deps.settings.workDiscoveryEnabled) {
           observeWorkDiscovery(deps.observability, {
             surface: "first_party_mcp",
@@ -4519,23 +4412,31 @@ function registerWorkspaceOrchestrationTools(
             ...(query?.trim() ? { query } : {}),
             ...(statuses ? { statuses: statuses as SessionStatus[] } : {}),
             activeOnly: activeOnly === true,
+            ...(originSiteId ? { originSiteId } : {}),
             ...(recentHours !== undefined ? { recentHours } : {}),
             ...(rootSessionId ? { rootSessionId } : {}),
+            ...(projectId !== undefined ? { channelId: projectId } : {}),
             ...(parentSessionId !== undefined ? { parentSessionId } : {}),
             ...(subject ? { subject: subject as WorkClaimSubjectFilter } : {}),
             ...(claimLimit !== undefined ? { claimLimit } : {}),
-            includeWorkDiscovery: deps.settings.workDiscoveryEnabled,
+            includeWorkDiscovery: deps.settings.workDiscoveryEnabled && relatedWorkRequested,
             subjectId: grant.subjectId,
             ...(authorizationScope ? { authorizationScope } : {}),
           });
-          const result = capSessionDiscoveryPage(page, includeLastMessage === true);
+          const result =
+            detail === "full"
+              ? capSessionDiscoveryPage(page, includeLastMessage === true)
+              : capSessionDiscoveryCompactPage(page, {
+                  includeLastMessage: includeLastMessage === true,
+                  includeRelatedWork: relatedWorkRequested,
+                });
           observeWorkDiscovery(deps.observability, {
             surface: "first_party_mcp",
             mode,
             outcome: result.sessions.length === 0 ? "empty" : "ok",
             authorizationScope: metricAuthorizationScope,
             durationMs: performance.now() - startedAtMs,
-            responseBytes: result.bytes,
+            responseBytes: Buffer.byteLength(JSON.stringify(result, null, 2), "utf8"),
             ...summarizeWorkDiscoveryRows(result.sessions),
           });
           return json(result);
@@ -4560,10 +4461,25 @@ function registerWorkspaceOrchestrationTools(
       "session_get",
       {
         description:
-          "Get another session you are managing: status, goal-bearing metadata, resources, persisted tool refs, exact bounded effectiveToolPolicy, and variableSet attachment (names/ids only, never variable values). effectiveToolPolicy distinguishes selected refs from workspace defaults, mandatory carriers, configured/deferred refs, and dropped refs. Do not call this with your own current session id to reconstruct context; your model-facing conversation history and persistent setting state are already supplied directly. Unbounded agent-set fields are clamped so monitoring another session cannot flood this context.",
-        inputSchema: { sessionId: z4.string().uuid() },
+          "Get an authorized session. Omit sessionId to read only the authenticated current agent session (a child reads itself, never its parent or root); sessionless/operator callers must provide an explicit ID. Both forms retain live-attempt and target authorization checks. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and snapshot lastSequence. Queued status and updatedAt are not proof of execution; inspect the active turn and durable results. Goal completion is not a terminal child result: join with session_wait waitFor=completion from the last consumed event cursor (0 if none), not this snapshot lastSequence, which may already include an unread completion. For an already-settled child, retrieve its result-bearing completion with session_events or join from the last consumed cursor. Use detail=full for the legacy bounded configuration including resources, persisted tool refs, effectiveToolPolicy and variableSet ids (never variable values). Full mode is configuration, not a substitute for compact goal/progress facts. Self reads inspect session state, not conversation history, which is supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
+        inputSchema: {
+          sessionId: z4
+            .string()
+            .uuid()
+            .optional()
+            .describe(
+              "Omit only to read the authenticated current agent session, never its parent or root. Sessionless callers must provide an explicit ID.",
+            ),
+          detail: z4.enum(["compact", "full"]).optional(),
+        },
       },
-      async ({ sessionId }) => {
+      async ({ sessionId: requestedSessionId, detail }) => {
+        const sessionId = requestedSessionId ?? exactAgentAttemptClaims(grant)?.sessionId;
+        if (sessionId === undefined) {
+          throw new Error(
+            "session_get requires an explicit sessionId without authenticated current agent session context",
+          );
+        }
         const authorization = await authorizeFirstPartySession(
           deps,
           grant,
@@ -4582,12 +4498,18 @@ function registerWorkspaceOrchestrationTools(
           },
           authorization?.relatedSessionAccess ?? "root",
         );
+        if (detail !== "full") {
+          return json(
+            boundSessionCompactDetailMcp(
+              projected,
+              await getSessionMcpMonitoringSummary(deps.db, grant.workspaceId, sessionId),
+              queue,
+            ),
+          );
+        }
         return json(
           boundSessionDetailMcp(
-            await withMcpEffectivePolicy(deps, grant.workspaceId, grant.subjectId, {
-              ...projected,
-              effectiveControl: queue?.effectiveControl ?? projected.effectiveControl,
-            }),
+            await withMcpEffectivePolicy(deps, grant.workspaceId, grant.subjectId, projected),
           ),
         );
       },
@@ -4597,9 +4519,14 @@ function registerWorkspaceOrchestrationTools(
       "session_events",
       {
         description:
-          "Read a compact semantic tail only when session_get status is insufficient. With no cursor, this returns the newest matching events and excludes raw message/reasoning/command/PTY deltas. Monitoring mode also omits a human/API user.message whose turn was never claimed (still queued, or deleted/edited/cancelled before any claim; waiting work is represented by sessions_list queuedPromptCount); the row appears at its own sequence once the turn is claimed. Use `latest` as an exclusive lookup for the authoritative newest durable sequence in exactly one semantic class; `receipt` is the concise alias for `tool_receipt`, and latest cannot be combined with type or class filters. Add `resultMode=compact` to latest for one bounded result-bearing completion/checkpoint/receipt without another inference. Use nextBefore to page older or explicit after/nextAfter to page forward. Type/class filters run in the RLS-scoped database query. payloadMode none|summary|full controls retained audit payload projection, but every model result is independently byte-capped with explicit truncation and exact covered sequence bounds. Exact retained forensic payloads, including unclaimed prompt rows, require mode=forensic or the access-controlled REST/SDK events API with mode=forensic&payloadMode=full; generic source bytes never retained by the audit boundary remain unavailable.",
+          "Read session history. Default view=conversation returns roughly ten complete user/assistant messages, including completed commentary, in a 16 KiB envelope; no token deltas or execution records. Prefer fewer complete messages; a single oversized message has fragment offsets and a lossless nextCursor continuation over retained source text, including large legacy rows. Fragment unit is codepoint for plain text or utf16 for codec text; pass the opaque v2 cursor unchanged (v1 cursors must restart). Pass cursor=nextCursor with sessionId, omitting other selectors; it binds the view, detail and direction. after/nextAfter and before/nextBefore only change position, never view or detail; use nextCursor when present to avoid skipping a message fragment. view=results returns final turn answers and actionable outcomes without duplicate message-completion text. view=tools returns compact call/result identities; includeArguments/includeOutput opt into one text or JSON-encoded value, and callId selects an exact call (sparse scans can return an empty advancing page). sourceExact=false and sourceOmitted identify oversized structured values that were omitted, never partial JSON presented as complete; scalar text remains resumable. Conversation/results/tools omit never-claimed human/API prompts and stale duplicate events. view=debug exposes the existing authorized audit query with explicit type/class filters, mode=monitoring|forensic and payloadMode=none|summary|full; raw deltas and never-claimed prompts require mode=forensic. Explicit legacy audit selectors remain supported without view. latest is an exclusive semantic-class lookup; resultMode=compact requires latest. No read observes commands or changes append-only history. REST behavior is unchanged.",
         inputSchema: {
           sessionId: z4.string().uuid(),
+          view: z4.enum(["conversation", "results", "tools", "debug"]).optional(),
+          cursor: z4.string().max(4096).optional(),
+          callId: z4.string().max(512).optional(),
+          includeArguments: z4.boolean().optional(),
+          includeOutput: z4.boolean().optional(),
           after: z4.number().int().nonnegative().optional(),
           before: z4.number().int().positive().optional(),
           limit: z4.number().int().positive().optional(),
@@ -4607,8 +4534,34 @@ function registerWorkspaceOrchestrationTools(
           mode: z4.enum(SessionEventReadMode.options).optional(),
           payloadMode: z4.enum(SessionEventPayloadMode.options).optional(),
           resultMode: z4.enum(SessionEventResultMode.options).optional(),
-          includeTypes: z4.array(z4.enum(SessionEventType.options)).max(100).optional(),
-          excludeTypes: z4.array(z4.enum(SessionEventType.options)).max(100).optional(),
+          includeTypes: z4
+            .array(
+              z4
+                .string()
+                .refine(
+                  (value) => SessionEventType.safeParse(value).success,
+                  "Unknown session event type",
+                ),
+            )
+            .max(100)
+            .describe(
+              "Debug audit event types, e.g. turn.completed, user.message, agent.message.completed, agent.toolCall.output. Validated against the canonical event-type registry.",
+            )
+            .optional(),
+          excludeTypes: z4
+            .array(
+              z4
+                .string()
+                .refine(
+                  (value) => SessionEventType.safeParse(value).success,
+                  "Unknown session event type",
+                ),
+            )
+            .max(100)
+            .describe(
+              "Debug audit event types to exclude; validated against the canonical event-type registry.",
+            )
+            .optional(),
           includeClasses: z4
             .array(z4.enum(SessionEventSemanticClass.options))
             .max(SessionEventSemanticClass.options.length)
@@ -4622,6 +4575,11 @@ function registerWorkspaceOrchestrationTools(
       },
       async ({
         sessionId,
+        view,
+        cursor,
+        callId,
+        includeArguments,
+        includeOutput,
         after,
         before,
         limit,
@@ -4629,19 +4587,75 @@ function registerWorkspaceOrchestrationTools(
         mode: requestedMode,
         payloadMode: requestedPayloadMode,
         resultMode: requestedResultMode,
-        includeTypes,
-        excludeTypes,
+        includeTypes: requestedIncludeTypes,
+        excludeTypes: requestedExcludeTypes,
         includeClasses,
         excludeClasses,
         latest,
       }) => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
+        // Keep the model schema compact without weakening either MCP validation
+        // or direct adapter calls: the canonical registry owns accepted types.
+        const includeTypes = requestedIncludeTypes?.map((type) => SessionEventType.parse(type));
+        const excludeTypes = requestedExcludeTypes?.map((type) => SessionEventType.parse(type));
         const latestClass =
           latest === undefined ? undefined : sessionEventLatestClassToSemanticClass(latest);
         if (requestedResultMode === "compact" && latestClass === undefined) {
           throw new Error("resultMode=compact requires latest");
         }
         await requireSession(deps.db, grant.workspaceId, sessionId);
+        const auditRequested = [
+          requestedMode,
+          requestedPayloadMode,
+          requestedResultMode,
+          includeTypes,
+          excludeTypes,
+          includeClasses,
+          excludeClasses,
+          latest,
+        ].some((value) => value !== undefined);
+        if (((view !== undefined && view !== "debug") || cursor !== undefined) && auditRequested) {
+          throw new Error(
+            "Audit selectors require view=debug and cannot change a conversation cursor",
+          );
+        }
+        if (view !== "debug" && !auditRequested) {
+          const { readSessionEventView } = await import("./session-event-view");
+          const { listSessionEventSlices } = await import("@opengeni/db/session-event-slices");
+          const page = await readSessionEventView(
+            {
+              sessionId,
+              view,
+              cursor,
+              callId,
+              includeArguments,
+              includeOutput,
+              after,
+              before,
+              direction: requestedDirection,
+              limit,
+            },
+            (options) =>
+              listSessionEventSlices(
+                deps.db,
+                grant.workspaceId,
+                sessionId,
+                options,
+                (legacyOptions) =>
+                  listSessionEventPage(deps.db, grant.workspaceId, sessionId, legacyOptions),
+              ),
+          );
+          await acknowledgeReads([{ sessionId, sequences: completeChildReadSequences(page) }]);
+          return json(page);
+        }
+        if (
+          cursor !== undefined ||
+          callId !== undefined ||
+          includeArguments !== undefined ||
+          includeOutput !== undefined
+        ) {
+          throw new Error("cursor/callId/includeArguments/includeOutput require a non-debug view");
+        }
         if (
           latest &&
           [includeTypes, excludeTypes, includeClasses, excludeClasses].some(
@@ -4650,7 +4664,7 @@ function registerWorkspaceOrchestrationTools(
         ) {
           throw new Error("latest cannot be combined with event filters");
         }
-        const mode = requestedMode ?? (after !== undefined ? "forensic" : "monitoring");
+        const mode = requestedMode ?? "monitoring";
         const direction = latestClass
           ? "before"
           : (requestedDirection ??
@@ -4676,40 +4690,55 @@ function registerWorkspaceOrchestrationTools(
         });
         if (requestedResultMode === "compact") {
           const event = dbPage.events[0];
-          return json(
-            event
-              ? boundSessionEventCompactResult(
-                  compactSessionEventResult(
-                    event,
-                    latestClass!,
-                    dbPage.coveredSequence ?? {
-                      first: event.sequence,
-                      last: event.sequence,
-                    },
-                  ),
-                )
-              : null,
-          );
+          const result = event
+            ? boundSessionEventCompactResult(
+                compactSessionEventResult(
+                  event,
+                  latestClass!,
+                  dbPage.coveredSequence ?? {
+                    first: event.sequence,
+                    last: event.sequence,
+                  },
+                ),
+              )
+            : null;
+          if (
+            result &&
+            ["turn.completed", "agent.message.completed"].includes(result.type) &&
+            !result.truncation.truncated &&
+            dbPage.fullPayloadsExact
+          ) {
+            await acknowledgeReads([{ sessionId, sequences: [result.sequence] }]);
+          }
+          return json(result);
         }
-        return json(
-          boundSessionEventMcpPage({
-            events: dbPage.events,
-            mode,
-            payloadMode,
-            direction,
-            sourceHasMore: dbPage.hasMore,
-            sourceTruncatedBy: dbPage.truncatedBy,
-            after: after ?? 0,
-            before: before ?? null,
-          }),
-        );
+        const page = boundSessionEventMcpPage({
+          events: dbPage.events,
+          mode,
+          payloadMode,
+          direction,
+          sourceHasMore: dbPage.hasMore,
+          sourceTruncatedBy: dbPage.truncatedBy,
+          after: after ?? 0,
+          before: before ?? null,
+        });
+        if (
+          payloadMode === "full" &&
+          dbPage.fullPayloadsExact &&
+          !page.truncation?.reasons.includes("model_payload")
+        ) {
+          await acknowledgeReads([
+            { sessionId, sequences: page.events.map((event) => event.sequence) },
+          ]);
+        }
+        return json(page);
       },
     );
 
     server.registerTool(
       "session_wait",
       {
-        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this for short waits inside the current turn instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works; for long waits end this turn with goal_wait rather than looping session_wait for hours while holding the turn and sandbox. Pass each target's sessionId and afterSequence (its last seen sequence, 0 for a new session). waitFor=change is the backward-compatible default and returns on turn lifecycle, agent.message.completed, blocking failures, goal facts, or session status/control changes. waitFor=completion is the child-result join: it ignores progress, completed commentary messages, goal facts, maintenance turns, and continuation segment settlements and returns only for a result-bearing final turn or a blocking state. A goal.completed event records goal state but is not a terminal child result. Raw deltas, tool receipts, sandbox diagnostics, and unrelated progress never wake either mode. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). ownPendingUpdates > 0 means your own session has machine input that is delivered only when your next turn is claimed: finish this turn to receive it, or pass includeOwnPendingUpdates=false to keep waiting on the targets. timedOut=true means nothing changed; liveFanout=false means the live bus was unavailable and the wait relied on the deadline re-check. The whole result is byte-bounded: summaries are shortened first, then newest rows dropped, so a changed target may come back with events=[] and hasMore=true; read those rows with session_events after=latestSequence. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds.`,
+        description: `Wait once for durable session changes, your pending machine input, or maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}). Pass targets with sessionId and afterSequence: the last consumed cursor, or 0. Never substitute session_get.lastSequence, which may include an unread completion. waitFor=change returns on turn lifecycle, completed messages, terminal commands, blockers, goal facts, or session control. waitFor=completion joins a child result: only a result-bearing final turn or blocker qualifies, not commentary, goal.completed, background commands, maintenance turns, or continuation segments. Neither mode wakes on raw deltas or tool receipts. Each target contains up to ${SESSION_WAIT_EVENTS_PER_TARGET} bounded summaries, latestSequence (the next afterSequence), and hasMore. For omitted rows use session_events view=results after=latestSequence for final outcomes, or view=debug with explicit filters for diagnostics; the default conversation view does not contain execution records. Byte limits can leave events=[] with hasMore=true. ownPendingUpdates > 0 means input will arrive when your next turn is claimed: finish this turn, or use includeOwnPendingUpdates=false to keep waiting. timedOut=true means no matching change; liveFanout=false means the deadline re-check supplied durable truth without the live bus. Do not immediately repeat a timeout without new evidence. For long or uncertain waits call wait_for_input once and end the turn.`,
         inputSchema: {
           targets: z4
             .array(
@@ -4757,64 +4786,131 @@ function registerWorkspaceOrchestrationTools(
         // (tests) may pass no extra at all.
         const signal: AbortSignal | undefined = extra?.signal;
         const workspaceId = grant.workspaceId;
+        const incompleteWaitEvents = new Set<string>();
         // A NATS subscription is live fanout only; the durable session_events
         // read below is the authority. Bun.serve idleTimeout (255 s) and the
         // 60 s MCP client request timeout both exceed the 50 s cap.
-        return json(
-          await waitForSessionChanges({
-            targets,
-            ownSessionId,
-            maxWaitMs: (maxWaitSeconds ?? SESSION_WAIT_DEFAULT_SECONDS) * 1_000,
-            targetEventTypes,
-            targetEventMatches:
-              waitFor === "completion" ? sessionWaitCompletionEventMatches : undefined,
-            signal,
-            source: {
-              reauthorizeTargets: async (sessionIds) => {
-                for (const targetSessionId of sessionIds) {
-                  await authorizeFirstPartySession(
-                    deps,
-                    grant,
-                    targetSessionId,
-                    "session.events.read",
-                  );
-                }
-              },
-              readTargetEvents: async (target) => {
-                const page = await listSessionEventPage(deps.db, workspaceId, target.sessionId, {
-                  after: target.afterSequence,
-                  direction: "after",
-                  limit: SESSION_WAIT_EVENTS_PER_TARGET,
-                  payloadMode: "full",
-                  includeTypes: targetEventTypes,
-                  maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
-                });
-                return { events: page.events, hasMore: page.hasMore };
-              },
-              readOwnPendingUpdateKinds:
-                ownSessionId === null
-                  ? null
-                  : async () =>
-                      (
-                        await listOutstandingSessionSystemUpdates(
-                          deps.db,
-                          workspaceId,
-                          ownSessionId,
-                        )
-                      ).map((update) => update.kind),
-              subscribe: (targetSessionId, onEvents) =>
-                deps.bus.subscribe(workspaceId, targetSessionId, onEvents),
+        const result = await waitForSessionChanges({
+          targets,
+          ownSessionId,
+          maxWaitMs: (maxWaitSeconds ?? SESSION_WAIT_DEFAULT_SECONDS) * 1_000,
+          targetEventTypes,
+          targetEventMatches:
+            waitFor === "completion" ? sessionWaitCompletionEventMatches : undefined,
+          signal,
+          source: {
+            reauthorizeTargets: async (sessionIds) => {
+              for (const targetSessionId of sessionIds) {
+                await authorizeFirstPartySession(
+                  deps,
+                  grant,
+                  targetSessionId,
+                  "session.events.read",
+                );
+              }
             },
-          }),
-        );
+            readTargetEvents: async (target) => {
+              const page = await listSessionEventPage(deps.db, workspaceId, target.sessionId, {
+                after: target.afterSequence,
+                direction: "after",
+                limit: SESSION_WAIT_EVENTS_PER_TARGET,
+                payloadMode: "full",
+                includeTypes: targetEventTypes,
+                maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
+              });
+              if (!page.fullPayloadsExact) {
+                for (const event of page.events) incompleteWaitEvents.add(event.id);
+              }
+              return { events: page.events, hasMore: page.hasMore };
+            },
+            readOwnPendingUpdateKinds:
+              ownSessionId === null
+                ? null
+                : async () =>
+                    (
+                      await listOutstandingSessionSystemUpdates(deps.db, workspaceId, ownSessionId)
+                    ).map((update) => update.kind),
+            subscribe: (targetSessionId, onEvents) =>
+              deps.bus.subscribe(workspaceId, targetSessionId, onEvents),
+          },
+        });
+        if (!result.aborted && !result.truncated) {
+          await acknowledgeReads(
+            result.changed.map((target) => ({
+              sessionId: target.sessionId,
+              sequences: target.events
+                .filter((event) => event.contentComplete && !incompleteWaitEvents.has(event.id))
+                .map((event) => event.sequence),
+            })),
+          );
+        }
+        return json(result);
       },
     );
+
+    if (callerSessionId !== null) {
+      for (const toolName of ["command_read", "command_wait"] as const) {
+        server.registerTool(
+          toolName,
+          {
+            description: `${toolName === "command_read" ? "Read retained output immediately, or briefly wait" : "Briefly wait using the same read operation as command_read"} for one command owned by the current session, across sandbox and Connected Machine providers. Returns bounded stdout/stderr chunks, durable state and exitCode, nextCursor and hasMore, plus explicit retention limitations. Pass nextCursor to continue; output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. waitSeconds is at most 50; command_wait defaults to 45, command_read to 0. For long waits use wait_for_input. Neither tool sends stdin or cancels the command.`,
+            inputSchema: {
+              commandId: z4.string().uuid(),
+              cursor: z4.string().max(128).optional(),
+              waitSeconds: z4.number().int().min(0).max(COMMAND_READ_MAX_WAIT_SECONDS).optional(),
+              maxOutputBytes: z4.number().int().min(4).max(COMMAND_OUTPUT_MAX_BYTES).optional(),
+            },
+          },
+          async ({ commandId, cursor, waitSeconds, maxOutputBytes }, extra) => {
+            await authorizeFirstPartySession(deps, grant, callerSessionId, "session.events.read");
+            let initialRead = true;
+            return json(
+              await readCommandWithWait({
+                commandId,
+                waitSeconds:
+                  waitSeconds ?? (toolName === "command_wait" ? COMMAND_WAIT_DEFAULT_SECONDS : 0),
+                ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
+                ...(extra?.signal === undefined ? {} : { signal: extra.signal }),
+                read: async () => {
+                  if (!initialRead)
+                    await authorizeFirstPartySession(
+                      deps,
+                      grant,
+                      callerSessionId,
+                      "session.events.read",
+                    );
+                  initialRead = false;
+                  return await readSessionBackgroundCommandOutput(deps.db, {
+                    accountId: grant.accountId,
+                    workspaceId: grant.workspaceId,
+                    sessionId: callerSessionId,
+                    commandId,
+                    ...(cursor === undefined ? {} : { cursor }),
+                    ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
+                  });
+                },
+                subscribe: (onEvents) =>
+                  deps.bus.subscribe(grant.workspaceId, callerSessionId, onEvents),
+              }),
+            );
+          },
+        );
+      }
+    }
   }
 
   if (can("sessions:create") && sessionCreateVisible) {
     const sessionCreateInput = z4
       .object({
         initialMessage: z4.string().min(1),
+        projectId: z4
+          .string()
+          .uuid()
+          .nullable()
+          .optional()
+          .describe(
+            "Workspace project to file the new session into. Omit for existing default behavior; does not change runtime or visibility.",
+          ),
         title: z4
           .string()
           .min(1)
@@ -4824,8 +4920,13 @@ function registerWorkspaceOrchestrationTools(
             "Concise semantic title for the child session. Omit only when the delegated goal or initial message already provides a suitable title; OpenGeni derives a sensitive-safe bounded fallback from that text.",
           ),
         instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
-        goal: z4.unknown().optional(),
-        resources: z4.array(z4.unknown()).optional(),
+        goal: GoalSpec.optional(),
+        resources: z4
+          .array(z4.unknown())
+          .optional()
+          .describe(
+            "Omit to inherit parent repositories only. Files are never inherited automatically; explicitly include file resources to attach them. An empty array inherits no resources.",
+          ),
         tools: z4.array(z4.unknown()).optional(),
         mcpServers: z4.array(z4.unknown()).optional(),
         variableSetId: z4.string().uuid().optional(),
@@ -4870,7 +4971,16 @@ function registerWorkspaceOrchestrationTools(
           .array(z4.enum(FIRST_PARTY_MCP_TOOL_NAMES))
           .optional()
           .describe(
-            "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. To create a non-delegating leaf, provide a selection that omits session_create. This does not grant permissions.",
+            "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. An explicit selection may only narrow that selection: every listed tool must already be available to this session, and a wider list is rejected. To create a non-delegating leaf, provide a selection that omits session_create. This does not grant permissions.",
+          ),
+        // The child's agent-access scope and end-user label are never model
+        // choices: it inherits this session's exactly. Only the Memory
+        // selector may be narrowed here (workspace > user > off).
+        memoryScope: z4
+          .enum(["workspace", "user", "off"])
+          .optional()
+          .describe(
+            "Optional Memory selector for the child. Omit to inherit this session's selector. An explicit value may only narrow it (workspace > user > off); off gives the child no Memory tools. Use task notes for task-local findings.",
           ),
         // Omission is the ordinary safe sharing path. Literal "shared" remains
         // available to advanced REST/SDK callers but is intentionally absent
@@ -4905,7 +5015,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Do not delegate work you will also perform yourself; track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, OpenGeni derives one from its delegated goal or initial message. The child inherits this session's visibility; a private session can only create a same-owner private child. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Do not delegate work you will also perform yourself; track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, OpenGeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Sandbox Environment, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateInput,
       },
       async (args) => {
@@ -4918,22 +5028,29 @@ function registerWorkspaceOrchestrationTools(
           if (callerSessionId !== null) {
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
           }
-          const { machineTarget, title, ...request } = args;
+          const { machineTarget, title, projectId, ...request } = args;
+          const rawRequest = {
+            ...request,
+            ...(projectId !== undefined ? { channelId: projectId } : {}),
+            ...(machineTarget
+              ? {
+                  targetSandboxId: machineTarget.targetSandboxId,
+                  ...(machineTarget.workingDir !== undefined
+                    ? { workingDir: machineTarget.workingDir }
+                    : {}),
+                }
+              : {}),
+          };
+          // Keep authorization above validation and let core parse the original
+          // request. Only this preflight's failures are attributable to input;
+          // arbitrary downstream schema failures retain the private fallback.
+          const validation = CreateSessionRequest.safeParse(rawRequest);
+          if (!validation.success) return sessionCreateValidationFailureResult(validation.error);
           const result = await createSessionForRequestWithOutcome(
             deps,
             grant,
             grant.workspaceId,
-            {
-              ...request,
-              ...(machineTarget
-                ? {
-                    targetSandboxId: machineTarget.targetSandboxId,
-                    ...(machineTarget.workingDir !== undefined
-                      ? { workingDir: machineTarget.workingDir }
-                      : {}),
-                  }
-                : {}),
-            },
+            rawRequest,
             undefined,
             title === undefined ? {} : { automaticTitleCandidate: title },
           );
@@ -4950,7 +5067,7 @@ function registerWorkspaceOrchestrationTools(
       "session_send_message",
       {
         description:
-          "Send information to another session. From an OpenGeni worker this becomes a canonical coalescible machine input: it appears in the target's compact incoming queue group, is durably added to model history when claimed, and remains visible in the timeline. A sessionless operator call appends one human/API prompt.",
+          "Acceptance is not execution. Keep resource.id: for agent messages, match that ID in payload.updateIds from session_events view=debug, includeTypes=[system.update.delivered], payloadMode=full; retain the event turnId and read its relevant result. An unrelated in-flight turn completing does not prove delivery. Do not resend an unconsumed message; inspect blockers. Worker messages are coalescible machine input, added to history when claimed. Sessionless operator calls append a human/API prompt and resource.id is its turn ID. Use your last consumed event sequence. Report stalled delivery if it cannot safely progress.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),
@@ -5052,7 +5169,8 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_pause",
       {
-        description: "Pause this session. Waiting prompts stay saved and inert until Resume.",
+        description:
+          "Pause the selected session workstream, including descendants. From an agent, pausing an ancestor also stops this caller; it cannot then issue its own Resume. Do not use ancestor Pause merely to prevent concurrent edits. Waiting prompts stay saved and inert until Resume.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           idempotencyKey: z4.string().uuid(),
@@ -5333,6 +5451,130 @@ function registerWorkspaceOrchestrationTools(
   }
 }
 
+function registerProjectTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  can: (permission: Permission) => boolean,
+  json: JsonResult,
+): void {
+  const projectIdSchema = z4.string().uuid();
+  const nameSchema = z4.string().trim().min(1).max(80);
+  const descriptionSchema = z4.string().max(2000);
+  if (can("sessions:read")) {
+    server.registerTool(
+      "project_list",
+      {
+        description:
+          "List workspace-shared projects in sidebar order (pinned first). Projects group sessions in the user's sidebar; they do not change execution or access. Use before creating a project to reuse an existing group.",
+        inputSchema: {},
+      },
+      async () => json({ projects: await listChannels(deps.db, grant.workspaceId) }),
+    );
+    server.registerTool(
+      "project_get",
+      {
+        description:
+          "Read one workspace project: name, description, pin state and order. Use sessions_list with projectId to find its visible sessions.",
+        inputSchema: { projectId: projectIdSchema },
+      },
+      async ({ projectId }) => {
+        const project = await getChannel(deps.db, grant.workspaceId, projectId);
+        if (!project) throw new Error("Project not found");
+        return json({ project });
+      },
+    );
+  }
+  if (can("sessions:create")) {
+    server.registerTool(
+      "project_create",
+      {
+        description:
+          "Create a workspace-shared sidebar group for related sessions. A project is organizational metadata, not a repository, working directory, or inherited agent configuration.",
+        inputSchema: { name: nameSchema, description: descriptionSchema.optional() },
+      },
+      async ({ name, description }) =>
+        json({
+          project: await createChannel(deps.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            name,
+            description: description ?? null,
+            createdBy: grant.subjectId,
+          }),
+        }),
+    );
+    server.registerTool(
+      "project_update",
+      {
+        description:
+          "Rename, describe or pin/unpin a workspace project. Pin state is shared by everyone in the workspace. Omitted fields stay unchanged; null clears the description.",
+        inputSchema: {
+          projectId: projectIdSchema,
+          name: nameSchema.optional(),
+          description: descriptionSchema.nullable().optional(),
+          pinned: z4.boolean().optional(),
+        },
+      },
+      async ({ projectId, ...update }) => {
+        const project = await updateChannel(deps.db, grant.workspaceId, projectId, update);
+        if (!project) throw new Error("Project not found");
+        return json({ project });
+      },
+    );
+    server.registerTool(
+      "project_reorder",
+      {
+        description:
+          "Replace the shared sidebar project order. Pass every current project ID exactly once, from project_list. Pinned projects still appear first. If projects changed, list again before retrying.",
+        inputSchema: { projectIds: z4.array(projectIdSchema).min(1).max(200) },
+      },
+      async ({ projectIds }) => {
+        const projects = await reorderChannels(deps.db, grant.workspaceId, projectIds);
+        if (!projects)
+          throw new Error("Projects changed or order is invalid; call project_list and retry");
+        return json({ projects });
+      },
+    );
+    server.registerTool(
+      "project_delete",
+      {
+        description:
+          "Delete a workspace-shared project. Its sessions are preserved and become unfiled; no running work is stopped.",
+        inputSchema: { projectId: projectIdSchema },
+      },
+      async ({ projectId }) => {
+        if (!(await deleteChannel(deps.db, grant.workspaceId, projectId)))
+          throw new Error("Project not found");
+        return json({ ok: true, projectId });
+      },
+    );
+  }
+  if (can("sessions:control")) {
+    server.registerTool(
+      "session_set_project",
+      {
+        description:
+          "File a session into a workspace project, or pass projectId=null to unfile it. Projects group root sessions in the user's sidebar. Filing changes organization only, not visibility, instructions, runtime, or history.",
+        inputSchema: { sessionId: z4.string().uuid(), projectId: projectIdSchema.nullable() },
+      },
+      async ({ sessionId, projectId }) => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.control");
+        await requireSession(deps.db, grant.workspaceId, sessionId);
+        if (
+          !(await setSessionChannel(deps.db, {
+            workspaceId: grant.workspaceId,
+            sessionId,
+            channelId: projectId,
+          }))
+        )
+          throw new Error("Session not found");
+        return json({ ok: true, sessionId, projectId });
+      },
+    );
+  }
+}
+
 // Variable-set management for agents. Generic reads remain metadata-only.
 // Plaintext has one dedicated tool that additionally requires literal
 // secrets:read plus exact live attempt/session authorization.
@@ -5607,11 +5849,68 @@ function registerCapabilityDiscoveryTools(
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
 
+  // Installation is workspace metadata; an enabled personal MCP is usable only
+  // when its tools actually made it into this caller's immutable attempt catalog.
+  // This is a readiness projection, never credential resolution or a new grant.
+  const setupProjections = async (items: CapabilityCatalogItem[]) => {
+    const availableServerIds = new Set<string>();
+    const availableFirstPartyTools = new Set<string>();
+    const acceptedServerIds = new Set<string>();
+    let accountSelectionKnown = false;
+    if (
+      items.some(
+        (item) => item.enabled && (item.connectionRef || item.surfaceType === "first_party_fiken"),
+      )
+    ) {
+      const claims = exactAgentCommandContext(grant, sessionId);
+      const attemptCatalog = await getAttemptToolCatalog(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        attemptId: claims.callerAttemptId,
+      });
+      if (
+        attemptCatalog?.sessionId === sessionId &&
+        attemptCatalog.turnId === claims.callerTurnId &&
+        attemptCatalog.executionGeneration === claims.callerExecutionGeneration
+      ) {
+        for (const entry of attemptCatalog.entries) {
+          availableServerIds.add(entry.identity.serverId);
+          if (entry.identity.serverId === "opengeni")
+            availableFirstPartyTools.add(entry.identity.toolName);
+        }
+        const bindings = await getSessionTurnMcpAccountBindings(
+          deps.db,
+          grant.workspaceId,
+          sessionId,
+          claims.callerTurnId,
+        );
+        accountSelectionKnown = bindings !== null;
+        const readiness = capabilityAccountReadiness(availableServerIds, bindings);
+        for (const id of readiness.available) availableServerIds.add(id);
+        for (const id of readiness.accepted) acceptedServerIds.add(id);
+      }
+    }
+    return await Promise.all(
+      items.map((item) =>
+        capabilitySetupProjection(
+          deps,
+          grant.workspaceId,
+          item,
+          availableServerIds,
+          acceptedServerIds,
+          accountSelectionKnown,
+          availableFirstPartyTools,
+          new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
+        ),
+      ),
+    );
+  };
+
   server.registerTool(
     "capability_catalog_search",
     {
       description:
-        "Search OpenGeni's reviewed workspace capability catalog when the user asks to add an integration or the task needs a capability that is not currently usable. Search by the outcome needed (for example `GitHub repositories`, `product analytics`, or `Slack notifications`), compare the returned candidates, and prefer a ready or verified exact match. This only reads secret-free metadata; it never installs, connects, or authorizes anything.",
+        "Find integrations in OpenGeni's reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. This reads metadata only and does not connect or authorize anything.",
       inputSchema: {
         query: z4.string().min(1).max(500),
         limit: z4.number().int().min(1).max(20).optional(),
@@ -5625,25 +5924,28 @@ function registerCapabilityDiscoveryTools(
         query,
         limit ?? 8,
       );
-      const matches = await Promise.all(
-        ranked.map(async ({ item, matchedOn }) => ({
-          capabilityId: item.id,
-          name: item.name,
-          description: item.description,
-          kind: item.kind,
-          source: item.source,
-          category: item.category,
-          tags: item.tags.slice(0, 16),
-          providerDomain: item.providerDomain,
-          authKind: item.authKind,
-          tier: item.tier,
-          matchedOn,
-          setup: {
-            ...(await capabilitySetupProjection(deps, grant.workspaceId, item)),
-            requiredVariables: capabilityRequiredVariables(item),
-          },
-        })),
-      );
+      const setups = await setupProjections(ranked.map(({ item }) => item));
+      const matches = ranked.map(({ item, matchedOn }, index) => ({
+        capabilityId: item.id,
+        name: item.name,
+        description: item.description,
+        kind: item.kind,
+        source: item.source,
+        category: item.category,
+        tags: item.tags.slice(0, 16),
+        providerDomain: item.providerDomain,
+        authKind: item.authKind,
+        tier: item.tier,
+        matchedOn,
+        setup: {
+          ...setups[index]!,
+          requiredVariables: capabilityRequiredVariables(item),
+          nextAction:
+            setups[index]!.status === "authorization_required"
+              ? { toolName: "capability_authorization_request", capabilityId: item.id }
+              : null,
+        },
+      }));
       return json({ query, matches });
     },
   );
@@ -5652,7 +5954,7 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "After capability_catalog_search and after explaining one chosen recommendation to the user, post exactly one in-session human authorization card for that catalog capability. This tool never grants access, enables a capability, reads a secret, or mints provider credentials; the authenticated user must click and confirm the provider/domain flow. Do not call it for a candidate reported ready or unavailable.",
+        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable.",
       inputSchema: {
         capabilityId: z4.string().min(1).max(512),
         rationale: z4.string().min(1).max(2000),
@@ -5667,7 +5969,8 @@ function registerCapabilityDiscoveryTools(
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new Error("Unknown or untrusted capability; search the catalog again.");
       }
-      const setup = await capabilitySetupProjection(deps, grant.workspaceId, item);
+      const [setup] = await setupProjections([item]);
+      if (!setup) throw new Error("Capability setup projection is unavailable.");
       if (setup.status === "ready") {
         return json({
           capabilityId: item.id,
@@ -5729,7 +6032,48 @@ async function capabilitySetupProjection(
   deps: ApiRouteDeps,
   workspaceId: string,
   item: CapabilityCatalogItem,
+  availableServerIds: ReadonlySet<string>,
+  acceptedServerIds: ReadonlySet<string>,
+  accountSelectionKnown: boolean,
+  availableFirstPartyTools: ReadonlySet<string>,
+  selectedFirstPartyTools: ReadonlySet<string>,
 ): Promise<CapabilitySetupProjection> {
+  if (item.surfaceType === "first_party_fiken") {
+    if (!item.enabled || item.metadata.connectionStatus !== "active") {
+      return {
+        status: "authorization_required",
+        action: "connect",
+        detail:
+          item.metadata.connectionStatus === "needs_reauth"
+            ? "The workspace Fiken connection needs reconnection."
+            : "Connect Fiken through the protected setup form.",
+      };
+    }
+    const selected = FIRST_PARTY_MCP_TOOL_NAMES.filter(
+      (name) => name.startsWith("fiken_") && selectedFirstPartyTools.has(name),
+    );
+    if (selected.length === 0) {
+      return {
+        status: "authorization_required",
+        action: "enable",
+        detail:
+          "Fiken is connected, but its tools are not selected for this conversation. Ask the user to add its tools through the setup card, then send a new message.",
+      };
+    }
+    if (selected.some((name) => availableFirstPartyTools.has(name))) {
+      return {
+        status: "ready",
+        action: null,
+        detail: "Fiken is connected and has tools available in this turn.",
+      };
+    }
+    return {
+      status: "unavailable",
+      action: null,
+      detail:
+        "Fiken is connected, but its selected tools are unavailable in this execution. Check tool permissions and setup before retrying; reconnection is not required by this status.",
+    };
+  }
   if (item.id === "api:github-app" || item.surfaceType === "first_party_github") {
     const missing = githubAppMissingSettings(deps.settings);
     if (missing.length > 0) {
@@ -5768,6 +6112,32 @@ async function capabilitySetupProjection(
           action: "connect",
           detail: "A workspace admin must designate an authorized Codex Apps subscription.",
         };
+  }
+  if (item.enabled && item.connectionRef) {
+    if (item.runtime.mcpServerId && availableServerIds.has(item.runtime.mcpServerId)) {
+      return {
+        status: "ready",
+        action: null,
+        detail: "This capability has tools available in this turn.",
+      };
+    }
+    if (
+      !accountSelectionKnown ||
+      (item.runtime.mcpServerId && acceptedServerIds.has(item.runtime.mcpServerId))
+    ) {
+      return {
+        status: "unavailable",
+        action: null,
+        detail:
+          "This integration's tools are unavailable in this execution. Check its connection or setup failure before requesting reconnection; missing tools alone do not establish an authorization failure.",
+      };
+    }
+    return {
+      status: "authorization_required",
+      action: "connect",
+      detail:
+        "This integration is enabled in the workspace, but no account was selected for this execution. Connect or select an account available to the sender, then send a new message.",
+    };
   }
   if (item.enabled) {
     return {
@@ -5986,6 +6356,7 @@ const SESSION_DISCOVERY_PREVIEW_OMISSION_REASON = "aggregatePreviewBudget" as co
 const SESSION_DISCOVERY_PAGE_MAX_BYTES = 128_000;
 const SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL = "session_events" as const;
 const SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_BASE_INPUT = {
+  view: "debug",
   direction: "before",
   limit: 1,
   mode: "monitoring",
@@ -6009,7 +6380,8 @@ export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): st
   const relevance = cursor.orderBy === "relevance";
   return Buffer.from(
     JSON.stringify({
-      v: relevance ? 3 : 2,
+      v: cursor.originSiteId ? 4 : relevance ? 3 : 2,
+      ...(cursor.originSiteId ? { originSiteId: cursor.originSiteId } : {}),
       orderBy: cursor.orderBy,
       ...(relevance ? { sortRank: cursor.sortRank, filterHash: cursor.filterHash } : {}),
       sortRevision: cursor.sortRevision,
@@ -6063,6 +6435,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       updatedAfter?: unknown;
       sortRank?: unknown;
       filterHash?: unknown;
+      originSiteId?: unknown;
     };
     if (
       parsed.v === undefined &&
@@ -6112,8 +6485,14 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
     }
     const isV2 = parsed.v === 2;
     const isV3 = parsed.v === 3;
+    const isV4 = parsed.v === 4;
+    const relevance = parsed.orderBy === "relevance";
     if (
-      (!isV2 && !isV3) ||
+      (!isV2 && !isV3 && !isV4) ||
+      (isV4 &&
+        (typeof parsed.originSiteId !== "string" ||
+          !SESSION_DISCOVERY_UUID.test(parsed.originSiteId) ||
+          !["createdAt", "updatedAt", "relevance"].includes(parsed.orderBy as string))) ||
       (isV2 && parsed.orderBy !== "createdAt" && parsed.orderBy !== "updatedAt") ||
       (isV3 && parsed.orderBy !== "relevance") ||
       typeof parsed.sortRevision !== "string" ||
@@ -6127,7 +6506,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       throw new Error("invalid cursor fields");
     }
     if (
-      isV3 &&
+      relevance &&
       (!Number.isSafeInteger(parsed.sortRank) ||
         (parsed.sortRank as number) < 0 ||
         typeof parsed.filterHash !== "string" ||
@@ -6135,7 +6514,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
     ) {
       throw new Error("invalid relevance cursor fields");
     }
-    if (isV2 && (parsed.sortRank !== undefined || parsed.filterHash !== undefined)) {
+    if (!relevance && (parsed.sortRank !== undefined || parsed.filterHash !== undefined)) {
       throw new Error("chronological cursor cannot carry relevance fields");
     }
     const sortAt = normalizeSessionDiscoveryTimestamp(parsed.sortAt, "cursor sortAt");
@@ -6158,55 +6537,111 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
     if (parsed.orderBy === "createdAt" && (sortRevision !== "0" || snapshotRevision !== "0")) {
       throw new Error("creation cursor cannot carry activity revisions");
     }
-    const orderBy: SessionDiscoveryOrderBy = isV3
+    const orderBy: SessionDiscoveryOrderBy = relevance
       ? "relevance"
       : (parsed.orderBy as "createdAt" | "updatedAt");
     return {
       orderBy,
-      sortRank: isV3 ? (parsed.sortRank as number) : null,
+      sortRank: relevance ? (parsed.sortRank as number) : null,
       sortRevision,
       sortAt,
       id: parsed.id,
       snapshotAt,
       snapshotRevision,
       updatedAfter: normalizedUpdatedAfter,
-      filterHash: isV3 ? (parsed.filterHash as string) : null,
+      filterHash: relevance ? (parsed.filterHash as string) : null,
+      ...(isV4 ? { originSiteId: parsed.originSiteId as string } : {}),
     };
   } catch {
     throw new Error("sessions_list cursor is invalid");
   }
 }
 
-function capSessionDiscoveryText(
-  value: string | null,
-  maxChars = SESSION_DISCOVERY_TEXT_CHARS,
-  originalChars?: number | null,
+export function capSessionDiscoveryCompactPage(
+  page: Awaited<ReturnType<typeof listSessionDiscoverySummaries>>,
+  options: { includeLastMessage?: boolean; includeRelatedWork?: boolean } = {},
+  maxBytes = SESSION_DISCOVERY_PAGE_MAX_BYTES,
 ) {
-  if (value === null) {
-    return { text: value, truncated: false };
-  }
-  const projectedChars = Array.from(value);
-  const sourceChars = Math.max(projectedChars.length, originalChars ?? projectedChars.length);
-  if (sourceChars <= maxChars) {
-    return { text: value, truncated: false };
-  }
-
-  // The database supplies only a bounded prefix plus the original character
-  // count. Iterate to a stable marker width so the reported omission includes
-  // the characters replaced by the marker itself.
-  let bodyChars = maxChars;
-  let marker = "";
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const omittedChars = Math.max(0, sourceChars - bodyChars);
-    marker = `…[${omittedChars} chars truncated]…`;
-    const nextBodyChars = Math.max(0, maxChars - Array.from(marker).length);
-    if (nextBodyChars === bodyChars) break;
-    bodyChars = nextBodyChars;
-  }
-  return {
-    text: `${projectedChars.slice(0, bodyChars).join("")}${marker}`,
-    truncated: true,
+  let previewBytes = 0;
+  const projected = page.sessions.map((session) => {
+    const row = {
+      ...compactSessionMcpListRow(session, options.includeRelatedWork),
+      ...(options.includeLastMessage && session.queuedPromptCount > 0
+        ? { queuedPromptCount: session.queuedPromptCount }
+        : {}),
+    };
+    if (!options.includeLastMessage) return row;
+    const preview = capSessionDiscoveryText(
+      session.latestMessage?.preview ?? null,
+      600,
+      session.latestMessage?.previewOriginalChars,
+    );
+    if (!session.latestMessage) return row;
+    const bytes = Buffer.byteLength(preview.text ?? "", "utf8");
+    const omitted = previewBytes + bytes > SESSION_DISCOVERY_PREVIEW_MAX_BYTES;
+    if (!omitted) previewBytes += bytes;
+    return {
+      ...row,
+      latestMessage: {
+        type: session.latestMessage.type,
+        ...(omitted
+          ? {
+              previewOmitted: true,
+              previewOmissionReason: SESSION_DISCOVERY_PREVIEW_OMISSION_REASON,
+              previewDrillDownTool: SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL,
+              previewDrillDownInput: sessionDiscoveryPreviewDrillDownInput(
+                session.id,
+                session.latestMessage.type,
+              ),
+            }
+          : {
+              preview: preview.text,
+              ...(preview.truncated ? { previewTruncated: true } : {}),
+            }),
+      },
+    };
+  });
+  let kept = projected;
+  const build = () => {
+    const dropped = kept.length < projected.length;
+    const last = page.sessions[kept.length - 1];
+    const cursor =
+      dropped && last
+        ? {
+            orderBy: page.orderBy,
+            sortRank: last.sortRank,
+            sortRevision: last.sortRevision,
+            sortAt: last.sortAt,
+            id: last.id,
+            snapshotAt: page.snapshotAt,
+            snapshotRevision: page.snapshotRevision,
+            updatedAfter: page.updatedAfter,
+            filterHash: page.filterHash,
+            ...(page.originSiteId ? { originSiteId: page.originSiteId } : {}),
+          }
+        : page.nextCursor;
+    return {
+      sessions: kept,
+      total: page.total,
+      nextCursor: cursor ? encodeSessionDiscoveryCursor(cursor) : null,
+      ...(page.orderBy === "updatedAt" ? { updatedThrough: page.updatedThrough } : {}),
+      ...(dropped
+        ? {
+            responseTruncated: true,
+            truncationReason: `response exceeded ${maxBytes} bytes; continue with nextCursor`,
+          }
+        : {}),
+    };
   };
+  let result = build();
+  while (Buffer.byteLength(JSON.stringify(result, null, 2), "utf8") > maxBytes && kept.length > 1) {
+    kept = kept.slice(0, -1);
+    result = build();
+  }
+  if (Buffer.byteLength(JSON.stringify(result, null, 2), "utf8") > maxBytes) {
+    throw new RangeError(`sessions_list compact metadata exceeds its ${maxBytes}-byte envelope`);
+  }
+  return result;
 }
 
 export function capSessionDiscoveryPage(
@@ -6235,6 +6670,7 @@ export function capSessionDiscoveryPage(
       : null;
     return {
       id: session.id,
+      ...(session.channelId ? { projectId: session.channelId } : {}),
       title: title.text,
       titleTruncated: title.truncated,
       parentSessionId: session.parentSessionId,
@@ -6347,6 +6783,7 @@ export function capSessionDiscoveryPage(
             snapshotRevision: page.snapshotRevision,
             updatedAfter: page.updatedAfter,
             filterHash: page.filterHash,
+            ...(page.originSiteId ? { originSiteId: page.originSiteId } : {}),
           })
         : null
       : page.nextCursor

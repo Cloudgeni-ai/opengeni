@@ -41,6 +41,8 @@ export type TranscriptionRecordingAssemblyClaim = {
 };
 
 export type TranscriptionRecordingSegmentClaim = {
+  /** False after any prior possibly-started attempt; fail closed for legacy pins. */
+  fallbackAllowed?: boolean;
   recording: TranscriptionRecordingResponse;
   claimed: boolean;
   attemptId: string | null;
@@ -1005,6 +1007,7 @@ export async function claimNextTranscriptionRecordingSegment(
       claimed: true,
       attemptId: input.attemptId,
       segment: claimed,
+      fallbackAllowed: candidate.providerId === null && recording.completedSegmentCount === 0,
     };
   });
 }
@@ -1207,6 +1210,8 @@ export async function failTranscriptionRecordingSegment(
     attemptId: string;
     errorCode: TranscriptionRecordingErrorCode;
     retryable: boolean;
+    /** Only supplied after an explicit pre-result provider rejection. */
+    fallbackProviderId?: string | null;
   },
 ): Promise<TranscriptionRecordingResponse> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
@@ -1219,11 +1224,14 @@ export async function failTranscriptionRecordingSegment(
     if (recording.state !== "transcribing" || recording.processingOwner !== input.attemptId) {
       throw new TranscriptionRecordingStateError("Segment failure was stale");
     }
+    const fallbackProviderId =
+      recording.completedSegmentCount === 0 ? input.fallbackProviderId : null;
     const now = new Date();
     const [failed] = await scopedDb
       .update(schema.transcriptionRecordingSegments)
       .set({
         state: "failed",
+        ...(fallbackProviderId ? { providerId: null } : {}),
         attemptId: null,
         attemptStartedAt: null,
         attemptDeadlineAt: null,
@@ -1245,6 +1253,7 @@ export async function failTranscriptionRecordingSegment(
       .update(schema.transcriptionRecordings)
       .set({
         state: "failed",
+        ...(fallbackProviderId ? { providerId: fallbackProviderId } : {}),
         processingOwner: null,
         processingStartedAt: null,
         errorCode: input.errorCode,

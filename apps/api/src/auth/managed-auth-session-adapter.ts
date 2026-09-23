@@ -8,6 +8,17 @@ import type { ManagedAuth } from "@opengeni/core";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { runManagedAuthAttempt } from "./managed-auth-attempt-context";
 
+/** Server-only proof for a product-owned endpoint; never returned to a browser. */
+export async function managedAuthSelectedProofHeaders(
+  auth: ManagedAuth,
+  token: string,
+): Promise<Headers> {
+  const context = await auth.$context;
+  return new Headers({
+    cookie: `${context.authCookies.sessionToken.name}=${signedCookieValue(token, context.secret)}`,
+  });
+}
+
 export function createBetterAuthSessionAdapter(
   auth: ManagedAuth,
   db: Database,

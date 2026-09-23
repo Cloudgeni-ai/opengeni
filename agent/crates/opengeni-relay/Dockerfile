@@ -34,6 +34,8 @@ COPY . .
 # target without emulation. The workspace profile already strips + LTOs the
 # release build; `xx-verify` fails if the output architecture drifts.
 ARG TARGETPLATFORM
+# Native clang still needs the target musl headers and GCC runtime for C crates.
+RUN xx-apk add --no-cache gcc musl-dev
 RUN set -eux; \
     rust_target="$(xx-cargo --print-target-triple)"; \
     rustup target add "${rust_target}"; \

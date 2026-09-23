@@ -10,6 +10,8 @@ export type PreferenceRegistryProvenanceSource =
   | "human"
   | "onboarding"
   | "knowledge_proposal"
+  | "agent"
+  | "portable_skill"
   | "imported_document"
   | "slack"
   | "meeting_transcript"

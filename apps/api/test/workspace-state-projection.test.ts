@@ -1,14 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   WORKSPACE_STATE_MAX_ACTIVE_POLICY_HEADS,
-  WORKSPACE_STATE_MAX_BASES,
-  WORKSPACE_STATE_MAX_TOPICS,
-  WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
+  WORKSPACE_STATE_KNOWLEDGE_SAMPLE_LIMIT,
+  type KnowledgeEntrySummary,
   type WorkspaceInstructionPolicyHead,
   type WorkspaceInstructionPolicyListResponse,
 } from "@opengeni/contracts";
-import type { WorkspaceStateMemoryRecord } from "@opengeni/db";
-import type { DocumentInventory } from "@opengeni/documents";
 
 import { projectWorkspaceState } from "../src/workspace-state-projection";
 
@@ -18,34 +15,6 @@ const NOW = "2026-07-30T12:00:00.000Z";
 
 function id(sequence: number): string {
   return `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`;
-}
-
-function base(
-  sequence: number,
-  name = `Base ${sequence}`,
-  overrides: Partial<DocumentInventory["bases"][number]> = {},
-): DocumentInventory["bases"][number] {
-  return {
-    id: id(100 + sequence),
-    name,
-    visibleDocumentCount: 0,
-    statusCounts: { queued: 0, indexing: 0, ready: 0, failed: 0 },
-    latestUpdatedAt: null,
-    ...overrides,
-  };
-}
-
-function memory(
-  sequence: number,
-  overrides: Partial<WorkspaceStateMemoryRecord> = {},
-): WorkspaceStateMemoryRecord {
-  return {
-    id: id(3_000 + sequence),
-    status: "active",
-    kind: "semantic",
-    updatedAt: NOW,
-    ...overrides,
-  };
 }
 
 function head(sequence: number): WorkspaceInstructionPolicyHead {
@@ -376,46 +345,22 @@ describe("workspace state projection", () => {
     });
   });
 
-  test("bounds, sanitizes, sorts, and labels partial aggregate coverage deterministically", () => {
-    const bases = Array.from({ length: WORKSPACE_STATE_MAX_BASES + 1 }, (_, index) =>
-      base(
-        index,
-        index === 0 ? `  Primary   ${"x".repeat(300)}  ` : `Base ${index}`,
-        index === 0
-          ? {
-              visibleDocumentCount: 3,
-              statusCounts: { queued: 1, indexing: 0, ready: 1, failed: 1 },
-              latestUpdatedAt: NOW,
-            }
-          : {},
-      ),
-    );
-    const documents: DocumentInventory = {
-      baseCount: WORKSPACE_STATE_MAX_BASES + 1,
-      bases,
-      visibleDocumentCount: 4,
-      statusCounts: { queued: 1, indexing: 0, ready: 2, failed: 1 },
-      sourceKindCounts: {
-        manual_upload: 0,
-        meeting_transcript: 0,
-        repository: 1,
-        email: 0,
-        chat: 0,
-        document: 3,
-        web: 0,
-        other: 0,
-      },
-      authorityKindCounts: { organization: 1, workspace: 2, personal: 1 },
-      latestUpdatedAt: NOW,
-      topics: Array.from({ length: WORKSPACE_STATE_MAX_TOPICS }, (_, index) => ({
-        name: index === 0 ? "  Operations   Runbooks  " : `Topic ${String(index).padStart(2, "0")}`,
-        documentCount: index === 0 ? 2 : 1,
-      })),
-      topicsTruncated: true,
-    };
-    const memories = Array.from({ length: WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT + 1 }, (_, index) =>
-      memory(index, index === 0 ? { status: "proposed", kind: "decision" } : {}),
-    );
+  test("bounds canonical published metadata and excludes source text and provenance", () => {
+    const entries = Array.from(
+      { length: WORKSPACE_STATE_KNOWLEDGE_SAMPLE_LIMIT + 1 },
+      (_, index) => ({
+        id: id(3000 + index),
+        scope: "workspace" as const,
+        updatedAt: NOW,
+        revision: {
+          id: id(5000 + index),
+          title: index === 0 ? "  Exact title  " : `Entry ${index}`,
+          kind: "fact",
+          preview: "PRIVATE CONTENT",
+          provenance: { secret: "PRIVATE PROVENANCE" },
+        },
+      }),
+    ) as Pick<KnowledgeEntrySummary, "id" | "scope" | "revision" | "updatedAt">[];
     const activeHeads = Array.from(
       { length: WORKSPACE_STATE_MAX_ACTIVE_POLICY_HEADS + 1 },
       (_, index) => head(index),
@@ -452,7 +397,7 @@ describe("workspace state projection", () => {
         ],
         true,
       ),
-      knowledge: { documents, memories },
+      knowledge: { entries, nextCursor: "more" },
     });
 
     expect(projected.policy.activeHeads).toHaveLength(WORKSPACE_STATE_MAX_ACTIVE_POLICY_HEADS);
@@ -467,38 +412,36 @@ describe("workspace state projection", () => {
     expect(projected.knowledge.availability).toBe("available");
     if (projected.knowledge.availability !== "available") throw new Error("expected inventory");
     expect(projected.knowledge).toMatchObject({
+      authority: "knowledge_entries",
       coverage: "partial",
-      baseCount: WORKSPACE_STATE_MAX_BASES + 1,
-      basesTruncated: true,
-      inspectedVisibleDocumentCount: 4,
-      documentStatusCounts: { queued: 1, indexing: 0, ready: 2, failed: 1 },
-      authorityKindCounts: { organization: 1, workspace: 2, personal: 1 },
-      memorySample: {
-        recordCount: WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
-        limitReached: true,
-        statusCounts: { proposed: 1, active: WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT - 1 },
-        kindCounts: { decision: 1, semantic: WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT - 1 },
-        preferenceAuthority: {
-          kindCountSource: "knowledge_memories_legacy_observations",
-          activeAuthority: "structured_preference_registry",
-        },
-      },
+      sampleLimit: 50,
     });
-    expect(projected.knowledge.bases).toHaveLength(WORKSPACE_STATE_MAX_BASES);
-    expect(projected.knowledge.bases[0]!.name.length).toBeLessThanOrEqual(160);
-    expect(projected.knowledge.bases[0]!.name.startsWith("Primary x")).toBe(true);
-    expect(projected.knowledge.topics).toHaveLength(WORKSPACE_STATE_MAX_TOPICS);
-    expect(projected.knowledge.topicsTruncated).toBe(true);
-    expect(projected.knowledge.topics[0]).toEqual({
-      name: "Operations Runbooks",
-      documentCount: 2,
+    expect(projected.knowledge.entries).toHaveLength(50);
+    expect(projected.knowledge.entries[0]).toEqual({
+      id: id(3000),
+      revisionId: id(5000),
+      title: "  Exact title  ",
+      kind: "fact",
+      scope: "workspace",
+      updatedAt: NOW,
     });
-    expect(projected.knowledge.gaps.map((gap) => gap.code)).toEqual([
-      "failed_documents",
-      "processing_documents",
-      "pending_memory_review",
-      "partial_inventory",
-    ]);
-    expect(JSON.stringify(projected)).not.toContain("sourceRefs");
+    expect(JSON.stringify(projected)).not.toContain("PRIVATE CONTENT");
+    expect(JSON.stringify(projected)).not.toContain("PRIVATE PROVENANCE");
+    expect(
+      projectWorkspaceState({
+        workspaceId: WORKSPACE_ID,
+        generatedAt: NOW,
+        workspaceAgentInstructions: null,
+        policies: policies(),
+        preferences: preferences(),
+        knowledge: { entries: [], nextCursor: null },
+      }).knowledge,
+    ).toEqual({
+      availability: "available",
+      authority: "knowledge_entries",
+      coverage: "complete",
+      sampleLimit: 50,
+      entries: [],
+    });
   });
 });

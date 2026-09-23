@@ -1,3 +1,4 @@
+import type { OpenGeniClient } from "@opengeni/sdk";
 import { localDateTimeValue, formatTimestamp } from "@/lib/format";
 import type {
   ReasoningEffort,
@@ -57,6 +58,12 @@ export function normalizeCalendarDays(
 }
 
 export type ScheduledTaskFormState = {
+  agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
+  agentLearningVersion?: number;
+  agentLearningBaselineScope?: "workspace" | "personal";
+  agentLearningDestinationKey?: string;
+  agentLearningDirty?: boolean;
+  knowledgeSource?: ScheduledTaskAgentConfig["knowledgeSource"];
   name: string;
   description: string;
   prompt: string;
@@ -81,6 +88,8 @@ export type ScheduledTaskFormState = {
   workingDir: string;
   overlapPolicy: ScheduledTask["overlapPolicy"];
   includeOpenGeniTool: boolean;
+  mcpServerIds?: string[];
+  connectionAccounts?: import("@opengeni/sdk").McpConnectionAccountSelection[];
   slackBotConnectionId: string;
   resources: ResourceRef[];
 };
@@ -98,7 +107,7 @@ export function scheduledTaskStateLabel(task: ScheduledTask): {
   if (task.status === "paused") {
     return { label: "Paused", active: false, reason: "user_paused" };
   }
-  if (task.action?.kind === "knowledge_source_sync") {
+  if (task.agentConfig?.knowledgeSource || task.action?.kind === "knowledge_source_sync") {
     const value = task.metadata?.knowledgeSourceSync;
     if (value && typeof value === "object") {
       const control = value as Record<string, unknown>;
@@ -217,7 +226,12 @@ export function formStateFromScheduledTask(
   }
   return {
     ...base,
+    mcpServerIds: task.agentConfig.tools
+      .filter((tool) => tool.id !== "opengeni")
+      .map((tool) => tool.id),
+    connectionAccounts: task.agentConfig.connectionAccounts ?? [],
     name: task.name,
+    knowledgeSource: task.agentConfig.knowledgeSource,
     description: scheduledTaskDescription(task),
     prompt: task.agentConfig.prompt,
     model: task.agentConfig.model ?? defaults.model ?? "",
@@ -336,14 +350,19 @@ export function agentConfigFromFormState(
   form: ScheduledTaskFormState,
   existingTask?: ScheduledTask,
 ): ScheduledTaskAgentConfig {
-  const tools = (existingTask?.agentConfig.tools ?? []).filter(
-    (tool) => !(tool.kind === "mcp" && tool.id === "opengeni"),
-  );
+  const tools = (
+    form.mcpServerIds?.map((id) => ({ kind: "mcp" as const, id })) ??
+    existingTask?.agentConfig.tools ??
+    []
+  ).filter((tool) => !(tool.kind === "mcp" && tool.id === "opengeni"));
   if (form.includeOpenGeniTool) {
     tools.push({ kind: "mcp", id: "opengeni" });
   }
   return {
     prompt: form.prompt.trim(),
+    ...(existingTask?.agentConfig.knowledgeSource
+      ? { knowledgeSource: existingTask.agentConfig.knowledgeSource }
+      : {}),
     resources: form.resources,
     tools,
     metadata: existingTask?.agentConfig.metadata ?? {},
@@ -719,4 +738,30 @@ export function knowledgeSyncSourceLabel(action: KnowledgeSyncAction): string {
   const provider = (action.connection as { providerDomain?: string } | undefined)?.providerDomain;
   const reach = action.allDescendants ? "with descendants" : "selected only";
   return [scope, provider, reach].filter((part) => Boolean(part)).join(" · ");
+}
+
+/** Fetch every matching schedule without truncating the session navigation at one page. */
+export async function loadSessionSchedules(
+  client: Pick<OpenGeniClient, "listScheduledTasks">,
+  workspaceId: string,
+  sessionId: string,
+): Promise<ScheduledTask[]> {
+  const tasks = new Map<string, ScheduledTask>();
+  const limit = 100;
+  let offset = 0;
+  while (true) {
+    const page = await client.listScheduledTasks(workspaceId, { sessionId, limit, offset });
+    for (const task of page) tasks.set(task.id, task);
+    if (page.length < limit) return [...tasks.values()];
+    offset += page.length;
+  }
+}
+
+/** Identity of the execution destination being edited, excluding unrelated form fields. */
+export function scheduledLearningDestinationKey(form: ScheduledTaskFormState): string {
+  return JSON.stringify([
+    form.runMode,
+    form.targetSessionId,
+    form.knowledgeSource?.destination ?? null,
+  ]);
 }

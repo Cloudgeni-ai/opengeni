@@ -107,10 +107,29 @@ async function freezeRequest(
     allowSkip?: boolean;
     optionalText?: boolean;
     queueEditPrompt?: boolean;
+    initialUpdate?: boolean;
+    skillReview?: null;
   } = {},
 ) {
   const { grant, session } = await createFixture();
   await send(grant, session.id, "continue with my decision");
+  const initialUpdate = options.initialUpdate
+    ? await addSessionSystemUpdate(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        kind: "agent_message",
+        classification: "info",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: `initial-update-${crypto.randomUUID()}`,
+        summary: "INITIAL-ACK",
+        payload: {
+          type: "agent_message",
+          text: "INITIAL-ACK",
+          operationId: crypto.randomUUID(),
+        },
+      })
+    : null;
   const queuedPrompt = options.queueEditPrompt
     ? await send(grant, session.id, "revise this queued prompt later")
     : null;
@@ -149,6 +168,7 @@ async function freezeRequest(
           ],
           required: true,
           allowOther: false,
+          ...(options.skillReview === null ? { skillReview: null } : {}),
         },
       ];
   const expiresAt = options.expiresAt ?? null;
@@ -211,10 +231,47 @@ async function freezeRequest(
     requestId,
     parallelRequestId,
     questions,
+    initialUpdate,
   };
 }
 
 describe("durable structured human input", () => {
+  test.each([
+    [undefined, false],
+    [undefined, true],
+    [null, false],
+    [null, true],
+  ] as const)(
+    "ordinary response accepts skillReview=%s with canonicalHumanSession=%s",
+    async (skillReview, canonicalHumanSession) => {
+      const fixture = await freezeRequest(skillReview === null ? { skillReview } : {});
+      const request = await getSessionHumanInputRequest(
+        client.db,
+        fixture.grant.workspaceId!,
+        fixture.session.id,
+        fixture.requestId,
+      );
+      expect(request?.questions[0]?.skillReview).toBe(skillReview);
+      const accepted = await acceptSessionHumanInputResponse(client.db, {
+        accountId: fixture.grant.accountId,
+        workspaceId: fixture.grant.workspaceId!,
+        sessionId: fixture.session.id,
+        requestId: fixture.requestId,
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "environment", values: ["staging"] }],
+        },
+        respondedBy: fixture.grant.subjectId,
+        canonicalHumanSession,
+      });
+      expect(accepted.action).toBe("accepted");
+      const [stored] = await shared.admin`
+        select status, skill_review_human_authorized
+        from session_human_input_requests where id=${fixture.requestId}`;
+      expect(stored).toMatchObject({ status: "answered", skill_review_human_authorized: false });
+    },
+  );
+
   test("atomically freezes, survives a workflow restart, validates, and resumes the same turn", async () => {
     const expiresAt = new Date(Date.now() + 60_000);
     const fixture = await freezeRequest({ expiresAt });
@@ -321,8 +378,16 @@ describe("durable structured human input", () => {
     });
   });
 
-  test("attaches machine input after the resumed open suffix without creating a second turn", async () => {
-    const frozen = await freezeRequest();
+  test("retains distinct machine-input batches across interruption and idempotent resume", async () => {
+    const frozen = await freezeRequest({ initialUpdate: true });
+    if (!frozen.initialUpdate?.added) throw new Error("initial update was not added");
+    const firstBatch = await listSessionSystemUpdatesForTurn(
+      client.db,
+      frozen.grant.workspaceId!,
+      frozen.session.id,
+      frozen.turn.id,
+    );
+    expect(firstBatch.map((update) => update.id)).toEqual([frozen.initialUpdate.update.id]);
     const followUp = await addSessionSystemUpdate(client.db, {
       accountId: frozen.grant.accountId,
       workspaceId: frozen.grant.workspaceId!,
@@ -449,16 +514,20 @@ describe("durable structured human input", () => {
       action: "claimed",
       turn: { id: resumed.turn.id, executionGeneration: resumed.turn.executionGeneration },
     });
-    expect(
-      (
-        await listSessionSystemUpdatesForTurn(
-          client.db,
-          frozen.grant.workspaceId!,
-          frozen.session.id,
-          resumed.turn.id,
-        )
-      ).map((update) => update.id),
-    ).toEqual([followUp.update.id]);
+    const delivered = await listSessionSystemUpdatesForTurn(
+      client.db,
+      frozen.grant.workspaceId!,
+      frozen.session.id,
+      resumed.turn.id,
+    );
+    expect(resumed.turn.id).toBe(frozen.turn.id);
+    expect(delivered.map((update) => update.id)).toEqual([
+      frozen.initialUpdate.update.id,
+      followUp.update.id,
+    ]);
+    expect(new Set(delivered.map((update) => update.deliveredHistoryItemId)).size).toBe(2);
+    expect(delivered[0]?.deliveredHistoryItemId).toBe(firstBatch[0]?.deliveredHistoryItemId);
+    expect(delivered.every((update) => update.deliveredHistoryItemId)).toBe(true);
     expect(
       (
         await listOutstandingSessionSystemUpdates(
@@ -479,6 +548,12 @@ describe("durable structured human input", () => {
       "message",
     ]);
     expect(JSON.stringify(history.at(-1)?.item)).toContain("FOLLOWUP-ACK");
+    expect(history.filter((row) => JSON.stringify(row.item).includes("INITIAL-ACK"))).toHaveLength(
+      1,
+    );
+    expect(history.filter((row) => JSON.stringify(row.item).includes("FOLLOWUP-ACK"))).toHaveLength(
+      1,
+    );
 
     // Simulate an exact-attempt retry across a rolling deployment: the old
     // worker claimed the resume before pendingUpdateBoundarySequence existed.

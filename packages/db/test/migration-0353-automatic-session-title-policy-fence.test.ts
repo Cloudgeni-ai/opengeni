@@ -488,7 +488,10 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
         payload: { title: unsafeTitle, source: "agent" },
       },
     ]);
-    expect(unsafeEvent?.payload).toEqual({ title: unsafeTitle, source: "agent" });
+    expect(unsafeEvent?.payload).toEqual({
+      title: unsafeTitle,
+      source: "agent",
+    });
 
     expect(await drainQuarantine(database, await quarantineStatement())).toBe(1);
     const quarantined = await getSession(client.db, grant.workspaceId!, legacy.id);
@@ -944,10 +947,20 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // today's evaluator strict for every table that existed at that boundary,
     // while explicitly removing tables introduced by later migrations.
     const post0353RuntimeTables = new Set([
+      "additional_organization_creation_receipts",
       "company_profile_agent_automatic_activation_receipts",
+      "deployment_model_catalog",
+      "mcp_oauth_access_tokens",
+      "mcp_oauth_authorization_codes",
+      "mcp_oauth_authorization_requests",
+      "mcp_oauth_clients",
+      "mcp_oauth_refresh_tokens",
       "organization_company_profile_agent_policies",
       "organization_company_profile_agent_policy_events",
       "organization_codex_rotation_settings",
+      "organization_model_provider_connection_operations",
+      "organization_model_provider_connections",
+      "organization_model_provider_custom_models",
       "organization_recovery_approvals",
       "organization_recovery_command_receipts",
       "organization_recovery_custodian_acceptances",
@@ -961,30 +974,75 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "pr_review_managed_github_authority_nonces",
       "pr_review_managed_github_routes",
       "remember_knowledge_memory_materializations",
+      "session_tenancy_additional_organization_activation_evidence",
       "session_event_cursors",
       "session_work_claim_revisions",
       "session_work_claim_write_capabilities",
       "session_work_claims",
+      "tool_gateway_approval_capabilities",
       "workspace_codex_subscription_preferences",
+      "workspace_gateway_custom_models",
     ]);
     // The current runtime evaluator intentionally requires every capability in
     // today's schema. A database frozen immediately after 0353 predates the
     // 0361 Memory materialization table/function and the 0380 company-profile
-    // autonomy policy tables/functions. Preserve those exact expected boundary
-    // gaps while continuing to reject every other posture violation in this
+    // autonomy policy tables/functions, the 0400 model-context snapshot table,
+    // the 0401 setup-delivery transport routines, the 0422 Codex inventory,
+    // the 0429 message-boundary fork overload,
+    // the 0433 unified Skill tables/lifecycle capability, and the 0461 protected
+    // MCP operation ledger/command capability (which grants no direct DML), and
+    // the 0470 organization integration policy tables (SELECT-only at runtime),
+    // and the 0477 protected managed sign-in ledger and five runtime capabilities.
+    // It also predates the 0507 pending MCP OAuth state table.
+    // It also retains the three Pack tables removed from the runtime contract
+    // by 0482 and predates the 0492 accepted Codex source table/capture capability.
+    // Preserve those exact expected boundary gaps while continuing to
+    // reject every other posture violation in this
     // rolling-compatibility test.
     const expectedPost0353EvaluatorGaps = [
+      "runtime privilege tables are missing: codex_turn_source_bindings, connect_attempts, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, integration_oauth_pending_states, organization_integration_policies, organization_integration_policy_operations, session_attempt_model_context_snapshots, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads",
+      "protected tables are missing: agent_instruction_operations, agent_learning_revisions, agent_learning_snapshots, codex_turn_source_bindings, connect_attempts, external_identities, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, integration_oauth_pending_states, knowledge_entries, knowledge_entry_decisions, knowledge_entry_links, knowledge_entry_operations, knowledge_entry_revisions, knowledge_entry_search, knowledge_entry_vectors, knowledge_index_jobs, knowledge_review_batches, managed_sign_in_method_operations, mcp_operations, organization_integration_policies, organization_integration_policy_operations, session_attempt_model_context_snapshots, skill_config_conversion_receipts, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads",
+      "RLS tables are absent from the declared contract: pack_installation_components, pack_installations, workspace_packs",
+      "target-schema runtime capability knowledge_index_claim(text, integer, integer) is missing or ambiguous",
+      "target-schema runtime capability knowledge_index_work(uuid, uuid, uuid, jsonb) is missing or ambiguous",
+      "target-schema runtime capability knowledge_index_billing_policy(uuid, uuid, uuid, text, timestamp with time zone, bigint) is missing or ambiguous",
+      "target-schema runtime capability knowledge_index_wait_for_funding(uuid, uuid, uuid) is missing or ambiguous",
+      "target-schema runtime capability knowledge_index_paid_publication_guard(uuid, uuid, uuid) is missing or ambiguous",
+      "target-schema runtime capability knowledge_visible_index_status(uuid, uuid, jsonb, jsonb, text) is missing or ambiguous",
+      "target-schema runtime capability knowledge_entry_apply(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
+      "target-schema runtime capability knowledge_entry_confirm_legacy(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
+      "target-schema runtime capability agent_instruction_apply(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
+      "target-schema runtime capability knowledge_entry_read(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
+      "target-schema runtime capability knowledge_entry_prepare_file(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
+      "target-schema runtime capability knowledge_document_prepare(uuid, uuid, uuid, jsonb) is missing or ambiguous",
+      "target-schema runtime capability agent_learning_manage(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
+      "target-schema runtime capability mcp_operation_command(jsonb, text, jsonb) is missing or ambiguous",
+      "target-schema runtime capability skill_apply_lifecycle(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
       "target-schema runtime capability propose_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, text) authority tables are missing: company_profile_agent_automatic_activation_receipts, organization_company_profile_agent_policies, organization_company_profile_agent_policy_events",
       "target-schema runtime capability propose_company_profile_for_attempt_v2(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, text, text, text) is missing or ambiguous",
       "target-schema runtime capability confirm_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid) authority tables are missing: company_profile_agent_automatic_activation_receipts, organization_company_profile_agent_policies, organization_company_profile_agent_policy_events",
       "target-schema runtime capability get_company_profile_agent_policy(uuid, uuid, text) is missing or ambiguous",
       "target-schema runtime capability update_company_profile_agent_policy(uuid, uuid, text, text, bigint, uuid) is missing or ambiguous",
-      "target-schema runtime capability activate_governed_learning_decision(uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
-      "target-schema runtime capability activate_human_confirmed_learning_decision(uuid, uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
-      "target-schema runtime capability confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
-      "target-schema runtime capability materialize_remember_knowledge_memory(uuid, uuid, uuid) is missing or ambiguous",
       "target-schema runtime capability undo_governed_learning_activation(uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
+      "target-schema runtime capability fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, uuid) is missing or ambiguous",
+      "target-schema runtime capability get_external_identity_link_reference(uuid, uuid, text) is missing or ambiguous",
+      "target-schema runtime capability get_external_identity_link_inventory_references(uuid, uuid[]) is missing or ambiguous",
+      "target-schema runtime capability ensure_external_identity(uuid, text, text) is missing or ambiguous",
+      "target-schema runtime capability lookup_external_identity(uuid, text, text, text) is missing or ambiguous",
+      "target-schema runtime capability prepare_external_workspace_membership_operation(jsonb) is missing or ambiguous",
+      "target-schema runtime capability record_external_workspace_membership_operation(jsonb, jsonb) is missing or ambiguous",
+      "target-schema runtime capability capture_legacy_codex_turn_sources(uuid, uuid) is missing or ambiguous",
       "target-schema runtime capability list_organization_workspace_ids(uuid) is missing or ambiguous",
+      "target-schema runtime capability list_organization_codex_workspace_ids(uuid) is missing or ambiguous",
+      "target-schema runtime capability authorize_organization_shared_workspace_administration(uuid, uuid, text) is missing or ambiguous",
+      "target-schema runtime capability claim_organization_user_setup_delivery_v2(jsonb) is missing or ambiguous",
+      "target-schema runtime capability prepare_organization_user_setup_delivery_v2(jsonb) is missing or ambiguous",
+      "target-schema runtime capability list_owned_connection_accounts(uuid, uuid) is missing or ambiguous",
+      "target-schema runtime capability mutate_managed_sign_in_method(text, text, jsonb) is missing or ambiguous",
+      "target-schema runtime capability assert_managed_sign_in_recovery(text, text, uuid, jsonb) is missing or ambiguous",
+      "target-schema runtime capability replay_managed_sign_in_method(text, text, jsonb) is missing or ambiguous",
+      "target-schema runtime capability claim_managed_sign_in_notification(uuid, text, text, integer) is missing or ambiguous",
+      "target-schema runtime capability settle_managed_sign_in_notification(uuid, uuid, text) is missing or ambiguous",
     ];
     const sessionSetTables = new Set([
       "managed_auth_actor_mutation_leases",
@@ -1019,8 +1077,12 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     ]);
     const post0353CapabilityRoutines = new Set([
       ...sessionSetRoutines,
+      "create_additional_managed_organization(text, text, text, text, uuid)",
       "issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean)",
       "resolve_workspace_codex_subscription_source(uuid, uuid)",
+    ]);
+    const post0353ForbiddenRoutines = new Set([
+      "activate_session_tenancy_from_additional_organization(uuid)",
     ]);
     const post0353ProtectedTables = new Set([...post0353RuntimeTables, ...sessionSetTables]);
     const preSessionSetProtectedTables = FORCE_RLS_TABLES.filter(
@@ -1045,7 +1107,9 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       protectedNoDirectDmlTables: preSessionSetNoDirectDmlTables,
       tablePrivileges: preSessionSetTablePrivileges,
       targetSchemaCapabilityRoutines: preSessionSetCapabilityRoutines,
-      targetSchemaForbiddenRoutines: RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
+      targetSchemaForbiddenRoutines: RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES.filter(
+        (routine) => !post0353ForbiddenRoutines.has(routine),
+      ),
     });
 
     try {

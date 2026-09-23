@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { Manifest } from "@openai/agents/sandbox";
 import {
+  connectedMachinePathWithinRoot,
   connectedMachineWorkspaceRootsEqual,
+  isConnectedMachineAbsolutePath,
   normalizeConnectedMachineWorkspaceRoot,
+  relativeConnectedMachinePath,
   resolveConnectedMachinePath,
   resolveConnectedMachineWorkspaceRoot,
 } from "../src/sandbox";
@@ -41,6 +44,27 @@ describe("Connected Machine workspace path normalization", () => {
       normalizeConnectedMachineWorkspaceRoot(String.raw`\\?\C:\repo`, "windows"),
     ).toThrow("device-namespace");
     expect(() => resolveConnectedMachinePath("C:/repo", "D:relative")).toThrow("drive-relative");
+  });
+
+  test("classifies and confines host-native absolute paths across operating systems", () => {
+    expect(isConnectedMachineAbsolutePath("/srv/repo/src/app.ts")).toBe(true);
+    expect(isConnectedMachineAbsolutePath(String.raw`C:\repo\src\app.ts`)).toBe(true);
+    expect(isConnectedMachineAbsolutePath(String.raw`\\server\share\repo\app.ts`)).toBe(true);
+    expect(isConnectedMachineAbsolutePath("src/app.ts")).toBe(false);
+
+    expect(connectedMachinePathWithinRoot("/srv/repo", "/srv/repo/src/app.ts")).toBe(true);
+    expect(connectedMachinePathWithinRoot("/srv/repo", "/srv/other/app.ts")).toBe(false);
+    expect(connectedMachinePathWithinRoot("C:/Work/Repo", "c:/work/repo/src/app.ts")).toBe(true);
+    expect(connectedMachinePathWithinRoot("C:/Work/Repo", "D:/work/repo/src/app.ts")).toBe(false);
+    expect(
+      connectedMachinePathWithinRoot(
+        "//server/share/repo",
+        String.raw`\\SERVER\SHARE\repo\src\app.ts`,
+      ),
+    ).toBe(true);
+    expect(relativeConnectedMachinePath("C:/Work/Repo", "c:/work/repo/src/app.ts")).toBe(
+      "src/app.ts",
+    );
   });
 
   test("configured cwd is absolute or relative to Hello root; tilde is never guessed", () => {

@@ -10,6 +10,9 @@ live object the user sees in the Artifacts dock and grid. Never maintain a
 mutable XLSX shadow or publish a sandbox workbook over user edits.
 
 Read [references/api.md](references/api.md) before editing.
+When using `skill_read`, request that relative path from this Skill; reading
+does not materialize a local folder. Use an existing local copy only when the
+Skill was installed or explicitly checked out to the filesystem.
 
 ## Choose the canonical object
 

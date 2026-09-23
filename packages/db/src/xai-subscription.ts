@@ -1,15 +1,16 @@
+import { assignedConnectionDefault, connectionModelAllowed } from "./model-connection-access";
 import {
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
   type XaiProviderAccountAuthoritySnapshotV1 as XaiAuthoritySnapshot,
 } from "@opengeni/contracts";
-import { and, asc, eq, gt, isNull, lte, sql } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, lte, or, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withWorkspaceSubjectRls } from "./database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import * as schema from "./schema";
 
-export type XaiAccountAuthorityScope = "workspace" | "user";
+export type XaiAccountAuthorityScope = "workspace" | "user" | "organization";
 export type XaiCredentialStatus = "active" | "needs_relogin" | "error" | "disabled";
 
 export type XaiCredentialSecretV1 = {
@@ -21,6 +22,7 @@ export type XaiCredentialSecretV1 = {
 };
 
 export type XaiSubscriptionAccountMetadata = {
+  allowedModelIds?: string[] | null;
   id: string;
   scope: XaiAccountAuthorityScope;
   providerAccountId: string | null;
@@ -96,10 +98,12 @@ type XaiCredentialMetadataRow = Pick<
   | "exhaustedUntil"
   | "selectionCount"
   | "lastSelectedAt"
+  | "allowedModelIds"
   | "connectedBySubjectId"
 >;
 
-const xaiCredentialMetadataColumns = {
+export const xaiCredentialMetadataColumns = {
+  allowedModelIds: schema.xaiSubscriptionCredentials.allowedModelIds,
   id: schema.xaiSubscriptionCredentials.id,
   authorityScope: schema.xaiSubscriptionCredentials.authorityScope,
   providerAccountId: schema.xaiSubscriptionCredentials.providerAccountId,
@@ -152,11 +156,14 @@ function parseSecret(value: string): XaiCredentialSecretV1 {
   return secret;
 }
 
-function metadataFromRow(row: XaiCredentialMetadataRow): XaiSubscriptionAccountMetadata {
+export function xaiSubscriptionMetadataFromRow(
+  row: XaiCredentialMetadataRow,
+): XaiSubscriptionAccountMetadata {
   return {
     id: row.id,
     scope: row.authorityScope as XaiAccountAuthorityScope,
     providerAccountId: row.providerAccountId,
+    allowedModelIds: row.allowedModelIds,
     label: row.label,
     accountEmail: row.accountEmail,
     planType: row.planType,
@@ -186,7 +193,7 @@ async function resolveXaiPoolOwnerMembershipId(
     authoritySnapshot: XaiAuthoritySnapshot;
   },
 ): Promise<string | null> {
-  if (input.authoritySnapshot.scope === "workspace") return null;
+  if (input.authoritySnapshot.scope !== "user") return null;
   const rows = await rawRows<{ membership_id: string }>(
     db,
     sql`select organization_membership_id as membership_id
@@ -249,7 +256,7 @@ async function assertXaiCredentialInPool(
     .where(
       and(
         eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
-        eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+        xaiCredentialWorkspacePredicate(input.workspaceId),
         eq(schema.xaiSubscriptionCredentials.id, input.credentialId),
         eq(schema.xaiSubscriptionCredentials.authorityScope, input.authorityScope),
         input.ownerMembershipId === null
@@ -270,7 +277,7 @@ export async function createXaiSubscriptionCredential(
     accountId: string;
     workspaceId: string;
     subjectId: string;
-    scope?: XaiAccountAuthorityScope;
+    scope?: Exclude<XaiAccountAuthorityScope, "organization">;
     encryptionKey: Uint8Array;
     secret: XaiCredentialSecretV1;
     providerAccountId?: string | null;
@@ -318,7 +325,7 @@ export async function createXaiSubscriptionCredential(
             scope: "user",
             authorityGeneration: Number(created.authority_generation),
           });
-    return { account: metadataFromRow(row), authoritySnapshot };
+    return { account: xaiSubscriptionMetadataFromRow(row), authoritySnapshot };
   });
 }
 
@@ -330,7 +337,7 @@ export async function upsertXaiSubscriptionCredential(
     subjectId: string;
     credentialId?: string | null;
     authoritySnapshot?: XaiAuthoritySnapshot;
-    scope?: XaiAccountAuthorityScope;
+    scope?: Exclude<XaiAccountAuthorityScope, "organization">;
     encryptionKey: Uint8Array;
     secret: XaiCredentialSecretV1;
     providerAccountId?: string | null;
@@ -392,7 +399,7 @@ export async function upsertXaiSubscriptionCredential(
       .where(eq(schema.xaiSubscriptionCredentials.id, credentialId))
       .returning(xaiCredentialMetadataColumns);
     if (!row) throw new Error("xAI credential update lost its authority fence");
-    return { account: metadataFromRow(row), authoritySnapshot: snapshot };
+    return { account: xaiSubscriptionMetadataFromRow(row), authoritySnapshot: snapshot };
   });
 }
 
@@ -416,7 +423,7 @@ async function findXaiCredentialByProviderIdentity(
       .from(schema.xaiSubscriptionCredentials)
       .where(
         and(
-          eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+          xaiCredentialWorkspacePredicate(input.workspaceId),
           eq(schema.xaiSubscriptionCredentials.authorityScope, input.scope),
           eq(schema.xaiSubscriptionCredentials.providerAccountId, input.providerAccountId),
         ),
@@ -445,12 +452,12 @@ export async function listXaiSubscriptionAccountsMetadata(
     const rows = await scopedDb
       .select(xaiCredentialMetadataColumns)
       .from(schema.xaiSubscriptionCredentials)
-      .where(eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId))
+      .where(xaiCredentialWorkspacePredicate(input.workspaceId))
       .orderBy(
         asc(schema.xaiSubscriptionCredentials.createdAt),
         asc(schema.xaiSubscriptionCredentials.id),
       );
-    return rows.map(metadataFromRow);
+    return rows.map(xaiSubscriptionMetadataFromRow);
   });
 }
 
@@ -472,20 +479,72 @@ export async function workspaceXaiSubscriptionActive(
     workspaceId,
     subjectId,
   });
-  const [accounts, rotation] = await Promise.all([
-    listXaiSubscriptionAccountsMetadata(db, { workspaceId, subjectId }),
-    getXaiRotationSettings(db, { workspaceId, subjectId, authoritySnapshot }),
-  ]);
-  const activeCredentialId = rotation?.activeCredentialId ?? null;
-  const now = new Date();
-  const eligible = (account: XaiSubscriptionAccountMetadata) =>
-    account.status === "active" &&
-    account.allocatorEnabled &&
-    (!account.exhaustedUntil || account.exhaustedUntil <= now);
-  if (rotation?.rotationEnabled !== false) {
-    return accounts.some(eligible);
-  }
-  return accounts.some((account) => account.id === activeCredentialId && eligible(account));
+  return await workspaceXaiSubscriptionActiveForAuthority(db, settings, {
+    workspaceId,
+    subjectId,
+    authoritySnapshot,
+  });
+}
+
+/** Metadata-only readiness for the exact provider-account authority frozen on a turn. */
+export async function workspaceXaiSubscriptionActiveForAuthority(
+  db: Database,
+  settings: { readonly supergrokSubscriptionEnabled: boolean },
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    authoritySnapshot: XaiAuthoritySnapshot;
+  },
+): Promise<boolean> {
+  if (!settings.supergrokSubscriptionEnabled) return false;
+  const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const ownerMembershipId = await resolveXaiPoolOwnerMembershipId(scopedDb, {
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      authoritySnapshot: snapshot,
+    });
+    const ownerPredicate =
+      ownerMembershipId === null
+        ? isNull(schema.xaiSubscriptionCredentials.ownerOrganizationMembershipId)
+        : eq(schema.xaiSubscriptionCredentials.ownerOrganizationMembershipId, ownerMembershipId);
+    const [accounts, rotation] = await Promise.all([
+      scopedDb
+        .select(xaiCredentialMetadataColumns)
+        .from(schema.xaiSubscriptionCredentials)
+        .where(
+          and(
+            xaiCredentialWorkspacePredicate(input.workspaceId),
+            eq(schema.xaiSubscriptionCredentials.authorityScope, snapshot.scope),
+            ownerPredicate,
+          ),
+        ),
+      scopedDb
+        .select()
+        .from(schema.xaiRotationSettings)
+        .where(
+          and(
+            xaiRotationWorkspacePredicate(input.workspaceId),
+            eq(schema.xaiRotationSettings.authorityScope, snapshot.scope),
+            ownerMembershipId === null
+              ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
+              : eq(schema.xaiRotationSettings.ownerOrganizationMembershipId, ownerMembershipId),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null),
+    ]);
+    const activeCredentialId = rotation?.activeCredentialId ?? null;
+    const now = new Date();
+    const eligible = (account: XaiCredentialMetadataRow) =>
+      account.status === "active" &&
+      account.allocatorEnabled &&
+      (!account.exhaustedUntil || account.exhaustedUntil <= now);
+    if (rotation?.rotationEnabled !== false) {
+      return accounts.some(eligible);
+    }
+    return accounts.some((account) => account.id === activeCredentialId && eligible(account));
+  });
 }
 
 export async function getXaiSubscriptionAccountMetadata(
@@ -498,12 +557,12 @@ export async function getXaiSubscriptionAccountMetadata(
       .from(schema.xaiSubscriptionCredentials)
       .where(
         and(
-          eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+          xaiCredentialWorkspacePredicate(input.workspaceId),
           eq(schema.xaiSubscriptionCredentials.id, input.credentialId),
         ),
       )
       .limit(1);
-    return row ? metadataFromRow(row) : null;
+    return row ? xaiSubscriptionMetadataFromRow(row) : null;
   });
 }
 
@@ -521,12 +580,13 @@ export async function getXaiSubscriptionAccountAuthoritySnapshot(
       .from(schema.xaiSubscriptionCredentials)
       .where(
         and(
-          eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+          xaiCredentialWorkspacePredicate(input.workspaceId),
           eq(schema.xaiSubscriptionCredentials.id, input.credentialId),
         ),
       )
       .limit(1);
     if (!row) return null;
+    if (row.authorityScope === "organization") return { version: 1, scope: "organization" };
     return row.authorityScope === "workspace"
       ? WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1
       : XaiProviderAccountAuthoritySnapshotV1.parse({
@@ -577,12 +637,38 @@ export async function resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInT
     )
     .where(
       and(
-        eq(schema.xaiRotationSettings.workspaceId, input.workspaceId),
+        xaiRotationWorkspacePredicate(input.workspaceId),
         eq(schema.xaiRotationSettings.authorityScope, "user"),
       ),
     )
     .limit(1);
-  if (!row) return WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
+  if (!row) {
+    const [local] = await db
+      .select({ id: schema.xaiSubscriptionCredentials.id })
+      .from(schema.xaiSubscriptionCredentials)
+      .where(
+        and(
+          eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+          eq(schema.xaiSubscriptionCredentials.authorityScope, "workspace"),
+        ),
+      )
+      .limit(1);
+    if (!local) {
+      const [organization] = await db
+        .select({ id: schema.xaiRotationSettings.id })
+        .from(schema.xaiRotationSettings)
+        .where(
+          and(
+            isNull(schema.xaiRotationSettings.workspaceId),
+            eq(schema.xaiRotationSettings.authorityScope, "organization"),
+            sql`${schema.xaiRotationSettings.activeCredentialId} is not null`,
+          ),
+        )
+        .limit(1);
+      if (organization) return { version: 1, scope: "organization" };
+    }
+    return WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
+  }
   return XaiProviderAccountAuthoritySnapshotV1.parse({
     version: 1,
     scope: "user",
@@ -617,14 +703,14 @@ export async function updateXaiSubscriptionAccountSettings(
       })
       .where(
         and(
-          eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+          xaiCredentialWorkspacePredicate(input.workspaceId),
           eq(schema.xaiSubscriptionCredentials.id, input.credentialId),
           eq(schema.xaiSubscriptionCredentials.version, input.expectedVersion),
         ),
       )
       .returning(xaiCredentialMetadataColumns);
     if (!row) throw new Error("xAI subscription account settings changed");
-    return metadataFromRow(row);
+    return xaiSubscriptionMetadataFromRow(row);
   });
 }
 
@@ -662,7 +748,7 @@ export async function updateXaiAllocatorEligibility(
           .from(schema.xaiSubscriptionCredentials)
           .where(
             and(
-              eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+              xaiCredentialWorkspacePredicate(input.workspaceId),
               eq(schema.xaiSubscriptionCredentials.id, input.credentialId),
             ),
           )
@@ -690,7 +776,7 @@ export async function updateXaiAllocatorEligibility(
           })
           .where(
             and(
-              eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+              xaiCredentialWorkspacePredicate(input.workspaceId),
               eq(schema.xaiSubscriptionCredentials.id, input.credentialId),
               eq(schema.xaiSubscriptionCredentials.allocatorVersion, input.expectedVersion),
             ),
@@ -725,12 +811,12 @@ export async function renameXaiSubscriptionAccount(
       })
       .where(
         and(
-          eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+          xaiCredentialWorkspacePredicate(input.workspaceId),
           eq(schema.xaiSubscriptionCredentials.id, input.credentialId),
         ),
       )
       .returning(xaiCredentialMetadataColumns);
-    return row ? metadataFromRow(row) : null;
+    return row ? xaiSubscriptionMetadataFromRow(row) : null;
   });
 }
 
@@ -788,7 +874,7 @@ export async function materializeXaiCredentialForRun(
       .from(schema.xaiSubscriptionCredentials)
       .where(
         and(
-          eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+          xaiCredentialWorkspacePredicate(input.workspaceId),
           eq(schema.xaiSubscriptionCredentials.id, input.credentialId),
           eq(schema.xaiSubscriptionCredentials.status, "active"),
         ),
@@ -796,7 +882,7 @@ export async function materializeXaiCredentialForRun(
       .limit(1);
     if (!row) throw new Error("xAI credential is unavailable");
     return {
-      ...metadataFromRow(row),
+      ...xaiSubscriptionMetadataFromRow(row),
       secret: parseSecret(decryptEnvironmentValue(input.encryptionKey, row.credentialEncrypted)),
       authoritySnapshot: snapshot,
     };
@@ -856,7 +942,7 @@ export async function refreshXaiSubscriptionCredentialSerialized(
       .where(
         and(
           eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
-          eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+          xaiCredentialWorkspacePredicate(input.workspaceId),
           eq(schema.xaiSubscriptionCredentials.id, input.credentialId),
           eq(schema.xaiSubscriptionCredentials.status, "active"),
         ),
@@ -869,7 +955,7 @@ export async function refreshXaiSubscriptionCredentialSerialized(
       decryptEnvironmentValue(input.encryptionKey, row.credentialEncrypted),
     );
     const current: XaiCredentialForRun = {
-      ...metadataFromRow(row),
+      ...xaiSubscriptionMetadataFromRow(row),
       secret: currentSecret,
       authoritySnapshot: snapshot,
     };
@@ -900,7 +986,7 @@ export async function refreshXaiSubscriptionCredentialSerialized(
       .where(
         and(
           eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
-          eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+          xaiCredentialWorkspacePredicate(input.workspaceId),
           eq(schema.xaiSubscriptionCredentials.id, input.credentialId),
         ),
       )
@@ -908,7 +994,7 @@ export async function refreshXaiSubscriptionCredentialSerialized(
     if (!updated) throw new Error("xAI credential refresh lost its authority fence");
     return {
       credential: {
-        ...metadataFromRow(updated),
+        ...xaiSubscriptionMetadataFromRow(updated),
         secret: next.secret,
         authoritySnapshot: snapshot,
       },
@@ -920,6 +1006,7 @@ export async function refreshXaiSubscriptionCredentialSerialized(
 export async function acquireXaiCredentialLease(
   db: Database,
   input: {
+    modelId?: string;
     accountId: string;
     workspaceId: string;
     subjectId: string;
@@ -961,21 +1048,22 @@ export async function acquireXaiCredentialLease(
           authoritySnapshot: snapshot,
         });
 
-        await tx
-          .insert(schema.xaiRotationSettings)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            authorityScope: snapshot.scope,
-            ownerOrganizationMembershipId: ownerMembershipId,
-          })
-          .onConflictDoNothing();
+        if (snapshot.scope !== "organization")
+          await tx
+            .insert(schema.xaiRotationSettings)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              authorityScope: snapshot.scope,
+              ownerOrganizationMembershipId: ownerMembershipId,
+            })
+            .onConflictDoNothing();
         const [settings] = await tx
           .select()
           .from(schema.xaiRotationSettings)
           .where(
             and(
-              eq(schema.xaiRotationSettings.workspaceId, input.workspaceId),
+              xaiRotationWorkspacePredicate(input.workspaceId),
               eq(schema.xaiRotationSettings.authorityScope, snapshot.scope),
               ownerMembershipId === null
                 ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
@@ -1024,7 +1112,7 @@ export async function acquireXaiCredentialLease(
           const accounts = await tx
             .select(xaiCredentialMetadataColumns)
             .from(schema.xaiSubscriptionCredentials)
-            .where(eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId));
+            .where(xaiCredentialWorkspacePredicate(input.workspaceId));
           return {
             credentialId: updated!.credentialId,
             rotationEnabled: settings.rotationEnabled,
@@ -1032,7 +1120,7 @@ export async function acquireXaiCredentialLease(
             holderId: updated!.holderId,
             generation: updated!.generation,
             leasedUntil: updated!.leasedUntil,
-            accounts: accounts.map(metadataFromRow),
+            accounts: accounts.map(xaiSubscriptionMetadataFromRow),
           };
         }
 
@@ -1041,7 +1129,7 @@ export async function acquireXaiCredentialLease(
           .from(schema.xaiSubscriptionCredentials)
           .where(
             and(
-              eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+              xaiCredentialWorkspacePredicate(input.workspaceId),
               eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
               eq(schema.xaiSubscriptionCredentials.authorityScope, snapshot.scope),
               ownerMembershipId === null
@@ -1058,6 +1146,8 @@ export async function acquireXaiCredentialLease(
           );
         const eligible = candidates.filter(
           (candidate) =>
+            (input.modelId === undefined ||
+              connectionModelAllowed(candidate.allowedModelIds, input.modelId)) &&
             candidate.status === "active" &&
             candidate.allocatorEnabled &&
             (!candidate.exhaustedUntil || candidate.exhaustedUntil <= now),
@@ -1073,7 +1163,13 @@ export async function acquireXaiCredentialLease(
               (eligible.length > 0
                 ? eligible[xaiCredentialShardIndex(input.sessionId, eligible.length)]
                 : undefined))
-            : eligible.find((candidate) => candidate.id === settings.activeCredentialId);
+            : eligible.find(
+                (candidate) =>
+                  candidate.id ===
+                  (snapshot.scope === "organization"
+                    ? assignedConnectionDefault(settings.activeCredentialId, candidates)
+                    : settings.activeCredentialId),
+              );
         if (!selected) {
           return {
             credentialId: null,
@@ -1082,7 +1178,7 @@ export async function acquireXaiCredentialLease(
             holderId: null,
             generation: null,
             leasedUntil: null,
-            accounts: candidates.map(metadataFromRow),
+            accounts: candidates.map(xaiSubscriptionMetadataFromRow),
           };
         }
         const [lease] = await tx
@@ -1109,7 +1205,7 @@ export async function acquireXaiCredentialLease(
         // A session policy/manual home must never move the workspace-global
         // active pointer. A missing pointer is bootstrapped once for rotation-off
         // fallback and UI state, but healthy sharded turns never churn it.
-        if (settings.activeCredentialId === null) {
+        if (settings.activeCredentialId === null && snapshot.scope !== "organization") {
           await tx
             .update(schema.xaiRotationSettings)
             .set({
@@ -1126,7 +1222,7 @@ export async function acquireXaiCredentialLease(
           holderId: lease!.holderId,
           generation: lease!.generation,
           leasedUntil: lease!.leasedUntil,
-          accounts: candidates.map(metadataFromRow),
+          accounts: candidates.map(xaiSubscriptionMetadataFromRow),
         };
       }),
   );
@@ -1141,6 +1237,7 @@ export async function acquireXaiCredentialLease(
 export async function selectXaiCredentialForUse(
   db: Database,
   input: {
+    modelId?: string;
     accountId: string;
     workspaceId: string;
     subjectId: string;
@@ -1168,21 +1265,22 @@ export async function selectXaiCredentialForUse(
           subjectId: input.subjectId,
           authoritySnapshot: snapshot,
         });
-        await tx
-          .insert(schema.xaiRotationSettings)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            authorityScope: snapshot.scope,
-            ownerOrganizationMembershipId: ownerMembershipId,
-          })
-          .onConflictDoNothing();
+        if (snapshot.scope !== "organization")
+          await tx
+            .insert(schema.xaiRotationSettings)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              authorityScope: snapshot.scope,
+              ownerOrganizationMembershipId: ownerMembershipId,
+            })
+            .onConflictDoNothing();
         const [settings] = await tx
           .select()
           .from(schema.xaiRotationSettings)
           .where(
             and(
-              eq(schema.xaiRotationSettings.workspaceId, input.workspaceId),
+              xaiRotationWorkspacePredicate(input.workspaceId),
               eq(schema.xaiRotationSettings.authorityScope, snapshot.scope),
               ownerMembershipId === null
                 ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
@@ -1196,7 +1294,7 @@ export async function selectXaiCredentialForUse(
           .from(schema.xaiSubscriptionCredentials)
           .where(
             and(
-              eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+              xaiCredentialWorkspacePredicate(input.workspaceId),
               eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
               eq(schema.xaiSubscriptionCredentials.authorityScope, snapshot.scope),
               ownerMembershipId === null
@@ -1213,6 +1311,8 @@ export async function selectXaiCredentialForUse(
           );
         const eligible = candidates.filter(
           (candidate) =>
+            (input.modelId === undefined ||
+              connectionModelAllowed(candidate.allowedModelIds, input.modelId)) &&
             candidate.status === "active" &&
             candidate.allocatorEnabled &&
             (!candidate.exhaustedUntil || candidate.exhaustedUntil <= now),
@@ -1228,11 +1328,17 @@ export async function selectXaiCredentialForUse(
                 (eligible.length > 0
                   ? eligible[xaiCredentialShardIndex(input.shardKey, eligible.length)]
                   : undefined))
-              : eligible.find((candidate) => candidate.id === settings.activeCredentialId);
+              : eligible.find(
+                  (candidate) =>
+                    candidate.id ===
+                    (snapshot.scope === "organization"
+                      ? assignedConnectionDefault(settings.activeCredentialId, candidates)
+                      : settings.activeCredentialId),
+                );
         return {
           credentialId: selected?.id ?? null,
           rotationEnabled: settings.rotationEnabled,
-          accounts: candidates.map(metadataFromRow),
+          accounts: candidates.map(xaiSubscriptionMetadataFromRow),
         };
       }),
   );
@@ -1320,14 +1426,24 @@ export async function getXaiRotationSettings(
       .from(schema.xaiRotationSettings)
       .where(
         and(
-          eq(schema.xaiRotationSettings.workspaceId, input.workspaceId),
+          xaiRotationWorkspacePredicate(input.workspaceId),
           eq(schema.xaiRotationSettings.authorityScope, snapshot.scope),
           ownerMembershipId === null
             ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
             : eq(schema.xaiRotationSettings.ownerOrganizationMembershipId, ownerMembershipId),
         ),
       );
-    return rows[0] ?? null;
+    const row = rows[0];
+    if (row && snapshot.scope === "organization") {
+      const accounts = (await listXaiSubscriptionAccountsMetadata(scopedDb, input)).filter(
+        (account) => account.scope === "organization",
+      );
+      return {
+        ...row,
+        activeCredentialId: assignedConnectionDefault(row.activeCredentialId, accounts),
+      };
+    }
+    return row ?? null;
   });
 }
 
@@ -1340,6 +1456,11 @@ export async function ensureXaiRotationSettings(
     authoritySnapshot: XaiAuthoritySnapshot;
   },
 ): Promise<typeof schema.xaiRotationSettings.$inferSelect> {
+  if (input.authoritySnapshot.scope === "organization") {
+    const current = await getXaiRotationSettings(db, input);
+    if (!current) throw new Error("Organization SuperGrok settings are unavailable");
+    return current;
+  }
   const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
     const ownerMembershipId = await resolveXaiPoolOwnerMembershipId(scopedDb, {
@@ -1363,7 +1484,7 @@ export async function ensureXaiRotationSettings(
       .from(schema.xaiRotationSettings)
       .where(
         and(
-          eq(schema.xaiRotationSettings.workspaceId, input.workspaceId),
+          xaiRotationWorkspacePredicate(input.workspaceId),
           eq(schema.xaiRotationSettings.authorityScope, snapshot.scope),
           ownerMembershipId === null
             ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
@@ -1411,27 +1532,29 @@ export async function setActiveXaiCredential(
           .where(eq(schema.xaiSubscriptionCredentials.id, input.credentialId))
           .limit(1);
         if (!credential || credential.status !== "active") return false;
-        await tx
-          .insert(schema.xaiRotationSettings)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            authorityScope: snapshot.scope,
-            ownerOrganizationMembershipId: ownerMembershipId,
-            activeCredentialId: input.credentialId,
-          })
-          .onConflictDoUpdate({
-            target: [
-              schema.xaiRotationSettings.workspaceId,
-              schema.xaiRotationSettings.authorityScope,
-              schema.xaiRotationSettings.ownerOrganizationMembershipId,
-            ],
-            set: {
+        if (snapshot.scope !== "organization")
+          await tx
+            .insert(schema.xaiRotationSettings)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              authorityScope: snapshot.scope,
+              ownerOrganizationMembershipId: ownerMembershipId,
               activeCredentialId: input.credentialId,
-              version: sql`${schema.xaiRotationSettings.version} + 1`,
-              updatedAt: new Date(),
-            },
-          });
+            })
+            .onConflictDoUpdate({
+              target: [
+                schema.xaiRotationSettings.accountId,
+                schema.xaiRotationSettings.workspaceId,
+                schema.xaiRotationSettings.authorityScope,
+                schema.xaiRotationSettings.ownerOrganizationMembershipId,
+              ],
+              set: {
+                activeCredentialId: input.credentialId,
+                version: sql`${schema.xaiRotationSettings.version} + 1`,
+                updatedAt: new Date(),
+              },
+            });
         if (snapshot.scope === "workspace") {
           // Workspace is the deliberate default. Selecting a workspace account
           // also opts the current subject out of their private pool; FORCE RLS
@@ -1445,7 +1568,7 @@ export async function setActiveXaiCredential(
             })
             .where(
               and(
-                eq(schema.xaiRotationSettings.workspaceId, input.workspaceId),
+                xaiRotationWorkspacePredicate(input.workspaceId),
                 eq(schema.xaiRotationSettings.authorityScope, "user"),
               ),
             );
@@ -1484,15 +1607,16 @@ export async function setInitialActiveXaiCredential(
           authorityScope: snapshot.scope,
           ownerMembershipId,
         });
-        await tx
-          .insert(schema.xaiRotationSettings)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            authorityScope: snapshot.scope,
-            ownerOrganizationMembershipId: ownerMembershipId,
-          })
-          .onConflictDoNothing();
+        if (snapshot.scope !== "organization")
+          await tx
+            .insert(schema.xaiRotationSettings)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              authorityScope: snapshot.scope,
+              ownerOrganizationMembershipId: ownerMembershipId,
+            })
+            .onConflictDoNothing();
         const [updated] = await tx
           .update(schema.xaiRotationSettings)
           .set({
@@ -1502,7 +1626,7 @@ export async function setInitialActiveXaiCredential(
           })
           .where(
             and(
-              eq(schema.xaiRotationSettings.workspaceId, input.workspaceId),
+              xaiRotationWorkspacePredicate(input.workspaceId),
               eq(schema.xaiRotationSettings.authorityScope, snapshot.scope),
               ownerMembershipId === null
                 ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
@@ -1545,7 +1669,7 @@ export async function disconnectXaiSubscriptionCredentialAndRepick(
           .from(schema.xaiRotationSettings)
           .where(
             and(
-              eq(schema.xaiRotationSettings.workspaceId, input.workspaceId),
+              xaiRotationWorkspacePredicate(input.workspaceId),
               eq(schema.xaiRotationSettings.authorityScope, snapshot.scope),
               ownerMembershipId === null
                 ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
@@ -1564,7 +1688,7 @@ export async function disconnectXaiSubscriptionCredentialAndRepick(
           .where(
             and(
               eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
-              eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+              xaiCredentialWorkspacePredicate(input.workspaceId),
               eq(schema.xaiSubscriptionCredentials.authorityScope, snapshot.scope),
               ownerMembershipId === null
                 ? isNull(schema.xaiSubscriptionCredentials.ownerOrganizationMembershipId)
@@ -1793,6 +1917,8 @@ export async function updateXaiQuotaMetadata(
     quotaResetAt: Date | null;
     quotaCheckedAt: Date;
     exhaustedUntil: Date | null;
+    expectedExhaustedUntil?: Date | null;
+    expectedQuotaCheckedAt?: Date | null;
   },
 ): Promise<boolean> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
@@ -1807,8 +1933,14 @@ export async function updateXaiQuotaMetadata(
       })
       .where(
         and(
-          eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+          xaiCredentialWorkspacePredicate(input.workspaceId),
           eq(schema.xaiSubscriptionCredentials.id, input.credentialId),
+          ...(input.expectedExhaustedUntil === undefined
+            ? []
+            : [
+                sql`${schema.xaiSubscriptionCredentials.exhaustedUntil} IS NOT DISTINCT FROM ${input.expectedExhaustedUntil?.toISOString() ?? null}::timestamptz`,
+                sql`${schema.xaiSubscriptionCredentials.quotaCheckedAt} IS NOT DISTINCT FROM ${input.expectedQuotaCheckedAt?.toISOString() ?? null}::timestamptz`,
+              ]),
         ),
       )
       .returning({ id: schema.xaiSubscriptionCredentials.id });
@@ -1884,4 +2016,25 @@ export async function wakeXaiCapacityWaiters(
     }
     return rows.length;
   });
+}
+
+/** Workspace runtime can read its local pools and the same organization's shared pool.
+ * Account RLS remains authoritative; callers additionally filter exact frozen scope. */
+export function xaiCredentialWorkspacePredicate(workspaceId: string) {
+  return or(
+    eq(schema.xaiSubscriptionCredentials.workspaceId, workspaceId),
+    and(
+      isNull(schema.xaiSubscriptionCredentials.workspaceId),
+      eq(schema.xaiSubscriptionCredentials.authorityScope, "organization"),
+    ),
+  );
+}
+export function xaiRotationWorkspacePredicate(workspaceId: string) {
+  return or(
+    eq(schema.xaiRotationSettings.workspaceId, workspaceId),
+    and(
+      isNull(schema.xaiRotationSettings.workspaceId),
+      eq(schema.xaiRotationSettings.authorityScope, "organization"),
+    ),
+  );
 }

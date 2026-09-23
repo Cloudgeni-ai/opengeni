@@ -5,7 +5,7 @@
    distinct progress (`uploading`) and loss-prevention (`hasUnresolved`) gates.
    -------------------------------------------------------------------------- */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import type { FileAsset } from "@opengeni/sdk";
+import { OpenGeniSecureContextRequiredError, type FileAsset } from "@opengeni/sdk";
 import { act, startTransition, Suspense } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
@@ -506,12 +506,12 @@ describe("useFileAttachments", () => {
 
   test("restores only same-workspace ready assets without previews or duplicate ids", async () => {
     let resolveUpload!: (asset: FileAsset) => void;
-    const client = fakeClient({
+    const client = {
       uploadFile: () =>
         new Promise<FileAsset>((resolve) => {
           resolveUpload = resolve;
         }),
-    });
+    };
     const hook = await renderHook(
       () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
       undefined,
@@ -546,8 +546,92 @@ describe("useFileAttachments", () => {
     expect(hook.result.current.readyResources).toEqual([
       { kind: "file", fileId: "restored-ready" },
     ]);
+    expect(hook.result.current.loadPreview).toBeUndefined();
 
     await flushing(() => resolveUpload(fakeAsset({ id: "local-ready" })));
+    await hook.unmount();
+  });
+
+  test("loads a restored image preview only after the user requests it", async () => {
+    const ready = fakeAsset({
+      id: "33333333-3333-4333-8333-333333333333",
+      filename: "restored-preview.png",
+    });
+    const requested: Array<{
+      workspaceId: string;
+      fileId: string;
+      signal: AbortSignal | undefined;
+    }> = [];
+    const client = fakeClient({
+      uploadFile: async () => ready,
+      createFileDownloadUrl: async (workspaceId, fileId, options) => {
+        requested.push({ workspaceId, fileId, signal: options?.signal });
+        return { url: "https://files.example/restored-preview", expiresAt: "2026-09-05T01:00:00Z" };
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() => hook.result.current.restoreReadyFiles([ready]));
+    const restored = hook.result.current.attachments[0]!;
+    expect(restored.previewUrl).toBeUndefined();
+    expect(created).toEqual([]);
+    expect(requested).toEqual([]);
+
+    const controller = new AbortController();
+    const url = await hook.result.current.loadPreview?.(restored.id, controller.signal);
+    expect(url).toBe("https://files.example/restored-preview");
+    expect(requested).toEqual([
+      { workspaceId: WORKSPACE_ID, fileId: ready.id, signal: controller.signal },
+    ]);
+    expect(created).toEqual([]);
+    await hook.unmount();
+  });
+
+  test("rejects a signed preview minted by a previous client scope", async () => {
+    const ready = fakeAsset({
+      id: "33333333-3333-4333-8333-333333333333",
+      filename: "restored-preview.png",
+    });
+    let resolvePreviousPreview!: (value: { url: string; expiresAt: string }) => void;
+    const previousClient = fakeClient({
+      uploadFile: async () => ready,
+      createFileDownloadUrl: () =>
+        new Promise((resolve) => {
+          resolvePreviousPreview = resolve;
+        }),
+    });
+    const nextClient = fakeClient({
+      uploadFile: async () => ready,
+      createFileDownloadUrl: async () => ({
+        url: "https://files.example/next-client-preview",
+        expiresAt: "2026-09-05T01:00:00Z",
+      }),
+    });
+    const hook = await renderHook(
+      ({ client }: { client: typeof previousClient }) =>
+        useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      { client: previousClient },
+    );
+
+    await flushing(() => hook.result.current.restoreReadyFiles([ready]));
+    const previousPreview = hook.result.current.loadPreview?.(
+      hook.result.current.attachments[0]!.id,
+    );
+
+    await hook.rerender({ client: nextClient });
+    await flushing(() => hook.result.current.restoreReadyFiles([ready]));
+    resolvePreviousPreview({
+      url: "https://files.example/previous-client-preview",
+      expiresAt: "2026-09-05T01:00:00Z",
+    });
+
+    expect(await previousPreview).toBeUndefined();
+    expect(await hook.result.current.loadPreview?.(hook.result.current.attachments[0]!.id)).toBe(
+      "https://files.example/next-client-preview",
+    );
     await hook.unmount();
   });
 
@@ -604,6 +688,100 @@ describe("useFileAttachments", () => {
     await flushing(() => hook.result.current.remove(attachment.id));
     expect(hook.result.current.attachments).toEqual([]);
     expect(hook.result.current.hasUnresolved).toBe(false);
+    await hook.unmount();
+  });
+
+  test("classifies a typed secure-context upload failure for the attachment card", async () => {
+    const failure = new OpenGeniSecureContextRequiredError("insecure_context");
+    const client = fakeClient({
+      uploadFile: async () => {
+        throw failure;
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() => hook.result.current.addFiles([imageFile("dragged.png")]));
+    await flush();
+
+    expect(hook.result.current.attachments[0]).toMatchObject({
+      name: "dragged.png",
+      status: "failed",
+      errorCode: "secure_context_required",
+      error: failure.message,
+    });
+    expect(hook.result.current.hasUnresolved).toBe(true);
+    await hook.unmount();
+  });
+
+  test("tracks the failed attachment when insecure HTTP withholds crypto.randomUUID", async () => {
+    const randomUuidDescriptor = Object.getOwnPropertyDescriptor(globalThis.crypto, "randomUUID");
+    Object.defineProperty(globalThis.crypto, "randomUUID", {
+      configurable: true,
+      value: undefined,
+    });
+    const failure = new OpenGeniSecureContextRequiredError("insecure_context");
+    let uploads = 0;
+    const client = fakeClient({
+      uploadFile: async () => {
+        uploads += 1;
+        throw failure;
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    try {
+      await flushing(() => hook.result.current.addFiles([imageFile("http.png")]));
+      await flush();
+
+      expect(uploads).toBe(1);
+      expect(hook.result.current.attachments).toHaveLength(1);
+      expect(hook.result.current.attachments[0]).toMatchObject({
+        name: "http.png",
+        status: "failed",
+        errorCode: "secure_context_required",
+        error: failure.message,
+      });
+      expect(hook.result.current.hasUnresolved).toBe(true);
+    } finally {
+      await hook.unmount();
+      if (randomUuidDescriptor) {
+        Object.defineProperty(globalThis.crypto, "randomUUID", randomUuidDescriptor);
+      } else {
+        Reflect.deleteProperty(globalThis.crypto, "randomUUID");
+      }
+    }
+  });
+
+  test("classifies the stable secure-context code from a structurally compatible client", async () => {
+    const failure = Object.assign(new Error("Use HTTPS"), {
+      code: "secure_context_required" as const,
+      retryable: false,
+    });
+    const client = fakeClient({
+      uploadFile: async () => {
+        throw failure;
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() => hook.result.current.addFiles([imageFile("embedded.png")]));
+    await flush();
+
+    expect(hook.result.current.attachments[0]).toMatchObject({
+      name: "embedded.png",
+      status: "failed",
+      errorCode: "secure_context_required",
+      error: "Use HTTPS",
+    });
     await hook.unmount();
   });
 

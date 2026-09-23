@@ -266,6 +266,11 @@ function associationFromRow(row: BrowserAssociationRow) {
   } as const;
 }
 
+/** Legacy resources predate permission control; absence must never advertise support. */
+export function readStoredBrowserCapabilities(value: Record<string, unknown>) {
+  return BrowserSessionCapabilities.parse({ permissions: false, ...value });
+}
+
 function browserSessionFromRows(
   row: BrowserSessionRow,
   associations: readonly BrowserAssociationRow[],
@@ -286,7 +291,7 @@ function browserSessionFromRows(
     baseRevisionId: row.baseRevisionId,
     networkRouteId: row.networkRouteId,
     linkedComputerSessionId: row.linkedComputerSessionId,
-    capabilities: row.capabilities,
+    capabilities: readStoredBrowserCapabilities(row.capabilities),
     associations: associations.map(associationFromRow),
     createdBySubjectId: row.createdBySubjectId,
     createdAt: iso(row.createdAt),

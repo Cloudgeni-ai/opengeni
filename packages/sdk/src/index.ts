@@ -1,14 +1,102 @@
-export { OpenGeniClient } from "./artifact-client";
+export type {
+  ArtifactCatalogKind,
+  ArtifactCatalogItem,
+  ArtifactCatalogListOptions,
+  ArtifactCatalogListResponse,
+} from "./artifact-catalog";
+export type {
+  SessionMessageSearchRequest,
+  SessionMessageSearchMatch,
+  SessionMessageSearchResponse,
+} from "./session-message-search";
+export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
+export { pluginMcpUnavailableReason } from "@opengeni/contracts/plugin-discovery";
+export type { ToolDisplayMetadata } from "@opengeni/contracts";
+export { parseToolDisplayMetadata } from "./tool-display-metadata";
+export type {
+  PluginDiscoveryItem,
+  PluginDiscoveryPage,
+} from "@opengeni/contracts/plugin-discovery";
+export { createSiteToolBridge, isSiteCatalogStaleError } from "./site-tool-bridge";
+export type {
+  SiteToolBridge,
+  SiteToolCaller,
+  SiteToolCallRequest,
+  CreateSiteToolBridgeOptions,
+} from "./site-tool-bridge";
+export type {
+  ExternalIdentityLink,
+  BeginExternalIdentityLinkRequest,
+  BeginExternalIdentityLinkResponse,
+  ConfirmExternalIdentityLinkRequest,
+  ExternalIdentityLinkPreview,
+  ExternalIdentityLinkPage,
+} from "@opengeni/contracts/external-identities";
+export type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "./types";
+export {
+  OpenGeniToolCallError,
+  OpenGeniToolReapprovalRequiredError,
+  OpenGeniToolsClient,
+} from "./tools";
+export type {
+  OpenGeniDynamicToolNamespace,
+  OpenGeniDynamicToolNode,
+  OpenGeniGeneratedTools,
+  OpenGeniToolCallOptions,
+  OpenGeniToolFunction,
+  OpenGeniToolTransport,
+  OpenGeniToolsFacade,
+  OpenGeniWorkspaceTools,
+} from "./tools";
 export type {
   FetchLike,
+  FetchResponse,
   GetSessionOptions,
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
   SendMessageInput,
+  SessionListPageOptions,
   SteerMessageResult,
   TranscribeAudioInput,
   WorkspaceControlEventPage,
 } from "./client";
+export {
+  OPENGENI_SITE_BRIDGE_CANCEL,
+  OPENGENI_SITE_BRIDGE_CONNECT,
+  OPENGENI_SITE_BRIDGE_READY,
+  OPENGENI_SITE_BRIDGE_REQUEST,
+  OPENGENI_SITE_BRIDGE_RESPONSE,
+  OPENGENI_SITE_BRIDGE_VERSION,
+  OpenGeniSiteBridgeError,
+  createOpenGeniSiteClient,
+  isOpenGeniSiteBridgeCancelMessage,
+  isOpenGeniSiteBridgeConnectMessage,
+  isOpenGeniSiteBridgeRequestMessage,
+  sanitizeOpenGeniSiteToolCallRequest,
+} from "./site";
+export type {
+  OpenGeniSiteBridgeCancelMessage,
+  OpenGeniSiteBridgeConnectMessage,
+  OpenGeniSiteBridgeReadyMessage,
+  OpenGeniSiteBridgeRequestMessage,
+  OpenGeniSiteBridgeResponseMessage,
+  OpenGeniSiteClient,
+  OpenGeniSiteClientOptions,
+  OpenGeniSiteToolCatalog,
+  OpenGeniSiteToolCallRequest,
+  OpenGeniSiteWorkspaceTools,
+} from "./site";
+export type {
+  ToolGatewayCallRequest,
+  ToolGatewayCallResponse,
+  ToolGatewayApprovalRequest,
+  ToolGatewayApprovalResponse,
+  ToolGatewayCatalog,
+  ToolGatewayCatalogEntry,
+  ToolGatewayDeclarationsResponse,
+  ToolGatewayIdentity,
+  ToolGatewayResult,
+} from "./types";
 export type {
   CreateEditableArtifactMaterializationRequest,
   CreateEditableArtifactResourceRequest,
@@ -26,16 +114,30 @@ export type {
 export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
   isRetryableStreamError,
 } from "./errors";
+export type { OpenGeniSecureContextRequiredReason } from "./errors";
 export {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
+  deriveAutomaticSessionTitlePreview,
   deriveSessionDisplayTitle,
   sessionTitleIsPending,
 } from "./session-titles";
 export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
+export type {
+  ModelContextInstructionLayer,
+  ModelContextInstructionLayerId,
+  ModelContextSkill,
+  ModelContextSkillKind,
+  ModelContextSnapshot,
+  ModelContextTokenCounts,
+  ModelContextTool,
+  ModelContextToolVisibility,
+  SessionModelContextResponse,
+} from "./model-context";
 export {
   formatSseEvent,
   proxySessionEventStream,
@@ -134,7 +236,7 @@ export {
   TtydClientCommand,
   TtydServerCommand,
 } from "./terminal";
-export { streamSessionEvents } from "./stream";
+export { sessionEventStreamCoveredThrough, streamSessionEvents } from "./stream";
 export type {
   SessionEventStreamTransport,
   StreamConnectionState,
@@ -154,6 +256,7 @@ export type {
   CreateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
+  SetWorkspaceArtifactStatusRequest,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
@@ -161,6 +264,8 @@ export type {
   WorkspaceArtifactListOptions,
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
+  WorkspaceArtifactSourceBundle,
+  WorkspaceArtifactSourceFile,
   WorkspaceArtifactVersion,
 } from "./workspace-artifacts";
 export {
@@ -243,40 +348,25 @@ export type {
   WorkspaceInstructionPolicyTarget,
 } from "./workspace-instruction-policies";
 export type {
-  WorkspaceStateDocumentStatusCounts,
-  WorkspaceStateDocumentAuthorityKindCounts,
   WorkspaceStateAttemptGovernance,
   WorkspaceStateExportOmission,
   WorkspaceStateExportResponse,
-  WorkspaceStateGapCode,
   WorkspaceStateGetOptions,
   WorkspaceStateGovernanceDriftStatus,
-  WorkspaceStateMemoryKindCounts,
-  WorkspaceStateMemoryStatusCounts,
   WorkspaceStateResponse,
-  WorkspaceStateSourceKindCounts,
 } from "./workspace-state";
 export type {
   CompanyBrainContextReceiptListOptions,
   CompanyBrainContextReceiptPage,
   CompanyBrainInspectorTransport,
-  CompanyBrainKnowledgeBrowseRequest,
-  CompanyBrainKnowledgeBrowseResponse,
-  CompanyBrainKnowledgeGetResponse,
-  CompanyBrainKnowledgeRecord,
   CompanyBrainKnowledgeProposalListOptions,
   CompanyBrainKnowledgeProposalPage,
-  CompanyBrainKnowledgeSearchRequest,
-  CompanyBrainKnowledgeSearchResponse,
   CompanyBrainOkfDownload,
   CompanyBrainOkfPackage,
 } from "./company-brain";
 export {
-  browseCompanyBrainKnowledge,
-  getCompanyBrainKnowledge,
   listCompanyBrainContextReceipts,
   listCompanyBrainKnowledgeProposals,
-  searchCompanyBrainKnowledge,
 } from "./company-brain";
 export type {
   MemorySlackImportance,
@@ -295,6 +385,17 @@ export type {
   UpdateMemorySlackPublicationConfigurationRequest,
 } from "./memory-slack-delivery";
 export { normalizePreferenceRegistryStableKey } from "./preference-registry";
+export type {
+  SkillFile,
+  SkillScope,
+  SkillRecord,
+  SkillSummary,
+  SkillWriteReceipt,
+  SkillPublicationReceipt,
+  SkillSourceReleaseReceipt,
+  SaveWorkspaceSkillRequest,
+  ApplyWorkspaceSkillRevisionRequest,
+} from "./skills";
 export type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
@@ -390,9 +491,11 @@ export type {
   OrganizationAdministrationMember,
   OrganizationAdministrationMemberWorkspaceAccess,
   OrganizationAdministrationOverview,
+  OrganizationApiKeyAccess,
   OrganizationInvitation,
   OrganizationMember,
   OrganizationMembershipRole,
+  OrganizationSessionListResponse,
   OrganizationPrivateSessionSettings,
   OrganizationRecoveryApproval,
   OrganizationRecoveryCapabilities,
@@ -451,16 +554,8 @@ export type {
   CapabilityKind,
   CapabilityLifecycle,
   CapabilityLifecycleStatus,
-  CapabilityPack,
-  CapabilityPackComponentReference,
-  CapabilityPackConnector,
-  CapabilityPackConnectorAuthModel,
-  CapabilityPackRigRequirement,
-  CapabilityPackVariableSetSpec,
-  CapabilityPackKnowledge,
-  CapabilityPackScheduledTaskTemplate,
-  CapabilityPackSkill,
-  CapabilityPackSkillFile,
+  SkillArtifactDefinition,
+  SkillArtifactFile,
   CapabilityRuntime,
   CapabilityReadiness,
   CapabilitySource,
@@ -478,6 +573,7 @@ export type {
   EndSessionRealtimeRequest,
   ModelAvailabilityV1,
   ModelBillingAttributionV1,
+  ModelCostClassV1,
   ModelCapabilitiesV1,
   ModelCapabilityStateV1,
   ModelCapabilitySupportV1,
@@ -493,12 +589,29 @@ export type {
   SessionRealtimeState,
   WorkspaceModelCatalogModel,
   WorkspaceModelCatalogResponse,
+  WorkspaceGatewayCustomModel,
+  WorkspaceGatewayCustomModelsResponse,
+  CreateWorkspaceGatewayCustomModelRequest,
+  DeleteWorkspaceGatewayCustomModelRequest,
+  WorkspaceOpenRouterCustomModel,
+  WorkspaceOpenRouterCustomModelsResponse,
+  CreateWorkspaceOpenRouterCustomModelRequest,
+  DeleteWorkspaceOpenRouterCustomModelRequest,
+  OrganizationModelProviderKind,
+  OrganizationModelProviderConnection,
+  UpsertOrganizationModelProviderConnectionRequest,
+  RevokeOrganizationModelProviderConnectionRequest,
+  OrganizationProviderCustomModel,
+  OrganizationProviderCustomModelsResponse,
+  CreateOrganizationProviderCustomModelRequest,
+  DeleteOrganizationProviderCustomModelRequest,
   WorkspaceModelAccessPolicy,
   WorkspaceRealtimeModelCatalogItem,
   WorkspaceRealtimeModelCatalogResponse,
   CodexAccount,
   CodexAccountOverview,
   CodexAccountsResponse,
+  SessionCodexAccountsResponse,
   OrganizationCodexAccountsResponse,
   CodexAllocatorUpdate,
   CodexAccountSwitchedPayload,
@@ -533,7 +646,7 @@ export type {
   CompleteFileUploadResponse,
   ConnectionKind,
   ConnectionMetadata,
-  McpConnectionAuthoritySelection,
+  McpConnectionAccountSelection,
   ConnectionOwnership,
   ConnectionResponse,
   ConnectionStatus,
@@ -542,6 +655,7 @@ export type {
   PersonalGitHubDisconnectRequest,
   PersonalGitHubOAuthStartRequest,
   PersonalGitHubOAuthStartResponse,
+  ListGitHubRepositoryBranchesOptions,
   ListPersonalGitHubRepositoriesOptions,
   ListPersonalGitHubRepositoriesResponse,
   PersonalGitHubRepository,
@@ -612,11 +726,12 @@ export type {
   DocumentVisibility,
   MoveDocumentRequest,
   EnableCapabilityRequest,
-  EnablePackRequest,
   Entitlements,
   EntitlementValue,
   EntitlementsMode,
   FileAsset,
+  FileListRequest,
+  FileListResponse,
   HumanInputAnswer,
   HumanInputOption,
   HumanInputQuestion,
@@ -638,13 +753,23 @@ export type {
   AtlassianSelectedSource,
   AtlassianSourceKind,
   AtlassianSyncCadence,
-  GetPackResponse,
+  GitHubActionPoliciesResponse,
+  GitHubActionPolicyActor,
+  GitHubActionPolicyActorState,
+  GitHubActionPolicyDecision,
+  GitHubActionPolicyEffectiveDecision,
+  GitHubActionPolicyGroup,
   GitHubAppInfo,
   GitHubAppSetupMode,
   GitHubBindingStatus,
   GitHubInstallationBinding,
   GitHubInstallationLifecycle,
+  GitHubRepositoryBranch,
+  GitHubRepositoryBranchesResponse,
+  VerifyPublicGitHubRepositoryRefRequest,
+  VerifyPublicGitHubRepositoryRefResponse,
   GitHubRepositoriesResponse,
+  UpdateGitHubActionPolicyRequest,
   GoogleDriveBrowseItem,
   GoogleDriveBrowseResponse,
   GoogleDriveConnectionLifecycle,
@@ -664,6 +789,8 @@ export type {
   GitHubRepository,
   GitHubRepositoryScope,
   GoalSpec,
+  SessionGoalReportRequirement,
+  SessionGoalReportDelivery,
   IntegrationClientMetadata,
   KnownPermission,
   KnownSessionEventType,
@@ -690,8 +817,8 @@ export type {
   UpdatePrReviewRepositoryBindingRequest,
   ListPrReviewConfigurationResponse,
   ListApiKeysResponse,
+  ListOrganizationSessionsOptions,
   ListConnectionsResponse,
-  ListPacksResponse,
   ListSlackUserLinkAccessRequestsResponse,
   ListWorkspaceMemberCandidatesResponse,
   ListWorkspaceMembersResponse,
@@ -700,17 +827,6 @@ export type {
   McpPersonalConnectionSummary,
   OAuthStartRequest,
   OAuthStartResponse,
-  PackInstallation,
-  PackInstallationPreview,
-  PackInstallationStatus,
-  PackComponentResolution,
-  PackComponentResolutionStatus,
-  PackRigResolution,
-  PackUninstallPreview,
-  PreviewPackInstallationRequest,
-  InstallPackRequest,
-  UninstallPackRequest,
-  UninstallPackResult,
   Permission,
   PrepareSlackUserLinkAccessRequest,
   ProductAccessMode,
@@ -749,7 +865,6 @@ export type {
   RecordingFailedReason,
   RecordingMode,
   RecordingStartedPayload,
-  RegisterCapabilityPackRequest,
   RepositoryResourceRef,
   ResourceRef,
   SaveGoogleDriveSourceRequest,
@@ -793,6 +908,12 @@ export type {
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
   SessionControlResponse,
+  SessionRetryRequest,
+  SandboxRecoverySelection,
+  SandboxRecoveryProjection,
+  SandboxRecoveryRequest,
+  SandboxRecoveryResponse,
+  SessionRetryResponse,
   ComposerDraft,
   DeleteSessionQueueItemRequest,
   EditSessionQueueItemRequest,
@@ -811,6 +932,8 @@ export type {
   SessionPromptRouting,
   SteerSessionQueueItemRequest,
   WorkspaceInferenceControlResponse,
+  WorkspacePauseTimer,
+  WorkspacePauseTimerRequest,
   SessionPendingInputPreview,
   SessionSystemUpdate,
   SessionSystemUpdateKind,
@@ -818,18 +941,19 @@ export type {
   SessionSummary,
   LineageNode,
   SessionMcpCredentialUpdateInput,
+  RotateSessionMcpCredentialsRequest,
+  RotateSessionMcpCredentialsReceipt,
   SessionMcpApprovalPolicy,
+  SessionMcpApprovalPolicyTarget,
   SessionMcpServerInput,
   SessionMcpServerMetadata,
   SessionToolPolicy,
-  // Per-surface capability cell aliases (views of SessionCapabilities).
   FileSystemCapability,
   TerminalCapability,
   GitCapability,
   DesktopStreamCapability,
   RecordingCapability,
   ComputerUseCapability,
-  // Stream-surfacing client surface (Phase 5).
   ClientAuthConfig,
   StreamUrlRotatedPayload,
   StreamOpenedPayload,
@@ -883,7 +1007,6 @@ export type {
   TurnInitiator,
   ToolAuthNeededPayload,
   UpdateConnectionRequest,
-  // Channel-A structured services (P4.4) — A1 payloads + A2 request/response.
   SandboxCommandOutputDeltaPayload,
   FsChangeKind,
   FsChangedPayload,
@@ -894,6 +1017,7 @@ export type {
   FsNodeType,
   FsTreeNode,
   FsEncoding,
+  FileSystemRouteIdentity,
   FsListRequest,
   FsListResponse,
   FsListBatchRequest,
@@ -1057,6 +1181,7 @@ export type {
   InstalledPlugin,
   PluginInstallationSummary,
   ListInstalledPluginsResponse,
+  PluginUninstallComponentImpact,
   PluginUninstallPreview,
   UninstallPluginRequest,
   UninstallPluginResult,
@@ -1068,8 +1193,7 @@ export type {
   WorkspaceSettings,
   WorkspaceVideoGenerationSettings,
   WorkspaceVoiceInputSettings,
-  WorkspaceRegisteredPack,
-  // Bring-your-own-compute: Machines dashboard + per-machine metrics (M10).
+  VoiceInputProviderId,
   MetricSample,
   MachineState,
   MachineKind,
@@ -1086,11 +1210,8 @@ export type {
   MachineMetricsSeriesResponse,
   RemoveEnrollmentRequest,
   RemoveEnrollmentResponse,
-  // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
-  // Self-hosted enrollment UX (design 11): click-Grant approve-page lookup/deny +
-  // headless enroll-token mint/exchange.
   EnrollmentOs,
   ResourceAuthorityScope,
   DeviceEnrollmentLookupRequest,
@@ -1105,4 +1226,18 @@ export type {
   EnrollmentCredentials,
   EnrollTokenExchangeRequest,
   EnrollTokenExchangeResponse,
+} from "./types";
+
+export type {
+  FeedbackSentiment,
+  CreateFeedbackRequest,
+  Feedback,
+  FeedbackSubmissionResponse,
+} from "./feedback";
+export type * from "./knowledge";
+export type {
+  ConnectorToolPermission,
+  ConnectorToolPermissionEntry,
+  ConnectorToolPermissionsResponse,
+  UpdateConnectorToolPermissionsRequest,
 } from "./types";

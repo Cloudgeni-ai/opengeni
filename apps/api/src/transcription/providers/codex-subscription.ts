@@ -45,6 +45,7 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
       );
       if (!account) {
         throw new TranscriptionServiceError({
+          fallbackSafe: true,
           code: "unavailable",
           message: "Transcription is unavailable.",
         });
@@ -55,6 +56,7 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
         token = await resolver.getToken();
       } catch {
         throw new TranscriptionServiceError({
+          fallbackSafe: true,
           code: "unavailable",
           message: "Transcription is unavailable.",
         });

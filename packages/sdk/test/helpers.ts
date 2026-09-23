@@ -21,8 +21,8 @@ export function makeEvent(
   };
 }
 
-export function sseBlock(event: SessionEvent): string {
-  return `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+export function sseBlock(event: SessionEvent, coveredThrough = event.sequence): string {
+  return `id: ${coveredThrough}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
 }
 
 /** A byte stream that emits the given chunks then closes. */

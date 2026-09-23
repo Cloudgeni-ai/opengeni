@@ -1,5 +1,7 @@
 # Agent Knowledge overview (Workspace State projection)
 
+> **After migration 0461:** Workspace State now projects bounded published Knowledge metadata from `knowledge_entries`. Old document/base/Memory aggregate fields and the old overview UI are retired. See [Knowledge and Agent learning](knowledge.md) for the current runtime. The older model below documents historical storage and receipts.
+
 The user-facing **Agent Knowledge** page is a small map of what agents can follow
 or find in the current workspace. The Workspace State projection supplies its
 status counts, but the page does not expose the projection's diagnostic model.
@@ -29,7 +31,7 @@ The small always-on organization identity and mission are administered from
 **Organization settings → Knowledge**. Products, customers, goals, constraints,
 and other company facts live in company-scoped Documents on that same surface
 and are retrieved when relevant. Learning mode is administered from **Workspace
-settings → General → Learning & autonomy**. Neither is a workspace instruction
+settings → General → Workspace instruction & Skill autonomy**. Neither is a workspace instruction
 or Skill.
 
 ## Authority boundaries
@@ -54,7 +56,7 @@ Workspace State projects existing sources; it owns none of them:
   plus its immutable revisions and lifecycle events) is the sole active
   preference authority, as documented in
   [`preference-registry.md`](preference-registry.md);
-- skills, tools, agents/sessions, rigs, variable sets, and workspace settings
+- skills, tools, agents/sessions, sandbox environments, variable sets, and workspace settings
   remain on their existing API and console surfaces.
 
 The inventory does not add `workspace_charters`, a generic source/fact schema,

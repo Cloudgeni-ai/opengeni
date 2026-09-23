@@ -1261,6 +1261,7 @@ const ParagraphLeaf = memo(
     onKeyDown,
   }: ParagraphLeafProps) {
     const composing = useRef(false);
+    const suppressNextEnter = useRef(false);
     const Tag = headingTag(paragraph.style.headingLevel);
     const label =
       paragraph.style.list?.kind === "number"
@@ -1292,6 +1293,15 @@ const ParagraphLeaf = memo(
         }}
         onCompositionEnd={(event) => {
           composing.current = false;
+          // IME commit Enter often arrives in the same turn as compositionend.
+          // Suppress that key so it cannot also insert a trailing newline, but
+          // clear before the next task so a later explicit Enter still works.
+          suppressNextEnter.current = true;
+          queueMicrotask(() => {
+            suppressNextEnter.current = false;
+          });
+          syncTrailingBreak(event.currentTarget);
+          stabilizeCaretAfterTrailingNewline(event.currentTarget);
           onInput(paragraph, event.currentTarget.textContent ?? "");
           onSelection(paragraph);
         }}
@@ -1316,15 +1326,18 @@ const ParagraphLeaf = memo(
         onKeyDown={(event) => {
           onKeyDown(event, paragraph);
           if (event.defaultPrevented || readOnly) return;
-          if (event.key === "Enter" && !event.metaKey && !event.ctrlKey && !event.altKey) {
-            event.preventDefault();
-            insertPlainText(event.currentTarget, "\n");
-            onInput(paragraph, event.currentTarget.textContent ?? "");
-            onSelection(paragraph);
-          }
+          if (event.key !== "Enter" || event.metaKey || event.ctrlKey || event.altKey) return;
+          if (isDocumentImeComposing(event, composing.current)) return;
+          event.preventDefault();
+          if (suppressNextEnter.current) return;
+          insertPlainText(event.currentTarget, "\n");
+          onInput(paragraph, event.currentTarget.textContent ?? "");
+          onSelection(paragraph);
         }}
         onInput={(event) => {
           if (!composing.current && !(event.nativeEvent as InputEvent).isComposing) {
+            syncTrailingBreak(event.currentTarget);
+            stabilizeCaretAfterTrailingNewline(event.currentTarget);
             onInput(paragraph, event.currentTarget.textContent ?? "");
           }
         }}
@@ -1348,6 +1361,9 @@ const ParagraphLeaf = memo(
             {segment.text}
           </span>
         ))}
+        {segments.at(-1)?.text.endsWith("\n") ? (
+          <br data-og-trailing-break="" aria-hidden="true" />
+        ) : null}
       </Tag>
     );
   },
@@ -1753,6 +1769,45 @@ function selectionOffsets(root: HTMLElement | undefined): { start: number; end: 
   };
 }
 
+const TRAILING_BREAK_ATTR = "data-og-trailing-break";
+
+function isDocumentImeComposing(
+  event: ReactKeyboardEvent<HTMLElement>,
+  composing: boolean,
+): boolean {
+  const native = event.nativeEvent;
+  return composing || native.isComposing === true || native.keyCode === 229;
+}
+
+function syncTrailingBreak(root: HTMLElement): void {
+  const existing = root.querySelector(`br[${TRAILING_BREAK_ATTR}]`);
+  const needsBreak = (root.textContent ?? "").endsWith("\n");
+  if (needsBreak && !existing) {
+    const br = globalThis.document.createElement("br");
+    br.setAttribute(TRAILING_BREAK_ATTR, "");
+    br.setAttribute("aria-hidden", "true");
+    root.appendChild(br);
+  } else if (!needsBreak && existing) {
+    existing.remove();
+  }
+}
+
+function stabilizeCaretAfterTrailingNewline(root: HTMLElement): void {
+  const text = root.textContent ?? "";
+  if (!text.endsWith("\n")) return;
+  const selection = globalThis.getSelection?.();
+  if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) return;
+  const offsets = selectionOffsets(root);
+  if (!offsets || offsets.start !== text.length) return;
+  const br = root.querySelector(`br[${TRAILING_BREAK_ATTR}]`);
+  if (!br) return;
+  const range = globalThis.document.createRange();
+  range.setStartBefore(br);
+  range.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
 function insertPlainText(root: HTMLElement, text: string): void {
   const selection = globalThis.getSelection?.();
   if (!selection || selection.rangeCount === 0) return;
@@ -1761,10 +1816,12 @@ function insertPlainText(root: HTMLElement, text: string): void {
   range.deleteContents();
   const node = globalThis.document.createTextNode(text);
   range.insertNode(node);
+  syncTrailingBreak(root);
   range.setStartAfter(node);
   range.collapse(true);
   selection.removeAllRanges();
   selection.addRange(range);
+  stabilizeCaretAfterTrailingNewline(root);
 }
 
 function restoreSelection(

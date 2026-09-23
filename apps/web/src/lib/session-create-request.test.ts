@@ -14,6 +14,7 @@ import {
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
 } from "./session-create";
+import { newSessionProjectSelection } from "../routes/sessions-index-hydration";
 
 const fileA = "00000000-0000-4000-8000-0000000000a1";
 const fileB = "00000000-0000-4000-8000-0000000000b2";
@@ -109,6 +110,7 @@ describe("buildCreateSessionRequest", () => {
     const tools = [{ kind: "mcp" as const, id: "opengeni" }];
     const result = build(currentResources, submissionResources, {
       instructions: "Hidden session guidance",
+      installedSkillIds: ["skill:product-integration@abc"],
       selectedTools: tools,
       targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
       workingDir: "/workspace/opengeni",
@@ -121,6 +123,7 @@ describe("buildCreateSessionRequest", () => {
     expect(result).toMatchObject({
       resources: [...currentBefore, ...submissionBefore],
       instructions: "Hidden session guidance",
+      installedSkillIds: ["skill:product-integration@abc"],
       tools,
       targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
       workingDir: "/workspace/opengeni",
@@ -137,6 +140,29 @@ describe("buildCreateSessionRequest", () => {
         submission: { text: "start", resources: [], latencyMode: "fast" },
       }).latencyMode,
     ).toBe("fast");
+  });
+
+  test("retains chat review overrides through draft recovery and initial submission", () => {
+    const agentLearning = { knowledge: "review_first" as const, skills: "off" as const };
+    for (const compute of [
+      { kind: "sandbox" as const, backend: "" as const },
+      {
+        kind: "machine" as const,
+        sandboxId: fileA,
+        folder: { kind: "path" as const, path: "/workspace" },
+      },
+    ]) {
+      const saved = newSessionDraftOptionsFromSessionDraft({
+        ...emptySessionDraft(),
+        compute,
+        agentLearning,
+      });
+      const recovered = sessionDraftFromNewSessionDraftOptions(saved);
+      expect(build([], [], { agentLearning: recovered.agentLearning }).agentLearning).toEqual(
+        agentLearning,
+      );
+    }
+    expect(build([], [], { agentLearning: {} })).not.toHaveProperty("agentLearning");
   });
 
   test("threads the selected session visibility and defaults to workspace access", () => {
@@ -195,6 +221,62 @@ describe("buildCreateSessionRequest", () => {
     });
 
     expect(result).not.toHaveProperty("tools");
+  });
+
+  test("preserves the acknowledged draft policy when explicit tools equal defaults", () => {
+    const tools = [{ kind: "mcp" as const, id: "docs" }];
+    const result = build([], [], {
+      selectedTools: tools,
+      workspaceDefaultMcpServerIds: ["docs"],
+      workspaceMcpCatalogReady: true,
+      expectedNewSessionDraftRevision: 7,
+      newSessionDraftToolPolicy: { tools, toolsProvided: true },
+    });
+    expect(result.tools).toEqual(tools);
+    expect(result.expectedNewSessionDraftRevision).toBe(7);
+  });
+
+  test("creates a live default policy with durable connector exclusions", () => {
+    const result = build([], [], {
+      selectedTools: [],
+      newSessionDraftToolPolicy: {
+        tools: [],
+        toolsProvided: false,
+        excludedMcpServerIds: ["slack"],
+      },
+      expectedNewSessionDraftRevision: 7,
+    });
+    expect(result).not.toHaveProperty("tools");
+    expect(result.excludedMcpServerIds).toEqual(["slack"]);
+    expect(result.expectedNewSessionDraftRevision).toBe(7);
+  });
+
+  test("remembers customize-without-pin as exclusions rather than an empty tool list", () => {
+    const result = build([], [], {
+      selectedTools: [{ kind: "mcp", id: "docs" }],
+      newSessionDraftToolPolicy: {
+        tools: [],
+        toolsProvided: true,
+        excludedMcpServerIds: [],
+      },
+      expectedNewSessionDraftRevision: 7,
+    });
+    expect(result).not.toHaveProperty("tools");
+    expect(result.excludedMcpServerIds).toEqual([]);
+  });
+
+  test("preserves explicit empty and omitted draft policies across catalog changes", () => {
+    for (const toolsProvided of [true, false]) {
+      const result = build([], [], {
+        selectedTools: [{ kind: "mcp", id: "docs" }],
+        workspaceDefaultMcpServerIds: ["files"],
+        workspaceMcpCatalogReady: true,
+        expectedNewSessionDraftRevision: 7,
+        newSessionDraftToolPolicy: { tools: [], toolsProvided },
+      });
+      if (toolsProvided) expect(result.tools).toEqual([]);
+      else expect(result).not.toHaveProperty("tools");
+    }
   });
 
   test("keeps explicit empty, subset, and partially hydrated selections on the wire", () => {
@@ -421,6 +503,204 @@ describe("successful-create selection history", () => {
     });
     expect(rememberedMachineFolder(history, null, machineB)).toEqual({ kind: "root" });
   });
+
+  test("reapplies the complete Default project selection on repeated same-route launches", () => {
+    const defaultHistory = {
+      projects: [
+        {
+          channelId: null,
+          targetSandboxId: machineB,
+          machines: [{ sandboxId: machineB, workingDir: "/workspace/default-project" }],
+        },
+        ...history.projects,
+      ],
+    };
+    const staleProjectCompute = {
+      kind: "machine" as const,
+      sandboxId: machineA,
+      folder: { kind: "path" as const, path: "/workspace/other-project" },
+    };
+
+    const firstDefault = newSessionProjectSelection(defaultHistory, null, {
+      channelId: project,
+      compute: staleProjectCompute,
+    });
+    expect(firstDefault).toEqual({
+      channelId: null,
+      compute: {
+        kind: "machine",
+        sandboxId: machineB,
+        folder: { kind: "path", path: "/workspace/default-project" },
+      },
+    });
+
+    const locallyChanged = newSessionProjectSelection(defaultHistory, project, firstDefault);
+    const repeatedDefault = newSessionProjectSelection(defaultHistory, null, locallyChanged);
+    expect(repeatedDefault).toEqual(firstDefault);
+  });
+
+  test("resets stale compute when the selected project has no history", () => {
+    const staleProjectSelection = {
+      channelId: project,
+      compute: {
+        kind: "machine" as const,
+        sandboxId: machineA,
+        folder: { kind: "path" as const, path: "/workspace/other-project" },
+      },
+    };
+    const historyWithoutDefault = {
+      projects: history.projects.filter((candidate) => candidate.channelId !== null),
+    };
+
+    expect(newSessionProjectSelection(historyWithoutDefault, null, staleProjectSelection)).toEqual({
+      channelId: null,
+      compute: { kind: "sandbox", backend: "" },
+    });
+    expect(
+      newSessionProjectSelection(historyWithoutDefault, null, staleProjectSelection, "selfhosted"),
+    ).toEqual({
+      channelId: null,
+      compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
+    });
+  });
+
+  test("preserves persisted machine placement for the same project without history", () => {
+    const hydratedCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/project-a" },
+    };
+    const selection = newSessionProjectSelection({ projects: [] }, project, {
+      channelId: project,
+      compute: hydratedCompute,
+    });
+
+    expect(selection).toEqual({ channelId: project, compute: hydratedCompute });
+    expect(
+      submissionFromSessionDraft({ ...emptySessionDraft(), compute: selection.compute }).options,
+    ).toEqual({
+      targetSandboxId: machineB,
+      workingDir: "/workspace/project-a",
+      visibility: "workspace",
+    });
+  });
+
+  test("resets persisted compute for a different explicit launch target", () => {
+    const hydratedCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/project-a" },
+    };
+    const projectB = "00000000-0000-4000-8000-000000000032";
+    const historyWithoutTargets = {
+      projects: history.projects.filter(
+        (candidate) => candidate.channelId !== null && candidate.channelId !== projectB,
+      ),
+    };
+
+    expect(
+      newSessionProjectSelection(historyWithoutTargets, projectB, {
+        channelId: project,
+        compute: hydratedCompute,
+      }),
+    ).toEqual({
+      channelId: projectB,
+      compute: { kind: "sandbox", backend: "" },
+    });
+    expect(
+      newSessionProjectSelection(
+        historyWithoutTargets,
+        projectB,
+        { channelId: project, compute: hydratedCompute },
+        "selfhosted",
+      ),
+    ).toEqual({
+      channelId: projectB,
+      compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
+    });
+  });
+
+  test("resets legacy hydrated compute with missing project provenance", () => {
+    const hydratedCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/legacy" },
+    };
+
+    expect(
+      newSessionProjectSelection(
+        { projects: [] },
+        project,
+        { channelId: undefined, compute: hydratedCompute },
+        "selfhosted",
+      ),
+    ).toEqual({
+      channelId: project,
+      compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
+    });
+  });
+
+  test("remembered project history wins over hydrated compute with unknown provenance", () => {
+    expect(
+      newSessionProjectSelection(history, project, {
+        channelId: undefined,
+        compute: {
+          kind: "machine",
+          sandboxId: machineB,
+          folder: { kind: "path", path: "/workspace/unknown-project" },
+        },
+      }),
+    ).toEqual({
+      channelId: project,
+      compute: {
+        kind: "machine",
+        sandboxId: machineA,
+        folder: { kind: "path", path: "/workspace/opengeni" },
+      },
+    });
+  });
+
+  test("preserves explicit compute intent with established same-project provenance", () => {
+    const explicitDefaultSelection = {
+      channelId: null,
+      compute: {
+        kind: "machine" as const,
+        sandboxId: machineB,
+        folder: { kind: "path" as const, path: "/workspace/explicit-default" },
+      },
+    };
+    const historyWithoutDefault = {
+      projects: history.projects.filter((candidate) => candidate.channelId !== null),
+    };
+
+    expect(
+      newSessionProjectSelection(historyWithoutDefault, null, explicitDefaultSelection),
+    ).toEqual(explicitDefaultSelection);
+  });
+
+  test("treats null as explicit Default-project provenance", () => {
+    const defaultCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/default-draft" },
+    };
+
+    expect(
+      newSessionProjectSelection({ projects: [] }, null, {
+        channelId: null,
+        compute: defaultCompute,
+      }),
+    ).toEqual({ channelId: null, compute: defaultCompute });
+    expect(
+      newSessionProjectSelection({ projects: [] }, project, {
+        channelId: null,
+        compute: defaultCompute,
+      }),
+    ).toEqual({
+      channelId: project,
+      compute: { kind: "sandbox", backend: "" },
+    });
+  });
 });
 
 describe("new-session draft option mapping", () => {
@@ -433,9 +713,21 @@ describe("new-session draft option mapping", () => {
   });
 
   test("creates Only-me Personal-workspace sessions with private tenancy", () => {
-    expect(newSessionCreateVisibility(true, "workspace")).toBe("private");
-    expect(newSessionCreateVisibility(true, "private")).toBe("private");
-    expect(newSessionCreateVisibility(false, "workspace")).toBe("workspace");
+    expect(newSessionCreateVisibility(true, "workspace", true)).toBe("private");
+    expect(newSessionCreateVisibility(true, "private", true)).toBe("private");
+    expect(newSessionCreateVisibility(false, "workspace", false)).toBe("workspace");
+  });
+
+  test("Personal sessions remain startable when Only-me tenancy is unavailable", () => {
+    for (const selected of ["private", "workspace"] as const) {
+      const visibility = newSessionCreateVisibility(true, selected, false);
+      const draft = { ...emptySessionDraft(), visibility: selected };
+      const options = newSessionDraftOptionsFromSessionDraft(draft, undefined, visibility);
+      const request = build([], [], { visibility });
+      expect(options.visibility).toBe("workspace");
+      expect(request.visibility).toBe("workspace");
+    }
+    expect(newSessionCreateVisibility(false, "private", false)).toBe("private");
   });
 
   test("preserves ordered Variable Set precedence through create and draft persistence", () => {
@@ -459,7 +751,7 @@ describe("new-session draft option mapping", () => {
       variableSetId: variableSetIds.at(-1),
       personalResourceAttachment,
     });
-    const visibility = newSessionCreateVisibility(true, draft.visibility);
+    const visibility = newSessionCreateVisibility(true, draft.visibility, true);
     const request = build([], [], {
       submission: { text: "start privately", ...submission.extras },
       visibility,

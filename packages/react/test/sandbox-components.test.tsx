@@ -406,30 +406,145 @@ describe("SandboxFiles guarded-file routing", () => {
     await r.unmount();
   });
 
-  test("a capability error beats the waking state and offers a retry", async () => {
-    let retries = 0;
-    const r = await renderComponent(
-      <SandboxFiles
-        files={filesResult()}
-        git={gitResult()}
-        workspaceWaking
-        capabilitiesError={new Error("Out of OpenGeni credits")}
-        onRetryCapabilities={() => {
-          retries += 1;
-        }}
-      />,
+  test("a failed cold live-file open replaces the spinner with an error and retry", async () => {
+    let wakeCalls = 0;
+    const files = filesResult({
+      source: "capture",
+      readFile: async (path) => {
+        throw new CapturedFileUnavailableError(path, "not-captured");
+      },
+    });
+    const props = {
+      files,
+      liveWorkspaceReady: false,
+      onWakeWorkspace: () => {
+        wakeCalls += 1;
+      },
+    };
+    const r = await renderComponent(<SandboxFiles {...props} initialSelectedPath="README.md" />);
+    await flush();
+    await actRun(() =>
+      Array.from(r.container.querySelectorAll("button"))
+        .find((b) => b.textContent === "Open live file")!
+        .click(),
+    );
+    expect(r.container.textContent).toContain("Waking workspace");
+    await r.rerender(
+      <SandboxFiles {...props} workspaceError={new Error("Wake failed: unavailable")} />,
     );
     await flush();
-    const alert = r.container.querySelector('[role="alert"]');
-    expect(alert?.textContent).toContain("Sandbox unavailable");
-    expect(alert?.textContent).toContain("Out of OpenGeni credits");
     expect(r.container.textContent).not.toContain("Waking workspace");
-    const retry = Array.from(r.container.querySelectorAll("button")).find(
-      (button) => button.textContent === "Retry",
+    expect(r.container.textContent).toContain("Wake failed: unavailable");
+    await actRun(() =>
+      Array.from(r.container.querySelectorAll("button"))
+        .find((b) => b.textContent === "Retry live file")!
+        .click(),
     );
-    expect(retry).toBeDefined();
-    await actRun(() => retry!.click());
-    expect(retries).toBe(1);
+    expect(wakeCalls).toBe(2);
+    await r.unmount();
+  });
+
+  test("a pending guarded file surfaces wake failure and retries before selection", async () => {
+    let wakeCalls = 0;
+    const props = {
+      files: filesResult({ source: "capture" }),
+      requestedPath: "README.md",
+      requestedPathRequestId: 1,
+      requestedPathReady: false,
+      liveWorkspaceReady: false,
+      onWakeWorkspace: () => {
+        wakeCalls += 1;
+      },
+    };
+    const r = await renderComponent(<SandboxFiles {...props} />);
+    await flush();
+    expect(r.container.textContent).toContain("Waking sandbox");
+    await r.rerender(<SandboxFiles {...props} workspaceError={new Error("Guarded wake failed")} />);
+    await flush();
+    expect(r.container.textContent).toContain("Guarded wake failed");
+    expect(r.container.textContent).not.toContain("Waking sandbox");
+    await actRun(() =>
+      Array.from(r.container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Retry live file")!
+        .click(),
+    );
+    expect(wakeCalls).toBe(1);
+    await r.rerender(<SandboxFiles {...props} />);
+    await flush();
+    expect(r.container.textContent).toContain("Waking sandbox");
+    await r.rerender(<SandboxFiles {...props} requestedPathReady liveWorkspaceReady />);
+    await flush();
+    expect(selectedFile(r.container)).toBe("README.md");
+    expect(r.container.textContent).not.toContain("Waking sandbox");
+    expect(r.container.textContent).not.toContain("Guarded wake failed");
+    await r.unmount();
+  });
+
+  test("a failed workspace wake without a capture offers a retry", async () => {
+    const r = await renderComponent(
+      <SandboxFiles
+        files={filesResult({ source: null })}
+        liveWorkspaceReady={false}
+        workspaceWaking
+        workspaceError={new Error("Permission denied")}
+        onWakeWorkspace={() => {}}
+      />,
+    );
+    expect(r.container.textContent).toContain("Permission denied");
+    expect(r.container.textContent).toContain("Retry live workspace");
+    expect(r.container.textContent).not.toContain("Waking workspace");
+    await r.unmount();
+  });
+
+  test("raster screenshots render as images but truncated and active formats do not", async () => {
+    for (const [path, truncated, image] of [
+      ["screen.png", false, true],
+      ["screen.png", true, false],
+      ["screen.svg", false, false],
+      ["archive.zip", false, false],
+    ] as const) {
+      const files = filesResult({
+        readFile: async () => ({
+          path,
+          encoding: "base64",
+          content: "aGVsbG8=",
+          isBinary: true,
+          truncated,
+          sizeBytes: 5,
+          revision: 0,
+        }),
+      });
+      const r = await renderComponent(
+        <SandboxFiles files={files} initialSelectedPath={path} usePierre={false} />,
+      );
+      await flush();
+      expect(Boolean(r.container.querySelector("img"))).toBe(image);
+      if (image)
+        expect(r.container.querySelector("img")?.getAttribute("src")).toBe(
+          "data:image/png;base64,aGVsbG8=",
+        );
+      expect(r.container.querySelector(".cm-editor")).toBeNull();
+      await r.unmount();
+    }
+  });
+
+  test("an invalid raster image reports a decode error instead of a broken image", async () => {
+    const files = filesResult({
+      readFile: async () => ({
+        path: "bad.png",
+        encoding: "base64",
+        content: "aGVsbG8=",
+        isBinary: true,
+        truncated: false,
+        sizeBytes: 5,
+        revision: 0,
+      }),
+    });
+    const r = await renderComponent(<SandboxFiles files={files} initialSelectedPath="bad.png" />);
+    await flush();
+    await actRun(() => r.container.querySelector("img")!.dispatchEvent(new Event("error")));
+    expect(r.container.textContent).toContain("Image preview unavailable");
+    expect(r.container.querySelector("img")).toBeNull();
     await r.unmount();
   });
 

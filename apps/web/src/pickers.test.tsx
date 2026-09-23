@@ -10,10 +10,12 @@ import {
   ModelPicker,
   ModelPickerMenu,
   SessionToolPicker,
+  SessionToolsMenuBody,
   visibleSessionToolSelection,
   type PickerModelRow,
   type SessionToolSelection,
 } from "@/components/pickers";
+import { DropdownMenu } from "@/components/ui/dropdown-menu";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -46,6 +48,66 @@ const FIRST_PARTY = [
 ];
 
 describe("unified session tool picker", () => {
+  test("dialog connectors toggle without a roving-focus context and preserve hidden builtins", async () => {
+    let latest: SessionToolSelection = {
+      mcpServerIds: new Set(["files"]),
+      firstPartyToolIds: new Set<FirstPartyMcpToolName>(["session_get"]),
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    function Harness() {
+      const [selection, setSelection] = useState(latest);
+      const [customizing, setCustomizing] = useState(false);
+      return (
+        <DropdownMenu>
+          <SessionToolsMenuBody
+            presentation="dialog"
+            servers={[{ id: "linear", name: "Linear" }]}
+            firstPartyTools={FIRST_PARTY}
+            selection={selection}
+            customizing={customizing}
+            onCustomizingChange={setCustomizing}
+            onChange={(next) => {
+              latest = next;
+              setSelection(next);
+            }}
+          />
+        </DropdownMenu>
+      );
+    }
+    try {
+      await act(async () => root.render(<Harness />));
+      // Connector controls are deliberately outside the eager composer graph.
+      await act(async () => {
+        await import("@/components/session-connectors-menu-body");
+      });
+      const customize = container.querySelector<HTMLButtonElement>(
+        'button[role="switch"][aria-label="Customize connectors"]',
+      )!;
+      expect(container.querySelector('button[role="switch"][aria-label="Linear"]')).toBeNull();
+      expect(container.querySelector('[aria-label="Linear, off for this session"]')).not.toBeNull();
+      await act(async () => customize.click());
+      const linear = container.querySelector<HTMLButtonElement>(
+        'button[role="switch"][aria-label="Linear"]',
+      )!;
+      expect(linear.getAttribute("aria-checked")).toBe("false");
+      await act(async () => linear.click());
+      expect(latest.mcpServerIds.has("linear")).toBe(true);
+      expect(linear.getAttribute("aria-checked")).toBe("true");
+      await act(async () => linear.click());
+      expect(latest.mcpServerIds.has("linear")).toBe(false);
+      expect(latest.mcpServerIds.has("files")).toBe(true);
+      expect([...latest.firstPartyToolIds]).toEqual(["session_get"]);
+      expect(
+        container.querySelectorAll('button[role="switch"][aria-label="Customize connectors"]'),
+      ).toHaveLength(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("shows one durable selection for connected and OpenGeni tools", async () => {
     let latest: SessionToolSelection = {
       mcpServerIds: new Set(["linear"]),
@@ -265,7 +327,7 @@ describe("catalog-backed ModelPicker", () => {
     }
   });
 
-  test("opens on Thinking; only that leaf shows a selection check", async () => {
+  test("shows every billing section and separate thinking controls", async () => {
     const rows = projectPickerRows([
       catalogModel({ id: "gpt-5.6-sol", label: "Sol" }),
       catalogModel({
@@ -274,7 +336,10 @@ describe("catalog-backed ModelPicker", () => {
         provider: "codex-subscription",
         providerLabel: "Codex",
         credentialSource: { kind: "connected_subscription", provider: "codex" },
-        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+        billing: {
+          upstreamPayer: "connected_subscription",
+          metering: "external",
+        },
       }),
     ]);
     const container = document.createElement("div");
@@ -296,21 +361,16 @@ describe("catalog-backed ModelPicker", () => {
       );
       expect(container.querySelector('[data-testid="model-picker-reasoning"]')).toBeTruthy();
       expect(container.textContent).toContain("Thinking");
-      expect(container.textContent).toContain(
-        "Unsupported attachments stay in the session but are hidden from this model.",
-      );
       expect(
-        container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
+        container.querySelector('[data-testid="model-picker-choice-gpt-5.6-sol"]'),
       ).toBeTruthy();
-      expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeTruthy();
-      expect(container.querySelectorAll('[data-testid="model-picker-effort-check"]')).toHaveLength(
-        1,
-      );
-      // Provider/model pages are not mounted on the leaf page.
       expect(
-        container.querySelector('[data-testid="model-picker-rail-opengeni_credits"]'),
-      ).toBeNull();
-      expect(container.querySelector('[data-testid="model-picker-choice-gpt-5.6-sol"]')).toBeNull();
+        container.querySelector('[data-testid="model-picker-choice-codex/gpt-5.6-luna"]'),
+      ).toBeTruthy();
+      expect(
+        container.querySelector('[role="radiogroup"][aria-label="Thinking effort"]'),
+      ).toBeTruthy();
+      expect(container.querySelector('[data-testid="model-picker-back"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -320,7 +380,11 @@ describe("catalog-backed ModelPicker", () => {
   test("one usable rail collapses the provider root", async () => {
     const rows = projectPickerRows([
       catalogModel({ id: "gpt-5.6-sol", label: "Sol", source: "opengeni" }),
-      catalogModel({ id: "deepseek-v4-flash-0731", label: "DeepSeek", source: "opengeni" }),
+      catalogModel({
+        id: "deepseek-v4-flash-0731",
+        label: "DeepSeek",
+        source: "opengeni",
+      }),
     ]);
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -352,7 +416,7 @@ describe("catalog-backed ModelPicker", () => {
     }
   });
 
-  test("slides providers → models → thinking; Thinking commits the model", async () => {
+  test("changes model directly and adjusts thinking without navigation", async () => {
     const rows = projectPickerRows([
       catalogModel({ id: "gpt-5.6-sol", label: "Sol" }),
       catalogModel({
@@ -361,7 +425,10 @@ describe("catalog-backed ModelPicker", () => {
         provider: "codex-subscription",
         providerLabel: "Codex",
         credentialSource: { kind: "connected_subscription", provider: "codex" },
-        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+        billing: {
+          upstreamPayer: "connected_subscription",
+          metering: "external",
+        },
       }),
     ]);
     let selected = "gpt-5.6-sol";
@@ -401,62 +468,26 @@ describe("catalog-backed ModelPicker", () => {
 
     try {
       await act(async () => root.render(<Harness />));
-      // Back from Thinking → models
-      await act(async () => {
-        container.querySelector<HTMLElement>('[data-testid="model-picker-back"]')!.click();
-      });
-      expect(container.querySelector('[data-testid="model-picker-models"]')).toBeTruthy();
-      expect(selected).toBe("gpt-5.6-sol");
-
-      // Back → providers
-      await act(async () => {
-        container.querySelector<HTMLElement>('[data-testid="model-picker-back"]')!.click();
-      });
-      expect(
-        container.querySelector('[data-testid="model-picker-rail-codex_subscription"]'),
-      ).toBeTruthy();
-
-      await act(async () => {
+      await act(async () =>
         container
-          .querySelector<HTMLElement>('[data-testid="model-picker-rail-codex_subscription"]')!
-          .click();
-      });
-      expect(
-        container.querySelector('[data-testid="model-picker-choice-codex/gpt-5.6-luna"]'),
-      ).toBeTruthy();
-      expect(selected).toBe("gpt-5.6-sol");
-
-      await act(async () => {
-        container
-          .querySelector<HTMLElement>('[data-testid="model-picker-choice-codex/gpt-5.6-luna"]')!
-          .click();
-      });
-      expect(selected).toBe("gpt-5.6-sol");
-      expect(container.querySelector('[data-testid="model-picker-reasoning"]')).toBeTruthy();
-
-      await act(async () => {
-        const thinking = container.querySelector('[data-testid="model-picker-reasoning"]')!;
-        const high = [...thinking.querySelectorAll("button")].find(
-          (button) => button.textContent?.trim() === "High",
-        );
-        high!.click();
-      });
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="model-picker-choice-codex/gpt-5.6-luna"]',
+          )!
+          .click(),
+      );
       expect(selected).toBe("codex/gpt-5.6-luna");
+      expect(selection.effort).toBe("low");
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="High"]')!.click();
+      });
       expect(selection.effort).toBe("high");
-      expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeTruthy();
-
-      await act(async () => {
-        container.querySelector<HTMLElement>('[data-testid="model-picker-fast"]')!.click();
-      });
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('[data-testid="model-picker-fast"]')!.click(),
+      );
       expect(selection.latency).toBe("fast");
-
-      // Back leaves Thinking without changing the committed selection.
-      await act(async () => {
-        container.querySelector<HTMLElement>('[data-testid="model-picker-back"]')!.click();
-      });
-      expect(container.querySelector('[data-testid="model-picker-reasoning"]')).toBeNull();
-      expect(container.querySelector('[data-testid="model-picker-models"]')).toBeTruthy();
-      expect(selected).toBe("codex/gpt-5.6-luna");
+      expect(
+        container.querySelector('[data-testid="model-picker-choice-gpt-5.6-sol"]'),
+      ).toBeTruthy();
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -464,7 +495,10 @@ describe("catalog-backed ModelPicker", () => {
   });
 
   test("hides Fast toggle when the focused model cannot run it", async () => {
-    const baseCapabilities = catalogModel({ id: "x", label: "x" }).capabilities!;
+    const baseCapabilities = catalogModel({
+      id: "x",
+      label: "x",
+    }).capabilities!;
     const rows = projectPickerRows([
       catalogModel({
         id: "slow-only",
@@ -496,65 +530,6 @@ describe("catalog-backed ModelPicker", () => {
       expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
-      container.remove();
-    }
-  });
-
-  test("standalone menu keeps client nav while mounted; remount resets to selected Thinking", async () => {
-    const rows = projectPickerRows([
-      catalogModel({ id: "gpt-5.6-sol", label: "Sol" }),
-      catalogModel({
-        id: "codex/gpt-5.6-luna",
-        label: "Luna",
-        provider: "codex-subscription",
-        providerLabel: "Codex",
-        credentialSource: { kind: "connected_subscription", provider: "codex" },
-        billing: { upstreamPayer: "connected_subscription", metering: "external" },
-      }),
-    ]);
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    const menu = (
-      <ModelPickerMenu
-        rows={rows}
-        model="gpt-5.6-sol"
-        effort="low"
-        latencyMode="standard"
-        sessionKey="session-a"
-        onModelChange={() => {}}
-        onEffortChange={() => {}}
-        onLatencyModeChange={() => {}}
-      />
-    );
-    try {
-      await act(async () => root.render(menu));
-      expect(container.querySelector('[data-testid="model-picker-reasoning"]')).toBeTruthy();
-
-      await act(async () => {
-        container.querySelector<HTMLElement>('[data-testid="model-picker-back"]')!.click();
-      });
-      await act(async () => {
-        container.querySelector<HTMLElement>('[data-testid="model-picker-back"]')!.click();
-      });
-      expect(
-        container.querySelector('[data-testid="model-picker-rail-codex_subscription"]'),
-      ).toBeTruthy();
-
-      // A plain rerender without an open transition keeps the standalone menu page.
-      await act(async () => root.render(menu));
-      expect(
-        container.querySelector('[data-testid="model-picker-rail-codex_subscription"]'),
-      ).toBeTruthy();
-
-      // Fresh mount (refresh) → selected Thinking leaf again.
-      await act(async () => root.unmount());
-      const root2 = createRoot(container);
-      await act(async () => root2.render(menu));
-      expect(container.querySelector('[data-testid="model-picker-reasoning"]')).toBeTruthy();
-      expect(container.textContent).toContain("Thinking");
-      await act(async () => root2.unmount());
-    } finally {
       container.remove();
     }
   });

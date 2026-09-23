@@ -600,6 +600,7 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
                     <Input
                       id={`${headingId}-name`}
                       name="organization-api-key-name"
+                      suppressAutofill
                       autoComplete="off"
                       value={apiKeyName}
                       onChange={(event) => setApiKeyName(event.target.value)}
@@ -700,7 +701,6 @@ const { workspace } = await client.ensureWorkspace({
 });
 
 await client.updateWorkspaceSettings(workspace.id, {
-  memoryEnabled: true,
   agentHumanInputEnabled: true,
 });
 

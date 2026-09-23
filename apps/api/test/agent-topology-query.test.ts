@@ -37,6 +37,44 @@ describe("agent topology query", () => {
     });
   });
 
+  test("an explicit root searches every depth unless an explicit parent narrows it", () => {
+    expect(
+      agentTopologyQuery({ rootSessionId: PARENT_ID, statuses: "requires_action" }),
+    ).toMatchObject({
+      rootSessionId: PARENT_ID,
+      parentSessionId: undefined,
+      statuses: ["requires_action"],
+    });
+    expect(
+      agentTopologyQuery({ rootSessionId: PARENT_ID, parentSessionId: "null" }).parentSessionId,
+    ).toBeNull();
+    expect(
+      agentTopologyQuery({ rootSessionId: PARENT_ID, parentSessionId: PARENT_ID }).parentSessionId,
+    ).toBe(PARENT_ID);
+    const cursor = encodeAgentTopologyCursor({
+      cursor: CURSOR,
+      rootSessionId: PARENT_ID,
+      parentSessionId: "all",
+      query: null,
+      statuses: ["requires_action"],
+      activeOnly: false,
+      recentHours: null,
+      subject: null,
+      claimLimit: null,
+    });
+    expect(
+      agentTopologyQuery({ rootSessionId: PARENT_ID, statuses: "requires_action", cursor }).cursor,
+    ).toEqual(CURSOR);
+    expect(() =>
+      agentTopologyQuery({
+        rootSessionId: PARENT_ID,
+        parentSessionId: "null",
+        statuses: "requires_action",
+        cursor,
+      }),
+    ).toThrow("cursor does not match");
+  });
+
   test("round-trips a cursor only with its original branch filters", () => {
     const cursor = encodeAgentTopologyCursor({
       cursor: CURSOR,

@@ -26,6 +26,7 @@ import {
   hasGitHubRepositorySelection,
   resolveStreamTokenSecret,
   sandboxLifecycleTransitionWaitMs,
+  sandboxWarmRateMicrosPerSecond,
   stableSandboxEnvironmentForRun,
 } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
@@ -37,7 +38,7 @@ import {
   getSandbox,
   getScheduledScopedRigVersionMetadata,
   getSandboxSessionEnvelope,
-  heartbeatLeaseHolder,
+  heartbeatLeaseHolderStatus,
   loadWorkspaceEnvironmentForRun,
   markSandboxProviderReady,
   markWarmLeaseInstanceLost,
@@ -46,6 +47,7 @@ import {
   recordLeaseTerminalDataPlaneUrl,
   releaseLeaseHolder,
   SandboxLeaseSupersededError,
+  SandboxPaidComputeAdmissionError,
   type Database,
   type LeaseSnapshot,
   type SandboxRecord,
@@ -55,6 +57,7 @@ import {
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
 import { httpExceptionForSandboxViewerAdmission } from "../http/sandbox-viewer-admission-error";
+import type { ObjectStorage } from "@opengeni/storage";
 
 // The leaf — agent-loop-free. apps/api imports sandbox symbols ONLY from here
 // (enforced by sandbox-access-import-guard.test.ts).
@@ -98,6 +101,7 @@ export type ViewerServices = {
   db: Database;
   settings: Settings;
   bus?: EventBus;
+  objectStorage?: ObjectStorage | null;
   /** Provider-establish dependency used by API-direct readiness and stream
    *  operations. Production uses the runtime leaf; isolated tests may supply a
    *  deterministic provider without replacing a process-global module. */
@@ -298,6 +302,10 @@ export async function attachViewer(
       ...(attachSubjectId ? { viewerSubjectId: attachSubjectId } : {}),
       ...(attachAuthorityEpoch !== null ? { viewerAuthorityEpoch: attachAuthorityEpoch } : {}),
       backend: session.sandboxBackend,
+      warmBilling: {
+        mode: settings.sandboxWarmBillingMode,
+        rateMicrosPerSecond: sandboxWarmRateMicrosPerSecond(settings, session.sandboxBackend),
+      },
       os: session.sandboxOs,
       image: sandboxRuntime.image,
       rigVersionId: session.rigVersionId,
@@ -309,6 +317,10 @@ export async function attachViewer(
   } catch (error) {
     const admission = httpExceptionForSandboxViewerAdmission(error);
     if (admission) throw admission;
+    if (error instanceof SandboxPaidComputeAdmissionError) {
+      throw new HTTPException(402, { message: error.message, cause: error });
+    }
+
     throw error;
   }
 
@@ -374,6 +386,7 @@ export async function attachViewer(
         acquiredLease: acquired.lease,
         fallbackEnvelope: envelope,
         dataPlaneUrl: null,
+        ...(services.objectStorage !== undefined ? { objectStorage: services.objectStorage } : {}),
       });
       established = result.established;
       return {
@@ -582,7 +595,7 @@ export async function heartbeatViewer(
     expectedEpoch: number;
   },
 ): Promise<boolean> {
-  const alive = await heartbeatLeaseHolder(services.db, {
+  const status = await heartbeatLeaseHolderStatus(services.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     sandboxGroupId: input.sandboxGroupId,
@@ -590,8 +603,12 @@ export async function heartbeatViewer(
     holderId: input.viewerId,
     leaseTtlMs: services.settings.sandboxLeaseTtlMs,
     expectedEpoch: input.expectedEpoch,
+    billingMode: services.settings.sandboxWarmBillingMode,
   });
-  if (!alive) return false;
+  // A funding fence stops renewing paid provider time, but the holder is
+  // deliberately kept alive while the viewer winds down or adds funds. Other
+  // fences (epoch/rotation/drain) still require the client to re-attach.
+  if (!status.leaseExtended) return status.holderAlive && status.fence === "funding";
   const lease = await readLease(services.db, input.workspaceId, input.sandboxGroupId);
   if (lease?.liveness === "warm" && lease.leaseEpoch === input.expectedEpoch && lease.instanceId) {
     await renewSandboxProviderExpiration({

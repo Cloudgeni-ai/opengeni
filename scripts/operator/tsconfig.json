@@ -15,6 +15,11 @@
     "sandbox-reaper-hold.ts",
     "sandbox-reaper-hold.test.ts",
     "reconcile-cold-lost-sandbox-blockers.ts",
-    "reconcile-cold-lost-sandbox-blockers.test.ts"
+    "reconcile-cold-lost-sandbox-blockers.test.ts",
+    "verify-portable-compaction.ts",
+    "verify-portable-compaction.test.ts",
+    "compaction-durable.ts",
+    "compaction-history.ts",
+    "compaction-verification-errors.ts"
   ]
 }

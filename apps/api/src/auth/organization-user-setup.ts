@@ -2,6 +2,7 @@ import type { Settings } from "@opengeni/config";
 import type { ManagedEmailTransport } from "@opengeni/core";
 
 const encoder = new TextEncoder();
+export type OrganizationUserSetupEmailTokenTransport = "fragment" | "query";
 
 /**
  * Prove that the stable invited-user setup bearer can be constructed before an
@@ -13,9 +14,28 @@ export function assertOrganizationUserSetupDeliveryConfigured(
   settings: Settings,
   transport: ManagedEmailTransport,
 ): void {
+  assertOrganizationUserSetupQueryTransportConfigured(settings);
   requiredSetupSecret(settings);
   requiredPublicBaseUrl(settings);
   assertManagedEmailTransportMetadata(transport);
+}
+
+/** Enforce the query-bearing edge proof for env and embedded settings alike. */
+export function assertOrganizationUserSetupQueryTransportConfigured(
+  settings: Pick<
+    Settings,
+    | "organizationUserSetupEmailTokenTransport"
+    | "organizationUserSetupQueryEdgeSanitizationConfirmed"
+  >,
+): void {
+  if (
+    settings.organizationUserSetupEmailTokenTransport === "query" &&
+    !settings.organizationUserSetupQueryEdgeSanitizationConfirmed
+  ) {
+    throw new Error(
+      "OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED=true is required when OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT=query",
+    );
+  }
 }
 
 /** Reject an invalid embedded-provider contract before any durable boundary. */
@@ -42,7 +62,11 @@ export function assertManagedEmailTransportMetadata(transport: ManagedEmailTrans
 
 export async function deriveOrganizationUserSetupToken(
   settings: Settings,
-  input: { invitationId: string; deliveryId: string },
+  input: {
+    invitationId: string;
+    deliveryId: string;
+    transport?: OrganizationUserSetupEmailTokenTransport;
+  },
 ): Promise<{ token: string; digest: string; url: string }> {
   const secret = requiredSetupSecret(settings);
   const key = await crypto.subtle.importKey(
@@ -62,7 +86,15 @@ export async function deriveOrganizationUserSetupToken(
   const token = base64Url(new Uint8Array(signature));
   const digest = await sha256Hex(token);
   const url = new URL("/setup-account", requiredPublicBaseUrl(settings));
-  url.hash = new URLSearchParams({ token }).toString();
+  if ((input.transport ?? settings.organizationUserSetupEmailTokenTransport) === "query") {
+    // Email security gateways routinely wrap links and may discard URL
+    // fragments. Enable this only after the compatibility web rollout; the
+    // browser's first executable head bootstrap scrubs query authority without
+    // redirecting or allowing a query-bearing subresource Referer.
+    url.searchParams.set("token", token);
+  } else {
+    url.hash = new URLSearchParams({ token }).toString();
+  }
   return { token, digest, url: url.toString() };
 }
 
@@ -107,9 +139,9 @@ export function renderOrganizationUserSetupEmail(input: OrganizationUserSetupEma
   return {
     from: input.senderEmail,
     to: input.recipientEmail,
-    subject: `Join ${input.organizationName} on OpenGeni`,
-    text: `${greeting}\n\nYou have been invited to ${input.organizationName} as ${role}.\n\n${workspaceSummary}\n\nThis invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.\n\nSet up your account: ${input.setupUrl}\n\nIf you already have an OpenGeni account, sign in and accept the invitation instead.`,
-    html: `<p>${escapeHtml(greeting)}</p><p>You have been invited to <strong>${escapeHtml(input.organizationName)}</strong> as ${escapeHtml(role)}.</p>${workspaceHtml}<p>This invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.</p><p><a href="${escapeHtml(input.setupUrl)}">Set up your account</a></p><p>If you already have an OpenGeni account, sign in and accept the invitation instead.</p>`,
+    subject: `You're invited to join ${input.organizationName} on OpenGeni`,
+    text: `${greeting}\n\nYou've been invited to join ${input.organizationName} on OpenGeni as ${role}.\n\n${workspaceSummary}\n\nThis invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.\n\nAccept invitation to ${input.organizationName}: ${input.setupUrl}\n\nYou'll sign in or create an account before joining. Already use OpenGeni? Open this invitation and choose Sign in as ${input.recipientEmail}. OpenGeni will show the invitation immediately after you sign in.`,
+    html: `<p>${escapeHtml(greeting)}</p><p>You've been invited to join <strong>${escapeHtml(input.organizationName)}</strong> on OpenGeni as ${escapeHtml(role)}.</p>${workspaceHtml}<p>This invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.</p><p><a href="${escapeHtml(input.setupUrl)}">Accept invitation to ${escapeHtml(input.organizationName)}</a></p><p>You'll sign in or create an account before joining. Already use OpenGeni? Open this invitation and choose <strong>Sign in as ${escapeHtml(input.recipientEmail)}</strong>. OpenGeni will show the invitation immediately after you sign in.</p>`,
   };
 }
 
@@ -132,6 +164,64 @@ export async function organizationUserSetupPayloadDigest(input: {
       html: input.html,
     }),
   );
+}
+
+export async function resolveOrganizationUserSetupDeliveryEmail(
+  settings: Settings,
+  input: {
+    invitationId: string;
+    deliveryId: string;
+    senderEmail: string;
+    recipientEmail: string;
+    recipientName: string | null;
+    organizationName: string;
+    organizationRole: "owner" | "admin" | "member";
+    sharedWorkspaceAccess: OrganizationUserSetupEmailSnapshot["sharedWorkspaceAccess"];
+    providerIdempotencyScope: string;
+    frozenTransport: OrganizationUserSetupEmailTokenTransport | null;
+    frozenPayloadDigest: string | null;
+  },
+): Promise<{
+  transport: OrganizationUserSetupEmailTokenTransport;
+  token: string;
+  tokenDigest: string;
+  payloadDigest: string;
+  message: ReturnType<typeof renderOrganizationUserSetupEmail>;
+}> {
+  const candidates: OrganizationUserSetupEmailTokenTransport[] = input.frozenTransport
+    ? [input.frozenTransport]
+    : input.frozenPayloadDigest
+      ? ["fragment", "query"]
+      : [settings.organizationUserSetupEmailTokenTransport];
+  for (const transport of candidates) {
+    const setup = await deriveOrganizationUserSetupToken(settings, {
+      invitationId: input.invitationId,
+      deliveryId: input.deliveryId,
+      transport,
+    });
+    const message = renderOrganizationUserSetupEmail({
+      senderEmail: input.senderEmail,
+      recipientEmail: input.recipientEmail,
+      recipientName: input.recipientName,
+      organizationName: input.organizationName,
+      organizationRole: input.organizationRole,
+      sharedWorkspaceAccess: input.sharedWorkspaceAccess,
+      setupUrl: setup.url,
+    });
+    const payloadDigest = await organizationUserSetupPayloadDigest({
+      ...message,
+      providerIdempotencyScope: input.providerIdempotencyScope,
+    });
+    if (input.frozenPayloadDigest && payloadDigest !== input.frozenPayloadDigest) continue;
+    return {
+      transport,
+      token: setup.token,
+      tokenDigest: setup.digest,
+      payloadDigest,
+      message,
+    };
+  }
+  throw new Error("Organization setup delivery transport does not match its frozen payload");
 }
 
 export async function organizationUserSetupRequestFingerprint(

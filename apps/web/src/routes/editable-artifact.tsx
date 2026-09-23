@@ -1,3 +1,4 @@
+import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
 import { editableArtifactKernelRuntime as documentRuntime } from "@opengeni/artifact-kernel-wasm-document";
 import { editableArtifactKernelRuntime as presentationRuntime } from "@opengeni/artifact-kernel-wasm-presentation";
 import { editableArtifactKernelRuntime as spreadsheetRuntime } from "@opengeni/artifact-kernel-wasm-spreadsheet";
@@ -15,6 +16,7 @@ import artifactWorkerUrl from "@opengeni/sdk/editable-artifacts/worker?worker&ur
 import { useEffect, useState } from "react";
 
 import { apiBaseUrl, authHeadersForAccessKey, getStoredAccessKey } from "@/api";
+import { artifactRouteErrorMessage, mapArtifactRouteError } from "@/lib/artifact-route-error";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
@@ -40,6 +42,28 @@ const absoluteApiBaseUrl = new URL(apiBaseUrl || "/", window.location.origin);
 
 /** First-party consumer of the exact public SDK/React editable-artifact API. */
 export function EditableArtifactRoute({
+  fromSession,
+  embedded = false,
+  ...params
+}: Readonly<{
+  workspaceId: string;
+  artifactId: string;
+  fromSession?: string | undefined;
+  embedded?: boolean;
+}>) {
+  if (embedded) return <EditableArtifactContent {...params} />;
+  return (
+    <ArtifactSessionPage
+      workspaceId={params.workspaceId}
+      fromSession={fromSession}
+      showAllArtifacts
+    >
+      <EditableArtifactContent {...params} />
+    </ArtifactSessionPage>
+  );
+}
+
+function EditableArtifactContent({
   workspaceId,
   artifactId,
 }: Readonly<{ workspaceId: string; artifactId: string }>) {
@@ -79,18 +103,21 @@ export function EditableArtifactRoute({
     return <LoadingPanel label="Opening artifact" />;
   }
   if (state.kind === "error") {
+    const view = mapArtifactRouteError(state.error, "editable");
     return (
       <ProblemPanel
-        title="Could not open this artifact"
-        description={state.error.message}
+        title={view.title}
+        description={artifactRouteErrorMessage(view)}
         action={
-          <Button
-            type="button"
-            variant="secondary"
-            onClick={() => setLoadEpoch((value) => value + 1)}
-          >
-            Try again
-          </Button>
+          view.retryable ? (
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setLoadEpoch((value) => value + 1)}
+            >
+              Try again
+            </Button>
+          ) : undefined
         }
       />
     );

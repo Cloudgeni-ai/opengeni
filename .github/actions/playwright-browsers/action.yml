@@ -99,8 +99,13 @@ runs:
         ATTEMPT_TIMEOUT_SECONDS: ${{ inputs.attempt-timeout-seconds }}
         ATTEMPTS: ${{ inputs.attempts }}
         KILL_AFTER_SECONDS: "15"
+        PLAYWRIGHT_RUNNER_OS: ${{ runner.os }}
+        PLAYWRIGHT_ACTION_PATH: ${{ github.action_path }}
       run: |
         set -uo pipefail
+        if [ "${PLAYWRIGHT_RUNNER_OS}" = "Linux" ]; then
+          sudo python3 "${PLAYWRIGHT_ACTION_PATH}/exclude-google-chrome-apt.py"
+        fi
         only_shell=""
         if [ "${PLAYWRIGHT_ONLY_SHELL}" = "true" ]; then
           only_shell="--only-shell"

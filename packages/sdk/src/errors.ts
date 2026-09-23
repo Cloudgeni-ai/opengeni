@@ -49,6 +49,29 @@ export class OpenGeniApiError extends Error {
   }
 }
 
+export type OpenGeniSecureContextRequiredReason = "insecure_context" | "web_crypto_unavailable";
+
+/**
+ * A browser operation requires secure-context-only platform capabilities.
+ * Callers may key UI behavior on the stable `secure_context_required` code;
+ * `reason` exists only to keep the human guidance truthful.
+ */
+export class OpenGeniSecureContextRequiredError extends Error {
+  readonly code = "secure_context_required" as const;
+  readonly retryable = false;
+  readonly reason: OpenGeniSecureContextRequiredReason;
+
+  constructor(reason: OpenGeniSecureContextRequiredReason) {
+    super(
+      reason === "insecure_context"
+        ? "Couldn’t attach this file because OpenGeni is open over HTTP. Attachments require a secure HTTPS connection. Open the secure site or configure HTTPS for this deployment."
+        : "Couldn’t attach this file because secure browser cryptography is unavailable. Attachments require HTTPS and Web Crypto support. Open a secure site in a supported browser or configure HTTPS for this deployment.",
+    );
+    this.name = "OpenGeniSecureContextRequiredError";
+    this.reason = reason;
+  }
+}
+
 function decodeApiErrorBody(body: string): {
   code: string | undefined;
   message: string | undefined;

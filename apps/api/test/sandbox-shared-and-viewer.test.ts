@@ -239,6 +239,56 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     expect(b.id).not.toBe(a.id);
   }, 60_000);
 
+  test("child resource defaults exclude parent uploads and preserve explicit overrides", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "parent with repository",
+        resources: [
+          { kind: "repository", uri: "https://github.com/acme/project.git", ref: "main" },
+        ],
+      },
+    );
+    const file = { kind: "file" as const, fileId: crypto.randomUUID() };
+    // Seed an existing upload reference without an object-storage fixture. An
+    // implicit child must not resolve it or require storage to be configured.
+    await admin`update sessions set resources = ${JSON.stringify([...parent.resources, file])}::jsonb where id = ${parent.id}`;
+    for (const sandbox of [undefined, "new"] as const) {
+      const child = await createSessionForRequest(
+        deps(bus),
+        grant(accountId, workspaceId, parent.id),
+        workspaceId,
+        { initialMessage: "child", ...(sandbox ? { sandbox } : {}) },
+      );
+      expect(child.resources).toEqual(parent.resources);
+      const messages = (await listSessionEvents(db, workspaceId, child.id)).filter(
+        (event) => event.type === "user.message",
+      );
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.payload.resources).toEqual(parent.resources);
+    }
+    const empty = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "no resources", resources: [] },
+    );
+    expect(empty.resources).toEqual([]);
+    // Explicit file selection still enters normal file validation, rather than
+    // being silently filtered by the repository-only inheritance policy.
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId, parent.id), workspaceId, {
+        initialMessage: "explicit upload",
+        resources: [file],
+      }),
+    ).rejects.toThrow("object storage is not configured");
+  }, 60_000);
+
   test("a child inherits omitted mixed-provider repositories, tools, and encrypted MCP context", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
@@ -286,7 +336,12 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       skills: [
         {
           name: "release",
-          files: [{ path: "SKILL.md", content: "# Release\n" }],
+          files: [
+            {
+              path: "SKILL.md",
+              content: "---\nname: release\ndescription: Prepare a release.\n---\n# Release\n",
+            },
+          ],
         },
       ],
       mcpServers: [
@@ -460,7 +515,12 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
         skills: [
           {
             name: "release",
-            files: [{ path: "SKILL.md", content: "# Release\n" }],
+            files: [
+              {
+                path: "SKILL.md",
+                content: "---\nname: release\ndescription: Prepare a release.\n---\n# Release\n",
+              },
+            ],
           },
         ],
       },
@@ -1252,17 +1312,19 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     expect(lease1?.viewerHolders).toBe(1);
   }, 60_000);
 
-  test("an over-limit viewer receives the typed billing response and cannot re-arm until a fresh evaluation clears the gate", async () => {
+  test("a warm-cap viewer receives the typed limit response and cannot re-arm until a fresh evaluation clears the gate", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
     const session = await getSession(db, workspaceId, sessionId);
+    const capEventKey = `viewer-warm-cap:${crypto.randomUUID()}`;
+    await admin`INSERT INTO usage_events(account_id,workspace_id,event_type,quantity,unit,idempotency_key,occurred_at)
+      VALUES(${accountId},${workspaceId},'sandbox.warm_seconds',10,'seconds',${capEventKey},now())`;
 
     await forceDrainOverLimitViewerOnlyBoxes(db, {
       workspaceId,
-      balanceMicros: 0,
-      enforceBalance: true,
-      maxWarmSecondsPerWorkspace: 0,
+      enforceBalance: false,
+      maxWarmSecondsPerWorkspace: 5,
       idleGraceMs: settings.sandboxIdleGraceMs,
     });
 
@@ -1273,19 +1335,19 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
       blocked = error;
     }
     expect(blocked).toBeInstanceOf(HTTPException);
-    expect((blocked as HTTPException).status).toBe(402);
-    expect((blocked as Error).message).toContain("insufficient OpenGeni credits");
+    expect((blocked as HTTPException).status).toBe(429);
+    expect((blocked as Error).message).toContain("warm allowance exhausted");
     expect(await readLease(db, workspaceId, sandboxGroupId)).toMatchObject({
       liveness: "draining",
       refcount: 0,
       viewerHolders: 0,
     });
 
+    await admin`DELETE FROM usage_events WHERE idempotency_key=${capEventKey}`;
     await forceDrainOverLimitViewerOnlyBoxes(db, {
       workspaceId,
-      balanceMicros: 1,
-      enforceBalance: true,
-      maxWarmSecondsPerWorkspace: 0,
+      enforceBalance: false,
+      maxWarmSecondsPerWorkspace: 5,
       idleGraceMs: settings.sandboxIdleGraceMs,
     });
     const attached = await attachViewer(

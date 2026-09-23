@@ -1,0 +1,16 @@
+{
+  "name": "@opengeni/example-site-session-embed",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun server.ts",
+    "build": "bun build --compile --target=browser --production --external @pierre/diffs --external @pierre/diffs/react ./index.html --outdir=dist"
+  },
+  "dependencies": {
+    "@opengeni/codemode": "workspace:*",
+    "@opengeni/react": "workspace:*",
+    "@opengeni/sdk": "workspace:*",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  }
+}

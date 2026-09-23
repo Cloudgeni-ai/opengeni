@@ -7,6 +7,7 @@ import {
   activateSessionRealtimeConnectionInTransaction,
   beginSessionRealtimeInTransaction,
   bootstrapWorkspace,
+  appendSessionEvents,
   claimSessionRealtimeConnectionInTransaction,
   claimSessionWorkForAttempt,
   completeSessionRealtimeConnectionInTransaction,
@@ -271,6 +272,54 @@ function sourceEntry(role: "user" | "assistant", text: string): SessionRealtimeC
     payload: { turnId: crypto.randomUUID() },
   };
 }
+
+describe("voice handoff execution policy", () => {
+  test("inherits latest started model, effort and speed when voice ends", async () => {
+    const value = await fixture();
+    const [previous] = await transaction(value.workspaceId, (tx) =>
+      tx
+        .insert(schema.sessionTurns)
+        .values({
+          accountId: value.accountId,
+          workspaceId: value.workspaceId,
+          sessionId: value.session.id,
+          triggerEventId: crypto.randomUUID(),
+          temporalWorkflowId: `session-${value.session.id}`,
+          status: "completed",
+          source: "user",
+          prompt: "changed model",
+          position: 0,
+          resources: [],
+          tools: [],
+          model: "codex/new-model",
+          reasoningEffort: "high",
+          latencyMode: "priority",
+          sandboxBackend: "none",
+        })
+        .returning(),
+    );
+    await appendSessionEvents(client.db, value.workspaceId, value.session.id, [
+      {
+        type: "turn.started",
+        turnId: previous!.id,
+        payload: {},
+      },
+    ]);
+    await runMode(value, [transcript("user", "Finish the remaining work")]);
+    const turns = await transaction(value.workspaceId, (tx) =>
+      tx
+        .select()
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.sessionId, value.session.id)),
+    );
+    const handoff = turns.find((turn) => turn.id !== previous!.id);
+    expect(handoff).toMatchObject({
+      model: "codex/new-model",
+      reasoningEffort: "high",
+      latencyMode: "priority",
+    });
+  });
+});
 
 describe("session realtime transcript tail and continuity", () => {
   test("renders escaped, bounded Codex-style tail context", () => {

@@ -1,6 +1,12 @@
 import type { ClientModel, EffectiveSessionControl } from "@opengeni/sdk";
 import { LayoutGroup, motion } from "motion/react";
-import type { ClipboardEvent, ReactNode } from "react";
+import {
+  useImperativeHandle,
+  type ClipboardEvent,
+  type ComponentProps,
+  type ReactNode,
+  type Ref,
+} from "react";
 import type { SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
 import type { UseFileAttachmentsResult } from "../hooks/use-file-attachments";
@@ -41,6 +47,14 @@ export { OPEN_WORKSTREAM_CONTROL_EVENT };
 
 export type ChatComposerProps = {
   composer: ComposerState;
+  /** Replace only the normal footer, inside the shared composer context.
+   * Confirmation, drafts, annotations and attachments remain native. */
+  footer?: ReactNode;
+  focusRef?: Ref<{ focusInput: () => void }>;
+  inputProps?: ComponentProps<typeof Input> & {
+    [attribute: `data-${string}`]: string | number | boolean | undefined;
+  };
+  surfaceClassName?: string;
   /**
    * Measurement surface for responsive chrome. Defaults to the historical
    * viewport breakpoints; opt into `container` for narrow embedded panels.
@@ -125,6 +139,10 @@ export function ChatComposer({
   commandContext,
   onClearView,
   messages,
+  footer,
+  focusRef,
+  inputProps,
+  surfaceClassName,
 }: ChatComposerProps) {
   const controller = useChatComposerController({
     delivery: composer,
@@ -146,19 +164,25 @@ export function ChatComposer({
     attachments || models || controlsLeading || controlsStart || transcription,
   );
   const stackActions = hasControls && Boolean(actionsStart);
+  useImperativeHandle(focusRef, () => ({ focusInput: controller.focusInput }), [
+    controller.focusInput,
+  ]);
 
   return (
     <>
       <Root controller={controller} responsiveBasis={responsiveBasis} className={className}>
         <Frame>
           <CommandPalette />
-          <Surface>
+          <Surface className={surfaceClassName}>
             <PausedState />
             <RestoredResources />
             <Attachments />
             {header}
-            {composer.annotations && composer.annotations.length > 0 ? (
-              <div className="px-3 pt-2 sm:px-4">
+            {composer.annotations &&
+            composer.annotations.length > 0 &&
+            composer.updateAnnotation &&
+            composer.removeAnnotation ? (
+              <div className="px-3.5 pt-2 md:px-4">
                 <TimelineAnnotationsChip
                   annotations={composer.annotations}
                   editable
@@ -169,9 +193,11 @@ export function ChatComposer({
                 />
               </div>
             ) : null}
-            <Input placeholder={placeholder} autoFocus={autoFocus} />
+            <Input {...inputProps} placeholder={placeholder} autoFocus={autoFocus} />
             {controller.confirmState ? (
               <Confirmation />
+            ) : footer !== undefined ? (
+              footer
             ) : (
               <Footer
                 data-og-stack-actions={stackActions ? "" : undefined}

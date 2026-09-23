@@ -1,5 +1,6 @@
 import {
   normalizeProtocolJsonValue,
+  TURN_OPERATIONAL_NOTICE_PREFIX,
   sanitizeHistoryItemsForModel,
   toolCallIdFromSdkItem,
 } from "@opengeni/runtime";
@@ -31,15 +32,20 @@ export function historyRowsToAppend(
   }
   // Canonical model-facing inputs (including machine-input batches) are
   // persisted before inference and therefore live inside the prefix represented
-  // by persistedHistoryCount. System messages synthesized only for this
-  // attempt—recovery diagnostics, credential notices, attachment materialization
-  // notes—must not accidentally become conversation memory during reconciliation.
-  // Advance the in-memory watermark past them, but only allocate durable
-  // positions to actual model/tool output.
+  // by persistedHistoryCount. Explicitly turn-scoped operational notices remain
+  // at their original positions: deleting them rewrites the model-visible prefix
+  // on the next turn and during compaction. Unscoped synthetic system messages
+  // still cannot silently become permanent conversation instructions.
   const rows: Array<{ position: number; item: Record<string, unknown> }> = [];
   for (const [offset, item] of modelReady.slice(persistedHistoryCount).entries()) {
     if (item.type === "message" && item.role === "system") {
-      continue;
+      const content =
+        typeof item.content === "string"
+          ? item.content
+          : Array.isArray(item.content)
+            ? item.content.map((part: { text?: string }) => part.text ?? "").join("")
+            : "";
+      if (!content.startsWith(TURN_OPERATIONAL_NOTICE_PREFIX)) continue;
     }
     rows.push({
       position: nextPosition + rows.length,
@@ -149,10 +155,18 @@ export function pendingToolCallFromSdkEvent(event: unknown): {
     return null;
   }
   const raw = item.rawItem as Record<string, unknown>;
-  // The hosted image call is a complete provider fact carried by one item; it
-  // never receives a separate function result and therefore must not enter the
-  // pending function-call ledger.
-  if (raw.type === "hosted_tool_call" && raw.name === "image_generation_call") return null;
+  // Provider-executed search/image calls carry their outcome in this item,
+  // not a later function result. Registering them as pending leaves an
+  // impossible receipt behind even after the turn completes. Hosted MCP
+  // approval requests are different: they still require a response.
+  const providerData = raw.providerData as Record<string, unknown> | undefined;
+  if (
+    raw.type === "hosted_tool_call" &&
+    raw.name !== "mcp_approval_request" &&
+    providerData?.type !== "mcp_approval_request" &&
+    (raw.status === "completed" || raw.name === "image_generation_call")
+  )
+    return null;
   const callId = toolCallIdFromSdkItem(raw) ?? raw.id;
   const callType = raw.type;
   if (typeof callId !== "string" || callId.length === 0 || typeof callType !== "string") {

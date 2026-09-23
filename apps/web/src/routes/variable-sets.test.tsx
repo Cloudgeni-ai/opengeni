@@ -130,7 +130,6 @@ describe("Variable Sets credential-autofill boundaries", () => {
             canWriteSet={true}
             canWriteSecrets={true}
             canReadSecrets={true}
-            revealEpoch={0}
             onUpdate={async () => VARIABLE_SET}
             onDelete={async () => true}
             onReadVariable={async () => null}
@@ -170,7 +169,6 @@ describe("Variable Sets credential-autofill boundaries", () => {
             canWriteSet={true}
             canWriteSecrets={true}
             canReadSecrets={true}
-            revealEpoch={0}
             onUpdate={async () => VARIABLE_SET}
             onDelete={async () => true}
             onReadVariable={async (name) => ({
@@ -287,7 +285,6 @@ describe("Variable Sets credential-autofill boundaries", () => {
             canWriteSet={true}
             canWriteSecrets={true}
             canReadSecrets={true}
-            revealEpoch={0}
             onUpdate={async () => VARIABLE_SET}
             onDelete={async () => true}
             onReadVariable={async () => null}
@@ -332,7 +329,7 @@ describe("Variable Sets credential-autofill boundaries", () => {
     }
   });
 
-  test("reveals and copies only on demand, then clears plaintext on hide and refresh", async () => {
+  test("reveals and copies only on demand, then clears plaintext on hide and update", async () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -347,12 +344,12 @@ describe("Variable Sets credential-autofill boundaries", () => {
         },
       },
     });
-    const renderCard = async (revealEpoch: number) => {
+    const renderCard = async (variableSet: WorkspaceVariableSet) => {
       await act(async () => {
         root.render(
           <VariableSetCard
             workspaceId="workspace-1"
-            variableSet={VARIABLE_SET}
+            variableSet={variableSet}
             attachedSessions={[]}
             attachedTasks={[]}
             attachmentsUnknown={false}
@@ -360,7 +357,6 @@ describe("Variable Sets credential-autofill boundaries", () => {
             canWriteSet={true}
             canWriteSecrets={true}
             canReadSecrets={true}
-            revealEpoch={revealEpoch}
             onUpdate={async () => VARIABLE_SET}
             onDelete={async () => true}
             onReadVariable={async (name) => {
@@ -380,7 +376,7 @@ describe("Variable Sets credential-autofill boundaries", () => {
     };
 
     try {
-      await renderCard(0);
+      await renderCard(VARIABLE_SET);
       await act(async () => {
         container
           .querySelector<HTMLButtonElement>('button[aria-label="Manage variables for staging"]')!
@@ -424,7 +420,7 @@ describe("Variable Sets credential-autofill boundaries", () => {
           .click();
       });
       expect(container.textContent).toContain(exact);
-      await renderCard(1);
+      await renderCard({ ...VARIABLE_SET, updatedAt: "2026-09-08T00:00:00.000Z" });
       expect(container.textContent).not.toContain(exact);
     } finally {
       await act(async () => root.unmount());
@@ -449,7 +445,6 @@ describe("Variable Sets credential-autofill boundaries", () => {
             canWriteSet={false}
             canWriteSecrets={false}
             canReadSecrets={false}
-            revealEpoch={0}
             onUpdate={async () => VARIABLE_SET}
             onDelete={async () => true}
             onReadVariable={async () => null}

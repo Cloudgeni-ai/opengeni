@@ -18,6 +18,7 @@ const connectionRef = {
 function server(input: {
   fetchImpl: typeof fetch;
   resolveCredential?: GmailRestMcpServerOptions["resolveCredential"];
+  onAuthNeeded?: GmailRestMcpServerOptions["onAuthNeeded"];
 }) {
   return new GmailRestMcpServer({
     workspaceId: "ws_1",
@@ -31,6 +32,7 @@ function server(input: {
         headers: { authorization: "Bearer gmail-token" },
         connectionId: "conn_1",
       })),
+    ...(input.onAuthNeeded ? { onAuthNeeded: input.onAuthNeeded } : {}),
     fetchImpl: input.fetchImpl,
   });
 }
@@ -129,6 +131,80 @@ describe("Gmail REST MCP adapter", () => {
     await gmail.connect();
     expect(providerAuthorizations).toBe(0);
     expect(requests).toBe(0);
+  });
+
+  test.each(["personal_authority_unavailable", "expired", "refresh_failed"] as const)(
+    "connect publishes %s before failing without a Gmail request",
+    async (reason) => {
+      const events: unknown[] = [];
+      let requests = 0;
+      const gmail = server({
+        resolveCredential: async () => ({
+          status: "auth_needed",
+          reason,
+          providerDomain: "gmailmcp.googleapis.com",
+          connectionId: "conn_1",
+          scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+          resource: OFFICIAL_GMAIL_MCP_URL,
+        }),
+        onAuthNeeded: (payload) => {
+          events.push(payload);
+        },
+        fetchImpl: async () => {
+          requests++;
+          return Response.json({});
+        },
+      });
+      await expect(gmail.connect()).rejects.toThrow("Authentication required for Gmail");
+      expect(requests).toBe(0);
+      expect(events).toEqual([
+        {
+          serverId: "gmail",
+          providerDomain: "gmailmcp.googleapis.com",
+          connectionId: "conn_1",
+          reason,
+          scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+          resource: OFFICIAL_GMAIL_MCP_URL,
+          subjectId: "subject-a",
+        },
+      ]);
+    },
+  );
+
+  test("preserves host provenance from a legacy credential result", async () => {
+    const authNeeded: unknown[] = [];
+    let requests = 0;
+    const gmail = server({
+      resolveCredential: async () => ({
+        status: "auth_needed",
+        reason: "expired",
+        providerDomain: "gmailmcp.googleapis.com",
+        authoritySource: "host",
+        connectionId: "legacy-gmail-binding",
+        authorizationUrl: "https://host.example.test/connections/gmail",
+      }),
+      onAuthNeeded: (payload) => authNeeded.push(payload),
+      fetchImpl: async () => {
+        requests += 1;
+        return Response.json({ labels: [] });
+      },
+    });
+
+    const result = (await gmail.callToolResult("list_labels", {})) as { isError?: boolean };
+    expect(result.isError).toBe(true);
+    expect(requests).toBe(0);
+    expect(authNeeded).toEqual([
+      expect.objectContaining({
+        serverId: "gmail",
+        toolName: "list_labels",
+        reason: "expired",
+        providerDomain: "gmailmcp.googleapis.com",
+        connectionId: "legacy-gmail-binding",
+        authoritySource: "host",
+        authorizationUrl: "https://host.example.test/connections/gmail",
+        subjectId: "subject-a",
+      }),
+    ]);
   });
 
   test("refreshes and retries a read once after 401", async () => {
@@ -454,6 +530,32 @@ describe("Gmail REST MCP adapter", () => {
     expect(requests).toBe(0);
   });
 
+  test.each(["subject", "workspace"] as const)(
+    "passes %s ownership unchanged to the credential resolver",
+    async (subjectScope) => {
+      const selected = { ...connectionRef, subjectScope };
+      const resolved: unknown[] = [];
+      const gmail = new GmailRestMcpServer({
+        workspaceId: "ws_1",
+        subjectId: "subject-a",
+        serverId: "gmail",
+        connectionRef: selected,
+        resolveCredential: async (input) => {
+          resolved.push(input.connectionRef);
+          return {
+            status: "ok",
+            headers: { authorization: "Bearer fixture" },
+            connectionId: "conn_1",
+          };
+        },
+        fetchImpl: async () => Response.json({ labels: [] }),
+      });
+      await gmail.callToolResult("list_labels", {});
+      expect(resolved.length).toBeGreaterThan(0);
+      expect(resolved.every((ref) => JSON.stringify(ref) === JSON.stringify(selected))).toBe(true);
+    },
+  );
+
   test("retains the hosted MCP URL as the OAuth resource identity", () => {
     expect(isOfficialGmailMcpConfig(OFFICIAL_GMAIL_MCP_URL, connectionRef)).toBe(true);
     expect(
@@ -461,6 +563,6 @@ describe("Gmail REST MCP adapter", () => {
         ...connectionRef,
         subjectScope: "workspace",
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 });

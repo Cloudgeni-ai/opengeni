@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  WORKSPACE_LEARNING_POLICY_DEFAULT_OFF_REVISION_ID,
+  WORKSPACE_LEARNING_POLICY_DEFAULT_SUGGEST_REVISION_ID,
   canonicalizeWorkspaceLearningSourceOverrides,
   resolveWorkspaceLearningPolicyEffectiveMode,
   workspaceLearningPolicyRouterContext,
@@ -100,13 +100,13 @@ describe("workspace learning-policy contracts", () => {
     ).toMatchObject({ mode: "suggest", inherited: true, policyRevision: accepted.revision });
   });
 
-  test("projects the exact immutable router context, including the default-off sentinel", () => {
+  test("projects the exact immutable router context, including the default-suggest sentinel", () => {
     const withoutActiveRevision = {
       ...snapshot(),
       revision: null,
       activationVersion: 0,
       activatedAt: null,
-      workspaceMode: "off" as const,
+      workspaceMode: "suggest" as const,
       sourceOverrides: [],
     } satisfies WorkspaceLearningPolicySnapshot;
     const effective = resolveWorkspaceLearningPolicyEffectiveMode(withoutActiveRevision, {
@@ -114,9 +114,9 @@ describe("workspace learning-policy contracts", () => {
       id: "meeting:1",
     });
     expect(workspaceLearningPolicyRouterContext(effective)).toEqual({
-      mode: "off",
+      mode: "suggest",
       snapshotId: withoutActiveRevision.id,
-      revisionId: WORKSPACE_LEARNING_POLICY_DEFAULT_OFF_REVISION_ID,
+      revisionId: WORKSPACE_LEARNING_POLICY_DEFAULT_SUGGEST_REVISION_ID,
     });
   });
 });

@@ -93,6 +93,14 @@ pub async fn serve_op_start_scoped_with_policy<P: Platform>(
         Ok(exec) => exec,
         Err(reply) => return *reply,
     };
+    if crate::uploads::is_upload_id(&request_id) {
+        return error_reply(
+            request_id,
+            ErrorCode::Protocol,
+            "fsw- operation IDs are reserved for transactional uploads",
+            false,
+        );
+    }
     crate::codemode::expose_native_client(&mut exec);
 
     // The op id is interpolated into the frame subject
@@ -227,6 +235,7 @@ fn cancelled_status(op_id: &str) -> v1::OpStatus {
             ..Default::default()
         }),
         lost_reason: v1::OpLostReason::Unspecified as i32,
+        write_offset: 0,
     }
 }
 
@@ -371,9 +380,9 @@ fn frame_publisher(publish: FrameSink, op_id: String) -> impl Fn(Frame) + Send +
     }
 }
 
-/// Extracts the exec op from the OpStart oneof; other kinds answer typed
-/// (`op_stream=true` advertises the PROTOCOL, kinds are per-OpStart — the M7
-/// milestone adds fs_read/fs_write + WriteChunk).
+/// Extracts the exec op from the OpStart oneof. Transactional fs_write is served
+/// separately by the supervisor's upload route and independent capability gate;
+/// op_stream alone does not implement filesystem streaming.
 fn extract_exec(
     request_id: &str,
     op: Option<v1::op_start::Op>,
@@ -384,8 +393,8 @@ fn extract_exec(
         Some(Op::FsRead(_) | Op::FsWrite(_)) => Err(Box::new(error_reply(
             request_id.to_string(),
             ErrorCode::Unsupported,
-            "op-stream fs_read/fs_write land with the M7 chunked-write milestone; \
-             use the legacy fs ops",
+            "filesystem operations do not use the exec stream pump; transactional \
+             writes require the separately advertised upload capability and route",
             false,
         ))),
         None => Err(Box::new(error_reply(
@@ -554,6 +563,7 @@ fn op_status(op_id: &str, answer: QueryAnswer, handles: Option<&OpHandles>) -> v
         next_seq,
         exit,
         lost_reason: lost.unwrap_or(v1::OpLostReason::Unspecified) as i32,
+        write_offset: 0,
     }
 }
 
@@ -1028,6 +1038,7 @@ mod tests {
             "wild*card",
             "tail>",
             "tab\tid",
+            "fsw-reserved",
         ] {
             let resp = rig.start_exec(bad, "echo never", 1 << 20).await;
             let err = resp

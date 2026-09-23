@@ -1,3 +1,4 @@
+import { seedSenderConnections } from "./sender-connection-fixture";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import {
@@ -21,6 +22,7 @@ import {
   editQueuedTurnInTransaction,
   frozenInitiatorForCommandActor,
   getNestedAgentDepthDeploymentPolicy,
+  grantWorkspaceAccess,
   getScheduledTargetSessionExecution,
   getScheduledTaskPersonalResourceAuthoritySubject,
   getScheduledTaskRevisionAuthority,
@@ -67,6 +69,42 @@ async function fixture() {
     subjectLabel: "Creator",
   });
   return access.workspaceGrants[0]!;
+}
+
+async function connectionLineage(
+  grant: Awaited<ReturnType<typeof fixture>>,
+  selections: Parameters<typeof seedSenderConnections>[2],
+) {
+  const ownerSubjectId = selections[0]?.ownerSubjectId ?? grant.subjectId;
+  const source = await createSession(client.db, {
+    ...sessionInput({ ...grant, subjectId: ownerSubjectId }),
+    personalConnectionDelegations: selections,
+  });
+  const started = await initializeSessionStartAtomically(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId!,
+    sessionId: source.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
+  if (!started.turn) throw new Error("missing causal fixture turn");
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+    sessionId: source.id,
+    workflowId: `session-${source.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") throw new Error("causal fixture turn was not claimed");
+  return {
+    connectionAuthoritySubjectId: ownerSubjectId,
+    callerSessionId: source.id,
+    callerTurnId: started.turn.id,
+    callerAttemptId: attemptId,
+    callerExecutionGeneration: claim.turn.executionGeneration,
+  };
 }
 
 function sessionInput(grant: Awaited<ReturnType<typeof fixture>>) {
@@ -317,6 +355,11 @@ describe("immutable session turn initiators", () => {
         kind: "oauth2" as const,
       },
     ];
+    await seedSenderConnections(
+      shared.admin,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+      winningDelegations,
+    );
     const first = await createSessionWithIdempotencyKey(client.db, {
       ...sessionInput(grant),
       personalConnectionDelegations: winningDelegations,
@@ -424,6 +467,11 @@ describe("immutable session turn initiators", () => {
         kind: "oauth2" as const,
       },
     ];
+    await seedSenderConnections(
+      shared.admin,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+      originalDelegations,
+    );
     const sent = await withWorkspaceSubjectRls(client.db, grant.workspaceId!, sender, (db) =>
       db.transaction((tx) =>
         submitHumanPromptInTransaction(tx as unknown as typeof db, {
@@ -656,24 +704,41 @@ describe("immutable session turn initiators", () => {
     );
   });
 
-  test("agent work inherits across coalesced notices while service batches stay explicit", async () => {
+  test("agent work keeps its causal claim separate while service batches stay explicit", async () => {
     const grant = await fixture();
+    const sourceSubjectId = `user:steer-caller-${crypto.randomUUID()}`;
+    await grantWorkspaceAccess(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      subjectId: sourceSubjectId,
+      permissions: ["sessions:create", "sessions:read", "sessions:control"],
+    });
+    const sourceGrant = {
+      ...grant,
+      subjectId: sourceSubjectId,
+      subjectLabel: "Steer caller",
+    };
     const sourceDelegations = [
       {
         serverId: "linear",
         connectionId: crypto.randomUUID(),
-        ownerSubjectId: grant.subjectId,
+        ownerSubjectId: sourceGrant.subjectId,
         providerDomain: "linear.app",
         kind: "oauth2" as const,
       },
     ];
+    await seedSenderConnections(
+      shared.admin,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+      sourceDelegations,
+    );
     const source = await createSession(client.db, {
-      ...sessionInput(grant),
+      ...sessionInput(sourceGrant),
       personalConnectionDelegations: sourceDelegations,
     });
     const sourceStart = await initializeSessionStartAtomically(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
+      accountId: sourceGrant.accountId,
+      workspaceId: sourceGrant.workspaceId!,
       sessionId: source.id,
       reasoningEffortFallback: "low",
       createdEventPayload: {},
@@ -702,7 +767,36 @@ describe("immutable session turn initiators", () => {
     ]);
 
     const steeredTarget = await createSession(client.db, sessionInput(grant));
-    await addSessionSystemUpdate(client.db, {
+    const targetStart = await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: steeredTarget.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    if (!targetStart.turn) throw new Error("missing target turn");
+    const targetAttemptId = crypto.randomUUID();
+    const targetClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: steeredTarget.id,
+      workflowId: `session-${steeredTarget.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: targetAttemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (targetClaim.action !== "claimed") throw new Error("target turn was not claimed");
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: steeredTarget.id,
+      turnId: targetClaim.turn.id,
+      triggerEventId: targetClaim.turn.triggerEventId,
+      attemptId: targetAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+
+    const steerUpdate = await addSessionSystemUpdate(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: steeredTarget.id,
@@ -724,6 +818,7 @@ describe("immutable session turn initiators", () => {
       },
       personalConnectionDelegations: sourceDelegations,
     });
+    if (!steerUpdate.added) throw new Error(`failed to add Steer: ${steerUpdate.reason}`);
     const coalescedGoal = await createSessionGoal(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -731,7 +826,7 @@ describe("immutable session turn initiators", () => {
       text: "Goal that must not override Steer",
       createdBy: "api",
     });
-    await addSessionSystemUpdate(client.db, {
+    const goalUpdate = await addSessionSystemUpdate(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: steeredTarget.id,
@@ -748,9 +843,14 @@ describe("immutable session turn initiators", () => {
         prompt: "Continue goal",
         policy: { model: "must-not-win-over-steer" },
       },
-      personalConnectionDelegations: sourceDelegations,
+      lineage: {
+        goalId: coalescedGoal.id,
+        causalTurnId: targetClaim.turn.id,
+      },
+      personalConnectionDelegations: [],
     });
-    await addSessionSystemUpdate(client.db, {
+    if (!goalUpdate.added) throw new Error(`failed to add goal: ${goalUpdate.reason}`);
+    const childUpdate = await addSessionSystemUpdate(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: steeredTarget.id,
@@ -764,13 +864,20 @@ describe("immutable session turn initiators", () => {
         childSessionId: source.id,
         status: "idle",
       },
-      personalConnectionDelegations: sourceDelegations,
+      lineage: {
+        parentSessionId: steeredTarget.id,
+        parentTurnId: targetClaim.turn.id,
+        childSessionId: source.id,
+      },
+      personalConnectionDelegations: [],
     });
+    if (!childUpdate.added) throw new Error(`failed to add child result: ${childUpdate.reason}`);
+    const steerAttemptId = crypto.randomUUID();
     const steeredClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
       sessionId: steeredTarget.id,
       workflowId: `session-${steeredTarget.id}`,
       workflowRunId: crypto.randomUUID(),
-      attemptId: crypto.randomUUID(),
+      attemptId: steerAttemptId,
       dispatchId: crypto.randomUUID(),
       trigger: { kind: "next" },
     });
@@ -779,10 +886,88 @@ describe("immutable session turn initiators", () => {
     expect(steeredClaim.turn.initiator).toEqual(sourceTurn.initiator);
     expect(steeredClaim.turn.source).toBe("system");
     expect(steeredClaim.turn.model).toBe("scripted-model");
+    expect(steeredClaim.turn.initiatingHumanSubjectId).toBe(sourceGrant.subjectId);
     expect(steeredClaim.turn.personalConnectionDelegations).toEqual(sourceDelegations);
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          grant.workspaceId!,
+          steeredTarget.id,
+          steeredClaim.turn.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([steerUpdate.update.id]);
+    expect(
+      (
+        await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, steeredTarget.id)
+      ).map((update) => update.id),
+    ).toEqual([childUpdate.update.id]);
+
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: steeredTarget.id,
+      turnId: steeredClaim.turn.id,
+      triggerEventId: steeredClaim.turn.triggerEventId,
+      attemptId: steerAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "queued",
+      activeTurnId: null,
+      events: [],
+    });
+    const causalClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: steeredTarget.id,
+      workflowId: `session-${steeredTarget.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (causalClaim.action !== "claimed") throw new Error("causal target batch was not claimed");
+    expect(causalClaim.turn.initiatingHumanSubjectId).toBe(grant.subjectId);
+    expect(causalClaim.turn.model).toBe("scripted-model");
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          grant.workspaceId!,
+          steeredTarget.id,
+          causalClaim.turn.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([childUpdate.update.id]);
 
     const malformedTarget = await createSession(client.db, sessionInput(grant));
-    await addSessionSystemUpdate(client.db, {
+    const malformedStart = await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: malformedTarget.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    if (!malformedStart.turn) throw new Error("missing malformed target turn");
+    const malformedInitialAttemptId = crypto.randomUUID();
+    const malformedInitialClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: malformedTarget.id,
+      workflowId: `session-${malformedTarget.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: malformedInitialAttemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (malformedInitialClaim.action !== "claimed") {
+      throw new Error("malformed target turn was not claimed");
+    }
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: malformedTarget.id,
+      turnId: malformedInitialClaim.turn.id,
+      triggerEventId: malformedInitialClaim.turn.triggerEventId,
+      attemptId: malformedInitialAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    const malformedSteer = await addSessionSystemUpdate(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: malformedTarget.id,
@@ -796,8 +981,39 @@ describe("immutable session turn initiators", () => {
         instruction: "Malformed legacy steer",
         operationId: crypto.randomUUID(),
       },
-      lineage: {},
+      lineage: {
+        callerSessionId: source.id,
+        callerTurnId: sourceTurn.id,
+        // A partial historical tuple must remain isolated and fall back to the
+        // service principal instead of borrowing the referenced turn.
+      },
     });
+    if (!malformedSteer.added) {
+      throw new Error(`failed to add malformed Steer: ${malformedSteer.reason}`);
+    }
+    const malformedChild = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: malformedTarget.id,
+      kind: "child_terminal_result",
+      classification: "info",
+      sourceId: source.id,
+      dedupeKey: crypto.randomUUID(),
+      summary: "Child result with human authority",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: source.id,
+        status: "idle",
+      },
+      lineage: {
+        parentSessionId: malformedTarget.id,
+        parentTurnId: malformedInitialClaim.turn.id,
+        childSessionId: source.id,
+      },
+    });
+    if (!malformedChild.added) {
+      throw new Error(`failed to add malformed-target child: ${malformedChild.reason}`);
+    }
     const malformedClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
       sessionId: malformedTarget.id,
       workflowId: `session-${malformedTarget.id}`,
@@ -816,7 +1032,23 @@ describe("immutable session turn initiators", () => {
     expect(malformedClaim.turn.initiatorContext.provenanceError).toBe(
       "agent_steer_lineage_incomplete",
     );
+    expect(malformedClaim.turn.initiatingHumanSubjectId).toBeNull();
     expect(malformedClaim.turn.personalConnectionDelegations).toEqual([]);
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          grant.workspaceId!,
+          malformedTarget.id,
+          malformedClaim.turn.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([malformedSteer.update.id]);
+    expect(
+      (
+        await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, malformedTarget.id)
+      ).map((update) => update.id),
+    ).toEqual([malformedChild.update.id]);
 
     const scheduledTarget = await createSession(client.db, {
       ...sessionInput(grant),
@@ -965,11 +1197,13 @@ describe("immutable session turn initiators", () => {
     if (mixedClaim.action !== "claimed") throw new Error("Mixed service batch was not claimed");
     expect(mixedClaim.turn.initiator).toEqual({
       kind: "service",
-      subjectId: "internal-update",
-      label: "OpenGeni internal update",
+      subjectId: "goal-continuation",
+      label: "OpenGeni goal continuation",
     });
-    // The mixed service batch has no single subject initiator, but an ordinary
-    // coalesced notice must not erase the goal's routing policy.
+    // An old message without caller lineage must not borrow the goal's human.
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, mixedTarget.id),
+    ).toMatchObject([{ kind: "agent_message", state: "pending" }]);
     expect(mixedClaim.turn.source).toBe("goal");
     expect(mixedClaim.turn.model).toBe("goal-routed-model");
     expect(mixedClaim.turn.reasoningEffort).toBe("high");
@@ -986,6 +1220,11 @@ describe("immutable session turn initiators", () => {
         kind: "oauth2" as const,
       },
     ];
+    await seedSenderConnections(
+      shared.admin,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+      steerDelegations,
+    );
     const noticeDelegations = [
       {
         serverId: "github",
@@ -995,6 +1234,11 @@ describe("immutable session turn initiators", () => {
         kind: "oauth2" as const,
       },
     ];
+    await seedSenderConnections(
+      shared.admin,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+      noticeDelegations,
+    );
     const source = await createSession(client.db, {
       ...sessionInput(grant),
       personalConnectionDelegations: steerDelegations,
@@ -1024,6 +1268,7 @@ describe("immutable session turn initiators", () => {
         operationId: crypto.randomUUID(),
       },
       lineage: {
+        connectionAuthoritySubjectId: grant.subjectId,
         callerSessionId: source.id,
         callerTurnId: sourceStart.turn.id,
         callerAttemptId: crypto.randomUUID(),
@@ -1046,7 +1291,7 @@ describe("immutable session turn initiators", () => {
         text: "Use the notice authority later",
         operationId: crypto.randomUUID(),
       },
-      lineage: {},
+      lineage: await connectionLineage(grant, noticeDelegations),
       personalConnectionDelegations: noticeDelegations,
     });
     if (!notice.added) throw new Error(`failed to add notice: ${notice.reason}`);
@@ -1123,6 +1368,11 @@ describe("immutable session turn initiators", () => {
         kind: "oauth2" as const,
       },
     ];
+    await seedSenderConnections(
+      shared.admin,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+      firstDelegations,
+    );
     const secondDelegations = [
       {
         serverId: "github",
@@ -1132,10 +1382,22 @@ describe("immutable session turn initiators", () => {
         kind: "oauth2" as const,
       },
     ];
+    await seedSenderConnections(
+      shared.admin,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+      secondDelegations,
+    );
+    const lineages = new Map<string, Awaited<ReturnType<typeof connectionLineage>>>();
     const addNotice = async (
       text: string,
       personalConnectionDelegations: typeof firstDelegations,
     ) => {
+      const key = JSON.stringify(personalConnectionDelegations);
+      let lineage = lineages.get(key);
+      if (!lineage) {
+        lineage = await connectionLineage(grant, personalConnectionDelegations);
+        lineages.set(key, lineage);
+      }
       const result = await addSessionSystemUpdate(client.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
@@ -1150,7 +1412,7 @@ describe("immutable session turn initiators", () => {
           text,
           operationId: crypto.randomUUID(),
         },
-        lineage: {},
+        lineage,
         personalConnectionDelegations,
       });
       if (!result.added) throw new Error(`failed to add ${text}: ${result.reason}`);

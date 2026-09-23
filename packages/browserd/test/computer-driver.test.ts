@@ -14,6 +14,52 @@ const computerSessionId = "11111111-1111-4111-8111-111111111111";
 const controllerGeneration = "controller-1";
 
 describe("NativeComputerDriver", () => {
+  test("captures a sized still before any viewer starts without consuming a live stream", async () => {
+    const transport = new FixtureNativeTransport();
+    const capture = transport.capture.bind(transport);
+    transport.capture = async () => {
+      throw new Error("no live stream started");
+    };
+    transport.captureStill = capture;
+    const driver = new NativeComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    try {
+      const frame = await driver.capture("window-1", {
+        format: "jpeg",
+        quality: 55,
+        maxWidth: 1024,
+        maxHeight: 768,
+      });
+      expect(frame.frameId).toBe("frame-2");
+    } finally {
+      await driver.close();
+    }
+  });
+  test("renews a subscription while the last viewer is retiring", async () => {
+    const transport = new FixtureNativeTransport();
+    const driver = new NativeComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    try {
+      const first = await driver.subscribeFrames("window-1");
+      await first[Symbol.asyncIterator]().next();
+      await first.close();
+      const renewed = await driver.subscribeFrames("window-1");
+      await expect(renewed[Symbol.asyncIterator]().next()).resolves.toMatchObject({
+        done: false,
+        value: { frameId: "frame-2" },
+      });
+      await renewed.close();
+    } finally {
+      await driver.close();
+    }
+  });
+
   test("projects native targets, observations, causal actions, and latest-wins frames", async () => {
     const transport = new FixtureNativeTransport();
     const driver = new NativeComputerDriver({
@@ -326,7 +372,7 @@ describe("NativeComputerDriver", () => {
 
 class FixtureNativeTransport implements ComputerNativeTransport {
   readonly handshake: NativeComputerHandshake = {
-    protocolVersion: 2,
+    protocolVersion: 3,
     helperVersion: "fixture",
     platform: "linux",
     capabilities: capabilities(),
@@ -375,6 +421,10 @@ class FixtureNativeTransport implements ComputerNativeTransport {
       sha256: "a".repeat(64),
       data: new Uint8Array([1, 2, 3]),
     };
+  }
+
+  async captureStill(targetId: string, options: NativeComputerCaptureOptions) {
+    return await this.capture(targetId, options);
   }
 
   async startCapture(_targetId: string, options: NativeComputerCaptureOptions): Promise<void> {

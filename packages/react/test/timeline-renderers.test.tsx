@@ -1,4 +1,5 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { setStartupDetails } from "../src/timeline/startup-preference";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
@@ -25,6 +26,36 @@ import { TimelineRow } from "../src/components/message-timeline";
    -------------------------------------------------------------------------- */
 
 registerDom();
+
+test("account-qualified native and Codemode calls render persisted labels after replay", async () => {
+  for (const origin of ["native", "codemode"]) {
+    const name = "a".repeat(64);
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("agent.toolCall.created", {
+            id: `call-${origin}`,
+            name,
+            origin,
+            arguments: {},
+            display: {
+              toolName: "search_documents",
+              title: "Search documents",
+              accountLabel: "Documents — Workspace: Team inbox",
+            },
+          }),
+          timelineEvent("agent.toolCall.output", { id: `call-${origin}`, output: "done" }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain(
+      "Search documents — Documents — Workspace: Team inbox",
+    );
+    expect(r.container.textContent).not.toContain(name);
+    await r.unmount();
+  }
+});
 
 let timelineSequence = 0;
 
@@ -292,7 +323,7 @@ describe("provider MCP unavailable rendering", () => {
     await r.unmount();
   });
 
-  test("does not offer a duplicate reconnect flow for unsupported host-owned auth", async () => {
+  test("does not offer a reconnect flow for unmarked unsupported auth", async () => {
     let reconnects = 0;
     const r = await renderComponent(
       <MessageTimeline
@@ -326,6 +357,61 @@ describe("provider MCP unavailable rendering", () => {
 });
 
 describe("durable machine-input timeline", () => {
+  test("opens the typed child source without treating receipt delivery as work completion", async () => {
+    resetTimelineEvents();
+    const childId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const opened: string[] = [];
+    const r = await renderComponent(
+      <MessageTimeline
+        onOpenSession={(id) => opened.push(id)}
+        events={[
+          timelineEvent("system.update.delivered", {
+            historyItemId: "history-results",
+            count: 3,
+            members: [
+              {
+                id: "result-1",
+                kind: "child_terminal_result",
+                classification: "success",
+                sourceId: childId,
+                summary: "The worker went idle while waiting for CI.",
+              },
+              {
+                id: "result-2",
+                kind: "child_terminal_result",
+                classification: "failure",
+                sourceId: childId,
+                summary: "A later turn failed.",
+              },
+              {
+                id: "result-3",
+                kind: "child_terminal_result",
+                classification: "success",
+                sourceId: "not-a-session",
+                summary: "Merged after verification.",
+              },
+            ],
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("3 agent results received");
+    expect(r.container.textContent).not.toContain("agents finished");
+    const links = [...r.container.querySelectorAll("button")].filter(
+      (button) => button.textContent === "View session",
+    );
+    expect(links).toHaveLength(2);
+    await act(async () => {
+      links[0]?.click();
+      links[1]?.click();
+    });
+    expect(opened).toEqual([childId, childId]);
+    expect(r.container.textContent).toContain("A later turn failed.");
+    expect(r.container.textContent).toContain("Merged after verification.");
+    await r.unmount();
+  });
+
   test("renders a collapsed landmark pill; details hold typed members", async () => {
     resetTimelineEvents();
     const r = await renderComponent(
@@ -355,7 +441,7 @@ describe("durable machine-input timeline", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("2 updates · Agent update, Agent finished");
+    expect(r.container.textContent).toContain("2 updates · Agent update, Agent result received");
     expect(r.container.textContent).not.toContain("updates joined this turn");
     expect(r.container.textContent).not.toContain("Input batch");
     expect(r.container.textContent).not.toContain('"sourceId"');
@@ -367,11 +453,11 @@ describe("durable machine-input timeline", () => {
     // Detail rows stay in the DOM for expand-on-demand audit.
     expect(r.container.textContent).toContain("verification-agent");
     expect(r.container.textContent).toContain("Cache verification completed.");
-    expect(r.container.textContent).toContain("Agent finished");
+    expect(r.container.textContent).toContain("Agent result received");
     await r.unmount();
   });
 
-  test("identical agent-finished members collapse to one plural pill", async () => {
+  test("result receipts collapse to a neutral count", async () => {
     resetTimelineEvents();
     const members = Array.from({ length: 15 }, (_, index) => ({
       id: `update-${index}`,
@@ -392,7 +478,7 @@ describe("durable machine-input timeline", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("15 agents finished");
+    expect(r.container.textContent).toContain("15 agent results received");
     expect(r.container.textContent).not.toContain("updates joined this turn");
     expect(
       (
@@ -454,6 +540,425 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
     ...overrides,
   };
 }
+
+describe("SiteArtifactRenderer", () => {
+  test("renders a direct durable Site link from the structured mutation result", async () => {
+    const item = toolItem({
+      name: "opengeni__artifacts_create",
+      output: {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              artifact: {
+                id: "22222222-2222-4222-8222-222222222222",
+                workspaceId: "11111111-1111-4111-8111-111111111111",
+                title: "Incident board",
+              },
+              version: { revision: 1 },
+              replayed: false,
+            }),
+          },
+        ],
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("Published Incident board");
+    const link = r.container.querySelector('a[aria-label="Open Incident board"]');
+    expect(link?.getAttribute("href")).toBe(
+      "/workspaces/11111111-1111-4111-8111-111111111111/artifacts/22222222-2222-4222-8222-222222222222",
+    );
+
+    await r.unmount();
+  });
+});
+
+describe("published file presentation", () => {
+  const artifactId = "33333333-3333-4333-8333-333333333333";
+  function receipt(contentType = "image/png", filename = "implementation.png") {
+    return {
+      type: "sandbox_file",
+      sandboxPath: `/workspace/${filename}`,
+      filename,
+      artifact: {
+        available: true,
+        artifactId,
+        kind: "file",
+        contentType,
+        originalBytes: 1024,
+        sha256: "c".repeat(64),
+        retainedAt: "2026-09-12T00:00:00.000Z",
+        retention: { policy: "workspace_file", expiresAt: null },
+        retrieval: {
+          method: "GET",
+          path: `/v1/workspaces/11111111-1111-4111-8111-111111111111/artifacts/${artifactId}/content`,
+          acceptRanges: "bytes",
+          maxRangeBytes: 1024 * 1024,
+        },
+      },
+    };
+  }
+
+  test("published images are visible after a settled turn without filesystem access", async () => {
+    resetTimelineEvents();
+    const loads: string[] = [];
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.message", { text: "Show the implementation" }),
+          timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }),
+          timelineEvent("agent.toolCall.created", {
+            id: "published-image",
+            name: "opengeni__sandbox_file_publish",
+            arguments: { path: "/workspace/implementation.png" },
+          }),
+          timelineEvent("agent.toolCall.output", {
+            id: "published-image",
+            output: { content: [{ type: "text", text: JSON.stringify(receipt()) }] },
+          }),
+          timelineEvent("agent.message.completed", { text: "Here is the implementation." }),
+          timelineEvent("turn.completed", {}),
+        ]}
+        loadRetainedArtifact={async (artifact) => {
+          loads.push(artifact.artifactId);
+          return { url: "https://objects.example/implementation.png" };
+        }}
+      />,
+    );
+    await flush();
+    await flush();
+    expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("true");
+    expect(r.container.textContent).toContain("Published implementation.png");
+    expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+    expect(r.container.querySelector('button[aria-label="Expand image"]')).not.toBeNull();
+    expect(
+      r.container
+        .querySelector('a[aria-label="Open implementation.png in Artifacts"]')
+        ?.getAttribute("href"),
+    ).toBe(`/workspaces/11111111-1111-4111-8111-111111111111/artifacts/files/${artifactId}`);
+    expect(r.container.textContent).not.toContain("Retry live file");
+    expect(loads).toEqual([artifactId]);
+    await r.unmount();
+  });
+
+  function publicationEvents(name = "opengeni__sandbox_file_publish") {
+    return [
+      timelineEvent("user.message", { text: "Show the implementation" }),
+      timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "prepare-image",
+        name: "exec_command",
+        arguments: { cmd: "prepare implementation image" },
+      }),
+      timelineEvent("agent.toolCall.output", { id: "prepare-image", output: "ready" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "published-image",
+        name,
+        arguments: { path: "/workspace/implementation.png" },
+      }),
+    ];
+  }
+
+  test.each([false, true])(
+    "streamed publications stay visible through narration and turn settlement (rolling=%p)",
+    async (rolling) => {
+      resetTimelineEvents();
+      const events = publicationEvents();
+      const loadRetainedArtifact = async () => ({
+        url: "https://objects.example/implementation.png",
+      });
+      const timeline = (nextEvents: SessionEvent[], status: "running" | "idle" = "running") => (
+        <MessageTimeline
+          events={nextEvents}
+          status={status}
+          turnSummary={{ rolling }}
+          loadRetainedArtifact={loadRetainedArtifact}
+        />
+      );
+      const r = await renderComponent(timeline(events));
+      try {
+        const published = [
+          ...events,
+          timelineEvent("agent.toolCall.output", { id: "published-image", output: receipt() }),
+        ];
+        await r.rerender(timeline(published));
+        await flush();
+        expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("true");
+        expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+
+        const narrated = [
+          ...published,
+          timelineEvent("agent.message.completed", { text: "Here is the implementation." }),
+        ];
+        await r.rerender(timeline(narrated));
+        await flush(2200);
+        expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("true");
+        expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+
+        await r.rerender(timeline([...narrated, timelineEvent("turn.completed", {})], "idle"));
+        await flush();
+        expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("true");
+        expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+      } finally {
+        await r.unmount();
+      }
+    },
+    10_000,
+  );
+
+  test.each([false, true])(
+    "explicit image-activity collapse survives narration and turn settlement (rolling=%p)",
+    async (rolling) => {
+      resetTimelineEvents();
+      const published = [
+        ...publicationEvents(),
+        timelineEvent("agent.toolCall.output", { id: "published-image", output: receipt() }),
+      ];
+      const loadRetainedArtifact = async () => ({
+        url: "https://objects.example/implementation.png",
+      });
+      const timeline = (events: SessionEvent[], status: "running" | "idle" = "running") => (
+        <MessageTimeline
+          events={events}
+          status={status}
+          turnSummary={{ rolling }}
+          loadRetainedArtifact={loadRetainedArtifact}
+        />
+      );
+      const r = await renderComponent(timeline(published));
+      try {
+        await flush();
+        const summary = turnSummaryTrigger(r.container);
+        expect(summary?.getAttribute("aria-expanded")).toBe("true");
+        await act(async () => summary?.click());
+        expect(summary?.getAttribute("aria-expanded")).toBe("false");
+
+        const narrated = [
+          ...published,
+          timelineEvent("agent.message.completed", { text: "Here is the implementation." }),
+        ];
+        await r.rerender(timeline(narrated));
+        await flush(2200);
+        expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("false");
+
+        await r.rerender(timeline([...narrated, timelineEvent("turn.completed", {})], "idle"));
+        await flush();
+        expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("false");
+        expect(r.container.querySelector('img[alt="implementation.png"]')).toBeNull();
+      } finally {
+        await r.unmount();
+      }
+    },
+    10_000,
+  );
+
+  test.each([false, true])(
+    "explicit image collapse survives a multi-cluster turn wrap (rolling=%p)",
+    async (rolling) => {
+      resetTimelineEvents();
+      const prepared = [
+        timelineEvent("user.message", { text: "Show the implementation" }),
+        timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }),
+        ...["inspect-project", "prepare-project"].flatMap((id) => [
+          timelineEvent("agent.toolCall.created", {
+            id,
+            name: "exec_command",
+            arguments: { cmd: id },
+          }),
+          timelineEvent("agent.toolCall.output", { id, output: "ready" }),
+        ]),
+      ];
+      const loadRetainedArtifact = async () => ({
+        url: "https://objects.example/implementation.png",
+      });
+      const timeline = (events: SessionEvent[], status: "running" | "idle" = "running") => (
+        <MessageTimeline
+          events={events}
+          status={status}
+          turnSummary={{ rolling }}
+          loadRetainedArtifact={loadRetainedArtifact}
+        />
+      );
+      const r = await renderComponent(timeline(prepared));
+      try {
+        const narrated = [
+          ...prepared,
+          timelineEvent("agent.message.completed", { text: "The project is ready." }),
+        ];
+        await r.rerender(timeline(narrated));
+        await flush(2200);
+        expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("false");
+
+        const published = [
+          ...narrated,
+          timelineEvent("agent.toolCall.created", {
+            id: "prepare-image",
+            name: "exec_command",
+            arguments: { cmd: "prepare implementation image" },
+          }),
+          timelineEvent("agent.toolCall.output", { id: "prepare-image", output: "ready" }),
+          timelineEvent("agent.toolCall.created", {
+            id: "published-image",
+            name: "opengeni__sandbox_file_publish",
+            arguments: { path: "/workspace/implementation.png" },
+          }),
+          timelineEvent("agent.toolCall.output", { id: "published-image", output: receipt() }),
+        ];
+        await r.rerender(timeline(published));
+        await flush();
+        const liveTriggers = turnSummaryTriggers(r.container);
+        expect(liveTriggers.map((trigger) => trigger.getAttribute("aria-expanded"))).toEqual([
+          "false",
+          "true",
+        ]);
+        expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+        await act(async () => liveTriggers[1]?.click());
+        expect(liveTriggers[1]?.getAttribute("aria-expanded")).toBe("false");
+
+        const settled = [
+          ...published,
+          timelineEvent("agent.message.completed", { text: "Here is the implementation." }),
+          timelineEvent("turn.completed", {}),
+        ];
+        await r.rerender(timeline(settled, "idle"));
+        await flush();
+        const settledTriggers = turnSummaryTriggers(r.container);
+        expect(settledTriggers.map((trigger) => trigger.getAttribute("aria-expanded"))).toEqual([
+          "true",
+          "false",
+          "false",
+        ]);
+        expect(r.container.querySelector('img[alt="implementation.png"]')).toBeNull();
+
+        // The remembered choice survives the settle window, but is not a lock:
+        // the reader can deliberately reopen the image's nested chip.
+        await flush(2200);
+        expect(r.container.querySelector('img[alt="implementation.png"]')).toBeNull();
+        await act(async () => settledTriggers[2]?.click());
+        await flush();
+        expect(settledTriggers[2]?.getAttribute("aria-expanded")).toBe("true");
+        expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+        await r.rerender(timeline(settled, "idle"));
+        await flush();
+        const reopenedTriggers = turnSummaryTriggers(r.container);
+        expect(reopenedTriggers).toHaveLength(3);
+        expect(reopenedTriggers[2]?.getAttribute("aria-expanded")).toBe("true");
+        await act(async () => reopenedTriggers[2]?.click());
+        expect(reopenedTriggers[2]?.getAttribute("aria-expanded")).toBe("false");
+      } finally {
+        await r.unmount();
+      }
+    },
+    10_000,
+  );
+
+  test.each([
+    "sandbox_file_publish",
+    "opengeni__sandbox_file_publish",
+    "customer__sandbox_file_publish",
+  ])("primary image presentation follows registry naming for %s", async (name) => {
+    resetTimelineEvents();
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          ...publicationEvents(name),
+          timelineEvent("agent.toolCall.output", { id: "published-image", output: receipt() }),
+          timelineEvent("agent.message.completed", { text: "Here is the implementation." }),
+          timelineEvent("turn.completed", {}),
+        ]}
+        loadRetainedArtifact={async () => ({ url: "https://objects.example/implementation.png" })}
+      />,
+    );
+    try {
+      await flush();
+      expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("true");
+      expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("standalone image renderers retain an on-demand named download without a lightbox", async () => {
+    const item = toolItem({ name: "sandbox_file_publish", output: receipt() });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const downloads: Array<{ href: string; filename: string }> = [];
+    const click = spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
+      function (this: HTMLAnchorElement) {
+        downloads.push({ href: this.href, filename: this.download });
+      },
+    );
+    let loads = 0;
+    const r = await renderComponent(
+      <Renderer
+        item={item}
+        loadRetainedArtifact={async () => {
+          loads++;
+          return { url: "https://objects.example/implementation.png" };
+        }}
+      />,
+    );
+    try {
+      await flush();
+      expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+      expect(r.container.querySelector('button[aria-label="Expand image"]')).toBeNull();
+      expect(loads).toBe(1);
+      expect(downloads).toEqual([]);
+      const download = Array.from(r.container.querySelectorAll("button")).find(
+        (button) => button.textContent === "Download",
+      );
+      expect(download).toBeDefined();
+      await act(async () => download?.click());
+      await flush();
+      expect(loads).toBe(2);
+      expect(downloads).toEqual([
+        { href: "https://objects.example/implementation.png", filename: "implementation.png" },
+      ]);
+    } finally {
+      click.mockRestore();
+      await r.unmount();
+    }
+  });
+
+  test("HTML publications remain downloads and never mount an executable preview", async () => {
+    const item = toolItem({
+      name: "sandbox_file_publish",
+      output: receipt("text/html", "report.html"),
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    let loads = 0;
+    const r = await renderComponent(
+      <Renderer
+        item={item}
+        loadRetainedArtifact={async () => {
+          loads++;
+          return null;
+        }}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Download");
+    expect(r.container.querySelector("iframe, img")).toBeNull();
+    expect(loads).toBe(0);
+    await r.unmount();
+  });
+
+  test("missing retained image bytes have an explicit unavailable state", async () => {
+    const item = toolItem({ name: "sandbox_file_publish", output: receipt() });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(
+      <Renderer item={item} loadRetainedArtifact={async () => null} />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("bytes are unavailable");
+    expect(r.container.querySelector("img, iframe")).toBeNull();
+    expect(r.container.textContent).not.toContain("live file");
+    await r.unmount();
+  });
+});
 
 describe("tool-output truncation disclosure", () => {
   test("shows bounded delivery and non-retention facts only after expansion", async () => {
@@ -715,6 +1220,31 @@ describe("FleetDecisionRow", () => {
     await r.unmount();
   });
 
+  test("renders allocator-disabled production waiting as policy-constrained capacity", async () => {
+    resetTimelineEvents();
+    const payload = fleetDecisionEventPayload();
+    Object.assign(payload.actual as Record<string, unknown>, {
+      outcome: "waiting",
+      candidateKey: null,
+      reason: "allocator_disabled",
+    });
+    payload.comparison = "different_outcome";
+    const r = await renderComponent(
+      <MessageTimeline events={[timelineEvent("codex.fleet.decision", payload)]} />,
+    );
+
+    const disclosure = await fleetDecisionDisclosure(r.container);
+    await act(async () => {
+      disclosure.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("The policy-selected subscription was disabled for new allocations");
+    expect(text).not.toContain("credential-secret");
+    await r.unmount();
+  });
+
   test("renders manager priority as standard-work pacing rather than manager admission", async () => {
     resetTimelineEvents();
     const payload = fleetDecisionEventPayload();
@@ -758,6 +1288,7 @@ function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem
     serverId: null,
     providerDomain: "linear.app",
     connectionId: null,
+    authoritySource: null,
     reason: "missing_connection",
     scopes: [],
     resource: null,
@@ -769,6 +1300,24 @@ function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem
 }
 
 describe("TimelineRow — connection recovery", () => {
+  test("lets the authenticated host render setup inline and preserves the fallback", async () => {
+    const row = authNeededItem();
+    const custom = await renderComponent(
+      <TimelineRow
+        item={row}
+        renderAuthNeeded={(value) => <button>Review {value.providerDomain} inline</button>}
+      />,
+    );
+    expect(custom.container.textContent).toContain("Review linear.app inline");
+    expect(custom.container.textContent).not.toContain("This tool call wasn't replayed");
+    await custom.unmount();
+    const fallback = await renderComponent(
+      <TimelineRow item={row} renderAuthNeeded={() => undefined} onReconnect={() => {}} />,
+    );
+    expect(fallback.container.textContent).toContain("Connect Linear");
+    await fallback.unmount();
+  });
+
   test("renders a capability recommendation as ungranted access with one review action", async () => {
     let selected = "";
     const r = await renderComponent(
@@ -844,6 +1393,51 @@ describe("TimelineRow — connection recovery", () => {
 
     finish();
     await flush();
+    await r.unmount();
+  });
+
+  test("uses only the host recovery link for host-owned auth", async () => {
+    let reconnectCalls = 0;
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({
+          authoritySource: "host",
+          authorizationUrl: "https://host.example/recover",
+          connectionId: "host:connection:42",
+          reason: "refresh_failed",
+        })}
+        onReconnect={() => {
+          reconnectCalls += 1;
+        }}
+      />,
+    );
+    await flush();
+
+    expect(r.container.querySelector("button")).toBeNull();
+    expect(r.container.querySelector("a")?.getAttribute("href")).toBe(
+      "https://host.example/recover",
+    );
+    expect(reconnectCalls).toBe(0);
+    await r.unmount();
+  });
+
+  test("offers no native reconnect action when a host recovery link is absent", async () => {
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({
+          authoritySource: "host",
+          connectionId: "host:connection:42",
+          reason: "refresh_failed",
+        })}
+        onReconnect={() => {
+          throw new Error("host auth must not invoke the native reconnect callback");
+        }}
+      />,
+    );
+    await flush();
+
+    expect(r.container.querySelector("button")).toBeNull();
+    expect(r.container.querySelector("a")).toBeNull();
     await r.unmount();
   });
 });
@@ -1014,13 +1608,17 @@ describe("MessageTimeline — settled turn folding", () => {
         phase: "commentary",
       }),
       timelineEvent("agent.toolCall.created", {
-        id: "goal-wait-1",
-        name: "goal_wait",
-        arguments: { reason: "child still running", untilSeconds: 900 },
+        id: "input-wait-1",
+        name: "wait_for_input",
+        arguments: { reason: "child still running", timeoutSeconds: 900 },
       }),
-      timelineEvent("goal.held", { actor: "agent", reason: "child still running" }),
-      timelineEvent("agent.toolCall.output", { id: "goal-wait-1", output: { status: "held" } }),
-      timelineEvent("turn.completed", {}),
+      timelineEvent("session.wait.started", { actor: "agent", reason: "child still running" }),
+      timelineEvent("agent.toolCall.output", {
+        id: "input-wait-1",
+        output: { status: "waiting_for_input" },
+      }),
+      timelineEvent("agent.message.completed", { text: fallback }),
+      timelineEvent("turn.completed", { output: fallback }),
     ];
     const r = await renderComponent(<MessageTimeline events={events} />);
     await flush();
@@ -1028,6 +1626,7 @@ describe("MessageTimeline — settled turn folding", () => {
     const trigger = turnSummaryTrigger(r.container);
     expect(trigger?.getAttribute("aria-expanded")).toBe("false");
     expect(r.container.textContent?.split(fallback)).toHaveLength(2);
+    expect(r.container.textContent).toContain("Waiting: child still running");
 
     await act(async () => {
       trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -1036,7 +1635,144 @@ describe("MessageTimeline — settled turn folding", () => {
 
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
     expect(r.container.textContent?.split(fallback)).toHaveLength(2);
-    expect(r.container.textContent).toContain("Goal wait");
+    expect(r.container.textContent).toContain("Waiting: child still running");
+    expect(r.container.textContent).toContain("Wait for input");
+
+    await r.unmount();
+  });
+
+  test.each([
+    "streamed",
+    "completed",
+    "completed-before-commentary",
+    "whitespace-tail",
+    "opaque-tail",
+  ])("a %s answer stays visible once when a trailing wait ends with empty output", async (mode) => {
+    resetTimelineEvents();
+    const answer = "Not yet. The browser test still times out; I have resumed the repair.";
+    const events = [
+      timelineEvent("user.message", { text: "Is it mergeable?" }),
+      timelineEvent("agent.message.delta", { text: "Checking CI now." }),
+      timelineEvent("agent.toolCall.created", {
+        id: "check",
+        name: "exec_command",
+        arguments: { cmd: "gh pr checks" },
+      }),
+      timelineEvent("agent.toolCall.output", { id: "check", output: "one failure" }),
+      timelineEvent("agent.message.delta", { text: answer.slice(0, 12) }),
+      timelineEvent("agent.message.delta", { text: answer.slice(12) }),
+      ...(mode === "streamed" || mode === "whitespace-tail" || mode === "opaque-tail"
+        ? []
+        : [timelineEvent("agent.message.completed", { text: answer, phase: "final_answer" })]),
+      ...(mode === "whitespace-tail" || mode === "opaque-tail"
+        ? [
+            timelineEvent("agent.toolCall.created", {
+              id: "tail",
+              name: "exec_command",
+              arguments: {},
+            }),
+            timelineEvent("agent.toolCall.output", { id: "tail", output: "ok" }),
+            timelineEvent("agent.message.delta", {
+              text: mode === "opaque-tail" ? "citeopaque-handle" : "  ",
+            }),
+          ]
+        : []),
+      ...(mode === "completed-before-commentary"
+        ? [
+            timelineEvent("agent.toolCall.created", {
+              id: "follow",
+              name: "exec_command",
+              arguments: {},
+            }),
+            timelineEvent("agent.toolCall.output", { id: "follow", output: "ok" }),
+            timelineEvent("agent.message.completed", {
+              text: "Waiting for the worker now.",
+              phase: "commentary",
+            }),
+          ]
+        : []),
+      timelineEvent("agent.toolCall.created", {
+        id: "wait",
+        name: "wait_for_input",
+        arguments: { reason: "Repair running", timeoutSeconds: 300 },
+      }),
+      timelineEvent("session.wait.started", { actor: "agent", reason: "Repair running" }),
+      timelineEvent("agent.toolCall.output", {
+        id: "wait",
+        output: { status: "waiting_for_input" },
+      }),
+      timelineEvent("turn.completed", { output: "" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+    const trigger = turnSummaryTrigger(r.container);
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(r.container.textContent?.split(answer)).toHaveLength(2);
+    expect(r.container.textContent).not.toContain("Checking CI now.");
+    if (mode !== "completed") expect(r.container.textContent).toContain("Waiting: Repair running");
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(r.container.textContent?.split(answer)).toHaveLength(2);
+    expect(r.container.textContent).toContain("Checking CI now.");
+    await r.unmount();
+  });
+
+  test("empty wait turns keep their durable reason outside the collapsed steps", async () => {
+    resetTimelineEvents();
+    const reason = "Two delegated reviews are still running.";
+    const events = [
+      timelineEvent("user.message", { text: "Wait for the reviews" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "input-wait-1",
+        name: "wait_for_input",
+        arguments: { reason, timeoutSeconds: 3600 },
+      }),
+      timelineEvent("session.wait.started", {
+        actor: "agent",
+        waitTurnId: "turn-1",
+        deadlineAt: "2026-06-10T13:00:00.000Z",
+        reason,
+      }),
+      timelineEvent("agent.toolCall.output", {
+        id: "input-wait-1",
+        output: { status: "waiting_for_input" },
+      }),
+      timelineEvent("agent.message.completed", { text: "" }),
+      timelineEvent("turn.completed", { output: "" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    const trigger = turnSummaryTrigger(r.container);
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(r.container.textContent).toContain(`Waiting: ${reason}`);
+    expect(r.container.textContent?.split(reason)).toHaveLength(2);
+    const visibleOutcome = Array.from(
+      r.container.querySelectorAll('[data-og-recorded-outcome="wait"]'),
+    ).find((element) => element.textContent?.includes(`Waiting: ${reason}`));
+    expect(visibleOutcome).not.toBeUndefined();
+    expect(visibleOutcome?.tagName).toBe("DETAILS");
+    expect(visibleOutcome?.hasAttribute("open")).toBe(false);
+    expect(visibleOutcome?.querySelector("summary")?.textContent).not.toContain(reason);
+    expect(visibleOutcome?.getAttribute("role")).toBe("note");
+    expect(visibleOutcome?.textContent).toContain("Wait recorded");
+    expect(visibleOutcome?.querySelector("time")?.getAttribute("datetime")).toBe(
+      events[2]!.occurredAt,
+    );
+    expect(visibleOutcome?.querySelector("time")?.textContent).toContain(
+      String(new Date(events[2]!.occurredAt).getFullYear()),
+    );
+
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(trigger?.getAttribute("aria-expanded")).toBe("true");
+    expect(visibleOutcome?.isConnected).toBe(true);
+    expect(r.container.textContent).toContain("Wait for input");
 
     await r.unmount();
   });
@@ -1216,7 +1952,8 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(settled).toBeTruthy();
     expect(live).toBeTruthy();
     expect(settled?.querySelectorAll("svg")).toHaveLength(1);
-    expect(settled?.querySelector(".animate-og-pulse")).not.toBeNull();
+    // Settled activity stays neutral even while a later cluster is running.
+    expect(settled?.querySelector(".animate-og-pulse")).toBeNull();
     // The live tail stays expanded: its command is visible without expanding.
     expect(r.container.textContent).toContain("step two");
     // The folded cluster's contents are NOT in the DOM until expanded.
@@ -1944,7 +2681,7 @@ describe("ApplyPatchRenderer — running state (in-flight affordance)", () => {
     ],
   };
 
-  test("running single-op: row shimmers (running class) and shows in-flight copy, not 'Edited'", async () => {
+  test("running single-op: row animates (running class) and shows in-flight copy, not 'Edited'", async () => {
     const item = toolItem({
       name: "apply_patch_call",
       raw: rawSingleOp,
@@ -1959,14 +2696,14 @@ describe("ApplyPatchRenderer — running state (in-flight affordance)", () => {
     // Must show "Applying" verb, not the settled "Edited" verb.
     expect(text).toContain("Applying");
     expect(text).not.toContain("Edited");
-    // The shimmer class must be present on the title element.
-    const shimmer = r.container.querySelector(".og-shimmer-text");
+    // The running animation must be present on the text line.
+    const shimmer = r.container.querySelector(".og-command-reel-running");
     expect(shimmer).not.toBeNull();
 
     await r.unmount();
   });
 
-  test("running multi-op: row shimmers and shows file count as in-flight, not settled count", async () => {
+  test("running multi-op: row animates and shows file count as in-flight, not settled count", async () => {
     const item = toolItem({
       name: "apply_patch_call",
       raw: rawMultiOp,
@@ -1982,7 +2719,7 @@ describe("ApplyPatchRenderer — running state (in-flight affordance)", () => {
     expect(text).toContain("Applying");
     expect(text).toContain("2");
     expect(text).not.toContain("Edited");
-    const shimmer = r.container.querySelector(".og-shimmer-text");
+    const shimmer = r.container.querySelector(".og-command-reel-running");
     expect(shimmer).not.toBeNull();
 
     await r.unmount();
@@ -2044,7 +2781,7 @@ describe("ApplyPatchRenderer — running state (in-flight affordance)", () => {
 /* ---- Running-state: write_stdin ------------------------------------------- */
 
 describe("WriteStdinRenderer — running state (in-flight affordance)", () => {
-  test("running write_stdin: row shimmers and shows 'sending…', not settled 'sent'", async () => {
+  test("running write_stdin: row animates and shows 'sending…', not settled 'sent'", async () => {
     const item = toolItem({
       name: "write_stdin",
       arguments: JSON.stringify({ session_id: "sess-42", chars: "ls\n" }),
@@ -2060,8 +2797,8 @@ describe("WriteStdinRenderer — running state (in-flight affordance)", () => {
     expect(text.toLowerCase()).toContain("sending");
     // Must NOT show the settled "sent" copy.
     expect(text).not.toContain("sent");
-    // Shimmer class must be on the title.
-    const shimmer = r.container.querySelector(".og-shimmer-text");
+    // Running animation must be on the text line.
+    const shimmer = r.container.querySelector(".og-command-reel-running");
     expect(shimmer).not.toBeNull();
 
     await r.unmount();
@@ -2088,7 +2825,7 @@ describe("WriteStdinRenderer — running state (in-flight affordance)", () => {
 /* ---- Running-state: view_image -------------------------------------------- */
 
 describe("ViewImageRenderer — running state (in-flight affordance)", () => {
-  test("running view_image: row shimmers (not settled); body shows 'reading' copy on expand", async () => {
+  test("running view_image: row animates (not settled); body shows 'reading' copy on expand", async () => {
     const item = toolItem({
       name: "view_image",
       arguments: JSON.stringify({ path: "/tmp/screenshot.png" }),
@@ -2099,8 +2836,8 @@ describe("ViewImageRenderer — running state (in-flight affordance)", () => {
     const r = await renderComponent(<Renderer item={item} />);
     await flush();
 
-    // Shimmer class must be present on the title — this is the in-flight signal.
-    const shimmer = r.container.querySelector(".og-shimmer-text");
+    // Running animation must be present on the text line — this is the in-flight signal.
+    const shimmer = r.container.querySelector(".og-command-reel-running");
     expect(shimmer).not.toBeNull();
 
     // Expand the row to see the body note.
@@ -2120,7 +2857,7 @@ describe("ViewImageRenderer — running state (in-flight affordance)", () => {
 /* ---- Running-state: environment_set_variable ------------------------------ */
 
 describe("SecretSetRenderer — running state (in-flight affordance)", () => {
-  test("running environment_set_variable: row shimmers and shows 'setting…'", async () => {
+  test("running environment_set_variable: row animates and shows 'setting…'", async () => {
     const item = toolItem({
       name: "environment_set_variable",
       arguments: JSON.stringify({ name: "MY_SECRET", value: "hunter2" }),
@@ -2135,7 +2872,7 @@ describe("SecretSetRenderer — running state (in-flight affordance)", () => {
     expect(text.toLowerCase()).toContain("setting");
     // Settled copy "write-only · never returned" must NOT appear during in-flight.
     expect(text).not.toContain("write-only");
-    const shimmer = r.container.querySelector(".og-shimmer-text");
+    const shimmer = r.container.querySelector(".og-command-reel-running");
     expect(shimmer).not.toBeNull();
 
     await r.unmount();
@@ -2258,6 +2995,29 @@ describe("SandboxRow — failed chip", () => {
 });
 
 describe("StartupPhaseRow", () => {
+  test("names a sandbox rotation wait", async () => {
+    const item: StartupPhaseItem = {
+      kind: "startup-phase",
+      id: "rotation-wait",
+      turnId: "turn-rotation",
+      phase: "sandbox",
+      status: "cancelled",
+      blockedReason: "rotation_in_progress",
+      startedAt: new Date(0).toISOString(),
+      completedAt: new Date(1000).toISOString(),
+      durationMs: 1000,
+      outcome: null,
+      occurredAt: new Date(0).toISOString(),
+    };
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+    expect(r.container.textContent ?? "").toContain("Waiting for sandbox rotation");
+    expect(r.container.textContent ?? "").not.toContain("Sandbox startup interrupted");
+    await r.unmount();
+  });
+
+  beforeEach(() => setStartupDetails(true));
+  afterEach(() => setStartupDetails(false));
   test("shows the settled phase duration and truthful sandbox origin", async () => {
     const item: StartupPhaseItem = {
       kind: "startup-phase",
@@ -2298,7 +3058,9 @@ describe("StartupPhaseRow", () => {
 
     const text = r.container.textContent ?? "";
     expect(text).toContain("Model request dispatched");
-    expect(text).toContain("Includes overlapping sandbox, rig, repository, and runtime setup");
+    expect(text).toContain(
+      "Includes overlapping sandbox startup, custom environment setup, repository preparation, and runtime setup",
+    );
     expect(text).toContain("27.5s");
 
     await r.unmount();

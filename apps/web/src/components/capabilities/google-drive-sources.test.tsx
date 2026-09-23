@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { OpenGeniClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -29,7 +30,17 @@ const WORKSPACE_ID = "33333333-3333-4333-8333-333333333333";
 
 const mutableContext: { current: Record<string, unknown> } = { current: {} };
 mock.module("@/context", () => ({
-  useAppContext: () => mutableContext.current,
+  useAppContext: () => {
+    const client = mutableContext.current.client as Record<string, unknown>;
+    client.connectTransport ??= () =>
+      new OpenGeniClient({
+        baseUrl: "http://localhost:3000",
+        fetch: async () => {
+          throw new Error("Unexpected Connect request in Drive presentation test");
+        },
+      }).connectTransport();
+    return mutableContext.current;
+  },
 }));
 const requestMock = mock(async (..._args: unknown[]): Promise<unknown> => {
   throw new Error("unexpected API request in test");

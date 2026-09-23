@@ -35,10 +35,10 @@ describe("migration 0361 remember Knowledge Memory materialization", () => {
     );
     expect(FORCE_RLS_TABLES).toContain("remember_knowledge_memory_materializations");
     expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("remember_knowledge_memory_materializations");
-    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).not.toContain(
       "materialize_remember_knowledge_memory(uuid, uuid, uuid)",
     );
-    expect(provisionRoles).toContain(
+    expect(provisionRoles).not.toContain(
       "GRANT EXECUTE ON FUNCTION %I.materialize_remember_knowledge_memory(uuid, uuid, uuid) TO %I",
     );
   });

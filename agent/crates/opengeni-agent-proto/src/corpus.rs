@@ -113,6 +113,7 @@ pub fn canonical_hello() -> v1::Hello {
             browser_bridge: false,
             operation_resource_policy: false,
             operation_cpu_quota: false,
+            transactional_fs_write: false,
         }),
         update_channel: "stable".to_string(),
         resume_token: "resume-token-1".to_string(),

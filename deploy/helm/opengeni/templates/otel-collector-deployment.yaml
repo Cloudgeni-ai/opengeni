@@ -36,10 +36,16 @@ spec:
             - name: config
               mountPath: /conf
               readOnly: true
+            {{- with .Values.observability.collector.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml ((.Values.observability).collector).resources | nindent 12 }}
       volumes:
         - name: config
           configMap:
             name: {{ include "opengeni.fullname" . }}-otel-collector
+        {{- with .Values.observability.collector.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
 {{- end }}

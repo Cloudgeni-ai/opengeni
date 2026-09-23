@@ -1,5 +1,6 @@
 import { hasPermission } from "@opengeni/core";
 import type { AttemptToolDefinition } from "@opengeni/codemode";
+import type { GeneratedSessionTitle } from "@opengeni/runtime";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -32,20 +33,72 @@ export function sessionTitleToolPlan(input: {
   tools: readonly ToolRef[];
   selectedFirstPartyMcpTools: readonly FirstPartyMcpToolName[];
   shouldRequestTitle: boolean;
+  parallelGenerationAvailable: boolean;
 }): {
   promoteTitleTool: boolean;
+  generateTitleInParallel: boolean;
   remoteFirstPartyMcpTools: FirstPartyMcpToolName[];
   preparationIndependentToolNames: string[];
 } {
-  const promoteTitleTool =
+  const titleToolAvailable =
     input.shouldRequestTitle &&
     input.tools.some((tool) => tool.kind === "mcp" && tool.id === "opengeni");
+  const generateTitleInParallel = titleToolAvailable && input.parallelGenerationAvailable;
+  const promoteTitleTool = titleToolAvailable && !generateTitleInParallel;
   return {
     promoteTitleTool,
-    remoteFirstPartyMcpTools: promoteTitleTool
+    generateTitleInParallel,
+    remoteFirstPartyMcpTools: titleToolAvailable
       ? input.selectedFirstPartyMcpTools.filter((tool) => tool !== "set_session_title")
       : [...input.selectedFirstPartyMcpTools],
     preparationIndependentToolNames: promoteTitleTool ? [SESSION_TITLE_MODEL_TOOL_NAME] : [],
+  };
+}
+
+export const PARALLEL_SESSION_TITLE_TIMEOUT_MS = 15_000;
+
+export type ParallelSessionTitleGeneration = {
+  finish: () => Promise<GeneratedSessionTitle | null>;
+  cancel: () => Promise<void>;
+};
+
+/**
+ * Start title inference immediately and keep it independent of the main agent
+ * stream. finish() waits for the already-running bounded request, so a quick
+ * main response does not discard a valid title merely because it completed
+ * first. cancel() aborts and joins exceptional/cancelled exits so no provider
+ * work escapes the owning runAgentTurn activity.
+ */
+export function startParallelSessionTitleGeneration(input: {
+  generate: (signal: AbortSignal) => Promise<GeneratedSessionTitle>;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  onError?: (error: unknown) => void;
+}): ParallelSessionTitleGeneration {
+  const cancellationController = new AbortController();
+  const timeoutSignal = AbortSignal.timeout(input.timeoutMs ?? PARALLEL_SESSION_TITLE_TIMEOUT_MS);
+  const signals = [cancellationController.signal, timeoutSignal];
+  if (input.signal) signals.push(input.signal);
+  const signal = AbortSignal.any(signals);
+  const generation = input
+    .generate(signal)
+    .then((result) => (signal.aborted ? null : result))
+    .catch((error: unknown) => {
+      if (!signal.aborted) input.onError?.(error);
+      return null;
+    });
+  let finished: Promise<GeneratedSessionTitle | null> | null = null;
+
+  return {
+    finish: () => {
+      if (finished) return finished;
+      finished = generation;
+      return finished;
+    },
+    cancel: async () => {
+      cancellationController.abort();
+      await generation;
+    },
   };
 }
 

@@ -17,6 +17,7 @@ import {
   isCodexTransportError,
   opaqueProviderArtifactFingerprint,
   parseCodexUsageHeaders,
+  withCodexRequestOverrides,
 } from "../src";
 
 type Capture = { url: string; init?: RequestInit | undefined };
@@ -99,6 +100,74 @@ function ctx(overrides: Partial<CodexRequestContext> = {}): CodexRequestContext 
   };
 }
 
+describe("Codex streaming EOF audit", () => {
+  test.each(["\n\n", "\n", "", "\r", "\r\n"])(
+    "successful terminal ending in %j settles exactly once after parsing",
+    async (suffix) => {
+      const events: CodexModelRequestEvent[] = [];
+      const terminal = {
+        type: "response.completed",
+        response: {
+          id: "synthetic-eof",
+          status: "completed",
+          output: [
+            { type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] },
+          ],
+        },
+      };
+      const response = await codexRequestStorage.run(
+        ctx({
+          onModelRequestEvent: (event) => {
+            events.push(event);
+          },
+        }),
+        () =>
+          codexSubscriptionFetch(
+            async () =>
+              new Response(`data: ${JSON.stringify(terminal)}${suffix}`, {
+                status: 200,
+                headers: { "content-type": "text/event-stream" },
+              }),
+          )("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({ stream: true, input: [] }),
+          }),
+      );
+      expect(await response.text()).toContain("synthetic-eof");
+      expectExactlyOneTerminalPerAttempt(events, [{ transportAttempt: 1, phase: "completed" }]);
+      expect(events.at(-1)?.meaningfulOutput).toBe(true);
+    },
+  );
+
+  test.each([
+    'data: {"type":"response.created"}',
+    'data: {"type":"response.failed","response":{"status":"failed"}}',
+    'data: {"type":"response.completed","response":{"status":"incomplete"}}',
+  ])("invalid or failed trailing terminal stays failed: %s", async (body) => {
+    const events: CodexModelRequestEvent[] = [];
+    const response = await codexRequestStorage.run(
+      ctx({
+        onModelRequestEvent: (event) => {
+          events.push(event);
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(
+          async () =>
+            new Response(body, {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            }),
+        )("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ stream: true, input: [] }),
+        }),
+    );
+    await expect(response.text()).rejects.toThrow();
+    expectExactlyOneTerminalPerAttempt(events, [{ transportAttempt: 1, phase: "failed" }]);
+  });
+});
+
 describe("Codex encrypted artifact rejection classifier", () => {
   const markedError = (message: string, status = 400) => ({
     status,
@@ -115,6 +184,37 @@ describe("Codex encrypted artifact rejection classifier", () => {
       status: 400,
       kind: "encrypted_content_rejected",
     });
+  });
+
+  test("accepts the exact provider error code without a message match", () => {
+    // Production compaction requests were rejected with this code while the
+    // human-readable text did not match the sentence patterns above.
+    const coded = {
+      status: 400,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+      error: {
+        type: "invalid_request_error",
+        code: "invalid_encrypted_content",
+        message: "Invalid encrypted reasoning artifact",
+      },
+    };
+    expect(classifyCodexEncryptedArtifactRejection(coded)).toEqual({
+      status: 400,
+      kind: "encrypted_content_rejected",
+    });
+    expect(classifyCodexEncryptedArtifactRejection(new Error("wrapped", { cause: coded }))).toEqual(
+      { status: 400, kind: "encrypted_content_rejected" },
+    );
+    expect(classifyCodexEncryptedArtifactRejection({ ...coded, status: 500 })).toBeNull();
+    expect(
+      classifyCodexEncryptedArtifactRejection({
+        ...coded,
+        error: { ...coded.error, code: "invalid_value" },
+      }),
+    ).toBeNull();
+    expect(
+      classifyCodexEncryptedArtifactRejection({ ...coded, headers: new Headers() }),
+    ).toBeNull();
   });
 
   test.each([
@@ -1527,6 +1627,79 @@ describe("codexSubscriptionFetch", () => {
 
     expect(response.status).toBe(200);
     expect(phases).toEqual(["transport_entry", "credential_ready", "wire_request_ready"]);
+  });
+
+  test("runs the durable dispatch fence after audit on every authentication attempt", async () => {
+    const { base, captures } = baseRecorder([401, 200]);
+    const order: string[] = [];
+    let fences = 0;
+    const response = await codexRequestStorage.run(
+      ctx({
+        onModelRequestEvent: (event) => {
+          if (event.phase === "started") order.push("audit");
+        },
+        beforeProviderDispatch: () => {
+          fences += 1;
+          order.push(`fence:${fences}`);
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(base)("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+        }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(captures).toHaveLength(2);
+    expect(order).toEqual(["audit", "fence:1", "audit", "fence:2"]);
+  });
+
+  test("preserves a dispatch-fence error and prevents the provider call", async () => {
+    class LeaseFenceError extends Error {}
+    const fenceError = new LeaseFenceError("Codex credential lease lost");
+    let calls = 0;
+    await expect(
+      codexRequestStorage.run(
+        ctx({ beforeProviderDispatch: () => Promise.reject(fenceError) }),
+        () =>
+          codexSubscriptionFetch(async () => {
+            calls += 1;
+            return new Response(null, { status: 200 });
+          })("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+          }),
+      ),
+    ).rejects.toBe(fenceError);
+    expect(calls).toBe(0);
+  });
+
+  test("compaction-style request overrides retain the durable dispatch fence", async () => {
+    const { base } = baseRecorder();
+    let fences = 0;
+    const response = await codexRequestStorage.run(
+      ctx({
+        beforeProviderDispatch: () => {
+          fences += 1;
+        },
+      }),
+      () =>
+        withCodexRequestOverrides(
+          {
+            betaFeatures: ["remote_compaction_v2"],
+            turnMetadata: { request_kind: "compaction" },
+          },
+          () =>
+            codexSubscriptionFetch(base)("https://chatgpt.com/backend-api/responses", {
+              method: "POST",
+              body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+            }),
+        ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(fences).toBe(1);
   });
 
   test("streaming caller: successful bytes pass through for model-level reconstruction", async () => {

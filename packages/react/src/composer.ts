@@ -7,7 +7,6 @@ export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./workstream-control-event";
 export {
   BillingClassMark,
   ModelPolicyPicker,
-  ModelPolicyPickerMenu,
   PickerAnimatedPage,
   PickerBackHeader,
   PickerNavRow,
@@ -16,6 +15,7 @@ export {
 export type {
   ModelPolicyPickerMessages,
   ModelPolicyPickerProps,
+  ModelPolicyPickerGroupPresentation,
 } from "./components/model-policy-picker";
 export {
   Actions,
@@ -109,3 +109,5 @@ export type {
   VoiceRecordingTranscriptionState,
   VoiceRecordingUploadState,
 } from "./voice-recording-store";
+
+export { ModelPolicyPickerMenu } from "./components/model-policy-picker-menu";

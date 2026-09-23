@@ -365,9 +365,38 @@ e2e(
         expect(names(await driver.observe(popup.id))).toContain("Popup ready");
       }
 
+      const beforeRedirect = page.target.url;
       page = await act(driver, page, { type: "navigate", url: `${fixture.mainUrl}/redirect` });
       expect(page.target.url).toBe(`${fixture.mainUrl}/destination`);
       expect(names(page)).toContain("Redirect complete");
+      page = await act(driver, page, { type: "history", direction: "back" });
+      expect(page.target.url).toBe(beforeRedirect);
+      page = await act(driver, page, { type: "history", direction: "forward" });
+      expect(page.target.url).toBe(`${fixture.mainUrl}/destination`);
+
+      if (!lightpandaBinary) {
+        page = await act(driver, page, {
+          type: "viewport",
+          width: 390,
+          height: 844,
+          mobile: true,
+          deviceScaleFactor: 2,
+        });
+        page = await act(driver, page, { type: "navigate", url: `${fixture.mainUrl}/viewport` });
+        expect(page.viewport).toMatchObject({ width: 390, height: 844, deviceScaleFactor: 2 });
+        expect(page.viewport?.maxTouchPoints).toBeGreaterThan(0);
+        page = await act(driver, page, clickRole("button", "Try viewport click"));
+        expect(names(page)).toContain("Viewport click worked");
+
+        page = await act(driver, page, {
+          type: "viewport",
+          width: 1440,
+          height: 900,
+          mobile: false,
+        });
+        expect(page.viewport).toMatchObject({ width: 1440, height: 900, deviceScaleFactor: 1 });
+        expect(page.viewport?.maxTouchPoints).toBe(0);
+      }
     } finally {
       await driver.close().catch(() => undefined);
       await downloadStore.close().catch(() => undefined);

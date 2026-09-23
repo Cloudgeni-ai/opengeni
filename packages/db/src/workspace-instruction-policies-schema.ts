@@ -35,6 +35,7 @@ export const workspaceInstructionPolicyRevisions = pgTable(
     contentHash: text("content_hash").notNull(),
     provenanceSource: text("provenance_source").notNull(),
     provenanceSourceId: text("provenance_source_id"),
+    agentLearningContext: jsonb("agent_learning_context").$type<Record<string, unknown>>(),
     supersedesRevisionId: uuid("supersedes_revision_id"),
     createdBySubjectId: text("created_by_subject_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

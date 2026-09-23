@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError, OpenGeniStreamError } from "../src/errors";
 import {
+  sessionEventStreamCoveredThrough,
   streamSessionEvents,
   type SessionEventStreamTransport,
   type StreamConnectionState,
@@ -201,7 +202,7 @@ describe("streamSessionEvents", () => {
       coalescedUntil: 100,
     });
     const transport = scriptedTransport([
-      { events: [compact] },
+      { events: [], raw: sseBlock(compact, 100) },
       { events: [makeEvent(101)], hang: true },
     ]);
     const seen: SessionEvent[] = [];
@@ -214,8 +215,21 @@ describe("streamSessionEvents", () => {
     }
 
     expect(sequences(seen)).toEqual([1, 101]);
+    expect(sessionEventStreamCoveredThrough(seen[0]!)).toBe(100);
     expect(transport.openedAfter).toEqual([0, 100]);
     expect(transport.listCalls).toEqual([]);
+  });
+
+  test("ignores producer-controlled coalescedUntil when the SSE id is raw", async () => {
+    const retained = makeEvent(10, "turn.completed", { coalescedUntil: 1000 });
+    const events = await collect(
+      streamSessionEvents(scriptedTransport([{ events: [retained, makeEvent(11)] }]), {
+        after: 9,
+        reconnect: false,
+      }),
+    );
+
+    expect(sequences(events)).toEqual([10, 11]);
   });
 
   test("suppresses duplicates when the server replays already-seen events", async () => {

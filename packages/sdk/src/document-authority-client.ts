@@ -1,5 +1,11 @@
+import type { CompanyBrainOkfDownload, CompanyBrainOkfPackage } from "./company-brain";
 import { OpenGeniClient as OpenGeniCoreClient } from "./client";
 import type {
+  Document,
+  IssueUserResourceGrantRequest,
+  UserResourceGrantMutationResponse,
+  DocumentBase,
+  FileDownloadUrlResponse,
   DocumentAuthorityReclassification,
   DocumentDefaultCollectionBackfill,
   DocumentDefaultCollectionBackfillAudit,
@@ -20,6 +26,80 @@ import type {
  * methods or their routes.
  */
 export class OpenGeniDocumentAuthorityClient extends OpenGeniCoreClient {
+  /** Issue an exact-session or standing personal-resource grant. */
+  async issueUserResourceGrant(
+    workspaceId: string,
+    authorityId: string,
+    request: IssueUserResourceGrantRequest,
+  ): Promise<UserResourceGrantMutationResponse> {
+    return await this.requestJson<UserResourceGrantMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/user-resource-authorities/${authorityId}/grants`,
+      request,
+    );
+  }
+
+  async listDocumentBases(workspaceId: string): Promise<DocumentBase[]> {
+    return await this.requestJson<DocumentBase[]>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/document-bases`,
+    );
+  }
+
+  /**
+   * List every Document the current human can manage from this workspace,
+   * including portable personal and organization-scoped Documents whose
+   * immutable ingestion workspace is different.
+   */
+  async listAccessibleDocuments(workspaceId: string): Promise<Document[]> {
+    return await this.requestJson<Document[]>("GET", `/v1/workspaces/${workspaceId}/documents`);
+  }
+
+  /** Mint a source-file URL through the Document's effective authority. */
+  async createDocumentOriginalFileDownloadUrl(
+    workspaceId: string,
+    documentId: string,
+  ): Promise<FileDownloadUrlResponse> {
+    return await this.requestJson<FileDownloadUrlResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/documents/${documentId}/original-file/download-url`,
+    );
+  }
+
+  /** Retry indexing for a failed document. */
+  async reindexDocument(
+    workspaceId: string,
+    baseId: string,
+    documentId: string,
+  ): Promise<Document> {
+    return await this.requestJson<Document>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/document-bases/${baseId}/documents/${documentId}/reindex`,
+    );
+  }
+
+  /** Permission-filtered Company Brain package with authorized guidance bodies. */
+  getCompanyBrain(workspaceId: string): Promise<CompanyBrainOkfPackage> {
+    return this.requestJson<CompanyBrainOkfPackage>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/company-brain`,
+    );
+  }
+
+  /** Download the deterministic Markdown/YAML Company Brain package. */
+  async exportCompanyBrainOkf(workspaceId: string): Promise<CompanyBrainOkfDownload> {
+    const response = await this.requestResponse(
+      "GET",
+      `/v1/workspaces/${workspaceId}/company-brain/export`,
+    );
+    const headers = response.headers;
+    return {
+      content: await response.text(),
+      contentType: headers.get("content-type") ?? "text/markdown",
+      filename: headers.get("content-disposition")?.split('"')[1] ?? "company-brain.okf.md",
+    };
+  }
+
   /**
    * Atomically reclassify a Document's authority and every indexed chunk.
    * The operation is replay-safe and rejects a stale expected authority tuple.

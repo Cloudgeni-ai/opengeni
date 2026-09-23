@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { shouldPublishToolAuthNeededForTurn } from "../src/activities/agent-turn";
+import {
+  rollingSafeToolAuthNeededPayload,
+  shouldPublishToolAuthNeededForTurn,
+} from "../src/activities/agent-turn";
 
 const setupAuthNeeded = {
   providerDomain: "slack.com",
@@ -199,5 +202,39 @@ describe("Slack auth prompt gating", () => {
         serviceTurn,
       ),
     ).toBe(true);
+  });
+
+  test("projects host auth safely for legacy browsers without losing the exact reason", () => {
+    expect(
+      rollingSafeToolAuthNeededPayload({
+        serverId: "host-tools",
+        toolName: "deploy",
+        providerDomain: "host.example.test",
+        connectionId: "opaque-host-binding",
+        authoritySource: "host",
+        reason: "refresh_failed",
+        authorizationUrl: "https://host.example.test/recover",
+      }),
+    ).toEqual({
+      serverId: "host-tools",
+      toolName: "deploy",
+      providerDomain: "host.example.test",
+      connectionId: "opaque-host-binding",
+      authoritySource: "host",
+      reason: "unsupported_auth",
+      hostReason: "refresh_failed",
+      authorizationUrl: "https://host.example.test/recover",
+    });
+  });
+
+  test("leaves native auth payloads byte-equivalent", () => {
+    const payload = {
+      serverId: "native-tools",
+      toolName: "search",
+      providerDomain: "native.example.test",
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      reason: "expired" as const,
+    };
+    expect(rollingSafeToolAuthNeededPayload(payload)).toBe(payload);
   });
 });

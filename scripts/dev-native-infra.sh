@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Container-free PostgreSQL/NATS/Temporal/MinIO for one OpenGeni worktree.
+# Container-free PostgreSQL/NATS/Temporal/object storage for one OpenGeni worktree.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -24,6 +24,18 @@ if [ -z "$COMPOSE_PROJECT_NAME" ]; then
   echo "Refusing to manage native infrastructure without a project name." >&2
   exit 1
 fi
+case "$COMPOSE_PROJECT_NAME" in
+  *[!a-zA-Z0-9_-]* | . | ..) echo "Invalid native project name" >&2; exit 1 ;;
+esac
+case "$(uname -s)" in
+  Linux)
+    if [ -r /proc/sys/kernel/osrelease ] && grep -qi microsoft /proc/sys/kernel/osrelease &&
+      ! grep -qi 'wsl2\|microsoft-standard' /proc/sys/kernel/osrelease; then
+      echo "Native Windows setup requires WSL2, not WSL1." >&2; exit 1
+    fi ;;
+  Darwin) ;;
+  *) echo "Native setup requires Linux/macOS; on Windows run the entire stack inside WSL2." >&2; exit 1 ;;
+esac
 export COMPOSE_PROJECT_NAME
 
 # Keep the helper independently usable for diagnostics and test setup. The full
@@ -37,10 +49,20 @@ OPENGENI_TEMPORAL_HOST_PORT="${OPENGENI_TEMPORAL_HOST_PORT:-7233}"
 OPENGENI_TEMPORAL_UI_HOST_PORT="${OPENGENI_TEMPORAL_UI_HOST_PORT:-8233}"
 OPENGENI_MINIO_HOST_PORT="${OPENGENI_MINIO_HOST_PORT:-9000}"
 OPENGENI_MINIO_CONSOLE_HOST_PORT="${OPENGENI_MINIO_CONSOLE_HOST_PORT:-9001}"
-OPENGENI_OBJECT_STORAGE_FIXTURE="${OPENGENI_OBJECT_STORAGE_FIXTURE:-minio}"
+OPENGENI_GARAGE_HOST_PORT="${OPENGENI_GARAGE_HOST_PORT:-3900}"
+OPENGENI_GARAGE_RPC_HOST_PORT="${OPENGENI_GARAGE_RPC_HOST_PORT:-3901}"
 OPENGENI_OBJECT_STORAGE_BUCKET="${OPENGENI_OBJECT_STORAGE_BUCKET:-opengeni-files}"
 
 STATE_DIR="$(pwd)/.opengeni/native/${COMPOSE_PROJECT_NAME}"
+storage_helper() { bun scripts/dev-native-storage.ts "$@"; }
+# Only startup may request a provider change. Diagnostics/cleanup must still
+# reach the recorded processes even after somebody edits their environment.
+if [ "${1:-}" = start ] || [ "${1:-}" = up ]; then
+  OPENGENI_OBJECT_STORAGE_FIXTURE="$(storage_helper resolve "$STATE_DIR" "${OPENGENI_OBJECT_STORAGE_FIXTURE:-}")"
+else
+  OPENGENI_OBJECT_STORAGE_FIXTURE="$(storage_helper resolve "$STATE_DIR")"
+fi
+export OPENGENI_OBJECT_STORAGE_FIXTURE OPENGENI_GARAGE_HOST_PORT OPENGENI_GARAGE_RPC_HOST_PORT OPENGENI_OBJECT_STORAGE_BUCKET
 LOG_DIR="$STATE_DIR/logs"
 PID_DIR="$STATE_DIR/pids"
 RUNTIME_DIR="$STATE_DIR/runtime"
@@ -49,7 +71,11 @@ RUNTIME_DIR="$STATE_DIR/runtime"
 # cluster without also gaining access to source and local secrets. Keep the
 # ordinary checkout-local path when it is traversable; otherwise use an exact,
 # hashed project directory under /var/tmp and remove it on `dev:clean`.
-repository_state_id="$(printf '%s' "$(pwd)" | sha256sum | cut -c1-16)"
+if command -v sha256sum >/dev/null 2>&1; then
+  repository_state_id="$(printf '%s' "$(pwd)" | sha256sum | cut -c1-16)"
+else
+  repository_state_id="$(printf '%s' "$(pwd)" | shasum -a 256 | cut -c1-16)"
+fi
 POSTGRES_STATE_ROOT="$STATE_DIR/postgres"
 if [ "$(id -u)" = "0" ] && id -u postgres >/dev/null 2>&1 &&
   ! runuser -u postgres -- test -x "$(pwd)"; then
@@ -66,13 +92,14 @@ POSTGRES_BINDIR="$(pg_config --bindir 2>/dev/null || true)"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/dev-native-infra.sh <start|status|ps|logs|down> [options]
+Usage: scripts/dev-native-infra.sh <start|up|status|ps|logs|down|clean> [options]
 
-  start             Start PostgreSQL, NATS, Temporal, and MinIO.
+  start / up        Start PostgreSQL, NATS, Temporal, and Garage (or explicit MinIO).
   status [--quiet]  Verify all four native dependencies are running.
   ps                 Print native dependency process state and logs.
-  logs [-f] [name]  Show logs (names: postgres, nats, temporal, minio).
+  logs [-f] [name]  Show logs (names: postgres, nats, temporal, garage, minio).
   down [--clean]    Stop native dependencies; --clean also removes their data.
+  clean             Stop and remove this project's native data.
 EOF
 }
 
@@ -100,19 +127,26 @@ log_file() {
 service_pid() {
   local file
   file="$(pid_file "$1")"
-  [ -f "$file" ] && sed -n '1p' "$file"
+  if [ -f "$file" ]; then sed -n '1p' "$file"; fi
 }
 
 service_start_time() {
   local file
   file="$(pid_file "$1")"
-  [ -f "$file" ] && sed -n '2p' "$file"
+  if [ -f "$file" ]; then sed -n '2p' "$file"; fi
 }
 
 process_start_time() {
   local pid="$1"
-  [ -r "/proc/$pid/stat" ] || return 1
-  awk '{print $22}' "/proc/$pid/stat"
+  if [ -r "/proc/$pid/stat" ]; then
+    awk '{print $22}' "/proc/$pid/stat"
+  elif [ "$(uname -s)" = "Darwin" ]; then
+    # macOS has no procfs. Keep the process birth time alongside the PID so
+    # cleanup still refuses an unrelated process that reused that PID.
+    LC_ALL=C ps -p "$pid" -o lstart=
+  else
+    return 1
+  fi
 }
 
 service_running() {
@@ -142,7 +176,6 @@ db_running() {
 start_service() {
   local name="$1"
   shift
-  require_command setsid
   if service_running "$name"; then
     echo "  ${name}=already-running (pid $(service_pid "$name"))"
     return
@@ -150,7 +183,13 @@ start_service() {
   rm -f "$(pid_file "$name")"
   (
     local child_pid child_start
-    nohup setsid "$@" >"$(log_file "$name")" 2>&1 &
+    if command -v setsid >/dev/null 2>&1; then
+      nohup setsid "$@" >"$(log_file "$name")" 2>&1 &
+    else
+      # macOS has no setsid utility. These services remain foreground processes;
+      # the birth-time fence below permits stopping only this exact child.
+      nohup "$@" >"$(log_file "$name")" 2>&1 &
+    fi
     child_pid="$!"
     child_start="$(process_start_time "$child_pid")"
     printf '%s\n%s\n' "$child_pid" "$child_start" >"$(pid_file "$name")"
@@ -260,12 +299,17 @@ start_postgres() {
 start_stack() {
   require_command nats-server
   require_command temporal
-  require_command minio
-  require_command mc
-  [ "${OPENGENI_OBJECT_STORAGE_FIXTURE:-}" = "minio" ] ||
-    die "native infrastructure requires OPENGENI_OBJECT_STORAGE_FIXTURE=minio"
+  local garage_binary garage_config
+  if [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = minio ]; then
+    require_command minio
+    require_command mc
+  else
+    garage_binary="$(storage_helper binary "$STATE_DIR")"
+    garage_config="$(storage_helper configure "$STATE_DIR")"
+  fi
 
-  mkdir -p "$LOG_DIR" "$PID_DIR" "$RUNTIME_DIR" "$NATS_DATA" "$TEMPORAL_DATA" "$MINIO_DATA" "$MC_CONFIG_DIR"
+  storage_helper record "$STATE_DIR" "$OPENGENI_OBJECT_STORAGE_FIXTURE"
+  mkdir -p "$LOG_DIR" "$PID_DIR" "$RUNTIME_DIR" "$NATS_DATA" "$TEMPORAL_DATA"
   start_postgres
 
   start_service nats \
@@ -281,16 +325,30 @@ start_stack() {
       --ui-ip 127.0.0.1 \
       --ui-port "$OPENGENI_TEMPORAL_UI_HOST_PORT" \
       --db-filename "$TEMPORAL_DATA/temporal.db" \
-      --ui-disable-news-fetch \
       --log-level warn
-  start_service minio \
+  if [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = minio ]; then
+    mkdir -p "$MINIO_DATA" "$MC_CONFIG_DIR"
+    start_service minio \
     env MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
       minio server "$MINIO_DATA" \
         --address "127.0.0.1:${OPENGENI_MINIO_HOST_PORT}" \
         --console-address "127.0.0.1:${OPENGENI_MINIO_CONSOLE_HOST_PORT}"
+  else
+    start_service garage env \
+      GARAGE_DEFAULT_ACCESS_KEY="${OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID:-GK0123456789abcdef0123456789abcdef}" \
+      GARAGE_DEFAULT_SECRET_KEY="${OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}" \
+      GARAGE_DEFAULT_BUCKET="$OPENGENI_OBJECT_STORAGE_BUCKET" \
+      "$garage_binary" -c "$garage_config" server --single-node --default-bucket
+  fi
 
   wait_for_tcp nats "$OPENGENI_NATS_HOST_PORT"
   wait_for_tcp temporal "$OPENGENI_TEMPORAL_HOST_PORT" 300
+  if [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = garage ]; then
+    wait_for_tcp garage "$OPENGENI_GARAGE_HOST_PORT"
+    storage_helper provision "$STATE_DIR"
+    echo "  garage-bucket=${OPENGENI_OBJECT_STORAGE_BUCKET} (CORS ready)"
+    return
+  fi
   wait_for_tcp minio "$OPENGENI_MINIO_HOST_PORT"
 
   mc --config-dir "$MC_CONFIG_DIR" alias set local \
@@ -301,7 +359,7 @@ start_stack() {
 }
 
 all_running() {
-  db_running && service_running nats && service_running temporal && service_running minio
+  db_running && service_running nats && service_running temporal && service_running "$OPENGENI_OBJECT_STORAGE_FIXTURE"
 }
 
 print_status() {
@@ -321,7 +379,7 @@ print_status() {
 print_ps() {
   printf '%-12s %-10s %-8s %s\n' SERVICE STATE PID LOG
   local name pid state
-  for name in postgres nats temporal minio; do
+  for name in postgres nats temporal "$OPENGENI_OBJECT_STORAGE_FIXTURE"; do
     if [ "$name" = "postgres" ]; then
       if db_running; then
         pid="$(sed -n '1p' "$POSTGRES_DATA/postmaster.pid")"
@@ -349,13 +407,13 @@ show_logs() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
     -f | --follow) follow=1 ;;
-    postgres | nats | temporal | minio) names+=("$1") ;;
+    postgres | nats | temporal | minio | garage) names+=("$1") ;;
     *) die "unknown log option or service '$1'" ;;
     esac
     shift
   done
   if [ "${#names[@]}" -eq 0 ]; then
-    names=(postgres nats temporal minio)
+    names=(postgres nats temporal "$OPENGENI_OBJECT_STORAGE_FIXTURE")
   fi
   local files=()
   local name file
@@ -372,8 +430,9 @@ show_logs() {
 
 stop_stack() {
   local clean="${1:-}"
+  [ -z "$clean" ] || [ "$clean" = --clean ] || die "unknown down option '$clean'"
   local name
-  for name in minio temporal nats; do
+  for name in garage minio temporal nats; do
     stop_service "$name"
   done
   if db_running; then
@@ -401,11 +460,12 @@ stop_stack() {
 command="${1:-help}"
 shift || true
 case "$command" in
-start) start_stack "$@" ;;
+start | up) start_stack "$@" ;;
 status) print_status "$@" ;;
 ps) print_ps "$@" ;;
 logs) show_logs "$@" ;;
 down) stop_stack "$@" ;;
+clean) stop_stack --clean ;;
 help | -h | --help) usage ;;
 *)
   usage >&2

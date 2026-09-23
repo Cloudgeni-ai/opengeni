@@ -31,9 +31,10 @@ import {
   registerHostExportConsumer,
   recordPendingSessionToolCallResult,
   registerPendingSessionToolCall,
-  saveWorkspaceMemory,
-  searchWorkspaceMemories,
-  updateKnowledgeMemory,
+  saveKnowledgeEntry,
+  getKnowledgeEntry,
+  listKnowledgeEntries,
+  type KnowledgeContext,
   withWorkspaceRls,
   type Database,
 } from "../src/index";
@@ -48,6 +49,7 @@ import {
   withLosslessContentWriteVersion,
 } from "../src/lossless-json";
 import * as schema from "../src/schema";
+import { migrate } from "../src/migrate";
 import { closePendingSessionToolCallsInTransaction } from "../src/session-tool-call-settlement";
 
 const migrationUrl = new URL("../drizzle/0176_lossless_canonical_json.sql", import.meta.url);
@@ -254,22 +256,12 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       // migration boundary. Advance the populated database to the current
       // schema before opening current application connections so unrelated
       // future session columns cannot invalidate this compatibility test.
-      // This raw migration loop intentionally bypasses the canonical runner.
-      // Keep its exact application-role authority on the same max=1 admin
-      // session so maintenance migration 0257 retains its fail-closed contract.
-      await admin`select set_config(
-        'opengeni.migration_application_roles',
-        ${JSON.stringify(["opengeni_app"])},
-        false
-      )`;
-      for (const file of files.filter((entry) => entry.localeCompare(migrationFile) > 0)) {
-        await admin.unsafe(await readFile(join(migrationsDir, file), "utf8"));
-        await admin`
-          insert into schema_migrations (name)
-          values (${file})
-          on conflict do nothing
-        `;
-      }
+      // Later migrations can require runner-owned parsing, transaction and
+      // backfill phases. Keep the historical boundary above exact, then use
+      // the production pipeline with the explicit drained application role.
+      await migrate(blank.databaseUrl, undefined, {
+        applicationDatabaseRoles: ["opengeni_app"],
+      });
 
       const testValue = String.fromCharCode(97, 112, 112, 112, 119);
       const firstKey = String.fromCharCode(97, 112, 112, 80, 97, 115, 115, 119, 111, 114, 100);
@@ -731,6 +723,12 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
     );
 
     const historyItem = {
+      orderedProbe: {
+        query: "search",
+        names: ["tool"],
+        limit: 5,
+        schema: { zebra: { type: "string" }, alpha: { type: "number" } },
+      },
       type: "message",
       role: "user",
       content: [
@@ -784,7 +782,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
           ),
         ),
     );
-    expect(fromPostgresLosslessJson(history!.item, history!.itemCodecVersion)).toEqual(historyItem);
+    expect(JSON.stringify(fromPostgresLosslessJson(history!.item, history!.itemCodecVersion))).toBe(
+      JSON.stringify(historyItem),
+    );
     const [rawHistory] = await shared.admin<Array<{ type: string | null }>>`
       select item ->> 'type' as type from session_history_items
       where workspace_id = ${workspaceId} and session_id = ${session.id} and position = 1`;
@@ -807,6 +807,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
 
     const callId = "pending-synthetic-call";
     const callItem = {
+      orderedProbe: { query: "search", names: [], limit: 5 },
       type: "function_call",
       callId,
       name: "synthetic_tool",
@@ -863,6 +864,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         .where(eq(schema.sessionPendingToolCalls.callId, callId)),
     );
     if (!pending?.eventOutput) throw new Error("Pending tool event output was not retained");
+    expect(
+      JSON.stringify(fromPostgresLosslessJson(pending.callItem, pending.callItemCodecVersion)),
+    ).toBe(JSON.stringify(callItem));
     expect({
       callItem: fromPostgresLosslessJson(pending.callItem, pending.callItemCodecVersion),
       resultItem: fromPostgresLosslessJson(pending.resultItem, pending.resultItemCodecVersion),
@@ -1022,123 +1026,45 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       unsafeText,
     );
 
-    const memoryText = `searchable${nul}needle ${loneHigh} exact memory`;
-    const savedMemory = await saveWorkspaceMemory(app.db, {
+    const knowledgeText = `searchable${nul}needle ${loneHigh} exact retained knowledge`;
+    const knowledgeContext: KnowledgeContext = {
       accountId: grant.accountId,
       workspaceId,
-      text: memoryText,
-      sessionId: session.id,
-      origin: "agent",
-    });
-    expect(savedMemory.memory.text).toBe(memoryText);
-    const duplicateMemory = await saveWorkspaceMemory(app.db, {
-      accountId: grant.accountId,
-      workspaceId,
-      text: memoryText,
-      sessionId: session.id,
-      origin: "agent",
-    });
-    expect(duplicateMemory).toMatchObject({
-      deduped: true,
-      dedupeReason: "exact",
-      memory: { id: savedMemory.memory.id, text: memoryText },
-    });
-    const memorySearch = await searchWorkspaceMemories(app.db, workspaceId, {
+      actor: {
+        kind: "human",
+        principalKind: "human_session",
+        subjectId: grant.subjectId,
+        writeScopes: ["workspace"],
+        settingsScopes: [],
+        review: true,
+      },
+    };
+    const knowledgeRequest = {
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      entry: { kind: "fact" as const, title: "Exact retained content", content: knowledgeText },
+    };
+    const savedKnowledge = await saveKnowledgeEntry(app.db, knowledgeContext, knowledgeRequest);
+    const repeatedKnowledge = await saveKnowledgeEntry(app.db, knowledgeContext, knowledgeRequest);
+    expect(repeatedKnowledge).toEqual({ ...savedKnowledge, replayed: true });
+    const retained = await getKnowledgeEntry(app.db, knowledgeContext, savedKnowledge.entryId);
+    expect(retained?.revision.entry.content).toBe(knowledgeText);
+    const knowledgeSearch = await listKnowledgeEntries(app.db, knowledgeContext, {
       query: "searchable needle",
-      mode: "keyword",
     });
-    expect(memorySearch.map((entry) => entry.memory.id)).toContain(savedMemory.memory.id);
+    expect(knowledgeSearch.entries.map((entry) => entry.id)).toContain(savedKnowledge.entryId);
+    const correctedText = `${knowledgeText} corrected${nul}exact`;
+    await saveKnowledgeEntry(app.db, knowledgeContext, {
+      ...knowledgeRequest,
+      operationId: crypto.randomUUID(),
+      expectedVersion: 1,
+      entry: { ...knowledgeRequest.entry, content: correctedText },
+    });
     expect(
-      memorySearch.find((entry) => entry.memory.id === savedMemory.memory.id)?.memory.text,
-    ).toBe(memoryText);
-
-    const publicBoundarySentinel = "SECRET_SENTINEL_123";
-    const SecretSentinelError = class SECRET_SENTINEL_123 extends Error {};
-    const exactEmbeddingError = Object.assign(
-      new SecretSentinelError(`embedding failed ${publicBoundarySentinel}`),
-      {
-        name: publicBoundarySentinel,
-        code: publicBoundarySentinel,
-        cause: { exact: publicBoundarySentinel },
-      },
-    );
-    const failingEmbedder = {
-      model: `model-${publicBoundarySentinel}`,
-      embedMany: async () => {
-        throw exactEmbeddingError;
-      },
-    };
-    const publicWarnings: Array<[unknown, unknown]> = [];
-    const originalWarn = console.warn;
-    console.warn = (message?: unknown, attributes?: unknown) => {
-      publicWarnings.push([message, attributes]);
-    };
-    let fallbackMemory: Awaited<ReturnType<typeof saveWorkspaceMemory>> | undefined;
-    let updatedFallbackMemory: Awaited<ReturnType<typeof updateKnowledgeMemory>> | undefined;
-    let fallbackSearch: Awaited<ReturnType<typeof searchWorkspaceMemories>> | undefined;
-    try {
-      fallbackMemory = await saveWorkspaceMemory(
-        app.db,
-        {
-          accountId: grant.accountId,
-          workspaceId,
-          text: "public boundary memory save",
-          sessionId: session.id,
-          origin: "agent",
-        },
-        failingEmbedder,
-      );
-      updatedFallbackMemory = await updateKnowledgeMemory(
-        app.db,
-        workspaceId,
-        fallbackMemory.memory.id,
-        { text: "public boundary memory edit" },
-        failingEmbedder,
-      );
-      fallbackSearch = await searchWorkspaceMemories(
-        app.db,
-        workspaceId,
-        { query: "public boundary memory edit", mode: "hybrid" },
-        failingEmbedder,
-      );
-    } finally {
-      console.warn = originalWarn;
-    }
-    expect(fallbackMemory!.memory.text).toBe("public boundary memory save");
-    expect(updatedFallbackMemory!.text).toBe("public boundary memory edit");
-    expect(fallbackSearch!.map((entry) => entry.memory.id)).toContain(fallbackMemory!.memory.id);
-    expect(publicWarnings).toEqual([
-      [
-        "workspace memory save: embedding failed; saving keyword-only",
-        {
-          errorClass: "MemoryEmbeddingOperationError",
-          errorCode: "memory_save_embedding_failed",
-          origin: "db",
-        },
-      ],
-      [
-        "workspace memory edit: embedding failed; storing keyword-only",
-        {
-          errorClass: "MemoryEmbeddingOperationError",
-          errorCode: "memory_edit_embedding_failed",
-          origin: "db",
-        },
-      ],
-      [
-        "workspace memory hybrid search vector component failed; falling back to keyword",
-        {
-          errorClass: "MemorySearchOperationError",
-          errorCode: "memory_hybrid_vector_failed",
-          origin: "db",
-        },
-      ],
-    ]);
-    expect(JSON.stringify(publicWarnings)).not.toContain(publicBoundarySentinel);
-    expect(JSON.stringify(publicWarnings)).not.toContain(workspaceId);
-    expect(JSON.stringify(publicWarnings)).not.toContain(session.id);
-    expect(exactEmbeddingError.message).toBe(`embedding failed ${publicBoundarySentinel}`);
-    expect(exactEmbeddingError.constructor.name).toBe(publicBoundarySentinel);
-    expect(exactEmbeddingError.code).toBe(publicBoundarySentinel);
+      (await getKnowledgeEntry(app.db, knowledgeContext, savedKnowledge.entryId))?.revision.entry
+        .content,
+    ).toBe(correctedText);
 
     const legacyPayload = {
       [LEGACY_LOSSLESS_JSON_ENVELOPE_KEY]: {

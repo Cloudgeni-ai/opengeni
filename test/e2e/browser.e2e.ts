@@ -125,7 +125,7 @@ describe("browser e2e", () => {
     await pageA
       .getByPlaceholder("Describe a task for the agent…")
       .fill("run a slow browser e2e session");
-    await pageA.getByRole("button", { name: "Send" }).click();
+    await pageA.getByRole("button", { name: "Send message", exact: true }).click();
     await waitFor(() => /\/workspaces\/[^/]+\/sessions\/[^/]+$/.test(pageA.url()), {
       timeoutMs: 15_000,
     });
@@ -213,7 +213,7 @@ describe("browser e2e", () => {
       await page
         .getByPlaceholder("Describe a task for the agent…")
         .fill("E2E HOLD INITIAL DIRECTION");
-      await page.getByRole("button", { name: "Send" }).click();
+      await page.getByRole("button", { name: "Send message", exact: true }).click();
       await waitFor(() => /\/workspaces\/[^/]+\/sessions\/[^/]+$/.test(page.url()), {
         timeoutMs: 15_000,
       });
@@ -226,7 +226,7 @@ describe("browser e2e", () => {
       await timeline.getByText("E2E HOLD INITIAL DIRECTION", { exact: true }).waitFor();
       if (turnWorkerSuspended) {
         expect((await browserQueueSnapshot(page, apiPort, coordinates)).items).toEqual([]);
-        expect(await queueChip.getByText(/queued prompt/).count()).toBe(0);
+        expect(await queueChip.count()).toBe(0);
         expect(
           await timeline.getByText("E2E HOLD INITIAL DIRECTION", { exact: true }).count(),
         ).toBe(1);
@@ -253,7 +253,7 @@ describe("browser e2e", () => {
       await submitSessionPrompt(page, composer, "E2E HOLD EARLIEST STEER", {
         waitForResponse: false,
       });
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.getByText(/^1 queued(?: prompt)?$/).waitFor();
       await queueChip.click();
       const earliestSteerResponse = page.waitForResponse(
         (candidateResponse) =>
@@ -270,10 +270,10 @@ describe("browser e2e", () => {
       );
 
       await submitSessionPrompt(page, composer, "E2E QUEUED FIRST");
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.getByText(/^1 queued(?: prompt)?$/).waitFor();
       expect(await timeline.getByText("E2E QUEUED FIRST", { exact: true }).count()).toBe(0);
       await submitSessionPrompt(page, composer, "E2E HOLD QUEUED SECOND");
-      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();
+      await queueChip.getByText(/^2 queued(?: prompts)?$/).waitFor();
       if ((await queueChip.getAttribute("aria-expanded")) !== "true") await queueChip.click();
       const queue = page.getByRole("list", { name: "Queued prompts" });
       const rows = queue.getByRole("listitem");
@@ -288,9 +288,9 @@ describe("browser e2e", () => {
 
       await page.getByRole("button", { name: "Edit queued prompt 2" }).click();
       await waitFor(async () => (await composer.inputValue()) === "E2E HOLD QUEUED SECOND");
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.getByText(/^1 queued(?: prompt)?$/).waitFor();
       await submitSessionPrompt(page, composer, "E2E HOLD QUEUED SECOND EDITED");
-      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();
+      await queueChip.getByText(/^2 queued(?: prompts)?$/).waitFor();
       await waitForQueuePrompts(page, apiPort, coordinates, [
         "E2E QUEUED FIRST",
         "E2E HOLD QUEUED SECOND EDITED",
@@ -301,7 +301,7 @@ describe("browser e2e", () => {
       expect(await page.getByRole("textbox", { name: "Message the agent" }).inputValue()).toBe("");
       await page
         .getByTestId("session-chrome-queue")
-        .getByText("2 queued prompts", { exact: true })
+        .getByText(/^2 queued(?: prompts)?$/)
         .waitFor();
       await waitForQueuePrompts(page, apiPort, coordinates, [
         "E2E QUEUED FIRST",
@@ -312,7 +312,7 @@ describe("browser e2e", () => {
         await reloadedQueueChip.click();
       }
       await page.getByRole("button", { name: "Remove queued prompt 1" }).click();
-      await reloadedQueueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await reloadedQueueChip.getByText(/^1 queued(?: prompt)?$/).waitFor();
       await waitForQueuePrompts(page, apiPort, coordinates, ["E2E HOLD QUEUED SECOND EDITED"]);
       expect(await page.getByTestId("session-timeline").getByText("E2E QUEUED FIRST").count()).toBe(
         0,
@@ -420,7 +420,7 @@ describe("browser e2e", () => {
       });
       await page
         .getByTestId("session-chrome-queue")
-        .getByText("1 queued prompt", { exact: true })
+        .getByText(/^1 queued(?: prompt)?$/)
         .waitFor({ timeout: 20_000 });
       await waitFor(() => submitCommitStatus !== null, {
         timeoutMs: 20_000,
@@ -448,7 +448,7 @@ describe("browser e2e", () => {
       await secondPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
       await secondPage
         .getByTestId("session-chrome-queue")
-        .getByText("1 queued prompt", { exact: true })
+        .getByText(/^1 queued(?: prompt)?$/)
         .waitFor();
       const completedBeforeResume = await page
         .getByTestId("session-timeline")
@@ -1194,17 +1194,7 @@ async function installThemeAndWindowOpenCapture(
       }
       return null;
     }) as typeof window.open;
-    const applyTheme = () => {
-      document.documentElement?.setAttribute("data-og-theme", selectedTheme);
-    };
-    applyTheme();
-    if (!document.documentElement) {
-      const applyThemeOnce = () => {
-        document.removeEventListener("DOMContentLoaded", applyThemeOnce);
-        applyTheme();
-      };
-      document.addEventListener("DOMContentLoaded", applyThemeOnce, { once: true });
-    }
+    localStorage.setItem("opengeni.appearance", selectedTheme);
   }, theme);
 }
 

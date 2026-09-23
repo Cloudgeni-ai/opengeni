@@ -17,6 +17,7 @@ import {
   SandboxExposedPortUnavailableError,
   SandboxProviderError,
   SandboxUnsupportedFeatureError,
+  SandboxWorkspaceReadNotFoundError,
   normalizeRelativePath,
   normalizeSandboxClientCreateArgs,
   recordExposedPortEndpoint,
@@ -941,9 +942,27 @@ export class OpenSandboxSession {
   async readFile(args: { path: string; runAs?: string; maxBytes?: number }): Promise<Uint8Array> {
     assertRunAsUnsupported(args.runAs);
     const provider = await this.ensureStarted();
-    return await provider.files.readBytes(workspacePath(args.path, { allowPrivate: true }), {
-      ...(args.maxBytes !== undefined ? { limit: args.maxBytes } : {}),
-    });
+    return await provider.files
+      .readBytes(workspacePath(args.path, { allowPrivate: true }), {
+        ...(args.maxBytes !== undefined ? { limit: args.maxBytes } : {}),
+      })
+      .catch((error) => this.rethrowFilesystemReadError(provider, error));
+  }
+
+  private async rethrowFilesystemReadError(
+    provider: ProviderSandbox,
+    error: unknown,
+  ): Promise<never> {
+    if (isNotFound(error)) {
+      // A filesystem 404 is optional-path absence only while the exact provider
+      // still exists. Provider loss and lifecycle failures must reach recovery.
+      const info = await provider.getInfo();
+      assertSupportedProviderState(info, this.state.sandboxId);
+      if (info.id === this.state.sandboxId) {
+        throw new SandboxWorkspaceReadNotFoundError("OpenSandbox workspace path not found");
+      }
+    }
+    throw error;
   }
 
   async writeFile(args: {
@@ -986,10 +1005,12 @@ export class OpenSandboxSession {
     const provider = await this.ensureStarted();
     const absolute = workspacePath(args.path);
     const absoluteOutput = args.path.trim().startsWith("/");
-    const entries = await provider.files.listDirectory({
-      path: absolute,
-      depth: 1,
-    });
+    const entries = await provider.files
+      .listDirectory({
+        path: absolute,
+        depth: 1,
+      })
+      .catch((error) => this.rethrowFilesystemReadError(provider, error));
     return entries.map((entry) => {
       const entryPath = workspacePath(entry.path);
       return {

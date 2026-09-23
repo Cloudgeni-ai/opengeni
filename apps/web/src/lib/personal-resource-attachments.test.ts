@@ -1,5 +1,6 @@
+import { ongoingPersonalResourceNames } from "./personal-resource-ongoing-access";
 import { describe, expect, test } from "bun:test";
-import { OpenGeniApiError, type Session } from "@opengeni/sdk";
+import { OpenGeniApiError, type Session, type UserResourceAuthoritySummary } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import { managedSelfContextIdentity } from "./managed-self-context";
@@ -646,7 +647,7 @@ describe("personal resource attachment authority", () => {
     });
   });
 
-  test("workspace-visible personal resources use message-only authority without a second toggle", () => {
+  test("workspace-visible personal attachments authorize ongoing work without a second toggle", () => {
     expect(
       newSessionPersonalResourceAttachment({
         personalResourceCount: 1,
@@ -654,7 +655,7 @@ describe("personal resource attachment authority", () => {
       }),
     ).toEqual({
       intent: {
-        mode: "once",
+        mode: "session",
         workspaceSharedAcknowledged: true,
         sharedOutputWarningVersion: 1,
       },
@@ -684,4 +685,96 @@ describe("personal resource attachment authority", () => {
       ),
     ).toBe(false);
   });
+});
+
+test("shared new sessions authorize only selected personal resources for ongoing work", () => {
+  const input = { personalResourceCount: 1, visibility: "workspace" as const };
+  expect(newSessionPersonalResourceAttachment(input).intent).toEqual({
+    mode: "session",
+    workspaceSharedAcknowledged: true,
+    sharedOutputWarningVersion: 1,
+  });
+  expect(
+    newSessionPersonalResourceAttachment({ ...input, personalResourceCount: 0 }).intent,
+  ).toBeUndefined();
+});
+
+test("ongoing authorization cue requires exact current grant metadata", () => {
+  const item: UserResourceAuthoritySummary = {
+    ...authority("variable_set", variableSetId),
+    grants: [],
+  };
+  const sessionId = "99999999-9999-4999-8999-999999999999";
+  const grant = {
+    grantId: "grant",
+    targetWorkspaceId: workspaceId,
+    targetSessionId: sessionId,
+    action: "variable_set.use" as const,
+    mode: "session" as const,
+    context: "workspace_shared" as const,
+    authorityEpoch: 3,
+    generation: 2,
+    status: "active" as const,
+    expiresAt: "2026-10-01T00:00:00Z",
+    delegation: {
+      authorityId: item.authorityId,
+      grantId: "grant",
+      organizationId,
+      workspaceId,
+      sessionId,
+      action: "variable_set.use",
+      mode: "session" as const,
+      context: "workspace_shared" as const,
+      authorityEpoch: 3,
+      authorityGeneration: 1,
+      grantGeneration: 2,
+    },
+  };
+  item.grants = [grant];
+  const input = {
+    authorities: [item],
+    resources: [{ kind: "variable_set" as const, id: variableSetId, name: "PR access" }],
+    organizationId,
+    workspaceId,
+    sessionId,
+    authorityEpoch: 3,
+    now: Date.parse("2026-09-07T00:00:00Z"),
+  };
+  expect(ongoingPersonalResourceNames(input)).toEqual(["PR access"]);
+  for (const mutate of [
+    (value: UserResourceAuthoritySummary) => {
+      value.status = "revoked";
+    },
+    (value: UserResourceAuthoritySummary) => {
+      value.generation = 2;
+    },
+    (value: UserResourceAuthoritySummary) => {
+      value.grants[0]!.status = "consumed";
+    },
+    (value: UserResourceAuthoritySummary) => {
+      value.grants[0]!.mode = "once";
+    },
+    (value: UserResourceAuthoritySummary) => {
+      value.grants[0]!.targetWorkspaceId = "other";
+    },
+    (value: UserResourceAuthoritySummary) => {
+      value.grants[0]!.targetSessionId = "other";
+    },
+    (value: UserResourceAuthoritySummary) => {
+      value.grants[0]!.authorityEpoch = 4;
+    },
+    (value: UserResourceAuthoritySummary) => {
+      value.grants[0]!.generation = 3;
+    },
+    (value: UserResourceAuthoritySummary) => {
+      value.grants[0]!.expiresAt = "2026-09-01T00:00:00Z";
+    },
+    (value: UserResourceAuthoritySummary) => {
+      value.grants[0]!.delegation.organizationId = "other";
+    },
+  ]) {
+    const altered = structuredClone(item);
+    mutate(altered);
+    expect(ongoingPersonalResourceNames({ ...input, authorities: [altered] })).toEqual([]);
+  }
 });

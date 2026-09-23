@@ -1,0 +1,8 @@
+body { margin:0; background:#0d1118; color:#e9eef6; font:15px/1.6 system-ui,sans-serif; }
+main { box-sizing:border-box; height:100dvh; max-width:850px; margin:0 auto; padding:24px; display:flex; flex-direction:column; }
+.conversation-panel { flex:1; min-height:0; min-width:0; }
+header { margin-bottom:32px; } header span { color:#8da8ef; font-size:11px; letter-spacing:.16em; }
+h1 { font-size:30px; line-height:1.2; letter-spacing:-.03em; } p,.status { color:#9eabc0; }
+.status { border-top:1px solid #273041; padding:16px 0; font-size:12px; }
+button { padding:12px 18px; border:0; border-radius:9px; background:#a8bdff; color:#111827; font-weight:600; cursor:pointer; }
+[role=alert] { color:#ffb4b4; white-space:pre-wrap; }

@@ -15,6 +15,18 @@ export type AgentBrainPromptModelSelection = {
 };
 
 function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
+  if (model.cost === "free") {
+    return "Free in this deployment";
+  }
+  if (model.cost === "credits") {
+    return "OpenGeni credits";
+  }
+  if (model.cost === "workspace") {
+    return "Workspace AI Gateway";
+  }
+  if (model.cost === "subscription") {
+    return model.source === "supergrok" ? "SuperGrok subscription" : "Codex subscription";
+  }
   if (model.source === "codex") {
     return "Codex subscription";
   }

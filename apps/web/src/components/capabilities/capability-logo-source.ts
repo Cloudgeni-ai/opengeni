@@ -1,4 +1,5 @@
 import type { CapabilityCatalogItem } from "@/types";
+import { capabilityLogoFallback } from "@opengeni/react/connect";
 
 /**
  * First-party connector rows are synthesized by the API rather than imported
@@ -12,8 +13,14 @@ export const FIRST_PARTY_CAPABILITY_LOGOS: Readonly<Record<string, string>> = {
 };
 
 export function capabilityLogoSource(
-  item: Pick<CapabilityCatalogItem, "id" | "logoAssetPath">,
+  item: Pick<CapabilityCatalogItem, "id" | "logoAssetPath"> &
+    Partial<Pick<CapabilityCatalogItem, "metadata">>,
   catalogAssetUrl: (path: string | null) => string | null,
 ): string | null {
-  return FIRST_PARTY_CAPABILITY_LOGOS[item.id] ?? catalogAssetUrl(item.logoAssetPath);
+  const localLogo = FIRST_PARTY_CAPABILITY_LOGOS[item.id] ?? catalogAssetUrl(item.logoAssetPath);
+  if (localLogo) return localLogo;
+
+  // Imports retain the upstream URL after applying our curated overrides,
+  // including explicit nulls that suppress a provider's logo.
+  return capabilityLogoFallback(item);
 }

@@ -22,6 +22,9 @@ export type IntegrationDefinitionSource =
       kind: "openapi";
       url: string;
       operationPathPrefixes?: readonly string[];
+      excludedOperationPathPrefixes?: readonly string[];
+      /** Expose JSON bodies without expanding the provider entity graph. */
+      schemaMode?: "provider_validated_json";
     }>;
 
 export interface IntegrationDefinition {
@@ -213,6 +216,7 @@ export const MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION: IntegrationDefinitio
   source: {
     kind: "openapi",
     url: MICROSOFT_GRAPH_OPENAPI_URL,
+    schemaMode: "provider_validated_json",
     operationPathPrefixes: [
       "/me/messages",
       "/me/mailFolders",
@@ -237,6 +241,7 @@ export const MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION: IntegrationDefin
   source: {
     kind: "openapi",
     url: MICROSOFT_GRAPH_OPENAPI_URL,
+    schemaMode: "provider_validated_json",
     operationPathPrefixes: [
       "/me/calendar",
       "/me/calendars",
@@ -297,10 +302,11 @@ export const MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION: IntegrationDefin
   source: {
     kind: "openapi",
     url: MICROSOFT_GRAPH_OPENAPI_URL,
+    schemaMode: "provider_validated_json",
     operationPathPrefixes: ["/me/contacts", "/me/contactFolders", "/me/people"],
   },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
-  authentication: microsoftOAuth(["Contacts.ReadWrite", "People.Read.All"]),
+  authentication: microsoftOAuth(["Contacts.ReadWrite", "People.Read"]),
   facets: [accountIdentityFacet("microsoft")],
 };
 
@@ -313,10 +319,13 @@ export const MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION: IntegrationDefinition = 
   source: {
     kind: "openapi",
     url: MICROSOFT_GRAPH_OPENAPI_URL,
-    operationPathPrefixes: ["/me/drive", "/me/drives", "/me/followedSites", "/drives", "/shares"],
+    schemaMode: "provider_validated_json",
+    operationPathPrefixes: ["/me/drive", "/me/drives", "/drives", "/shares"],
+    // Excel's nested workbook API is a separate surface, not file management.
+    excludedOperationPathPrefixes: ["/drives/{drive-id}/items/{driveItem-id}/workbook"],
   },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
-  authentication: microsoftOAuth(["Files.ReadWrite.All", "Sites.ReadWrite.All"]),
+  authentication: microsoftOAuth(["Files.ReadWrite.All"]),
   facets: [driveKnowledgeFacet("microsoft-onedrive"), accountIdentityFacet("microsoft")],
 };
 
@@ -350,12 +359,17 @@ export function filterOpenApiDocumentForDefinition(
     return document;
   }
   const operationPathPrefixes = definition.source.operationPathPrefixes;
+  const excludedOperationPathPrefixes = definition.source.excludedOperationPathPrefixes ?? [];
   if (!isRecord(document.paths)) {
     throw new IntegrationProtocolError("openapi_paths", "OpenAPI document has no paths object");
   }
   const paths = Object.fromEntries(
-    Object.entries(document.paths).filter(([path]) =>
-      operationPathPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`)),
+    Object.entries(document.paths).filter(
+      ([path]) =>
+        operationPathPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`)) &&
+        !excludedOperationPathPrefixes.some(
+          (prefix) => path === prefix || path.startsWith(`${prefix}/`),
+        ),
     ),
   );
   if (Object.keys(paths).length === 0) {

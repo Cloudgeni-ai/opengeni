@@ -881,6 +881,17 @@ impl Platform for NativePlatform {
         })
     }
 
+    fn transactional_fs_write_supported(&self) -> bool {
+        cfg!(target_os = "linux")
+    }
+
+    fn fs_write_begin(
+        &self,
+        req: &v1::FsWriteBegin,
+    ) -> PlatformResult<Box<dyn crate::transactional_write::TransactionalWrite>> {
+        crate::transactional_write::begin(&self.resolve_path(&req.path)?, req)
+    }
+
     async fn fs_write(&self, req: &v1::FsWriteRequest) -> PlatformResult<v1::FsWriteResponse> {
         let path = self.resolve_path(&req.path)?;
         if req.create_parents {

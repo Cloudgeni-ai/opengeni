@@ -192,7 +192,7 @@
   width: min(
     var(--og-model-picker-menu-width),
     calc(var(--og-portal-source-inline-size, 100vw) - 1rem),
-    var(--radix-dropdown-menu-content-available-width, 100vw)
+    var(--radix-popover-content-available-width, 100vw)
   );
   max-width: calc(100vw - 1rem);
 }

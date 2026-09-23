@@ -4,8 +4,8 @@ export const WORKSPACE_LEARNING_POLICY_MAX_SOURCE_OVERRIDES = 256;
 export const WORKSPACE_LEARNING_POLICY_SOURCE_KIND_MAX_CHARS = 96;
 export const WORKSPACE_LEARNING_POLICY_SOURCE_ID_MAX_CHARS = 1_024;
 export const WORKSPACE_LEARNING_POLICY_REASON_MAX_CHARS = 4_096;
-export const WORKSPACE_LEARNING_POLICY_DEFAULT_OFF_REVISION_ID =
-  "workspace-learning-policy:default-off:v1";
+export const WORKSPACE_LEARNING_POLICY_DEFAULT_SUGGEST_REVISION_ID =
+  "workspace-learning-policy:default-suggest:v1";
 
 export const WorkspaceLearningMode = z.enum(["off", "suggest", "automatic"]);
 export type WorkspaceLearningMode = z.infer<typeof WorkspaceLearningMode>;
@@ -220,7 +220,8 @@ export function resolveWorkspaceLearningPolicyEffectiveMode(
     policyRevision: parsedSnapshot.revision,
     activationVersion: parsedSnapshot.activationVersion,
     snapshotId: parsedSnapshot.id,
-    revisionId: parsedSnapshot.revision?.id ?? WORKSPACE_LEARNING_POLICY_DEFAULT_OFF_REVISION_ID,
+    revisionId:
+      parsedSnapshot.revision?.id ?? WORKSPACE_LEARNING_POLICY_DEFAULT_SUGGEST_REVISION_ID,
     snapshotHash: parsedSnapshot.snapshotHash,
   });
 }

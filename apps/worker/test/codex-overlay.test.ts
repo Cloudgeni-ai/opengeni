@@ -32,7 +32,7 @@ describe("withCodexProvider", () => {
     expect(codex?.api).toBe("responses");
     expect(codex?.baseUrl).toBe("https://chatgpt.com/backend-api");
     expect(codex?.models.every((m) => m.id.startsWith("codex/"))).toBe(true);
-    expect(codex?.models.some((m) => m.id === "codex/gpt-5.6-sol")).toBe(true);
+    expect(codex?.models.some((m) => m.id === "codex/gpt-6-sol")).toBe(true);
     expect(codex?.models.every((m) => m.upstreamModelId === m.id.slice("codex/".length))).toBe(
       true,
     );
@@ -51,7 +51,7 @@ describe("withCodexProvider", () => {
 
   test("builds the bounded native web-search manifest only when the turn policy allows it", () => {
     const settings = withCodexProvider(testSettings({ modelProvidersJson: "[]" }));
-    const resolved = resolveModelProvider(settings, "codex/gpt-5.6-sol")!;
+    const resolved = resolveModelProvider(settings, "codex/gpt-6-sol")!;
     const webSearchTools = (allowed: boolean) => {
       const agent = buildOpenGeniAgent(settings, [], {
         model: resolved.model.upstreamModelId,
@@ -83,15 +83,15 @@ describe("withCodexProvider", () => {
       codex?.models.every((m) => m.contextWindowTokens === CODEX_MODEL_CONTEXT_WINDOW_TOKENS),
     ).toBe(true);
     // It flows through to the resolved model catalog.
-    const sol = configuredModels(settings).find((m) => m.id === "codex/gpt-5.6-sol");
-    expect(sol?.id).toBe("codex/gpt-5.6-sol");
-    expect(sol?.upstreamModelId).toBe("gpt-5.6-sol");
+    const sol = configuredModels(settings).find((m) => m.id === "codex/gpt-6-sol");
+    expect(sol?.id).toBe("codex/gpt-6-sol");
+    expect(sol?.upstreamModelId).toBe("gpt-6-sol");
     expect(sol?.contextWindowTokens).toBe(CODEX_MODEL_CONTEXT_WINDOW_TOKENS);
     expect(sol?.effectiveContextWindowTokens).toBe(CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS);
     expect(sol?.autoCompactTokenLimit).toBe(CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT);
 
-    const resolved = resolveModelProvider(settings, "codex/gpt-5.6-sol")!;
-    expect(resolved.model.upstreamModelId).toBe("gpt-5.6-sol");
+    const resolved = resolveModelProvider(settings, "codex/gpt-6-sol")!;
+    expect(resolved.model.upstreamModelId).toBe("gpt-6-sol");
     const turnSettings = settingsWithResolvedModelContext(settings, resolved.model);
     expect(contextInputBudgetTokens(turnSettings)).toBe(258_400);
     const trigger = compactionThresholdTokens(turnSettings);

@@ -6,7 +6,10 @@ import {
   assertPersonalMachineForAttempt,
   type SandboxRecord,
 } from "@opengeni/db";
-import { sandboxOperationMetricObserver } from "@opengeni/observability";
+import {
+  sandboxOperationMetricObserver,
+  sandboxCaptureWaitMetricObserver,
+} from "@opengeni/observability";
 import {
   withRunCredentialsSession,
   runOwnedSandboxSetup,
@@ -29,7 +32,7 @@ import {
   type MintedRunGitCredentials,
   type SandboxCodemodeAuthority,
 } from "../environment";
-import { rigProviderImageSourceImage } from "../packs";
+import { rigProviderImageSourceImage } from "../sandbox-images";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import type { currentActivityContext } from "../streaming";
 import { resumeBoxForTurn, type ResumedTurnSandbox } from "../../sandbox-resume";
@@ -444,6 +447,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
             bus,
             onOp: machineOpObserver.observer,
             onSandboxOperation: sandboxOperationObserver,
+            onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
             opJournal,
           },
           {
@@ -475,6 +479,8 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               liveMachineEnrollment?.agentCapabilities.operationResourcePolicy === true,
             operationCpuQuotaSupported:
               liveMachineEnrollment?.agentCapabilities.operationCpuQuota === true,
+            transactionalFsWriteSupported:
+              liveMachineEnrollment?.agentCapabilities.transactionalFsWrite === true,
             ...(activeSandboxRecord!.scope === "user" && fileAuthoritySubjectId
               ? {
                   personalMachineAttempt: {
@@ -513,6 +519,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               opJournal,
               onOp: machineOpObserver.observer,
               onSandboxOperation: sandboxOperationObserver,
+              onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
               onHomeSandboxRebound,
               ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
             },
@@ -753,6 +760,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               bus,
               opJournal,
               onSandboxOperation: sandboxOperationObserver,
+              onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
               onHomeSandboxLost: publishSandboxLost,
               onHomeSandboxRebound,
               ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
@@ -1002,6 +1010,7 @@ export async function bindLazySandboxProvisioner(
                 {
                   settings: runSettings,
                   environment: sandboxEnvironment,
+                  recordLazyManifest: true,
                   onRuntimeEvent: async (event) => {
                     await eventing.publish?.([{ type: event.type, payload: event.payload }], true);
                   },
@@ -1120,6 +1129,7 @@ export async function bindLazySandboxProvisioner(
         opJournal,
         onOp: machineOpObserver.observer,
         onSandboxOperation: sandboxOperationObserver,
+        onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
         onHomeSandboxLost: publishSandboxLost,
         onHomeSandboxRebound,
         ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),

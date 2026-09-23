@@ -348,7 +348,7 @@ describe("established-session composer drafts", () => {
       model: saved.model,
       reasoningEffort: saved.reasoningEffort,
       latencyMode: saved.latencyMode,
-      connectionAuthorities: [],
+      connectionAccounts: [],
     };
     const deps = {
       settings: testSettings({ sandboxBackend: "none" }),

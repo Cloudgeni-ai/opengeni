@@ -3,7 +3,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 
 import {
   createDb,
-  createPreferenceRegistryProposal,
+  applySkillLifecycle,
   listCompanyBrainPreferenceGuidance,
   type DbClient,
 } from "../src";
@@ -16,29 +16,37 @@ let workspaceId: string;
 const subjectA = "company-brain-subject-a";
 const subjectB = "company-brain-subject-b";
 
+function guidanceContent(stableKey: string, body: string) {
+  return `---\nname: ${stableKey}\ndescription: ${stableKey} description\n---\n${body}`;
+}
+
 async function createProposal(input: {
   actorSubjectId: string;
   stableKey: string;
   scope: "organization" | "workspace" | "user";
   content: string;
 }) {
-  return await createPreferenceRegistryProposal(client!.db, {
-    accountId,
-    workspaceId,
-    actorSubjectId: input.actorSubjectId,
-    principalKind: "human_session",
-    scope: input.scope,
-    stableKey: input.stableKey,
-    title: input.stableKey,
-    description: `${input.stableKey} description`,
-    content: input.content,
-    precedenceRank: 0,
-    conflictStrategy: "override",
-    conflictsWith: [],
-    provenanceSource: "human",
-    provenanceSourceId: null,
-    expiresAt: null,
-  });
+  return await applySkillLifecycle(
+    client!.db,
+    {
+      accountId,
+      workspaceId,
+      actor: { kind: "human", subjectId: input.actorSubjectId, principalKind: "human_session" },
+    },
+    {
+      operation: "save",
+      operationId: crypto.randomUUID(),
+      skillId: crypto.randomUUID(),
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+      scope: input.scope,
+      stableKey: input.stableKey,
+      title: input.stableKey,
+      description: `${input.stableKey} description`,
+      files: [{ path: "SKILL.md", content: guidanceContent(input.stableKey, input.content) }],
+      reason: "Canonical scoped guidance fixture",
+    },
+  );
 }
 
 beforeAll(async () => {
@@ -120,14 +128,14 @@ describe("Company Brain preference guidance (real PostgreSQL + FORCE RLS)", () =
     const contentB = forB.rows.map((row) => row.content).sort();
 
     expect(contentA).toEqual([
-      "ORGANIZATION_GUIDE_BODY",
-      "SUBJECT_A_PRIVATE_BODY",
-      "WORKSPACE_GUIDE_BODY",
+      guidanceContent("organization-guide", "ORGANIZATION_GUIDE_BODY"),
+      guidanceContent("personal-guide-a", "SUBJECT_A_PRIVATE_BODY"),
+      guidanceContent("workspace-guide", "WORKSPACE_GUIDE_BODY"),
     ]);
     expect(contentB).toEqual([
-      "ORGANIZATION_GUIDE_BODY",
-      "SUBJECT_B_PRIVATE_BODY",
-      "WORKSPACE_GUIDE_BODY",
+      guidanceContent("organization-guide", "ORGANIZATION_GUIDE_BODY"),
+      guidanceContent("personal-guide-b", "SUBJECT_B_PRIVATE_BODY"),
+      guidanceContent("workspace-guide", "WORKSPACE_GUIDE_BODY"),
     ]);
     expect(JSON.stringify(forA)).not.toContain("SUBJECT_B_PRIVATE_BODY");
     expect(JSON.stringify(forB)).not.toContain("SUBJECT_A_PRIVATE_BODY");

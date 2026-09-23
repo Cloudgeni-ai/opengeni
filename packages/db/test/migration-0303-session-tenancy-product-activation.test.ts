@@ -296,6 +296,12 @@ describe("migration 0303 session tenancy product activation", () => {
         runtimeExecutable: true,
       },
       {
+        name: "fork_session_content",
+        argumentCount: 11,
+        defaultCount: 0,
+        runtimeExecutable: true,
+      },
+      {
         name: "replay_applied_session_fork",
         argumentCount: 10,
         defaultCount: 0,

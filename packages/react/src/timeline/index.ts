@@ -41,6 +41,7 @@ export type {
   MachineInputBatchItem,
   MachineInputMember,
   MemoryItem,
+  KnowledgeItem,
   NoticeItem,
   ReasoningItem,
   SandboxItem,
@@ -139,3 +140,6 @@ export {
   v4aToGitFileDiff,
 } from "./parsers";
 export type { ApplyPatchOperation } from "./parsers";
+
+export { KnowledgeActivityProvider } from "./knowledge-receipt";
+export type { KnowledgeActivityActions } from "./knowledge-receipt";

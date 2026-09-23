@@ -1,5 +1,27 @@
 import type { Session } from "@/types";
 
+function archiveTimestampOrder(timestamp: string | null | undefined) {
+  const milliseconds = timestamp ? Date.parse(timestamp) : 0;
+  const fraction = timestamp?.match(/\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/)?.[1] ?? "";
+  return {
+    milliseconds: Number.isFinite(milliseconds) ? milliseconds : 0,
+    // Date.parse retains the first three digits; PostgreSQL retains six.
+    microseconds: Number(fraction.padEnd(6, "0").slice(3, 6)),
+    precision: Math.min(6, fraction.length),
+  };
+}
+
+/** Archive order is personal filing time, never activity or running status. */
+export function compareSessionArchiveOrder(a: Session, b: Session): number {
+  const timeA = archiveTimestampOrder(a.archivedAt);
+  const timeB = archiveTimestampOrder(b.archivedAt);
+  return (
+    timeB.milliseconds - timeA.milliseconds ||
+    timeB.microseconds - timeA.microseconds ||
+    b.id.localeCompare(a.id)
+  );
+}
+
 export type SessionPageIdentity = {
   key: string;
   generation: number;
@@ -15,7 +37,7 @@ export type SessionContinuationState = {
   /** Shared causal generation captured when that snapshot's page-one read started. */
   snapshotGeneration: number;
   /** Root-hook snapshots and direct cursor-rebase snapshots have independent identities. */
-  source: "root" | "rebase";
+  source: "root" | "rebase" | "group";
   /** Rows fetched from that snapshot, excluding display-only rows retained from older snapshots. */
   authoritativeIds: ReadonlySet<string>;
   /** Actual request-start generation for each accepted continuation row's live channel fields. */
@@ -26,6 +48,96 @@ export type SessionContinuationChannelEvidence = readonly [
   session: Session,
   readGeneration: number,
 ];
+
+/**
+ * Apply the exact archive mutation fields without allowing its full response
+ * object to overwrite unrelated list projections that may have advanced while
+ * the request was in flight.
+ */
+export function applySessionArchiveProjection(current: Session, updated: Session): Session {
+  if ((current.archiveVersion ?? 0) > (updated.archiveVersion ?? 0)) return current;
+  const currentTime = archiveTimestampOrder(current.archivedAt);
+  const updatedTime = archiveTimestampOrder(updated.archivedAt);
+  // List pages retain exact SQL timestamps; an idempotent mutation receipt may
+  // still hydrate through Date. The same archive revision cannot change time.
+  const preserveExactTimestamp =
+    current.archived &&
+    updated.archived &&
+    (current.archiveVersion ?? 0) === (updated.archiveVersion ?? 0) &&
+    currentTime.milliseconds === updatedTime.milliseconds &&
+    currentTime.precision > updatedTime.precision;
+  return {
+    ...current,
+    archived: updated.archived,
+    archivedAt: preserveExactTimestamp ? current.archivedAt : updated.archivedAt,
+    archiveVersion: updated.archiveVersion,
+    ...((current.pinVersion ?? 0) <= (updated.pinVersion ?? 0)
+      ? {
+          pinned: updated.pinned,
+          pinnedAt: updated.pinnedAt,
+          pinVersion: updated.pinVersion,
+        }
+      : {}),
+    ...((current.attentionVersion ?? 0) <= (updated.attentionVersion ?? 0)
+      ? {
+          activelyWorking: updated.activelyWorking,
+          attentionVersion: updated.attentionVersion,
+        }
+      : {}),
+  };
+}
+
+/** Keep archive/restore writes authoritative over causally older retained pages. */
+export function projectSessionArchiveMembership(
+  sessions: readonly Session[],
+  overrides: ReadonlyMap<string, Session>,
+  archived: boolean | "all",
+  workspaceId: string,
+  options: {
+    flat?: boolean;
+    /** Local receipt completion fences, on the same clock as list request starts. */
+    completedGenerations?: ReadonlyMap<string, number>;
+    rowReadGenerations?: ReadonlyMap<string, number>;
+  } = {},
+): Session[] {
+  const rows = new Map(sessions.map((session) => [session.id, session]));
+  const resultIds = new Set(rows.keys());
+  for (const [id, override] of overrides) {
+    if (override.workspaceId !== workspaceId) continue;
+    const current = rows.get(id);
+    rows.set(id, current ? applySessionArchiveProjection(current, override) : override);
+  }
+  return [...rows.values()].flatMap((session) => {
+    // Search membership is server-owned. Root evidence may remove a match,
+    // but must never inject a root (or another row) that did not match the query.
+    if (options.flat && !resultIds.has(session.id)) return [];
+    // A cached descendant follows its root instead of becoming an orphan row.
+    const root = rows.get(session.rootSessionId ?? session.id);
+    const completion = root && options.completedGenerations?.get(root.id);
+    // A successful write is historical evidence, not a permanent membership
+    // lock. A later-started accepted filtered read proves membership for this
+    // child only. Keep the receipt for other, older cached rows; never hydrate
+    // or inject a nonmatching root. Response arrival time proves nothing.
+    if (
+      options.flat &&
+      archived !== "all" &&
+      root &&
+      !resultIds.has(root.id) &&
+      completion !== undefined &&
+      (options.rowReadGenerations?.get(session.id) ?? 0) > completion
+    )
+      return [session];
+    // A flat child-only page has already passed the server's root archive
+    // filter. The child's own personal flag is not its tree's membership.
+    if (options.flat && !root) return [session];
+    if (archived !== "all" && Boolean(root?.archived ?? session.archived) !== archived) return [];
+    return [
+      root && root.id !== session.id
+        ? { ...session, archived: root.archived, archivedAt: root.archivedAt }
+        : session,
+    ];
+  });
+}
 
 export function sessionPageKey(workspaceId: string, search: string): string {
   return `${workspaceId}\u0000${search}`;
@@ -72,7 +184,7 @@ export function mergeSessionContinuation(
   page: { sessions: Session[]; nextCursor: string | null },
   snapshotRevision: number,
   snapshotGeneration = 0,
-  source: "root" | "rebase" = "root",
+  source: "root" | "rebase" | "group" = "root",
   pageReadGeneration = snapshotGeneration,
 ): SessionContinuationState {
   if (requestGeneration !== activeGeneration) {
@@ -211,7 +323,7 @@ export function rebaseSessionContinuation(
   page: { sessions: Session[]; nextCursor: string | null },
   snapshotRevision: number,
   snapshotGeneration = 0,
-  source: "root" | "rebase" = "root",
+  source: "root" | "rebase" | "group" = "root",
 ): SessionContinuationState {
   if (requestGeneration !== activeGeneration) return state;
   const active = activeSessionContinuation(state, activeGeneration);

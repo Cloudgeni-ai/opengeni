@@ -10,7 +10,18 @@ live object the user sees in the Artifacts dock and full editor. Never create a
 mutable DOCX shadow, publish a sandbox file, or alternate between file and
 artifact state.
 
+This also applies when a report is a secondary output of another task, such as
+a Knowledge cleanup audit. Declare the report through the available goal tools
+before authoring; if the task has no goal and goal tools are available, create
+one with the report requirement. If a goal already exists, append the report
+requirement without replacing the standing objective. Ordinary chat answers,
+brief progress updates, internal worker findings, code navigation and explicitly requested local-file
+work are not report deliverables.
+
 Read [references/api.md](references/api.md) before editing.
+When using `skill_read`, request that relative path from this Skill; reading
+does not materialize a local folder. Use an existing local copy only when the
+Skill was installed or explicitly checked out to the filesystem.
 
 ## Choose the canonical object
 
@@ -60,8 +71,19 @@ Read [references/api.md](references/api.md) before editing.
 
 ## Completion gate
 
+- Every declared report requirement has server-verified artifact delivery
+  evidence at goal completion. Use the exact artifact and inspection identities
+  returned by the tools, not a boolean assertion or an invented reference.
 - The requested result exists in the durable artifact, not merely a local file.
 - Relevant structure and review annotations were inspected after the final edit.
+- Report completion needs a final `body` inspection receipt; `summary` alone
+  does not qualify. Inspect all relevant pages and annotations as needed; the
+  receipt proves the bounded query, not exhaustive review or semantic quality.
 - Any requested export completed and its `fileId`, format, and pinned source
   head were reported.
 - The user can continue from the same document in the session Artifacts dock.
+- Include the returned artifact reference in the handoff. A sandbox path, raw
+  file ID, or separately published Markdown/DOCX file does not replace the native
+  document. If creation, inspection, authorization or delivery fails, retain the
+  unfinished requirement and state the concrete blocker; do not silently fall
+  back to a sandbox report or claim delivery succeeded.

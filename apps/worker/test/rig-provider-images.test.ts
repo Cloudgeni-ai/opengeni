@@ -17,8 +17,9 @@ import {
   resolveRigProviderImageSelection,
   rigProviderImageSourceImage,
   settingsWithRigProviderImage,
-} from "../src/activities/packs";
+} from "../src/activities/sandbox-images";
 import {
+  rigPlatformChecksForSettings,
   rigProviderImageContentMarkerCommand,
   settingsForRigVerification,
   verifyRigProviderImageColdBoot,
@@ -60,6 +61,23 @@ function version(overrides: Partial<RigVersion> = {}): RigVersion {
     ...overrides,
   };
 }
+
+describe("rig platform verification contracts", () => {
+  test("uses a valid ephemeral browser token and the desktop launcher's actual noVNC path", () => {
+    const checks = rigPlatformChecksForSettings(
+      platformSettings({ sandboxTerminalEnabled: true, sandboxDesktopEnabled: true }),
+    );
+    const browser = checks.find((check) => check.name === "opengeni-platform-browser");
+    const desktop = checks.find((check) => check.name === "opengeni-platform-computer-desktop");
+
+    expect(browser?.command).toContain("od -An -N32 -tx1 /dev/urandom");
+    expect(browser?.command).toContain('test "${#__og_browser_token_value}" -eq 64');
+    expect(browser?.command).toContain("Authorization: Bearer $__og_browser_token_value");
+    expect(browser?.command).not.toContain("Bearer rig-platform-check");
+    expect(desktop?.command).toContain("test -x /opt/noVNC/utils/novnc_proxy");
+    expect(desktop?.command).not.toContain("command -v websockify");
+  });
+});
 
 function readyImage(settings: Settings, definition: RigVersion): RigProviderImage {
   const sourceImage = rigProviderImageSourceImage(settings, "modal");
@@ -393,19 +411,13 @@ describe("build-once rig provider image runtime", () => {
       modalImageRef: "deployment:latest",
       modalImageId: "im-deployment",
     });
-    const packRuntime = {
-      sandboxImage: "pack:stable",
-      sandboxProviderImages: { modal: { imageId: "im-pack" } },
-      skills: [],
-    };
-
-    const verification = settingsForRigVerification(deployment, packRuntime, null);
+    const verification = settingsForRigVerification(deployment, null);
     expect(verification).toBe(deployment);
     expect(verification.modalImageRef).toBe("deployment:latest");
     expect(verification.modalImageId).toBe("im-deployment");
     expect(rigProviderImageSourceImage(verification, "modal")).toBe("im-deployment");
 
-    const rigOverride = settingsForRigVerification(deployment, packRuntime, "rig:pinned");
+    const rigOverride = settingsForRigVerification(deployment, "rig:pinned");
     expect(rigOverride).toBe(deployment);
   });
 });

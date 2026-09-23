@@ -1,3 +1,23 @@
+export { sessionAuthRecommendation } from "./session-auth-recommendation";
+export {
+  SessionConnectionRequest,
+  type SessionConnectionRequestProps,
+} from "./components/session-connection-request";
+export {
+  SessionMcpCapabilityCard,
+  McpConnectionCard,
+  type McpConnectionCardProps,
+  type SessionMcpCapabilityCardProps,
+} from "./components/session-mcp-capability-card";
+export {
+  SessionCapabilityFrame,
+  type SessionCapabilityFrameProps,
+} from "./components/session-capability-frame";
+export {
+  attachSessionCapability,
+  completeSessionCapabilityOAuth,
+} from "./session-capability-policy";
+export { retainedImageId } from "./components/markdown";
 // oxlint-disable-next-line typescript/triple-slash-reference -- package consumers must load the ambient type for this optional untyped peer without emitting a runtime import.
 /// <reference path="./types/external.d.ts" />
 
@@ -48,7 +68,6 @@ export {
   SESSION_EVENT_BROWSER_MAX_COUNT,
   SESSION_EVENT_BROWSER_PENDING_MAX_BYTES,
   SESSION_EVENT_BROWSER_PENDING_MAX_COUNT,
-  SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES,
   boundBrowserSessionEventWindow,
   useSessionEvents,
 } from "./hooks/use-session-events";
@@ -217,8 +236,6 @@ export type {
   UseRigChangesOptions,
   UseRigChangesResult,
 } from "./hooks/use-rigs";
-export { usePacks } from "./hooks/use-packs";
-export type { UsePacksOptions, UsePacksResult } from "./hooks/use-packs";
 export { useWorkspaces } from "./hooks/use-workspaces";
 export type { UseWorkspacesOptions, UseWorkspacesResult } from "./hooks/use-workspaces";
 export { useBillingUsage } from "./hooks/use-billing-usage";
@@ -462,6 +479,9 @@ export type { CommandPaletteProps } from "./components/command-palette";
 
 // Components
 export { ChatComposer } from "./components/chat-composer";
+export { conversationTimeline } from "./conversation-timeline";
+export { SessionConversation } from "./components/session-conversation";
+export type { SessionConversationProps } from "./components/session-conversation";
 export type { ChatComposerProps } from "./components/chat-composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
 export type {
@@ -475,15 +495,16 @@ export type { ModelPickerProps } from "./components/model-picker";
 export {
   BillingClassMark,
   ModelPolicyPicker,
-  ModelPolicyPickerMenu,
   PickerAnimatedPage,
   PickerBackHeader,
   PickerNavRow,
   defaultModelPolicyPickerMessages,
 } from "./components/model-policy-picker";
+export { ModelPolicyPickerMenu } from "./components/model-policy-picker-menu";
 export type {
   ModelPolicyPickerMessages,
   ModelPolicyPickerProps,
+  ModelPolicyPickerGroupPresentation,
 } from "./components/model-policy-picker";
 export {
   advancedSourceSummary,
@@ -498,6 +519,7 @@ export {
   labelLatencyMode,
   labelReasoningEffort,
   payerSummaryForModel,
+  modelUsesCredits,
   projectClientModelRows,
   projectPickerRows,
   runnableLatencyModesForModel,
@@ -508,14 +530,22 @@ export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export { GeneratedVideoPlayer } from "./components/generated-video-player";
 export type { GeneratedVideoPlayerProps } from "./components/generated-video-player";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export type { TimelineSearchTarget } from "./components/timeline-search";
 export { UserMessageBody, userMessageLikelyNeedsDisclosure } from "./components/user-message-body";
-export type { UserMessageBodyProps } from "./components/user-message-body";
+export type {
+  UserMessageBodyProps,
+  UserMessageDisclosureLabels,
+} from "./components/user-message-body";
 export {
   Markdown,
   sandboxFileLocationFromHref,
   sandboxFilePathFromHref,
 } from "./components/markdown";
-export type { MarkdownProps, SandboxFileLocation } from "./components/markdown";
+export type {
+  MarkdownProps,
+  MarkdownInteractiveBlock,
+  SandboxFileLocation,
+} from "./components/markdown";
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
@@ -600,8 +630,17 @@ export {
   formatClockTime,
   formatRelativeTime,
   humanizeFailureReason,
+  presentFailure,
   isCreditExhaustion,
   stringifyPayload,
   truncate,
   tryParseJson,
 } from "./lib/format";
+export { SessionCommandsPanel } from "./components/session-commands-panel";
+export { SessionCommands } from "./components/session-commands";
+
+export { KnowledgeActivityProvider } from "./timeline/knowledge-receipt";
+export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";
+
+export { StartupTimings } from "./timeline/startup-timings";
+export { setStartupDetails, useStartupDetails } from "./timeline/startup-preference";

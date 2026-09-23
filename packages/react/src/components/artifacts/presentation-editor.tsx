@@ -44,6 +44,9 @@ const MAX_ZOOM = 4;
 const RAIL_ITEM_HEIGHT = 116;
 const RAIL_OVERSCAN = 3;
 const DEFAULT_RAIL_HEIGHT = 640;
+const MOBILE_RAIL_ITEM_HEIGHT = 44;
+const MOBILE_RAIL_OVERSCAN = 3;
+const DEFAULT_MOBILE_LIST_HEIGHT = 264;
 const DEFAULT_VIEWPORT = { width: 960, height: 640 };
 const SPATIAL_TILE = 256;
 const MAX_SPATIAL_BUCKETS_PER_OBJECT = 1_024;
@@ -450,6 +453,15 @@ export function PresentationProjectionEditor({
   );
 }
 
+function nextSlideIndexFromKey(key: string, activeIndex: number, length: number): number | null {
+  if (length === 0) return null;
+  if (key === "ArrowDown") return Math.min(length - 1, activeIndex + 1);
+  if (key === "ArrowUp") return Math.max(0, activeIndex - 1);
+  if (key === "Home") return 0;
+  if (key === "End") return length - 1;
+  return null;
+}
+
 function PresentationEditorCore({
   presentation,
   revision,
@@ -492,6 +504,11 @@ function PresentationEditorCore({
     scrollTop: 0,
     height: DEFAULT_RAIL_HEIGHT,
   });
+  const [mobileSelectorOpen, setMobileSelectorOpen] = useState(false);
+  const [mobileRail, setMobileRail] = useState({
+    scrollTop: 0,
+    height: DEFAULT_MOBILE_LIST_HEIGHT,
+  });
   const [viewport, setViewport] = useState<ViewportMetrics>({
     scrollLeft: 0,
     scrollTop: 0,
@@ -504,6 +521,9 @@ function PresentationEditorCore({
   const [textDraft, setTextDraft] = useState("");
   const [paintEpoch, setPaintEpoch] = useState(0);
   const railRef = useRef<HTMLDivElement>(null);
+  const mobileSelectorTriggerRef = useRef<HTMLButtonElement>(null);
+  const mobileSelectorPanelRef = useRef<HTMLDivElement>(null);
+  const mobileRailRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -517,6 +537,7 @@ function PresentationEditorCore({
   const commandVersionsRef = useRef(new Map<string, number>());
   const pendingSlideIdRef = useRef<string | null>(null);
   const pendingObjectIdRef = useRef<string | null>(null);
+  const mobileRailScrollOnOpenRef = useRef(0);
   const domId = useId().replaceAll(":", "");
   const selectionProxyId = `${domId}-presentation-selection`;
   const instructionsId = `${domId}-presentation-instructions`;
@@ -595,6 +616,47 @@ function PresentationEditorCore({
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
+
+  useLayoutEffect(() => {
+    if (!mobileSelectorOpen) return;
+    const element = mobileRailRef.current;
+    if (!element) return;
+    element.scrollTop = mobileRailScrollOnOpenRef.current;
+    element.focus();
+    const measure = () =>
+      setMobileRail((current) => ({
+        scrollTop: element.scrollTop,
+        height: element.clientHeight || current.height,
+      }));
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [mobileSelectorOpen]);
+
+  useEffect(() => {
+    if (!mobileSelectorOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (mobileSelectorTriggerRef.current?.contains(target)) return;
+      if (mobileSelectorPanelRef.current?.contains(target)) return;
+      setMobileSelectorOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setMobileSelectorOpen(false);
+      mobileSelectorTriggerRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [mobileSelectorOpen]);
 
   useLayoutEffect(() => {
     const element = viewportRef.current;
@@ -1058,6 +1120,34 @@ function PresentationEditorCore({
     [activeIndex, activeSlide, selectSlide, slides],
   );
 
+  const toggleMobileSlideSelector = useCallback(() => {
+    setMobileSelectorOpen((open) => {
+      if (open) return false;
+      const index = Math.max(0, activeIndex);
+      const height = DEFAULT_MOBILE_LIST_HEIGHT;
+      const maxScroll = Math.max(0, slides.length * MOBILE_RAIL_ITEM_HEIGHT - height);
+      const scrollTop = Math.max(
+        0,
+        Math.min(
+          maxScroll,
+          index * MOBILE_RAIL_ITEM_HEIGHT - height / 2 + MOBILE_RAIL_ITEM_HEIGHT / 2,
+        ),
+      );
+      mobileRailScrollOnOpenRef.current = scrollTop;
+      setMobileRail({ scrollTop, height });
+      return true;
+    });
+  }, [activeIndex, slides.length]);
+
+  const chooseMobileSlide = useCallback(
+    (slide: Slide, index: number) => {
+      if (slide !== activeSlide) selectSlide(slide, index);
+      setMobileSelectorOpen(false);
+      mobileSelectorTriggerRef.current?.focus();
+    },
+    [activeSlide, selectSlide],
+  );
+
   const handleCanvasKeyDown = useCallback(
     (event: ReactKeyboardEvent<SVGSVGElement>) => {
       if (event.metaKey || event.ctrlKey) {
@@ -1229,6 +1319,17 @@ function PresentationEditorCore({
     slides.length,
     Math.ceil((rail.scrollTop + rail.height) / RAIL_ITEM_HEIGHT) + RAIL_OVERSCAN,
   );
+  const mobileRailStart = Math.max(
+    0,
+    Math.floor(mobileRail.scrollTop / MOBILE_RAIL_ITEM_HEIGHT) - MOBILE_RAIL_OVERSCAN,
+  );
+  const mobileRailEnd = Math.min(
+    slides.length,
+    Math.ceil((mobileRail.scrollTop + mobileRail.height) / MOBILE_RAIL_ITEM_HEIGHT) +
+      MOBILE_RAIL_OVERSCAN,
+  );
+  const slideCountLabel =
+    activeIndex >= 0 ? `${activeIndex + 1} / ${slides.length}` : `0 / ${slides.length}`;
   const stageWidth = presentation.slideSize.width * zoom;
   const stageHeight = presentation.slideSize.height * zoom;
 
@@ -1256,8 +1357,22 @@ function PresentationEditorCore({
           >
             <ChevronLeftIcon />
           </button>
-          <span className="min-w-16 shrink-0 text-center text-og-xs tabular-nums text-og-fg-muted">
-            {activeIndex >= 0 ? `${activeIndex + 1} / ${slides.length}` : `0 / ${slides.length}`}
+          <button
+            ref={mobileSelectorTriggerRef}
+            type="button"
+            aria-label="Choose slide"
+            aria-haspopup="listbox"
+            aria-expanded={mobileSelectorOpen}
+            aria-controls={mobileSelectorOpen ? `${domId}-mobile-slides` : undefined}
+            disabled={slides.length === 0}
+            data-og-mobile-slide-selector
+            onClick={toggleMobileSlideSelector}
+            className="inline-flex min-h-11 min-w-16 shrink-0 items-center justify-center rounded-og-sm px-2 text-og-xs tabular-nums text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg disabled:opacity-35 sm:hidden"
+          >
+            <span>{slideCountLabel}</span>
+          </button>
+          <span className="hidden min-w-16 shrink-0 text-center text-og-xs tabular-nums text-og-fg-muted sm:inline">
+            {slideCountLabel}
           </span>
           <button
             type="button"
@@ -1364,7 +1479,7 @@ function PresentationEditorCore({
         {commandFailure?.message ?? (pendingCommands > 0 ? "Saving presentation changes" : "")}
       </div>
 
-      <div className="flex min-h-0 min-w-0 flex-1">
+      <div className="relative flex min-h-0 min-w-0 flex-1">
         <div
           ref={railRef}
           role="listbox"
@@ -1389,12 +1504,7 @@ function PresentationEditorCore({
             }));
           }}
           onKeyDown={(event) => {
-            if (slides.length === 0) return;
-            let nextIndex: number | null = null;
-            if (event.key === "ArrowDown") nextIndex = Math.min(slides.length - 1, activeIndex + 1);
-            else if (event.key === "ArrowUp") nextIndex = Math.max(0, activeIndex - 1);
-            else if (event.key === "Home") nextIndex = 0;
-            else if (event.key === "End") nextIndex = slides.length - 1;
+            const nextIndex = nextSlideIndexFromKey(event.key, activeIndex, slides.length);
             if (nextIndex === null) return;
             event.preventDefault();
             const next = slides[nextIndex];
@@ -1446,6 +1556,101 @@ function PresentationEditorCore({
             })}
           </div>
         </div>
+
+        {mobileSelectorOpen ? (
+          <div
+            ref={mobileSelectorPanelRef}
+            className="absolute left-2 top-2 z-40 max-w-56 overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 shadow-og-md sm:hidden"
+            style={{ width: "calc(100% - 1rem)" }}
+          >
+            <div
+              ref={mobileRailRef}
+              id={`${domId}-mobile-slides`}
+              role="listbox"
+              tabIndex={0}
+              aria-label="Slides"
+              aria-orientation="vertical"
+              aria-activedescendant={
+                activeSlide && activeIndex >= mobileRailStart && activeIndex < mobileRailEnd
+                  ? `${domId}-mobile-slide-${safeDomId(activeSlide.id)}`
+                  : undefined
+              }
+              className="max-h-72 overflow-y-auto outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
+              data-og-mobile-slide-list
+              data-og-window-start={mobileRailStart}
+              data-og-window-end={mobileRailEnd}
+              onScroll={(event) => {
+                const scrollTop = event.currentTarget.scrollTop;
+                const height = event.currentTarget.clientHeight;
+                setMobileRail((current) => ({
+                  scrollTop,
+                  height: height || current.height,
+                }));
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setMobileSelectorOpen(false);
+                  mobileSelectorTriggerRef.current?.focus();
+                  return;
+                }
+                const nextIndex = nextSlideIndexFromKey(event.key, activeIndex, slides.length);
+                if (nextIndex === null) return;
+                event.preventDefault();
+                const next = slides[nextIndex];
+                if (!next) return;
+                if (next !== activeSlide) selectSlide(next, nextIndex);
+                const list = event.currentTarget;
+                const top = nextIndex * MOBILE_RAIL_ITEM_HEIGHT;
+                const bottom = top + MOBILE_RAIL_ITEM_HEIGHT;
+                if (top < list.scrollTop) list.scrollTop = top;
+                else if (bottom > list.scrollTop + list.clientHeight) {
+                  list.scrollTop = bottom - list.clientHeight;
+                }
+              }}
+            >
+              <div
+                className="relative w-full"
+                style={{ height: slides.length * MOBILE_RAIL_ITEM_HEIGHT }}
+              >
+                {slides.slice(mobileRailStart, mobileRailEnd).map((slide, offset) => {
+                  const index = mobileRailStart + offset;
+                  const active = slide === activeSlide;
+                  return (
+                    <button
+                      key={slide.id}
+                      id={`${domId}-mobile-slide-${safeDomId(slide.id)}`}
+                      type="button"
+                      role="option"
+                      tabIndex={-1}
+                      aria-selected={active}
+                      aria-label={`Slide ${index + 1}${slide.title ? `: ${slide.title}` : ""}`}
+                      onClick={() => chooseMobileSlide(slide, index)}
+                      className={cn(
+                        "absolute left-0 flex min-h-11 w-full items-center gap-2 px-2 text-left",
+                        active
+                          ? "bg-og-surface-3 text-og-fg"
+                          : "text-og-fg-muted hover:bg-og-surface-3/70",
+                      )}
+                      style={{
+                        top: index * MOBILE_RAIL_ITEM_HEIGHT,
+                        height: MOBILE_RAIL_ITEM_HEIGHT,
+                      }}
+                      data-og-mobile-slide-index={index}
+                    >
+                      <span className="w-7 shrink-0 text-right text-og-xs tabular-nums text-og-fg-subtle">
+                        {index + 1}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-og-sm">
+                        {slide.title || `Slide ${index + 1}`}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         <div
           ref={viewportRef}

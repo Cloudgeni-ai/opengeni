@@ -1043,3 +1043,183 @@ describe("resumable transcription recording routes", () => {
     );
   });
 });
+
+test("moves a rejected untouched recording to the next provider", async () => {
+  const segmentBytes = new Uint8Array([7, 8, 9]);
+  const segmentSha256 = createHash("sha256").update(segmentBytes).digest("hex");
+  const requests: Array<{ providerId?: string; requestId: string }> = [];
+  const transcription: TranscriptionService = {
+    limits: () => ({
+      maxDurationSeconds: 50,
+      maxSizeBytes: 25 * 1024 * 1024,
+      acceptedMimeTypes: ["audio/webm"],
+    }),
+    available: () => true,
+    selectProvider: () => "azure-openai",
+    transcribe: async (input) => {
+      requests.push({ providerId: input.providerId, requestId: input.requestId });
+      throw new TranscriptionServiceError({
+        code: "unavailable",
+        fallbackSafe: true,
+        message: "temporary provider failure",
+        retryable: true,
+      });
+    },
+  };
+  const claimSegment = spyOn(dbModule, "claimNextTranscriptionRecordingSegment").mockResolvedValue({
+    recording: response("transcribing", { segmentCount: 1 }),
+    claimed: true,
+    fallbackAllowed: true,
+    attemptId: CORRELATION_ID,
+    segment: {
+      segmentNumber: 0,
+      durationMilliseconds: 50_000,
+      byteLength: segmentBytes.byteLength,
+      sha256: segmentSha256,
+      objectKey: "segment-0",
+      providerId: "openai",
+    } as never,
+  });
+  const failSegment = spyOn(dbModule, "failTranscriptionRecordingSegment").mockResolvedValue(
+    response("failed", {
+      segmentCount: 1,
+      errorCode: "provider",
+      retryable: true,
+    }),
+  );
+  spyOn(dbModule, "startTranscriptionRecordingSegmentProviderCall").mockResolvedValue(undefined);
+  spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
+
+  const api = app({
+    transcription,
+    segmenter: {
+      available: () => true,
+      segment() {
+        throw new Error("not used");
+      },
+    },
+    objectStorage: storage({
+      getObjectBytes: async () => ({ bytes: segmentBytes, contentType: "audio/wav" }),
+    }),
+  });
+  const result = await api.request(
+    `/v1/workspaces/${WORKSPACE_ID}/transcription-recordings/${RECORDING_ID}/process-next`,
+    {
+      method: "POST",
+      headers: {
+        authorization: await bearer(),
+        "x-opengeni-correlation-id": CORRELATION_ID,
+      },
+    },
+  );
+
+  expect(result.status).toBe(200);
+  expect(await result.json()).toMatchObject({
+    recording: { state: "failed", errorCode: "provider", retryable: true },
+  });
+  expect(claimSegment).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.objectContaining({ providerId: "azure-openai", attemptId: CORRELATION_ID }),
+  );
+  expect(requests).toEqual([{ providerId: "openai", requestId: CORRELATION_ID }]);
+  expect(failSegment).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.objectContaining({
+      segmentNumber: 0,
+      attemptId: CORRELATION_ID,
+      errorCode: "unavailable",
+      retryable: true,
+      fallbackProviderId: "azure-openai",
+    }),
+  );
+});
+
+test("keeps a previously attempted recording pinned after later auth rejection", async () => {
+  const segmentBytes = new Uint8Array([7, 8, 9]);
+  const segmentSha256 = createHash("sha256").update(segmentBytes).digest("hex");
+  const requests: Array<{ providerId?: string; requestId: string }> = [];
+  const transcription: TranscriptionService = {
+    limits: () => ({
+      maxDurationSeconds: 50,
+      maxSizeBytes: 25 * 1024 * 1024,
+      acceptedMimeTypes: ["audio/webm"],
+    }),
+    available: () => true,
+    selectProvider: () => "azure-openai",
+    transcribe: async (input) => {
+      requests.push({ providerId: input.providerId, requestId: input.requestId });
+      throw new TranscriptionServiceError({
+        code: "unavailable",
+        fallbackSafe: true,
+        message: "temporary provider failure",
+        retryable: true,
+      });
+    },
+  };
+  const claimSegment = spyOn(dbModule, "claimNextTranscriptionRecordingSegment").mockResolvedValue({
+    recording: response("transcribing", { segmentCount: 1 }),
+    claimed: true,
+    fallbackAllowed: false,
+    attemptId: CORRELATION_ID,
+    segment: {
+      segmentNumber: 0,
+      durationMilliseconds: 50_000,
+      byteLength: segmentBytes.byteLength,
+      sha256: segmentSha256,
+      objectKey: "segment-0",
+      providerId: "openai",
+    } as never,
+  });
+  const failSegment = spyOn(dbModule, "failTranscriptionRecordingSegment").mockResolvedValue(
+    response("failed", {
+      segmentCount: 1,
+      errorCode: "provider",
+      retryable: true,
+    }),
+  );
+  spyOn(dbModule, "startTranscriptionRecordingSegmentProviderCall").mockResolvedValue(undefined);
+  spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
+
+  const api = app({
+    transcription,
+    segmenter: {
+      available: () => true,
+      segment() {
+        throw new Error("not used");
+      },
+    },
+    objectStorage: storage({
+      getObjectBytes: async () => ({ bytes: segmentBytes, contentType: "audio/wav" }),
+    }),
+  });
+  const result = await api.request(
+    `/v1/workspaces/${WORKSPACE_ID}/transcription-recordings/${RECORDING_ID}/process-next`,
+    {
+      method: "POST",
+      headers: {
+        authorization: await bearer(),
+        "x-opengeni-correlation-id": CORRELATION_ID,
+      },
+    },
+  );
+
+  expect(result.status).toBe(200);
+  expect(await result.json()).toMatchObject({
+    recording: { state: "failed", errorCode: "provider", retryable: true },
+  });
+  expect(claimSegment).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.objectContaining({ providerId: "azure-openai", attemptId: CORRELATION_ID }),
+  );
+  expect(requests).toEqual([{ providerId: "openai", requestId: CORRELATION_ID }]);
+  expect(failSegment).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.objectContaining({
+      segmentNumber: 0,
+      attemptId: CORRELATION_ID,
+      errorCode: "unavailable",
+      retryable: true,
+      fallbackProviderId: null,
+    }),
+  );
+});

@@ -725,7 +725,7 @@ export function helloReportsOpStream(hello: Hello): boolean {
   return hello.capabilities?.opStream === true;
 }
 
-function helloRuntimeCapabilities(hello: Hello): Record<string, boolean> {
+export function helloRuntimeCapabilities(hello: Hello): Record<string, boolean> {
   const caps = hello.capabilities;
   // Absence is an older-agent/unknown signal, not a fabricated set of false claims.
   // Keep the durable cursor empty so reconnects from legacy agents remain a
@@ -741,6 +741,7 @@ function helloRuntimeCapabilities(hello: Hello): Record<string, boolean> {
     browserBridge: caps.browserBridge === true,
     operationResourcePolicy: caps.operationResourcePolicy === true,
     operationCpuQuota: caps.operationCpuQuota === true,
+    transactionalFsWrite: caps.transactionalFsWrite === true,
   };
 }
 

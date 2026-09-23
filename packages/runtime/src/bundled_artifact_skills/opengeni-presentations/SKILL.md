@@ -10,6 +10,9 @@ object the user sees in the Artifacts dock and slide editor. Never maintain a
 mutable PPTX shadow or publish a sandbox deck over user edits.
 
 Read [references/api.md](references/api.md) before editing.
+When using `skill_read`, request that relative path from this Skill; reading
+does not materialize a local folder. Use an existing local copy only when the
+Skill was installed or explicitly checked out to the filesystem.
 
 ## Choose the canonical object
 

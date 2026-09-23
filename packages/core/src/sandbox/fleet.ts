@@ -46,7 +46,7 @@ import {
   type SelfhostedOperationResourcePolicy,
 } from "@opengeni/runtime/sandbox";
 import { relayConfigFromSettings } from "./routing";
-import { managedSessionGroupBackend } from "./runtime-settings";
+import { managedSessionGroupBackend, sessionGroupMachinePresentation } from "./runtime-settings";
 
 export type FleetServices = {
   db: Database;
@@ -130,7 +130,7 @@ export type FleetSandboxEntry = {
   /** The sandbox id used as the attach/swap/run_on `target`. For the session's
    *  own group box this is the group id (a null active pointer == this box). */
   id: string;
-  kind: "modal" | "selfhosted" | "opensandbox";
+  kind: Exclude<SandboxBackend, "none">;
   name: string;
   liveness: FleetLiveness;
   /** True for the session's currently-active sandbox (the routing target). */
@@ -325,10 +325,11 @@ export async function listFleet(
         : groupRecovering
           ? "recovering"
           : "wakeable";
+    const presentation = sessionGroupMachinePresentation(groupBackend);
     entries.push({
       id: ctx.sessionGroupId,
-      kind: groupBackend === "opensandbox" ? "opensandbox" : "modal",
-      name: "session sandbox",
+      kind: presentation.kind,
+      name: presentation.name,
       liveness: groupOnline ? "online" : groupRecovering ? "reconnecting" : "offline",
       active: groupActive,
       isSessionGroup: true,
@@ -454,31 +455,18 @@ export async function listFleet(
   };
 }
 
-/** Resolve a swap target id → the value `setActiveSandbox` writes. The session's
- *  own group id maps to NULL (the default pointer); a first-class sandbox id is
- *  validated (workspace ownership + liveness) and written verbatim. */
-async function resolveTarget(
+type FleetResourceContext = Pick<FleetContext, "accountId" | "workspaceId" | "subjectId">;
+
+type ResolvedNamedSandboxTarget =
+  | { ok: true; targetSandboxId: string; workspaceRoot?: string }
+  | { ok: false; reason: string; code: BackendUnresolvableCode };
+
+/** Resolve one named sandbox, independent of any existing session pointer. */
+async function resolveNamedSandboxTarget(
   services: FleetServices,
-  ctx: FleetContext,
+  ctx: FleetResourceContext,
   target: string,
-): Promise<
-  | { ok: true; targetSandboxId: string | null; workspaceRoot?: string }
-  | { ok: false; reason: string; code: BackendUnresolvableCode }
-> {
-  // The session's own group box → the default pointer (null).
-  if (target === ctx.sessionGroupId || target === "session" || target === "default") {
-    if (!managedSessionGroupBackend(services.settings.sandboxBackend, ctx.sessionBackend)) {
-      return {
-        ok: false,
-        reason:
-          ctx.sessionBackend === "none"
-            ? "this session has no home sandbox; attach a Connected Machine"
-            : "this deployment has no managed session sandbox; select an enrolled machine",
-        code: "unsupported_backend_context",
-      };
-    }
-    return { ok: true, targetSandboxId: null };
-  }
+): Promise<ResolvedNamedSandboxTarget> {
   const sandbox = await getSandbox(
     services.db,
     ctx.subjectId
@@ -564,6 +552,81 @@ async function resolveTarget(
     targetSandboxId: sandbox.id,
     ...(targetWorkspaceRoot ? { workspaceRoot: targetWorkspaceRoot } : {}),
   };
+}
+
+export type CreateTimeSandboxTargetPreflight =
+  | { ok: true; targetSandboxId: string; workingDir: string | null }
+  | {
+      ok: false;
+      reason: string;
+      code: BackendUnresolvableCode | "invalid_working_directory";
+    };
+
+/**
+ * Validate a named create-time machine target before any session row exists.
+ * The caller still commits the pointer with `setActiveSandbox` inside the
+ * session-create transaction, which rechecks durable ownership/enrollment
+ * authority and closes the remove/revoke race without holding database locks
+ * across the liveness probe.
+ */
+export async function preflightCreateTimeSandboxTarget(
+  services: FleetServices,
+  ctx: FleetResourceContext,
+  target: string,
+  workingDir: string | null,
+): Promise<CreateTimeSandboxTargetPreflight> {
+  const resolved = await resolveNamedSandboxTarget(services, ctx, target);
+  if (!resolved.ok) return resolved;
+  if (!resolved.workspaceRoot) {
+    return {
+      ok: true,
+      targetSandboxId: resolved.targetSandboxId,
+      workingDir,
+    };
+  }
+  try {
+    return {
+      ok: true,
+      targetSandboxId: resolved.targetSandboxId,
+      workingDir:
+        resolveConnectedMachineWorkspaceRoot(resolved.workspaceRoot, workingDir) ??
+        resolved.workspaceRoot,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error instanceof Error ? error.message : String(error),
+      code: "invalid_working_directory",
+    };
+  }
+}
+
+/** Resolve a swap target id → the value `setActiveSandbox` writes. The session's
+ *  own group id maps to NULL (the default pointer); a first-class sandbox id is
+ *  validated (workspace ownership + liveness) and written verbatim. */
+async function resolveTarget(
+  services: FleetServices,
+  ctx: FleetContext,
+  target: string,
+): Promise<
+  | { ok: true; targetSandboxId: string | null; workspaceRoot?: string }
+  | { ok: false; reason: string; code: BackendUnresolvableCode }
+> {
+  // The session's own group box → the default pointer (null).
+  if (target === ctx.sessionGroupId || target === "session" || target === "default") {
+    if (!managedSessionGroupBackend(services.settings.sandboxBackend, ctx.sessionBackend)) {
+      return {
+        ok: false,
+        reason:
+          ctx.sessionBackend === "none"
+            ? "this session has no home sandbox; attach a Connected Machine"
+            : "this deployment has no managed session sandbox; select an enrolled machine",
+        code: "unsupported_backend_context",
+      };
+    }
+    return { ok: true, targetSandboxId: null };
+  }
+  return await resolveNamedSandboxTarget(services, ctx, target);
 }
 
 /**

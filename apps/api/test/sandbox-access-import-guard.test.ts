@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // P0.4 guard: apps/api accesses runtime symbols ONLY via explicitly approved
-// agent-loop-free leaves — NEVER the bare
+// leaves — NEVER the bare
 // `@opengeni/runtime` barrel (which re-exports the @openai/agents agent loop:
 // Agent/run/Runner/RunState). Importing the barrel would pull the agent-loop
 // graph into the API process and break the API-direct control-plane invariant.
@@ -33,6 +33,10 @@ const ALLOWED_RUNTIME_SUBPATHS = new Set([
   // Immutable curated Skill metadata/artifact reader. This leaf imports only
   // Node filesystem/crypto utilities and does not import the agent loop.
   "@opengeni/runtime/skill-library",
+  // The unified current-human gateway deliberately reuses the canonical MCP
+  // preparation path used by model execution and Codemode. This entrypoint
+  // exports only that preparation contract, never Agent/run/sandbox APIs.
+  "@opengeni/runtime/workspace-tool-gateway",
 ]);
 
 function importSpecifiersOf(source: string): string[] {

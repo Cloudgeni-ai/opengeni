@@ -9,9 +9,29 @@ import {
   SESSION_TITLE_MODEL_TOOL_NAME,
   sessionTitleToolPlan,
   shouldRequestMissingSessionTitle,
+  startParallelSessionTitleGeneration,
 } from "../src/activities/agent-turn/session-title";
 
 describe("shouldRequestMissingSessionTitle", () => {
+  test("an empty linked permission ceiling cannot promote or generate a title", () => {
+    const shouldRequestTitle = shouldRequestMissingSessionTitle({
+      title: null,
+      titleSource: null,
+      firstPartyMcpTools: ["set_session_title"],
+      firstPartyMcpPermissions: [],
+    });
+    expect(shouldRequestTitle).toBe(false);
+    for (const parallelGenerationAvailable of [true, false]) {
+      expect(
+        sessionTitleToolPlan({
+          tools: [{ kind: "mcp", id: "opengeni" }],
+          selectedFirstPartyMcpTools: ["set_session_title"],
+          shouldRequestTitle,
+          parallelGenerationAvailable,
+        }),
+      ).toMatchObject({ promoteTitleTool: false, generateTitleInParallel: false });
+    }
+  });
   test("requests semantic titling while the durable title is absent or still the fallback", () => {
     expect(
       shouldRequestMissingSessionTitle({
@@ -76,7 +96,7 @@ describe("shouldRequestMissingSessionTitle", () => {
 });
 
 describe("sessionTitleToolPlan", () => {
-  test("promotes only the title tool while keeping the first-party carrier deferred", () => {
+  test("removes automatic titling from the agent loop when parallel generation is available", () => {
     const tools = [
       { kind: "mcp" as const, id: "opengeni" },
       { kind: "mcp" as const, id: "connector", optional: true },
@@ -86,16 +106,34 @@ describe("sessionTitleToolPlan", () => {
         tools,
         selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
         shouldRequestTitle: true,
+        parallelGenerationAvailable: true,
       }),
     ).toEqual({
-      promoteTitleTool: true,
+      promoteTitleTool: false,
+      generateTitleInParallel: true,
       remoteFirstPartyMcpTools: ["goal_set"],
-      preparationIndependentToolNames: [SESSION_TITLE_MODEL_TOOL_NAME],
+      preparationIndependentToolNames: [],
     });
     expect(tools).toEqual([
       { kind: "mcp", id: "opengeni" },
       { kind: "mcp", id: "connector", optional: true },
     ]);
+  });
+
+  test("retains the serialized local-tool fallback for custom runtimes", () => {
+    expect(
+      sessionTitleToolPlan({
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
+        shouldRequestTitle: true,
+        parallelGenerationAvailable: false,
+      }),
+    ).toEqual({
+      promoteTitleTool: true,
+      generateTitleInParallel: false,
+      remoteFirstPartyMcpTools: ["goal_set"],
+      preparationIndependentToolNames: [SESSION_TITLE_MODEL_TOOL_NAME],
+    });
   });
 
   test("does not grant a missing carrier or change titled-session disclosure", () => {
@@ -104,9 +142,11 @@ describe("sessionTitleToolPlan", () => {
         tools: [{ kind: "mcp", id: "connector" }],
         selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
         shouldRequestTitle: true,
+        parallelGenerationAvailable: true,
       }),
     ).toEqual({
       promoteTitleTool: false,
+      generateTitleInParallel: false,
       remoteFirstPartyMcpTools: ["set_session_title", "goal_set"],
       preparationIndependentToolNames: [],
     });
@@ -116,12 +156,68 @@ describe("sessionTitleToolPlan", () => {
         tools: [{ kind: "mcp", id: "opengeni" }],
         selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
         shouldRequestTitle: false,
+        parallelGenerationAvailable: true,
       }),
     ).toEqual({
       promoteTitleTool: false,
+      generateTitleInParallel: false,
       remoteFirstPartyMcpTools: ["set_session_title", "goal_set"],
       preparationIndependentToolNames: [],
     });
+  });
+});
+
+describe("startParallelSessionTitleGeneration", () => {
+  test("starts immediately and returns a completed title without blocking the caller", async () => {
+    let started = false;
+    const task = startParallelSessionTitleGeneration({
+      generate: async () => {
+        started = true;
+        return { title: "Parallel session titles", usage: null };
+      },
+    });
+
+    await Promise.resolve();
+    expect(started).toBe(true);
+    expect(await task.finish()).toEqual({
+      title: "Parallel session titles",
+      usage: null,
+    });
+  });
+
+  test("finish waits for a title request that is still pending", async () => {
+    let observedSignal: AbortSignal | null = null;
+    let completeGeneration!: (value: { title: string; usage: null }) => void;
+    const task = startParallelSessionTitleGeneration({
+      generate: async (signal) => {
+        observedSignal = signal;
+        return await new Promise<{ title: string; usage: null }>((resolve) => {
+          completeGeneration = resolve;
+        });
+      },
+    });
+
+    await Promise.resolve();
+    const finished = task.finish();
+    expect(observedSignal?.aborted).toBe(false);
+    completeGeneration({ title: "Quick response title", usage: null });
+    expect(await finished).toEqual({ title: "Quick response title", usage: null });
+    expect(observedSignal?.aborted).toBe(false);
+  });
+
+  test("cancel aborts and joins a title request that is still pending", async () => {
+    let observedSignal: AbortSignal | null = null;
+    const task = startParallelSessionTitleGeneration({
+      generate: async (signal) => {
+        observedSignal = signal;
+        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
+        return { title: "Too late", usage: null };
+      },
+    });
+
+    await Promise.resolve();
+    await task.cancel();
+    expect(observedSignal?.aborted).toBe(true);
   });
 });
 

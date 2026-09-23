@@ -15,6 +15,8 @@ function catalogModel(
   overrides: {
     selectable?: boolean;
     source?: WorkspaceModelCatalogModel["source"];
+    cost?: WorkspaceModelCatalogModel["cost"];
+    billing?: WorkspaceModelCatalogModel["billing"];
     efforts?: ReasoningEffort[];
     defaultEffort?: ReasoningEffort | null;
     latencyModes?: Array<{ id: LatencyMode; runnable: boolean }>;
@@ -31,6 +33,8 @@ function catalogModel(
     providerLabel: source === "codex" ? "Codex" : source === "supergrok" ? "SuperGrok" : "OpenGeni",
     source,
     api: "responses",
+    ...(overrides.cost ? { cost: overrides.cost } : {}),
+    ...(overrides.billing ? { billing: overrides.billing } : {}),
     credentialReadiness: {
       status: "ready",
       reason: null,
@@ -107,6 +111,44 @@ describe("resolveAgentBrainPromptModel", () => {
       latencyMode: "standard",
     });
     expect(selection?.model).toBe("codex/gpt-5.6-luna");
+  });
+
+  test("uses deployment cost instead of inferring payment from provider settlement", () => {
+    const openRouterBilling = {
+      upstreamPayer: "deployment",
+      metering: "external",
+    } as const;
+    const free = resolveAgentBrainPromptModel(
+      [
+        catalogModel("openrouter/nvidia/nemotron-3-super-120b-a12b:free", {
+          source: "openrouter",
+          cost: "free",
+          billing: openRouterBilling,
+        }),
+      ],
+      {
+        model: "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        reasoningEffort: "low",
+        latencyMode: "standard",
+      },
+    );
+    const credits = resolveAgentBrainPromptModel(
+      [
+        catalogModel("openrouter/nvidia/nemotron-3-super-120b-a12b:free", {
+          source: "openrouter",
+          cost: "credits",
+          billing: openRouterBilling,
+        }),
+      ],
+      {
+        model: "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        reasoningEffort: "low",
+        latencyMode: "standard",
+      },
+    );
+
+    expect(free?.paymentSource).toBe("Free in this deployment");
+    expect(credits?.paymentSource).toBe("OpenGeni credits");
   });
 
   test("falls back when the preferred model is absent from the catalog", () => {
@@ -336,7 +378,7 @@ describe("AgentKnowledgePrompt", () => {
     container.remove();
   });
 
-  test("keeps the personal Skill draft honest about the manual save boundary", async () => {
+  test("explains that personal Skills follow Agent learning policy", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -348,7 +390,7 @@ describe("AgentKnowledgePrompt", () => {
     await settle();
 
     expect(container.textContent).toContain("Describe a personal skill");
-    expect(container.textContent).toContain("use the personal manual editor below to save it");
+    expect(container.textContent).toContain("Uses your Agent learning settings.");
     const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
     await setValue(textarea, "Lead with the outcome.");
     await act(async () => {
@@ -359,8 +401,10 @@ describe("AgentKnowledgePrompt", () => {
     await settle();
 
     const options = startSession.mock.calls[0]?.[2] as { instructions: string };
-    expect(options.instructions).toContain("cannot safely activate a user-scoped Skill");
-    expect(options.instructions).toContain("do not call remember or claim that you saved it");
+    expect(options.instructions).toContain(
+      "Use skill_read and skill_save in this personal workspace",
+    );
+    expect(options.instructions).toContain("Report the actual saved or pending receipt");
 
     await act(async () => root.unmount());
     container.remove();

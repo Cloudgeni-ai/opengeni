@@ -279,6 +279,14 @@ describe("useComposer embedding policy", () => {
       }),
     );
     expect(hook.result.current.canSend).toBe(false);
+    expect(hook.result.current.annotationReviewTargetId).toBe(
+      "00000000-0000-4000-8000-000000000611",
+    );
+    await actRun(() => hook.result.current.clearAnnotationReviewTarget?.());
+    await actRun(() => hook.result.current.requestAnnotationReview?.());
+    expect(hook.result.current.annotationReviewTargetId).toBe(
+      "00000000-0000-4000-8000-000000000611",
+    );
     expect(await actRun(() => hook.result.current.send())).toBe(false);
     await hook.unmount();
   });

@@ -1,6 +1,8 @@
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
+  nestedPostgresSqlState,
+  safeDatabaseErrorFacts,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
   SandboxLeaseTransitionError,
@@ -9,10 +11,16 @@ import {
   ActiveBackendUnresolvableError,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
+  compactionProviderRejection,
+  describeCompactionProviderRejection,
+  type CompactionProviderRejection,
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
   isModalTaskExecStartDnsResolutionError,
   RoutingWorkspaceRootChangedError,
+  SandboxMaterializationVerificationError,
+  materializationVerificationDiagnostic,
+  type MaterializationVerificationDiagnostic,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
 } from "@opengeni/runtime";
@@ -22,9 +30,11 @@ import {
 } from "@opengeni/runtime/mcp-network";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { CODEX_USAGE_EXHAUSTED_PCT } from "../codex-rotation";
+import { RetainedAttachmentTransportLimitError } from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
 import {
   CodexReloginRequired,
+  classifyCodexEncryptedArtifactRejection,
   classifyCodexResponseTimeoutError,
   classifyCodexUsageLimitError,
   isCodexTransportError,
@@ -109,6 +119,7 @@ export function providerRecoveryResult(input: {
           input.failureCode === "sandbox_command_start_unavailable" ||
           input.failureCode === "mcp_transport_timeout" ||
           input.failureCode === "mcp_transport_unavailable" ||
+          input.failureCode === "turn_execution_policy_definition_mismatch" ||
           input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
         ? Math.max(
             providerDelay ?? 0,
@@ -266,23 +277,38 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
  * Convert the atomic claim transaction's failure into a small, stable
  * Temporal wire contract. The original error remains in activity diagnostics,
  * but SQL text, parameters, and arbitrary invariant messages never enter
- * workflow history. Contention and operational database unavailability are
- * safe to re-read after backoff because the claim transaction contains no
- * model/tool effects; permanent database and state failures require terminal
- * settlement.
+ * workflow history. Operational failures retry; other persistence rejections
+ * retain accepted work behind a durable explicit-recheck fence. Repeating the
+ * same rejected transaction without changed conditions is not recovery.
  */
 export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
   const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
   const retryableCode = retryableDatabaseFailureCode(error);
-  // The database transaction itself retries only the two contention failures
-  // proven safe for immediate replay. Once the activity has failed, the
-  // workflow may also retry operational outages after a durable re-read and
-  // bounded delay. Unknown driver/database failures stay recoverable because
-  // they commonly represent a lost connection; known constraint, auth, and
-  // application SQLSTATEs are permanent and must not create an infinite loop.
+  const rejectedClaim =
+    persistenceFailure?.details.stage === "session_attempts.claim" &&
+    persistenceFailure.details.retryOutcome === "not_retryable" &&
+    !retryableCode;
   const detail: PreClaimFailureDetail = {
-    disposition: retryableCode ? "retryable" : "permanent",
+    disposition: rejectedClaim
+      ? "blocked"
+      : persistenceFailure || retryableCode
+        ? "retryable"
+        : "permanent",
     code: retryableCode ?? persistenceFailure?.details.code ?? "claim_invariant",
+    ...(persistenceFailure && rejectedClaim
+      ? {
+          sqlState: persistenceFailure.details.sqlState,
+          reason:
+            persistenceFailure.details.stage === "session_attempts.claim" &&
+            persistenceFailure.details.sqlState === "OG001"
+              ? ("initiator_membership_required" as const)
+              : persistenceFailure.details.stage === "session_attempts.claim" &&
+                  persistenceFailure.details.sqlState === "OG002"
+                ? ("personal_resource_grant_required" as const)
+                : ("database_claim_rejected" as const),
+          retryPolicy: "explicit_recheck" as const,
+        }
+      : {}),
   };
   return ApplicationFailure.create({
     message: PRE_CLAIM_FAILURE_MESSAGE,
@@ -572,7 +598,21 @@ export function safeErrorForTelemetry(error: unknown): Error {
   return safe;
 }
 
+/**
+ * Guidance appended to a definitive provider rejection. Repeating the exact
+ * request cannot succeed, so the generic "send another message to retry"
+ * advice is wrong here: a new prompt re-sends the same rejected history.
+ */
+export const COMPACTION_PROVIDER_REJECTION_GUIDANCE =
+  "The provider refused this exact request, so repeating it fails the same way until the conversation changes. If a new message fails again, start a new session.";
+
 export function compactionFailureReasonFromError(error: unknown): string {
+  const rejection = compactionProviderRejection(error);
+  if (rejection) {
+    return compactionFailureReason(
+      `the model provider rejected the compaction request (${describeCompactionProviderRejection(rejection)}). Active history was preserved. ${COMPACTION_PROVIDER_REJECTION_GUIDANCE}`,
+    );
+  }
   if (
     error instanceof CompactionProviderResponseError ||
     error instanceof EmptyCompactionSummaryError
@@ -581,6 +621,34 @@ export function compactionFailureReasonFromError(error: unknown): string {
   }
   const errorName = error instanceof Error && error.name ? error.name : "unknown error";
   return compactionFailureReason(`unexpected ${errorName}`);
+}
+
+/**
+ * Exact `turn.failed` payload for a terminal compaction failure. A definitive
+ * provider rejection additionally carries its closed identifier record so the
+ * timeline, API consumers, and operators can name the rejected field without
+ * parsing the message.
+ */
+export function compactionFailureTurnEventPayload(
+  error: unknown,
+  overrides: { error?: string } = {},
+): {
+  error: string;
+  code: "context_compaction_failed";
+  retryable: false;
+  recovery: "user_message";
+  compacted: false;
+  providerRejection?: CompactionProviderRejection;
+} {
+  const rejection = compactionProviderRejection(error);
+  return {
+    error: overrides.error ?? compactionFailureReasonFromError(error),
+    code: "context_compaction_failed",
+    retryable: false,
+    recovery: "user_message",
+    compacted: false,
+    ...(rejection ? { providerRejection: rejection } : {}),
+  };
 }
 
 export function isCompactionSummaryFailure(error: unknown): boolean {
@@ -592,6 +660,11 @@ export function isCompactionSummaryFailure(error: unknown): boolean {
 export function shouldRecoverCompactionProviderFailure(error: unknown): boolean {
   if (!(error instanceof CompactionProviderResponseError)) return false;
   if (isCodexTransportError(error) && classifyCodexUsageLimitError(error)) return true;
+  // Codex may reject an opaque artifact it minted itself on the compaction
+  // request exactly as it can on an ordinary request. Failure settlement
+  // invalidates only the exact participating artifacts and recovers the same
+  // logical turn; when nothing can be invalidated it fails closed there.
+  if (classifyCodexEncryptedArtifactRejection(error)) return true;
   return agentRunFailurePayload(error).retryable === true;
 }
 
@@ -725,7 +798,22 @@ export function isExactStatuslessUpstreamConnectivityMessage(message: string): b
   return message.trim().toLowerCase() === STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE;
 }
 
+function providerSafetyRefusalDiagnostic(error: unknown): string | undefined {
+  return collectErrorStrings(error).find(
+    (value) =>
+      /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy)$/.test(
+        value,
+      ) || /\bthis request was blocked by our safety systems\b/i.test(value),
+  );
+}
+
+function isProviderSafetyRefusal(error: unknown): boolean {
+  return providerSafetyRefusalDiagnostic(error) !== undefined;
+}
+
 export function isTransientProviderError(error: unknown): boolean {
+  // A semantic refusal can arrive inside a 5xx transport envelope.
+  if (isProviderSafetyRefusal(error)) return false;
   const status =
     typeof error === "object" && error !== null
       ? Number(
@@ -769,6 +857,7 @@ export type XaiCredentialFailure = {
  * without an accepted model response; refresh relogin is equally definitive.
  */
 export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailure | null {
+  if (isProviderSafetyRefusal(error)) return null;
   let relogin: unknown = error;
   for (let depth = 0; depth < 6 && relogin && typeof relogin === "object"; depth += 1) {
     if (relogin instanceof XaiSubscriptionReloginRequired) {
@@ -810,7 +899,36 @@ export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailu
   return null;
 }
 
+// The generic turn-failure boundary also receives application/provider errors.
+// A five-character code or generic severity alone does not establish a driver error.
+function findPostgresDriverError(error: unknown): Record<string, unknown> | null {
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+  for (let index = 0; index < queue.length && index < 64; index += 1) {
+    const current = queue[index];
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    const record = current as Record<string, unknown>;
+    if (record.name === "PostgresError") return record;
+    for (const key of ["cause", "original", "driverError", "error", "errors"]) {
+      const nested = record[key];
+      if (Array.isArray(nested)) queue.push(...nested.slice(0, 64));
+      else if (nested !== undefined) queue.push(nested);
+    }
+  }
+  return null;
+}
+
 export function agentRunFailurePayload(
+  error: unknown,
+  options: { isCodexTurn?: boolean } = {},
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  const failure = baseAgentRunFailurePayload(error, options);
+  const diagnostic = materializationVerificationDiagnostic(error);
+  return diagnostic ? { ...failure, materializationDiagnostic: diagnostic } : failure;
+}
+
+function baseAgentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): {
@@ -832,7 +950,19 @@ export function agentRunFailurePayload(
   database?: Record<string, string>;
   historyPersistenceStage?: MandatoryHistoryPersistenceStage;
   mcpTransportDiagnostic?: McpTransportRequestFailureDiagnostic;
+  materializationDiagnostic?: MaterializationVerificationDiagnostic;
 } {
+  if (error instanceof SandboxMaterializationVerificationError) {
+    return {
+      error: error.message,
+      code: error.code,
+      retryable: false,
+      materializationDiagnostic: error.diagnostic,
+    };
+  }
+  if (error instanceof RetainedAttachmentTransportLimitError) {
+    return { error: error.message, code: "retained_attachment_transport_limit", retryable: false };
+  }
   if (error instanceof MandatoryHistoryPersistenceError) {
     const underlying = isSessionEventPersistenceError(error.cause)
       ? agentRunFailurePayload(error.cause, options)
@@ -842,6 +972,16 @@ export function agentRunFailurePayload(
     return {
       ...underlying,
       historyPersistenceStage: error.stage,
+    };
+  }
+  const safetyRefusalDiagnostic = providerSafetyRefusalDiagnostic(error);
+  if (safetyRefusalDiagnostic !== undefined) {
+    return {
+      error:
+        "The model provider blocked this request through its safety systems. Automatic retries stopped.",
+      code: "provider_safety_refusal",
+      retryable: false,
+      detail: safetyRefusalDiagnostic,
     };
   }
   const message = error instanceof Error ? error.message : String(error);
@@ -1040,6 +1180,18 @@ export function agentRunFailurePayload(
     }
     return { error: message, code: "provider_unavailable", retryable: true };
   }
+  const postgresDriverError = findPostgresDriverError(error);
+  if (postgresDriverError) {
+    const database = safeDatabaseErrorFacts(postgresDriverError);
+    const sqlState = nestedPostgresSqlState(postgresDriverError);
+    if (sqlState !== null || Object.keys(database).length > 0) {
+      return {
+        error: message,
+        sqlState,
+        ...(Object.keys(database).length > 0 ? { database } : {}),
+      };
+    }
+  }
   return { error: message };
 }
 
@@ -1106,6 +1258,8 @@ export function codexCredentialCooldownUntil(
  * progress and therefore MUST NOT walk the credential pool automatically.
  */
 export function classifyCodexCredentialFailure(error: unknown): CodexCredentialFailure | null {
+  // A request safety refusal is not evidence that another account should run it.
+  if (isProviderSafetyRefusal(error)) return null;
   // A permanent OAuth refresh failure is definitive and the shared resolver has
   // already fenced/stamped the exact credential version. The OpenAI client can
   // wrap a rejection from its custom fetch in APIConnectionError, so recognize
@@ -1207,7 +1361,7 @@ export function codexUsageLimitFailurePayload(
   info: { resetsInSeconds: number | null },
   detail: string,
   opts?: { allAccounts?: boolean },
-): { error: string; code: string; retryable: boolean; detail?: string } {
+): { error: string; code: string; retryable: false; detail?: string } {
   // P3: when EVERY connected subscription is rate-limited the message names the
   // earliest reset across accounts; the single-account message is unchanged.
   const error = opts?.allAccounts

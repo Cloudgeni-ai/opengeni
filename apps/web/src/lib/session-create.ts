@@ -98,6 +98,7 @@ export function rememberedMachineFolder(
 }
 
 export type SessionDraft = {
+  agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
   visibility: "private" | "workspace";
   // PROMOTED — the parent that gates the compute-dependent band.
   compute: ComputeTarget;
@@ -159,13 +160,14 @@ export function isSessionDraftComputeReady(draft: SessionDraft): boolean {
   return draft.compute.kind !== "machine" || draft.compute.sandboxId !== null;
 }
 
-/** Personal workspaces are presented as Only me and must create the matching
- * private tenancy instead of silently persisting a workspace-visible row. */
+/** Personal workspace access is already owner-only. Use private session tenancy
+ * when the server supports it, without making its activation a prerequisite. */
 export function newSessionCreateVisibility(
   personalWorkspace: boolean,
   selectedVisibility: "private" | "workspace",
+  canCreatePrivate: boolean,
 ): "private" | "workspace" {
-  return personalWorkspace ? "private" : selectedVisibility;
+  return personalWorkspace ? (canCreatePrivate ? "private" : "workspace") : selectedVisibility;
 }
 
 export type SessionDraftSubmission = {
@@ -189,10 +191,18 @@ export type BuildCreateSessionRequestInput = {
   submission: TurnSubmission;
   /** Session-scoped system guidance that is not rendered in the chat timeline. */
   instructions?: string;
+  /** Installed session-selected Skills to freeze onto the new session. */
+  installedSkillIds?: string[];
   startMode?: "realtime";
   visibility?: "private" | "workspace";
   omitWorkspaceResources?: boolean;
   selectedTools: ToolRef[];
+  /** Exact policy acknowledged by the revision-fenced new-session draft. */
+  newSessionDraftToolPolicy?: {
+    tools: ToolRef[];
+    toolsProvided: boolean;
+    excludedMcpServerIds?: string[];
+  };
   defaultModel: string;
   defaultReasoningEffort: ReasoningEffort;
   defaultLatencyMode: LatencyMode;
@@ -202,6 +212,7 @@ export type BuildCreateSessionRequestInput = {
   workingDir?: string | null;
   channelId?: string | null;
   expectedNewSessionDraftRevision?: number;
+  agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
   /** Server-authoritative omitted-tools defaults, including mandatory opengeni. */
   workspaceDefaultMcpServerIds?: string[];
   /** Prevent a partially hydrated capability catalog from becoming a pin. */
@@ -268,11 +279,19 @@ export function buildCreateSessionRequest(
   const defaultToolIds = input.workspaceDefaultMcpServerIds
     ? [...new Set(input.workspaceDefaultMcpServerIds)].sort()
     : null;
-  const tools =
-    input.workspaceMcpCatalogReady === true &&
-    defaultToolIds &&
-    selectedToolIds.join("\u0000") ===
-      [...new Set(buildTools([], defaultToolIds).map((tool) => tool.id))].sort().join("\u0000")
+  const draftPolicy = input.newSessionDraftToolPolicy;
+  const exclusionOnlyCustomize =
+    draftPolicy?.toolsProvided === true &&
+    draftPolicy.tools.length === 0 &&
+    draftPolicy.excludedMcpServerIds !== undefined;
+  const tools = draftPolicy
+    ? draftPolicy.toolsProvided && !exclusionOnlyCustomize
+      ? [...draftPolicy.tools]
+      : undefined
+    : input.workspaceMcpCatalogReady === true &&
+        defaultToolIds &&
+        selectedToolIds.join("\u0000") ===
+          [...new Set(buildTools([], defaultToolIds).map((tool) => tool.id))].sort().join("\u0000")
       ? undefined
       : [...input.selectedTools];
   return {
@@ -281,8 +300,12 @@ export function buildCreateSessionRequest(
       : { initialMessage: input.submission.text }),
     visibility: input.visibility ?? "workspace",
     instructions: input.instructions || undefined,
+    ...(input.installedSkillIds?.length ? { installedSkillIds: input.installedSkillIds } : {}),
     resources,
     ...(tools === undefined ? {} : { tools }),
+    ...(input.newSessionDraftToolPolicy?.excludedMcpServerIds !== undefined
+      ? { excludedMcpServerIds: input.newSessionDraftToolPolicy.excludedMcpServerIds }
+      : {}),
     model: input.submission.model ?? input.defaultModel,
     reasoningEffort: input.submission.reasoningEffort ?? input.defaultReasoningEffort,
     latencyMode: input.submission.latencyMode ?? input.defaultLatencyMode,
@@ -310,12 +333,15 @@ export function buildCreateSessionRequest(
           personalResourceAttachment: input.submission.personalResourceAttachment,
         }
       : {}),
-    ...(input.submission.connectionAuthorities
-      ? { connectionAuthorities: input.submission.connectionAuthorities }
+    ...(input.submission.connectionAccounts
+      ? { connectionAccounts: input.submission.connectionAccounts }
       : {}),
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
     ...(input.channelId ? { channelId: input.channelId } : {}),
+    ...(input.agentLearning && Object.keys(input.agentLearning).length
+      ? { agentLearning: input.agentLearning }
+      : {}),
     ...(input.expectedNewSessionDraftRevision !== undefined
       ? {
           expectedNewSessionDraftRevision: input.expectedNewSessionDraftRevision,
@@ -450,6 +476,7 @@ export function newSessionDraftOptionsFromSessionDraft(
     const workingDir = workingDirFromFolder(draft.compute.folder);
     return {
       visibility: effectiveVisibility,
+      ...(draft.agentLearning ? { agentLearning: draft.agentLearning } : {}),
       ...(draft.compute.sandboxId ? { targetSandboxId: draft.compute.sandboxId } : {}),
       ...(workingDir ? { workingDir } : {}),
       ...(goal ? { goal } : {}),
@@ -460,6 +487,7 @@ export function newSessionDraftOptionsFromSessionDraft(
 
   return {
     visibility: effectiveVisibility,
+    ...(draft.agentLearning ? { agentLearning: draft.agentLearning } : {}),
     ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
     ...(draft.variableSetIds.length
       ? {
@@ -492,6 +520,7 @@ export function sessionDraftFromNewSessionDraftOptions(
   return {
     ...base,
     visibility: options.visibility ?? "workspace",
+    ...(options.agentLearning ? { agentLearning: options.agentLearning } : {}),
     compute: machine
       ? {
           kind: "machine",

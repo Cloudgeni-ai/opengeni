@@ -64,7 +64,36 @@ describe("browser controller image build contract", () => {
     test(`${imagePath} prepares shared inputs once and compiles natively for the target`, async () => {
       const dockerfile = await readFile(resolve(root, imagePath), "utf8");
 
+      // These images copy source packages, not a bundled dependency closure.
+      // Every contracts runtime dependency must accompany that source.
+      const contracts = JSON.parse(
+        await readFile(resolve(root, "packages/contracts/package.json"), "utf8"),
+      ) as { dependencies: Record<string, string> };
+      for (const dependency of Object.keys(contracts.dependencies)) {
+        expect(dockerfile).toContain(
+          `cp -aL packages/contracts/node_modules/${dependency} "$runtime/node_modules/${dependency}"`,
+        );
+      }
+
       expect(buildsBrowserControllerOnTargetPlatform(dockerfile)).toBe(true);
+      expect(dockerfile).toContain('"$runtime/node_modules/@opengeni/tool-gateway"');
+      expect(dockerfile).toContain(
+        'packages/tool-gateway/package.json "$runtime/node_modules/@opengeni/tool-gateway/package.json"',
+      );
+      expect(dockerfile).toContain(
+        'cp -a packages/tool-gateway/src "$runtime/node_modules/@opengeni/tool-gateway/src"',
+      );
+      expect(dockerfile).toContain(
+        'cp -aL packages/tool-gateway/node_modules/ajv "$runtime/node_modules/ajv"',
+      );
+      expect(dockerfile).toContain(
+        'test -f "$runtime/node_modules/@opengeni/tool-gateway/src/index.ts"',
+      );
+      expect(dockerfile).toContain(
+        "ln -s /opt/opengeni/codemode-runtime/node_modules /node_modules",
+      );
+      expect(dockerfile).toContain('await import("@opengeni/codemode")');
+      expect(dockerfile).toContain('await import("@opengeni/sdk/site")');
 
       const crossCompiled = dockerfile.replace(
         "FROM oven/bun:${BUN_VERSION} AS browserd-build",

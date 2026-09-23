@@ -268,15 +268,6 @@ export async function reconcileActiveSandboxPointer(
   return { pointer: reread, record: rereadRecord };
 }
 
-/**
- * Warm the Modal private-registry image for the image ref this turn actually
- * resolved, not only the deployment-global OPENGENI_MODAL_IMAGE_REF warmed at
- * worker boot. A provider-native modalImageId bypasses registry import and is
- * resolved by ModalImageSelector.fromId during create. Otherwise packs can
- * override `modalImageRef` per workspace/turn, so a private pack image must be
- * resolved before sandbox creation or Modal falls back to the unauthenticated
- * `fromTag` path.
- */
 export async function ensureTurnModalRegistryImage(
   runSettings: Settings,
   sandboxCreationBackend: Settings["sandboxBackend"] | undefined,
@@ -302,17 +293,6 @@ export type SandboxArtifactRuntimeAdmission = Readonly<{
   environment: Readonly<Record<string, string>>;
 }>;
 
-/**
- * Admit the optional native standalone-file runtime only for the deployment's
- * exact base sandbox image contract. A pack/rig image override is an
- * independent filesystem and therefore fails closed even when the deployment
- * base image is capable. Collaborative artifact skills are admitted separately
- * from the frozen canonical tool catalog.
- *
- * This keeps lazy provisioning intact: CI/release proves the image closure,
- * while a before-agent-start doctor verifies the actual box before any model
- * call. No speculative sandbox is created merely to populate the skill index.
- */
 export function sandboxArtifactRuntimeAdmission(
   deploymentSettings: Settings,
   runSettings: Settings,

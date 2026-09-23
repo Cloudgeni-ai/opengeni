@@ -65,6 +65,8 @@ describe("Helm database upgrade contract", () => {
       source("deploy/helm/opengeni/templates/api-deployment.yaml"),
       source("deploy/helm/opengeni/templates/worker-deployment.yaml"),
       source("deploy/helm/opengeni/templates/worker-turns-deployment.yaml"),
+      source("deploy/helm/opengeni/templates/migration-job.yaml"),
+      source("deploy/helm/opengeni/templates/catalog-import-job.yaml"),
     ]);
 
     for (const workload of workloads) {
@@ -77,6 +79,16 @@ describe("Helm database upgrade contract", () => {
         "Later envFrom sources win duplicate keys",
       );
     }
+
+    const migrationJob = workloads[3]!;
+    const runtimeSecret = migrationJob.indexOf('name: {{ include "opengeni.secretName" . }}');
+    const migrationSecret = migrationJob.indexOf(
+      'name: {{ include "opengeni.migrationSecretName" . }}',
+    );
+    expect(migrationSecret).toBeGreaterThan(runtimeSecret);
+    expect(migrationJob.slice(runtimeSecret, migrationSecret)).toContain(
+      "The migration Secret is last so owner-only database settings win",
+    );
   });
 
   test("routes worker first-party MCP over the private service by default", async () => {
@@ -85,6 +97,15 @@ describe("Helm database upgrade contract", () => {
     expect(configMap).toContain('hasKey .Values.config "OPENGENI_MCP_INTERNAL_URL"');
     expect(configMap).toContain("-api:%d/v1/workspaces/{workspaceId}/mcp");
     expect(configMap).not.toContain('hasKey .Values.config "OPENGENI_MCP_URL"');
+  });
+
+  test("keeps the API unready until runtime dependencies and the database catalog converge", async () => {
+    const values = Bun.YAML.parse(await source("deploy/helm/opengeni/values.yaml")) as {
+      api: { probes: { readiness: { path: string }; liveness: { path: string } } };
+    };
+
+    expect(values.api.probes.readiness.path).toBe("/traffic-readyz");
+    expect(values.api.probes.liveness.path).toBe("/healthz");
   });
 
   test("projects only dedicated credentials into the artifact materializer", async () => {

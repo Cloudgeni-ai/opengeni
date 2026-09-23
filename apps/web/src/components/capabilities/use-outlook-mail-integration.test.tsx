@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { OpenGeniClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -16,6 +17,23 @@ const ACCOUNT_ID = "22222222-2222-4222-8222-222222222222";
 const mutableContext: { current: Record<string, unknown> } = { current: {} };
 mock.module("@/context", () => ({
   useAppContext: () => mutableContext.current,
+}));
+mock.module("./native-connect-setup", () => ({
+  NativeConnectSetup: ({ request }: { request: { ownership: string } }) => (
+    <div data-connect-ownership={request.ownership} />
+  ),
+}));
+
+// Radix portals do not mount under happy-dom; render dialog frames inline so
+// the reaction-channel dialog's real body can be exercised.
+mock.module("@/components/ui/dialog", () => ({
+  Dialog: ({ open, children }: { open?: boolean; children?: React.ReactNode }) =>
+    open ? <div data-dialog>{children}</div> : null,
+  DialogContent: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
+  DialogDescription: ({ children }: { children?: React.ReactNode }) => <p>{children}</p>,
+  DialogFooter: ({ children }: { children?: React.ReactNode }) => <footer>{children}</footer>,
+  DialogHeader: ({ children }: { children?: React.ReactNode }) => <header>{children}</header>,
+  DialogTitle: ({ children }: { children?: React.ReactNode }) => <h2>{children}</h2>,
 }));
 
 const { useOutlookMailIntegration } = await import("./use-outlook-mail-integration");
@@ -46,6 +64,13 @@ function accessContext(permissions: string[]): AccessContext {
 }
 
 function appContext(permissions: string[], client: Record<string, unknown> = {}) {
+  client.connectTransport ??= () =>
+    new OpenGeniClient({
+      baseUrl: "http://localhost:3000",
+      fetch: async () => {
+        throw new Error("Unexpected Connect request in Outlook presentation test");
+      },
+    }).connectTransport();
   return { client, accessContext: accessContext(permissions) };
 }
 
@@ -124,10 +149,77 @@ function Harness({
     instances,
   });
   onModel(adapter.model);
-  return null;
+  return adapter.dialogs;
 }
 
 describe("useOutlookMailIntegration", () => {
+  test("new Outlook accounts are personal; reconnecting preserves existing ownership", async () => {
+    for (const ownership of [null, "personal", "workspace"] as const) {
+      let model: ReturnType<typeof useOutlookMailIntegration>["model"] | undefined;
+      const rendered = await render(
+        <Harness
+          permissions={["capabilities:manage"]}
+          instances={ownership ? [account({ connected: false, ownership })] : []}
+          onModel={(current) => (model = current)}
+        />,
+      );
+      try {
+        await act(async () => {
+          if (ownership) await model!.access!.items[0]!.actions![0]!.onClick();
+          else if (model!.footer.kind === "setup") await model!.footer.onSetup();
+        });
+        if (!ownership) {
+          expect(document.querySelector<HTMLInputElement>("input[value=personal]")?.checked).toBe(
+            true,
+          );
+          await act(async () => {
+            Array.from(document.querySelectorAll("button"))
+              .find((button) => button.textContent === "Continue")!
+              .click();
+          });
+        }
+        expect(
+          rendered.container
+            .querySelector("[data-connect-ownership]")
+            ?.getAttribute("data-connect-ownership"),
+        ).toBe(ownership ?? "personal");
+      } finally {
+        await rendered.unmount();
+      }
+    }
+  });
+
+  test("a new Outlook account can be shared with the workspace", async () => {
+    let model: ReturnType<typeof useOutlookMailIntegration>["model"] | undefined;
+    const rendered = await render(
+      <Harness
+        permissions={["capabilities:manage"]}
+        instances={[]}
+        onModel={(current) => (model = current)}
+      />,
+    );
+    try {
+      await act(async () => {
+        if (model!.footer.kind === "setup") await model!.footer.onSetup();
+      });
+      await act(async () => {
+        document.querySelector<HTMLInputElement>("input[value=workspace]")!.click();
+      });
+      await act(async () => {
+        Array.from(document.querySelectorAll("button"))
+          .find((button) => button.textContent === "Continue")!
+          .click();
+      });
+      expect(
+        rendered.container
+          .querySelector("[data-connect-ownership]")
+          ?.getAttribute("data-connect-ownership"),
+      ).toBe("workspace");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("zero accounts: idle chip and a Set up footer for an admin", async () => {
     let model: ReturnType<typeof useOutlookMailIntegration>["model"] | undefined;
     const rendered = await render(

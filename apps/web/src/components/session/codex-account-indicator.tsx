@@ -53,13 +53,23 @@ function UsageRow(props: { label: string; window: CodexUsageWindow | null | unde
   return (
     <div className="flex items-center gap-2 text-2xs text-fg-subtle">
       <span className="w-10 shrink-0">{props.label}</span>
-      <span className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-2">
+      <span
+        className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-2"
+        role="progressbar"
+        aria-label={`${props.label} remaining`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={pct}
+        aria-valuetext={`${Math.round(pct)}% remaining`}
+      >
         <span
           className={cn("block h-full rounded-full", danger ? "bg-status-waiting" : "bg-brand")}
           style={{ width: `${pct}%` }}
         />
       </span>
-      <span className="w-8 shrink-0 text-right tabular-nums">{Math.round(pct)}%</span>
+      <span className="shrink-0 whitespace-nowrap text-right tabular-nums">
+        {Math.round(pct)}% remaining
+      </span>
     </div>
   );
 }
@@ -70,13 +80,16 @@ function MiniBar({ account }: { account: CodexAccount | undefined | null }) {
   const pct = Math.min(100, Math.max(0, remaining));
   return (
     <span
-      className="inline-block h-1 w-8 shrink-0 overflow-hidden rounded-full bg-surface-2"
-      title={`${Math.round(pct)}% remaining`}
+      className="inline-flex shrink-0 items-center gap-1.5 text-2xs text-fg-subtle"
+      title={`${Math.round(pct)}% remaining in the tighter usage window`}
     >
-      <span
-        className={cn("block h-full rounded-full", pct <= 10 ? "bg-status-waiting" : "bg-brand")}
-        style={{ width: `${pct}%` }}
-      />
+      <span className="h-1 w-8 overflow-hidden rounded-full bg-surface-2" aria-hidden="true">
+        <span
+          className={cn("block h-full rounded-full", pct <= 10 ? "bg-status-waiting" : "bg-brand")}
+          style={{ width: `${pct}%` }}
+        />
+      </span>
+      <span className="whitespace-nowrap tabular-nums">{Math.round(pct)}% remaining</span>
     </span>
   );
 }
@@ -113,8 +126,25 @@ export function CodexAccountIndicator({
     return null;
   }
 
+  const current = codex.currentSelection;
   const effective =
-    codex.accounts.find((account) => account.id === codex.effectiveAccountId) ?? null;
+    (current ? codex.currentAccount : null) ??
+    codex.accounts.find(
+      (account) => account.id === (current ? current.credentialId : codex.pinnedAccountId),
+    ) ??
+    null;
+  const selectionLabel = current
+    ? current.waiting
+      ? "Waiting for capacity"
+      : "Current account"
+    : "Account selection";
+  const displayName = effective
+    ? accountLabel(effective)
+    : current?.credentialId
+      ? "Account unavailable"
+      : current && !current.waiting
+        ? "Selecting account"
+        : "Automatic selection";
   const accountsPending = codex.loading && !effective;
   if (accountsPending) {
     return (
@@ -124,9 +154,7 @@ export function CodexAccountIndicator({
 
   const tone = statusTone(effective);
   const hasAccounts = codex.accounts.length > 0;
-  const ariaLabel = effective
-    ? `Switch Codex account · ${accountLabel(effective)}${effective.plan ? ` · ${effective.plan}` : ""}`
-    : "Switch Codex account";
+  const ariaLabel = `Switch Codex account · ${selectionLabel} · ${displayName}`;
 
   return (
     <DropdownMenu>
@@ -177,7 +205,8 @@ export function CodexAccountIndicator({
               <ChatGptMark className="size-4" />
             </span>
             <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium text-fg">{accountLabel(effective)}</p>
+              <p className="text-2xs text-fg-subtle">{selectionLabel}</p>
+              <p className="truncate text-sm font-medium text-fg">{displayName}</p>
               <p className="truncate text-2xs text-fg-subtle">
                 {[effective?.plan, effective?.status === "active" ? null : effective?.status]
                   .filter(Boolean)
@@ -196,7 +225,7 @@ export function CodexAccountIndicator({
         <DropdownMenuSeparator className="shrink-0" />
 
         <DropdownMenuLabel className="shrink-0 px-2 pt-1 pb-1 text-xs font-normal text-fg-subtle">
-          Run next turn on
+          {current?.waiting ? "Retry with" : "Use for next turn"}
         </DropdownMenuLabel>
 
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
@@ -204,12 +233,14 @@ export function CodexAccountIndicator({
             disabled={codex.pinning}
             onSelect={(event) => {
               event.preventDefault();
-              if (codex.pinnedAccountId === null) return;
+              if (codex.pinnedAccountId === null && !current?.waiting) return;
               void codex.pin(AUTO);
             }}
             className="flex h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm"
           >
-            <span className="min-w-0 flex-1 truncate">Auto (workspace default)</span>
+            <span className="min-w-0 flex-1 truncate">
+              {current?.waiting ? "Auto" : "Auto (workspace default)"}
+            </span>
             {codex.pinningTarget === AUTO ? (
               <Loader2Icon className="ml-1 size-4 shrink-0 animate-spin" />
             ) : codex.pinnedAccountId === null ? (
@@ -218,7 +249,7 @@ export function CodexAccountIndicator({
           </DropdownMenuItem>
 
           {codex.accounts.map((account) => {
-            const isEffective = account.id === codex.effectiveAccountId;
+            const isSelected = account.id === codex.pinnedAccountId;
             const isPinning = codex.pinningTarget === account.id;
             return (
               <DropdownMenuItem
@@ -226,7 +257,7 @@ export function CodexAccountIndicator({
                 disabled={codex.pinning}
                 onSelect={(event) => {
                   event.preventDefault();
-                  if (codex.pinnedAccountId === account.id) return;
+                  if (codex.pinnedAccountId === account.id && !current?.waiting) return;
                   void codex.pin(account.id);
                 }}
                 className="flex h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm"
@@ -243,7 +274,7 @@ export function CodexAccountIndicator({
                 ) : null}
                 {isPinning ? (
                   <Loader2Icon className="ml-1 size-4 shrink-0 animate-spin" />
-                ) : isEffective ? (
+                ) : isSelected ? (
                   <CheckIcon className="ml-1 size-4 shrink-0" />
                 ) : null}
               </DropdownMenuItem>
@@ -251,14 +282,24 @@ export function CodexAccountIndicator({
           })}
 
           {!hasAccounts ? (
-            <p className="px-2 pt-1 text-2xs text-fg-subtle">No Codex subscriptions connected.</p>
+            <p className="px-2 pt-1 text-2xs text-fg-subtle">
+              {codex.error ? "Accounts unavailable." : "No Codex subscriptions connected."}
+            </p>
           ) : null}
           {codex.mutationError ? (
             <p className="px-2 pt-1 text-2xs text-danger">
               Switch failed: {codex.mutationError.message}
             </p>
           ) : (
-            <p className="px-2 pt-1 text-2xs text-fg-subtle">Applies next turn.</p>
+            <p className="px-2 pt-1 text-2xs text-fg-subtle">
+              {codex.switchAppliedTo === "waiting_turn"
+                ? "Selection saved. Capacity is being rechecked."
+                : codex.switchAppliedTo === "next_turn"
+                  ? "Selection saved for the next turn."
+                  : current?.waiting
+                    ? "Changing accounts retries the waiting turn."
+                    : "Applies next turn. The current turn keeps its account."}
+            </p>
           )}
         </div>
       </DropdownMenuContent>

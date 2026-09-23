@@ -73,7 +73,7 @@ export function useSupportDemo(): SupportDemoResult {
         .catch((cause: unknown) => {
           setError(cause instanceof Error ? cause : new Error(String(cause)));
         });
-    }, 3_000);
+    }, 15_000);
     const onDomainEvent = (event: MessageEvent<string>) => {
       try {
         const parsed = JSON.parse(event.data) as SupportDomainEvent;

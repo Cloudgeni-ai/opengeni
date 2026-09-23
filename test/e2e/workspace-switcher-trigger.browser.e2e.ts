@@ -67,10 +67,19 @@ describe("Workspace switcher trigger in Chromium", () => {
       "Product Testing",
       "Research Sandbox",
       "New workspace…",
+      "New organization…",
+      "Organization settings for CloudGeni Product Engineering and Reliability",
     ]) {
       expect(await page.getByRole("menuitem", { name: label, exact: true }).isVisible()).toBe(true);
     }
-    expect(await page.getByRole("menuitem", { name: "Settings", exact: true }).count()).toBe(0);
+    expect(
+      await page
+        .getByRole("menuitem", {
+          name: "Organization settings for CloudGeni Research",
+          exact: true,
+        })
+        .count(),
+    ).toBe(0);
     const personalMenuItem = page.getByRole("menuitem", {
       name: "Personal workspace Personal workspace",
       exact: true,
@@ -91,7 +100,32 @@ describe("Workspace switcher trigger in Chromium", () => {
 
     await page.getByRole("menuitem", { name: "Product Testing", exact: true }).click();
     expect(await page.getByTestId("last-action").textContent()).toBe("Opened Product Testing");
-  });
+  }, 15_000);
+
+  test("the combined menu exposes organization creation and settings to pointer and keyboard", async () => {
+    await page.goto(`${baseUrl}/test/workspace-switcher-trigger.html`, {
+      waitUntil: "networkidle",
+    });
+    const trigger = page.locator('button[aria-label$="Switch workspace"]');
+
+    await trigger.focus();
+    await trigger.press("Enter");
+    await page.getByRole("menuitem", { name: "New organization…", exact: true }).click();
+    expect(await page.getByTestId("last-action").textContent()).toBe("New organization");
+
+    const organizationSettings = page.getByRole("menuitem", {
+      name: "Organization settings for CloudGeni Product Engineering and Reliability",
+      exact: true,
+    });
+    await page.keyboard.press("Home");
+    expect(
+      await organizationSettings.evaluate((element) => document.activeElement === element),
+    ).toBe(true);
+    await page.keyboard.press("Enter");
+    expect(await page.getByTestId("route-path").textContent()).toBe(
+      "/workspaces/workspace-personal/organization",
+    );
+  }, 15_000);
 
   test("the narrow expanded rail contains the same trigger without page overflow", async () => {
     await page.setViewportSize({ width: 320, height: 760 });
@@ -117,7 +151,7 @@ describe("Workspace switcher trigger in Chromium", () => {
     expect(
       await page.getByRole("menuitem", { name: "Product Testing", exact: true }).isVisible(),
     ).toBe(true);
-  });
+  }, 15_000);
 
   test("Enter and Space open the collapsed tooltip-wrapped trigger and Escape restores focus", async () => {
     await page.setViewportSize({ width: 1120, height: 760 });
@@ -132,11 +166,18 @@ describe("Workspace switcher trigger in Chromium", () => {
       await page.getByRole("menuitem", { name: "Product Testing", exact: true }).isVisible(),
     ).toBe(true);
     await page.keyboard.press("Escape");
+    // Radix restores focus during deferred close cleanup, not synchronously on Escape.
+    await page.waitForFunction(
+      () =>
+        document.activeElement === document.querySelector('button[aria-label$="Switch workspace"]'),
+      undefined,
+      { timeout: 2_000 },
+    );
     expect(await trigger.evaluate((element) => document.activeElement === element)).toBe(true);
 
     await trigger.press("Space");
     expect(
       await page.getByRole("menuitem", { name: "Product Testing", exact: true }).isVisible(),
     ).toBe(true);
-  });
+  }, 15_000);
 });

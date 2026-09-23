@@ -6,6 +6,7 @@ import {
   DEFAULT_INTEGRATION_RESPONSE_BYTES,
   DEFAULT_INTEGRATION_TIMEOUT_MS,
   MAX_INTEGRATION_SPEC_BYTES,
+  MAX_CURATED_INTEGRATION_SPEC_BYTES,
   MAX_INTEGRATION_TOOLS,
   fetchWithDeadline,
   readIntegrationResponse,
@@ -59,6 +60,7 @@ export interface CompileOpenApiOptions {
   readonly sourceUrl?: string;
   readonly baseUrl?: string;
   readonly provider?: string;
+  readonly schemaMode?: "provider_validated_json";
 }
 
 export interface OpenApiServerOptions {
@@ -102,12 +104,25 @@ const forbiddenParameterHeaders = new Set([
   "transfer-encoding",
 ]);
 
-export function parseOpenApiDocument(source: string | Uint8Array): Record<string, unknown> {
+export function parseOpenApiDocument(
+  source: string | Uint8Array,
+  options: { maxBytes?: number } = {},
+): Record<string, unknown> {
+  const maxBytes = options.maxBytes ?? MAX_INTEGRATION_SPEC_BYTES;
+  if (
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes < 1 ||
+    maxBytes > MAX_CURATED_INTEGRATION_SPEC_BYTES
+  ) {
+    throw new RangeError(
+      `OpenAPI parser limit must be between 1 and ${MAX_CURATED_INTEGRATION_SPEC_BYTES} bytes`,
+    );
+  }
   const bytes = typeof source === "string" ? Buffer.byteLength(source) : source.byteLength;
-  if (bytes === 0 || bytes > MAX_INTEGRATION_SPEC_BYTES) {
+  if (bytes === 0 || bytes > maxBytes) {
     throw new IntegrationProtocolError(
       "openapi_spec_size",
-      `OpenAPI document must be between 1 and ${MAX_INTEGRATION_SPEC_BYTES} bytes`,
+      `OpenAPI document must be between 1 and ${maxBytes} bytes`,
     );
   }
   const text =
@@ -142,7 +157,9 @@ export function compileOpenApiRevision(
   options: CompileOpenApiOptions,
 ): OpenApiRevision {
   const document = isRecord(source) ? source : parseOpenApiDocument(source);
-  const contentSha256 = sha256Hex(canonicalJson(document));
+  const contentSha256 = sha256Hex(
+    canonicalJson(options.schemaMode ? { document, schemaMode: options.schemaMode } : document),
+  );
   const revisionId = immutableRevisionId("openapi", contentSha256);
   const info = isRecord(document.info) ? document.info : {};
   const documentServers = readServers(document.servers, options.baseUrl, options.sourceUrl);
@@ -167,7 +184,7 @@ export function compileOpenApiRevision(
         sharedParameters,
         readParameters(document, operation.parameters),
       );
-      const requestBody = readRequestBody(document, operation.requestBody);
+      const requestBody = readRequestBody(document, operation.requestBody, options.schemaMode);
       const serverUrl = firstServerUrl(
         readServers(operation.servers, undefined, undefined),
         pathServers,
@@ -177,7 +194,9 @@ export function compileOpenApiRevision(
         operation.security === undefined ? documentSecurity : readSecurity(operation.security);
       const safety = classifyHttpSafety(method, operation);
       const inputSchema = operationInputSchema(parameters, requestBody);
-      const outputSchema = operationOutputSchema(document, operation.responses);
+      const outputSchema = options.schemaMode
+        ? undefined
+        : operationOutputSchema(document, operation.responses);
       const summary = stringValue(operation.summary) ?? stringValue(operation.description);
       tools.push({
         id,
@@ -554,6 +573,7 @@ function mergeParameters(
 function readRequestBody(
   document: Record<string, unknown>,
   value: unknown,
+  schemaMode?: CompileOpenApiOptions["schemaMode"],
 ): OpenApiOperationBinding["requestBody"] | undefined {
   if (value === undefined) return undefined;
   const body = resolveObject(document, value, "request body");
@@ -561,7 +581,15 @@ function readRequestBody(
   const schemas: Record<string, JsonSchema> = {};
   for (const [contentType, rawMedia] of Object.entries(body.content)) {
     if (!isRecord(rawMedia)) continue;
-    schemas[contentType.toLowerCase()] = dereferenceSchema(document, rawMedia.schema);
+    const normalizedType = contentType.toLowerCase();
+    const jsonBody = normalizedType === "application/json" || normalizedType.endsWith("+json");
+    schemas[normalizedType] =
+      schemaMode === "provider_validated_json" && jsonBody
+        ? {
+            description:
+              "Request JSON for this API operation. The provider validates fields; follow the operation documentation.",
+          }
+        : dereferenceSchema(document, rawMedia.schema);
   }
   const contentTypes = Object.keys(schemas);
   return contentTypes.length === 0

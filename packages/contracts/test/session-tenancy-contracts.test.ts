@@ -12,6 +12,24 @@ const sessionId = "33333333-3333-4333-8333-333333333333";
 const workspaceId = "44444444-4444-4444-8444-444444444444";
 
 describe("session tenancy public contracts", () => {
+  test("accepts an exact message boundary without changing whole-session fork requests", () => {
+    const request = {
+      idempotencyKey: "fork-point",
+      visibility: "private",
+      workspaceSharedAcknowledged: false,
+    };
+    expect(ForkSessionRequest.parse({ ...request, sourceEventId: eventId }).sourceEventId).toBe(
+      eventId,
+    );
+    expect(ForkSessionRequest.parse(request).sourceEventId).toBeUndefined();
+    expect(
+      ForkSessionRequest.safeParse({ ...request, sourceEventId: "not-an-event-id" }).success,
+    ).toBe(false);
+    expect(
+      ForkSessionRequest.safeParse({ ...request, sourceEventId: eventId, variableSetIds: [] })
+        .success,
+    ).toBe(false);
+  });
   test("normalizes the required bounded idempotency key and epoch", () => {
     expect(
       UpdateSessionVisibilityRequest.parse({

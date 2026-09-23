@@ -81,11 +81,13 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
     setLoading(true);
     setLoadError(null);
     void context.client
       .getWorkspaceInsights(workspaceId, {
         range,
+        signal: controller.signal,
         ...(filters.provider !== "all" ? { provider: filters.provider } : {}),
         ...(filters.model !== "all" ? { model: filters.model } : {}),
       })
@@ -102,6 +104,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [canRead, context.client, filters, range, workspaceId]);
 
@@ -170,7 +173,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
   if (!canRead || (loadError && !snapshot)) {
     return (
       <ContentPage width="wide" data-insights className="gap-4">
-        <h1 className="text-lg font-semibold text-fg">Workspace insights</h1>
+        <h1 className="text-xl font-semibold tracking-tight text-fg">Workspace insights</h1>
         <p className="text-sm text-fg-muted">{loadError ?? "Unavailable."}</p>
       </ContentPage>
     );
@@ -179,7 +182,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
   if ((!snapshot && loading) || !snap || !totals || !deltas || !view) {
     return (
       <ContentPage width="wide" data-insights className="gap-4">
-        <h1 className="text-lg font-semibold text-fg">Workspace insights</h1>
+        <h1 className="text-xl font-semibold tracking-tight text-fg">Workspace insights</h1>
         <p className="text-sm text-fg-muted">Loading rollups…</p>
       </ContentPage>
     );
@@ -198,7 +201,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
             <p className="text-2xs font-medium uppercase tracking-[0.14em] text-fg-subtle">
               {workspace?.name ?? "Workspace"}
             </p>
-            <h1 className="mt-1 text-xl font-semibold tracking-[-0.03em] text-fg">Insights</h1>
+            <h1 className="mt-1 text-xl font-semibold tracking-tight text-fg">Insights</h1>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <MeasureControl value={measure} onChange={setMeasure} />
@@ -267,11 +270,14 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           <div className="rounded-lg border border-brand/20 bg-brand/5 px-3 py-2 text-xs leading-5 text-fg-muted">
             <strong className="text-fg">Estimated provider USD</strong> is a hypothetical
             provider-rate comparison from captured list pricing or gateway-reported inference cost,
-            not an OpenGeni charge. <strong className="text-fg">OpenGeni credit price</strong> is
-            shown separately and is zero for externally paid calls.
+            before OpenGeni markup.{" "}
+            <strong className="text-fg">Equivalent OpenGeni credit price</strong>
+            includes the configured markup even when the call was externally paid.{" "}
+            <strong className="text-fg">OpenGeni credit price</strong> is the actual credits-path
+            price and is zero for externally paid calls.
           </div>
         ) : null}
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
           {measure === "tokens" ? (
             <>
               <Metric
@@ -304,6 +310,11 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                 delta={`${formatPctDelta(deltas.estimatedPct, snap.priorLabel)} · ${totals.pricingCoveragePct}% call coverage`}
               />
               <Metric
+                label="Equivalent OpenGeni credit price"
+                value={formatUsd(totals.equivalentCreditUsd)}
+                delta={`${formatPctDelta(deltas.equivalentPct, snap.priorLabel)} · ${totals.equivalentPricingCoveragePct}% call coverage`}
+              />
+              <Metric
                 label={
                   snap.modelFilterActive
                     ? "OpenGeni credit price (filtered)"
@@ -313,8 +324,8 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                 delta={`${formatPctDelta(deltas.modelPct, snap.priorLabel)} · external calls excluded`}
               />
               <Metric
-                label="Priced calls"
-                value={`${snap.estimatedProviderCostKnownCalls.toLocaleString()} / ${snap.modelCalls.toLocaleString()}`}
+                label="Equivalent-priced calls"
+                value={`${snap.equivalentCreditCostKnownCalls.toLocaleString()} / ${snap.modelCalls.toLocaleString()}`}
                 delta="Historical or unconfigured prices remain unknown"
               />
               <Metric
@@ -337,7 +348,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               <p className="text-2xs text-fg-subtle">
                 {measure === "tokens"
                   ? "Total includes input + output"
-                  : "Estimate and credits never merge"}
+                  : "Provider estimate, equivalent price, and actual price stay separate"}
               </p>
             </div>
             <AreaChart
@@ -374,6 +385,12 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                         label: "Estimated provider USD",
                         values: series.map((d) => d.estimatedProviderUsd),
                         className: "text-brand",
+                      },
+                      {
+                        id: "equivalent",
+                        label: "Equivalent OpenGeni credit price",
+                        values: series.map((d) => d.equivalentCreditUsd),
+                        className: "text-status-running",
                       },
                       {
                         id: "credits",
@@ -499,7 +516,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
           <div className="rounded-lg border border-border bg-surface/35 p-4">
             <h3 className="text-sm font-medium text-fg">
-              {measure === "tokens" ? "Total tokens" : "Estimated provider USD"}
+              {measure === "tokens" ? "Total tokens" : "Equivalent OpenGeni credit price"}
             </h3>
             <p className="mt-0.5 text-2xs text-fg-subtle">Share by model · click to filter</p>
             <DonutChart
@@ -509,7 +526,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               centerValue={
                 measure === "tokens"
                   ? formatTokens(totals.totalTokens)
-                  : formatUsd(totals.estimatedProviderUsd)
+                  : formatUsd(totals.equivalentCreditUsd)
               }
               formatValue={measure === "tokens" ? formatTokens : formatUsd}
               onSelect={(id) => {
@@ -519,7 +536,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               slices={models.map((row, i) => ({
                 id: row.id,
                 label: row.model,
-                value: measure === "tokens" ? row.totalTokens : row.estimatedProviderUsd,
+                value: measure === "tokens" ? row.totalTokens : row.equivalentCreditUsd,
                 toneClass: donutTone(i),
               }))}
             />
@@ -541,6 +558,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                     "Cache write",
                     "Reasoning",
                     "Est. provider USD",
+                    "Equivalent credits",
                     "OpenGeni credits",
                   ].map((h) => (
                     <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
@@ -591,13 +609,18 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                         : "Unknown"}
                     </td>
                     <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                      {row.equivalentCreditCostKnownCalls > 0
+                        ? `${formatUsd(row.equivalentCreditUsd)} · ${row.equivalentCreditCostKnownCalls}/${row.calls}`
+                        : "Unknown"}
+                    </td>
+                    <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
                       {formatUsd(row.creditUsd)}
                     </td>
                   </tr>
                 ))}
                 {models.length === 0 ? (
                   <tr>
-                    <td colSpan={12} className="px-3 py-8 text-center text-fg-subtle">
+                    <td colSpan={13} className="px-3 py-8 text-center text-fg-subtle">
                       No model calls match this window and filter.
                     </td>
                   </tr>
@@ -630,6 +653,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                   "Cache write",
                   "Reasoning",
                   "Est. provider USD",
+                  "Equivalent credits",
                   "OpenGeni credits",
                 ].map((h) => (
                   <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
@@ -692,13 +716,18 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                       : `${formatUsd(call.estimatedProviderUsd)} · ${call.pricingSource === "gateway_reported" ? "gateway reported" : "list price"}`}
                   </td>
                   <td className="whitespace-nowrap px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                    {call.equivalentCreditUsd == null
+                      ? "Unknown"
+                      : formatUsd(call.equivalentCreditUsd)}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2.5 font-mono tabular-nums text-fg-muted">
                     {formatUsd(call.creditUsd)}
                   </td>
                 </tr>
               ))}
               {snap.recentCalls.length === 0 ? (
                 <tr>
-                  <td colSpan={13} className="px-3 py-8 text-center text-fg-subtle">
+                  <td colSpan={14} className="px-3 py-8 text-center text-fg-subtle">
                     No model calls match this window and filter.
                   </td>
                 </tr>
@@ -713,7 +742,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
           <div className="rounded-lg border border-border bg-surface/35 p-4">
             <h3 className="text-sm font-medium text-fg">
-              {measure === "tokens" ? "Total tokens" : "Estimated provider USD"}
+              {measure === "tokens" ? "Total tokens" : "Equivalent OpenGeni credit price"}
             </h3>
             <p className="mt-0.5 text-2xs text-fg-subtle">Share by provider · click to filter</p>
             <DonutChart
@@ -723,7 +752,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               centerValue={
                 measure === "tokens"
                   ? formatTokens(totals.totalTokens)
-                  : formatUsd(totals.estimatedProviderUsd)
+                  : formatUsd(totals.equivalentCreditUsd)
               }
               formatValue={measure === "tokens" ? formatTokens : formatUsd}
               onSelect={(id) => {
@@ -733,7 +762,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               slices={providers.map((p, i) => ({
                 id: p.provider,
                 label: providerLabel(p.provider),
-                value: measure === "tokens" ? p.totalTokens : p.estimatedProviderUsd,
+                value: measure === "tokens" ? p.totalTokens : p.equivalentCreditUsd,
                 toneClass: donutTone(i),
               }))}
             />
@@ -768,6 +797,10 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                     {p.estimatedProviderCostKnownCalls > 0
                       ? `${formatUsd(p.estimatedProviderUsd)} est. provider`
                       : "provider price unknown"}
+                    {" · "}
+                    {p.equivalentCreditCostKnownCalls > 0
+                      ? `${formatUsd(p.equivalentCreditUsd)} equivalent credits`
+                      : "equivalent price unknown"}
                     {" · "}
                     {formatUsd(p.creditUsd)} credits
                   </p>
@@ -965,6 +998,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                   "Shown share",
                   "Cache",
                   "Est. provider USD",
+                  "Equivalent credits",
                   "OpenGeni credits",
                   "Credit Δ",
                 ].map((h) => (
@@ -997,6 +1031,11 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                       : "Unknown"}
                   </td>
                   <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                    {driver.equivalentCreditCostKnownCalls > 0
+                      ? formatUsd(driver.equivalentCreditUsd)
+                      : "Unknown"}
+                  </td>
+                  <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
                     {formatUsd(driver.creditUsd)}
                   </td>
                   <td
@@ -1011,7 +1050,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               ))}
               {snap.drivers.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-fg-subtle">
+                  <td colSpan={8} className="px-3 py-8 text-center text-fg-subtle">
                     No attributed model usage in this window.
                   </td>
                 </tr>
@@ -1120,6 +1159,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                   "Tokens",
                   "Cache",
                   "Est. provider USD",
+                  "Equivalent credits",
                   "OpenGeni credits",
                   "Billing",
                 ].map((h) => (
@@ -1152,6 +1192,13 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                       : formatUsd(row.estimatedProviderUsd)}
                   </td>
                   <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                    {row.equivalentCreditUsd == null ||
+                    row.equivalentCreditCostKnownCalls == null ||
+                    row.equivalentCreditCostKnownCalls === 0
+                      ? "Unknown"
+                      : formatUsd(row.equivalentCreditUsd)}
+                  </td>
+                  <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
                     {row.creditUsd == null ? "—" : formatUsd(row.creditUsd)}
                   </td>
                   <td className="px-3 py-2.5">
@@ -1161,7 +1208,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               ))}
               {snap.schedules.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-fg-subtle">
+                  <td colSpan={8} className="px-3 py-8 text-center text-fg-subtle">
                     No schedules in this workspace.
                   </td>
                 </tr>

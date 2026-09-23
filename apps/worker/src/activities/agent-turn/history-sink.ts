@@ -10,6 +10,7 @@ import { safeErrorDiagnostic } from "./errors";
 import { historyRowsToAppend, isModelOrToolProgressHistoryItem } from "./history";
 import { runMandatoryHistoryPersistenceStep } from "./quiescence";
 import type { TurnMediaArtifacts } from "./media-artifacts";
+import { HistoryPrefixGuard } from "./history-prefix";
 
 export type TurnHistorySinkDeps = {
   db: SharedActivityServices["db"];
@@ -28,8 +29,8 @@ export type TurnHistorySinkDeps = {
  * Dual-write of conversation truth (issue #35): completed items are reconciled
  * into session_history_items after every model response and at every turn-end
  * path (idempotent on position), and the sandbox recovery envelope is upserted
- * alongside. Best-effort by design: persistence problems must never fail the
- * run.
+ * alongside. Provider dispatch and settlement require durable persistence;
+ * the prefix guard rejects SDK history removal/reordering before slicing.
  *
  * Orphaned-tool-output guard: `stream.state.history` is NOT a plain
  * append-only array — it is a computed getter
@@ -48,6 +49,23 @@ export type TurnHistorySinkDeps = {
  * other reconcile.
  */
 export class TurnHistorySink {
+  private readonly prefix = new HistoryPrefixGuard();
+
+  seedHistory(input: string | readonly unknown[] | { readonly history: unknown[] }, count: number) {
+    const items =
+      typeof input === "string" && count === 0
+        ? []
+        : Array.isArray(input)
+          ? input
+          : (input as { history?: unknown[] })?.history;
+    if (!Array.isArray(items)) throw new Error("Conversation history seed is unavailable");
+    this.prefix.seed(
+      items as Array<Record<string, unknown>>,
+      count,
+      this.deps.getModelRunSettings().modelToolOutputTruncationTokens,
+    );
+    this.persistedHistoryCount = count;
+  }
   persistedHistoryCount = 0;
   nextHistoryPosition = 0;
   providerArtifactCandidates: Awaited<ReturnType<typeof turnInput>>["providerArtifactCandidates"] =
@@ -72,6 +90,10 @@ export class TurnHistorySink {
       const rawHistory = (stream.state as { history?: unknown[] }).history;
       if (Array.isArray(rawHistory)) {
         const typedHistory = rawHistory as Array<Record<string, unknown>>;
+        const verifiedKeys = this.prefix.verify(
+          typedHistory,
+          this.deps.getModelRunSettings().modelToolOutputTruncationTokens,
+        );
         await media.retainNativeGeneratedImagesFromHistory(typedHistory);
         const durableHistory = compactGeneratedImageHistory(
           compactRetainedScreenshotHistory(typedHistory, media.retainedScreenshotReceiptsByCallId),
@@ -109,9 +131,14 @@ export class TurnHistorySink {
           });
         }
         if (shouldAppendRows || !options.skipInputOnlyRows) {
+          this.prefix.acknowledge(verifiedKeys, nextWatermark);
           this.persistedHistoryCount = nextWatermark;
           this.nextHistoryPosition = nextPosition;
         }
+      } else if (options.requireDurable) {
+        throw new Error(
+          "SDK conversation history is unavailable at a mandatory persistence boundary",
+        );
       }
       const envelope = sandboxStateEntryFromRunState(stream.state);
       if (envelope) {
@@ -125,10 +152,7 @@ export class TurnHistorySink {
         );
       }
     } catch (persistError) {
-      console.error(
-        "session history dual-write failed (run unaffected)",
-        safeErrorDiagnostic(persistError),
-      );
+      console.error("session history persistence failed", safeErrorDiagnostic(persistError));
       if (options.requireDurable) throw persistError;
     }
   };

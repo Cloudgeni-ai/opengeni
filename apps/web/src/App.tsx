@@ -1,18 +1,17 @@
 // Route assembly only — components live under src/routes, shared state in
 // src/context.tsx, logic in src/lib. Route map:
-//   /                                        → default-workspace redirect
+//   /                                        → remembered/default workspace redirect
 //   /workspaces/:id                          → sessions redirect
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
-//   /workspaces/:id/priority                 → "For you" priority feed (agent-time-lost ledger)
+//   /workspaces/:id/priority                 → "For you" priority feed (verified human waits)
 //   /workspaces/:id/agents                   → workspace agent topology
 //   /sessions/:sessionId                     → authorized compatibility redirect
 //   /workspaces/:id/variable-sets            → variable sets + variables
 //   /workspaces/:id/rigs                     → rigs list + create
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
-//   /workspaces/:id/packs                    → redirect to plugins (Packs subsection)
-//   /workspaces/:id/plugins                  → plugin catalog + registry (incl. Packs subsection)
+
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
 //   /workspaces/:id/schedules                → scheduled tasks + run history
 //   /workspaces/:id/documents                → document bases + search
@@ -39,10 +38,19 @@ import { ProblemPanel } from "@/components/common";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
-import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
+import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
+import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
+import {
+  parseRootWorkspaceSearch,
+  readLastWorkspaceId,
+  resolveLandingWorkspaceId,
+  type RootWorkspaceSearch,
+  workspaceNavigationPreferenceStorageId,
+} from "@/lib/workspace-navigation-preference";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
 type OrganizationAdminSection =
+  | "integrations"
   | "overview"
   | "knowledge"
   | "models"
@@ -52,9 +60,9 @@ type OrganizationAdminSection =
   | "developer"
   | "billing";
 type WorkspaceSettingsSection =
+  | "learning"
   | "general"
   | "members"
-  | "tools"
   | "plugins"
   | "models"
   | "api-keys"
@@ -97,6 +105,10 @@ const LazyAccountAuthRoute = lazyRouteComponent(
   () => import("@/routes/account-auth"),
   "AccountAuthRoute",
 );
+const LazyPersonalSecurityRoute = lazyRouteComponent(
+  () => import("@/routes/personal-security"),
+  "PersonalSecurityRoute",
+);
 const LazyOnboardingPreviewRoute = lazyRouteComponent(
   () => import("@/routes/onboarding-preview"),
   "OnboardingPreviewRoute",
@@ -125,6 +137,14 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
   "WorkspaceStateRoute",
 );
 const LazyArtifactsRoute = lazyRouteComponent(() => import("@/routes/artifacts"), "ArtifactsRoute");
+const LazyRetainedArtifactRoute = lazyRouteComponent(
+  () => import("@/routes/retained-artifact"),
+  "RetainedArtifactRoute",
+);
+const LazyIdentityLinkRoute = lazyRouteComponent(
+  () => import("@/routes/identity-link"),
+  "IdentityLinkRoute",
+);
 const LazyEditableArtifactRoute = lazyRouteComponent(
   () => import("@/routes/editable-artifact"),
   "EditableArtifactRoute",
@@ -145,12 +165,23 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
+  validateSearch: (search: Record<string, unknown>): RootWorkspaceSearch =>
+    parseRootWorkspaceSearch(search),
   component: RootIndexRoute,
 });
 const sessionDeepLinkRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "sessions/$sessionId",
   component: SessionDeepLink,
+});
+const identityLinkRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "identity-links/$linkId",
+  validateSearch: (search: Record<string, unknown>): { organization?: string } =>
+    typeof search.organization === "string" && /^[0-9a-f-]{36}$/i.test(search.organization)
+      ? { organization: search.organization }
+      : {},
+  component: IdentityLink,
 });
 // Stripe checkout return target. The API bakes `/billing?checkout=…` into every
 // checkout session's success_url/cancel_url; this top-level route forwards the
@@ -203,6 +234,11 @@ const accountAuthRoute = createRoute({
   }),
   component: AccountAuth,
 });
+const personalSecurityRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "settings/security",
+  component: LazyPersonalSecurityRoute,
+});
 // DEV-only visual harness for the Session composer chrome stack (queue / goal /
 // agents / composer). Public so it needs no live auth or session; omitted from
 // production route trees.
@@ -247,8 +283,10 @@ const workspaceSessionsRoute = createRoute({
 const workspaceSessionRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "sessions/$sessionId",
-  validateSearch: (search: Record<string, unknown>): ComposerLaunchSearch =>
-    parseComposerLaunchSearch(search),
+  validateSearch: (search: Record<string, unknown>): ComposerLaunchSearch & SessionSearchRoute => ({
+    ...parseComposerLaunchSearch(search),
+    ...parseSessionSearchRoute(search),
+  }),
   component: SessionView,
 });
 const workspaceAgentsRoute = createRoute({
@@ -291,29 +329,19 @@ const workspacePriorityRoute = createRoute({
   path: "priority",
   component: Priority,
 });
-// Legacy standalone Packs route: packs are now a subsection of Capabilities,
-// so this redirects there (focusing the Packs subsection) instead of mounting
-// a separate page.
-const workspacePacksRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "packs",
-  component: PacksRedirect,
-});
 const workspaceCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "plugins",
-  // `?section=packs` focuses the Packs subsection (used by the legacy
-  // /packs redirect and the nav). Unknown values fall back to the catalog.
-  validateSearch: (search: Record<string, unknown>): { section?: "packs" } => ({
-    ...(search.section === "packs" ? { section: "packs" as const } : {}),
+  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
+    ...(search.section === "skills" ? { section: "skills" as const } : {}),
   }),
   component: Capabilities,
 });
 const workspaceLegacyCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "capabilities",
-  validateSearch: (search: Record<string, unknown>): { section?: "packs" } => ({
-    ...(search.section === "packs" ? { section: "packs" as const } : {}),
+  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
+    ...(search.section === "skills" ? { section: "skills" as const } : {}),
   }),
   component: CapabilitiesLegacyRedirect,
 });
@@ -324,10 +352,14 @@ const workspaceSchedulesRoute = createRoute({
   path: "schedules",
   validateSearch: (
     search: Record<string, unknown>,
-  ): { sourceSessionId?: string; taskId?: string } => ({
+  ): { sourceSessionId?: string; taskId?: string; targetSessionId?: string } => ({
     ...(typeof search.sourceSessionId === "string" &&
     SCHEDULES_SEARCH_UUID.test(search.sourceSessionId)
       ? { sourceSessionId: search.sourceSessionId }
+      : {}),
+    ...(typeof search.targetSessionId === "string" &&
+    SCHEDULES_SEARCH_UUID.test(search.targetSessionId)
+      ? { targetSessionId: search.targetSessionId }
       : {}),
     // Set when arriving from a session that a schedule started, so the page can
     // reveal that one task instead of leaving the reader to find it.
@@ -374,15 +406,15 @@ const workspaceSettingsRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { section?: WorkspaceSettingsSection } => {
     const section =
       search.section === "general" ||
+      search.section === "learning" ||
       search.section === "members" ||
-      search.section === "tools" ||
       search.section === "plugins" ||
       search.section === "models" ||
       search.section === "api-keys" ||
       search.section === "danger"
         ? search.section
-        : search.section === "capabilities" || search.section === "permissions"
-          ? "tools"
+        : search.section === "capabilities"
+          ? "plugins"
           : undefined;
     return section ? { section } : {};
   },
@@ -391,24 +423,40 @@ const workspaceSettingsRoute = createRoute({
 const workspaceStateRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "state",
-  validateSearch: (search: Record<string, unknown>): { view?: "instructions" | "skills" } =>
-    search.view === "instructions" || search.view === "skills" ? { view: search.view } : {},
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { view?: "instructions" | "skills" | "files"; file?: string; review?: boolean } => ({
+    ...(search.review === true ? { review: true } : {}),
+    ...(search.view === "instructions" || search.view === "skills" || search.view === "files"
+      ? { view: search.view }
+      : {}),
+    ...(typeof search.file === "string" ? { file: search.file } : {}),
+  }),
   component: WorkspaceState,
 });
 const workspaceArtifactsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts",
+  validateSearch: artifactReturnSearch,
   component: Artifacts,
 });
 const workspaceArtifactDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts/$artifactId",
+  validateSearch: artifactReturnSearch,
   component: ArtifactDetail,
 });
 const workspaceEditableArtifactRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts/editable/$artifactId",
+  validateSearch: artifactReturnSearch,
   component: EditableArtifact,
+});
+const workspaceRetainedArtifactRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "artifacts/files/$artifactId",
+  validateSearch: artifactReturnSearch,
+  component: RetainedArtifact,
 });
 const workspaceOrganizationRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -426,6 +474,7 @@ const workspaceOrganizationRoute = createRoute({
       search.section === "people" ||
       search.section === "recovery" ||
       search.section === "retention" ||
+      search.section === "integrations" ||
       search.section === "developer" ||
       search.section === "billing"
         ? search.section
@@ -451,8 +500,10 @@ const routeTree = rootRoute.addChildren([
   billingReturnRoute,
   deviceRoute,
   resetPasswordRoute,
+  identityLinkRoute,
   setupAccountRoute,
   accountAuthRoute,
+  personalSecurityRoute,
   ...(import.meta.env.DEV
     ? [composerChromeGalleryRoute, agentTopologyPreviewRoute, onboardingPreviewRoute]
     : []),
@@ -469,7 +520,6 @@ const routeTree = rootRoute.addChildren([
     workspaceMachinesRoute,
     workspaceInsightsRoute,
     workspacePriorityRoute,
-    workspacePacksRoute,
     workspaceCapabilitiesRoute,
     workspaceLegacyCapabilitiesRoute,
     workspaceSchedulesRoute,
@@ -477,6 +527,7 @@ const routeTree = rootRoute.addChildren([
     workspaceMemoryRoute,
     workspaceStateRoute,
     workspaceArtifactsRoute,
+    workspaceRetainedArtifactRoute,
     workspaceArtifactDetailRoute,
     workspaceEditableArtifactRoute,
     workspaceSettingsRoute,
@@ -502,10 +553,15 @@ export function App() {
 
 function RootIndexRoute() {
   const context = useAppContext();
-  const workspaceId =
-    context.accessContext.defaultWorkspaceId ??
-    context.workspaces[0]?.id ??
-    context.accessContext.workspaceGrants[0]?.workspaceId;
+  const { workspaceId: requestedWorkspaceId } = indexRoute.useSearch();
+  const workspaceId = resolveLandingWorkspaceId({
+    requestedWorkspaceId,
+    rememberedWorkspaceId: readLastWorkspaceId(
+      workspaceNavigationPreferenceStorageId(context.accessContext.subjectId),
+    ),
+    workspaces: context.workspaces,
+    accessContext: context.accessContext,
+  });
   if (!workspaceId) {
     return (
       <ProblemPanel
@@ -542,6 +598,7 @@ function SessionView() {
       sessionId={sessionId}
       launch={launch}
       realtimeAutostartModel={launch.realtime}
+      searchTarget={launch}
     />
   );
 }
@@ -591,45 +648,31 @@ function Priority() {
   return <LazyPriorityRoute workspaceId={workspaceId} />;
 }
 
-function PacksRedirect() {
-  const { workspaceId } = workspacePacksRoute.useParams();
-  return (
-    <Navigate
-      to="/workspaces/$workspaceId/plugins"
-      params={{ workspaceId }}
-      search={{ section: "packs" }}
-      replace
-    />
-  );
-}
-
 function CapabilitiesLegacyRedirect() {
   const { workspaceId } = workspaceLegacyCapabilitiesRoute.useParams();
   const { section } = workspaceLegacyCapabilitiesRoute.useSearch();
   return (
-    <Navigate
-      to="/workspaces/$workspaceId/plugins"
-      params={{ workspaceId }}
-      search={section ? { section } : {}}
-      replace
-    />
+    <LazyCapabilitiesRoute workspaceId={workspaceId} initialSection={section} legacyRedirect />
   );
 }
 
 function Capabilities() {
   const { workspaceId } = workspaceCapabilitiesRoute.useParams();
   const { section } = workspaceCapabilitiesRoute.useSearch();
-  return <LazyCapabilitiesRoute workspaceId={workspaceId} initialSection={section} />;
+  return (
+    <LazyCapabilitiesRoute key={workspaceId} workspaceId={workspaceId} initialSection={section} />
+  );
 }
 
 function Schedules() {
   const { workspaceId } = workspaceSchedulesRoute.useParams();
-  const { sourceSessionId, taskId } = workspaceSchedulesRoute.useSearch();
+  const { sourceSessionId, taskId, targetSessionId } = workspaceSchedulesRoute.useSearch();
   return (
     <LazySchedulesRoute
       workspaceId={workspaceId}
       sourceSessionId={sourceSessionId}
       focusTaskId={taskId}
+      targetSessionId={targetSessionId}
     />
   );
 }
@@ -677,20 +720,44 @@ function WorkspaceSettings() {
 
 function WorkspaceState() {
   const { workspaceId } = workspaceStateRoute.useParams();
-  const { view } = workspaceStateRoute.useSearch();
-  return <LazyWorkspaceStateRoute workspaceId={workspaceId} view={view} />;
+  const { view, file, review } = workspaceStateRoute.useSearch();
+  return (
+    <LazyWorkspaceStateRoute
+      workspaceId={workspaceId}
+      view={view}
+      review={review}
+      {...(file ? { fileId: file } : {})}
+    />
+  );
 }
 
 function Artifacts() {
-  return <LazyArtifactsRoute {...workspaceArtifactsRoute.useParams()} />;
+  const { workspaceId } = workspaceArtifactsRoute.useParams();
+  const { fromSession } = workspaceArtifactsRoute.useSearch();
+  return <LazyArtifactsRoute workspaceId={workspaceId} fromSession={fromSession} />;
+}
+function IdentityLink() {
+  const { linkId } = identityLinkRoute.useParams();
+  const { organization } = identityLinkRoute.useSearch();
+  return <LazyIdentityLinkRoute linkId={linkId} organizationId={organization} />;
 }
 
 function ArtifactDetail() {
-  return <LazyArtifactsRoute {...workspaceArtifactDetailRoute.useParams()} />;
+  const params = workspaceArtifactDetailRoute.useParams();
+  const { fromSession } = workspaceArtifactDetailRoute.useSearch();
+  return <LazyArtifactsRoute {...params} fromSession={fromSession} />;
 }
 
 function EditableArtifact() {
-  return <LazyEditableArtifactRoute {...workspaceEditableArtifactRoute.useParams()} />;
+  const params = workspaceEditableArtifactRoute.useParams();
+  const { fromSession } = workspaceEditableArtifactRoute.useSearch();
+  return <LazyEditableArtifactRoute {...params} fromSession={fromSession} />;
+}
+
+function RetainedArtifact() {
+  const params = workspaceRetainedArtifactRoute.useParams();
+  const { fromSession } = workspaceRetainedArtifactRoute.useSearch();
+  return <LazyRetainedArtifactRoute {...params} fromSession={fromSession} />;
 }
 
 function Organization() {

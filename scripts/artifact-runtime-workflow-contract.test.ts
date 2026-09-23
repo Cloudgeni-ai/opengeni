@@ -10,15 +10,61 @@ type CiStep = Readonly<{
   id?: string;
   name?: string;
   uses?: string;
+  run?: string;
+  if?: string;
+  env?: Readonly<Record<string, string>>;
+  "continue-on-error"?: boolean;
   with?: Readonly<Record<string, unknown>>;
 }>;
 
 type CiJob = Readonly<{
+  if?: string;
   steps?: readonly CiStep[];
   with?: Readonly<Record<string, unknown>>;
 }>;
 
 describe("artifact runtime workflow contract", () => {
+  test("required package contracts prepare the real report runtime and fail closed on PostgreSQL", async () => {
+    const source = await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8");
+    const parsed = Bun.YAML.parse(source) as { jobs: Record<string, CiJob> };
+    const job = parsed.jobs["package-contracts"]!;
+    expect(job.if).toContain("needs.plan.outputs.build_count != '0'");
+    const steps = job.steps!;
+    const toolchain = steps.findIndex(
+      (step) => step.run === "bun scripts/artifact-kernel-rust.ts ensure",
+    );
+    const delivery = steps.findIndex((step) => step.name === "Native report delivery contracts");
+    expect(toolchain).toBeGreaterThanOrEqual(0);
+    expect(delivery).toBeGreaterThan(toolchain);
+    const step = steps[delivery]!;
+    expect(step.if).toBeUndefined();
+    expect(step["continue-on-error"]).toBeUndefined();
+    expect(step.env).toEqual({
+      NODE_ENV: "development",
+      OPENGENI_REQUIRE_REAL_DB: "1",
+      OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES: "opengeni_app",
+      OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST:
+        "${{ github.workspace }}/.opengeni/artifact-runtime-report-ci/installation.development.json",
+      OPENGENI_ARTIFACT_TOOL_ENTRY:
+        "${{ github.workspace }}/.opengeni/artifact-runtime-report-ci/skill-facade-entry.mjs",
+    });
+    expect(step.run).toBe(`set -euo pipefail
+bun scripts/prepare-development-artifact-runtime.ts \\
+  --repository-root "$GITHUB_WORKSPACE" \\
+  --output "$GITHUB_WORKSPACE/.opengeni/artifact-runtime-report-ci"
+bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts
+`);
+    const unitSteps = parsed.jobs["unit-shards"]!.steps!;
+    expect(unitSteps.some((candidate) => candidate.run?.includes("artifact-kernel-rust"))).toBe(
+      false,
+    );
+    expect(
+      unitSteps.some((candidate) =>
+        candidate.run?.includes("prepare-development-artifact-runtime"),
+      ),
+    ).toBe(false);
+  });
+
   test("keeps byte-hashed kernel sources identical on every checkout platform", async () => {
     const attributes = await readFile(resolve(root, ".gitattributes"), "utf8");
     expect(attributes.split(/\r?\n/u)).toContain(
@@ -143,5 +189,61 @@ describe("artifact runtime workflow contract", () => {
       (step) => step.id === "sandbox_image",
     );
     expect(sandboxBuild?.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${exactCiSource}`);
+  });
+
+  test("desktop publish consumes the same verified runtime bundle as the headless sandbox", async () => {
+    const source = await readFile(
+      resolve(root, ".github/workflows/publish-desktop-image.yml"),
+      "utf8",
+    );
+    const parsed = Bun.YAML.parse(source) as {
+      jobs: Record<
+        string,
+        {
+          needs?: string | string[];
+          uses?: string;
+          with?: Readonly<Record<string, unknown>>;
+          steps?: readonly CiStep[];
+        }
+      >;
+    };
+
+    expect(parsed.jobs["artifact-runtime"]?.uses).toBe("./.github/workflows/artifact-runtime.yml");
+    expect(parsed.jobs["artifact-runtime"]?.with?.source_sha).toBe("${{ github.sha }}");
+    expect(parsed.jobs["desktop-image"]?.needs).toBe("artifact-runtime");
+    expect(
+      parsed.jobs["desktop-image"]?.steps?.find(
+        (step) => step.name === "Download exact artifact runtime inputs",
+      )?.with?.name,
+    ).toBe("${{ needs.artifact-runtime.outputs.artifact_name }}");
+    expect(
+      parsed.jobs["desktop-image"]?.steps?.find(
+        (step) => step.name === "Download exact artifact runtime inputs",
+      )?.with?.path,
+    ).toBe(".release/artifact-runtime");
+    expect(
+      parsed.jobs["desktop-image"]?.steps?.find((step) => step.id === "desktop_image")?.with?.[
+        "build-args"
+      ],
+    ).toBe("OPENGENI_SOURCE_SHA=${{ github.sha }}");
+    const desktopBuild = parsed.jobs["desktop-image"]?.steps?.find(
+      (step) => step.id === "desktop_image",
+    );
+    expect(desktopBuild?.with?.labels).toContain(
+      "org.opencontainers.image.revision=${{ github.sha }}",
+    );
+    expect(desktopBuild?.with?.labels).toContain(
+      "org.opencontainers.image.source=https://github.com/${{ github.repository }}",
+    );
+    for (const glob of [
+      "packages/artifact-tool/**",
+      "packages/artifact-kernel-wasm-document/**",
+      "packages/artifact-kernel-wasm-presentation/**",
+      "packages/artifact-kernel-wasm-spreadsheet/**",
+      "scripts/*artifact*.ts",
+      ".github/workflows/artifact-runtime.yml",
+    ]) {
+      expect(source).toContain(`- "${glob}"`);
+    }
   });
 });

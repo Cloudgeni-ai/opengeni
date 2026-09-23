@@ -1,5 +1,10 @@
-import type { ScheduledTask as ScheduledTaskValue } from "@opengeni/contracts";
-import { deleteScheduledTaskLifecycle, type ApiRouteDeps } from "@opengeni/core";
+import { scheduledTaskKnowledgeSource } from "@opengeni/contracts";
+import type { AccessGrant, ScheduledTask as ScheduledTaskValue } from "@opengeni/contracts";
+import {
+  assertScheduledTaskMutationOwner,
+  deleteScheduledTaskLifecycle,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import type { TemporalScheduleCleanupClaim } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
@@ -35,7 +40,7 @@ async function preflightConnectorAuthorization(
   task: ScheduledTaskValue,
   subjectId: string,
 ): Promise<void> {
-  if (task.action.kind !== "knowledge_source_sync") return;
+  if (!scheduledTaskKnowledgeSource(task)) return;
   if (task.metadata.connectorKind === "atlassian") {
     await preflightAtlassianScheduleAuthorization(deps, { task, subjectId });
     return;
@@ -54,7 +59,7 @@ async function revokeConnectorAuthorization(
   task: ScheduledTaskValue,
   subjectId: string,
 ): Promise<void> {
-  if (task.action.kind !== "knowledge_source_sync") return;
+  if (!scheduledTaskKnowledgeSource(task)) return;
   if (task.metadata.connectorKind === "atlassian") {
     await revokeAtlassianScheduleAuthorization(deps, { task, subjectId });
     return;
@@ -99,13 +104,19 @@ export async function cleanupScheduledTaskConnectorAuthorization(
 /** Shared HTTP/MCP domain operation: authorize, tombstone, persist, then accelerate cleanup. */
 export async function deleteScheduledTaskWithDurableCleanup(
   deps: ApiRouteDeps,
-  input: { workspaceId: string; taskId: string; subjectId: string },
+  request: { grant: AccessGrant; taskId: string },
 ): Promise<{ task: ScheduledTaskValue; changed: boolean }> {
+  const input = {
+    workspaceId: request.grant.workspaceId,
+    subjectId: request.grant.subjectId,
+    taskId: request.taskId,
+  };
   const result = await deleteScheduledTaskLifecycle({
     db: deps.db,
     workspaceId: input.workspaceId,
     taskId: input.taskId,
     subjectId: input.subjectId,
+    beforeDeleteCommit: (tx) => assertScheduledTaskMutationOwner(tx, request.grant, request.taskId),
     preflightConnectorAuthorization: async (task) =>
       await preflightConnectorAuthorization(deps, task, input.subjectId),
     cleanupConnectorAuthorization: async (db, task) =>

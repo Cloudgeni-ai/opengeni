@@ -1,5 +1,568 @@
 # @opengeni/runtime
 
+## 4.0.1
+
+### Patch Changes
+
+- 701ea95: Preserve the original shell command when adopting background processes, so running command rows and completion notices show the command instead of execCommand. Keep long command rows ellipsized and expose their saved preview on hover and expansion.
+- e9c4379: Resolve published-file Markdown links through host navigation, expose message presentation in SessionConversation, and document exact retained-file link/embed syntax.
+- d92af11: Keep original command text through ambiguous launch recovery and persist it separately from bounded previews. Preserve whitespace, mark clipped previews with an ellipsis, and show complete commands on expansion and hover.
+- f60ca2b: Raise Skill folder limits eightfold to 1,024 files, 2 MiB per file, and 8 MiB total, while retaining bounded reads and existing validation.
+- 86c710a: Expose a first-party Connected Machine enrollment-token tool with existing enrollment-management authority, short-lived tokens and deployment-bound installer commands. Include agent guidance without introducing an additional approval flow.
+- 2f8bc58: Use bounded readable MCP tool aliases while preserving exact account routing and historical approval rehydration. Retain action and account display metadata in native and Codemode timeline events and approval cards without changing execution or approval identity. Legacy opaque calls resolve only against the current authorized tool catalog.
+- a184108: Teach agents that a Site reaches OpenGeni models and tools through the host bridge and never needs its own server. Ask about external commitments or material architecture changes beyond the authorized scope while preserving established and delegated choices.
+- Updated dependencies [a642885]
+- Updated dependencies [793a6c9]
+- Updated dependencies [d92af11]
+- Updated dependencies [f60ca2b]
+- Updated dependencies [a11d810]
+- Updated dependencies [86c710a]
+- Updated dependencies [ab3adb3]
+- Updated dependencies [2f8bc58]
+- Updated dependencies [a11d810]
+- Updated dependencies [90e089a]
+  - @opengeni/codex@0.2.25
+  - @opengeni/config@2.1.0
+  - @opengeni/contracts@5.1.0
+  - @opengeni/sdk@7.1.0
+  - @opengeni/codemode@0.6.1
+  - @opengeni/tool-gateway@0.1.12
+
+## 4.0.0
+
+### Major Changes
+
+- 1bfb6a4: Remove Packs and their Workflow templates from the application, public clients,
+  runtime, and active database schema. Plugins, Skills, Connections, sandbox
+  environments, Knowledge, scheduled tasks, and event automations remain independent.
+
+  PR Review now has its own setup authority and fixed automation template. Generic
+  automation routes cannot mutate review-owned sources or triggers. The API contract
+  revision changes; deploy matching server and client versions together.
+
+  Migration 0482 is a destructive maintenance cutover: drain all API and worker
+  database clients, settle Pack-related operations and queued Pack automation work,
+  then apply migrations and provision roles before starting only matching binaries.
+  It removes Pack data without a compatibility layer or data-preservation migration.
+  Historical events mixing Pack and independent automation work block the cutover
+  for explicit operator resolution; independent execution history is never silently deleted.
+  Customized, shared, and re-scoped Skills, Connections, and session history are
+  preserved; source-only Skills lose their active distribution owner.
+
+### Minor Changes
+
+- 6d0a4de: Include opengeni-client in the default Skill catalog in local, self-hosted and
+  managed deployments. The repository guide is the sole authored source; generated
+  runtime assets include every reference and require no Pack, installation, network
+  fetch or sandbox to read. Explicit bundledSkillIds selections still narrow it.
+
+  Improve adaptive resource discovery, UI selection, runtime behavior, tool data
+  semantics, and outcome-based verification without prescribing a fixed product
+  architecture or answer format.
+
+- c64a94f: Support simultaneous authorized personal and workspace MCP account attachments with immutable account-qualified routing, sender isolation, and scheduled execution binding. Move attachment controls inside Connectors with readable ownership labels; keep account setup on the Capabilities page.
+
+### Patch Changes
+
+- a6d3e4a: Route persistent behavior to scoped workspace instructions or applicable Skills
+  instead of retrieval-only Knowledge. Make the routing and safe instruction-edit
+  guidance unconditional, reinforce it in save tools and Skill guidance, and retain
+  the existing scope and Agent learning controls.
+- c31a951: Add connection-bound MCP tool permission discovery and Allow/Ask/Block management through the existing approval ledger, enforced consistently for direct tools and Codemode.
+
+  Let workspace-default sessions inherit newly connected apps while retaining per-session connector exclusions and exact explicit selections. Present connected apps, logos, health, and reconnection in the composer connector menu. Keep internal runtime controls out of workspace settings and use Capabilities consistently in settings navigation.
+
+- 348e54d: Use Sandbox Environment terminology in user-facing controls, errors, tool descriptions, and runtime guidance. Existing rig routes, tool names, IDs, permissions, and stored definitions remain unchanged.
+- d1ab270: Persist configured skill catalogs as versioned conversation context, preserving prior prompt history across catalog updates, retries, compaction, and forks.
+- c3f1705: Handle an explicitly disabled MCP approval policy when rebuilding connection-backed agents. Preserve connector authorization and action-policy checks while avoiding a startup TypeError after approval settings change.
+- 9de8e51: Route missing integration setup through provider-neutral catalog discovery and the shared human authorization card, with an explicit next action for every eligible catalog integration. Continue account selection and installation through owner authorization without an extra launch click, and open repository configuration in a separate tab.
+- a74ea02: Await release-matched client preparation before publishing a supported mid-turn
+  managed home replacement, fenced against its exact lease and provider. Join
+  concurrent home resolutions, preserve the prior route on preparation failure,
+  and leave unchanged identities and Connected Machine clients untouched.
+- 9a7931c: Observe the fixed Modal materialization visibility probe through its own
+  cancelable provider cursor instead of borrowing the parent mutation's retained
+  command handle. Preserve actual failures and unconfirmed deadline evidence
+  without retrying materialization or agent work.
+- 3fa175e: Provide bundled OpenGeni product help with official documentation links,
+  integration and billing boundaries, and dependency recovery guidance. Hosts can
+  exclude it with the existing bundledSkillIds selection, including an empty list
+  for embedded agents. Update the canonical integration guide.
+- 332a02d: Accept an explicit null skill-review reference for ordinary structured human-input questions while retaining strict validation of real review references and their host-owned confirmation presentation.
+- 9d9b94b: Keep the published dependency closure aligned with the updated plugin removal
+  contracts. The SDK exposes named removal outcomes and optional preview-token
+  confirmation alongside the existing installation-version check.
+- 0a41330: Reuse the fully prepared model request for remote compaction, including sandbox instructions, filtered tools, and model settings. Prepare operator and pre-turn compaction through the same model boundary without sending ordinary inference. Capture compaction requests in model diagnostics.
+- e261b39: Retain background command outcomes without starting a new agent turn unless the session is explicitly waiting for input. Let compatible command notices accompany later input without blocking messages behind a command backlog. Coalesce different originating turns only when their resolved human and complete inherited execution authority match, retaining original lineage and existing batch limits.
+- f90d628: Add durable native supervision for supported stock Modal non-PTY commands. Retain
+  the idle invocation before provider dispatch and user-code release, verify native
+  capability on the exact warm instance, persist descendant-quiescence proof
+  before supervisor acknowledgment, and fence canonical settlement on provider exit
+  plus captured output. Deadline cancellation keeps a monotonic stdin fence without
+  cancelling ordinarily adopted background commands. Unsupported and legacy paths
+  remain explicit and cannot manufacture supervision proof.
+- ac006ef: Add opt-in durable GPT-6 Astra reasoning effort updates with a stable request-level baseline, retry fencing, SDK replay, and explicit compaction restoration. Disabled by default pending live backend verification.
+- d3672c0: Measure workspace capture gate waits on every routed sandbox operation, including
+  mid-turn and API-direct operations, without changing provider-call accounting or
+  admission guarantees. Record physical warm capture and publication duration at
+  actual settlement, including captures that outlive the initiating caller.
+- d84b1a3: Preserve sandbox visibility-check command evidence in durable turn failures and
+  expose bounded, explained failure categories on the Runtime Failures dashboard.
+- 7e2436a: Keep ordinary chat attachments out of Knowledge unless selected as useful evidence or a reusable reference. Distinguish supporting evidence from discoverable references, preserve exact originals and revisions, and add read-only collection and duplicate discovery before saving. Includes maintenance migration 0469; old runtimes must be drained before activation.
+- bfc92c2: Preserve reasoning configuration during remote compaction, retain turn-scoped operational notices in conversation history, and keep attachment receipt text stable across metadata refreshes.
+- bd6319b: Detach standalone compaction from the completed SDK Runner trace without changing its provider-visible request prefix.
+- c66ba31: Unify interactive and trusted-backend OAuth setup on native workspace connections
+  with optional canonical-user ownership, persisted lifecycle bindings, native
+  credential refresh, and captured execution authority.
+
+  Remove the superseded host binding, delegation, and credential-resolver API/SDK
+  surfaces and runtime configuration. Migrate integrations to ordinary OAuth
+  connections before upgrading; retired host selections are rejected rather than
+  translated or silently replaced. Apply the matching database migrations and role
+  provisioning with the runtime. Historical records remain preserved. See
+  `docs/remote-mcp-credentials.md` for the cutover contract.
+
+  Share connection setup, provider identity, loading states, conversation cards,
+  composer, and activity surfaces between the console and React SDK. Preserve
+  personal-account consent and native sharing authority, and keep interaction-only
+  connection and command panels outside the initial session bundle.
+
+- 0ea365c: Route user-facing reports, including secondary audit outputs, to native document
+  Artifacts before authoring. Persist explicit report requirements and require
+  server-verified current-head inspection evidence at goal completion, preserving
+  ordinary chat, internal worker findings, code navigation and explicitly requested
+  local-file workflows. Keep unavailable or failed report delivery incomplete
+  instead of silently substituting sandbox links.
+- a74ea02: Deliver verified release-matched CLI and ESM Codemode clients during managed
+  sandbox setup, including warm boxes with older baked clients. Select immutable
+  content-addressed client paths per command without changing sandbox manifests,
+  catalog integrity, authorization, or the public operation journal.
+- Updated dependencies [6d0a4de]
+- Updated dependencies [c64a94f]
+- Updated dependencies [c387603]
+- Updated dependencies [3b73fc0]
+- Updated dependencies [1c924ed]
+- Updated dependencies [c31a951]
+- Updated dependencies [f90d628]
+- Updated dependencies [aa09567]
+- Updated dependencies [d1ab270]
+- Updated dependencies [c702159]
+- Updated dependencies [c8bb974]
+- Updated dependencies [3fa175e]
+- Updated dependencies [332a02d]
+- Updated dependencies [132b945]
+- Updated dependencies [779b16b]
+- Updated dependencies [1cb688d]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [621201d]
+- Updated dependencies [f90d628]
+- Updated dependencies [a6251eb]
+- Updated dependencies [ac006ef]
+- Updated dependencies [1bfb6a4]
+- Updated dependencies [1641006]
+- Updated dependencies [c9e2743]
+- Updated dependencies [7e2436a]
+- Updated dependencies [0bf014d]
+- Updated dependencies [c2b66d5]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [c66ba31]
+- Updated dependencies [f7c9169]
+- Updated dependencies [0ea365c]
+  - @opengeni/contracts@5.0.0
+  - @opengeni/sdk@7.0.0
+  - @opengeni/codex@0.2.24
+  - @opengeni/config@2.0.0
+  - @opengeni/codemode@0.6.0
+  - @opengeni/tool-gateway@0.1.11
+
+## 3.0.1
+
+### Patch Changes
+
+- 7746251: Prevent agent-authored workspace instruction changes from replacing the complete active policy, fence unsafe older pending revisions at approval, and show reviewers the current and proposed instruction text before approval.
+- 85cafd0: Add a shared workspace/session artifact catalog over existing Sites, editable artifacts, generated images, and published files. Keep file bytes and content authorization in their existing domains, expose bounded filtered discovery through the SDK, and retain explicit sandbox-file publication provenance. The web Artifacts library includes type/search/sort controls, grid/list views, retained image previews, and file viewers that do not wake compute. Published images use the shared chat image/lightbox presentation; ordinary HTML file downloads remain non-executable.
+- Updated dependencies [084e56b]
+- Updated dependencies [7746251]
+- Updated dependencies [37f16c2]
+- Updated dependencies [85cafd0]
+  - @opengeni/capabilities@0.3.4
+  - @opengeni/contracts@4.1.0
+  - @opengeni/sdk@6.1.0
+  - @opengeni/codemode@0.5.9
+  - @opengeni/config@1.2.2
+  - @opengeni/tool-gateway@0.1.10
+
+## 3.0.0
+
+### Major Changes
+
+- efeaa9c: Replace autonomous Memory and reviewed Knowledge authoring with structured Knowledge entries, exact revisions, evidence, groups and nonblocking review. Add centralized Agent learning defaults with chat and scheduled-task overrides, private original-file ownership, canonical source preparation and rebuildable retrieval. Retire legacy Memory/learning mutation APIs and SDK methods; migration 0461 requires a drained maintenance cutover and the matching runtime. See docs/knowledge.md and docs/deployment.md.
+
+### Patch Changes
+
+- 750060c: Support inline HTML visualizations, retained images, and embedded Sites in chat. Add a plain HTML Site client, preserve application request headers through the shared bridge, document visualization workflows, and use Image 2.5 Sunburst for Codex image generation.
+- 123cf57: Make agent-authored workspace instruction changes non-destructive: append new rules by default, require one exact anchor for edits or removals, and reserve complete replacement for an explicit mode while preserving baseline conflict checks and instruction budgets.
+- Updated dependencies [50ac837]
+- Updated dependencies [ad9dc2f]
+- Updated dependencies [750060c]
+- Updated dependencies [da4a85f]
+- Updated dependencies [123cf57]
+- Updated dependencies [efeaa9c]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/config@1.2.1
+  - @opengeni/sdk@6.0.0
+  - @opengeni/codemode@0.5.8
+  - @opengeni/codex@0.2.23
+  - @opengeni/tool-gateway@0.1.9
+
+## 2.6.0
+
+### Minor Changes
+
+- e41027c: Add opt-in MCP operation outcome recovery through a configured read-only provider receipt tool. Persist exact operation identity before dispatch, retain original invocation outcomes separately from late receipts, and revalidate current authority across accepted attempts without replaying mutations. Preserve arbitrary SDK call IDs as correlation rather than replacing UUID operation identity.
+
+  Apply the additive operation-ledger migration and runtime-role provisioning, and upgrade all claim-capable workers to the membership-first lock order before enabling provider mappings. Providers must implement the documented observation contract; unsupported providers and historical operations without captured authority are not automatically recoverable.
+
+- d08dbb6: Support capability-gated transactional large-file edits on Connected Machines,
+  with bounded transfers, verified outcomes, and live authorization checks. Keep
+  legacy agent writes compatible and report oversized outbound requests accurately
+  instead of marking a healthy agent offline. Native agent support is required;
+  unsupported filesystem semantics fail closed.
+
+### Patch Changes
+
+- 4661bbd: Recommend a 10-second default wait for foreground commands in agent instructions.
+- 8a60104: Record Gmail startup authorization failures in diagnostics and let agents request in-conversation consent for enabled personal integrations whose tools are unavailable. Personal access continues to require the owner's explicit session grant.
+- 1598498: Read repository Skill descriptions as YAML and advertise exact source-qualified identifiers with a live repository reader. Preserve sandbox-free managed Skill reading and sandbox attempt authorization. Valid multiline YAML descriptions retain their text; symlink entrypoints are excluded consistently with repository reads.
+- Updated dependencies [4e2b59d]
+- Updated dependencies [4e2b59d]
+- Updated dependencies [e41027c]
+- Updated dependencies [488a69b]
+- Updated dependencies [935af4e]
+- Updated dependencies [d08dbb6]
+  - @opengeni/sdk@5.1.0
+  - @opengeni/contracts@3.1.0
+  - @opengeni/config@1.2.0
+  - @opengeni/tool-gateway@0.1.8
+  - @opengeni/codemode@0.5.7
+  - @opengeni/agent-proto@0.6.0
+
+## 2.5.3
+
+### Patch Changes
+
+- e1a50ba: Spool Linux host-backed workspace archives through capture, object storage, and cold restore instead of materializing whole JSON/base64 payloads. Isolate each upload at a fresh physical locator and verify stored bytes without assuming conditional-PUT support. Preserve legacy locators, archive format, configured restore limits, and lease capture/publication authority; retain candidates after ambiguous publication outcomes.
+- Updated dependencies [e1a50ba]
+  - @opengeni/contracts@3.0.2
+  - @opengeni/codemode@0.5.6
+  - @opengeni/config@1.1.2
+  - @opengeni/sdk@5.0.5
+  - @opengeni/tool-gateway@0.1.7
+
+## 2.5.2
+
+### Patch Changes
+
+- 6a60a58: Canonicalize typed Skill review cards using host-owned choices. Allow explicit
+  authorized Save/Don't save responses to existing exact-bound cards with the
+  legacy Other flag and null option descriptions, without rewriting cards,
+  manufacturing consent, or weakening human, tenant, turn, or revision fences.
+  Apply rolling migration 0458; pre-0435 runtimes remain unsupported.
+- Updated dependencies [6a60a58]
+  - @opengeni/contracts@3.0.1
+  - @opengeni/codemode@0.5.5
+  - @opengeni/config@1.1.1
+  - @opengeni/sdk@5.0.3
+  - @opengeni/tool-gateway@0.1.6
+
+## 2.5.1
+
+### Patch Changes
+
+- be17b8e: Remove the SDK Skill loader capability and use eager sandbox-free Skill reading
+  with a turn-prepared descriptor index. Keep on-demand checkout and repository
+  Skill discovery separate, and render Skill tool calls consistently in the timeline.
+
+## 2.5.0
+
+### Minor Changes
+
+- cffd21b: Add organization-scoped external users, explicit native identity linking, shared
+  white-label Connect flows and Site lifecycle/bridge surfaces. Add opt-in durable
+  host-MCP delegation and renewal while preserving simple short-lived credentials,
+  existing schedule authority and approval behavior. Share native/embedded device
+  polling and setup components, and synchronize developer integration Skills with
+  the installable Product Integration Pack.
+
+  Database migrations 0437–0457 require the documented maintenance/cutover procedure;
+  older API and worker writers must not be restarted after activation. Provider
+  OAuth applications and host resolvers remain deployment configuration, not
+  automatic external provisioning. No package is published by this changeset.
+
+### Patch Changes
+
+- Updated dependencies [cffd21b]
+- Updated dependencies [f8be7df]
+- Updated dependencies [cffd21b]
+  - @opengeni/contracts@3.0.0
+  - @opengeni/sdk@5.0.0
+  - @opengeni/config@1.1.0
+  - @opengeni/codemode@0.5.4
+  - @opengeni/tool-gateway@0.1.5
+
+## 2.4.5
+
+### Patch Changes
+
+- 5b17932: Make bundled runtime skills authoritative and remove their duplicate repository-agent skill sources.
+
+## 2.4.4
+
+### Patch Changes
+
+- 5249b0d: Detach provider response item identities from portable checkpoint requests while preserving inline history and tool call/result correlation. This prevents Azure from rejecting a message whose opaque reasoning identity was omitted during compaction. Classify the known rejection without persisting provider message content.
+
+  Explicitly disable tool selection for Azure-profile Responses checkpoints so historical tool records cannot yield a new tool call instead of summary text. Empty/provider failure safeguards remain unchanged.
+
+## 2.4.3
+
+### Patch Changes
+
+- 8a55774: Preserve the original Modal SDK observer when setup or readiness commands yield, without colliding with retained command handles or replaying commands.
+- Updated dependencies [1b0f4f2]
+  - @opengeni/contracts@2.15.2
+  - @opengeni/sdk@4.0.2
+  - @opengeni/codemode@0.5.3
+  - @opengeni/config@1.0.4
+  - @opengeni/tool-gateway@0.1.4
+
+## 2.4.2
+
+### Patch Changes
+
+- 068be26: Complete a Skill save in the same transaction as its one verified human chat decision. Show the full immutable Skill folder, preserve exact scope and revision checks, and refuse delegated, stale, or mismatched approval. Autonomous saves activate directly; declining a proposal preserves existing active guidance.
+- 69924e8: Preserve structured model-history ordering through PostgreSQL replay and pending-tool recovery. Retain authorized uploaded images across turns and compaction input, preserve images in retained messages, and include their projected token cost in compaction retention budgets. Migration requires draining writers.
+- d1cb266: Keep automatic history filling from evicting the latest reply or cycling between older and newer pages. Preserve explicit history navigation and stable jumps back to latest. Retain provider message identity so assistant chunks interleaved with tool activity remain one message without merging distinct replies.
+- 2fa33e4: Unify installed and authored workspace Skills behind one versioned text-folder
+  store and shared editor. Derive names and descriptions from mandatory SKILL.md
+  frontmatter, provide eager sandbox-free reading with exact requested paths, and
+  expose lazy search, install, save, checkout, and publish tools under workspace
+  Learning policy. Preserve workspace customizations on source updates and let
+  embedding hosts narrow bundled guidance independently of lazy tool discovery.
+
+  Migration 0433 is a maintenance cutover: drain old runtimes and use the
+  parser-backed migration runner. Preserve historical snapshots and archive legacy
+  configuration before conversion; invalid or pinned headerless configuration
+  requires explicit repair before migration. See docs/skills-lifecycle.md for the
+  deployment procedure and compatibility boundaries.
+
+- Updated dependencies [068be26]
+- Updated dependencies [2fa33e4]
+  - @opengeni/contracts@2.15.1
+  - @opengeni/sdk@4.0.1
+  - @opengeni/config@1.0.3
+  - @opengeni/codemode@0.5.2
+  - @opengeni/tool-gateway@0.1.3
+
+## 2.4.1
+
+### Patch Changes
+
+- 392c575: Retain Modal command handles, provider execution identities, output, and exact exit status across provider-client reconstruction. Persist stream pages before acknowledging their cursors, and treat unavailable historical locators as unknown rather than proof of process loss. Execution status is provider-owned and never read from sandbox-writable files.
+- befd389: Preserve prompt-cache reuse across turns with unchanged governance by keeping attempt-specific snapshot receipt UUIDs out of system instructions. Stable content hashes, policy revisions, and skill retrieval handles remain model-visible; exact-attempt snapshot IDs remain in durable audit records.
+- f3bd0d0: Preserve unknown Modal command observations instead of falsely settling local SDK handle loss as physical process loss. Retain exact command holders with explicit deferred/quarantine diagnostics while allowing the original owner's terminal proof to settle normally.
+- 5904fd1: Remove the Site SDK endpoint allowlist. Workspace API requests now reach ordinary authorization handlers in published Sites and sandbox previews; tenant routing, agent permission limits, and direct integration-tool checks remain unchanged. Clarify the distinction between authoring, preview, and viewer access in the Sites skill, including honest reporting of viewer-only verification.
+- 29551cb: Clarify that ancestor Pause interrupts the calling agent and that accepted coordination messages require identity-correlated delivery and result verification. Preserve existing recursive controls and discourage duplicate unconsumed messages.
+- Updated dependencies [231b103]
+- Updated dependencies [392c575]
+- Updated dependencies [9827c25]
+- Updated dependencies [5904fd1]
+- Updated dependencies [14dd6fe]
+  - @opengeni/contracts@2.15.0
+  - @opengeni/sdk@4.0.0
+  - @opengeni/codemode@0.5.1
+  - @opengeni/config@1.0.2
+  - @opengeni/tool-gateway@0.1.2
+
+## 2.4.0
+
+### Minor Changes
+
+- fa12951: Separate command interaction from session history. Add bounded retained-output command reads and use the same operation for command waits. Terminal reads observe completion and suppress only still-pending completion notifications; running reads, claimed notifications, and historical tool results remain unchanged.
+
+  Make session history conversation-first with complete-message pagination and explicit results, tools, and debug views. Preserve cursor detail selection, provide oversized-message continuation, and keep queued prompts distinct from processed conversation. Update concise model guidance for the new surfaces.
+
+  `command_wait` now uses `waitSeconds`, an output cursor, and the same flat result as `command_read`; clients using the previous command wrapper must update. Apply the additive command-observation migration before starting the new readers.
+
+- 575af5b: Expose workspace project management through MCP, including shared pins/order, session filing, project-filtered discovery and project selection at session creation. Bundle concise, on-demand project organization guidance for every agent, independent of compute backend and retain existing session authorization checks.
+
+### Patch Changes
+
+- 7dac7e3: Clarify that default CLI discovery lists every authorized tool with compact per-tool summaries, without schemas or an output-size cutoff.
+- 22a6704: Correct oversized session-message continuation with bounded source slicing, preserve typed runner terminal failures during command observation, and keep retained command output readable when live refresh encounters a recognized temporary transport failure. Refresh fallback rechecks API authorization and explicitly marks unavailable freshness; it does not mask integrity or authorization errors.
+- c1dc59b: Guide agents through compact Codemode discovery followed by explicit single-tool schema inspection before calling an unfamiliar tool. Preserve the same authorized execution path for stock and Connected Machine CLIs.
+- 09de906: Open absolute file links outside a Connected Machine session's working directory, including sibling worktrees. Preserve route identity checks and managed sandbox confinement.
+- d8a70ec: Enforce the first-party MCP tool ceiling on current-human gateway and OAuth consent surfaces, propagate MCP OAuth deployment settings, and hide the undeliverable Sites Skill on Connected Machines.
+- d06450c: Capture final provider HTTP request bodies for the context inspector, including conversation input and provider-normalized tools/settings. Keep unsupported or oversized captures explicitly unavailable, label section/item token estimates, and preserve transport cancellation and streaming behavior.
+- c69ad5f: Preserve externally managed history across opaque compaction checkpoints and verify conversation persistence before continuation. Reject shifted history prefixes and conflicting saved items instead of silently losing completed work.
+- 1c4b707: Expose goal_resume so agents can resume any paused goal without a pause-reason restriction; include it for existing sessions with goal_pause.
+- 712967e: Recover typed Undici socket disconnections during safe first-party MCP initialization and tool discovery, while preserving terminal authentication failures and avoiding retries of tool invocations.
+- ccbf227: Pin the project-local Site CLI alongside SDK packages so sandbox image age cannot select an incompatible catalog client.
+- 66326b3: Compose Site package-version metadata in the skill manifest without writing into the worker application directory.
+- b272df2: Explain how to correct repository fetch failures, including abbreviated commit references, while preserving valid branch, tag, PR ref, and full SHA behavior.
+- eac6a61: End model execution after a successful trusted `wait_for_input` call, including
+  calls routed through native shell and Codemode. Preserve settled tool receipts
+  and normal worker completion without requiring a final assistant message.
+- 2fb17fd: Track published Site session origin automatically; add origin-filtered session
+  listing and skill defaults for reusable in-Site conversations. Site provenance
+  remains independent of project placement and session authorization.
+- 107aa14: Support standard SDK/React conversations in Sites and sandbox previews, direct
+  HTML/source uploads, exact deployment package pins, and embedded layout/queue
+  defaults. Refresh exhausted Grok capacity after external resets.
+- 9e412ef: Add bounded tool listing and exact-name schema disclosure as a recovery path for keyword-search misses across native and generic transports. Backfill search results after schema-budget exclusions without changing authorization, approvals, or eager-tool policy.
+
+  Prefer the connection-bound native Codemode client when available so an older installed CLI does not mask the supported Connected Machine path.
+
+  The native Connected Machine client now sends the compiled API contract acknowledgement, with a cross-language parity test, and reports flat contract-mismatch errors rather than hiding their explanation.
+
+  Native Codemode errors retain operation identity, observed outcome, and error details as JSON on stderr. A read-only journal command supports inspection without resubmitting tools. Packaged-client fixture verification covers JavaScript imports, CLI calls, and native recovery without probing customer tools.
+
+- d8a70ec: Unify first-party and integration tools behind one workspace gateway for MCP, model execution, Codemode, SDK, and browser clients; require host-confirmed SDK approval for human-gated model calls, keep Codemode claims live through gateway preparation, and deduplicate reclaimed tool-created events; add opt-in resource-bound MCP OAuth; ship governed self-contained HTML Sites with retained source, version rollback, an exact-version direct-call tool allowlist, and a native Site-authoring Skill; and default Modal self-hosts to OpenGeni's public digest-pinned desktop runtime image.
+- Updated dependencies [22a6704]
+- Updated dependencies [4536385]
+- Updated dependencies [7dac7e3]
+- Updated dependencies [fa2b99a]
+- Updated dependencies [694c1ff]
+- Updated dependencies [fa12951]
+- Updated dependencies [c1dc59b]
+- Updated dependencies [52cf486]
+- Updated dependencies [1fc0889]
+- Updated dependencies [d06450c]
+- Updated dependencies [d9dbd5d]
+- Updated dependencies [c69ad5f]
+- Updated dependencies [1c4b707]
+- Updated dependencies [cc1bfe0]
+- Updated dependencies [3db0b05]
+- Updated dependencies [c90f3fc]
+- Updated dependencies [414946c]
+- Updated dependencies [0c39126]
+- Updated dependencies [ba890d1]
+- Updated dependencies [0c39126]
+- Updated dependencies [4708cfb]
+- Updated dependencies [575af5b]
+- Updated dependencies [6de9fe3]
+- Updated dependencies [cda46e8]
+- Updated dependencies [b1d3673]
+- Updated dependencies [2fb17fd]
+- Updated dependencies [3a29372]
+- Updated dependencies [107aa14]
+- Updated dependencies [92cdc31]
+- Updated dependencies [d8a70ec]
+- Updated dependencies [0a81cc8]
+  - @opengeni/contracts@2.14.0
+  - @opengeni/sdk@3.8.0
+  - @opengeni/codex@0.2.22
+  - @opengeni/config@1.0.1
+  - @opengeni/network@0.3.1
+  - @opengeni/codemode@0.5.0
+  - @opengeni/xai-subscription@0.1.4
+  - @opengeni/tool-gateway@0.1.1
+  - @opengeni/capabilities@0.3.3
+
+## 2.3.0
+
+### Minor Changes
+
+- 6b65383: Replace goal-scoped long waits with self-only session-level `wait_for_input`, add provider-neutral `command_wait`, and deliver terminal background-command proof as exactly-once durable agent input with workflow wakes for nonterminal sessions while preserving event-only audit for terminal sessions.
+
+### Patch Changes
+
+- Updated dependencies [876396d]
+- Updated dependencies [6b65383]
+- Updated dependencies [6f84c02]
+  - @opengeni/network@0.3.0
+  - @opengeni/contracts@2.13.0
+  - @opengeni/sdk@3.7.0
+  - @opengeni/config@1.0.0
+  - @opengeni/capabilities@0.3.2
+  - @opengeni/codex@0.2.21
+  - @opengeni/xai-subscription@0.1.3
+  - @opengeni/codemode@0.4.27
+
+## 2.2.1
+
+### Patch Changes
+
+- 599a64e: Keep model-visible context capture idempotent when an agent is reused across retries or runs.
+
+## 2.2.0
+
+### Minor Changes
+
+- b420912: Show the exact model-visible system instructions, tools, skills, and token counts in the session Debug inspector.
+
+### Patch Changes
+
+- d63ee0f: Keep Connected Machine file links in the target's canonical filesystem namespace, including Windows drive and UNC roots, and reject stale file requests with a retryable route conflict.
+- d8f84ac: Report repository Skill discovery timing without double-counting nested routed sandbox work.
+- Updated dependencies [d63ee0f]
+- Updated dependencies [b420912]
+  - @opengeni/contracts@2.12.0
+  - @opengeni/sdk@3.6.0
+  - @opengeni/codemode@0.4.26
+  - @opengeni/config@0.23.3
+
+## 2.1.2
+
+### Patch Changes
+
+- 0214875: Price model usage with a 5% default markup and dedicated cache-write rates, and show provider estimates, equivalent OpenGeni credit prices, and actual credit-path prices separately in Insights.
+- Updated dependencies [38de50d]
+- Updated dependencies [8b42f58]
+- Updated dependencies [0214875]
+- Updated dependencies [e2a668b]
+- Updated dependencies [9c45eae]
+  - @opengeni/contracts@2.11.1
+  - @opengeni/sdk@3.5.1
+  - @opengeni/config@0.23.2
+  - @opengeni/codemode@0.4.25
+
+## 2.1.1
+
+### Patch Changes
+
+- Updated dependencies [32b9de4]
+- Updated dependencies [8f81b57]
+  - @opengeni/sdk@3.5.0
+  - @opengeni/contracts@2.11.0
+  - @opengeni/codemode@0.4.24
+  - @opengeni/config@0.23.1
+
+## 2.1.0
+
+### Minor Changes
+
+- 2d0fad4: Add deployment-defined model catalogs and cost policy, workspace-managed Gateway and OpenRouter credentials plus custom models, a separate deployment-managed OpenRouter rail, live catalog refresh, the `list_models` agent tool, and model-picker/API/SDK support for the new catalog surfaces.
+- 9fe5c5b: Add organization-scoped Vercel AI Gateway and OpenRouter BYOK/custom models for shared workspaces while preserving independent workspace connections.
+
+### Patch Changes
+
+- 8e2f71d: Contain pre-execution connector authority mismatches as model-visible tool errors instead of failing the whole agent turn.
+- 6934f99: Prevent an active-goal status update from immediately spawning a continuation that repeats the same unchanged external wait. Status turns now establish an available goal hold when progress is genuinely blocked, while continuation turns avoid restating an already-reported wait before calling `goal_wait`.
+- aa19556: Require agents to copy user-facing screenshots and artifacts into the workspace before emitting sandbox file links, preventing inaccessible links to temporary or host paths.
+- 9e21a09: Generate pending semantic session titles in a bounded parallel model request so the main assistant response no longer waits on a title tool round trip, while retaining the serialized compatibility path for custom runtimes.
+- c356468: Add explicit host authority provenance for opaque MCP connection references so embedding hosts can resolve any binding identity, including UUID values, without native delegation, catalog, attachment reauthorization, or reconnect flows reinterpreting it. Preserve the legacy non-UUID host-binding lane during rolling upgrades, retain host provenance after successful credential resolution, make auth-needed events inert in legacy browsers, and gate newly marked refs behind a default-off two-phase fleet activation.
+- Updated dependencies [2d0fad4]
+- Updated dependencies [9fe5c5b]
+- Updated dependencies [c356468]
+- Updated dependencies [dd98677]
+- Updated dependencies [5ef0757]
+- Updated dependencies [9af1666]
+  - @opengeni/config@0.23.0
+  - @opengeni/contracts@2.10.0
+  - @opengeni/sdk@3.4.0
+  - @opengeni/codemode@0.4.23
+
 ## 2.0.1
 
 ### Patch Changes

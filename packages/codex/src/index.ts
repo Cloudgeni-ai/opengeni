@@ -15,3 +15,4 @@ export * from "./opaque-artifact";
 export * from "./images";
 export * from "./realtime";
 export * from "./realtime-v3";
+export * from "./reasoning-configuration";

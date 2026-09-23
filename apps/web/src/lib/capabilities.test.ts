@@ -15,7 +15,7 @@ import {
   capabilityMonogram,
   capabilityQuickConnectPlan,
   capabilityReconnectPlan,
-  capabilityRequiresPersonalConnection,
+  defaultCapabilityConnectionOwnership,
   capabilitySourceLabel,
   connectionHealth,
   connectionToReuseForApiKey,
@@ -29,6 +29,7 @@ import {
   normalizeProviderDomain,
   oauthConnectionOwnership,
   oauthConnectionRef,
+  catalogConnectionAccountSelection,
   oauthResumeAction,
   preferredSocialConnection,
   registryResultsForQuery,
@@ -193,7 +194,7 @@ describe("human labels", () => {
   test("kind labels never leak enum slugs", () => {
     expect(capabilityKindLabel("mcp")).toBe("MCP server");
     expect(capabilityKindLabel("api")).toBe("API");
-    expect(capabilityKindLabel("pack")).toBe("Pack");
+    expect(capabilityKindLabel("plugin")).toBe("Plugin");
     expect(
       capabilityItemKindLabel(item({ kind: "api", surfaceType: "provider_integration" })),
     ).toBe("Integration");
@@ -330,46 +331,33 @@ describe("capabilityConnectPlan", () => {
     });
   });
 
-  test("official Gmail is personal-only even before refreshed catalog metadata arrives", () => {
+  test("ownership defaults are preferences, not provider restrictions", () => {
     expect(
-      capabilityRequiresPersonalConnection(
+      defaultCapabilityConnectionOwnership(
+        item({ metadata: { oauthProfile: { defaultOwnership: "personal" } } }),
+      ),
+    ).toBe("personal");
+    expect(
+      defaultCapabilityConnectionOwnership(
         item({
-          mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
-          metadata: {},
+          metadata: {
+            defaultConnectionOwnership: "workspace",
+            oauthProfile: { defaultOwnership: "personal" },
+          },
         }),
       ),
-    ).toBe(true);
+    ).toBe("workspace");
     expect(
-      capabilityRequiresPersonalConnection(
-        item({ metadata: { connectionOwnership: "personal_only" } }),
+      defaultCapabilityConnectionOwnership(
+        item({ metadata: { defaultConnectionOwnership: "personal" } }),
       ),
-    ).toBe(true);
-  });
-
-  test("Slack's hosted MCP is personal-only; shared Slack access is the workspace bot", () => {
-    expect(
-      capabilityRequiresPersonalConnection(
-        item({
-          providerDomain: "slack.com",
-          mcpUrl: "https://mcp.slack.com/mcp",
-          metadata: {},
-        }),
-      ),
-    ).toBe(true);
-    expect(
-      capabilityRequiresPersonalConnection(
-        item({
-          providerDomain: "slack.com",
-          endpointUrl: "https://mcp.slack.com/mcp/",
-          metadata: {},
-        }),
-      ),
-    ).toBe(true);
-    expect(
-      capabilityRequiresPersonalConnection(
-        item({ providerDomain: "slack.com", mcpUrl: "https://slack.example.test/mcp" }),
-      ),
-    ).toBe(false);
+    ).toBe("personal");
+    expect(defaultCapabilityConnectionOwnership(item({ providerDomain: "linear.app" }))).toBe(
+      "workspace",
+    );
+    expect(defaultCapabilityConnectionOwnership(item({ providerDomain: "slack.com" }))).toBe(
+      "workspace",
+    );
   });
 
   test("MCP with required headers collects an api_key with humanized labels", () => {
@@ -781,6 +769,31 @@ describe("connectionHealth", () => {
       connection: null,
     });
   });
+
+  test("host bindings stay enabled without native connection health lookup", () => {
+    const hostRef = {
+      authoritySource: "host" as const,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      providerDomain: "cloudgeni.example",
+      kind: "delegated",
+      subjectScope: "subject" as const,
+    };
+    expect(
+      connectionHealth(
+        item({ enabled: true, connectionRef: hostRef }),
+        [
+          connection({
+            id: hostRef.connectionId,
+            subjectId: "current-user",
+            providerDomain: hostRef.providerDomain,
+            kind: "delegated",
+            status: "revoked",
+          }),
+        ],
+        true,
+      ),
+    ).toEqual({ state: "none" });
+  });
 });
 
 describe("capabilityReconnectPlan", () => {
@@ -863,6 +876,19 @@ describe("capabilityReconnectPlan", () => {
     expect(
       capabilityReconnectPlan(item({ enabled: true, connectionRef: null }), deleted),
     ).toBeNull();
+  });
+
+  test("never offers native repair for a host-owned installation", () => {
+    const hostItem = item({
+      enabled: true,
+      connectionRef: {
+        authoritySource: "host",
+        connectionId: "host:connection:42",
+        providerDomain: "cloudgeni.example",
+        kind: "oauth2",
+      },
+    });
+    expect(capabilityReconnectPlan(hostItem, deleted)).toBeNull();
   });
 });
 
@@ -964,6 +990,64 @@ describe("subjectOAuthConnectionRef", () => {
 });
 
 describe("OAuth ownership helpers", () => {
+  test("reconnect preserves exact pins and existing explicit selector mode", () => {
+    expect(catalogConnectionAccountSelection({ enabled: false, connectionRef: null })).toBe(
+      "all_eligible",
+    );
+    expect(
+      catalogConnectionAccountSelection({
+        enabled: true,
+        connectionRef: { providerDomain: "slack.com", kind: "oauth2", connectionId: "pinned" },
+      }),
+    ).toBeUndefined();
+    expect(
+      catalogConnectionAccountSelection({
+        enabled: true,
+        connectionRef: {
+          providerDomain: "slack.com",
+          kind: "oauth2",
+          accountSelection: "all_eligible",
+        },
+      }),
+    ).toBe("all_eligible");
+  });
+  test("selector health reflects a connected eligible account, not a missing seed pin", () => {
+    const selector = item({
+      enabled: true,
+      connectionRef: {
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        accountSelection: "all_eligible",
+      },
+    });
+    const shared = connection({
+      id: "shared",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      subjectId: null,
+    });
+    expect(connectionHealth(selector, [shared], true)).toEqual({
+      state: "connected",
+      connection: shared,
+    });
+    expect(connectionHealth(selector, [], true)).toEqual({ state: "attention", connection: null });
+  });
+  test("new catalog connection selectors explicitly allow both ownership scopes without a seed pin", () => {
+    for (const ownership of ["workspace", "personal"] as const) {
+      expect(oauthConnectionRef(ownership, "seed", "slack.com", "all_eligible")).toEqual({
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        subjectScope: ownership === "personal" ? "subject" : "workspace",
+        accountSelection: "all_eligible",
+      });
+      expect(apiKeyConnectionRef(ownership, "seed", "api.test", "all_eligible")).toEqual({
+        providerDomain: "api.test",
+        kind: "api_key",
+        subjectScope: ownership === "personal" ? "subject" : "workspace",
+        accountSelection: "all_eligible",
+      });
+    }
+  });
   test("workspace refs pin the exact shared row while personal refs hide the private UUID", () => {
     expect(oauthConnectionRef("workspace", "workspace-conn", "linear.app")).toEqual({
       connectionId: "workspace-conn",
@@ -1280,16 +1364,16 @@ describe("capabilityQuickConnectPlan (row/tile icon fast path)", () => {
     ).toMatchObject({ confirm: true });
   });
 
-  test("a personal-only connector never quick-connects a workspace-owned binding", () => {
+  test("quick connect respects the configured personal default", () => {
     for (const mcpUrl of ["https://gmailmcp.googleapis.com/mcp/v1", "https://mcp.slack.com/mcp"]) {
       const personalOnly = item({
         kind: "mcp",
         authKind: "oauth2",
         providerDomain: "google.com",
         mcpUrl,
-        metadata: { curation: { official: true } },
+        metadata: { curation: { official: true }, defaultConnectionOwnership: "personal" },
       });
-      expect(capabilityRequiresPersonalConnection(personalOnly)).toBe(true);
+      expect(defaultCapabilityConnectionOwnership(personalOnly)).toBe("personal");
       expect(capabilityQuickConnectPlan(personalOnly)).toMatchObject({
         mode: "oauth",
         ownership: "personal",
@@ -1302,7 +1386,7 @@ describe("capabilityQuickConnectPlan (row/tile icon fast path)", () => {
           authKind: "api_key",
           providerDomain: "example.test",
           metadata: {
-            connectionOwnership: "personal_only",
+            defaultConnectionOwnership: "personal",
             requiredHeaders: ["X-Api-Key"],
           },
         }),

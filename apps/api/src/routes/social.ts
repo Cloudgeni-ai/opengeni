@@ -2,8 +2,10 @@ import {
   CreateSocialConnectionRequest,
   CreateSocialPostRequest,
   OAuthStartResponse,
+  OrganizationIntegrationDeniedError,
   SocialOAuthStartRequest,
 } from "@opengeni/contracts";
+import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
 import {
   createSocialConnection,
   createSocialPost,
@@ -19,6 +21,7 @@ import { requireAccessGrant, requireAccessGrantAuthorization } from "@opengeni/c
 import {
   assertPersonalConnectionOwnerPrincipal,
   isPersonalConnectionOwnerPrincipal,
+  requireLegacyOAuthActor,
 } from "../connection-ownership";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
@@ -46,19 +49,25 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = CreateSocialConnectionRequest.parse(await c.req.json());
     try {
       return c.json(
-        await createSocialConnection(db, {
-          accountId: grant.accountId,
-          workspaceId,
-          provider: payload.provider,
-          accountHandle: payload.accountHandle,
-          accountName: payload.accountName ?? null,
-          externalAccountId: payload.externalAccountId ?? null,
-          status: payload.status,
-          scopes: payload.scopes,
-          credentialRef: payload.credentialRef ?? null,
-          tokenMetadata: payload.tokenMetadata,
-          metadata: payload.metadata,
-        }),
+        await withOrganizationIntegrationAcquisition(
+          db,
+          { accountId: grant.accountId, workspaceId },
+          [payload.provider === "x" || payload.provider === "reddit" ? payload.provider : null],
+          (tx) =>
+            createSocialConnection(tx, {
+              accountId: grant.accountId,
+              workspaceId,
+              provider: payload.provider,
+              accountHandle: payload.accountHandle,
+              accountName: payload.accountName ?? null,
+              externalAccountId: payload.externalAccountId ?? null,
+              status: payload.status,
+              scopes: payload.scopes,
+              credentialRef: payload.credentialRef ?? null,
+              tokenMetadata: payload.tokenMetadata,
+              metadata: payload.metadata,
+            }),
+        ),
         201,
       );
     } catch (error) {
@@ -111,6 +120,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     // The contract already defaults this request to workspace ownership; an
     // explicit personal choice still needs a human who can own it.
+    requireLegacyOAuthActor(access);
     const personalOwnershipAllowed = isPersonalConnectionOwnerPrincipal(access);
     if (payload.ownership === "personal") {
       assertPersonalConnectionOwnerPrincipal(access);
@@ -140,7 +150,9 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
         requestUrl: c.req.url,
       },
     );
-    return c.redirect(result.redirectTo, 302);
+    return result.exactReturn
+      ? new Response(null, { status: 302, headers: { location: result.redirectTo } })
+      : c.redirect(result.redirectTo, 302);
   });
 
   app.get("/v1/workspaces/:workspaceId/social/posts", async (c) => {
@@ -218,6 +230,9 @@ function parseConnectionIds(raw: string | undefined): string[] | undefined {
 }
 
 function socialHttpException(error: unknown): HTTPException {
+  if (error instanceof OrganizationIntegrationDeniedError) {
+    return new HTTPException(403, { message: error.message });
+  }
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("not found")) {
     return new HTTPException(404, { message });

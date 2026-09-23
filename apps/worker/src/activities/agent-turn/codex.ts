@@ -3,7 +3,7 @@ import {
   fetchCodexUsageForAccount,
   type CodexAccountStatus,
 } from "@opengeni/db";
-import { type RegistryProviderKind, type Settings } from "@opengeni/config";
+import { type ResolvedModelProvider, type Settings } from "@opengeni/config";
 import { codexAccountNeedsLiveCapacityRefresh } from "../codex-rotation";
 import {
   refreshCodexUsageAndRepairCapacityWaiters,
@@ -19,7 +19,7 @@ export function codexWorkspaceMetricKey(workspaceId: string): string {
 /** Stable public request identity across partial resumes and activity retries. */
 export function acceptsPromptCacheKeyForTurn(
   resolvedModel: {
-    provider: { kind: RegistryProviderKind; builtin?: boolean };
+    provider: { kind: ResolvedModelProvider["kind"]; builtin?: boolean };
   } | null,
 ): boolean {
   if (!resolvedModel) {
@@ -61,6 +61,7 @@ export async function refreshCappedCodexUsageRows(
     signalCodexCapacityWorkflow?: ActivityServices["signalCodexCapacityWorkflow"] | undefined;
     wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
   },
+  acceptedTurnId?: string,
 ): Promise<
   Array<
     Pick<
@@ -82,10 +83,13 @@ export async function refreshCappedCodexUsageRows(
     return accounts;
   }
   await refreshCodexUsageAndRepairCapacityWaiters(
-    stale.map((account) => () => fetchCodexUsageForAccount(db, settings, workspaceId, account.id)),
+    stale.map(
+      (account) => () =>
+        fetchCodexUsageForAccount(db, settings, workspaceId, account.id, undefined, acceptedTurnId),
+    ),
     () => signalPendingCodexCapacityWakeTargets({ db, ...capacitySignals }, workspaceId),
   );
-  return listCodexAccountStatuses(db, workspaceId).catch(() => accounts);
+  return listCodexAccountStatuses(db, workspaceId, acceptedTurnId).catch(() => accounts);
 }
 
 /**

@@ -8,6 +8,10 @@ When the repository is available, `docs/product-integration.md` is the canonical
 external-product contract. This reference should summarize and link to it, not
 invent a second organization-key, workspace-mapping, or Skill-ownership model.
 
+`.agents/skills/opengeni-client` is the canonical implementation Skill. Update
+that tree directly. Do not inject this developer guide into customer-facing
+runtime sessions.
+
 ## First Determine Context
 
 Ask or infer:

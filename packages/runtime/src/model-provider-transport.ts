@@ -3,6 +3,7 @@ import type { ResolvedModelProvider } from "@opengeni/config";
 import {
   GATEWAY_REQUEST_BODY_NORMALIZED_HEADER,
   normalizeVercelGatewayRequestBody,
+  type GatewayRequestPolicyLookup,
 } from "./model-provider-request-policy";
 
 /**
@@ -15,9 +16,10 @@ import {
 export function vercelGatewayRoutingFetch(
   kind: Extract<
     ResolvedModelProvider["kind"],
-    "vercel-gateway-managed" | "vercel-gateway-workspace"
+    "vercel-gateway-managed" | "vercel-gateway-workspace" | "vercel-gateway-organization"
   >,
   inner: typeof fetch,
+  configuredPolicies?: GatewayRequestPolicyLookup,
 ): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     if (!isModelCallFetch(input)) {
@@ -37,7 +39,7 @@ export function vercelGatewayRoutingFetch(
           throw new Error("invalid body");
         }
         const body = parsed as Record<string, unknown>;
-        normalizeVercelGatewayRequestBody(body);
+        normalizeVercelGatewayRequestBody(body, configuredPolicies);
         nextInit = { ...nextInit, body: JSON.stringify(body) };
       } catch (error) {
         if (error instanceof Error && error.message.includes("approved catalogue")) throw error;
@@ -51,10 +53,13 @@ export function vercelGatewayRoutingFetch(
     // The public error below replaces the upstream response. Cancel its unread
     // body now so buffered bytes and the connection are not retained until GC.
     await response.body?.cancel().catch(() => undefined);
+    const authenticationFailure = response.status === 401 || response.status === 403;
     const message =
-      kind === "vercel-gateway-workspace" && (response.status === 401 || response.status === 403)
-        ? "Your Gateway connection needs attention. Reconnect it in workspace Settings."
-        : "The selected model is temporarily unavailable.";
+      kind === "vercel-gateway-organization" && authenticationFailure
+        ? "The organization Gateway connection needs attention. Ask an organization admin to reconnect it in Organization settings."
+        : kind === "vercel-gateway-workspace" && authenticationFailure
+          ? "Your Gateway connection needs attention. Reconnect it in workspace Settings."
+          : "The selected model is temporarily unavailable.";
     return new Response(JSON.stringify({ error: { type: "model_unavailable", message } }), {
       status: response.status,
       statusText: response.statusText,

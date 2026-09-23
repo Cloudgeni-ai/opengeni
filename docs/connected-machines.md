@@ -18,6 +18,43 @@ generation, interruption state, and current machine selection immediately before
 the machine transport is used. Revocation advances the machine and common authority
 generation and invalidates existing grants.
 
+### Enrollment maintenance boundary
+
+Migration `0498_enrollment_membership_fence.sql` repairs user-owned device approval
+under a non-superuser, non-bypass migration owner. Stop every old API/control/turn
+worker and supply the exact application-role list before applying it; the migration
+refuses live listed connections. Start only the matching binaries afterward—do not
+restart pre-0498 approval writers. This is not a rolling or application-rollback-safe
+cutover, and preparing the migration does not authorize deployment.
+
+User approval takes the organization membership fence before RLS workspace-tenancy
+entry, pending-request locks, and enrollment writes. Both the public wrapper and
+SQL finalizer fail closed with `55P03` on fence contention rather than waiting while
+an unknown caller may hold a reverse-order lock. Retry the complete transaction
+after the membership change settles; no failed approval is automatically replayed.
+The finalizer rereads exact active organization membership under that fence and
+retains workspace membership `FOR KEY SHARE` to exclude direct runtime DELETEs.
+Direct workspace-removal preparation takes the same early nonblocking fence before
+downstream rows; its command keeps the existing organization/tenancy prefix.
+Legacy token enrollment retains its existing workspace-owned authority contract.
+
+Known separate boundary: `scoped_compute_actor_membership` still uses an
+organization-membership `FOR SHARE` that can be blinded by FORCE-RLS under this
+owner posture. Its list/rig/attach consumers—including `list_scoped_enrollments`,
+`get_scoped_sandbox`, and `authorize_scoped_sandbox_attach`—are not repaired here.
+Successful enrollment does not establish a complete Connected Machine availability
+fix or prove that those downstream paths work.
+
+Device-code lookup is another unresolved boundary: the migration-0025
+`opengeni_private.resolve_device_enrollment_request` SECURITY DEFINER resolver can
+return no row under the tested non-bypass owner/FORCE-RLS posture because it lacks
+the required context. Independent tests reproduced the same three
+`getDeviceEnrollmentRequestByDeviceCode` failures before and after 0498. The legacy
+suite's historical 0025 replay recreates this resolver through a superuser, so a
+pass after that replay does not validate non-bypass device-code lookup. The 0498
+approval/finalization tests do not certify end-to-end device-flow availability;
+this migration does not repair the resolver.
+
 This guide is embedder-facing: it shows how to create a session on a machine,
 discover the enrolled machines and their metrics, swap a session's active
 sandbox, connect a machine (zero-click token or the interactive device flow), and
@@ -49,17 +86,32 @@ already reports its absolute launch root; OpenGeni persists it and resolves an
 optional relative session folder once against that root. The SDK manifest,
 exec cwd, filesystem calls, editor, and PTY all use that same host-native path.
 Relative operation paths resolve from it and absolute paths stay literal, so
-`/workspace` has no special meaning on a machine. Durable artifact receipts and
-`sandbox:` UI links may still use their provider-independent `/workspace/...`
-identity, projected to cwd-relative paths when shown to the model.
+`/workspace` has no special meaning on a machine.
+
+The Files surface advertises that effective path as `FileSystem.root`, including
+Windows drive and UNC roots. A canonical absolute `sandbox:` link opens the tree
+in the same namespace and sends the negotiated `{ epoch, root }` identity with
+each list, read, or mutation. The API validates that the path remains beneath
+the advertised root, pins the request to the first resolved active route, and
+uses a contained workspace-relative path for machine execution. Responses keep
+the canonical host-native spelling; a route or root change returns a retryable
+conflict instead of a misleading outside-workspace validation error or a read
+from a different target. Provider-independent artifact receipts may still use
+their own portable identity where that receipt contract requires it.
 
 The exact model-visible tool catalog remains available through Codemode without
 installing a machine credential. OpenGeni sends no Codemode manifest pointer or
 token file. Instead, the worker snapshots a renewable exact-attempt URL/bearer
 only into each new child exec. It is never written to disk or stable machine
 state. The installed binary exposes its absolute path to that authorized child,
-so `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list|call` works even without
-Bun/Node/`ogtool`. It reaches the same journal/executor as model MCP; the machine
+so `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list|show|call` works even without
+Bun/Node/`ogtool`. Default text and `list --json` return all authorized tools with
+short summaries, without an aggregate stdout cap or default pagination;
+use `list --query <substring>` to filter, or explicitly opt into a slice with
+`--limit <1..100> --offset <integer>`,
+`list --json` for digest/count/continuation metadata, or `list --full` for the legacy
+complete catalog. `show <path>` returns one tool's details/schema, capped at 64 KiB.
+It reaches the same journal/executor as model MCP; the machine
 still owns every ordinary credential and ambient environment.
 
 This authority follows the session's **active** execution path. The fleet
@@ -83,6 +135,34 @@ that exact closure in the Rust agent. On macOS it also enables the same real
 ScreenCaptureKit/CGEvent desktop feature as the release build. This is the supported local path: copying
 an agent binary next to arbitrary helpers can create a protocol-skewed runtime
 that production installation and managed updates deliberately forbid.
+
+The macOS native bridge drains Cocoa autorelease pools around synchronous calls
+and each Accessibility worker iteration. Stream ownership includes stopping a
+requested capture even when startup times out; dropping a timed-out request does
+not cancel the OS operation. The desktop viewer publishes discovered targets
+before awaiting semantic observation so a stalled app cannot prevent switching
+to another window or screen. `macos_autorelease` exercises the actual helper with
+Objective-C missing-pool diagnostics enabled; run this ignored test explicitly
+in an unlocked local GUI session.
+
+On macOS, runner restart waits for the previous launchd label to disappear before
+accepting a replacement. A matching program path on a retiring job is not proof
+that the replacement started.
+
+If a desktop producer ends after delivering frames, the viewer exposes its
+connection error and Reconnect action instead of leaving the last image over
+them. Exhausted socket retries become an explicit connection error. Refresh
+desktops also retries a failed stream; terminal placement changes still require
+the existing replacement-session recovery path.
+
+The Chrome Native Messaging bridge accepts two exact extension origins: the
+development manifest key (`imdmcebcclhibdfolbokjbiibpcnpbel`) and the Chrome Web
+Store item (`phpmmcbeelfkcinjfbbggegjdcdmnnch`). Both the installed native-host
+manifest and the agent's native-host invocation check must include the store
+origin. Older agent releases that only accept the development origin cannot
+connect the store-installed extension; updating the extension alone cannot fix
+that host-side restriction. Store uploads omit the development-only manifest
+`key` field.
 
 Attached Chrome profiles are a separate physical placement. Inventory reports a
 `connectionGeneration` that becomes the BrowserSession/ComputerSession
@@ -173,9 +253,12 @@ Rules to keep in mind:
   **422**.
 - When a child omits both `sandbox` and `machineTarget`, sharing a parent that is
   currently routed to a Connected Machine automatically copies that exact
-  machine and working directory to the child before its first turn. The model
-  does not choose the machine again. A selfhosted-only create with neither an
-  inherited nor explicit machine is rejected before an unusable session starts.
+  machine and working directory to the child before its first turn. A
+  `backend:none` parent remains a backend-none shared home; its valid attached
+  machine is an independent active route and is inherited without relabeling the
+  child. The model does not choose the machine again. A selfhosted-only create
+  with neither an inherited nor explicit machine is rejected before an unusable
+  session starts.
 
 The model-facing first-party `session_create` tool makes the dependency
 structural: it accepts an optional `machineTarget` object containing required
@@ -198,7 +281,10 @@ seeds the generated session's active pointer before its first turn. A deployment
 whose default backend is `selfhosted` rejects a generated-session schedule that
 does not select a machine instead of creating a session that cannot execute.
 Manual runs also preflight current liveness and the reported workspace root
-before consuming run capacity.
+before consuming run capacity. After that preflight, session creation rechecks
+durable target authority and commits the active pointer in the same transaction
+as the new session row. If the target is invalid, removed, revoked, or otherwise
+no longer attachable, the create fails without leaving a queued session shell.
 
 Unattended schedules currently accept workspace- and organization-scoped
 machines only. User-scoped machines require an owning human's explicit personal
@@ -458,6 +544,10 @@ idempotent `OpCancel`, and only a typed terminal exit/loss is checkpointed as
 proof before settlement. Offline, timeout, malformed, or still-running results
 are deferred. Claim expiry recovers coordination only and never implies process
 death; a successor connection is never queried on the predecessor's behalf.
+Completed operations may need multiple retained-output batches. Reconciliation
+keeps one reader and its integrity checkpoint while captured sequence progress
+continues, and settles only after the terminal output frontier is verified.
+Empty or repeated batches defer recovery; they never license a success result.
 Adoption takes the canonical workspace-control and exact turn-attempt fence, so
 it has a total order with Steer, Pause, terminal Cancel, and session deletion.
 Before that transaction starts, the op-stream yield path takes exact
@@ -548,6 +638,22 @@ authority.
 
 ### Zero-click token (fleet / headless)
 
+Agents with the existing `enrollments:manage` permission can call the first-party
+`connected_machine_enroll_token` MCP tool when it is selected for their session.
+It returns the same one-hour token and deployment-specific Unix/PowerShell install
+commands. `allowScreenControl` defaults to false. No additional approval flow is
+introduced. The workspace/account come from the caller's grant, not tool input.
+Run the command on the intended machine through an already-authorized execution
+path, then verify readiness with `sandboxes_list`. A token cannot execute the
+installer on a machine for which no access path exists.
+
+The token is returned to the agent in the tool result; never publish it in source
+code or unrelated logs. Missing `enrollments:manage`, an explicit tool selection
+that excludes it, or disabled Connected Machines means the tool is unavailable.
+This addition does not grant the permission to existing sessions. For interactive
+enrollment without this permission, `sandbox_provision` still returns human
+device-flow instructions.
+
 Mint a short-TTL enroll token and hand it to the machine's installer. The token
 is **secret** — surface it once with a copy-now warning; it cannot be re-read.
 
@@ -603,8 +709,48 @@ Approving lands an enrollment plus a `selfhosted` sandbox and unblocks the
 agent's poll; `sandboxId` is immediately usable as a `targetSandboxId` or a swap
 target. The managed consent page always asks for personal, workspace, or
 organization access and defaults to personal. Organization publication is
-available only to account administrators. Machines and Rigs display the
+available only to account administrators. Machines and Sandbox Environments display the
 resulting scope in their list cards so wider publication is never implicit.
+
+## Large file edits
+
+The editor uses transactional transfers for large text edits when the exact live
+agent advertises `transactional_fs_write`. This is separate from `op_stream`;
+older agents retain their existing single-message write behavior. An outbound
+message-size rejection is reported as a request-size fault, not an offline
+machine, and does not prove that earlier operations failed.
+
+Transfers stage bounded chunks privately, verify the intended BLAKE3 digest and
+byte count, and publish only after the expected destination state is checked.
+Every transfer request is reauthorized against the same physical connection.
+An ambiguous acknowledgment triggers one read-only query of the exact operation,
+never a replay of the edit. A lost operation after agent restart remains unknown;
+inspect the destination before submitting another edit.
+If that query confirms the abandoned transfer is still running, the caller
+cancels only that exact operation through the same authorization checks. A commit
+racing cancellation retains its verified receipt. Lost cancellation responses or
+lost authority do not prove cleanup: private staging may remain until the link
+ends, and a process crash may leave an orphan. There is no automatic sweep or
+adoption of unknown transfers.
+
+The initial native implementation supports ordinary Linux regular files with
+existing parent directories. It fails closed on unsupported symlinks, hard links,
+ownership, special modes, and extended metadata rather than silently discarding
+their semantics. Transactional editing does not implement `runAs` impersonation.
+Expected-base checks detect observed changes but are not a filesystem
+compare-and-swap against unrelated concurrent writers.
+
+An edit with `moveTo` replaces the destination and then verifies and removes the
+source on the same authorized connection. This is **not an atomic move**. If
+source cleanup cannot be verified, the tool reports that the destination was
+verified but cleanup remains uncertain; it does not replay the move. Inspect
+both paths before retrying.
+The source check and subsequent deletion are not conditional deletion; unrelated
+writers can still change the source between those steps. This is not a
+metadata-preserving filesystem rename.
+
+Deploy matching protocol/runtime packages and a compatible native agent before
+expecting transactional support. Changing transport limits is not required.
 
 ## Revoke / detach
 
@@ -638,3 +784,31 @@ resulting scope in their list cards so wider publication is never implicit.
 - **`MachineStatusPill`** / **`ConnectionStatusPill`** — the status chips.
 
 See the [`@opengeni/react` README](../packages/react/README.md) for wiring.
+
+### Interaction runtime reliability
+
+Managed BrowserSessions own browser lifetime across tool calls. A browser daemon
+launched by a shell command remains subject to that command's containment and
+cleanup; repeating its CLI session name does not retain its process. Explicit
+Connected Machine interaction creation must match the source session's current
+placement. Move the session first; a creation mismatch is a 422, while an existing
+resource on a retired placement retains the terminal stale-resource fence.
+
+Attached Chrome is an explicit user-profile choice, never an automatic fallback
+for an unavailable managed browser. A new attached BrowserSession creates a new
+background tab rather than navigating an existing personal tab. Reuse honors
+explicit placement, identity, revision, network route and linked desktop choices.
+Debugger continuation pages are drained without treating a full page as lost
+history; actual sequence gaps still terminate the connection.
+
+Native computer protocol version 3 separates `capture_still` (including JPEG and
+size options) from reading an explicitly started live stream. macOS helpers use
+private, byte-identical executable copies for each process: concurrent
+ScreenCaptureKit clients sharing one executable path can otherwise route capture
+to the first process and leave another waiting. Copies retain their signatures
+and responsible-app permission checks, and are removed after process exit.
+
+Unexpected controller errors are retained in two owner-only, size-bounded
+`controller-errors.jsonl` files in the private controller state directory, as
+well as stderr. The agent forwards bounded controller stderr diagnostics;
+startup mismatch errors report both expected and received runtime build IDs.

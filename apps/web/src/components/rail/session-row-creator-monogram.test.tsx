@@ -2,8 +2,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { CreatorMonogram } from "@/components/creator-monogram";
+
 import {
   RailTrailingMetadata,
+  SessionRowHoverDetails,
   SessionRowContent,
   sessionRowAccessibleName,
 } from "./session-row-content";
@@ -30,6 +33,14 @@ function parse(markup: string): HTMLElement {
 }
 
 describe("rail creator monogram", () => {
+  test("a standalone monogram keeps its native fallback title", () => {
+    const host = parse(renderToStaticMarkup(<CreatorMonogram createdBy={human} />));
+
+    expect(host.querySelector("[data-creator-monogram]")?.getAttribute("title")).toBe(
+      "Bendik Nyheim",
+    );
+  });
+
   test("a root row shows its human creator's monogram before the status dot", () => {
     const host = parse(
       renderToStaticMarkup(
@@ -39,7 +50,7 @@ describe("rail creator monogram", () => {
 
     const monogram = host.querySelector("[data-creator-monogram]");
     expect(monogram?.textContent).toBe("BN");
-    expect(monogram?.getAttribute("title")).toBe("Bendik Nyheim");
+    expect(monogram?.getAttribute("title")).toBeNull();
     expect(monogram?.getAttribute("aria-hidden")).toBe("true");
     expect(monogram?.getAttribute("style")).toContain("oklch(0.45 0.11 ");
     expect(monogram?.className).toContain("size-4");
@@ -63,7 +74,7 @@ describe("rail creator monogram", () => {
 
     const monogram = host.querySelector("[data-creator-monogram]");
     expect(monogram?.textContent).toBe("IU");
-    expect(monogram?.getAttribute("title")).toBe("user:iuliia");
+    expect(monogram?.getAttribute("title")).toBeNull();
   });
 
   test("renders a creator-only metadata block when a row has nothing else", () => {
@@ -132,6 +143,42 @@ describe("rail creator monogram", () => {
       "",
       "3h",
     ]);
+  });
+});
+
+describe("SessionRowHoverDetails", () => {
+  test("shows the full title, creator, age, and exact sub-agent count without row status copy", () => {
+    const markup = renderToStaticMarkup(
+      <SessionRowHoverDetails
+        title="Diagnose staging availability error with the complete title"
+        createdAt={new Date(Date.now() - 13 * 3_600_000).toISOString()}
+        createdBy={human}
+        descendantCount={3}
+        descendantCountTruncated={false}
+      />,
+    );
+
+    expect(markup).toContain("Diagnose staging availability error with the complete title");
+    expect(markup).toContain("13h ago");
+    expect(markup).toContain("Created by Bendik Nyheim");
+    expect(markup).toContain("3 sub-agents");
+    expect(markup).not.toContain("Idle");
+    expect(markup).not.toContain("Read");
+  });
+
+  test("preserves lower-bound counts and names service-created sessions", () => {
+    const markup = renderToStaticMarkup(
+      <SessionRowHoverDetails
+        title="Nightly sweep"
+        createdAt={new Date(Date.now() - 60_000).toISOString()}
+        createdBy={service}
+        descendantCount={1000}
+        descendantCountTruncated
+      />,
+    );
+
+    expect(markup).toContain("Created by Scheduled task");
+    expect(markup).toContain("1,000+ sub-agents");
   });
 });
 

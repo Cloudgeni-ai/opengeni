@@ -83,15 +83,32 @@ export async function completeSelfServiceOrganizationSetup(
     organizationName: string;
     operationId: string;
     requestFingerprint: string;
+    trialCreditsEnabled?: boolean;
   },
 ): Promise<CompleteSelfServiceOrganizationSetupResponseType> {
   return await db.transaction(async (tx) => {
     const txDb = tx as unknown as Database;
     await setSubjectRlsContext(txDb, input.actorSubjectId);
+    // Transaction-local and set by the trusted API, never the request body.
+    // The AFTER INSERT receipt trigger handles the grant atomically with setup;
+    // replaying an old receipt cannot create a new grant after launch.
+    await rawRows(
+      txDb,
+      sql`select pg_catalog.set_config(
+      'opengeni.verified_signup_trial_enabled',
+      ${input.trialCreditsEnabled === true ? "on" : "off"}, true
+    )`,
+    );
     const [row] = await rawRows<{ result: unknown }>(
       txDb,
       sql`select complete_self_service_organization_setup(
-        ${JSON.stringify(input)}::jsonb
+        ${JSON.stringify({
+          authUserId: input.authUserId,
+          actorSubjectId: input.actorSubjectId,
+          organizationName: input.organizationName,
+          operationId: input.operationId,
+          requestFingerprint: input.requestFingerprint,
+        })}::jsonb
       ) as result`,
     );
     return CompleteSelfServiceOrganizationSetupResponse.parse(row?.result);
@@ -150,6 +167,8 @@ export type OrganizationUserSetupDeliveryClaim =
         role: "viewer" | "member" | "admin";
       }>;
       expiresAt: string;
+      setupTokenTransport: "fragment" | "query" | null;
+      payloadDigest: string | null;
     };
 
 export async function claimOrganizationUserSetupDelivery(
@@ -169,7 +188,7 @@ export async function claimOrganizationUserSetupDelivery(
       await setSubjectRlsContext(scopedDb, input.actorSubjectId);
       const [row] = await rawRows<{ result: unknown }>(
         scopedDb,
-        sql`select claim_organization_user_setup_delivery(
+        sql`select claim_organization_user_setup_delivery_v2(
           ${JSON.stringify(input)}::jsonb
         ) as result`,
       );
@@ -188,6 +207,7 @@ export async function prepareOrganizationUserSetupDelivery(
     claimHolderId: string;
     tokenDigest: string;
     payloadDigest: string;
+    setupTokenTransport: "fragment" | "query";
     providerIdempotencyScope: string;
     providerIdempotencyRetentionSeconds: number;
   },
@@ -199,7 +219,7 @@ export async function prepareOrganizationUserSetupDelivery(
       await setSubjectRlsContext(scopedDb, input.actorSubjectId);
       await rawRows(
         scopedDb,
-        sql`select prepare_organization_user_setup_delivery(
+        sql`select prepare_organization_user_setup_delivery_v2(
           ${JSON.stringify(input)}::jsonb
         )`,
       );
@@ -273,7 +293,13 @@ function parseOrganizationUserSetupDeliveryClaim(
     typeof candidate.organizationName !== "string" ||
     !["owner", "admin", "member"].includes(String(candidate.organizationRole)) ||
     !workspaceAccess.success ||
-    typeof candidate.expiresAt !== "string"
+    typeof candidate.expiresAt !== "string" ||
+    (candidate.setupTokenTransport !== null &&
+      candidate.setupTokenTransport !== "fragment" &&
+      candidate.setupTokenTransport !== "query") ||
+    (candidate.payloadDigest !== null &&
+      (typeof candidate.payloadDigest !== "string" ||
+        !/^[0-9a-f]{64}$/u.test(candidate.payloadDigest)))
   ) {
     throw new Error("Organization user setup delivery claim returned an invalid result");
   }
@@ -290,6 +316,8 @@ function parseOrganizationUserSetupDeliveryClaim(
     organizationRole: candidate.organizationRole as "owner" | "admin" | "member",
     sharedWorkspaceAccess: workspaceAccess.data,
     expiresAt: candidate.expiresAt,
+    setupTokenTransport: candidate.setupTokenTransport,
+    payloadDigest: candidate.payloadDigest,
   };
 }
 

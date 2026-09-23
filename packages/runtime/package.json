@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "2.0.1",
+  "version": "4.0.1",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -40,6 +40,10 @@
     "./github-rest-mcp": {
       "types": "./src/github-rest-mcp.ts",
       "default": "./src/github-rest-mcp.ts"
+    },
+    "./workspace-tool-gateway": {
+      "types": "./src/workspace-tool-gateway.ts",
+      "default": "./src/workspace-tool-gateway.ts"
     }
   },
   "publishConfig": {
@@ -53,6 +57,7 @@
   },
   "dependencies": {
     "@alibaba-group/opensandbox": "0.1.11",
+    "@grpc/grpc-js": "1.14.4",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@noble/hashes": "^1.8.0",
     "@openai/agents": "0.14.3",
@@ -66,14 +71,17 @@
     "@opengeni/contracts": "workspace:*",
     "@opengeni/network": "workspace:*",
     "@opengeni/sdk": "workspace:*",
+    "@opengeni/tool-gateway": "workspace:*",
     "@opengeni/xai-subscription": "workspace:*",
     "debug": "4.4.3",
     "modal": "0.9.0",
     "openai": "6.47.0",
+    "protobufjs": "7.6.5",
     "ws": "8.21.1",
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@opengeni/ogtool": "workspace:*",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
   }

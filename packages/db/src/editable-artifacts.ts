@@ -4760,7 +4760,7 @@ function persistedEditableArtifactActorKey(actor: PersistedEditableArtifactActor
   }
 }
 
-async function transactionallyAuthorizeEditableArtifactActor(
+export async function transactionallyAuthorizeEditableArtifactActor(
   tx: Database,
   input: Readonly<{
     scope: PersistedEditableArtifactScope;

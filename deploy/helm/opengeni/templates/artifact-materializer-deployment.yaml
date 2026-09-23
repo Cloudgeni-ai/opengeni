@@ -1,5 +1,12 @@
 {{- if .Values.artifactMaterializer.enabled }}
 {{- $materializer := .Values.artifactMaterializer }}
+{{- $hostUsers := $materializer.hostUsers }}
+{{- if and (ne $hostUsers nil) (not (kindIs "bool" $hostUsers)) }}
+{{- fail "artifactMaterializer.hostUsers must be a boolean or null" }}
+{{- end }}
+{{- if and (eq (default "Default" $materializer.securityContext.procMount) "Unmasked") (or (not (kindIs "bool" $hostUsers)) $hostUsers) }}
+{{- fail "artifactMaterializer.securityContext.procMount=Unmasked requires artifactMaterializer.hostUsers=false" }}
+{{- end }}
 {{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" $materializer.priorityClassName "tier" "execution") }}
 {{- $credentialsSecret := default (include "opengeni.secretName" .) $materializer.credentialsSecret }}
 {{- $storageBackend := default "s3-compatible" (index .Values.config "OPENGENI_OBJECT_STORAGE_BACKEND") }}
@@ -31,6 +38,9 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      {{- if kindIs "bool" $hostUsers }}
+      hostUsers: {{ $hostUsers }}
+      {{- end }}
       serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       terminationGracePeriodSeconds: {{ $materializer.terminationGracePeriodSeconds }}

@@ -1,17 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { readdir } from "node:fs/promises";
 import { listSkillLibraryEntries, loadSkillLibrarySkill } from "@opengeni/runtime/skill-library";
 import postgres from "postgres";
 
-import {
-  bootstrapWorkspace,
-  createDb,
-  listInstalledPortableSkills,
-  listInstalledSkills,
-} from "../src";
+import { createDb, listInstalledPortableSkills, listInstalledSkills } from "../src";
 import { migrate } from "../src/migrate";
+import { provisionRoles } from "../src/provision-roles";
 
 const migrationName = "0233_skill_and_integration_authority_cutover.sql";
+const skillCutover = "0433_unified_skill_lifecycle.sql";
 
 describe("Skill and Integration authority migration replay", () => {
   test("preserves exact curated selection and makes the generic ledger MCP-only", async () => {
@@ -26,17 +24,14 @@ describe("Skill and Integration authority migration replay", () => {
     }
     let app = createDb(shared.appUrl);
     try {
-      const grant = (
-        await bootstrapWorkspace(app.db, {
-          accountExternalSource: "test",
-          accountExternalId: `capability-authority-account-${crypto.randomUUID()}`,
-          accountName: "Capability authority account",
-          workspaceExternalSource: "test",
-          workspaceExternalId: `capability-authority-workspace-${crypto.randomUUID()}`,
-          workspaceName: "Capability authority workspace",
-          subjectId: "user:capability-authority",
-        })
-      ).workspaceGrants[0]!;
+      // Seed the historical schema directly: current bootstrapWorkspace uses
+      // organization-scoped external-ID uniqueness introduced after this checkpoint.
+      const [account] = await shared.admin<{ id: string }[]>`
+        insert into managed_accounts (name) values ('Capability authority account') returning id`;
+      const [workspace] = await shared.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${account!.id}, 'Capability authority workspace') returning id`;
+      const grant = { accountId: account!.id, workspaceId: workspace!.id };
       await app.close();
 
       const entry = listSkillLibraryEntries().find((candidate) => candidate.id === "checkov")!;
@@ -212,6 +207,14 @@ describe("Skill and Integration authority migration replay", () => {
         installationKinds: ["mcp"],
       });
 
+      // The current reader resolves the canonical Skill head. Exercise the
+      // actual ordering: 0233 materializes portable content, then 0433 binds it
+      // to that head. Replaying 0233 after a fully migrated empty template would
+      // manufacture legacy content after its one-time backfill already ran.
+      await shared.admin`delete from schema_migrations where name >= ${skillCutover}`;
+      await migrate(shared.adminUrl);
+      await provisionApplicationRole(shared.adminUrl, shared.appUrl);
+
       app = createDb(shared.appUrl);
       const summaries = await listInstalledSkills(app.db, grant.workspaceId);
       expect(summaries).toEqual([
@@ -242,6 +245,14 @@ describe("Skill and Integration authority migration replay", () => {
           files: loaded.skill.files,
         }),
       ]);
+      const history = await shared.admin`
+        select r.* from preference_registry_revisions r
+        join skill_source_bindings b on b.preference_id = r.preference_id
+          and b.account_id = r.account_id
+        where b.workspace_id = ${grant.workspaceId}
+        order by r.id
+      `;
+      expect(history).toHaveLength(1);
       await app.close();
 
       const blockedGenericSkillWrite = (async () => {
@@ -282,6 +293,16 @@ describe("Skill and Integration authority migration replay", () => {
           ) as "mcpCount"
       `;
       expect(replayed).toEqual({ skillCount: 1, mcpCount: 1 });
+      app = createDb(shared.appUrl);
+      expect(await listInstalledPortableSkills(app.db, grant.workspaceId)).toEqual(runtime);
+      const replayedHistory = await shared.admin`
+        select r.* from preference_registry_revisions r
+        join skill_source_bindings b on b.preference_id = r.preference_id
+          and b.account_id = r.account_id
+        where b.workspace_id = ${grant.workspaceId}
+        order by r.id
+      `;
+      expect([...replayedHistory]).toEqual([...history]);
     } finally {
       await app.close().catch(() => undefined);
       await shared.release();
@@ -290,22 +311,58 @@ describe("Skill and Integration authority migration replay", () => {
 });
 
 async function acquireCapabilityAuthorityDatabase(): Promise<SharedTestDatabase | null> {
-  const adminUrl = process.env.OPENGENI_CAPABILITY_AUTHORITY_TEST_POSTGRES_ADMIN_URL;
-  const appUrl = process.env.OPENGENI_CAPABILITY_AUTHORITY_TEST_POSTGRES_APP_URL;
+  let adminUrl = process.env.OPENGENI_CAPABILITY_AUTHORITY_TEST_POSTGRES_ADMIN_URL;
+  let appUrl = process.env.OPENGENI_CAPABILITY_AUTHORITY_TEST_POSTGRES_APP_URL;
   if ((adminUrl && !appUrl) || (!adminUrl && appUrl)) {
     throw new Error(
       "OPENGENI_CAPABILITY_AUTHORITY_TEST_POSTGRES_ADMIN_URL and OPENGENI_CAPABILITY_AUTHORITY_TEST_POSTGRES_APP_URL must be set together",
     );
   }
-  if (!adminUrl || !appUrl) {
-    return await acquireSharedTestDatabase("migration-0231-capability-authority");
+  const blank = !adminUrl
+    ? await acquireBlankTestDatabase("migration-0233-capability-authority")
+    : null;
+  if (!adminUrl) {
+    if (!blank) return null;
+    if (!blank.appPassword) {
+      await blank.release();
+      throw new Error("Capability authority replay requires an application-role password");
+    }
+    adminUrl = blank.databaseUrl;
+    const application = new URL(adminUrl);
+    application.username = "opengeni_app";
+    application.password = blank.appPassword;
+    appUrl = application.toString();
   }
-  await migrate(adminUrl);
   const admin = postgres(adminUrl, { max: 4 });
+  try {
+    // Explicit URLs must also identify a pristine disposable database.
+    await admin`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
+    const deferred = (await readdir(new URL("../drizzle", import.meta.url))).filter(
+      (name) => name.endsWith(".sql") && name >= skillCutover,
+    );
+    for (const name of deferred) await admin`insert into schema_migrations(name) values(${name})`;
+    await migrate(adminUrl);
+    await provisionApplicationRole(adminUrl, appUrl!);
+  } catch (error) {
+    await admin.end();
+    await blank?.release();
+    throw error;
+  }
   return {
     admin,
     adminUrl,
-    appUrl,
-    release: async () => await admin.end().catch(() => undefined),
+    appUrl: appUrl!,
+    release: async () => {
+      await admin.end().catch(() => undefined);
+      await blank?.release();
+    },
   };
+}
+
+async function provisionApplicationRole(adminUrl: string, appUrl: string): Promise<void> {
+  const application = new URL(appUrl);
+  await provisionRoles(adminUrl, {
+    appRole: decodeURIComponent(application.username),
+    appPassword: decodeURIComponent(application.password),
+  });
 }

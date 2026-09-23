@@ -605,6 +605,7 @@ export async function getCurrentPreferenceRegistryGovernanceMetadata(
       .where(
         and(
           eq(schema.preferenceRegistryPreferences.status, "active"),
+          sql`coalesce(${schema.preferenceRegistryRevisions.skillActivationMode}, 'workspace_managed') = 'workspace_managed'`,
           or(
             isNull(schema.preferenceRegistryRevisions.expiresAt),
             gt(schema.preferenceRegistryRevisions.expiresAt, sql`transaction_timestamp()`),

@@ -1,10 +1,6 @@
 import {
-  EvaluateGovernedLearningProposalRequest,
   GovernedLearningDecisionReceipt,
-  GovernedLearningEvaluationAttempt,
   type GovernedLearningDecisionReceipt as GovernedLearningDecisionReceiptType,
-  type GovernedLearningEvaluationAttempt as GovernedLearningEvaluationAttemptType,
-  type EvaluateGovernedLearningProposalRequest as EvaluateGovernedLearningProposalRequestType,
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import type { Database } from "./database";
@@ -14,15 +10,6 @@ import { nestedPostgresSqlState } from "./persistence-errors";
 export class GovernedLearningEvaluationAuthorityError extends Error {
   readonly name = "GovernedLearningEvaluationAuthorityError";
 }
-
-export class GovernedLearningEvaluationConflictError extends Error {
-  readonly name = "GovernedLearningEvaluationConflictError";
-}
-
-export type GovernedLearningEvaluationInput = Readonly<{
-  attempt: GovernedLearningEvaluationAttemptType;
-  request: EvaluateGovernedLearningProposalRequestType;
-}>;
 
 type ReceiptRow = {
   receipt_id: string;
@@ -154,62 +141,6 @@ export async function listGovernedLearningDecisionReceipts(
     if (nestedPostgresSqlState(error) === "42501") {
       throw new GovernedLearningEvaluationAuthorityError(
         "Governed-learning history is unavailable",
-      );
-    }
-    throw error;
-  }
-}
-
-/**
- * Persist one inert, content-free governed-learning decision. The database
- * capability independently revalidates the accepted attempt, policy snapshot,
- * proposal lineage, current evidence authority, and deterministic verdict.
- */
-export async function evaluateGovernedLearningProposal(
-  db: Database,
-  input: GovernedLearningEvaluationInput,
-): Promise<GovernedLearningDecisionReceiptType> {
-  const attempt = GovernedLearningEvaluationAttempt.parse(input.attempt);
-  const request = EvaluateGovernedLearningProposalRequest.parse(input.request);
-  try {
-    return await withWorkspaceSubjectRls(
-      db,
-      attempt.workspaceId,
-      attempt.subjectId,
-      async (scopedDb) => {
-        const rows = await rawRows<ReceiptRow>(
-          scopedDb,
-          sql`SELECT * FROM evaluate_governed_learning_proposal(
-            current_setting('opengeni.account_id')::uuid,
-            ${attempt.workspaceId}::uuid,
-            ${attempt.sessionId}::uuid,
-            ${attempt.turnId}::uuid,
-            ${attempt.attemptId}::uuid,
-            ${attempt.executionGeneration}::integer,
-            ${request.operationId}::uuid,
-            ${request.policySnapshotId}::uuid,
-            ${request.proposalId}::uuid,
-            ${request.claimId}::uuid,
-            ${request.evidenceId}::uuid
-          )`,
-        );
-        const row = rows[0];
-        if (!row || rows.length !== 1) {
-          throw new Error("Governed-learning evaluation returned no unique receipt");
-        }
-        return receiptFromRow(row);
-      },
-    );
-  } catch (error) {
-    const state = nestedPostgresSqlState(error);
-    if (state === "42501") {
-      throw new GovernedLearningEvaluationAuthorityError(
-        "Governed-learning proposal evaluation is unavailable",
-      );
-    }
-    if (state === "23505" || state === "40001") {
-      throw new GovernedLearningEvaluationConflictError(
-        "Governed-learning proposal evaluation conflicted",
       );
     }
     throw error;

@@ -62,13 +62,9 @@ function EmptyState({ onEnroll }: { onEnroll?: (() => void) | undefined }) {
 function Header({
   count,
   onEnroll,
-  onRefresh,
-  loading,
 }: {
   count: number;
   onEnroll?: (() => void) | undefined;
-  onRefresh?: (() => void) | undefined;
-  loading?: boolean | undefined;
 }): ReactNode {
   return (
     <div className="flex items-center justify-between gap-3">
@@ -77,17 +73,6 @@ function Header({
         <span className="font-og-mono text-og-xs text-og-fg-subtle">{count}</span>
       </div>
       <div className="flex items-center gap-1.5">
-        {onRefresh ? (
-          <button
-            type="button"
-            data-refresh
-            onClick={onRefresh}
-            title="Refresh"
-            className="rounded-og-sm p-1.5 text-og-fg-subtle transition-colors hover:bg-og-surface-2 hover:text-og-fg"
-          >
-            <RefreshCwIcon className={cn("size-3.5", loading && "animate-og-spin")} aria-hidden />
-          </button>
-        ) : null}
         {onEnroll ? (
           <button
             type="button"
@@ -131,7 +116,7 @@ export function MachinesDashboard({
 
   return (
     <section data-machines-dashboard className={cn("og-root flex flex-col gap-3", className)}>
-      <Header count={machines.length} onEnroll={onEnroll} onRefresh={onRefresh} loading={loading} />
+      <Header count={machines.length} onEnroll={onEnroll} />
 
       {error ? (
         <div

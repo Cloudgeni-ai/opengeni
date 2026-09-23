@@ -36,7 +36,8 @@ describe("documents", () => {
       indexStart,
       source.indexOf("export async function searchDocuments", indexStart),
     );
-    expect(index).toContain("subjectId: cleanString(document.createdBy) ?? null");
+    expect(index).toContain("claimKnowledgeDocumentPreparation(db, identity)");
+    expect(index).toContain("const file = preparation.file");
     const readyFile = source.slice(source.indexOf("async function requireReadyFile"));
     expect(readyFile).toContain("getFilesForSubject(db");
     expect(readyFile).not.toContain("requireFile(db");
@@ -296,7 +297,7 @@ describe("documents", () => {
     expect(embedderCalled).toBe(false);
   });
 
-  test("parses uploaded text bytes into normalized document text", async () => {
+  test("retains exact uploaded text including whitespace and NUL", async () => {
     const parsed = await parseDocumentBytes(new TextEncoder().encode("  hello\0 world  "), {
       id: "file-1",
       filename: "notes.txt",
@@ -310,7 +311,7 @@ describe("documents", () => {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
-    expect(parsed.text).toBe("hello  world");
+    expect(parsed.text).toBe("  hello\0 world  ");
   });
 
   test("recognizes ordinary text filenames when browsers send a generic MIME type", async () => {

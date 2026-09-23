@@ -27,6 +27,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
+import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { registerSessionRoutes } from "../src/routes/sessions";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -194,6 +195,56 @@ async function fixture() {
 }
 
 describe("private Slack session authorization without an embedding-host port", () => {
+  test("Codex account projection cannot expose a private session to another workspace member", async () => {
+    if (!available) return;
+    const value = await fixture();
+    for (const sessionId of [value.root.id, value.child.id]) {
+      const path = `/v1/workspaces/${value.owner.workspaceId}/sessions/${sessionId}/codex-accounts`;
+      expect((await app().request(path, { headers: headers(value.otherBearer) })).status).toBe(404);
+      const own = await app().request(path, { headers: headers(value.ownerBearer) });
+      expect(own.status).toBe(200);
+      expect(await own.json()).toMatchObject({ accounts: [], currentAccount: null });
+    }
+  });
+  test("session_get explicit IDs retain private-session rejection in both detail modes", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const deps = {
+      settings: testSettings(),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {},
+      objectStorage: null,
+      githubStateSecret: "test",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => ({}) as never,
+    } as unknown as ApiRouteDeps;
+    for (const grant of [value.owner, value.other]) {
+      const server = buildOpenGeniMcpServer(deps, grant);
+      const tool = (
+        server as unknown as {
+          _registeredTools: Record<
+            string,
+            { handler: (args: unknown, extra: unknown) => Promise<unknown> }
+          >;
+        }
+      )._registeredTools.session_get!;
+      for (const sessionId of [value.root.id, value.child.id]) {
+        for (const detail of ["compact", "full"]) {
+          if (grant === value.other) {
+            await expect(tool.handler({ sessionId, detail }, {})).rejects.toMatchObject({
+              reason: "forbidden",
+            });
+          } else {
+            await expect(tool.handler({ sessionId, detail }, {})).resolves.toMatchObject({
+              content: expect.any(Array),
+            });
+          }
+        }
+      }
+    }
+  });
+
   test("preserves the legacy no-port path for definitively unmapped and missing sessions", async () => {
     if (!available) return;
     const value = await fixture();

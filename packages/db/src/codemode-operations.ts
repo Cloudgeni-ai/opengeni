@@ -92,6 +92,14 @@ export async function submitCodemodeOperation(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        // Serialize the caller-owned id before testing for an existing row.
+        // Without this fence, two first submissions can both observe absence
+        // and the later insert fails its unique constraint instead of replaying.
+        await tx.execute(sql`
+          select pg_advisory_xact_lock(
+            hashtextextended(${`codemode-operation:${input.workspaceId}:${call.operationId}`}, 0)
+          )
+        `);
         const [existing] = await tx
           .select()
           .from(schema.sessionAttemptCodemodeCalls)
@@ -213,7 +221,13 @@ export async function getCodemodeOperation(
 }
 
 export type ClaimCodemodeOperationResult =
-  | { status: "claimed"; operation: CodemodeOperationValue; claimId: string }
+  | {
+      status: "claimed";
+      operation: CodemodeOperationValue;
+      claimId: string;
+      reclaimed: boolean;
+    }
+  | { status: "execution_owner_lost"; operation: CodemodeOperationValue; claimId: string }
   | { status: "already_running" | "terminal"; operation: CodemodeOperationValue }
   | { status: "rejected"; operation: CodemodeOperationValue | null };
 
@@ -250,30 +264,20 @@ export async function claimCodemodeOperation(
         }
         const now = input.now ?? new Date();
         const claimExpiresAt = new Date(now.getTime() + boundedClaimLeaseMs(input.claimLeaseMs));
+        let reclaimed = false;
         if (row.state === "running") {
           if (!row.claimExpiresAt || row.claimExpiresAt.getTime() > now.getTime()) {
             return { status: "already_running", operation: mapOperation(row) };
           }
           if (row.executionStartedAt) {
-            const [unknown] = await tx
-              .update(schema.sessionAttemptCodemodeCalls)
-              .set({
-                state: "outcome_unknown",
-                errorCode: "worker_lost_during_execution",
-                errorMessage:
-                  "The execution owner disappeared after the tool call began. Inspect actual state before retrying.",
-                completedAt: now,
-                updatedAt: now,
-              })
-              .where(
-                and(
-                  eq(schema.sessionAttemptCodemodeCalls.operationId, input.operationId),
-                  eq(schema.sessionAttemptCodemodeCalls.state, "running"),
-                  eq(schema.sessionAttemptCodemodeCalls.claimId, row.claimId!),
-                ),
-              )
-              .returning();
-            return { status: "terminal", operation: mapOperation(unknown ?? row) };
+            if (!row.claimId) {
+              throw new Error("Codemode running operation is missing its claim id");
+            }
+            return {
+              status: "execution_owner_lost",
+              operation: mapOperation(row),
+              claimId: row.claimId,
+            };
           }
           const [requeued] = await tx
             .update(schema.sessionAttemptCodemodeCalls)
@@ -294,6 +298,7 @@ export async function claimCodemodeOperation(
             .returning();
           if (!requeued) throw new Error("Codemode expired claim recovery lost its row lock");
           row = requeued;
+          reclaimed = true;
         }
         if (isTerminalState(row.state)) return { status: "terminal", operation: mapOperation(row) };
 
@@ -353,7 +358,12 @@ export async function claimCodemodeOperation(
           )
           .returning();
         if (!claimed) throw new Error("Codemode operation claim lost its row lock");
-        return { status: "claimed", operation: mapOperation(claimed), claimId: input.claimId };
+        return {
+          status: "claimed",
+          operation: mapOperation(claimed),
+          claimId: input.claimId,
+          reclaimed,
+        };
       }),
   );
 }

@@ -1,6 +1,10 @@
 import { z } from "zod";
+import { ToolGatewayIdentity } from "./tool-catalog";
 
-export const WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES = 4 * 1024 * 1024;
+export const WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES = 5_000_000_000;
+export const WORKSPACE_ARTIFACT_SOURCE_MAX_UTF8_BYTES = 5_000_000_000;
+export const WORKSPACE_ARTIFACT_SOURCE_MAX_FILES = Number.MAX_SAFE_INTEGER;
+export const WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX = 128;
 export const WORKSPACE_ARTIFACT_TITLE_MAX_CHARS = 120;
 export const WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS = 2_000;
 export const WORKSPACE_ARTIFACT_LIST_MAX = 100;
@@ -21,6 +25,84 @@ export type WorkspaceArtifactSlug = z.infer<typeof WorkspaceArtifactSlug>;
 export const WorkspaceArtifactStatus = z.enum(["active", "archived"]);
 export type WorkspaceArtifactStatus = z.infer<typeof WorkspaceArtifactStatus>;
 
+export const WorkspaceArtifactSourcePath = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/u)
+  .refine(
+    (value) =>
+      !value
+        .split("/")
+        .some((segment) => segment === "." || segment === ".." || segment.length === 0),
+    { message: "artifact source paths must be relative and traversal-free" },
+  );
+export type WorkspaceArtifactSourcePath = z.infer<typeof WorkspaceArtifactSourcePath>;
+
+export const WorkspaceArtifactSourceFile = z
+  .object({
+    path: WorkspaceArtifactSourcePath,
+    content: z.string(),
+  })
+  .strict();
+export type WorkspaceArtifactSourceFile = z.infer<typeof WorkspaceArtifactSourceFile>;
+
+/** Retained editable source; the published runtime remains one exact HTML document. */
+export const WorkspaceArtifactSourceBundle = z
+  .object({
+    entrypoint: WorkspaceArtifactSourcePath,
+    files: z.array(WorkspaceArtifactSourceFile).min(1).max(WORKSPACE_ARTIFACT_SOURCE_MAX_FILES),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const paths = new Set<string>();
+    for (const [index, file] of value.files.entries()) {
+      if (paths.has(file.path)) {
+        context.addIssue({
+          code: "custom",
+          path: ["files", index, "path"],
+          message: "artifact source file paths must be unique",
+        });
+      }
+      paths.add(file.path);
+    }
+    if (!paths.has(value.entrypoint)) {
+      context.addIssue({
+        code: "custom",
+        path: ["entrypoint"],
+        message: "artifact source entrypoint must name one retained file",
+      });
+    }
+    if (
+      encoder.encode(JSON.stringify(value)).byteLength > WORKSPACE_ARTIFACT_SOURCE_MAX_UTF8_BYTES
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: `artifact source exceeds ${WORKSPACE_ARTIFACT_SOURCE_MAX_UTF8_BYTES} UTF-8 bytes`,
+      });
+    }
+  });
+export type WorkspaceArtifactSourceBundle = z.infer<typeof WorkspaceArtifactSourceBundle>;
+
+export const WorkspaceArtifactRequestedTools = z
+  .array(ToolGatewayIdentity)
+  .max(WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX)
+  .superRefine((tools, context) => {
+    const seen = new Set<string>();
+    for (const [index, identity] of tools.entries()) {
+      const key = `${identity.serverId}\u0000${identity.toolName}`;
+      if (seen.has(key)) {
+        context.addIssue({
+          code: "custom",
+          path: [index],
+          message: "requested artifact tools must be unique",
+        });
+      }
+      seen.add(key);
+    }
+  });
+export type WorkspaceArtifactRequestedTools = z.infer<typeof WorkspaceArtifactRequestedTools>;
+
 export const WorkspaceArtifactVersion = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -28,8 +110,16 @@ export const WorkspaceArtifactVersion = z.object({
   artifactId: z.string().uuid(),
   revision: z.number().int().positive(),
   contentType: z.literal("text/html"),
-  contentSha256: sha256,
+  contentSha256: sha256.nullable(),
   sizeBytes: z.number().int().positive().max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+  sourceSha256: sha256.nullable(),
+  sourceSizeBytes: z
+    .number()
+    .int()
+    .positive()
+    .max(WORKSPACE_ARTIFACT_SOURCE_MAX_UTF8_BYTES)
+    .nullable(),
+  requestedTools: WorkspaceArtifactRequestedTools,
   sourceSessionId: z.string().uuid().nullable(),
   sourceTurnId: z.string().uuid().nullable(),
   sourceAttemptId: z.string().uuid().nullable(),
@@ -54,7 +144,12 @@ export const WorkspaceArtifact = z.object({
 });
 export type WorkspaceArtifact = z.infer<typeof WorkspaceArtifact>;
 
-export const WorkspaceArtifactEventType = z.enum(["published", "rolled_back"]);
+export const WorkspaceArtifactEventType = z.enum([
+  "published",
+  "rolled_back",
+  "archived",
+  "restored",
+]);
 export type WorkspaceArtifactEventType = z.infer<typeof WorkspaceArtifactEventType>;
 
 export const WorkspaceArtifactEvent = z.object({
@@ -83,6 +178,9 @@ export const WorkspaceArtifactListQuery = z.object({
     .max(WORKSPACE_ARTIFACT_LIST_MAX)
     .default(WORKSPACE_ARTIFACT_LIST_DEFAULT),
   cursor: z.string().min(1).max(WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS).optional(),
+  status: WorkspaceArtifactStatus.optional(),
+  /** Sites created or published by this session, including older versions. */
+  sourceSessionId: z.string().uuid().optional(),
 });
 export type WorkspaceArtifactListQuery = z.infer<typeof WorkspaceArtifactListQuery>;
 
@@ -115,22 +213,42 @@ export const WorkspaceArtifactHtml = z
     }
   });
 
-export const CreateWorkspaceArtifactRequest = z.object({
-  slug: WorkspaceArtifactSlug.optional(),
-  title: z.string().trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS),
-  description: z.string().max(WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS).nullable().optional(),
-  html: WorkspaceArtifactHtml,
-  idempotencyKey: z.string().trim().min(1).max(200),
-});
+export const CreateWorkspaceArtifactRequest = z
+  .object({
+    slug: WorkspaceArtifactSlug.optional(),
+    title: z.string().trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS),
+    description: z.string().max(WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS).nullable().optional(),
+    html: WorkspaceArtifactHtml.optional(),
+    uploadId: z.string().uuid().optional(),
+    source: WorkspaceArtifactSourceBundle.optional(),
+    requestedTools: WorkspaceArtifactRequestedTools.optional(),
+    idempotencyKey: z.string().trim().min(1).max(200),
+  })
+  .refine((value) => (value.html !== undefined) !== (value.uploadId !== undefined), {
+    message: "Provide either html or uploadId",
+  })
+  .refine((value) => !value.uploadId || value.source === undefined, {
+    message: "Upload source using the prepared source URL",
+  });
 export type CreateWorkspaceArtifactRequest = z.infer<typeof CreateWorkspaceArtifactRequest>;
 
-export const PublishWorkspaceArtifactVersionRequest = z.object({
-  title: z.string().trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS).optional(),
-  description: z.string().max(WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS).nullable().optional(),
-  html: WorkspaceArtifactHtml,
-  expectedCurrentVersionId: z.string().uuid(),
-  idempotencyKey: z.string().trim().min(1).max(200),
-});
+export const PublishWorkspaceArtifactVersionRequest = z
+  .object({
+    title: z.string().trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS).optional(),
+    description: z.string().max(WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS).nullable().optional(),
+    html: WorkspaceArtifactHtml.optional(),
+    uploadId: z.string().uuid().optional(),
+    source: WorkspaceArtifactSourceBundle.optional(),
+    requestedTools: WorkspaceArtifactRequestedTools.optional(),
+    expectedCurrentVersionId: z.string().uuid(),
+    idempotencyKey: z.string().trim().min(1).max(200),
+  })
+  .refine((value) => (value.html !== undefined) !== (value.uploadId !== undefined), {
+    message: "Provide either html or uploadId",
+  })
+  .refine((value) => !value.uploadId || value.source === undefined, {
+    message: "Upload source using the prepared source URL",
+  });
 export type PublishWorkspaceArtifactVersionRequest = z.infer<
   typeof PublishWorkspaceArtifactVersionRequest
 >;
@@ -142,6 +260,14 @@ export const RollbackWorkspaceArtifactRequest = z.object({
   idempotencyKey: z.string().trim().min(1).max(200),
 });
 export type RollbackWorkspaceArtifactRequest = z.infer<typeof RollbackWorkspaceArtifactRequest>;
+
+export const SetWorkspaceArtifactStatusRequest = z.object({
+  status: WorkspaceArtifactStatus,
+  expectedCurrentVersionId: z.string().uuid(),
+  reason: z.string().trim().min(1).max(4096),
+  idempotencyKey: z.string().trim().min(1).max(200),
+});
+export type SetWorkspaceArtifactStatusRequest = z.infer<typeof SetWorkspaceArtifactStatusRequest>;
 
 export const WorkspaceArtifactMutationResponse = z.object({
   artifact: WorkspaceArtifact,
@@ -155,8 +281,10 @@ export const WorkspaceArtifactContentResponse = z.object({
   artifactId: z.string().uuid(),
   versionId: z.string().uuid(),
   contentType: z.literal("text/html"),
-  contentSha256: sha256,
+  contentSha256: sha256.nullable(),
   html: WorkspaceArtifactHtml,
+  source: WorkspaceArtifactSourceBundle,
+  requestedTools: WorkspaceArtifactRequestedTools,
 });
 export type WorkspaceArtifactContentResponse = z.infer<typeof WorkspaceArtifactContentResponse>;
 

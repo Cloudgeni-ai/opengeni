@@ -399,6 +399,76 @@ describe("SessionTenancyControl", () => {
     container.remove();
   });
 
+  test("forks from the selected message through the existing visibility confirmation", async () => {
+    const privateSession = {
+      ...baseSession,
+      tenancy: { ...baseSession.tenancy!, visibility: "private" as const, authorityEpoch: 5 },
+    };
+    const requests: unknown[] = [];
+    const forkSession = mock(async (_workspaceId, _sessionId, request) => {
+      requests.push(request);
+      return {
+        operationId: crypto.randomUUID(),
+        eventId: crypto.randomUUID(),
+        eventSequence: 1,
+        sessionId: "session-fork",
+        workspaceId: "workspace-a",
+        visibility: "workspace" as const,
+        authorityEpoch: 1 as const,
+        copiedHistoryItemCount: 3,
+        replay: false,
+      };
+    });
+    const getSession = mock(async () => ({
+      ...baseSession,
+      id: "session-fork",
+      tenancy: {
+        ...baseSession.tenancy!,
+        visibility: "workspace" as const,
+        authorityEpoch: 1,
+      },
+    }));
+    const onOpenSession = mock((_workspaceId: string, _sessionId: string) => undefined);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <SessionTenancyControl
+          sourceEventId="selected-message-event"
+          session={privateSession}
+          client={{ forkSession, getSession } as unknown as OpenGeniBrowserClient}
+          managedSession
+          canForkPrivately
+          scopeLabel="Engineering"
+          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
+          ownsWorkspaceInvocation={() => true}
+          {...operationAuthority()}
+          onOpenSession={onOpenSession}
+        />,
+      );
+    });
+
+    await act(async () => dialogButton(container, "Workspace").click());
+    expect(container.textContent).toContain("selected message");
+    await act(async () => dialogButton(container, "Fork for workspace").click());
+    await flush();
+
+    expect(requests).toEqual([
+      {
+        sourceEventId: "selected-message-event",
+        visibility: "workspace",
+        workspaceSharedAcknowledged: true,
+        idempotencyKey: expect.any(String),
+      },
+    ]);
+    expect(getSession).toHaveBeenCalledWith("workspace-a", "session-fork", { fresh: true });
+    expect(onOpenSession).toHaveBeenCalledWith("workspace-a", "session-fork");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("offers no private fork destination when the organization has not enabled private sessions", async () => {
     // Migration 0336 fails a private fork into a shared workspace closed with
     // SQLSTATE 55000 when the organization has not enabled private sessions, so

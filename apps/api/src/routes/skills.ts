@@ -11,8 +11,11 @@ import {
 } from "@opengeni/contracts";
 import {
   portableSkillCapabilityId,
+  createPublicSkillSearchClient,
+  PublicSkillSearchError,
   portableSkillPluginKey,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   resolveSkillImport,
   type ApiRouteDeps,
   type GitHubSkillSourceClient,
@@ -23,7 +26,9 @@ import {
   listInstalledSkills,
   PortableSkillInstallationVersionConflictError,
   PortableSkillInstallationVersionRequiredError,
+  PortableSkillSourcePathConflictError,
   uninstallPortableSkill,
+  SkillSourceRemovalAuthorityError,
 } from "@opengeni/db";
 import { loadSkillLibrarySkill, skillLibraryRepositoryUrl } from "@opengeni/runtime/skill-library";
 import { createHash } from "node:crypto";
@@ -31,6 +36,8 @@ import { HTTPException } from "hono/http-exception";
 import type { Hono } from "hono";
 
 import { createGitHubSkillSourceClient } from "../integrations/github-skill-source";
+import { registerSkillContentRoutes } from "./skill-content";
+import { skillInstallerActor, skillRemovalActor } from "./skill-install-authority";
 
 export type SkillRouteOverrides = Readonly<{
   github?: GitHubSkillSourceClient;
@@ -41,7 +48,24 @@ export function registerSkillRoutes(
   deps: ApiRouteDeps,
   overrides: SkillRouteOverrides = {},
 ): void {
+  registerSkillContentRoutes(app, deps);
   const github = overrides.github ?? createGitHubSkillSourceClient(deps.settings);
+  const discovery = createPublicSkillSearchClient(deps.settings);
+  app.get("/v1/workspaces/:workspaceId/skills/search", async (c) => {
+    await requireAccessGrant(c, deps, c.req.param("workspaceId"), "workspace:read");
+    try {
+      return c.json(await discovery.search({ query: c.req.query("q") ?? "", limit: 20 }));
+    } catch (error) {
+      if (!(error instanceof PublicSkillSearchError)) throw error;
+      if (error.retryAfterSeconds) c.header("Retry-After", String(error.retryAfterSeconds));
+      throw new HTTPException(
+        error.code === "invalid_query" ? 422 : error.code === "rate_limited" ? 429 : 503,
+        {
+          message: "Skill search is unavailable. Please try again.",
+        },
+      );
+    }
+  });
 
   app.get("/v1/workspaces/:workspaceId/skills", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -55,7 +79,14 @@ export function registerSkillRoutes(
 
   app.post("/v1/workspaces/:workspaceId/skills/library/:libraryId/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const access = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "capabilities:manage",
+    );
+    const { grant } = access;
+    const skillActor = skillInstallerActor(access);
     const libraryId = decodeURIComponent(c.req.param("libraryId"));
     const payload = InstallLibrarySkillRequest.parse(await c.req.json());
     let loaded: ReturnType<typeof loadSkillLibrarySkill>;
@@ -81,6 +112,7 @@ export function registerSkillRoutes(
     });
     try {
       const installed = await installPortableSkill(deps.db, {
+        skillActor,
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
@@ -136,7 +168,14 @@ export function registerSkillRoutes(
 
   app.post("/v1/workspaces/:workspaceId/skills/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const access = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "capabilities:manage",
+    );
+    const { grant } = access;
+    const skillActor = skillInstallerActor(access);
     const payload = InstallSkillRequest.parse(await c.req.json());
     const resolved = await resolveForRoute(payload.url, github);
     if (
@@ -144,8 +183,7 @@ export function registerSkillRoutes(
       resolved.preview.contentSha256 !== payload.expectedContentSha256
     ) {
       throw new HTTPException(409, {
-        message:
-          "The Skill source changed after preview. Review the new commit and contents before installing.",
+        message: "The skill changed after preview. Review its contents again before installing.",
       });
     }
     const fileSummaryByPath = new Map(
@@ -153,6 +191,7 @@ export function registerSkillRoutes(
     );
     try {
       const installed = await installPortableSkill(deps.db, {
+        skillActor,
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
@@ -204,13 +243,21 @@ export function registerSkillRoutes(
 
   app.delete("/v1/workspaces/:workspaceId/skills/:capabilityId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const access = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "capabilities:manage",
+    );
+    const { grant } = access;
+    const skillActor = skillRemovalActor(access);
     const capabilityId = decodeURIComponent(c.req.param("capabilityId"));
     const payload = UninstallSkillRequest.parse(await c.req.json());
     try {
       return c.json(
         UninstallSkillResult.parse(
           await uninstallPortableSkill(deps.db, {
+            ...(skillActor ? { skillActor } : {}),
             accountId: grant.accountId,
             workspaceId,
             capabilityId,
@@ -224,12 +271,17 @@ export function registerSkillRoutes(
           message: "The Skill changed after preview. Review uninstall impact again.",
         });
       }
+      if (error instanceof SkillSourceRemovalAuthorityError)
+        throw new HTTPException(403, { message: error.message });
       throw error;
     }
   });
 }
 
 function portableSkillMutationHttpError(error: unknown): Error {
+  if (error instanceof PortableSkillSourcePathConflictError) {
+    return new HTTPException(409, { message: error.message });
+  }
   if (error instanceof PortableSkillInstallationVersionRequiredError) {
     return new HTTPException(400, { message: error.message });
   }

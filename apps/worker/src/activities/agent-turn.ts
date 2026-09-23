@@ -1,5 +1,9 @@
 /** Public agent-turn surface. Implementation lives in `./agent-turn/*`. */
-export { createRunAgentTurnActivity } from "./agent-turn/run";
+export {
+  createRunAgentTurnActivity,
+  sessionTitleCodexRequestContext,
+  sessionTitleXaiRequestContext,
+} from "./agent-turn/run";
 export * from "./agent-turn/admission";
 export * from "./agent-turn/codex";
 export * from "./agent-turn/errors";

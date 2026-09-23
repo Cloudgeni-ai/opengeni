@@ -48,6 +48,21 @@ describe("session tenancy domain", () => {
     );
   });
 
+  test("binds the selected message into fork idempotency", () => {
+    const input = {
+      sourceSessionId: "source",
+      destinationWorkspaceId: "workspace",
+      destinationVisibility: "user_private" as const,
+      workspaceSharedAcknowledged: false,
+    };
+    expect(canonicalSessionForkHash({ ...input, sourceEventId: "first" })).not.toBe(
+      canonicalSessionForkHash(input),
+    );
+    expect(canonicalSessionForkHash({ ...input, sourceEventId: "first" })).not.toBe(
+      canonicalSessionForkHash({ ...input, sourceEventId: "second" }),
+    );
+  });
+
   test("binds ordered restart runtime intent without changing legacy fork hashes", () => {
     const input = {
       sourceSessionId: "2dbf723a-cb9b-45e1-9c37-d51fcb73b32c",

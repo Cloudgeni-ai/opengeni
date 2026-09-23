@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { act } from "react";
 
 import { ChatComposer } from "../src/components/chat-composer";
+import * as Composer from "../src/composer";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { EffectiveSessionControl } from "@opengeni/sdk";
 import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
@@ -73,6 +74,30 @@ async function press(textarea: HTMLTextAreaElement, init: KeyboardEventInit): Pr
 }
 
 describe("ChatComposer delivery and lifecycle controls", () => {
+  test("a custom footer keeps native input, focus and keyboard delivery", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    const focusRef = { current: null as { focusInput: () => void } | null };
+    mounted = await renderComponent(
+      <ChatComposer
+        composer={composer(spy)}
+        focusRef={focusRef}
+        footer={
+          <Composer.Footer>
+            <span>Business controls</span>
+            <Composer.SendButton />
+          </Composer.Footer>
+        }
+      />,
+    );
+    const input = mounted.container.querySelector("textarea")!;
+    focusRef.current?.focusInput();
+    expect(document.activeElement).toBe(input);
+    expect(mounted.container.textContent).toContain("Business controls");
+    expect(mounted.container.querySelectorAll("textarea")).toHaveLength(1);
+    await press(input, {});
+    await press(input, { metaKey: true });
+    expect(spy.sends).toEqual(["send", "steer"]);
+  });
   test("keeps the mobile footer on one nowrap row when controls and actions share the bar", async () => {
     const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
     mounted = await renderComponent(
@@ -235,6 +260,62 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     expect(send?.getAttribute("data-og-tip")).toContain("Cmd/Ctrl+Enter");
     await act(async () => send?.click());
     expect(spy.sends).toEqual(["send"]);
+  });
+
+  test.each([false, true])("annotation review survives custom footer: %s", async (customFooter) => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    let reviewRequests = 0;
+    mounted = await renderComponent(
+      <ChatComposer
+        footer={
+          customFooter ? (
+            <Composer.Footer>
+              <Composer.SendButton />
+            </Composer.Footer>
+          ) : undefined
+        }
+        composer={{
+          ...composer(spy),
+          canSend: false,
+          annotations: [
+            {
+              id: "00000000-0000-4000-8000-000000000701",
+              quote: "beta",
+              note: "",
+              source: {
+                kind: "assistant_message",
+                eventId: "00000000-0000-4000-8000-000000000702",
+                eventType: "agent.message.completed",
+                sequence: 4,
+                turnId: "00000000-0000-4000-8000-000000000703",
+                startOffset: 0,
+                endOffset: 4,
+                contextBefore: "",
+                contextAfter: "",
+              },
+            },
+          ],
+          updateAnnotation: () => {},
+          removeAnnotation: () => {},
+          requestAnnotationReview: () => {
+            reviewRequests += 1;
+          },
+        }}
+      />,
+    );
+    const send = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Send message"]',
+    );
+    expect(send?.disabled).toBe(true);
+    expect(send?.getAttribute("data-og-tip")).toBe("Add a note to each quote before sending.");
+    const textarea = mounted.container.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Message the agent"]',
+    );
+    expect(textarea).not.toBeNull();
+    await press(textarea!, { key: "Enter" });
+    expect(spy.sends).toEqual([]);
+    expect(reviewRequests).toBe(1);
+    expect(mounted.container.textContent).toContain("Add a note to each quote before sending.");
   });
 
   test("a disabled send button can explain the exact route-level blocker", async () => {

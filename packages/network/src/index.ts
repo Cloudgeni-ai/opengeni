@@ -5,6 +5,7 @@ import { lookup as nodeLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
 export * from "./json-base64";
+export * from "./mcp-oauth-discovery";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 

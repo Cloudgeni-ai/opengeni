@@ -26,6 +26,10 @@ import {
   type SpreadsheetCanvasProjection,
   type SpreadsheetCanvasTheme,
 } from "./spreadsheet-canvas";
+import {
+  formatSpreadsheetGeneralDisplay,
+  spreadsheetCellEditSource,
+} from "./spreadsheet-general-display";
 
 const MAX_ROWS = 1_048_576;
 const MAX_COLUMNS = 16_384;
@@ -494,13 +498,6 @@ function isCellSelected(selection: SpreadsheetSelection, row: number, col: numbe
   );
 }
 
-function displayValue(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (value instanceof Date) return Number.isNaN(value.getTime()) ? "" : value.toLocaleDateString();
-  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
-  return String(value);
-}
-
 function parseCellInput(input: string): string | number | boolean | null {
   if (input === "") return null;
   const normalized = input.trim();
@@ -906,7 +903,7 @@ export function SpreadsheetGrid({
         const data = worksheet.cellData(row, col);
         return {
           value: data.formula ? workbook.valueAt(worksheet, { row, col }) : data.value,
-          input: data.formula ?? displayValue(data.value),
+          input: data.formula ?? spreadsheetCellEditSource(data.value),
           format: data.format,
         };
       },
@@ -2059,7 +2056,7 @@ export function SpreadsheetProjectionGrid({
                       role="gridcell"
                       aria-colindex={col + 1}
                       aria-selected={selected}
-                      aria-label={`${address}${value === null ? "" : `, ${displayValue(value)}`}`}
+                      aria-label={`${address}${value === null ? "" : `, ${formatSpreadsheetGeneralDisplay(value)}`}`}
                       data-og-cell={address}
                       className={cn(
                         "pointer-events-none absolute top-0 flex h-full min-w-0 overflow-hidden border-b border-r border-og-border px-1.5 text-og-fg",
@@ -2099,7 +2096,7 @@ export function SpreadsheetProjectionGrid({
                         />
                       ) : (
                         <span className="block min-w-0 overflow-hidden text-ellipsis">
-                          {displayValue(value)}
+                          {formatSpreadsheetGeneralDisplay(value)}
                         </span>
                       )}
                     </div>
@@ -2117,7 +2114,9 @@ export function SpreadsheetProjectionGrid({
                 aria-colindex={selection.focus.col + 1}
                 aria-selected="true"
                 aria-label={`${cellName(selection.focus)}${
-                  hiddenActiveValue == null ? "" : `, ${displayValue(hiddenActiveValue)}`
+                  hiddenActiveValue == null
+                    ? ""
+                    : `, ${formatSpreadsheetGeneralDisplay(hiddenActiveValue)}`
                 }`}
               />
             </div>

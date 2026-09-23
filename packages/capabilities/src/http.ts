@@ -6,6 +6,7 @@ import { IntegrationInvocationError } from "./types";
 export const DEFAULT_INTEGRATION_TIMEOUT_MS = 30_000;
 export const DEFAULT_INTEGRATION_RESPONSE_BYTES = 4 * 1024 * 1024;
 export const MAX_INTEGRATION_SPEC_BYTES = 8 * 1024 * 1024;
+export const MAX_CURATED_INTEGRATION_SPEC_BYTES = 64 * 1024 * 1024;
 export const MAX_INTEGRATION_TOOLS = 2_000;
 
 export async function fetchIntegrationSourceDocument(

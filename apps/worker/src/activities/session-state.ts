@@ -3,10 +3,12 @@ import {
   applySessionTurnSettlement,
   enqueueSessionWorkflowWake,
   failSessionWorkBeforeAttemptClaim,
+  blockSessionWorkBeforeAttemptClaim,
   requestSessionTurnRecovery,
   recoverSessionDispatch,
   reconcileSessionAttemptQuiescence,
   peekSessionWork as peekSessionWorkDb,
+  settleSessionInputWait as settleSessionInputWaitDb,
   countQueuedTurns,
   getSessionAttemptActivityRef,
   getSessionEvent,
@@ -18,6 +20,8 @@ import {
   settleSessionIdleWithParentOutbox,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import { CancelledFailure } from "@temporalio/activity";
+import { currentActivityContext } from "./streaming";
 import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./parent-wake";
 import { recordTurnsQueuedGauge, recordWorkerDeathRecoveryMetrics } from "../observability-metrics";
 import {
@@ -42,6 +46,8 @@ import type {
   RecoverDispatchResult,
   RecoverEscapedMcpTimeoutInput,
   RecoverEscapedMcpTimeoutResult,
+  SettleSessionInputWaitInput,
+  SettleSessionInputWaitResult,
 } from "./types";
 
 export type SessionStateActivityOverrides = Partial<{
@@ -49,10 +55,12 @@ export type SessionStateActivityOverrides = Partial<{
   applySessionTurnSettlement: typeof applySessionTurnSettlement;
   enqueueSessionWorkflowWake: typeof enqueueSessionWorkflowWake;
   failSessionWorkBeforeAttemptClaim: typeof failSessionWorkBeforeAttemptClaim;
+  blockSessionWorkBeforeAttemptClaim: typeof blockSessionWorkBeforeAttemptClaim;
   requestSessionTurnRecovery: typeof requestSessionTurnRecovery;
   recoverSessionDispatch: typeof recoverSessionDispatch;
   reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
   peekSessionWork: typeof peekSessionWorkDb;
+  settleSessionInputWait: typeof settleSessionInputWaitDb;
   countQueuedTurns: typeof countQueuedTurns;
   getSessionAttemptActivityRef: typeof getSessionAttemptActivityRef;
   getSessionEvent: typeof getSessionEvent;
@@ -87,12 +95,15 @@ export function createSessionStateActivities(
     overrides.enqueueSessionWorkflowWake ?? enqueueSessionWorkflowWake;
   const failSessionWorkBeforeAttemptClaimFn =
     overrides.failSessionWorkBeforeAttemptClaim ?? failSessionWorkBeforeAttemptClaim;
+  const blockSessionWorkBeforeAttemptClaimFn =
+    overrides.blockSessionWorkBeforeAttemptClaim ?? blockSessionWorkBeforeAttemptClaim;
   const requestSessionTurnRecoveryFn =
     overrides.requestSessionTurnRecovery ?? requestSessionTurnRecovery;
   const recoverSessionDispatchFn = overrides.recoverSessionDispatch ?? recoverSessionDispatch;
   const reconcileSessionAttemptQuiescenceFn =
     overrides.reconcileSessionAttemptQuiescence ?? reconcileSessionAttemptQuiescence;
   const peekSessionWorkFn = overrides.peekSessionWork ?? peekSessionWorkDb;
+  const settleSessionInputWaitFn = overrides.settleSessionInputWait ?? settleSessionInputWaitDb;
   const countQueuedTurnsFn = overrides.countQueuedTurns ?? countQueuedTurns;
   const getSessionAttemptActivityRefFn =
     overrides.getSessionAttemptActivityRef ?? getSessionAttemptActivityRef;
@@ -148,6 +159,28 @@ export function createSessionStateActivities(
 
       const preClaimFailureDisposition =
         input.preClaimFailure?.disposition ?? input.preClaimFailureDisposition;
+      if (
+        preClaimFailureDisposition === "blocked" &&
+        input.admissionFence &&
+        input.preClaimFailure?.reason
+      ) {
+        const blocked = await blockSessionWorkBeforeAttemptClaimFn(db, input.workspaceId, {
+          accountId: input.accountId,
+          sessionId: input.sessionId,
+          workflowId,
+          attemptId: input.attemptId,
+          fence: input.admissionFence,
+          reason: input.preClaimFailure.reason,
+          sqlState: input.preClaimFailure.sqlState ?? null,
+        });
+        await publishDurableSessionEventsFn(
+          bus,
+          input.workspaceId,
+          input.sessionId,
+          blocked.events,
+        );
+        return { action: blocked.action };
+      }
       if (preClaimFailureDisposition === "permanent" && input.trigger) {
         const failed = await failSessionWorkBeforeAttemptClaimFn(db, input.workspaceId, {
           accountId: input.accountId,
@@ -155,6 +188,14 @@ export function createSessionStateActivities(
           workflowId,
           trigger: input.trigger,
           error: input.error ?? "Agent turn admission failed before attempt claim.",
+          ...(input.preClaimFailure?.disposition === "permanent"
+            ? {
+                admissionFailure: {
+                  disposition: "permanent" as const,
+                  code: input.preClaimFailure.code,
+                },
+              }
+            : {}),
         });
         if (failed.action === "terminal") return { action: "terminal" };
         if (failed.action === "stale") return { action: "stale" };
@@ -219,7 +260,9 @@ export function createSessionStateActivities(
       : input.preClaimFailure?.disposition === "retryable" &&
           input.preClaimFailure.code !== "claim_invariant"
         ? input.preClaimFailure.code
-        : null;
+        : input.preClaimFailureDisposition === "retryable"
+          ? "legacy_retryable_preclaim_database_failure"
+          : null;
     if (recoveredClaimCode) {
       const recovery = await requestSessionTurnRecoveryFn(db, input.workspaceId, {
         sessionId: input.sessionId,
@@ -480,10 +523,66 @@ export function createSessionStateActivities(
   }
 
   async function peekSessionWork(input: PeekSessionWorkInput) {
-    const { db, observability } = await services();
-    const peek = await peekSessionWorkFn(db, input.workspaceId, input.sessionId);
+    const { db, observability, inspectSessionAttemptActivity } = await services();
+    const peek = await peekSessionWorkFn(
+      db,
+      input.workspaceId,
+      input.sessionId,
+      input.includeAdmissionFence,
+      input.observerAccountId,
+    );
+    if (peek.kind === "unavailable") return peek;
+    if (peek.kind === "attempt-owned") {
+      // Observation never revokes a writer or recovers a live owner. In
+      // particular, a settled Temporal activity is not physical-writer proof.
+      let ownerActivityState: "pending" | "settled" | "unknown" = "unknown";
+      if (inspectSessionAttemptActivity) {
+        try {
+          ownerActivityState = await inspectSessionAttemptActivity(peek.activityRef);
+        } catch (error) {
+          if (error instanceof CancelledFailure) throw error;
+          if (currentActivityContext()?.cancellationSignal.aborted)
+            throw new CancelledFailure("Control observation cancelled");
+          // This optional metadata observation grants no recovery authority.
+          // An unavailable inspector must not pin the control activity in
+          // retries and prevent a fresh Pause/owner/visibility observation.
+          // Database reads below remain outside this catch and retry normally.
+        }
+      }
+      if (currentActivityContext()?.cancellationSignal.aborted)
+        throw new CancelledFailure("Control observation cancelled");
+      const current = await peekSessionWorkFn(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        input.includeAdmissionFence,
+        input.observerAccountId,
+      );
+      if (
+        current.kind !== "attempt-owned" ||
+        current.turnId !== peek.turnId ||
+        current.attemptId !== peek.attemptId ||
+        current.executionGeneration !== peek.executionGeneration ||
+        current.activityRef.workflowId !== peek.activityRef.workflowId ||
+        current.activityRef.workflowRunId !== peek.activityRef.workflowRunId ||
+        current.activityRef.activityId !== peek.activityRef.activityId
+      )
+        return current;
+      return { ...current, ownerActivityState };
+    }
     await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
     return peek;
+  }
+
+  async function settleSessionInputWait(
+    input: SettleSessionInputWaitInput,
+  ): Promise<SettleSessionInputWaitResult> {
+    const { db, bus } = await services();
+    const result = await settleSessionInputWaitFn(db, input);
+    if (result.events.length > 0) {
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
+    }
+    return { action: result.action };
   }
 
   async function expireSessionHumanInput(
@@ -522,14 +621,12 @@ export function createSessionStateActivities(
       await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, settled.events);
     }
     await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
-    if (settled.action === "stale") {
+    if (settled.action === "stale" || !settled.notifyParent) {
       return;
     }
-    // The workflow reaches markSessionIdle exactly when it has decided to stop
-    // for now (no queued turn, no goal continuation): the terminal-for-now
-    // point for a spawned worker, whatever the cause (goal completed, agent or
-    // system paused goal, goalless work finished, idle control settlement). Wake
-    // the parent here, deduped per idle episode so the manager is nudged once.
+    // The idle transaction distinguishes parked wait/goal obligations from
+    // completed work. Only a terminal idle boundary may notify the parent;
+    // workflow closure while waiting retains its durable wake without a result.
     await notifyParentOfChildIdleFn(
       { db, bus, settings, observability, wakeSessionWorkflow },
       input.workspaceId,
@@ -546,6 +643,7 @@ export function createSessionStateActivities(
     recoverDispatch,
     recoverEscapedMcpTimeout,
     peekSessionWork,
+    settleSessionInputWait,
     expireSessionHumanInput,
     expireSessionInteractionIntervention,
     markSessionIdle,

@@ -24,6 +24,7 @@ export function useOutlookContactsIntegration({
   refreshRevision?: number;
 }): IntegrationAdapter {
   return useIntegrationDefinitionRow({
+    ownership: "personal",
     id: "outlook-contacts",
     name: "Outlook Contacts",
     description: "Read and manage contacts in a connected Outlook account.",

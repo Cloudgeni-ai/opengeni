@@ -1,11 +1,20 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import {
+  AutomationNormalizedEvent,
+  signDelegatedAccessToken,
+  type Permission,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
   bootstrapWorkspace,
   createAutomationSource,
   createAutomationTrigger,
+  createPrReviewAppRegistration,
+  createPrReviewRepositoryBinding,
+  createWorkspaceGatewayCustomModel,
   createDb,
+  deleteWorkspaceGatewayCustomModel,
+  getAutomationSourceSecret,
   deleteWorkspace,
   type DbClient,
 } from "@opengeni/db";
@@ -16,7 +25,8 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
-import { registerAutomationRoutes } from "../src/routes/automations";
+import postgres from "postgres";
+import { acceptAutomationEvent, registerAutomationRoutes } from "../src/routes/automations";
 
 const DELEGATION_SECRET = "automation-authorization-test-secret";
 let shared: SharedTestDatabase;
@@ -27,6 +37,11 @@ let workspaceId: string;
 let subjectId: string;
 let sourceId: string;
 let triggerId: string;
+const triggeredRuns: Array<{
+  accountId: string;
+  workspaceId: string;
+  runId: string;
+}> = [];
 const sessionTemplate = {
   prompt: "Investigate the event",
   instructions: null,
@@ -42,8 +57,26 @@ const sessionTemplate = {
   metadata: {},
 };
 
+async function acquireDatabase(): Promise<SharedTestDatabase | null> {
+  const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_TEST_POSTGRES_APP_URL;
+  if (!adminUrl && !appUrl) return await acquireSharedTestDatabase("automations-authorization");
+  if (!adminUrl || !appUrl) {
+    throw new Error(
+      "OPENGENI_TEST_POSTGRES_ADMIN_URL and OPENGENI_TEST_POSTGRES_APP_URL must be set together",
+    );
+  }
+  const admin = postgres(adminUrl, { max: 4 });
+  return {
+    admin,
+    adminUrl,
+    appUrl,
+    release: async () => await admin.end().catch(() => undefined),
+  };
+}
+
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("automations-authorization");
+  const acquired = await acquireDatabase();
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   await migrate(shared.adminUrl);
@@ -85,13 +118,10 @@ beforeAll(async () => {
       parameters: {},
       sessionTemplate,
       status: "active",
-      packInstallationId: null,
-      packTemplateId: null,
     },
   });
   triggerId = trigger.id;
   app = new Hono();
-  const noop = async () => undefined;
   registerAutomationRoutes(app, {
     settings: testSettings({
       productAccessMode: "managed",
@@ -100,7 +130,9 @@ beforeAll(async () => {
     }),
     db: client.db,
     workflowClient: {
-      triggerAutomationRun: noop,
+      triggerAutomationRun: async (input) => {
+        triggeredRuns.push(input);
+      },
     } as unknown as SessionWorkflowClient,
   } as unknown as ApiRouteDeps);
 }, 300_000);
@@ -144,9 +176,71 @@ describe("automation route authorization", () => {
     expect(response.status).toBe(403);
   });
 
-  test("rejects Pack ownership through the generic trigger create route", async () => {
+  test("rejects PR Review authority through the generic source create route", async () => {
     const response = await app.request(
-      `http://test/v1/workspaces/${workspaceId}/automations/triggers`,
+      `http://test/v1/workspaces/${workspaceId}/automations/sources`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await authorization([
+            "workspace:read",
+            "workspace:admin",
+            "secrets:write",
+          ]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          name: "Claimed PR Review source",
+          adapterId: "source-control.pull-request.v1",
+          webhookSecret: "test-webhook-secret",
+          configuration: {},
+        }),
+      },
+    );
+    expect(response.status).toBe(409);
+  });
+
+  test("does not accept a new event for a trigger whose custom model was retired", async () => {
+    triggeredRuns.length = 0;
+    const upstreamModelId = `fixture/retired-${crypto.randomUUID()}`;
+    const model = await createWorkspaceGatewayCustomModel(client.db, {
+      accountId,
+      workspaceId,
+      upstreamModelId,
+      operationId: crypto.randomUUID(),
+      requestHash: "a".repeat(64),
+      createdBySubjectId: subjectId,
+    });
+    if (!model) throw new Error("custom model create unexpectedly conflicted");
+    await createAutomationTrigger(client.db, {
+      accountId,
+      workspaceId,
+      createdBySubjectId: subjectId,
+      adapterId: "signed-json.v1",
+      request: {
+        sourceId,
+        name: "Retired model trigger",
+        eventTypes: ["retired.model.event"],
+        configuration: {},
+        parameters: {},
+        sessionTemplate: {
+          ...sessionTemplate,
+          model: `workspace-gateway/${upstreamModelId}`,
+        },
+        status: "active",
+      },
+    });
+    await deleteWorkspaceGatewayCustomModel(client.db, {
+      accountId,
+      workspaceId,
+      customModelId: model.id,
+      expectedVersion: model.version,
+      operationId: crypto.randomUUID(),
+      requestHash: "b".repeat(64),
+    });
+
+    const response = await app.request(
+      `http://test/v1/workspaces/${workspaceId}/automations/sources/${sourceId}/events`,
       {
         method: "POST",
         headers: {
@@ -154,17 +248,175 @@ describe("automation route authorization", () => {
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          sourceId,
-          name: "Claimed Pack trigger",
-          eventTypes: ["authorization.event"],
-          configuration: {},
-          parameters: {},
-          sessionTemplate,
-          packInstallationId: "11111111-1111-4111-8111-111111111111",
-          packTemplateId: "review",
+          eventType: "retired.model.event",
+          occurrenceKey: `retired:${crypto.randomUUID()}`,
+          payload: {},
         }),
       },
     );
-    expect(response.status).toBe(409);
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({
+      accepted: true,
+      ignoredReason: "no_executable_triggers",
+      runIds: [],
+    });
+    expect(triggeredRuns).toEqual([]);
+  });
+
+  test("checks the adapter-rendered model before accepting a PR-review event", async () => {
+    triggeredRuns.length = 0;
+    const registration = await createPrReviewAppRegistration(client.db, {
+      accountId,
+      workspaceId,
+      createdBySubjectId: subjectId,
+      webhookSecretEncrypted: "test-ciphertext",
+      name: "PR review rendered-model source",
+      provider: "github",
+      providerBaseUrl: "https://github.com",
+      appId: "12345",
+      credentialKind: "github_app",
+      credentialEncrypted: "fixture-private-key",
+      accessTokenExpiresAt: null,
+      webhookAuthKind: "hmac_sha256",
+      webhookUsername: null,
+    });
+    const source = { id: registration.sourceId, adapterId: "source-control.pull-request.v1" };
+    const upstreamModelId = `fixture/pr-review-retired-${crypto.randomUUID()}`;
+    const productModelId = `workspace-gateway/${upstreamModelId}`;
+    const model = await createWorkspaceGatewayCustomModel(client.db, {
+      accountId,
+      workspaceId,
+      upstreamModelId,
+      operationId: crypto.randomUUID(),
+      requestHash: "d".repeat(64),
+      createdBySubjectId: subjectId,
+    });
+    if (!model) throw new Error("custom model create unexpectedly conflicted");
+    await createPrReviewRepositoryBinding(client.db, {
+      accountId,
+      workspaceId,
+      createdBySubjectId: subjectId,
+      adapterId: source.adapterId,
+      registrationId: registration.id,
+      eventTypes: ["pull_request.review_requested"],
+      configuration: {},
+      provider: "github",
+      repositoryUri: "https://github.com/example/repository.git",
+      repositoryFullName: "example/repository",
+      providerRepositoryId: "101",
+      installationId: "202",
+      projectId: null,
+      model: productModelId,
+      additionalInstructions: null,
+      sessionTemplate: {
+        ...sessionTemplate,
+        instructions: "Follow the PR-review instructions.",
+        policyRole: "pull_request_review",
+      },
+      status: "active",
+    });
+    await deleteWorkspaceGatewayCustomModel(client.db, {
+      accountId,
+      workspaceId,
+      customModelId: model.id,
+      expectedVersion: model.version,
+      operationId: crypto.randomUUID(),
+      requestHash: "e".repeat(64),
+    });
+    const sourceSecret = await getAutomationSourceSecret(client.db, {
+      accountId,
+      workspaceId,
+      sourceId: source.id,
+    });
+    if (!sourceSecret) throw new Error("PR review source fixture is unavailable");
+    const occurrenceKey = `pr-review-retired:${crypto.randomUUID()}`;
+    const result = await acceptAutomationEvent(
+      {
+        settings: testSettings(),
+        db: client.db,
+        workflowClient: {
+          triggerAutomationRun: async (input) => {
+            triggeredRuns.push(input);
+          },
+        },
+      } as unknown as ApiRouteDeps,
+      sourceSecret,
+      {
+        deliveryKey: occurrenceKey,
+        requestDigest: "f".repeat(64),
+        normalizedEvent: AutomationNormalizedEvent.parse({
+          adapterId: source.adapterId,
+          eventType: "pull_request.review_requested",
+          occurrenceKey,
+          occurredAt: null,
+          subject: "pull-request:7",
+          resource: "repository:101",
+          payload: {
+            provider: "github",
+            eventName: "pull_request",
+            action: "opened",
+            providerRepositoryId: "101",
+            installationId: "202",
+            projectId: null,
+            pullRequestId: "7",
+            headSha: "a".repeat(40),
+            baseSha: "b".repeat(40),
+            headRef: "feature",
+            baseRef: "main",
+            ignoredReason: null,
+          },
+        }),
+      },
+    );
+
+    expect(result).toMatchObject({
+      accepted: true,
+      ignoredReason: "no_executable_triggers",
+      runIds: [],
+    });
+    expect(triggeredRuns).toEqual([]);
+  });
+
+  test("records an unmatched event without requiring the deployment catalog", async () => {
+    const source = await getAutomationSourceSecret(client.db, {
+      accountId,
+      workspaceId,
+      sourceId,
+    });
+    if (!source) throw new Error("automation source fixture is unavailable");
+    const occurrenceKey = `unmatched:${crypto.randomUUID()}`;
+
+    const result = await acceptAutomationEvent(
+      {
+        settings: testSettings({ modelCatalogSource: "database" }),
+        db: client.db,
+        workflowClient: {
+          triggerAutomationRun: async (input) => {
+            triggeredRuns.push(input);
+          },
+        },
+      } as unknown as ApiRouteDeps,
+      source,
+      {
+        deliveryKey: occurrenceKey,
+        requestDigest: "c".repeat(64),
+        normalizedEvent: AutomationNormalizedEvent.parse({
+          adapterId: source.adapterId,
+          eventType: "unmatched.event",
+          occurrenceKey,
+          occurredAt: null,
+          subject: null,
+          resource: null,
+          payload: {},
+        }),
+      },
+    );
+
+    expect(result).toMatchObject({
+      accepted: true,
+      ignoredReason: "no_matching_triggers",
+      runIds: [],
+    });
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { DEFAULT_MODAL_IMAGE_REF } from "@opengeni/config";
 
 async function source(relativePath: string): Promise<string> {
   return readFile(new URL(relativePath, import.meta.url), "utf8");
@@ -11,7 +12,7 @@ describe("desktop Modal image pin", () => {
     const helpers = await source("../templates/_helpers.tpl");
     const configmap = await source("../templates/configmap.yaml");
 
-    expect(values).toContain('desktop:\n  imageRef: ""');
+    expect(values).toContain(`desktop:\n  imageRef: "${DEFAULT_MODAL_IMAGE_REF}"`);
     expect(helpers).toContain("opengeni.assertDesktopModalImagePin");
     expect(helpers).toContain("docker/desktop.Dockerfile");
     expect(configmap).toContain("opengeni.assertDesktopModalImagePin");

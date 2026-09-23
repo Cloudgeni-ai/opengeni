@@ -84,15 +84,6 @@ export type SessionClientLike = Pick<
   | "verifyRigChange"
   | "promoteRigChange"
   | "verifyRig"
-  // Packs
-  | "listPacks"
-  | "registerPack"
-  | "enablePack"
-  | "previewPackInstallation"
-  | "installPack"
-  | "previewPackUninstall"
-  | "uninstallPack"
-  | "deletePack"
   // Workspaces + billing
   | "listWorkspaces"
   | "createWorkspace"
@@ -246,7 +237,8 @@ export type EmbeddedSessionLineageClientLike = EmbeddedSessionEventClientLike &
   Pick<OpenGeniClient, "getSessionLineage">;
 
 /** Exact client surface required by {@link useFileAttachments}. */
-export type EmbeddedFileAttachmentClientLike = Pick<OpenGeniClient, "uploadFile">;
+export type EmbeddedFileAttachmentClientLike = Pick<OpenGeniClient, "uploadFile"> &
+  Partial<Pick<OpenGeniClient, "createFileDownloadUrl">>;
 
 /** Exact client surface required by structured human-input hooks. */
 export type EmbeddedHumanInputSessionClientLike = EmbeddedSessionEventClientLike &

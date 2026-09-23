@@ -10,12 +10,11 @@ import {
   type Database,
 } from "@opengeni/db";
 import {
-  coalesceSessionEventDeltas,
+  coalesceSessionEventDeltasWithCoverage,
   formatSessionEventSse,
   formatWorkspaceControlEventSse,
   requireSessionEventDurableFanoutCapability,
   SESSION_EVENT_SSE_FRAME_MAX_BYTES,
-  sessionEventResumeSequence,
   type EventBus,
 } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
@@ -64,11 +63,12 @@ export type ByteBoundedSseStream = {
  * checking `desiredSize` can still accumulate an unbounded server-side queue.
  *
  * One writer is expected per stream. The Web Streams queue holds at most one
- * complete frame, and that frame must fit inside the byte cap. A second write
+ * complete frame. One oversized frame is delivered intact rather than lost;
+ * the byte budget is a batching target, not a content limit. A second write
  * waits for consumer pull only for a bounded interval; cancellation or a stalled
  * reader wakes it and terminates upstream delivery before another durable page is
- * read. One frame is deliberate: it makes both queued-frame count and queued
- * bytes independently bounded instead of relying on byte accounting alone.
+ * read. One frame is deliberate: queued memory is bounded by one event, not
+ * by the size of the session, without imposing a lossy per-message limit.
  */
 export function createByteBoundedSseStream(
   options: ByteBoundedSseStreamOptions = {},
@@ -150,19 +150,6 @@ export function createByteBoundedSseStream(
     stream,
     write: async (frame) => {
       const chunk = encoder.encode(frame);
-      if (chunk.byteLength > maxQueuedBytes) {
-        const error = new RangeError(
-          `SSE frame cannot fit in the configured queue (${chunk.byteLength} > ${maxQueuedBytes} bytes)`,
-        );
-        options.onObservation?.({
-          reason: "frame_too_large",
-          desiredSize: controller.desiredSize,
-          queuedFrames,
-          queuedBytes,
-        });
-        stop(() => controller.error(error));
-        throw error;
-      }
       for (;;) {
         if (stopped) return false;
         const desired = controller.desiredSize;
@@ -295,8 +282,14 @@ export async function sseSessionStream(
       limit: SESSION_REPLAY_PAGE_SIZE,
     });
     await options.reauthorize?.();
+    const compactProjection = coalesceSessionEventDeltasWithCoverage(events);
     return finiteSseBatchResponse(
-      coalesceSessionEventDeltas(events).map(formatSessionEventSse),
+      compactProjection.events.map((event) =>
+        formatSessionEventSse(
+          event,
+          compactProjection.coveredThroughBySequence.get(event.sequence) ?? event.sequence,
+        ),
+      ),
       options,
     );
   }
@@ -375,18 +368,22 @@ export async function sseSessionStream(
         );
       }
       // The durable audit log remains exact. The browser transport combines
-      // adjacent text deltas into bounded frames carrying `coalescedUntil`, so
+      // adjacent text deltas into lossless batches carrying `coalescedUntil`, so
       // a long answer cannot create thousands of React renders and starve
       // command acknowledgements behind its own token stream.
-      for (const projected of coalesceSessionEventDeltas(eligible)) {
-        await writeFrame(formatSessionEventSse(projected));
-        lastSent = sessionEventResumeSequence(projected);
+      const compactProjection = coalesceSessionEventDeltasWithCoverage(eligible);
+      for (const projected of compactProjection.events) {
+        const coveredThrough =
+          compactProjection.coveredThroughBySequence.get(projected.sequence) ?? projected.sequence;
+        await writeFrame(formatSessionEventSse(projected, coveredThrough));
+        lastSent = coveredThrough;
       }
       if (lastSent <= previousLastSent) {
         throw new Error(`Session event replay made no progress after sequence ${lastSent}`);
       }
       if (targetSequence !== undefined && lastSent >= targetSequence) return;
-      if (targetSequence === undefined && page.length < limit) return;
+      // A byte-selected page may contain fewer rows than requested, especially
+      // when one large message travels alone. Only an empty read proves EOF.
     }
   };
   let durableDeliveryTail = Promise.resolve();
@@ -432,7 +429,7 @@ export async function sseSessionStream(
     drainReconnectReconciliation();
   };
   const send = async (event: SessionEvent) => {
-    const targetSequence = sessionEventResumeSequence(event);
+    const targetSequence = event.sequence;
     if (targetSequence <= lastSent) return;
     await reconcileDurableThrough(targetSequence);
   };
@@ -1108,12 +1105,7 @@ function finiteSseBatchResponse(frames: readonly string[], options: SseDeliveryO
   let length = 0;
   for (const frame of frames) {
     const chunk = encoder.encode(frame);
-    if (chunk.byteLength > maxBytes) {
-      throw new RangeError(
-        `SSE frame cannot fit in the finite browser batch (${chunk.byteLength} > ${maxBytes} bytes)`,
-      );
-    }
-    if (length + chunk.byteLength > maxBytes) break;
+    if (chunks.length > 0 && length + chunk.byteLength > maxBytes) break;
     chunks.push(chunk);
     length += chunk.byteLength;
   }
@@ -1146,7 +1138,7 @@ async function collectFiniteSseBatch(
       if (next.done) break;
       // Each source chunk is one complete SSE frame. End before an overflowing
       // frame so reconnect replay starts from the consumer's last whole cursor.
-      if (length + next.value.byteLength > maxBytes) {
+      if (chunks.length > 0 && length + next.value.byteLength > maxBytes) {
         await reader.cancel("finite SSE batch reached its byte limit");
         break;
       }

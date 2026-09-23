@@ -1,10 +1,14 @@
+import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
+import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
+import { StartupTimings, useStartupDetails, setStartupDetails } from "@opengeni/react/session-ui";
+import { buildTimeline } from "@opengeni/react";
+import { PreferenceToggleRow } from "@/components/transcription-settings";
 import {
   SessionStatus as SessionStatusBadge,
   type SessionEventsConnectionState,
-  useRigs,
   useVariableSets,
 } from "@opengeni/react";
-import { MACHINES_SESSION_POLL_MS, useMachines } from "@opengeni/react/machines";
+import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
 import { useNavigate } from "@tanstack/react-router";
 import {
   ChevronDownIcon,
@@ -20,6 +24,7 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { ConnectionPill, CopyableMono, InfoRow, InspectorSection } from "@/components/common";
+import { ModelContextInspectorPane } from "@/components/session/model-context-inspector";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -35,6 +40,7 @@ import {
 } from "@/lib/session-restart-operation-controller";
 import { classifySessionTenancyFailure } from "@/lib/session-tenancy";
 import { repositoryDisplayName } from "@/lib/session-tools";
+import { sessionHasVariableSetBlockingWork } from "@/lib/session-variable-set-editability";
 import type { Session, SessionEvent } from "@/types";
 
 export function SessionInspector(props: {
@@ -43,10 +49,15 @@ export function SessionInspector(props: {
   connectionState: SessionEventsConnectionState;
   onReloadSession: () => Promise<void>;
 }) {
+  const startupDetails = useStartupDetails();
+  const startupPhases = useMemo(
+    () => buildTimeline(props.events).filter((item) => item.kind === "startup-phase"),
+    [props.events],
+  );
   const context = useAppContext();
   const navigate = useNavigate();
   const variableSets = useVariableSets({ workspaceId: props.session.workspaceId });
-  const rigs = useRigs({ workspaceId: props.session.workspaceId });
+  const rigs = useWorkspaceRigs({ workspaceId: props.session.workspaceId });
   const sessionVariableSetIds = useMemo(
     () =>
       props.session.variableSetIds ??
@@ -82,6 +93,7 @@ export function SessionInspector(props: {
     (variableSet) => !selectedVariableSetIds.includes(variableSet.id),
   );
   const saveVariableSets = async () => {
+    if (sessionHasVariableSetBlockingWork(props.session)) return;
     setSavingVariableSets(true);
     setRuntimeFailure(null);
     try {
@@ -155,7 +167,7 @@ export function SessionInspector(props: {
   // inspector agrees with the "Run on" header instead of reading "modal" while a
   // selfhosted box runs the turn. Degrades to the home backend when no machine is
   // active (or selfhosted is disabled → the fleet 404s to empty).
-  const fleet = useMachines({
+  const fleet = useWorkspaceMachines({
     sessionId: props.session.id,
     pollIntervalMs: MACHINES_SESSION_POLL_MS,
   });
@@ -197,22 +209,42 @@ export function SessionInspector(props: {
 
       <Tabs defaultValue="overview" className="min-h-0 min-w-0 flex-1 gap-0 overflow-hidden">
         <div className="min-w-0 border-b border-border px-2 py-2">
-          <TabsList className="grid h-8 w-full min-w-0 grid-cols-4 rounded-md bg-bg p-1">
-            <TabsTrigger value="overview" className="h-6 min-w-0 rounded px-1 text-2xs">
+          <TabsList className="flex !h-auto w-full min-w-0 flex-wrap justify-start gap-1 rounded-md bg-bg p-1">
+            <TabsTrigger value="overview" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Overview
             </TabsTrigger>
-            <TabsTrigger value="events" className="h-6 min-w-0 rounded px-1 text-2xs">
+            <TabsTrigger value="context" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
+              Context
+            </TabsTrigger>
+            <TabsTrigger value="events" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Events
             </TabsTrigger>
-            <TabsTrigger value="timeline" className="h-6 min-w-0 rounded px-1 text-2xs">
+            <TabsTrigger value="timeline" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Timeline
             </TabsTrigger>
-            <TabsTrigger value="raw" className="h-6 min-w-0 rounded px-1 text-2xs">
+            <TabsTrigger value="startup" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
+              Startup
+            </TabsTrigger>
+            <TabsTrigger value="raw" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Raw
             </TabsTrigger>
           </TabsList>
         </div>
 
+        <TabsContent value="startup" className="min-h-0 min-w-0 overflow-hidden">
+          <ScrollArea className="h-full min-w-0">
+            <div className="space-y-5 p-3">
+              <PreferenceToggleRow
+                label="Show startup details in chat"
+                description="Remembered in this browser. Timings are always recorded."
+                checked={startupDetails}
+                onToggle={() => setStartupDetails(!startupDetails)}
+                wrapDescription
+              />
+              <StartupTimings phases={startupPhases} />
+            </div>
+          </ScrollArea>
+        </TabsContent>
         <TabsContent value="overview" className="min-h-0 min-w-0 overflow-hidden">
           <ScrollArea className="h-full min-w-0">
             <div className="min-w-0 space-y-4 p-3">
@@ -251,7 +283,7 @@ export function SessionInspector(props: {
                 <InfoRow label="Model" value={props.session.model} />
                 <InfoRow label="Effort" value={props.session.reasoningEffort} />
                 <InfoRow label={computeLabel} value={computeValue} />
-                <InfoRow label="Rig" value={props.session.rigId ?? "none"} />
+                <InfoRow label="Sandbox Environment" value={props.session.rigId ?? "none"} />
                 <div className="space-y-2 rounded-md border border-border bg-bg/35 p-2">
                   <div className="text-xs font-medium">Variable Sets</div>
                   {selectedVariableSetIds.length === 0 ? (
@@ -354,12 +386,18 @@ export function SessionInspector(props: {
                     Later sets override earlier sets. Changes are allowed only between turns and
                     rotate the managed sandbox before reuse.
                   </p>
+                  {sessionHasVariableSetBlockingWork(props.session) ? (
+                    <p className="text-2xs text-fg-subtle">
+                      Variable Sets can be changed after the current and queued work finishes.
+                    </p>
+                  ) : null}
                   <Button
                     type="button"
                     size="sm"
                     variant="secondary"
                     disabled={
                       !selectedChanged ||
+                      sessionHasVariableSetBlockingWork(props.session) ||
                       savingVariableSets ||
                       restarting ||
                       Boolean(pendingRestartAttempt)
@@ -372,14 +410,14 @@ export function SessionInspector(props: {
                 </div>
                 {props.session.tenancy ? (
                   <div className="space-y-2 rounded-md border border-border bg-bg/35 p-2">
-                    <div className="text-xs font-medium">Restart with rig</div>
+                    <div className="text-xs font-medium">Restart with sandbox environment</div>
                     <Select
                       value={selectedRigId}
                       disabled={savingVariableSets || restarting || Boolean(pendingRestartAttempt)}
                       onChange={(event) => setSelectedRigId(event.target.value)}
                       className="h-8 w-full text-xs"
                     >
-                      <option value="">No rig</option>
+                      <option value="">No sandbox environment</option>
                       {rigs.rigs.map((rig) => (
                         <option key={rig.id} value={rig.id}>
                           {rig.name}
@@ -388,8 +426,9 @@ export function SessionInspector(props: {
                       ))}
                     </Select>
                     <p className="text-2xs text-fg-subtle">
-                      Rig setup is immutable for a live sandbox. Restart creates an independent
-                      history fork with a fresh sandbox and leaves this session unchanged.
+                      Sandbox Environment setup is immutable for a live sandbox. Restart creates an
+                      independent history fork with a fresh sandbox and leaves this session
+                      unchanged.
                     </p>
                     <Button
                       type="button"
@@ -446,6 +485,15 @@ export function SessionInspector(props: {
               </InspectorSection>
             </div>
           </ScrollArea>
+        </TabsContent>
+
+        <TabsContent value="context" className="min-h-0 min-w-0 overflow-hidden">
+          <ModelContextInspectorPane
+            workspaceId={props.session.workspaceId}
+            sessionId={props.session.id}
+            events={displayEvents}
+            isRunning={props.session.status === "running"}
+          />
         </TabsContent>
 
         <TabsContent value="events" className="min-h-0 min-w-0 overflow-hidden">

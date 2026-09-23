@@ -1,3 +1,5 @@
+import { formatSpreadsheetGeneralDisplay } from "./spreadsheet-general-display";
+
 const TILE_SIZE = 256;
 const MAX_CACHE_PHYSICAL_PIXELS = 32_000_000;
 const MAX_CACHE_TILES = 96;
@@ -430,7 +432,7 @@ export class SpreadsheetCanvasRenderer {
 
     for (const cell of cells) {
       const value = input.projection.valueAt(cell);
-      const text = displayValue(value);
+      const text = formatSpreadsheetGeneralDisplay(value);
       if (!text) continue;
       paintCellText(context, input, cell, text, tileLeft, tileTop);
     }
@@ -774,13 +776,6 @@ function ellipsize(context: CanvasRenderingContext2D, input: string, maximumWidt
 
 function finitePositive(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-function displayValue(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (value instanceof Date) return Number.isNaN(value.getTime()) ? "" : value.toLocaleDateString();
-  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
-  return String(value);
 }
 
 function columnName(index: number): string {

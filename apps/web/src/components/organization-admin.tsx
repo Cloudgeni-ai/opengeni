@@ -963,6 +963,7 @@ export function OrganizationOverviewSection(props: {
                 <Input
                   aria-label="Organization name"
                   name="organization-name"
+                  suppressAutofill
                   autoComplete="off"
                   value={name}
                   onChange={(event) => setName(event.target.value)}
@@ -1071,18 +1072,16 @@ export function OrganizationOverviewSection(props: {
                     </span>
                   </summary>
                   <div className="grid gap-3 border-t border-border/70 px-3 py-3">
-                    {props.accessibleWorkspaceIds.has(workspace.id) ? (
-                      <div className="flex justify-end">
-                        <a
-                          href={`/workspaces/${encodeURIComponent(workspace.id)}/settings?section=general`}
-                          aria-label={`Open ${workspace.name} workspace settings`}
-                          className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
-                        >
-                          Open settings
-                          <ArrowUpRightIcon className="size-3.5" />
-                        </a>
-                      </div>
-                    ) : null}
+                    <div className="flex justify-end">
+                      <a
+                        href={`/workspaces/${encodeURIComponent(workspace.id)}/settings?section=general`}
+                        aria-label={`Manage ${workspace.name} workspace settings`}
+                        className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+                      >
+                        Manage settings
+                        <ArrowUpRightIcon className="size-3.5" />
+                      </a>
+                    </div>
                     <form
                       className="flex flex-wrap items-end gap-2"
                       onSubmit={(event) => {
@@ -1095,6 +1094,7 @@ export function OrganizationOverviewSection(props: {
                         <Input
                           aria-label={`Workspace name for ${workspace.name}`}
                           name={`workspace-name-${workspace.id}`}
+                          suppressAutofill
                           autoComplete="off"
                           value={workspaceNameDrafts[workspace.id] ?? workspace.name}
                           disabled={accessBusyWorkspaceId === workspace.id}
@@ -1325,6 +1325,7 @@ export function OrganizationOverviewSection(props: {
               <Label htmlFor="new-workspace-name">Workspace name</Label>
               <Input
                 id="new-workspace-name"
+                suppressAutofill
                 aria-label="New workspace name"
                 name="workspace-name"
                 autoComplete="off"
@@ -1335,7 +1336,8 @@ export function OrganizationOverviewSection(props: {
                 autoFocus
               />
               <p className="text-xs text-fg-muted">
-                You can invite organization members after it is created.
+                You will be added as a workspace administrator. You can add other organization
+                members after it is created.
               </p>
             </div>
             <DialogFooter>
@@ -2710,6 +2712,7 @@ export function OrganizationPeopleSection(props: {
                   <Label htmlFor="organization-invite-name">Name</Label>
                   <Input
                     id="organization-invite-name"
+                    suppressAutofill
                     name="name"
                     autoComplete="name"
                     value={inviteName}

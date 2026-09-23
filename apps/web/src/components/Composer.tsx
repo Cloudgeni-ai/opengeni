@@ -13,8 +13,11 @@ import type { EffectiveSessionControl } from "@opengeni/sdk";
 import { type ReactNode } from "react";
 import { useAppContext } from "@/context";
 
-export function useDraftAttachments(workspaceId: string): UseFileAttachmentsResult {
-  return useFileAttachments({ workspaceId });
+export function useDraftAttachments(
+  workspaceId: string,
+  scope: "workspace" | "personal" = "workspace",
+): UseFileAttachmentsResult {
+  return useFileAttachments({ workspaceId, scope });
 }
 
 export function ConsoleComposer(props: {
@@ -50,6 +53,7 @@ export function ConsoleComposer(props: {
   const voiceInputEnabled = resolveWorkspaceVoiceInputEnabled(workspace?.settings) ?? true;
   return (
     <ChatComposer
+      responsiveBasis="container"
       composer={props.composer}
       effectiveControl={props.effectiveControl}
       queuedAheadCount={props.queuedAheadCount}
@@ -64,8 +68,8 @@ export function ConsoleComposer(props: {
       {...(props.onClearView ? { onClearView: props.onClearView } : {})}
       {...(props.controlsLeading ? { controlsLeading: props.controlsLeading } : {})}
       {...(props.header ? { header: props.header } : {})}
-      // Desktop keeps the paperclip; mobile reaches attach via the “+” menu.
-      attachButtonClassName="max-sm:hidden"
+      // The actions menu owns attachments when supplied.
+      attachButtonClassName={props.controlsLeading ? "hidden" : undefined}
       controlsStart={props.controls}
       actionsStart={props.actions}
       transcriptionSuppressed={props.transcriptionSuppressed === true}

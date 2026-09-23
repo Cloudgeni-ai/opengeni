@@ -1,49 +1,104 @@
 import type { Settings } from "@opengeni/config";
-import type { ConnectionCredentialsPort } from "@opengeni/contracts";
+import { stableJson } from "@opengeni/contracts";
 import {
   buildConnectionTokenResolver,
-  buildHostConnectionTokenResolver,
   resolveAcceptedConnectionUse,
-  sessionTenancyProductActivated,
   type Database,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
   type SessionTurnForExecution,
 } from "@opengeni/db";
-import { recordTenancyCompatibilityLaneUse, type Observability } from "@opengeni/observability";
+import { mcpOperationAuthorityDigest } from "./mcp-operation-authority";
 
-export function connectionTokenResolverForTurn(input: {
+type TurnConnectionInput = {
   db: Database;
   settings: Settings;
-  connectionCredentials?: ConnectionCredentialsPort | null;
   accountId: string;
   workspaceId: string;
   sessionId: string;
-  rootSessionId: string;
   attemptId: string;
   turn: SessionTurnForExecution;
+  /** Policy identities before account expansion; never used to select credentials. */
+  canonicalMcpServerIds?: readonly string[];
   authorizeAcceptedUse?: typeof resolveAcceptedConnectionUse;
-  /** Test seam for the activation fence on pre-snapshot workspace refs. */
-  isSessionTenancyProductActivated?: typeof sessionTenancyProductActivated;
-  /** Optional; used only for content-free compatibility-lane counters. */
-  observability?: Observability | null | undefined;
-}): (request: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult> {
-  const hostResolver = input.connectionCredentials?.mcpCredentials;
-  const baseResolver = hostResolver
-    ? buildHostConnectionTokenResolver(hostResolver, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        rootSessionId: input.rootSessionId,
-        turnId: input.turn.id,
-        attemptId: input.attemptId,
-        executionGeneration: input.turn.executionGeneration,
-        initiator: input.turn.initiator,
-        initiatorContext: input.turn.initiatorContext,
-        surface: "model",
-      })
-    : buildConnectionTokenResolver(input.db, input.settings);
+};
+
+type CredentialResolver = (
+  request: ResolveConnectionCredentialInput,
+) => Promise<ResolveConnectionCredentialResult>;
+
+export function connectionTokenResolverForTurn(input: TurnConnectionInput): CredentialResolver {
+  return bindNativeConnectionCredentialsToTurn(
+    input,
+    buildConnectionTokenResolver(input.db, input.settings),
+  );
+}
+
+/** Bind the ordinary credential resolver to one immutable accepted turn.
+ * Credential acquisition and refresh stay inside the native connection engine;
+ * this layer adds the exact execution context and physical-request checks. */
+export function bindNativeConnectionCredentialsToTurn(
+  input: TurnConnectionInput,
+  nativeResolver: CredentialResolver,
+): CredentialResolver {
+  const recoveryEnabled = (serverId: string) =>
+    input.settings.mcpServers.some(
+      (server) =>
+        server.id === serverId &&
+        "operationRecovery" in server &&
+        server.operationRecovery !== undefined &&
+        Object.keys(server.operationRecovery ?? {}).length > 0,
+    );
+  const canonicalMcpServerIds = new Set(
+    input.canonicalMcpServerIds ??
+      input.settings.mcpServers.filter((server) => server.connectionRef).map((server) => server.id),
+  );
   return async (request) => {
+    // Superseded host references must never fall through to native lookup,
+    // even when their opaque identifier happens to be a valid native UUID.
+    if (request.connectionRef.authoritySource === "host") {
+      return {
+        status: "auth_needed",
+        reason: "unsupported_auth",
+        providerDomain: request.connectionRef.providerDomain,
+        authoritySource: "host",
+        ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
+        ...(request.connectionRef.connectionId
+          ? { connectionId: request.connectionRef.connectionId }
+          : {}),
+        ...(request.connectionRef.scopes ? { scopes: request.connectionRef.scopes } : {}),
+        ...(request.connectionRef.resource ? { resource: request.connectionRef.resource } : {}),
+        ...(request.connectionRef.selectedResources
+          ? { selectedResources: request.connectionRef.selectedResources }
+          : {}),
+      };
+    }
+    const accountBindings = input.turn.mcpAccountBindings ?? [];
+    const accountBinding = accountBindings.find((binding) => binding.serverId === request.serverId);
+    // Canonical policy identity cannot be invoked as a credential fallback once
+    // this turn selected explicit account routes for that connector.
+    if (
+      (input.turn.mcpAccountBindings != null &&
+        !accountBinding &&
+        canonicalMcpServerIds.has(request.serverId)) ||
+      (!accountBinding &&
+        accountBindings.some((binding) => binding.canonicalServerId === request.serverId)) ||
+      (accountBinding &&
+        (request.connectionRef.connectionId !== accountBinding.connectionId ||
+          request.connectionRef.providerDomain !== accountBinding.providerDomain ||
+          request.connectionRef.kind !== accountBinding.kind ||
+          request.connectionRef.subjectScope !== accountBinding.subjectScope ||
+          stableJson(request.connectionRef) !== stableJson(accountBinding.connectionRef) ||
+          (accountBinding.subjectScope === "subject" &&
+            request.subjectId !== accountBinding.ownerSubjectId)))
+    ) {
+      return {
+        status: "auth_needed",
+        reason: "personal_authority_unavailable",
+        providerDomain: request.connectionRef.providerDomain,
+        ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
+      };
+    }
     const acceptedDelegation = input.turn.personalConnectionDelegations.find(
       (delegation) =>
         (delegation.connectionType === undefined ||
@@ -62,9 +117,7 @@ export function connectionTokenResolverForTurn(input: {
     const subjectScope: "subject" | "workspace" =
       request.connectionRef.subjectScope === "subject" ? "subject" : "workspace";
     // Every subject-scoped request must match an exact connection frozen on the
-    // accepted turn. This also hard-fences pre-cutover common-user turns that
-    // lack a userDelegation: the DB resolver denies those rows because only a
-    // true legacy_user connection is eligible for bounded compatibility.
+    // accepted turn. The database then checks its immutable sender snapshot.
     if (
       subjectScope === "subject" &&
       (!acceptedDelegation || !request.connectionRef.connectionId)
@@ -76,31 +129,15 @@ export function connectionTokenResolverForTurn(input: {
         ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
       };
     }
-    // Workspace-scope requests now run through the same accepted-use authority
-    // (migration 0279): the exact workspace-owned connection is revalidated
-    // inside the canonical lifecycle fences and every use leaves an idempotent
-    // audit fact. A ref with no connection id is the bounded pre-snapshot
-    // legacy path - it cannot be authorized by exact identity, so it keeps the
-    // unprivileged resolution the old short-circuit used.
+    // Workspace connections also need an exact identity for accepted-use
+    // validation and attribution. Never rediscover a credential by domain here.
     if (subjectScope === "workspace" && !request.connectionRef.connectionId) {
-      if (
-        await (input.isSessionTenancyProductActivated ?? sessionTenancyProductActivated)(
-          input.db,
-          input.workspaceId,
-        )
-      ) {
-        return {
-          status: "auth_needed",
-          reason: "missing_connection",
-          providerDomain: request.connectionRef.providerDomain,
-          ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
-        };
-      }
-      // This lane writes no `connection_use_audit_facts` row, so this counter is
-      // the only evidence it was taken. Lane name only - never the server,
-      // provider domain, connection, or subject.
-      recordTenancyCompatibilityLaneUse(input.observability, "connection_pre_snapshot_ref");
-      return await baseResolver(request);
+      return {
+        status: "auth_needed",
+        reason: "missing_connection",
+        providerDomain: request.connectionRef.providerDomain,
+        ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
+      };
     }
     const credentialUseContext = {
       accountId: input.accountId,
@@ -136,10 +173,30 @@ export function connectionTokenResolverForTurn(input: {
       });
     const withProviderRequestAuthorization = (
       result: ResolveConnectionCredentialResult,
+      attribution = result.status === "ok" ? result.connectionUseAttribution : undefined,
     ): ResolveConnectionCredentialResult => {
       if (result.status !== "ok") return result;
       return {
         ...result,
+        ...(attribution && recoveryEnabled(request.serverId)
+          ? {
+              operationAuthorityDigest: mcpOperationAuthorityDigest(request, {
+                native: attribution,
+                // Match the canonical DB recovery principal: a causal human
+                // survives goal/service continuations. These fields come from
+                // the accepted turn, never request.subjectId or caller JSON.
+                principal: input.turn.initiatingHumanSubjectId
+                  ? { kind: "subject", subjectId: input.turn.initiatingHumanSubjectId }
+                  : {
+                      kind: input.turn.initiator.kind,
+                      ...(input.turn.initiator.kind === "subject" ||
+                      input.turn.initiator.kind === "service"
+                        ? { subjectId: input.turn.initiator.subjectId }
+                        : {}),
+                    },
+              }),
+            }
+          : {}),
         authorizeProviderRequest: async () => {
           const authorization = await authorize({
             ...credentialUseContext,
@@ -150,49 +207,30 @@ export function connectionTokenResolverForTurn(input: {
         },
       };
     };
-    // One place records the `legacy_user` lane for both resolution paths: the
-    // scope comes back on the resolver result when the DB resolver authorized
-    // internally, and on the resolution itself when the host resolver did.
-    const recordAuthorizedScope = (scope: "workspace" | "user" | "legacy_user" | undefined) => {
-      if (scope === "legacy_user") {
-        recordTenancyCompatibilityLaneUse(input.observability, "connection_legacy_user");
-      }
-    };
-    if (!hostResolver) {
-      const result = await baseResolver({
-        ...request,
-        connectionUseContext: credentialUseContext,
-      });
-      if (result.status === "ok") recordAuthorizedScope(result.connectionUseAttribution?.scope);
-      return withProviderRequestAuthorization(result);
-    }
-    const authorization = await authorize(credentialUseContext);
-    if (authorization.status === "denied") {
+    const { subjectId: requestSubjectId, ...requestWithoutSubject } = request;
+    const result = await nativeResolver({
+      ...requestWithoutSubject,
+      ...(accountBinding?.connectionAuthorityGeneration !== undefined
+        ? { expectedAuthorityGeneration: accountBinding.connectionAuthorityGeneration }
+        : {}),
+      // Workspace authority has no personal owner, even when the turn has a
+      // causal human. Do not pass that human as credential ownership context.
+      ...(accountBinding?.subjectScope !== "workspace" && requestSubjectId !== undefined
+        ? { subjectId: requestSubjectId }
+        : {}),
+      connectionUseContext: credentialUseContext,
+    });
+    if (
+      accountBinding &&
+      result.status === "ok" &&
+      result.connectionId !== accountBinding.connectionId
+    ) {
       return {
         status: "auth_needed",
-        reason:
-          request.connectionRef.subjectScope === "subject"
-            ? "personal_authority_unavailable"
-            : "missing_connection",
-        providerDomain: request.connectionRef.providerDomain,
-        ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
+        reason: "personal_authority_unavailable",
+        providerDomain: accountBinding.providerDomain,
       };
     }
-    recordAuthorizedScope(authorization.attribution.scope);
-    const result = await baseResolver({
-      ...request,
-      connectionUseContext: credentialUseContext,
-      connectionUseAuthority: authorization.attribution,
-      connectionRef: {
-        ...request.connectionRef,
-        connectionId: authorization.attribution.connectionId,
-        kind: authorization.connectionKind,
-        subjectScope: authorization.attribution.scope === "workspace" ? "workspace" : "subject",
-      },
-      ...(authorization.attribution.ownerSubjectId
-        ? { subjectId: authorization.attribution.ownerSubjectId }
-        : {}),
-    });
     return withProviderRequestAuthorization(result);
   };
 }

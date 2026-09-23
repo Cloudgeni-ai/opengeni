@@ -27,21 +27,33 @@ const workspaceRouteContracts = {
     kind: "self-managed",
     source: "routes/priority.tsx",
   },
-  workspacePacksRoute: { kind: "redirect" },
   workspaceCapabilitiesRoute: {
     kind: "self-managed",
     source: "routes/capabilities.tsx",
   },
   workspaceLegacyCapabilitiesRoute: { kind: "redirect" },
   workspaceSchedulesRoute: { kind: "page", source: "routes/schedules.tsx" },
-  workspaceDocumentsRoute: { kind: "page", source: "routes/documents.tsx" },
-  workspaceMemoryRoute: { kind: "page", source: "routes/memory.tsx" },
-  workspaceStateRoute: { kind: "page", source: "routes/workspace-state.tsx" },
+  workspaceDocumentsRoute: {
+    kind: "page",
+    source: "routes/documents.tsx",
+    scrollSource: "components/knowledge/agent-knowledge-page.tsx",
+  },
+  workspaceMemoryRoute: {
+    kind: "page",
+    source: "routes/memory.tsx",
+    scrollSource: "components/knowledge/agent-knowledge-page.tsx",
+  },
+  workspaceStateRoute: {
+    kind: "page",
+    source: "routes/workspace-state.tsx",
+    scrollSource: "components/knowledge/agent-knowledge-page.tsx",
+  },
   workspaceArtifactsRoute: { kind: "page", source: "routes/artifacts.tsx" },
   workspaceArtifactDetailRoute: {
     kind: "page",
     source: "routes/artifacts.tsx",
   },
+  workspaceRetainedArtifactRoute: { kind: "page", source: "routes/retained-artifact.tsx" },
   workspaceEditableArtifactRoute: {
     kind: "self-managed",
     source: "routes/editable-artifact.tsx",
@@ -105,6 +117,29 @@ describe("workspace route scroll ownership", () => {
           `${route} must declare its intentional internal scroll model`,
         ).toContain('data-workspace-scroll-owner="self-managed"');
       }
+    }
+  });
+
+  test("settings shells consume the app canvas remainder instead of reclaiming the viewport", async () => {
+    const sharedSource = await source("components/settings/settings-sidebar.tsx");
+    const shellClasses = sharedSource.match(/export const SETTINGS_SHELL_CLASS =\s*"([^"]+)"/)?.[1];
+    expect(shellClasses, "shared settings layout must fit below persistent app chrome").toContain(
+      "h-full",
+    );
+    expect(shellClasses).toContain("min-h-0");
+    expect(shellClasses).not.toContain("h-dvh");
+    for (const path of [
+      "components/settings/workspace-settings-shell.tsx",
+      "components/settings/organization-settings-shell.tsx",
+    ]) {
+      const shellSource = await source(path);
+      expect(shellSource, `${path} must use the shared bounded settings layout`).toContain(
+        "className={SETTINGS_SHELL_CLASS}",
+      );
+      expect(
+        shellSource,
+        `${path} must not clip app chrome by reclaiming the viewport`,
+      ).not.toContain("h-dvh");
     }
   });
 

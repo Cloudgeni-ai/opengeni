@@ -16,6 +16,8 @@ import {
   modalProvider,
 } from "../src/sandbox/providers/modal";
 import { discoverWorkspaceSkills } from "../src/workspace-skills";
+import { SandboxChannelAService } from "../src/sandbox/channel-a";
+import { ModalProcessObservationUnavailableError } from "../src/sandbox/errors";
 
 type Persistence = "tar" | "snapshot_filesystem" | "snapshot_directory";
 const SNAPSHOT_REQUEST_ID = "11111111-1111-4111-8111-111111111111";
@@ -443,7 +445,10 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
       }
       return terminal;
     });
-    const session = Object.assign(fakeSession("tar"), { writeStdin });
+    const session = Object.assign(fakeSession("tar"), {
+      writeStdin,
+      activeProcesses: new Map([[7, {}]]),
+    });
 
     installOpenGeniModalSnapshotPolicy(session);
 
@@ -514,7 +519,7 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     expect(replacementDetach).not.toHaveBeenCalled();
   });
 
-  test("falls back to the exact lost-session result after typed completion cleanup fails", async () => {
+  test("preserves unknown terminal observation after typed completion cleanup fails", async () => {
     let call = 0;
     const writeStdin = mock(async () => {
       call += 1;
@@ -528,12 +533,32 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
       }
       throw new Error("cleanup transport failed");
     });
-    const session = Object.assign(fakeSession("tar"), { writeStdin });
+    const session = Object.assign(fakeSession("tar"), {
+      writeStdin,
+      activeProcesses: new Map([[11, {}]]),
+    });
 
     installOpenGeniModalSnapshotPolicy(session);
 
-    await expect(session.writeStdin({ sessionId: 11, chars: "input" })).resolves.toBe(
-      "write_stdin failed: session not found: 11",
+    await expect(session.writeStdin({ sessionId: 11, chars: "input" })).rejects.toThrow(
+      "observation unavailable",
+    );
+    call = 0;
+    await expect(
+      new SandboxChannelAService({ session }).ptyWrite(
+        { ptyId: "uncertain-pty", data: "input" },
+        11,
+        "input",
+      ),
+    ).rejects.toBeInstanceOf(ModalProcessObservationUnavailableError);
+    const terminal = new SandboxChannelAService({ session });
+    call = 0;
+    await expect(
+      terminal.ptyResize({ ptyId: "uncertain-pty", cols: 80, rows: 24 }, 11),
+    ).rejects.toBeInstanceOf(ModalProcessObservationUnavailableError);
+    call = 0;
+    await expect(terminal.ptyClose({ ptyId: "uncertain-pty" }, 11)).rejects.toBeInstanceOf(
+      ModalProcessObservationUnavailableError,
     );
   });
 
@@ -561,7 +586,10 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     const writeStdin = mock(async () => {
       throw failure;
     });
-    const session = Object.assign(fakeSession("tar"), { writeStdin });
+    const session = Object.assign(fakeSession("tar"), {
+      writeStdin,
+      activeProcesses: new Map([[13, {}]]),
+    });
     installOpenGeniModalSnapshotPolicy(session);
 
     await expect(session.writeStdin({ sessionId: 13, chars: "input" })).rejects.toBe(failure);

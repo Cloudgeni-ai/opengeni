@@ -18,6 +18,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useAppContext } from "@/context";
 import { findPickerRow, groupPickerRowsByBillingClass } from "@/lib/model-policy";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
+import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
 
 export function PrReviewSetupCard(props: {
   client: OpenGeniBrowserClient;
@@ -26,6 +27,8 @@ export function PrReviewSetupCard(props: {
 }) {
   const context = useAppContext();
   const client = useMemo(() => new OpenGeniPrReviewClient(props.client), [props.client]);
+  const connectTransport = useMemo(() => props.client.connectTransport(), [props.client]);
+  const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
   const modelCatalog = useWorkspaceModelCatalog(props.workspaceId);
   const [registrations, setRegistrations] = useState<PrReviewAppRegistration[]>([]);
   const [repositories, setRepositories] = useState<PrReviewRepositoryBinding[]>([]);
@@ -249,7 +252,14 @@ export function PrReviewSetupCard(props: {
             size="sm"
             disabled={busy || !props.canManage || !managedGitHub?.connectUrl}
             onClick={() =>
-              managedGitHub?.connectUrl && window.location.assign(managedGitHub.connectUrl)
+              setConnectRequest({
+                scope: { workspaceId: props.workspaceId, transport: connectTransport },
+                providerId: "github-lens",
+                ownership: "workspace",
+                displayName: "OpenGeni Lens",
+                returnUrl: window.location.href,
+                idempotencyKey: crypto.randomUUID(),
+              })
             }
           >
             <BotIcon />
@@ -278,6 +288,7 @@ export function PrReviewSetupCard(props: {
               value={name}
               onChange={(event) => setName(event.target.value)}
               placeholder="Registration name"
+              suppressAutofill
             />
             <Input
               value={providerBaseUrl}
@@ -510,6 +521,18 @@ export function PrReviewSetupCard(props: {
             })}
           </div>
         </div>
+      ) : null}
+      {connectRequest ? (
+        <NativeConnectSetup
+          transport={connectTransport}
+          workspaceId={props.workspaceId}
+          request={connectRequest}
+          onClose={() => setConnectRequest(null)}
+          onComplete={() => {
+            setConnectRequest(null);
+            void refresh().catch((reason) => setError(messageForError(reason)));
+          }}
+        />
       ) : null}
     </section>
   );

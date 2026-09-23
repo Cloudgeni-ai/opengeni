@@ -48,10 +48,37 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE =
 const AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE =
   "enforce_automatic_session_title_policy_v1()";
 const AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE = "automatic_session_title_fanout_outbox_v1";
+export const SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES = [
+  "record_sandbox_file_publication(uuid, uuid, uuid, uuid)",
+  "list_sandbox_file_publications(uuid, uuid, jsonb)",
+] as const;
+const SANDBOX_FILE_PUBLICATIONS_TABLE = "sandbox_file_publications";
 const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
   "acquire_automatic_session_title_quarantine_fences_v1(integer)";
 
+const MCP_OPERATION_CAPABILITY_ROUTINE = "mcp_operation_command(jsonb, text, jsonb)";
+const MCP_OPERATION_AUTHORITY_TABLES = [
+  "mcp_operations",
+  "sessions",
+  "session_turns",
+  "session_turn_attempts",
+  "workspaces",
+  "workspace_inference_controls",
+  "organization_memberships",
+  "workspace_memberships",
+  "external_identity_links",
+  "external_link_turn_authorities",
+  "host_mcp_turn_authorities",
+  "scheduled_task_runs",
+] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "read_sender_connection(uuid, uuid, uuid, text)",
+  "validate_mcp_account_bindings(jsonb, jsonb)",
+  "fence_mcp_account_bindings()",
+  "guard_mcp_operation_immutable()",
+  "mcp_operation_command_scoped(jsonb, text, jsonb)",
+  "guard_workspace_owned_skill_head_delete()",
+  "guard_workspace_owned_skill_history_delete()",
   ...ARTIFACT_OUTBOX_CAPABILITY_ROUTINES,
   ...ARTIFACT_MATERIALIZER_CAPABILITY_ROUTINES,
   ...ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES,
@@ -81,7 +108,15 @@ const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
 ] as const;
 const MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE =
   "ensure_managed_human_personal_workspace(uuid, text, uuid)";
+const ADDITIONAL_ORGANIZATION_CREATION_ROUTINE =
+  "create_additional_managed_organization(text, text, text, text, uuid)";
 const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
+  "get_external_identity_link_reference(uuid, uuid, text)",
+  "get_external_identity_link_inventory_references(uuid, uuid[])",
+  "ensure_external_identity(uuid, text, text)",
+  "lookup_external_identity(uuid, text, text, text)",
+  "prepare_external_workspace_membership_operation(jsonb)",
+  "record_external_workspace_membership_operation(jsonb, jsonb)",
   "list_self_organization_memberships(text)",
   "list_self_organization_invitations(text)",
   "list_self_organization_invitations(text, uuid, integer)",
@@ -92,11 +127,15 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "get_organization_administration_overview(uuid, text)",
   "get_workspace_kind(uuid, uuid)",
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
+  "capture_legacy_codex_turn_sources(uuid, uuid)",
   "list_organization_workspace_ids(uuid)",
+  "list_organization_codex_workspace_ids(uuid)",
   "organization_workspace_command(jsonb)",
+  "authorize_organization_shared_workspace_administration(uuid, uuid, text)",
   "resolve_organization_workspace_removal_subject(uuid, text, uuid)",
   "prepare_organization_workspace_member_removal(jsonb)",
   "record_organization_workspace_member_removal(jsonb, uuid, uuid)",
+  ADDITIONAL_ORGANIZATION_CREATION_ROUTINE,
   "create_managed_organization(text, text, text, uuid)",
   "assert_organization_shared_workspace_administrator(uuid, uuid, text)",
   "open_organization_shared_workspace_administration_capability(uuid, uuid, text)",
@@ -111,7 +150,9 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "complete_self_service_organization_setup(jsonb)",
   "ensure_organization_user_setup_intent(jsonb)",
   "claim_organization_user_setup_delivery(jsonb)",
+  "claim_organization_user_setup_delivery_v2(jsonb)",
   "prepare_organization_user_setup_delivery(jsonb)",
+  "prepare_organization_user_setup_delivery_v2(jsonb)",
   "settle_organization_user_setup_delivery(jsonb)",
   "preview_organization_user_setup(text)",
   "get_organization_invitation_for_administration(uuid, text, uuid)",
@@ -153,6 +194,10 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
   "organization_workspace_lifecycle_events",
   "organization_workspace_operation_receipts",
   "self_service_organization_setup_receipts",
+] as const;
+const ADDITIONAL_ORGANIZATION_CREATION_AUTHORITY_TABLES = [
+  ...ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES,
+  "additional_organization_creation_receipts",
 ] as const;
 const PRIVATE_SESSION_CREATE_POLICY_ROUTINE = "get_private_session_create_policy(uuid, uuid, text)";
 const ORGANIZATION_PRIVATE_SESSION_SETTINGS_READ_ROUTINE =
@@ -211,10 +256,10 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
 const PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE =
   "resolve_session_attempt_personal_resources(uuid, uuid, uuid)";
 const USER_RESOURCE_LIFECYCLE_ROUTINES = [
+  "list_owned_connection_accounts(uuid, uuid)",
   "accept_turn_personal_resource_attachment(uuid, uuid, uuid, uuid, text, integer, boolean, integer)",
   "list_self_user_resource_authorities(uuid, uuid, text, uuid, integer)",
   "issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, integer, boolean)",
-  "issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean)",
   "revoke_self_user_resource_grant(uuid, uuid, uuid)",
   "authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid)",
 ] as const;
@@ -222,9 +267,7 @@ const CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE =
   "connection_authority_convergence_audit_capability_active(uuid)";
 const CONNECTION_AUTHORITY_ROUTINES = [
   CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE,
-  "resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb)",
   "resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text)",
-  "resolve_connection_use_authority(uuid, uuid, uuid, jsonb)",
   "inspect_organization_connection_authority_convergence(uuid, integer, uuid)",
 ] as const;
 const PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES = [
@@ -239,7 +282,6 @@ const PERSONAL_GITHUB_REPOSITORY_AUTHORITY_TABLES = [
 const SCHEDULED_PERSONAL_RESOURCE_ROUTINES = [
   "freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint)",
   "clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint)",
-  "refresh_scheduled_task_personal_resources_clone_connections(uuid, uuid, uuid, bigint, bigint)",
   "create_scheduled_agent_run_with_admission(uuid, uuid, uuid, uuid, bigint, text, text, text, timestamp with time zone, timestamp with time zone, jsonb)",
   "materialize_scheduled_task_reusable_session_from_run(uuid, uuid, uuid, uuid, uuid, bigint, text)",
   "scheduled_task_run_personal_resource_authority(uuid, uuid, uuid)",
@@ -316,6 +358,11 @@ const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
   "detach_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
 ] as const;
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
+  "mutate_managed_sign_in_method(text, text, jsonb)",
+  "assert_managed_sign_in_recovery(text, text, uuid, jsonb)",
+  "replay_managed_sign_in_method(text, text, jsonb)",
+  "claim_managed_sign_in_notification(uuid, text, text, integer)",
+  "settle_managed_sign_in_notification(uuid, uuid, text)",
   "ensure_canonical_human_identity(text, text)",
   "validate_canonical_human_session(text, text, boolean)",
   "get_canonical_human_identity_projection(text)",
@@ -391,10 +438,6 @@ const COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE =
 const GOVERNED_LEARNING_EVALUATION_ROUTINE =
   "evaluate_governed_learning_proposal(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, uuid)";
 const GOVERNED_LEARNING_ACTIVATION_ROUTINES = [
-  "activate_governed_learning_decision(uuid, uuid, uuid, uuid)",
-  "activate_human_confirmed_learning_decision(uuid, uuid, uuid, uuid, uuid)",
-  "confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid)",
-  "materialize_remember_knowledge_memory(uuid, uuid, uuid)",
   "undo_governed_learning_activation(uuid, uuid, uuid, uuid)",
 ] as const;
 const GOVERNED_LEARNING_INSPECTION_ROUTINES = [
@@ -479,6 +522,8 @@ const LEGACY_FORK_SESSION_CONTENT_ROUTINE =
   "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text, integer)";
 const FORK_SESSION_CONTENT_ROUTINE =
   "fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer)";
+const MESSAGE_FORK_SESSION_CONTENT_ROUTINE =
+  "fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, uuid)";
 const REPLAY_APPLIED_SESSION_FORK_ROUTINE =
   "replay_applied_session_fork(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer)";
 const SESSION_TENANCY_ACTIVATED_ROUTINE = "session_tenancy_product_activated(uuid, integer)";
@@ -489,6 +534,8 @@ const TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE =
   "check_tenancy_backfill_activation_evidence(uuid)";
 const GREENFIELD_SESSION_TENANCY_ACTIVATION_ROUTINE =
   "activate_greenfield_session_tenancy_from_setup(text)";
+const ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE =
+  "activate_session_tenancy_from_additional_organization(uuid)";
 const SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE =
   "session_visibility_lifecycle_capability_held()";
 const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
@@ -499,6 +546,7 @@ const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   LEGACY_FORK_SESSION_CONTENT_ROUTINE,
   FORK_SESSION_CONTENT_ROUTINE,
+  MESSAGE_FORK_SESSION_CONTENT_ROUTINE,
   REPLAY_APPLIED_SESSION_FORK_ROUTINE,
   SESSION_TENANCY_ACTIVATED_ROUTINE,
   SESSION_TENANCY_ANY_ACTIVATION_ROUTINE,
@@ -535,14 +583,56 @@ const XAI_AUTHORITY_TABLES = [
   "xai_subscription_credentials",
 ] as const;
 
+const UNIFIED_KNOWLEDGE_ROUTINES = [
+  "knowledge_index_claim(text, integer, integer)",
+  "knowledge_index_work(uuid, uuid, uuid, jsonb)",
+  "knowledge_index_billing_policy(uuid, uuid, uuid, text, timestamp with time zone, bigint)",
+  "knowledge_index_wait_for_funding(uuid, uuid, uuid)",
+  "knowledge_index_paid_publication_guard(uuid, uuid, uuid)",
+  "knowledge_visible_index_status(uuid, uuid, jsonb, jsonb, text)",
+  "knowledge_entry_apply(uuid, uuid, jsonb, jsonb)",
+  "knowledge_entry_confirm_legacy(uuid, uuid, jsonb, jsonb)",
+  "agent_instruction_apply(uuid, uuid, jsonb, jsonb)",
+  "knowledge_entry_read(uuid, uuid, jsonb, jsonb)",
+  "knowledge_entry_prepare_file(uuid, uuid, jsonb, jsonb)",
+  "knowledge_document_prepare(uuid, uuid, uuid, jsonb)",
+  "agent_learning_manage(uuid, uuid, jsonb, jsonb)",
+] as const;
+const UNIFIED_KNOWLEDGE_ROUTINE_SET = new Set<string>(UNIFIED_KNOWLEDGE_ROUTINES);
+const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
+  "knowledge_entries",
+  "knowledge_entry_revisions",
+  "knowledge_entry_decisions",
+  "knowledge_entry_links",
+  "knowledge_entry_operations",
+  "knowledge_entry_search",
+  "knowledge_index_jobs",
+  "knowledge_entry_vectors",
+  "knowledge_review_batches",
+  "agent_learning_revisions",
+  "agent_learning_snapshots",
+  "agent_instruction_operations",
+  "workspace_instruction_policy_revisions",
+  "workspace_instruction_policy_heads",
+  "workspace_instruction_policy_activation_events",
+  "workspaces",
+  "sessions",
+  "session_turns",
+  "session_turn_attempts",
+  "files",
+  "documents",
+] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  ...UNIFIED_KNOWLEDGE_ROUTINES,
+  MCP_OPERATION_CAPABILITY_ROUTINE,
+  "skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)",
   COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE,
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
   ...COMPANY_PROFILE_AGENT_ADMIN_ROUTINES,
-  GOVERNED_LEARNING_EVALUATION_ROUTINE,
   ...GOVERNED_LEARNING_ACTIVATION_ROUTINES,
   ...GOVERNED_LEARNING_INSPECTION_ROUTINES,
   FORK_SESSION_CONTENT_ROUTINE,
+  MESSAGE_FORK_SESSION_CONTENT_ROUTINE,
   LEGACY_FORK_SESSION_CONTENT_ROUTINE,
   REPLAY_APPLIED_SESSION_FORK_ROUTINE,
   SESSION_TENANCY_ACTIVATED_ROUTINE,
@@ -597,6 +687,7 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE,
   AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE,
   ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
   GREENFIELD_SESSION_TENANCY_ACTIVATION_ROUTINE,
@@ -620,6 +711,10 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
  * commit as the migration so startup cannot silently accept an unreviewed gap.
  */
 export const FORCE_RLS_TABLES = [
+  "additional_organization_creation_receipts",
+  "agent_instruction_operations",
+  "agent_learning_revisions",
+  "agent_learning_snapshots",
   "agent_run_states",
   "api_keys",
   "attached_browser_devices",
@@ -665,6 +760,7 @@ export const FORCE_RLS_TABLES = [
   "codex_reset_redemption_attempts",
   "codex_rotation_settings",
   "codex_subscription_credentials",
+  "codex_turn_source_bindings",
   "company_brain_context_selection_receipts",
   "company_brain_preference_proposal_receipts",
   "company_brain_turn_context_snapshots",
@@ -678,6 +774,7 @@ export const FORCE_RLS_TABLES = [
   "composer_drafts",
   "computer_session_associations",
   "computer_sessions",
+  "connect_attempts",
   "connection_disconnect_operations",
   "connection_use_audit_facts",
   "connection_use_once_consumption_receipts",
@@ -710,6 +807,11 @@ export const FORCE_RLS_TABLES = [
   "editable_artifact_versions",
   "editable_artifacts",
   "enrollments",
+  "external_identities",
+  "external_identity_links",
+  "external_link_task_authorities",
+  "external_link_turn_authorities",
+  "feedback_submissions",
   "file_uploads",
   "files",
   "generated_image_artifacts",
@@ -726,11 +828,18 @@ export const FORCE_RLS_TABLES = [
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "host_mcp_bindings",
+  "host_mcp_delegations",
+  "host_mcp_resolver_operations",
+  "host_mcp_resolvers",
+  "host_mcp_task_authorities",
+  "host_mcp_turn_authorities",
   "image_generation_operations",
   "import_batches",
   "integration_facet_binding_owners",
   "integration_facet_bindings",
   "integration_facet_definitions",
+  "integration_oauth_pending_states",
   "integration_oauth_state_nonces",
   "integration_spec_revisions",
   "integration_tools",
@@ -745,13 +854,22 @@ export const FORCE_RLS_TABLES = [
   "knowledge_document_versions",
   "knowledge_entities",
   "knowledge_entity_aliases",
+  "knowledge_entries",
+  "knowledge_entry_decisions",
+  "knowledge_entry_links",
+  "knowledge_entry_operations",
+  "knowledge_entry_revisions",
+  "knowledge_entry_search",
+  "knowledge_entry_vectors",
   "knowledge_facts",
+  "knowledge_index_jobs",
   "knowledge_lifecycle_events",
   "knowledge_memories",
   "knowledge_memory_lifecycle_events",
   "knowledge_memory_relationships",
   "knowledge_operation_receipts",
   "knowledge_providers",
+  "knowledge_review_batches",
   "knowledge_source_acl_versions",
   "knowledge_source_objects",
   "knowledge_source_sync_index_obligations",
@@ -772,6 +890,8 @@ export const FORCE_RLS_TABLES = [
   "managed_auth_login_transactions",
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",
+  "managed_sign_in_method_operations",
+  "mcp_operations",
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
@@ -781,11 +901,16 @@ export const FORCE_RLS_TABLES = [
   "organization_codex_rotation_settings",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
+  "organization_integration_policies",
+  "organization_integration_policy_operations",
   "organization_invitation_binding_events",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
   "organization_memberships",
+  "organization_model_provider_connection_operations",
+  "organization_model_provider_connections",
+  "organization_model_provider_custom_models",
   "organization_private_session_setting_events",
   "organization_private_session_settings",
   "organization_profile_events",
@@ -812,8 +937,6 @@ export const FORCE_RLS_TABLES = [
   "organization_user_setup_intents",
   "organization_workspace_lifecycle_events",
   "organization_workspace_operation_receipts",
-  "pack_installation_components",
-  "pack_installations",
   "personal_document_once_consumption_receipts",
   "personal_github_repository_selection_heads",
   "personal_github_repository_selection_operations",
@@ -856,6 +979,7 @@ export const FORCE_RLS_TABLES = [
   "session_attempt_codemode_calls",
   "session_attempt_connected_machine_authorizations",
   "session_attempt_interruptions",
+  "session_attempt_model_context_snapshots",
   "session_attempt_personal_document_admissions",
   "session_attempt_personal_document_snapshots",
   "session_attempt_personal_resource_admissions",
@@ -883,6 +1007,7 @@ export const FORCE_RLS_TABLES = [
   "session_system_update_outbox",
   "session_system_updates",
   "session_tenancy_activations",
+  "session_tenancy_additional_organization_activation_evidence",
   "session_tenancy_greenfield_activation_evidence",
   "session_turn_attempts",
   "session_turn_startup_milestones",
@@ -895,6 +1020,9 @@ export const FORCE_RLS_TABLES = [
   "session_workflow_wake_outbox",
   "sessions",
   "site_auth_connections",
+  "skill_config_conversion_receipts",
+  "skill_source_bindings",
+  "skill_write_receipts",
   "slack_app_home_refreshes",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
@@ -925,6 +1053,7 @@ export const FORCE_RLS_TABLES = [
   "temporal_schedule_cleanup_outbox",
   "tenancy_backfill_receipts",
   "tenancy_backfill_unresolved_rows",
+  "tool_gateway_approval_capabilities",
   "transcription_recording_chunks",
   "transcription_recording_objects",
   "transcription_recording_segments",
@@ -937,11 +1066,13 @@ export const FORCE_RLS_TABLES = [
   "video_generation_operations",
   "video_generation_references",
   "workspace_artifact_events",
+  "workspace_artifact_uploads",
   "workspace_artifact_versions",
   "workspace_artifacts",
   "workspace_captures",
   "workspace_codex_subscription_preferences",
   "workspace_control_events",
+  "workspace_gateway_custom_models",
   "workspace_inference_controls",
   "workspace_instruction_policy_activation_events",
   "workspace_instruction_policy_deactivation_events",
@@ -955,7 +1086,6 @@ export const FORCE_RLS_TABLES = [
   "workspace_learning_policy_revisions",
   "workspace_learning_policy_snapshots",
   "workspace_model_policies",
-  "workspace_packs",
   "workspace_screenshot_quotas",
   "workspace_session_activity_revisions",
   "workspace_variable_set_variables",
@@ -981,8 +1111,14 @@ export const NON_RLS_RUNTIME_TABLES = [
   "auth_users",
   "auth_verifications",
   "automation_webhook_endpoints",
+  "deployment_model_catalog",
   "integration_oauth_clients",
   "managed_accounts",
+  "mcp_oauth_access_tokens",
+  "mcp_oauth_authorization_codes",
+  "mcp_oauth_authorization_requests",
+  "mcp_oauth_clients",
+  "mcp_oauth_refresh_tokens",
   "nested_agent_depth_configuration",
   "pr_review_managed_github_routes",
   "stripe_webhook_events",
@@ -1028,6 +1164,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "codex_subscription_credentials",
   "composer_drafts",
   "computer_session_associations",
+  "connect_attempts",
   "connection_disconnect_operations",
   "connections",
   "connector_action_policies",
@@ -1045,13 +1182,15 @@ export const RUNTIME_FULL_DML_TABLES = [
   "generated_video_artifacts",
   "github_installation_repositories",
   "github_installations",
+  "host_mcp_bindings",
+  "host_mcp_delegations",
   "image_generation_operations",
   "import_batches",
   "integration_facet_binding_owners",
   "integration_facet_bindings",
   "integration_oauth_clients",
+  "integration_oauth_pending_states",
   "integration_oauth_state_nonces",
-  "knowledge_memories",
   "knowledge_source_sync_index_obligations",
   "knowledge_source_sync_item_outcomes",
   "knowledge_source_sync_object_observations",
@@ -1061,14 +1200,20 @@ export const RUNTIME_FULL_DML_TABLES = [
   "machine_metrics_series",
   "machine_removal_operations",
   "managed_accounts",
+  "mcp_oauth_access_tokens",
+  "mcp_oauth_authorization_codes",
+  "mcp_oauth_authorization_requests",
+  "mcp_oauth_clients",
+  "mcp_oauth_refresh_tokens",
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
   "model_call_facts",
   "new_session_drafts",
   "organization_codex_rotation_settings",
-  "pack_installation_components",
-  "pack_installations",
+  "organization_model_provider_connection_operations",
+  "organization_model_provider_connections",
+  "organization_model_provider_custom_models",
   "pr_review_app_registrations",
   "pr_review_managed_github_routes",
   "pr_review_repository_bindings",
@@ -1124,6 +1269,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "social_connections",
   "social_posts",
   "stripe_webhook_events",
+  "tool_gateway_approval_capabilities",
   "transcription_recording_chunks",
   "transcription_recording_objects",
   "transcription_recording_segments",
@@ -1131,15 +1277,16 @@ export const RUNTIME_FULL_DML_TABLES = [
   "usage_events",
   "video_generation_operations",
   "video_generation_references",
+  "workspace_artifact_uploads",
   "workspace_artifacts",
   "workspace_captures",
   "workspace_codex_subscription_preferences",
   "workspace_control_events",
+  "workspace_gateway_custom_models",
   "workspace_inference_controls",
   "workspace_instruction_policy_heads",
   "workspace_memberships",
   "workspace_model_policies",
-  "workspace_packs",
   "workspace_screenshot_quotas",
   "workspace_video_generation_policies",
   "workspace_video_generation_quotas",
@@ -1153,18 +1300,25 @@ export const RUNTIME_FULL_DML_TABLES = [
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
 export const RUNTIME_READ_ONLY_TABLES = [
+  "codex_turn_source_bindings",
   "company_profile_activation_events",
   "company_profile_heads",
   "company_profile_snapshots",
+  "deployment_model_catalog",
   "document_authority_reclassifications",
   "knowledge_lifecycle_events",
+  "knowledge_memories",
   "knowledge_memory_lifecycle_events",
   "knowledge_memory_relationships",
   "nested_agent_depth_configuration",
+  "organization_integration_policies",
+  "organization_integration_policy_operations",
   "preference_registry_events",
   "preference_registry_snapshots",
   "session_tenancy_activations",
   "session_work_claims",
+  "skill_source_bindings",
+  "skill_write_receipts",
   "slack_installation_bindings",
   "slack_task_policy_activation_events",
   "slack_task_policy_heads",
@@ -1173,6 +1327,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "workspace_instruction_policy_snapshots",
   "workspace_learning_policy_activation_events",
   "workspace_learning_policy_heads",
+  "workspace_learning_policy_revisions",
   "workspace_learning_policy_snapshots",
 ] as const;
 
@@ -1195,8 +1350,14 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "editable_artifact_transactions",
   "editable_artifact_undo_claims",
   "editable_artifact_versions",
+  "external_link_task_authorities",
+  "external_link_turn_authorities",
+  "feedback_submissions",
   "google_drive_object_acl_evidence",
   "google_drive_object_acl_principals",
+  "host_mcp_resolver_operations",
+  "host_mcp_task_authorities",
+  "host_mcp_turn_authorities",
   "knowledge_change_proposals",
   "knowledge_claim_evidence",
   "knowledge_claim_relations",
@@ -1226,7 +1387,6 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "workspace_instruction_policy_activation_events",
   "workspace_instruction_policy_onboarding_proposals",
   "workspace_instruction_policy_revisions",
-  "workspace_learning_policy_revisions",
 ] as const;
 
 /** Durable operation journals are append/read plus claim/settle updates, never deletes. */
@@ -1249,6 +1409,8 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "computer_sessions",
   "editable_artifact_session_links",
   "editable_artifacts",
+  "external_identity_links",
+  "host_mcp_resolvers",
   "integration_facet_definitions",
   "integration_spec_revisions",
   "integration_tools",
@@ -1259,6 +1421,7 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "scheduled_task_runs",
   "scheduled_tasks",
   "session_attempt_codemode_calls",
+  "session_attempt_model_context_snapshots",
   "session_turn_startup_milestones",
   "site_auth_connections",
   "slack_user_link_access_requests",
@@ -1270,6 +1433,10 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
  * The ordinary application role must have no direct table privileges on them.
  */
 export const PROTECTED_NO_DIRECT_DML_TABLES = [
+  "additional_organization_creation_receipts",
+  "agent_instruction_operations",
+  "agent_learning_revisions",
+  "agent_learning_snapshots",
   "canonical_human_identities",
   "canonical_human_identity_operations",
   "canonical_human_identity_subjects",
@@ -1287,6 +1454,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "document_default_collection_backfill_runs",
   "editable_artifact_live_tickets",
   "editable_artifact_scope_authorization_heads",
+  "external_identities",
   "governed_learning_activation_receipts",
   "governed_learning_activation_undo_receipts",
   "governed_learning_decision_receipts",
@@ -1295,6 +1463,15 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "knowledge_entries",
+  "knowledge_entry_decisions",
+  "knowledge_entry_links",
+  "knowledge_entry_operations",
+  "knowledge_entry_revisions",
+  "knowledge_entry_search",
+  "knowledge_entry_vectors",
+  "knowledge_index_jobs",
+  "knowledge_review_batches",
   "managed_auth_actor_mutation_leases",
   "managed_auth_browser_installations",
   "managed_auth_login_return_intents",
@@ -1303,6 +1480,8 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "managed_auth_login_transactions",
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",
+  "managed_sign_in_method_operations",
+  "mcp_operations",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
   "organization_invitation_binding_events",
@@ -1359,11 +1538,13 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "session_attempt_personal_document_snapshots",
   "session_attempt_personal_resource_admissions",
   "session_attempt_personal_resource_snapshots",
+  "session_tenancy_additional_organization_activation_evidence",
   "session_tenancy_greenfield_activation_evidence",
   "session_variable_set_attachments",
   "session_visibility_write_capabilities",
   "session_work_claim_revisions",
   "session_work_claim_write_capabilities",
+  "skill_config_conversion_receipts",
   "task_note_events",
   "task_note_knowledge_promotion_capabilities",
   "task_note_replacement_receipts",
@@ -1468,6 +1649,7 @@ export type RuntimeRoutinePosture = {
   execute: boolean;
   publicExecute?: boolean;
   securityDefiner: boolean;
+  configuration?: string[] | null;
 };
 
 export type RuntimeTargetRoutinePosture = RuntimeRoutinePosture & {
@@ -1510,6 +1692,27 @@ export class RuntimeDatabasePostureError extends Error {
     this.name = "RuntimeDatabasePostureError";
     this.violations = violations;
   }
+}
+
+/** Posture/configuration mismatches cannot heal through connection backoff. */
+export function isRetryableRuntimeDatabaseStartupError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof RuntimeDatabasePostureError) return false;
+    const code = (current as Error & { code?: unknown }).code;
+    // PostgreSQL authentication, missing database, permission, and schema errors.
+    // Network failures and server-starting states retain the existing retry path.
+    if (
+      typeof code === "string" &&
+      ["28P01", "28000", "3D000", "42501", "42P01", "42703"].includes(code)
+    ) {
+      return false;
+    }
+    current = current.cause;
+  }
+  return true;
 }
 
 type IdentityRow = {
@@ -1774,9 +1977,17 @@ export async function inspectRuntimeDatabasePosture(
             c.relforcerowsecurity as rls_forced,
             row_security_active(c.oid) as rls_active,
             (select count(*)::int from pg_policy policy where policy.polrelid = c.oid) as policy_count,
-            has_table_privilege(current_user, c.oid, 'SELECT') as can_select,
-            has_table_privilege(current_user, c.oid, 'INSERT') as can_insert,
-            has_table_privilege(current_user, c.oid, 'UPDATE') as can_update,
+            -- Column-only grants on the inventory stamp are also unsafe; in
+            -- particular INSERT can mint authority without a table grant.
+            (has_table_privilege(current_user, c.oid, 'SELECT') or
+              (c.relname = 'modal_inventory_read_capabilities' and
+                has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
+            (has_table_privilege(current_user, c.oid, 'INSERT') or
+              (c.relname = 'modal_inventory_read_capabilities' and
+                has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
+            (has_table_privilege(current_user, c.oid, 'UPDATE') or
+              (c.relname = 'modal_inventory_read_capabilities' and
+                has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
@@ -1790,6 +2001,11 @@ export async function inspectRuntimeDatabasePosture(
               ${DOCUMENT_MIGRATION_CAPABILITY_TABLE},
               ${SCOPED_COMPUTE_CAPABILITY_TABLE},
               ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
+              ${SANDBOX_FILE_PUBLICATIONS_TABLE},
+              'organization_usage_read_capabilities',
+              'session_file_attachments',
+              'session_file_read_capabilities',
+              'modal_inventory_read_capabilities',
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE}
             )
         `),
@@ -1856,6 +2072,7 @@ export async function inspectRuntimeDatabasePosture(
         can_execute: boolean;
         public_execute: boolean;
         security_definer: boolean;
+        configuration: string[] | null;
       }>(
         await tx.execute(sql`
           select
@@ -1867,7 +2084,8 @@ export async function inspectRuntimeDatabasePosture(
               from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
               where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
             ) as public_execute,
-            p.prosecdef as security_definer
+            p.prosecdef as security_definer,
+            p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
           where n.nspname = 'opengeni_private'
@@ -1880,6 +2098,7 @@ export async function inspectRuntimeDatabasePosture(
         execute: row.can_execute,
         publicExecute: row.public_execute,
         securityDefiner: row.security_definer,
+        configuration: row.configuration,
       }));
 
       return {
@@ -1994,6 +2213,35 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
+  if (tableByName.has("organization_integration_policies")) {
+    for (const name of [
+      "update_organization_integration_policy(uuid, text, jsonb)",
+      "assert_organization_integration_policy_administrator(uuid, text)",
+    ]) {
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+      const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+      const searchPaths = new Set([
+        `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+        `search_path=pg_catalog, ${targetSchema}, pg_temp`,
+      ]);
+      const routine = routines[0];
+      if (
+        routines.length !== 1 ||
+        !routine?.execute ||
+        routine.publicExecute ||
+        !routine.securityDefiner ||
+        !routine.configuration?.some((configuration) => searchPaths.has(configuration)) ||
+        [
+          "organization_integration_policies",
+          "organization_integration_policy_operations",
+          "organization_memberships",
+          "api_keys",
+        ].some((table) => tableByName.get(table)?.owner !== routine.owner)
+      ) {
+        violations.push("organization integration policy mutation capability is missing or unsafe");
+      }
+    }
+  }
   const actualRlsTables = new Set(
     posture.tables.filter((table) => table.rlsEnabled).map((table) => table.name),
   );
@@ -2151,6 +2399,19 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
+    } else if (routine.name === MCP_OPERATION_CAPABILITY_ROUTINE) {
+      const missing = MCP_OPERATION_AUTHORITY_TABLES.filter((name) => !tableByName.has(name));
+      if (missing.length > 0) {
+        violations.push(`MCP operation authority tables are missing: ${missing.join(", ")}`);
+      } else if (
+        MCP_OPERATION_AUTHORITY_TABLES.some(
+          (name) => tableByName.get(name)!.owner !== routine.owner,
+        )
+      ) {
+        violations.push(
+          `MCP operation capability ${routine.name} authority table owners do not match`,
+        );
+      }
     } else if (routine.name === KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE) {
       const missingAuthorityTables = KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.filter(
         (tableName) => !tableByName.has(tableName),
@@ -2173,6 +2434,54 @@ export function evaluateRuntimeDatabasePosture(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
           );
         }
+      }
+    } else if (
+      [
+        "lookup_external_identity(uuid, text, text, text)",
+        "prepare_external_workspace_membership_operation(jsonb)",
+        "record_external_workspace_membership_operation(jsonb, jsonb)",
+      ].includes(routine.name)
+    ) {
+      const names = [
+        "external_identities",
+        "organization_memberships",
+        "organization_workspace_operation_receipts",
+        "api_keys",
+      ];
+      if (
+        names.some(
+          (name) => !tableByName.has(name) || tableByName.get(name)!.owner !== routine.owner,
+        )
+      ) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority table owners do not match`,
+        );
+      }
+    } else if (
+      [
+        "ensure_external_identity(uuid, text, text)",
+        "get_external_identity_link_reference(uuid, uuid, text)",
+        "get_external_identity_link_inventory_references(uuid, uuid[])",
+      ].includes(routine.name)
+    ) {
+      const names =
+        routine.name !== "ensure_external_identity(uuid, text, text)"
+          ? ["external_identity_links", "external_identities", "organization_memberships"]
+          : [
+              "external_identities",
+              "organization_memberships",
+              "workspaces",
+              "workspace_inference_controls",
+            ];
+      const missing = names.filter((name) => !tableByName.has(name));
+      if (missing.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missing.join(", ")}`,
+        );
+      } else if (names.some((name) => tableByName.get(name)!.owner !== routine.owner)) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority table owners do not match`,
+        );
       }
     } else if (routine.name === MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE) {
       const authorityTables = MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES.filter(
@@ -2295,6 +2604,29 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
+    } else if (routine.name === ADDITIONAL_ORGANIZATION_CREATION_ROUTINE) {
+      const missingAuthorityTables = ADDITIONAL_ORGANIZATION_CREATION_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = ADDITIONAL_ORGANIZATION_CREATION_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
     } else if (
       (ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES as readonly string[]).includes(routine.name)
     ) {
@@ -2349,6 +2681,32 @@ export function evaluateRuntimeDatabasePosture(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
           );
         }
+      }
+    } else if (UNIFIED_KNOWLEDGE_ROUTINE_SET.has(routine.name)) {
+      // PostgreSQL 15+ public is owned by pg_database_owner while migrated
+      // tables/functions share the concrete migrator. Check the authority graph,
+      // as for the native Skill lifecycle, rather than the schema label.
+      for (const name of UNIFIED_KNOWLEDGE_AUTHORITY_TABLES) {
+        const table = tableByName.get(name);
+        if (!table) violations.push(`Knowledge authority table ${name} is missing`);
+        else if (routine.owner !== table.owner)
+          violations.push(
+            `Knowledge capability ${routine.name} owner ${routine.owner} does not match ${name} owner ${table.owner}`,
+          );
+      }
+    } else if (routine.name === "skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)") {
+      const authorityTables = [
+        "preference_registry_preferences",
+        "preference_registry_revisions",
+        "preference_registry_events",
+      ];
+      for (const name of authorityTables) {
+        const table = tableByName.get(name);
+        if (!table) violations.push(`Skill lifecycle authority table ${name} is missing`);
+        else if (routine.owner !== table.owner)
+          violations.push(
+            `Skill lifecycle owner ${routine.owner} does not match ${name} owner ${table.owner}`,
+          );
       }
     } else if (routine.name === PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE) {
       if (!tableByName.has("company_brain_preference_proposal_receipts")) {
@@ -3237,11 +3595,216 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
 
+  const publicationTables = posture.privateTables.filter(
+    (table) => table.name === SANDBOX_FILE_PUBLICATIONS_TABLE,
+  );
+  if (publicationTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("sandbox file publication private relation is missing or ambiguous");
+  } else {
+    const table = publicationTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 2) {
+      violations.push("sandbox file publication relation lacks active FORCE-RLS file isolation");
+    }
+    if (
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete ||
+      table.owner === expectedRole
+    ) {
+      violations.push("runtime role has forbidden direct sandbox file publication authority");
+    }
+    const filesOwner = tableByName.get("files")?.owner;
+    if (filesOwner && table.owner !== filesOwner)
+      violations.push("sandbox file publication owner does not match file authority");
+    for (const name of SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES) {
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+      const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+      const searchPaths = new Set([
+        `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+        `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedSchema}, pg_temp`,
+      ]);
+      if (
+        routines.length !== 1 ||
+        !routines[0]!.execute ||
+        routines[0]!.publicExecute ||
+        !routines[0]!.securityDefiner ||
+        routines[0]!.owner !== table.owner ||
+        !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
+      ) {
+        violations.push(`sandbox file publication capability ${name} is missing or unsafe`);
+      }
+    }
+  }
+
+  for (const name of ["session_file_attachments", "session_file_read_capabilities"]) {
+    const table = posture.privateTables.find((candidate) => candidate.name === name);
+    if (!table) {
+      if (!options.protectedTables)
+        violations.push(`session attachment relation ${name} is missing`);
+      continue;
+    }
+    if (
+      table.owner === expectedRole ||
+      table.owner !== tableByName.get("files")?.owner ||
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete
+    )
+      violations.push(`session attachment relation ${name} has unsafe authority`);
+    if (
+      name === "session_file_attachments" &&
+      (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1)
+    )
+      violations.push("session attachment grants lack FORCE-RLS isolation");
+    const routines =
+      name === "session_file_attachments"
+        ? [
+            "accept_session_file_attachments(uuid, uuid, uuid, uuid, text, uuid[])",
+            "read_session_file_attachments(uuid, uuid, uuid, integer, uuid[], jsonb)",
+          ]
+        : ["session_file_read_allowed(uuid, uuid, uuid)"];
+    for (const signature of routines) {
+      const routine = posture.privateRoutines.find((candidate) => candidate.name === signature);
+      const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+      const paths =
+        name === "session_file_read_capabilities"
+          ? ["search_path=pg_catalog, pg_temp"]
+          : [
+              `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+              `search_path=pg_catalog, ${targetSchema}, pg_temp`,
+            ];
+      if (
+        !routine ||
+        !routine.execute ||
+        routine.publicExecute ||
+        !routine.securityDefiner ||
+        routine.owner !== table.owner ||
+        !routine.configuration?.some((value) => paths.includes(value))
+      )
+        violations.push(`session attachment capability ${signature} is missing or unsafe`);
+    }
+  }
+
+  const organizationUsageCapability = posture.privateTables.find(
+    (table) => table.name === "organization_usage_read_capabilities",
+  );
+  const modalInventoryCapability = posture.privateTables.find(
+    (table) => table.name === "modal_inventory_read_capabilities",
+  );
+  if (modalInventoryCapability) {
+    const capability = modalInventoryCapability;
+    const inventory = posture.privateRoutines.find(
+      (routine) => routine.name === "list_live_modal_sandbox_leases()",
+    );
+    if (
+      capability.owner === expectedRole ||
+      capability.owner !== tableByName.get("sandbox_leases")?.owner ||
+      capability.select ||
+      capability.insert ||
+      capability.update ||
+      capability.delete ||
+      !inventory?.execute ||
+      !inventory.securityDefiner ||
+      inventory.publicExecute ||
+      inventory.owner !== capability.owner ||
+      !inventory.configuration?.includes("search_path=pg_catalog")
+    ) {
+      violations.push("Modal inventory capability has unsafe owner, ACL or runtime privileges");
+    }
+  }
+  if (organizationUsageCapability) {
+    const capability = organizationUsageCapability;
+    if (
+      capability.owner === expectedRole ||
+      capability.owner !== tableByName.get("usage_events")?.owner ||
+      capability.select ||
+      capability.insert ||
+      capability.update ||
+      capability.delete
+    ) {
+      violations.push(
+        "organization usage capability has unsafe owner or direct runtime privileges",
+      );
+    }
+    const aggregateRoutine = posture.privateRoutines.find(
+      (routine) =>
+        routine.name ===
+        "organization_usage_summary(uuid, timestamp with time zone, timestamp with time zone, text, uuid, boolean)",
+    );
+    if (
+      !aggregateRoutine ||
+      !aggregateRoutine.securityDefiner ||
+      !aggregateRoutine.execute ||
+      aggregateRoutine.publicExecute ||
+      aggregateRoutine.owner !== capability.owner
+    ) {
+      violations.push("organization usage aggregate capability is missing or unsafe");
+    }
+  }
+
   for (const routine of posture.privateRoutines) {
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
     const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
+    if (
+      ["validate_mcp_account_bindings(jsonb, jsonb)", "fence_mcp_account_bindings()"].includes(
+        routine.name,
+      )
+    ) {
+      if (routine.execute || routine.publicExecute) {
+        violations.push(
+          `runtime or PUBLIC has forbidden EXECUTE on MCP account binding internal routine ${routine.name}`,
+        );
+      }
+      if (routine.owner !== tableByName.get("session_turns")?.owner) {
+        violations.push(
+          `MCP account binding internal routine ${routine.name} owner does not match turn owner`,
+        );
+      }
+      if (routine.securityDefiner !== (routine.name === "fence_mcp_account_bindings()")) {
+        violations.push(
+          `MCP account binding internal routine ${routine.name} has unsafe execution mode`,
+        );
+      }
+    }
+    if (
+      routine.name === "read_sender_connection(uuid, uuid, uuid, text)" &&
+      (routine.execute || routine.publicExecute)
+    ) {
+      violations.push("runtime or PUBLIC can call the internal sender connection reader");
+    }
+    if (
+      [
+        "guard_mcp_operation_immutable()",
+        "mcp_operation_command_scoped(jsonb, text, jsonb)",
+      ].includes(routine.name)
+    ) {
+      if (routine.execute || routine.publicExecute) {
+        violations.push(
+          `runtime or PUBLIC has forbidden EXECUTE on MCP operation internal routine ${routine.name}`,
+        );
+      }
+      if (routine.owner !== tableByName.get("mcp_operations")?.owner) {
+        violations.push(
+          `MCP operation internal routine ${routine.name} owner does not match ledger owner`,
+        );
+      }
+    }
+    if (
+      [
+        "guard_workspace_owned_skill_head_delete()",
+        "guard_workspace_owned_skill_history_delete()",
+      ].includes(routine.name) &&
+      (routine.execute || routine.publicExecute)
+    ) {
+      violations.push(
+        `runtime or PUBLIC has forbidden EXECUTE on Skill cascade guard ${routine.name}`,
+      );
+    }
     if (!routine.execute && !ownerInternalRoutine) {
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }

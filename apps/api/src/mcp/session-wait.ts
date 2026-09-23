@@ -66,7 +66,10 @@ export const SESSION_WAIT_EVENT_TYPES = [
   "session.humanInput.requested",
   "session.control.paused",
   "session.control.resumed",
+  "session.wait.started",
+  "session.wait.finished",
   "tool.auth_needed",
+  "session.command.finished",
   "credential.auth_needed",
   "rig.setup.failed",
   "goal.set",
@@ -161,6 +164,8 @@ export function sessionWaitSemanticClass(type: SessionEventType): SessionEventSe
 export type SessionWaitTarget = { sessionId: string; afterSequence: number };
 
 export type SessionWaitEventSummary = {
+  /** True only when every semantic result field survived all projections. */
+  contentComplete?: boolean;
   id: string;
   sequence: number;
   type: SessionEventType;
@@ -460,7 +465,7 @@ const SUMMARY_FAILURE_CHARS = 500;
 const SUMMARY_RESULT_CHARS = 1_000;
 
 function truncationMarker(droppedChars: number): string {
-  return `…[${droppedChars} chars omitted from this session_wait summary; use session_events for the exact event]`;
+  return `…[${droppedChars} chars omitted from this session_wait summary; use session_events view=debug payloadMode=full for the exact event]`;
 }
 
 function clampSummaryString(value: string, maxChars: number): string {
@@ -518,6 +523,20 @@ export function summarizeSessionWaitEvent(
   } else if (typeof compact.result === "string" && compact.result !== compact.text) {
     summary.result = clampSummaryString(compact.result, textChars);
   }
+  // Other wait summaries may omit actionable fields (e.g. human-input
+  // questions); absence of a truncation marker is not proof of full content.
+  summary.contentComplete =
+    ["turn.completed", "agent.message.completed"].includes(event.type) &&
+    !compact.truncation.truncated &&
+    text === compact.text &&
+    JSON.stringify(failure) === JSON.stringify(compact.failure) &&
+    (compact.output === null ||
+      compact.output === compact.text ||
+      JSON.stringify(compact.output) === JSON.stringify(summary.result)) &&
+    (compact.result === null ||
+      compact.result === undefined ||
+      compact.result === compact.text ||
+      JSON.stringify(summary.result) === JSON.stringify(compact.result));
   return summary;
 }
 
@@ -567,6 +586,7 @@ export function boundSessionWaitResult(
       ...target,
       events: target.events.map((event) => ({
         ...event,
+        contentComplete: false,
         text: event.text === null ? null : clampSummaryString(event.text, textChars),
         ...(typeof event.result === "string"
           ? { result: clampSummaryString(event.result, textChars) }

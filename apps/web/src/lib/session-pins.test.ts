@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "@opengeni/sdk";
 
 import type { Session } from "@/types";
+import { compareSessionActivity, compareSessionBrowse } from "./sessions-group";
 import * as sessionChannelMove from "./session-channel-move";
 import {
   applySessionChannelProjection,
@@ -934,6 +935,44 @@ describe("session pin reconciliation", () => {
       channelId: "channel-new",
       treeStats: projected.treeStats,
     });
+  });
+
+  test("selection and deselection do not borrow a detail timestamp for rail ordering", () => {
+    const listed = { ...session, status: "idle" } as Session;
+    const peer = { ...listed, id: "peer", updatedAt: "2026-07-10T00:02:00.000Z" };
+    const order = (row: Session) => [row, peer].sort(compareSessionActivity).map((item) => item.id);
+
+    // Detail can be either ahead of the list poll or behind a refreshed page.
+    for (const updatedAt of ["2026-07-10T00:03:00.000Z", "2026-07-09T00:00:00.000Z"]) {
+      const detail = { ...listed, updatedAt, initialMessage: "Fresh route content" };
+      const selected = applySessionRailProjection(detail, listed);
+      expect(order(selected)).toEqual(order(listed));
+      expect(selected.updatedAt).toBe(listed.updatedAt);
+      expect(selected.initialMessage).toBe("Fresh route content");
+      // Selecting a different row restores the unmodified list projection.
+      expect(order(listed)).toEqual(order(selected));
+    }
+
+    const refreshed = { ...listed, updatedAt: "2026-07-10T00:04:00.000Z" };
+    expect(order(applySessionRailProjection(listed, refreshed))).toEqual([listed.id, peer.id]);
+  });
+
+  test("selection and deselection preserve exact list creation ordering within one millisecond", () => {
+    const listed = { ...session, createdAt: "2026-07-10T00:00:00.123456Z" };
+    const peer = { ...listed, id: "peer", createdAt: "2026-07-10T00:00:00.123455Z" };
+    const order = (row: Session) =>
+      [peer, row].sort((a, b) => compareSessionBrowse(a, b, "createdAt")).map((item) => item.id);
+    const detail = {
+      ...listed,
+      createdAt: "2026-07-10T00:00:00.123Z",
+      initialMessage: "Fresh route content",
+    };
+    const selected = applySessionRailProjection(detail, listed);
+    expect(selected.createdAt).toBe(listed.createdAt);
+    expect(selected.initialMessage).toBe(detail.initialMessage);
+    expect(order(listed)).toEqual([listed.id, peer.id]);
+    expect(order(selected)).toEqual(order(listed));
+    expect(order(listed)).toEqual(order(selected));
   });
 
   test("retains display-only list fields without copying an expired channel projection", () => {

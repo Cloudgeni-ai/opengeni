@@ -1,4 +1,27 @@
+type AtlassianRequestAuthority = {
+  connectionUseContext?: Omit<AcceptedConnectionUseContext, "physicalRequestId" | "usePhase">;
+};
+
+import type { AcceptedConnectionUseContext } from "@opengeni/db";
+import {
+  withOrganizationIntegrationAcquisition,
+  withOrganizationIntegrationPolicyFence,
+} from "@opengeni/db/organization-integration-policy";
+import {
+  claimOAuthAcquisition,
+  finishOAuthAcquisition,
+  integrationSourceSelectionRequiresAcquisition,
+} from "./oauth-client";
+import {
+  scheduledTaskKnowledgeSource,
+  requireScheduledTaskKnowledgeSource,
+  knowledgeSourceAgentConfig,
+  assertOrganizationIntegrationAllowed,
+} from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
+import { createHash } from "node:crypto";
+import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
+import { requireConnectOwnerAuthority } from "./connect-authority";
 import type { AccessGrant, ScheduledTask, ScheduledTaskScheduleSpec } from "@opengeni/contracts";
 import {
   ATLASSIAN_CREDENTIAL_LABEL,
@@ -24,7 +47,6 @@ import {
 import {
   captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
-  hasPermission,
   manualScheduledTaskTriggerWorkflowId,
   requireEnvironmentEncryption,
   syncCreatedScheduledTask,
@@ -37,6 +59,10 @@ import {
   ConnectionDisconnectGenerationError,
   ConnectionDisconnectIdempotencyError,
   consumeIntegrationOAuthStateNonce,
+  finishConnectOperation,
+  getConnectAttempt,
+  decryptEnvironmentValue,
+  type Database,
   createConnection,
   deauthorizeKnowledgeSourceRetrieval,
   disconnectConnectionIdempotently,
@@ -44,7 +70,6 @@ import {
   getConnectionMetadata,
   getKnowledgeSourceByExternalIdentityForSyncAuthority,
   getKnowledgeSourceForSyncAuthority,
-  getWorkspaceGrant,
   listKnowledgeSourceSyncTasksForConnection,
   loadConnectionCredentialForBroker,
   recordKnowledgeLifecycleEvent,
@@ -87,6 +112,8 @@ const ATLASSIAN_REQUEST_TIMEOUT_MS = 15_000;
 const ATLASSIAN_RETURN_PATH = (workspaceId: string) => `/workspaces/${workspaceId}/capabilities`;
 
 type AtlassianOAuthState = {
+  connectAttemptId?: string;
+  externalContinuation?: ExternalActorContinuation;
   accountId: string;
   workspaceId: string;
   subjectId: string;
@@ -115,8 +142,11 @@ export async function startAtlassianOAuth(
     subjectId: string;
     requestUrl: string;
     payload: AtlassianOAuthStartRequest;
+    connectAttemptId?: string;
+    externalContinuation?: ExternalActorContinuation;
   },
 ): Promise<AtlassianOAuthStartResponse> {
+  await withOrganizationIntegrationAcquisition(deps.db, input, ["atlassian"], async () => {});
   const oauth = requireAtlassianSettings(deps.settings);
   const existing = input.payload.connectionId
     ? await getConnectionMetadata(
@@ -138,6 +168,15 @@ export async function startAtlassianOAuth(
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
     kind: ATLASSIAN_OAUTH_STATE_KIND,
+    ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
+    ...(input.externalContinuation
+      ? {
+          encryptedExternalContinuation: encryptEnvironmentValue(
+            requireEnvironmentEncryption(deps.settings),
+            JSON.stringify(ExternalActorContinuation.parse(input.externalContinuation)),
+          ),
+        }
+      : {}),
     // The route admits only a managed human, so reaching here is the proof; the
     // callback has no live principal and enforces exactly this claim.
     [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
@@ -166,12 +205,38 @@ export async function completeAtlassianOAuthCallback(
     error?: string | undefined;
     requestUrl: string;
   },
-): Promise<{ redirectTo: string }> {
+): Promise<{ redirectTo: string; exactReturn?: boolean }> {
   const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
   const returnBaseUrl = deps.settings.webBaseUrl?.replace(/\/+$/, "") ?? baseUrl;
   let state: AtlassianOAuthState | null = null;
+  let exactReturnUrl: string | undefined;
+  let operation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
   try {
     state = readAtlassianOAuthState(input.state, deps.settings);
+    if (state.connectAttemptId) {
+      const stored = await getConnectAttempt(deps.db, state, state.connectAttemptId);
+      if (stored.attempt.providerId !== "atlassian" || stored.attempt.ownership !== "personal")
+        throw new AtlassianCallbackError("connection_conflict");
+      exactReturnUrl = stored.returnUrl;
+      operation = {
+        attemptId: state.connectAttemptId,
+        operationId: `oauth:${state.nonce}`,
+        inputDigest: createHash("sha256").update(input.state!).digest("hex"),
+      };
+      const claim = await claimOAuthAcquisition(
+        deps.db,
+        state,
+        {
+          ...operation,
+          expectedRevision: stored.attempt.revision,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        },
+        "atlassian",
+        Boolean(input.code && !input.error),
+      );
+      if (claim.status === "replayed") return { redirectTo: exactReturnUrl, exactReturn: true };
+    }
     await requireCallbackGrant(deps, state);
     const consumed = await consumeIntegrationOAuthStateNonce(deps.db, {
       accountId: state.accountId,
@@ -182,8 +247,28 @@ export async function completeAtlassianOAuthCallback(
       now: new Date(),
     });
     if (!consumed) throw new AtlassianCallbackError("state_reused");
+    if (operation && (input.error || !input.code)) {
+      await finishConnectOperation(deps.db, state, {
+        ...operation,
+        authorize: (tx, _attempt, origin) =>
+          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        commit: async (_tx, current) => ({
+          ...current,
+          revision: current.revision + 1,
+          state: input.error === "access_denied" ? "cancelled" : "failed",
+          nextAction: { type: "none" },
+          error: {
+            code: input.error ? "provider_denied" : "missing_code",
+            message: "Authorization was not completed. Start a new connection attempt.",
+            retryable: false,
+          },
+        }),
+      });
+      return { redirectTo: exactReturnUrl!, exactReturn: true };
+    }
     if (input.error) throw new AtlassianCallbackError("provider_denied");
     if (!input.code) throw new AtlassianCallbackError("missing_code");
+    await withOrganizationIntegrationAcquisition(deps.db, state, ["atlassian"], async () => {});
 
     const oauth = requireAtlassianSettings(deps.settings);
     const redirectUri = `${baseUrl}/v1/integrations/atlassian/callback`;
@@ -262,39 +347,87 @@ export async function completeAtlassianOAuthCallback(
         : {}),
       selectedSources: previousMetadata?.selectedSources ?? [],
     });
-    const connection = existing
-      ? await updateConnection(deps.db, {
-          workspaceId: state.workspaceId,
-          connectionId: existing.id,
-          visibleToSubjectId: state.subjectId,
-          expectedVersion: existing.version,
-          subjectId: state.subjectId,
-          providerDomain: ATLASSIAN_PROVIDER_DOMAIN,
-          kind: "oauth2",
-          status: "active",
-          credentialEncrypted,
-          grantedScopes: token.scopes,
-          expiresAt: token.expiresAt,
-          metadata,
-          updatedBySubjectId: state.subjectId,
-        })
-      : await createConnection(deps.db, {
-          accountId: state.accountId,
-          workspaceId: state.workspaceId,
-          subjectId: state.subjectId,
-          providerDomain: ATLASSIAN_PROVIDER_DOMAIN,
-          kind: "oauth2",
-          credentialEncrypted,
-          grantedScopes: token.scopes,
-          expiresAt: token.expiresAt,
-          metadata,
-          createdBySubjectId: state.subjectId,
-        });
+    const acceptedState = state;
+    const persist = (tx: Database) => {
+      // Capture the validated immutable callback state for delayed persistence.
+      // eslint-disable-next-line no-shadow
+      const state = acceptedState;
+      return existing
+        ? updateConnection(tx, {
+            workspaceId: state.workspaceId,
+            connectionId: existing.id,
+            visibleToSubjectId: state.subjectId,
+            expectedVersion: existing.version,
+            subjectId: state.subjectId,
+            providerDomain: ATLASSIAN_PROVIDER_DOMAIN,
+            kind: "oauth2",
+            status: "active",
+            credentialEncrypted,
+            grantedScopes: token.scopes,
+            expiresAt: token.expiresAt,
+            metadata,
+            updatedBySubjectId: state.subjectId,
+          })
+        : createConnection(tx, {
+            accountId: state.accountId,
+            workspaceId: state.workspaceId,
+            subjectId: state.subjectId,
+            providerDomain: ATLASSIAN_PROVIDER_DOMAIN,
+            kind: "oauth2",
+            credentialEncrypted,
+            grantedScopes: token.scopes,
+            expiresAt: token.expiresAt,
+            metadata,
+            createdBySubjectId: state.subjectId,
+          });
+    };
+    if (operation) {
+      await finishOAuthAcquisition(
+        deps.db,
+        acceptedState,
+        {
+          ...operation,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+          commit: async (tx, current) => {
+            const connection = await persist(tx);
+            if (!connection) throw new AtlassianCallbackError("connection_conflict");
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "complete",
+              credentialsCommitted: true,
+              nextAction: { type: "none" },
+              account: {
+                id: connection.id,
+                version: connection.version,
+                providerId: "atlassian",
+                label: profile.displayName ?? "Atlassian",
+                ownership: "personal",
+                status: "connected",
+              },
+            };
+          },
+        },
+        "atlassian",
+      );
+      return { redirectTo: exactReturnUrl!, exactReturn: true };
+    }
+    const connection = await withOrganizationIntegrationAcquisition(
+      deps.db,
+      acceptedState,
+      ["atlassian"],
+      async (tx) => {
+        await requireCallbackGrant({ ...deps, db: tx }, acceptedState);
+        return persist(tx);
+      },
+    );
     if (!connection) throw new AtlassianCallbackError("connection_conflict");
     return {
       redirectTo: returnUrl(returnBaseUrl, state.returnPath, "connected", connection.id),
     };
   } catch (error) {
+    if (exactReturnUrl) return { redirectTo: exactReturnUrl, exactReturn: true };
     return {
       redirectTo: returnUrl(
         returnBaseUrl,
@@ -308,7 +441,11 @@ export async function completeAtlassianOAuthCallback(
 
 export async function browseAtlassianSources(
   deps: ApiRouteDeps,
-  input: { workspaceId: string; subjectId: string; connectionId: string },
+  input: AtlassianRequestAuthority & {
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+  },
 ) {
   const connection = await getConnectionMetadata(
     deps.db,
@@ -349,7 +486,7 @@ export async function browseAtlassianSources(
 
 export async function searchAtlassianLive(
   deps: ApiRouteDeps,
-  input: {
+  input: AtlassianRequestAuthority & {
     workspaceId: string;
     subjectId: string;
     connectionId: string;
@@ -452,7 +589,7 @@ export async function searchAtlassianLive(
 
 export async function getAtlassianLiveItem(
   deps: ApiRouteDeps,
-  input: {
+  input: AtlassianRequestAuthority & {
     workspaceId: string;
     subjectId: string;
     connectionId: string;
@@ -604,9 +741,28 @@ export async function saveAtlassianSources(
     initiatingSubjectId: input.subjectId,
   });
 
-  const available = (await browseAtlassianSources(deps, input)).items;
+  const requestedSelection = parsed.data.sources.map((source) => ({
+    ...source,
+    destination,
+    syncCadence: parsed.data.syncCadence,
+    syncEnabled: parsed.data.syncEnabled,
+    readPolicy: parsed.data.readPolicy,
+  }));
+  const acquiring = integrationSourceSelectionRequiresAcquisition(
+    metadata.selectedSources,
+    requestedSelection,
+  );
+  if (acquiring) {
+    await withOrganizationIntegrationAcquisition(deps.db, input, ["atlassian"], async () => {});
+  }
+
+  const available =
+    acquiring && parsed.data.sources.length
+      ? (await browseAtlassianSources(deps, input)).items
+      : [];
   const availableById = new Map(available.map((source) => [source.id, source]));
   const verified = parsed.data.sources.map((source) => {
+    if (!acquiring) return source;
     const current = availableById.get(source.id);
     if (
       !current ||
@@ -623,28 +779,39 @@ export async function saveAtlassianSources(
     return current;
   });
   const previousSources = metadata.selectedSources;
-  const updated = await transitionConnectionState(deps.db, {
-    workspaceId: input.workspaceId,
-    connectionId: existing.id,
-    visibleToSubjectId: input.subjectId,
-    expectedVersion: existing.version,
-    metadata: AtlassianConnectionMetadata.parse({
-      ...metadata,
-      documentDestination: destination,
-      selectedSources: verified.map((source) => ({
-        ...source,
-        destination,
-        syncCadence: parsed.data.syncCadence,
-        syncEnabled: parsed.data.syncEnabled,
-        configGeneration:
-          (previousSources.find((previous) => previous.id === source.id)?.configGeneration ?? 0) +
-          1,
-        readPolicy: parsed.data.readPolicy,
-        selectedAt: new Date().toISOString(),
-      })),
-    }),
-    updatedBySubjectId: input.subjectId,
-  });
+  const updated = await withOrganizationIntegrationPolicyFence(
+    deps.db,
+    input,
+    async (tx, policy) => {
+      // The exact generation checked by transitionConnectionState binds this
+      // comparison to the row being changed. Provider verification already ended.
+      if (integrationSourceSelectionRequiresAcquisition(previousSources, requestedSelection)) {
+        assertOrganizationIntegrationAllowed(policy, "atlassian");
+      }
+      return transitionConnectionState(tx, {
+        workspaceId: input.workspaceId,
+        connectionId: existing.id,
+        visibleToSubjectId: input.subjectId,
+        expectedVersion: existing.version,
+        metadata: AtlassianConnectionMetadata.parse({
+          ...metadata,
+          documentDestination: destination,
+          selectedSources: verified.map((source) => ({
+            ...source,
+            destination,
+            syncCadence: parsed.data.syncCadence,
+            syncEnabled: parsed.data.syncEnabled,
+            configGeneration:
+              (previousSources.find((previous) => previous.id === source.id)?.configGeneration ??
+                0) + 1,
+            readPolicy: parsed.data.readPolicy,
+            selectedAt: new Date().toISOString(),
+          })),
+        }),
+        updatedBySubjectId: input.subjectId,
+      });
+    },
+  );
   if (!updated) throw new HTTPException(409, { message: "Atlassian connection changed" });
   await materializeSchedules(deps, {
     ...input,
@@ -682,14 +849,27 @@ export async function transitionAtlassianLifecycle(
   if (target === "paused") {
     await deauthorizeConnectionSources(deps, connection, input.subjectId, "connection_paused");
   }
-  const updated = await transitionConnectionState(deps.db, {
-    workspaceId: input.workspaceId,
-    connectionId: input.connectionId,
-    visibleToSubjectId: input.subjectId,
-    expectedVersion: connection.version,
-    metadata: AtlassianConnectionMetadata.parse({ ...metadata, lifecycle: lifecycle(target) }),
-    updatedBySubjectId: input.subjectId,
-  });
+  const persist = (tx: Database) =>
+    transitionConnectionState(tx, {
+      workspaceId: input.workspaceId,
+      connectionId: input.connectionId,
+      visibleToSubjectId: input.subjectId,
+      expectedVersion: connection.version,
+      metadata: AtlassianConnectionMetadata.parse({ ...metadata, lifecycle: lifecycle(target) }),
+      updatedBySubjectId: input.subjectId,
+    });
+  const updated =
+    target === "active"
+      ? await withOrganizationIntegrationPolicyFence(
+          deps.db,
+          { accountId: connection.accountId, workspaceId: input.workspaceId },
+          (tx, policy) => {
+            if ((metadata.lifecycle?.state ?? "active") !== "active")
+              assertOrganizationIntegrationAllowed(policy, "atlassian");
+            return persist(tx);
+          },
+        )
+      : await persist(deps.db);
   if (!updated) throw new HTTPException(409, { message: "Atlassian connection changed" });
   await setSchedulePause(deps, input.workspaceId, input.connectionId, target === "paused");
   return updated;
@@ -744,10 +924,10 @@ export async function preflightAtlassianScheduleAuthorization(
   input: { task: ScheduledTask; subjectId: string },
 ): Promise<void> {
   const { task } = input;
-  if (task.action.kind !== "knowledge_source_sync") return;
+  if (!scheduledTaskKnowledgeSource(task)) return;
   if (
-    task.action.initiatingSubjectId !== input.subjectId ||
-    task.action.connection.ownerSubjectId !== input.subjectId
+    requireScheduledTaskKnowledgeSource(task).initiatingSubjectId !== input.subjectId ||
+    requireScheduledTaskKnowledgeSource(task).connection.ownerSubjectId !== input.subjectId
   ) {
     throw new HTTPException(403, {
       message: "knowledge source schedule requires the exact initiating subject",
@@ -766,10 +946,10 @@ export async function revokeAtlassianScheduleAuthorization(
   input: { task: ScheduledTask; subjectId: string },
 ): Promise<void> {
   const { task } = input;
-  if (task.action.kind !== "knowledge_source_sync") return;
+  if (!scheduledTaskKnowledgeSource(task)) return;
   if (
-    task.action.initiatingSubjectId !== input.subjectId ||
-    task.action.connection.ownerSubjectId !== input.subjectId
+    requireScheduledTaskKnowledgeSource(task).initiatingSubjectId !== input.subjectId ||
+    requireScheduledTaskKnowledgeSource(task).connection.ownerSubjectId !== input.subjectId
   ) {
     throw new HTTPException(403, {
       message: "knowledge source schedule requires the exact initiating subject",
@@ -783,11 +963,11 @@ export async function revokeAtlassianScheduleAuthorization(
     taskId: task.id,
     accountId: task.accountId,
     workspaceId: task.workspaceId,
-    connectionId: task.action.connection.connectionId,
-    connectionVersion: task.action.connection.connectionVersion,
-    sourceId: task.action.sourceId,
-    sourceLifecycleGeneration: task.action.sourceLifecycleGeneration,
-    sourceConfigGeneration: task.action.sourceConfigGeneration,
+    connectionId: requireScheduledTaskKnowledgeSource(task).connection.connectionId,
+    connectionVersion: requireScheduledTaskKnowledgeSource(task).connection.connectionVersion,
+    sourceId: requireScheduledTaskKnowledgeSource(task).sourceId,
+    sourceLifecycleGeneration: requireScheduledTaskKnowledgeSource(task).sourceLifecycleGeneration,
+    sourceConfigGeneration: requireScheduledTaskKnowledgeSource(task).sourceConfigGeneration,
     externalSourceId,
     subjectId: input.subjectId,
   });
@@ -918,11 +1098,11 @@ async function materializeSchedules(
     let source = null as Awaited<ReturnType<typeof upsertKnowledgeSource>> | null;
     let existingTask: (typeof tasks)[number] | null = null;
     for (const task of tasks) {
-      if (task.action.kind !== "knowledge_source_sync") continue;
+      if (!scheduledTaskKnowledgeSource(task)) continue;
       const resolved = await getKnowledgeSourceForSyncAuthority(deps.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
-        sourceId: task.action.sourceId,
+        sourceId: requireScheduledTaskKnowledgeSource(task).sourceId,
         initiatingSubjectId: input.subjectId,
       });
       if (resolved?.source.externalSourceId !== identity.externalSourceId) continue;
@@ -1029,7 +1209,10 @@ async function materializeSchedules(
         name: `Sync ${selectedSource.kind === "jira_project" ? "Jira" : "Confluence"}: ${selectedSource.name}`,
         schedule: atlassianSchedule(selectedSource.syncCadence),
         overlapPolicy: "buffer_one",
-        action,
+        action: { kind: "agent_turn" },
+        agentConfig: knowledgeSourceAgentConfig(action, existingTask.agentConfig),
+        refreshPersonalResourceAuthority: true,
+        authorityUpdatedBy: { kind: "subject", subjectId: input.subjectId },
         metadata: {
           ...existingTask.metadata,
           connectorKind: "atlassian",
@@ -1057,16 +1240,11 @@ async function materializeSchedules(
           status: "active",
           schedule: atlassianSchedule(selectedSource.syncCadence),
           overlapPolicy: "buffer_one",
-          action,
+          action: { kind: "agent_turn" },
           runMode: "new_session_per_run",
           targetSessionId: null,
-          connectionAuthorities: [],
-          agentConfig: {
-            prompt: "Knowledge source synchronization",
-            resources: [],
-            tools: [],
-            metadata: {},
-          },
+          connectionAccounts: [],
+          agentConfig: knowledgeSourceAgentConfig(action),
           variableSetId: null,
           environmentId: null,
           rigId: null,
@@ -1091,11 +1269,11 @@ async function materializeSchedules(
   }
 
   for (const task of tasks) {
-    if (task.action.kind !== "knowledge_source_sync") continue;
+    if (!scheduledTaskKnowledgeSource(task)) continue;
     const resolved = await getKnowledgeSourceForSyncAuthority(deps.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
-      sourceId: task.action.sourceId,
+      sourceId: requireScheduledTaskKnowledgeSource(task).sourceId,
       initiatingSubjectId: input.subjectId,
     });
     if (!resolved || enabledIds.has(resolved.source.externalSourceId)) continue;
@@ -1130,7 +1308,11 @@ async function materializeSchedules(
 
 async function browseJiraProjects(
   deps: ApiRouteDeps,
-  input: { workspaceId: string; subjectId: string; connectionId: string },
+  input: AtlassianRequestAuthority & {
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+  },
   site: AtlassianSite,
 ): Promise<AtlassianBrowseItem[]> {
   const items: AtlassianBrowseItem[] = [];
@@ -1176,7 +1358,11 @@ async function browseJiraProjects(
 
 async function browseConfluenceSpaces(
   deps: ApiRouteDeps,
-  input: { workspaceId: string; subjectId: string; connectionId: string },
+  input: AtlassianRequestAuthority & {
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+  },
   site: AtlassianSite,
 ): Promise<AtlassianBrowseItem[]> {
   const items: AtlassianBrowseItem[] = [];
@@ -1234,7 +1420,7 @@ export function confluenceNextUrl(cloudId: string, next: string): URL {
 
 async function atlassianApiRequest(
   deps: ApiRouteDeps,
-  input: {
+  input: AtlassianRequestAuthority & {
     workspaceId: string;
     subjectId: string;
     connectionId: string;
@@ -1255,9 +1441,20 @@ async function atlassianApiRequest(
   });
   const resolve = async (forceRefresh: boolean) =>
     await resolver({
-      workspaceId: input.workspaceId,
+      workspaceId: input.connectionUseContext?.workspaceId ?? input.workspaceId,
+      ...(input.connectionUseContext
+        ? {
+            connectionUseContext: {
+              ...input.connectionUseContext,
+              physicalRequestId: crypto.randomUUID(),
+              usePhase: "credential_resolution" as const,
+            },
+          }
+        : {}),
       subjectId: input.subjectId,
-      serverId: "atlassian-source-browser",
+      serverId: input.connectionUseContext
+        ? `atlassian:${input.connectionId}`
+        : "atlassian-source-browser",
       toolName: input.label,
       connectionRef: {
         providerDomain: ATLASSIAN_PROVIDER_DOMAIN,
@@ -1414,20 +1611,20 @@ async function deauthorizeConnectionSources(
     connection.id,
   );
   for (const task of tasks) {
-    if (task.action.kind !== "knowledge_source_sync") continue;
+    if (!scheduledTaskKnowledgeSource(task)) continue;
     const resolved = await getKnowledgeSourceForSyncAuthority(deps.db, {
       accountId: task.accountId,
       workspaceId: task.workspaceId,
-      sourceId: task.action.sourceId,
+      sourceId: requireScheduledTaskKnowledgeSource(task).sourceId,
       initiatingSubjectId: subjectId,
     });
     if (!resolved || resolved.source.lifecycleState !== "active") continue;
     await deauthorizeKnowledgeSourceRetrieval(deps.db, {
       accountId: task.accountId,
       workspaceId: task.workspaceId,
-      sourceId: task.action.sourceId,
-      audience: task.action.destination,
-      operationId: `atlassian-deauthorize:${connection.id}:${connection.version + 1}:${task.action.sourceId}:${reasonCode}`,
+      sourceId: requireScheduledTaskKnowledgeSource(task).sourceId,
+      audience: requireScheduledTaskKnowledgeSource(task).destination,
+      operationId: `atlassian-deauthorize:${connection.id}:${connection.version + 1}:${requireScheduledTaskKnowledgeSource(task).sourceId}:${reasonCode}`,
       reasonCode,
       actor: { kind: "human", subjectId, initiatingHumanSubjectId: subjectId },
     });
@@ -1521,6 +1718,21 @@ function readAtlassianOAuthState(raw: string | undefined, settings: Settings): A
     workspaceId,
     subjectId,
     personalOwnerVerified: personalOwnerVerifiedInState(payload),
+    ...(typeof payload.connectAttemptId === "string"
+      ? { connectAttemptId: payload.connectAttemptId }
+      : {}),
+    ...(typeof payload.encryptedExternalContinuation === "string"
+      ? {
+          externalContinuation: ExternalActorContinuation.parse(
+            JSON.parse(
+              decryptEnvironmentValue(
+                requireEnvironmentEncryption(settings),
+                payload.encryptedExternalContinuation,
+              ),
+            ),
+          ),
+        }
+      : {}),
     returnPath,
     ...(connectionId ? { connectionId, connectionVersion: connectionVersion! } : {}),
     nonce: requiredString(payload.nonce, "state.nonce"),
@@ -1544,14 +1756,7 @@ async function requireCallbackGrant(deps: ApiRouteDeps, state: AtlassianOAuthSta
       message: personalOnlyConnectionPrincipalMessage("Atlassian"),
     });
   }
-  const grant = await getWorkspaceGrant(deps.db, state.subjectId, state.workspaceId);
-  if (
-    !grant ||
-    grant.accountId !== state.accountId ||
-    !hasPermission(grant.permissions, "connections:write")
-  ) {
-    throw new HTTPException(403, { message: "Atlassian OAuth subject no longer has access" });
-  }
+  await requireConnectOwnerAuthority(deps.db, state, "connections:write");
 }
 
 function requireAtlassianSettings(settings: Settings) {
@@ -1656,7 +1861,12 @@ function cqlString(value: string): string {
 
 async function readJiraLiveComments(
   deps: ApiRouteDeps,
-  input: { workspaceId: string; subjectId: string; connectionId: string; id: string },
+  input: AtlassianRequestAuthority & {
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    id: string;
+  },
   cloudId: string,
 ) {
   const comments: Array<{ author: string | null; createdAt: string | null; body: string }> = [];
@@ -1689,7 +1899,12 @@ async function readJiraLiveComments(
 
 async function readConfluenceLiveComments(
   deps: ApiRouteDeps,
-  input: { workspaceId: string; subjectId: string; connectionId: string; id: string },
+  input: AtlassianRequestAuthority & {
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    id: string;
+  },
   cloudId: string,
 ) {
   const comments: Array<{ createdAt: string | null; content: string }> = [];

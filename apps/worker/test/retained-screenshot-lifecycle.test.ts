@@ -1,6 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import {
   claimRetainedScreenshotMaintenance,
+  withSessionRlsActorContext,
+  getFile,
   claimSessionWorkForAttempt,
   completeRetainedScreenshotMaintenance,
   createDb,
@@ -356,82 +358,100 @@ describe("retained screenshot lifecycle fences", () => {
     });
   }, 180_000);
 
-  test("session cascade preserves object, file, lifecycle evidence, and quota until owned cleanup", async () => {
-    if (!available) return;
-    const fixture = await freshTurn();
-    const memory = storageFixture();
-    const prepared = await prepareArtifact(fixture, memory.storage);
-    await memory.storage.putObject({
-      key: prepared.objectKey,
-      contentType: "image/png",
-      body: PNG,
-      sha256: SCREENSHOT.sha256,
-    });
-    await settleRetainedScreenshotArtifactReady(db, {
-      ...fixture,
-      artifactId: prepared.artifactId,
-      settlementKey: prepared.settlementKey,
-    });
-    expect(await getWorkspaceScreenshotQuota(db, fixture.workspaceId)).toEqual({
-      reservedBytes: 0,
-      readyBytes: PNG.byteLength,
-    });
+  test.each([false, true])(
+    "session cascade preserves files until owned cleanup (personal=%s)",
+    async (personal) => {
+      if (!available) return;
+      const fixture = await freshTurn();
+      const memory = storageFixture();
+      const withOwner = <T>(fn: () => Promise<T>) =>
+        withSessionRlsActorContext(
+          {
+            subjectId: "user:retained-screenshot-owner",
+            privateFileOwnerSubjectId: personal ? "user:retained-screenshot-owner" : null,
+          },
+          fn,
+        );
+      const prepared = await withOwner(() => prepareArtifact(fixture, memory.storage));
+      await memory.storage.putObject({
+        key: prepared.objectKey,
+        contentType: "image/png",
+        body: PNG,
+        sha256: SCREENSHOT.sha256,
+      });
+      await withOwner(() =>
+        settleRetainedScreenshotArtifactReady(db, {
+          ...fixture,
+          artifactId: prepared.artifactId,
+          settlementKey: prepared.settlementKey,
+        }),
+      );
+      expect(
+        (await withOwner(() => getFile(db, fixture.workspaceId, prepared.artifactId)))?.scope,
+      ).toBe(personal ? "personal" : "workspace");
+      if (personal) expect(await getFile(db, fixture.workspaceId, prepared.artifactId)).toBeNull();
+      expect(await getWorkspaceScreenshotQuota(db, fixture.workspaceId)).toEqual({
+        reservedBytes: 0,
+        readyBytes: PNG.byteLength,
+      });
 
-    let fileDeleteError: unknown;
-    try {
-      await admin`delete from files where workspace_id = ${fixture.workspaceId} and id = ${prepared.artifactId}`;
-    } catch (error) {
-      fileDeleteError = error;
-    }
-    expect(String((fileDeleteError as { constraint_name?: unknown })?.constraint_name)).toBe(
-      "retained_screenshot_artifacts_workspace_file_fk",
-    );
+      let fileDeleteError: unknown;
+      try {
+        await admin`delete from files where workspace_id = ${fixture.workspaceId} and id = ${prepared.artifactId}`;
+      } catch (error) {
+        fileDeleteError = error;
+      }
+      expect(String((fileDeleteError as { constraint_name?: unknown })?.constraint_name)).toBe(
+        "retained_screenshot_artifacts_workspace_file_fk",
+      );
 
-    await deleteTurnHierarchy(fixture);
-    expect(await artifactRow(prepared.artifactId)).toMatchObject({
-      sessionId: null,
-      turnId: null,
-      attemptId: null,
-      status: "cleanup_queued",
-      quotaState: "ready",
-      cleanupReason: "session_deleted",
-    });
-    expect(await fileCount(fixture.workspaceId, prepared.artifactId)).toBe(1);
-    expect(memory.objects.has(prepared.objectKey)).toBeTrue();
-    expect(await getWorkspaceScreenshotQuota(db, fixture.workspaceId)).toEqual({
-      reservedBytes: 0,
-      readyBytes: PNG.byteLength,
-    });
+      await deleteTurnHierarchy(fixture);
+      expect(await artifactRow(prepared.artifactId)).toMatchObject({
+        sessionId: null,
+        turnId: null,
+        attemptId: null,
+        status: "cleanup_queued",
+        quotaState: "ready",
+        cleanupReason: "session_deleted",
+      });
+      expect(await fileCount(fixture.workspaceId, prepared.artifactId)).toBe(1);
+      expect(memory.objects.has(prepared.objectKey)).toBeTrue();
+      expect(await getWorkspaceScreenshotQuota(db, fixture.workspaceId)).toEqual({
+        reservedBytes: 0,
+        readyBytes: PNG.byteLength,
+      });
 
-    const claims = await claimRetainedScreenshotMaintenance(db, {
-      pendingGraceMs: 0,
-      claimTimeoutMs: 0,
-      limit: 10,
-    });
-    expect(claims).toHaveLength(1);
-    expect(claims[0]).toMatchObject({
-      action: "delete",
-      artifactId: prepared.artifactId,
-      sessionId: null,
-      cleanupReason: "session_deleted",
-    });
-    await memory.storage.deleteObject(prepared.objectKey);
-    const completion = {
-      ...fixture,
-      artifactId: prepared.artifactId,
-      claimId: claims[0]!.claimId,
-      outcome: "deleted" as const,
-    };
-    expect(await completeRetainedScreenshotMaintenance(db, completion)).toBeTrue();
-    expect(await completeRetainedScreenshotMaintenance(db, completion)).toBeTrue();
-    expect(await artifactRow(prepared.artifactId)).toBeNull();
-    expect(await fileCount(fixture.workspaceId, prepared.artifactId)).toBe(0);
-    expect(await getWorkspaceScreenshotQuota(db, fixture.workspaceId)).toEqual({
-      reservedBytes: 0,
-      readyBytes: 0,
-    });
-    expect(memory.deleteCalls).toEqual([prepared.objectKey]);
-  }, 180_000);
+      const claims = await claimRetainedScreenshotMaintenance(db, {
+        pendingGraceMs: 0,
+        claimTimeoutMs: 0,
+        limit: 10,
+      });
+      expect(claims).toHaveLength(1);
+      expect(claims[0]).toMatchObject({
+        action: "delete",
+        artifactId: prepared.artifactId,
+        sessionId: null,
+        cleanupReason: "session_deleted",
+      });
+      await memory.storage.deleteObject(prepared.objectKey);
+      const completion = {
+        ...fixture,
+        artifactId: prepared.artifactId,
+        claimId: claims[0]!.claimId,
+        outcome: "deleted" as const,
+      };
+      expect(await completeRetainedScreenshotMaintenance(db, completion)).toBeTrue();
+      expect(await completeRetainedScreenshotMaintenance(db, completion)).toBeTrue();
+      expect(await artifactRow(prepared.artifactId)).toBeNull();
+      expect(await fileCount(fixture.workspaceId, prepared.artifactId)).toBe(0);
+      expect(await getWorkspaceScreenshotQuota(db, fixture.workspaceId)).toEqual({
+        reservedBytes: 0,
+        readyBytes: 0,
+      });
+      expect(memory.deleteCalls).toEqual([prepared.objectKey]);
+    },
+    180_000,
+  );
 
   test("duplicate settlement and duplicate expiry completion move and release quota exactly once", async () => {
     if (!available) return;
@@ -735,6 +755,68 @@ describe("retained screenshot lifecycle fences", () => {
     const output = history[0]?.output;
     expect(typeof output).toBe("string");
     expect(String(output).startsWith("data:image/png;base64,")).toBeTrue();
+  }, 180_000);
+
+  test("recovers a truncated screenshot receipt by exact session and tool call", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const other = await freshTurn();
+    const memory = storageFixture();
+    const result = await retainComputerScreenshot({
+      db,
+      objectStorage: memory.storage,
+      ...fixture,
+      output: {
+        callId: "call-truncated-receipt",
+        toolOutputId: "call-truncated-receipt",
+        bytes: PNG,
+        mediaType: "image/png",
+      },
+      retentionMs: 60_000,
+      workspaceQuotaBytes: 1024 * 1024,
+    });
+    expect(result.available).toBe(true);
+    const corruptedHistory = [
+      {
+        type: "function_call_result",
+        callId: "call-truncated-receipt",
+        output: [
+          { type: "input_text", text: "Screen capture" },
+          {
+            type: "input_image",
+            image: {
+              type: "retained_artifact",
+              artifact: {
+                available: false,
+                artifactId: "[omitted text field 1 ...]",
+                reason: "[omitted text field 2 ...]",
+              },
+            },
+          },
+        ],
+      },
+    ];
+    const recovered = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: memory.storage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history: corruptedHistory,
+    });
+    const recoveredOutput = recovered[0]?.output;
+    if (!Array.isArray(recoveredOutput)) throw new Error("expected content array");
+    expect(
+      String((recoveredOutput[1] as { image?: string }).image).startsWith("data:image/png;base64,"),
+    ).toBeTrue();
+    await expect(
+      materializeRetainedScreenshotHistory({
+        db,
+        objectStorage: memory.storage,
+        workspaceId: other.workspaceId,
+        sessionId: other.sessionId,
+        history: corruptedHistory,
+      }),
+    ).rejects.toThrow("cannot be recovered");
   }, 180_000);
 
   test("FORCE-RLS denies cross-workspace rows while the fixed SECURITY DEFINER claim sees both", async () => {

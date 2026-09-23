@@ -110,6 +110,15 @@ export function renderSelfhostedFault(error: SelfhostedControlError): string {
   const detail = error.detail;
 
   if (error.payloadTooLarge || error.code === ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE) {
+    if (detail.direction === "request") {
+      return assemble(error, {
+        headline: "the request was too large to send",
+        happened: "the request was not sent because it exceeded the per-message size limit",
+        layer: "the machine link's outbound request size limit, not machine availability",
+        preserved: "the rejected request did not execute on the machine",
+        tryNext: "use a supported bounded transfer; retrying the unchanged request will not help",
+      });
+    }
     // The STREAMING retention-ceiling overflow (op-stream OP_OVERFLOW) is a
     // different truth than the legacy reply-size wall: the machine STOPPED the
     // command at the ceiling (it did not run to completion), and none of its

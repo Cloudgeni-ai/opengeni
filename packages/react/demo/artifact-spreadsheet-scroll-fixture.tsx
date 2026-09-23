@@ -20,6 +20,32 @@ export function mountFullSpreadsheet(target: HTMLElement): void {
   createRoot(target).render(createElement(SpreadsheetGrid, { workbook, worksheet }));
 }
 
+/** General-display acceptance: noisy floats, formulas, exponent-scale, and non-numeric labels. */
+export function mountGeneralDisplaySpreadsheet(target: HTMLElement): void {
+  const workbook = Workbook.create();
+  const worksheet = workbook.worksheets.add("General");
+  workbook.transact(() => {
+    worksheet.getRange("A1").values = [[110.00000000000001]];
+    worksheet.getRange("B1").values = [[220.00000000000003]];
+    worksheet.getRange("C1").formulas = [["=0.1+0.2"]];
+    worksheet.getRange("D1").values = [[1e-20]];
+    worksheet.getRange("E1").values = [[1e21]];
+    worksheet.getRange("A2").values = [[-110.00000000000001]];
+    worksheet.getRange("B2").values = [[0]];
+    worksheet.getRange("C2").values = [[42]];
+    worksheet.getRange("D2").values = [[true]];
+    worksheet.getRange("E2").values = [["#DIV/0!"]];
+    worksheet.getRange("A3").values = [[1.23456789012345]];
+    worksheet.getRange("B3").values = [[new Date("2024-06-15T00:00:00Z")]];
+  });
+  (
+    globalThis as typeof globalThis & {
+      __ogGeneralDisplay?: { workbook: Workbook; worksheet: typeof worksheet };
+    }
+  ).__ogGeneralDisplay = { workbook, worksheet };
+  createRoot(target).render(createElement(SpreadsheetGrid, { workbook, worksheet }));
+}
+
 /** One CSS-pixel rows/columns: hundreds of thousands of visible blank cells, but sparse data. */
 export function mountDenseSpreadsheet(target: HTMLElement): void {
   const workbook = Workbook.create();
