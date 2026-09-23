@@ -6,6 +6,7 @@ import {
 } from "@opengeni/codex/constants";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
+  TurnExecutionPolicyDefinitionMismatchError,
   calculateGatewayReportedCostBreakdown,
   calculateGatewayReportedCostMicros,
   calculateGatewayReportedProviderCostMicros,
@@ -1658,7 +1659,54 @@ describe("turn execution policy V1", () => {
           modelId: policy.productModelId,
           reasoningEffort: policy.reasoningEffort,
         }),
-      ).toThrow("current provider definition");
+      ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
+    }
+    const error = new TurnExecutionPolicyDefinitionMismatchError();
+    expect(error.code).toBe("turn_execution_policy_definition_mismatch");
+    expect(error.message).toBe(
+      "Turn execution policy does not match the current provider definition",
+    );
+
+    const nonDefinitionFailures = [
+      () =>
+        assertTurnExecutionPolicyMatchesConfigV1(settings, policy, {
+          modelId: policy.productModelId,
+          reasoningEffort: "low",
+        }),
+      () =>
+        assertTurnExecutionPolicyMatchesConfigV1(
+          settings,
+          {
+            ...policy,
+            definitionVersion: "malformed",
+          },
+          { modelId: policy.productModelId, reasoningEffort: policy.reasoningEffort },
+        ),
+      () =>
+        assertTurnExecutionPolicyMatchesConfigV1(
+          { ...settings, modelProvidersJson: "[]" },
+          policy,
+          { modelId: policy.productModelId, reasoningEffort: policy.reasoningEffort },
+        ),
+      () =>
+        assertTurnExecutionPolicyMatchesConfigV1(
+          settings,
+          {
+            ...policy,
+            requestedModelId: "other-model",
+          },
+          { modelId: policy.productModelId, reasoningEffort: policy.reasoningEffort },
+        ),
+    ];
+    for (const fail of nonDefinitionFailures) {
+      let caught: unknown;
+      try {
+        fail();
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect(caught).not.toBeInstanceOf(TurnExecutionPolicyDefinitionMismatchError);
     }
   });
 
