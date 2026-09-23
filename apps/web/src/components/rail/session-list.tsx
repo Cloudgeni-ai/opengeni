@@ -396,6 +396,8 @@ export function SessionList() {
   } = channelsQuery;
   const [channelDialogOpen, setChannelDialogOpen] = useState(false);
   const [channelNameDraft, setChannelNameDraft] = useState("");
+  const [projectPendingRename, setProjectPendingRename] = useState<Channel | null>(null);
+  const [projectRenameDraft, setProjectRenameDraft] = useState("");
   const [projectPendingDelete, setProjectPendingDelete] = useState<Channel | null>(null);
   const [sessionPendingDelete, setSessionPendingDelete] = useState<Session | null>(null);
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
@@ -1415,6 +1417,20 @@ export function SessionList() {
     },
     [context, refreshSessionPages, verifySessionChannelMove],
   );
+  const submitRenameProject = useCallback(async () => {
+    const name = projectRenameDraft.trim();
+    if (!projectPendingRename || !name || channelsQuery.mutating) return;
+    if (name === projectPendingRename.name) {
+      setProjectPendingRename(null);
+      return;
+    }
+    const updated = await updateProject(projectPendingRename.id, { name });
+    if (updated) {
+      setProjectPendingRename(null);
+    } else {
+      toast.error("Couldn't rename the project. The name may already be in use.");
+    }
+  }, [projectRenameDraft, projectPendingRename, channelsQuery.mutating, updateProject]);
   const onToggleProjectPin = useCallback(
     async (project: Channel) => {
       const updated = await updateProject(project.id, { pinned: !project.pinned });
@@ -2716,6 +2732,10 @@ export function SessionList() {
                       : undefined
                   }
                   onToggleProjectPin={onToggleProjectPin}
+                  onRenameProject={(project) => {
+                    setProjectRenameDraft(project.name);
+                    setProjectPendingRename(project);
+                  }}
                   onDeleteProject={setProjectPendingDelete}
                   draggedProjectId={draggedProjectId}
                   dragOverProjectId={dragOverProjectId}
@@ -2849,6 +2869,18 @@ export function SessionList() {
         )}
       </div>
       <ChannelCreateDialog
+        key={projectPendingRename?.id ?? "rename-project"}
+        mode="rename"
+        open={projectPendingRename !== null}
+        name={projectRenameDraft}
+        busy={channelsQuery.mutating}
+        onNameChange={setProjectRenameDraft}
+        onOpenChange={(open) => {
+          if (!open) setProjectPendingRename(null);
+        }}
+        onSubmit={() => void submitRenameProject()}
+      />
+      <ChannelCreateDialog
         open={channelDialogOpen}
         name={channelNameDraft}
         busy={channelsQuery.mutating}
@@ -2981,6 +3013,7 @@ function SessionGroup(props: {
   allowNewSession?: boolean;
   project?: Channel;
   onToggleProjectPin?: (project: Channel) => void;
+  onRenameProject?: (project: Channel) => void;
   onDeleteProject?: (project: Channel) => void;
   draggedProjectId?: string | null;
   dragOverProjectId?: string | null;
@@ -3116,6 +3149,10 @@ function SessionGroup(props: {
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" side="right">
+                <DropdownMenuItem onSelect={() => props.onRenameProject?.(props.project!)}>
+                  <PencilIcon aria-hidden="true" className="size-3.5" />
+                  Rename project
+                </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => props.onToggleProjectPin?.(props.project!)}>
                   <PinIcon
                     aria-hidden="true"
