@@ -11,7 +11,7 @@ export type DevelopmentPrerequisiteOptions = {
   /** resolve defers artifact build checks until the resolver needs source fallback;
    * it is NOT a verified runtime. Only the verifier may select verified-prebuilt. */
   artifactRuntime?: "source-build" | "verified-prebuilt" | "resolve";
-  /** Defaults to source-build only when effective selfhosted is enabled. */
+  /** Defaults to source-build only when startup owns a local relay. */
   relayRuntime?: "source-build" | "verified-prebuilt" | "disabled";
 };
 
@@ -43,14 +43,14 @@ const nativeInstall = {
     "Explicit MinIO compatibility requires minio RELEASE.2025-09-07T16-13-09Z and mc RELEASE.2025-08-13T08-35-41Z (docker-compose.yml pins). Obtain matching verified host binaries from the upstream release archives; if unavailable on this host use Docker or Garage, not an unpinned latest binary.",
 };
 
-export function developmentPrerequisiteErrors(options: {
-  bunVersion: string;
-  requiredBunVersion: string;
-  platform: string;
-  which: (command: string) => string | null;
-  artifactRuntime?: DevelopmentPrerequisiteOptions["artifactRuntime"];
-  relayRuntime?: DevelopmentPrerequisiteOptions["relayRuntime"];
-}): string[] {
+export function developmentPrerequisiteErrors(
+  options: Pick<DevelopmentPrerequisiteOptions, "artifactRuntime" | "relayRuntime"> & {
+    bunVersion: string;
+    requiredBunVersion: string;
+    platform: string;
+    which: (command: string) => string | null;
+  },
+): string[] {
   const errors: string[] = [];
   if (options.bunVersion !== options.requiredBunVersion) {
     errors.push(
@@ -299,6 +299,20 @@ export async function collectDevelopmentPrerequisites(
   return { backend, errors };
 }
 
+/** Match dev-stack.sh: absent URL uses the local default, explicit bind owns a
+ * local relay, otherwise only the launcher's loopback hostnames start one. */
+function needsLocalRelay(environment: NodeJS.ProcessEnv): boolean {
+  if (environment.OPENGENI_SANDBOX_SELFHOSTED_ENABLED !== "true") return false;
+  if (environment.OPENGENI_RELAY_BIND) return true;
+  if (!environment.OPENGENI_SELFHOSTED_RELAY_URL) return true;
+  try {
+    const { hostname } = new URL(environment.OPENGENI_SELFHOSTED_RELAY_URL);
+    return hostname === "localhost" || hostname === "127.0.0.1";
+  } catch {
+    throw new Error("Invalid OPENGENI_SELFHOSTED_RELAY_URL; no services were started.");
+  }
+}
+
 /** Called by the runtime resolver BEFORE a source fallback build. Independent of
  * infrastructure: no Docker/PG/service checks, installs, or generated files. */
 export async function collectDevelopmentSourceBuildPrerequisites(
@@ -308,8 +322,7 @@ export async function collectDevelopmentSourceBuildPrerequisites(
   const repositoryRoot = options.repositoryRoot ?? resolve(import.meta.dir, "..");
   const environment = options.environment ?? process.env;
   const relayRuntime =
-    options.relayRuntime ??
-    (environment.OPENGENI_SANDBOX_SELFHOSTED_ENABLED === "true" ? "source-build" : "disabled");
+    options.relayRuntime ?? (needsLocalRelay(environment) ? "source-build" : "disabled");
   const host = suppliedHost ?? createPrerequisiteHost(environment, repositoryRoot);
   const errors = sourceBuildHostErrors({
     ...options,
@@ -331,23 +344,38 @@ export async function collectDevelopmentSourceBuildPrerequisites(
     const channel = parsed.toolchain.channel;
     if (!/^\d+\.\d+\.\d+$/u.test(channel))
       throw new Error("Invalid pinned artifact Rust toolchain");
-    await requireProbe(
-      "rustup",
-      ["run", channel, "rustc", "--version"],
-      `Artifact source-build requires pinned Rust ${channel}. Run: rustup toolchain install ${channel} --profile minimal --no-self-update. Or supply a source/host/integrity-verified prebuilt artifact runtime through the launcher.`,
-      new RegExp(`^rustc ${channel.replaceAll(".", "\\.")}\\s`, "u"),
-    );
-    await requireProbe(
-      "rustup",
-      ["run", channel, "cargo", "--version"],
-      `Artifact source-build requires cargo in Rust ${channel}. Run: rustup toolchain install ${channel} --profile minimal --no-self-update.`,
-    );
-    if (host.platform === "win32") {
+    const rustc = await host.probe("rustup", ["run", channel, "rustc", "--version"]);
+    // The build's ensureArtifactKernelRustToolchain owns installing the exact
+    // pin. A missing pin is not a missing host prerequisite unless opted out.
+    if (rustc.ok || environment.RUSTUP_AUTO_INSTALL === "0") {
+      if (
+        !rustc.ok ||
+        !new RegExp(`^rustc ${channel.replaceAll(".", "\\.")}\\s`, "u").test(rustc.stdout)
+      )
+        errors.push(
+          `Artifact source-build requires pinned Rust ${channel}. Run: rustup toolchain install ${channel} --profile minimal --no-self-update.${environment.RUSTUP_AUTO_INSTALL === "0" ? " RUSTUP_AUTO_INSTALL=0 forbids automatic setup." : ""}`,
+        );
+      await requireProbe(
+        "rustup",
+        ["run", channel, "cargo", "--version"],
+        `Artifact source-build requires cargo in Rust ${channel}. Run: rustup toolchain install ${channel} --profile minimal --no-self-update.`,
+      );
+    }
+    if (host.platform === "win32" && rustc.ok) {
       await requireProbe(
         "rustup",
         ["run", channel, "rustc", "-vV"],
         `Standalone Windows artifact builds require the x86_64-pc-windows-msvc Rust host, not GNU/MinGW. Configure rustup set default-host x86_64-pc-windows-msvc, install Rust ${channel}, and use the MSVC x64 Native Tools Command Prompt.`,
         /^host: x86_64-pc-windows-msvc\r?$/mu,
+      );
+    } else if (host.platform === "win32") {
+      // No installed pin yet: inspect rustup's selected host without installing
+      // anything. Do not let source fallback silently select GNU/MinGW.
+      await requireProbe(
+        "rustup",
+        ["show"],
+        "Standalone Windows artifact builds require the x86_64-pc-windows-msvc Rust host, not GNU/MinGW. Configure rustup set default-host x86_64-pc-windows-msvc.",
+        /^Default host: x86_64-pc-windows-msvc\r?$/mu,
       );
     }
   }
@@ -404,7 +432,8 @@ export function createPrerequisiteHost(
     arch: process.arch,
     uid: process.getuid?.() ?? -1,
     bunVersion: Bun.version,
-    which: (command) => Bun.which(command, { PATH: environment.PATH }),
+    which: (command) =>
+      Bun.which(command, environment.PATH === undefined ? undefined : { PATH: environment.PATH }),
     readable: (path) => accessible(path, constants.R_OK),
     executable: (path) => accessible(path, constants.X_OK),
     probe: async (command, args) => {

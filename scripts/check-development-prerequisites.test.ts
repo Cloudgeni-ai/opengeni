@@ -234,6 +234,71 @@ describe("backend-aware read-only preflight", () => {
     ]);
   });
 
+  test("missing artifact pin defers to build-time installation unless explicitly forbidden", async () => {
+    for (const environment of [{}, { RUSTUP_AUTO_INSTALL: "1" }, { RUSTUP_AUTO_INSTALL: "0" }]) {
+      const { host, commands } = fixture();
+      host.probe = (command, args) => {
+        commands.push([command, ...args].join(" "));
+        return { ok: false, stdout: "unavailable-pin" };
+      };
+      const errors = await collectDevelopmentSourceBuildPrerequisites(
+        { artifactRuntime: "source-build", relayRuntime: "disabled", environment },
+        host,
+      );
+      if (environment.RUSTUP_AUTO_INSTALL === "0") {
+        expect(errors).toHaveLength(2);
+        expect(errors[0]).toContain("RUSTUP_AUTO_INSTALL=0 forbids automatic setup");
+      } else {
+        expect(errors).toEqual([]);
+        expect(commands).toEqual(["rustup run 1.97.0 rustc --version"]);
+      }
+      expect(commands.every((command) => !command.includes(" install"))).toBe(true);
+    }
+  });
+
+  test("missing Windows artifact pin checks default MSVC host without blocking automatic installation", async () => {
+    for (const target of ["x86_64-pc-windows-msvc", "x86_64-pc-windows-gnu"]) {
+      const { host } = fixture({ platform: "win32" });
+      host.probe = (_command, args) =>
+        args[0] === "show"
+          ? { ok: true, stdout: `Default host: ${target}\n` }
+          : { ok: false, stdout: "" };
+      const errors = await collectDevelopmentSourceBuildPrerequisites(
+        { artifactRuntime: "source-build", relayRuntime: "disabled", environment: {} },
+        host,
+      );
+      expect(errors).toEqual(
+        target.endsWith("msvc") ? [] : [expect.stringContaining("not GNU/MinGW")],
+      );
+    }
+  });
+
+  test("relay Rust requirements match local relay ownership, not just selfhosted enablement", async () => {
+    for (const [url, bind, enabled, local] of [
+      [undefined, undefined, "true", true],
+      ["ws://127.0.0.1:8280", undefined, "true", true],
+      ["ws://localhost:8280", undefined, "true", true],
+      ["wss://relay.example.test", undefined, "true", false],
+      ["wss://relay.example.test", "0.0.0.0:8280", "true", true],
+      ["ws://localhost:8280", "0.0.0.0:8280", "false", false],
+    ] as const) {
+      const { host, commands } = fixture({ which: () => null });
+      const errors = await collectDevelopmentSourceBuildPrerequisites(
+        {
+          artifactRuntime: "verified-prebuilt",
+          environment: {
+            OPENGENI_SANDBOX_SELFHOSTED_ENABLED: enabled,
+            OPENGENI_SELFHOSTED_RELAY_URL: url,
+            OPENGENI_RELAY_BIND: bind,
+          },
+        },
+        host,
+      );
+      expect(errors).toHaveLength(local ? 3 : 0);
+      expect(commands).toEqual([]);
+    }
+  });
+
   test("MinIO is explicit, pinned, and does not require Garage", async () => {
     const { host, commands } = fixture();
     const options = {
