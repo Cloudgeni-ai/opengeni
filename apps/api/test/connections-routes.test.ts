@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { mcpAccountRouteId } from "@opengeni/core";
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
@@ -18,13 +19,20 @@ import {
   type Permission,
 } from "@opengeni/contracts";
 import {
+  createApiKey,
   createConnection,
+  createOrganizationApiKey,
+  ensureExternalIdentity,
+  grantWorkspaceAccess,
   createDb,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
   getConnectionMetadata,
+  getSessionTurnPersonalConnectionDelegations,
   listConnectionsMetadata,
   loadIntegrationOAuthClient,
+  loadIntegrationOAuthPendingState,
+  storeIntegrationOAuthPendingState,
   loadConnectionCredentialForBroker,
   loadWorkspaceOpenRouterApiKey,
   loadWorkspaceVercelAiGatewayApiKey,
@@ -34,6 +42,7 @@ import {
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
   acquireSharedTestDatabase,
+  MemoryEventBus,
   startTestMcpServer,
   testSettings,
   type SharedTestDatabase,
@@ -43,9 +52,7 @@ import postgres from "postgres";
 import {
   OFFICIAL_GMAIL_MCP_SCOPES,
   OFFICIAL_GMAIL_MCP_URL,
-  assertOfficialGmailPersonalOwnership,
   assertGoogleAuthorizationServer,
-  assertHostedSlackMcpPersonalOwnership,
   assertSlackAuthorizationServer,
   buildAuthorizationUrl,
   chooseMcpAuthorizeScopes,
@@ -63,6 +70,28 @@ let settings: Settings;
 
 const rawKey = randomBytes(32);
 const encryptionKey = rawKey.toString("base64");
+
+async function readMcpOAuthState(referenceState: string): Promise<Record<string, unknown>> {
+  const reference = readSignedState(referenceState, STATE_SECRET) as Record<string, unknown> | null;
+  if (
+    reference?.kind !== "mcp_oauth_reference" ||
+    typeof reference.id !== "string" ||
+    typeof reference.accountId !== "string" ||
+    typeof reference.workspaceId !== "string"
+  ) {
+    throw new Error("expected a short MCP OAuth state reference");
+  }
+  const encrypted = await loadIntegrationOAuthPendingState(client.db, {
+    id: reference.id,
+    accountId: reference.accountId,
+    workspaceId: reference.workspaceId,
+  });
+  if (!encrypted) throw new Error("pending MCP OAuth state missing");
+  const fullState = decryptEnvironmentValue(rawKey, encrypted);
+  const payload = readSignedState(fullState, STATE_SECRET);
+  if (!payload) throw new Error("pending MCP OAuth state invalid");
+  return payload as Record<string, unknown>;
+}
 
 async function acquireDatabase(): Promise<SharedTestDatabase | null> {
   const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
@@ -137,6 +166,7 @@ beforeAll(async () => {
     delegationSecret: DELEGATION_SECRET,
     environmentsEncryptionKey: encryptionKey,
     integrationsEnabled: true,
+    integrationsOauthShortStateEnabled: true,
     integrationsStateSecret: STATE_SECRET,
     publicBaseUrl: "https://api.opengeni.test",
   }) as Settings;
@@ -486,46 +516,40 @@ describe("official Gmail MCP OAuth compatibility", () => {
       }),
     ).toEqual([...OFFICIAL_GMAIL_MCP_SCOPES]);
   });
-
-  test("requires every Gmail OAuth connection to be personal", () => {
-    expect(() =>
-      assertOfficialGmailPersonalOwnership(OFFICIAL_GMAIL_MCP_URL, "personal"),
-    ).not.toThrow();
-    expect(() => assertOfficialGmailPersonalOwnership(OFFICIAL_GMAIL_MCP_URL, "workspace")).toThrow(
-      "Gmail connections are personal only",
-    );
-  });
-
-  test("requires every hosted Slack MCP OAuth connection to be personal", () => {
-    expect(() => assertHostedSlackMcpPersonalOwnership(true, "personal")).not.toThrow();
-    expect(() => assertHostedSlackMcpPersonalOwnership(false, "workspace")).not.toThrow();
-    expect(() => assertHostedSlackMcpPersonalOwnership(true, "workspace")).toThrow(
-      "Slack's hosted MCP connection is personal only",
-    );
-  });
 });
 
 describe("connections routes", () => {
-  test("rejects workspace-owned Gmail OAuth before contacting Google", async () => {
-    if (!available) return;
+  test("superseded host registration routes are absent", async () => {
+    if (!available) throw new Error("Real database required");
     const workspace = await freshWorkspace();
-    const response = await app().request(
-      `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
-      {
-        method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          providerDomain: "gmailmcp.googleapis.com",
-          mcpUrl: OFFICIAL_GMAIL_MCP_URL,
-          ownership: "workspace",
-        }),
-      },
-    );
-    expect(response.status).toBe(422);
-    expect(await response.text()).toContain("Gmail connections are personal only");
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", [
+        "connections:read",
+        "connections:write",
+      ]),
+      "content-type": "application/json",
+    };
+    const api = app();
+    const id = crypto.randomUUID();
+    for (const path of [
+      `/v1/workspaces/${workspace.workspaceId}/host-mcp-bindings`,
+      `/v1/workspaces/${workspace.workspaceId}/host-mcp-bindings/${id}`,
+      `/v1/workspaces/${workspace.workspaceId}/host-mcp-delegations`,
+      `/v1/workspaces/${workspace.workspaceId}/host-mcp-delegations/${id}`,
+      `/v1/organizations/${workspace.accountId}/mcp-credential-resolvers/example`,
+    ]) {
+      for (const method of ["GET", "POST", "PUT"] as const) {
+        expect(
+          (
+            await api.request(path, {
+              method,
+              headers,
+              ...(method === "GET" ? {} : { body: "{}" }),
+            })
+          ).status,
+        ).toBe(404);
+      }
+    }
   });
 
   test("manual connection ownership defaults to workspace and personal binds only the caller", async () => {
@@ -614,7 +638,7 @@ describe("connections routes", () => {
       );
       expect(response.status).toBe(200);
       const body = (await response.json()) as { state: string };
-      const payload = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      const payload = await readMcpOAuthState(body.state);
       expect(payload.ownership).toBe("personal");
       expect(payload.personalOwnerVerified).toBe(true);
 
@@ -997,7 +1021,11 @@ describe("connections routes", () => {
     });
     expect(first.status).toBe(201);
     const firstConnection = (await first.json()) as {
-      connection: { id: string; version: number; metadata: Record<string, unknown> };
+      connection: {
+        id: string;
+        version: number;
+        metadata: Record<string, unknown>;
+      };
     };
     expect(
       firstConnection.connection.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY],
@@ -1034,7 +1062,9 @@ describe("connections routes", () => {
       body: body("gateway-first", firstOperationId),
     });
     expect(retried.status).toBe(201);
-    const retriedConnection = (await retried.json()) as { connection: { id: string } };
+    const retriedConnection = (await retried.json()) as {
+      connection: { id: string };
+    };
     expect(retriedConnection.connection.id).toBe(firstConnection.connection.id);
     expect(
       (
@@ -1144,7 +1174,11 @@ describe("connections routes", () => {
     );
     expect(patched.status).toBe(200);
     const patchedConnection = (await patched.json()) as {
-      connection: { id: string; version: number; metadata: Record<string, unknown> };
+      connection: {
+        id: string;
+        version: number;
+        metadata: Record<string, unknown>;
+      };
     };
     expect(patchedConnection.connection.id).not.toBe(firstConnection.connection.id);
     expect(
@@ -1303,7 +1337,11 @@ describe("connections routes", () => {
     });
     expect(created.status).toBe(201);
     const createdConnection = (await created.json()) as {
-      connection: { id: string; version: number; metadata: Record<string, unknown> };
+      connection: {
+        id: string;
+        version: number;
+        metadata: Record<string, unknown>;
+      };
     };
     expect(
       createdConnection.connection.metadata[OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY],
@@ -1360,7 +1398,11 @@ describe("connections routes", () => {
     );
     expect(rotated.status).toBe(200);
     const rotatedConnection = (await rotated.json()) as {
-      connection: { id: string; version: number; metadata: Record<string, unknown> };
+      connection: {
+        id: string;
+        version: number;
+        metadata: Record<string, unknown>;
+      };
     };
     expect(rotatedConnection.connection.id).not.toBe(createdConnection.connection.id);
     expect(
@@ -1714,6 +1756,915 @@ describe("connections routes", () => {
     expect(convert.status).toBe(422);
   });
 
+  test.each(["external_user", "organization_service"] as const)(
+    "native gateway uses connections and rejects revoked keys for %s",
+    async (kind) => {
+      if (!available) throw new Error("Real database required for native gateway verification");
+      const workspace = await freshWorkspace();
+      const token = randomUUID();
+      const permissions: Permission[] = ["workspace:read"];
+      const key = await createOrganizationApiKey(client.db, {
+        accountId: workspace.accountId,
+        name: "Native gateway fixture",
+        prefix: "test",
+        keyHash: createHash("sha256").update(token).digest("hex"),
+        permissions,
+      });
+      const identity = await ensureExternalIdentity(client.db, {
+        accountId: workspace.accountId,
+        externalId: "gateway-owner",
+      });
+      await grantWorkspaceAccess(client.db, {
+        ...workspace,
+        subjectId: identity.subjectId,
+        permissions,
+      });
+      const mcp = startTestMcpServer({ requiredAuthorization: "Bearer synthetic-gateway" });
+      const connection = await createConnection(client.db, {
+        ...workspace,
+        subjectId: kind === "external_user" ? identity.subjectId : null,
+        providerDomain: new URL(mcp.url).hostname,
+        kind: "oauth2",
+        credentialEncrypted: encryptEnvironmentValue(
+          rawKey,
+          JSON.stringify({ access_token: "synthetic-gateway", token_type: "Bearer" }),
+        ),
+        metadata: { mcpUrl: mcp.url },
+        createdBySubjectId: identity.subjectId,
+      });
+      const gatewayApi = (requireApproval = false) =>
+        appWithDeps(
+          {
+            mcpServers: [
+              {
+                id: "native-fixture",
+                name: "Native fixture",
+                url: mcp.url,
+                cacheToolsList: false,
+                requireApproval,
+                connectionRef: {
+                  connectionId: connection.id,
+                  subjectScope: kind === "external_user" ? "subject" : "workspace",
+                  providerDomain: new URL(mcp.url).hostname,
+                },
+              },
+            ],
+          },
+          {},
+        );
+      const api = gatewayApi();
+      const headers = {
+        authorization: `Bearer ${token}`,
+        ...(kind === "external_user"
+          ? {
+              "x-opengeni-external-actor": encodeURIComponent(
+                JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+              ),
+            }
+          : {}),
+      };
+      const path = `/v1/workspaces/${workspace.workspaceId}/tools/catalog`;
+      try {
+        const response = await api.request(path, { headers });
+        expect(response.status).toBe(200);
+        const catalog = await response.json();
+        expect(JSON.stringify(catalog)).toContain("native-fixture");
+        expect(mcp.requests.some((request) => request.jsonRpcMethod === "tools/list")).toBe(true);
+        const call = {
+          operationId: randomUUID(),
+          catalogDigest: catalog.digest,
+          identity: { serverId: "native-fixture", toolName: "search_documents" },
+          arguments: { query: "embedding fixture" },
+        };
+        const post = (route: string, body: unknown) =>
+          api.request(`/v1/workspaces/${workspace.workspaceId}/tools/${route}`, {
+            method: "POST",
+            headers: { ...headers, "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+        const approval = await post("approvals", call);
+        expect(approval.status).toBe(422);
+        expect(mcp.calls).toHaveLength(0);
+        expect((await post("calls", call)).status).toBe(200);
+        expect(mcp.calls).toEqual([{ tool: "search_documents", args: call.arguments }]);
+        const guardedCatalog = await gatewayApi(true).request(path, { headers });
+        expect(guardedCatalog.status).toBe(200);
+        expect((await guardedCatalog.json()).entries).toEqual([]);
+        expect(mcp.calls).toHaveLength(1);
+        const requestsBeforeOutsider = mcp.requests.length;
+        const outsider = await api.request(path, {
+          headers: {
+            ...headers,
+            "x-opengeni-external-actor": encodeURIComponent(
+              JSON.stringify({
+                mode: "external",
+                identity: { externalId: "not-a-workspace-member" },
+              }),
+            ),
+          },
+        });
+        expect(outsider.status).toBe(403);
+        expect(mcp.requests).toHaveLength(requestsBeforeOutsider);
+        const before = mcp.requests.length;
+        await shared!
+          .admin`update api_keys set revoked_at = clock_timestamp() where id = ${key.id}`;
+        expect((await post("calls", { ...call, operationId: randomUUID() })).status).toBe(401);
+        expect(mcp.requests).toHaveLength(before);
+        expect(mcp.calls).toHaveLength(1);
+        expect((await api.request(path, { headers })).status).toBe(401);
+        expect(mcp.requests).toHaveLength(before);
+      } finally {
+        mcp.close();
+      }
+    },
+  );
+
+  test("external generic MCP OAuth preserves exact return and rechecks key authority before exchange and persistence", async () => {
+    if (!available) {
+      if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+        throw new Error("External MCP OAuth authority verification requires PostgreSQL");
+      }
+      return;
+    }
+    const workspace = await freshWorkspace();
+    const token = randomUUID();
+    const key = await createOrganizationApiKey(client.db, {
+      accountId: workspace.accountId,
+      name: "External MCP fixture",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: [
+        "workspace:read",
+        "connections:read",
+        "connections:write",
+        "sessions:create",
+        "sessions:read",
+        "sessions:control",
+        "scheduled_tasks:manage",
+      ],
+    });
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: workspace.accountId,
+      externalId: "opaque-host-user-for-mcp",
+    });
+    await grantWorkspaceAccess(client.db, {
+      ...workspace,
+      subjectId: identity.subjectId,
+      permissions: [
+        "workspace:read",
+        "connections:read",
+        "connections:write",
+        "sessions:create",
+        "sessions:read",
+        "sessions:control",
+        "scheduled_tasks:manage",
+      ],
+    });
+    let revokeDuringExchange = false;
+    const as = startFakeAuthorizationServer({
+      clientIdMetadataDocumentSupported: true,
+      onTokenRequest: async () => {
+        if (revokeDuringExchange)
+          await shared!.admin`update api_keys set revoked_at = now() where id = ${key.id}`;
+      },
+    });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="documents:read"`,
+    });
+    const returnUrl = "https://HOST.example:443/Done?x=%2f#fragment";
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+      ),
+    };
+    const api = app();
+    const begin = async () => {
+      const response = await api.request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            providerDomain: "external-mcp.example",
+            mcpUrl: mcp.url,
+            returnUrl,
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.state.length).toBeLessThan(1024);
+      const state = await readMcpOAuthState(body.state);
+      expect(typeof state.encryptedExternalContinuation).toBe("string");
+      expect(state.returnUrl).toBe(returnUrl);
+      expect(JSON.stringify(state)).not.toContain(identity.externalId);
+      return body.state as string;
+    };
+    const callback = (state: string) =>
+      api.request(
+        `/v1/integrations/oauth/callback?code=fixture&state=${encodeURIComponent(state)}`,
+      );
+    try {
+      const direct = await api.request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerDomain: "external-manual.example",
+          kind: "api_key",
+          ownership: "personal",
+          credential: { headers: { "x-api-key": "synthetic-never-returned" } },
+        }),
+      });
+      expect(direct.status).toBe(201);
+      const directBody = await direct.json();
+      expect(directBody.connection.subjectId).toBe(identity.subjectId);
+      expect(JSON.stringify(directBody)).not.toContain("synthetic-never-returned");
+      const oauthCredential = {
+        access_token: "synthetic-provisioned-access",
+        refresh_token: "synthetic-provisioned-refresh",
+        token_endpoint: `${as.url}/token`,
+        client_id: "synthetic-application-client",
+        token_endpoint_auth_method: "none",
+      };
+      const provisioningOperationId = randomUUID();
+      const provisioningPayload = {
+        providerDomain: "provisioned-mcp.example",
+        kind: "oauth2",
+        ownership: "personal",
+        credential: oauthCredential,
+        grantedScopes: ["documents:read"],
+        operationId: provisioningOperationId,
+      };
+      const provision = (payload = provisioningPayload) =>
+        api.request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+        });
+      await shared!.admin`
+        insert into session_tenancy_activations (
+          account_id, activation_version, inventory_digest, parity_digest, activated_by
+        ) values (${workspace.accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'oauth-admission-fixture')
+        on conflict do nothing
+      `;
+      const [provisioned, simultaneousProvision] = await Promise.all([provision(), provision()]);
+      expect(provisioned.status).toBe(201);
+      const provisionedBody = await provisioned.json();
+      expect(simultaneousProvision.status).toBe(201);
+      expect((await simultaneousProvision.json()).connection.id).toBe(
+        provisionedBody.connection.id,
+      );
+      expect(provisionedBody.connection).toMatchObject({
+        subjectId: identity.subjectId,
+        kind: "oauth2",
+        grantedScopes: ["documents:read"],
+      });
+      expect(JSON.stringify(provisionedBody)).not.toContain(oauthCredential.access_token);
+      expect(JSON.stringify(provisionedBody)).not.toContain(oauthCredential.refresh_token);
+      const recoveryPath = `/v1/workspaces/${workspace.workspaceId}/connections/operations/${provisioningOperationId}`;
+      const recovered = await api.request(recoveryPath, { headers });
+      expect(recovered.status).toBe(200);
+      expect(await recovered.json()).toEqual(provisionedBody);
+      const administratorRecovery = await api.request(recoveryPath, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(administratorRecovery.status).toBe(404);
+      expect(
+        (
+          await api.request(
+            `/v1/workspaces/${workspace.workspaceId}/connections/operations/${randomUUID()}`,
+            { headers },
+          )
+        ).status,
+      ).toBe(404);
+      const provisionedCredential = await loadConnectionCredentialForBroker(client.db, settings, {
+        workspaceId: workspace.workspaceId,
+        connectionId: provisionedBody.connection.id,
+        providerDomain: "provisioned-mcp.example",
+        subjectId: identity.subjectId,
+        allowSubjectOwned: true,
+      });
+      expect(provisionedCredential?.credential).toEqual(oauthCredential);
+      const initialGrants = await shared!.admin`
+        select id, context, status from organization_user_resource_grants
+        where authority_id = ${provisionedBody.connection.authorityId}
+      `;
+      expect(initialGrants).toHaveLength(0);
+      const granted = await api.request(
+        `/v1/workspaces/${workspace.workspaceId}/connection-authorities/${provisionedBody.connection.authorityId}/grants`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            scope: "user",
+            mode: "always",
+            context: "workspace_shared",
+            workspaceSharedAcknowledged: true,
+          }),
+        },
+      );
+      expect(granted.status).toBe(404);
+      const sessionApi = appWithDeps(
+        {
+          sandboxBackend: "none",
+          mcpServers: [
+            {
+              id: "provisioned",
+              url: mcp.url,
+              transport: "streamable_http",
+              connectionRef: {
+                subjectScope: "subject",
+                providerDomain: "provisioned-mcp.example",
+                kind: "oauth2",
+              },
+            },
+          ],
+        },
+        {
+          bus: new MemoryEventBus(),
+          workflowClient: {
+            wakeSessionWorkflow: async () => {},
+            requestSessionWorkflowWakeDispatch: async () => {},
+            syncScheduledTask: async () => {},
+          },
+        },
+      );
+      const started = await sessionApi.request(`/v1/workspaces/${workspace.workspaceId}/sessions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          initialMessage: "Use the connected service",
+          idempotencyKey: randomUUID(),
+          visibility: "workspace",
+          tools: [{ kind: "mcp", id: "provisioned" }],
+          sandboxBackend: "none",
+        }),
+      });
+      expect(started.status).toBe(202);
+      const admitted = await started.json();
+      expect(admitted.id).toBeString();
+      expect(admitted.initialTurnId).toBeString();
+      const acceptedRouteId = mcpAccountRouteId("provisioned", provisionedBody.connection.id);
+      const acceptedDelegation = {
+        serverId: acceptedRouteId,
+        canonicalServerId: "provisioned",
+        connectionId: provisionedBody.connection.id,
+        originWorkspaceId: provisionedBody.connection.workspaceId,
+        ownerSubjectId: identity.subjectId,
+        providerDomain: "provisioned-mcp.example",
+        kind: "oauth2",
+        connectionType: "mcp",
+      };
+      const capturedOAuth = await shared!.admin`
+        select personal_connection_delegations, mcp_account_bindings from session_turns
+        where workspace_id = ${workspace.workspaceId} and session_id = ${admitted.id}
+          and id = ${admitted.initialTurnId}
+      `;
+      expect(capturedOAuth[0]?.personal_connection_delegations).toEqual([acceptedDelegation]);
+      expect(capturedOAuth[0]?.mcp_account_bindings).toMatchObject([
+        {
+          serverId: acceptedRouteId,
+          canonicalServerId: "provisioned",
+          connectionId: provisionedBody.connection.id,
+          ownerSubjectId: identity.subjectId,
+          subjectScope: "subject",
+          connectionRef: { connectionId: provisionedBody.connection.id, subjectScope: "subject" },
+        },
+      ]);
+      expect(
+        await getSessionTurnPersonalConnectionDelegations(
+          client.db,
+          workspace.workspaceId,
+          admitted.id,
+          admitted.initialTurnId,
+        ),
+      ).toEqual([acceptedDelegation]);
+      const retries = await Promise.all([provision(), provision()]);
+      const continued = await sessionApi.request(
+        `/v1/workspaces/${workspace.workspaceId}/sessions/${admitted.id}/events`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            type: "user.message",
+            clientEventId: randomUUID(),
+            payload: { text: "Continue with my connection" },
+          }),
+        },
+      );
+      expect(continued.status).toBe(202);
+      const continuedCaptures = await shared!.admin`
+        select personal_connection_delegations, mcp_account_bindings from session_turns
+        where workspace_id = ${workspace.workspaceId} and session_id = ${admitted.id}
+      `;
+      expect(continuedCaptures).toHaveLength(2);
+      for (const captured of continuedCaptures) {
+        expect(captured.personal_connection_delegations).toEqual([acceptedDelegation]);
+        expect(captured.mcp_account_bindings).toEqual(capturedOAuth[0]?.mcp_account_bindings);
+      }
+      for (const runMode of ["existing_session", "new_session_per_run"] as const) {
+        const scheduled = await sessionApi.request(
+          `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              name: "Connected service task",
+              schedule: { type: "manual" },
+              runMode,
+              ...(runMode === "existing_session" ? { targetSessionId: admitted.id } : {}),
+              agentConfig: {
+                prompt: "Use my connected service",
+                tools: [{ kind: "mcp", id: "provisioned" }],
+              },
+            }),
+          },
+        );
+        expect(scheduled.status).toBe(201);
+        const task = await scheduled.json();
+        const capturedTask = await shared!.admin`
+          select owner_subject_id from scheduled_tasks
+          where workspace_id = ${workspace.workspaceId} and id = ${task.id}
+        `;
+        expect(capturedTask[0]?.owner_subject_id).toBe(identity.subjectId);
+      }
+      for (const retry of retries) {
+        expect(retry.status).toBe(201);
+        expect((await retry.json()).connection.id).toBe(provisionedBody.connection.id);
+      }
+      const conflictingRetry = await provision({
+        ...provisioningPayload,
+        grantedScopes: ["documents:write"],
+      });
+      expect(conflictingRetry.status).toBe(409);
+      const otherUser = await ensureExternalIdentity(client.db, {
+        accountId: workspace.accountId,
+        externalId: "second-connected-user",
+      });
+      await grantWorkspaceAccess(client.db, {
+        ...workspace,
+        subjectId: otherUser.subjectId,
+        permissions: [
+          "workspace:read",
+          "connections:read",
+          "connections:write",
+          "sessions:read",
+          "sessions:create",
+          "sessions:control",
+        ],
+      });
+      const otherHeaders = {
+        ...headers,
+        "x-opengeni-external-actor": encodeURIComponent(
+          JSON.stringify({
+            mode: "external",
+            identity: { externalId: otherUser.externalId },
+          }),
+        ),
+      };
+      const otherProvision = await api.request(
+        `/v1/workspaces/${workspace.workspaceId}/connections`,
+        {
+          method: "POST",
+          headers: otherHeaders,
+          body: JSON.stringify({
+            ...provisioningPayload,
+            operationId: randomUUID(),
+            credential: { ...oauthCredential, access_token: "second-synthetic-token" },
+          }),
+        },
+      );
+      expect(otherProvision.status).toBe(201);
+      const otherConnection = (await otherProvision.json()).connection;
+      const otherDelegation = {
+        ...acceptedDelegation,
+        serverId: mcpAccountRouteId("provisioned", otherConnection.id),
+        connectionId: otherConnection.id,
+        originWorkspaceId: otherConnection.workspaceId,
+        ownerSubjectId: otherUser.subjectId,
+      };
+      expect(otherDelegation.serverId).not.toBe(acceptedRouteId);
+      const otherGrant = await api.request(
+        `/v1/workspaces/${workspace.workspaceId}/connection-authorities/${otherConnection.authorityId}/grants`,
+        {
+          method: "POST",
+          headers: otherHeaders,
+          body: JSON.stringify({
+            scope: "user",
+            mode: "always",
+            context: "workspace_shared",
+            workspaceSharedAcknowledged: true,
+          }),
+        },
+      );
+      expect(otherGrant.status).toBe(404);
+      const switchedUser = await sessionApi.request(
+        `/v1/workspaces/${workspace.workspaceId}/sessions/${admitted.id}/events`,
+        {
+          method: "POST",
+          headers: otherHeaders,
+          body: JSON.stringify({
+            type: "user.message",
+            clientEventId: randomUUID(),
+            payload: { text: "Use my own connected account" },
+          }),
+        },
+      );
+      expect(switchedUser.status).toBe(202);
+      const sharedCaptures = await shared!.admin`
+        select personal_connection_delegations from session_turns
+        where workspace_id = ${workspace.workspaceId} and session_id = ${admitted.id}
+      `;
+      expect(sharedCaptures).toHaveLength(3);
+      expect(sharedCaptures.map((row) => row.personal_connection_delegations)).toContainEqual([
+        otherDelegation,
+      ]);
+      const draftPath = `/v1/workspaces/${workspace.workspaceId}/sessions/${admitted.id}/composer-draft`;
+      const currentDraftResponse = await sessionApi.request(draftPath, { headers: otherHeaders });
+      expect(currentDraftResponse.status).toBe(200);
+      const currentDraft = await currentDraftResponse.json();
+      const savedResponse = await sessionApi.request(draftPath, {
+        method: "PUT",
+        headers: otherHeaders,
+        body: JSON.stringify({
+          expectedRevision: currentDraft.revision,
+          text: "Continue from the browser composer",
+          annotations: [],
+          resources: [],
+          model: admitted.model,
+          reasoningEffort: admitted.reasoningEffort,
+          latencyMode: "standard",
+        }),
+      });
+      expect(savedResponse.status).toBe(200);
+      const savedDraft = await savedResponse.json();
+      const submitResponse = await sessionApi.request(`${draftPath}/submit`, {
+        method: "POST",
+        headers: otherHeaders,
+        body: JSON.stringify({
+          expectedDraftRevision: savedDraft.revision,
+          clientEventId: randomUUID(),
+          delivery: "send",
+          text: savedDraft.text,
+          annotations: savedDraft.annotations,
+          resources: savedDraft.resources,
+          model: savedDraft.model,
+          reasoningEffort: savedDraft.reasoningEffort,
+          latencyMode: savedDraft.latencyMode,
+        }),
+      });
+      expect(submitResponse.status).toBe(202);
+      const composerCaptures = await shared!.admin`
+        select personal_connection_delegations from session_turns
+        where workspace_id = ${workspace.workspaceId} and session_id = ${admitted.id}
+      `;
+      expect(composerCaptures).toHaveLength(4);
+      expect(
+        composerCaptures
+          .filter(
+            (row) => row.personal_connection_delegations[0]?.connectionId === otherConnection.id,
+          )
+          .map((row) => row.personal_connection_delegations),
+      ).toEqual([[otherDelegation], [otherDelegation]]);
+      expect((await provision()).status).toBe(201);
+      const grantsAfterReplay = await shared!.admin`
+        select id, context, status from organization_user_resource_grants
+        where authority_id = ${provisionedBody.connection.authorityId}
+      `;
+      expect(grantsAfterReplay).toHaveLength(0);
+      const disconnected = await api.request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/${provisionedBody.connection.id}`,
+        { method: "DELETE", headers },
+      );
+      expect(disconnected.status).toBe(200);
+      const replayAfterDisconnect = await provision();
+      expect(replayAfterDisconnect.status).toBe(201);
+      expect((await replayAfterDisconnect.json()).connection).toMatchObject({
+        id: provisionedBody.connection.id,
+        status: "revoked",
+      });
+      const recoveredAfterDisconnect = await api.request(recoveryPath, { headers });
+      expect(recoveredAfterDisconnect.status).toBe(200);
+      expect((await recoveredAfterDisconnect.json()).connection).toMatchObject({
+        id: provisionedBody.connection.id,
+        status: "revoked",
+      });
+      const first = await begin();
+      expect((await callback(first)).headers.get("location")).toBe(returnUrl);
+      expect(as.tokenRequests).toHaveLength(1);
+      expect(
+        (
+          await listConnectionsMetadata(client.db, workspace.workspaceId, identity.subjectId)
+        ).filter((row) => row.providerDomain === "external-mcp.example"),
+      ).toHaveLength(1);
+      expect((await callback(first)).headers.get("location")).toBe(returnUrl);
+      expect(as.tokenRequests).toHaveLength(1);
+      const second = await begin();
+      revokeDuringExchange = true;
+      expect((await callback(second)).headers.get("location")).toBe(returnUrl);
+      expect(as.tokenRequests).toHaveLength(2);
+      expect(
+        (
+          await listConnectionsMetadata(client.db, workspace.workspaceId, identity.subjectId)
+        ).filter((row) => row.providerDomain === "external-mcp.example"),
+      ).toHaveLength(1);
+      await shared!.admin`update api_keys set revoked_at = null where id = ${key.id}`;
+      const third = await begin();
+      await shared!.admin`update api_keys set revoked_at = now() where id = ${key.id}`;
+      expect((await callback(third)).headers.get("location")).toBe(returnUrl);
+      expect(as.tokenRequests).toHaveLength(2);
+      await shared!.admin`update api_keys set revoked_at = null where id = ${key.id}`;
+      const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+      const customBegin = await api.request(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "mcp-headers",
+          ownership: "personal",
+          returnUrl,
+          idempotencyKey: randomUUID(),
+        }),
+      });
+      expect(customBegin.status).toBe(200);
+      const custom = await customBegin.json();
+      const customSubmit = (values: Record<string, string>) =>
+        api.request(`${base}/${custom.id}/advance`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            expectedRevision: custom.revision,
+            idempotencyKey: "custom-headers-fixture",
+            action: { type: "credentials", values },
+          }),
+        });
+      for (const invalid of [
+        { Host: "wrong.example" },
+        { "X-Key": "a", "x-key": "b" },
+        { "X-Key": "bad\r\nvalue" },
+        {},
+      ]) {
+        expect(
+          (
+            await customSubmit({
+              mcpUrl: "https://mcp.fixture.invalid/custom",
+              headers: JSON.stringify(invalid),
+            })
+          ).status,
+        ).toBe(422);
+      }
+      const customValues = {
+        mcpUrl: "https://mcp.fixture.invalid/custom",
+        headers: JSON.stringify({ "X-Key": "synthetic-custom-secret", "X-Tenant": "fixture" }),
+      };
+      const customResult = await customSubmit(customValues);
+      expect(customResult.status).toBe(200);
+      const customBody = await customResult.json();
+      expect(customBody.state).toBe("complete");
+      expect(JSON.stringify(customBody)).not.toContain("synthetic-custom-secret");
+      expect(await (await customSubmit(customValues)).json()).toEqual(customBody);
+      const manualBegin = await api.request(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "mcp-bearer",
+          ownership: "personal",
+          returnUrl,
+          idempotencyKey: randomUUID(),
+        }),
+      });
+      expect(manualBegin.status).toBe(200);
+      const manual = await manualBegin.json();
+      expect(manual.nextAction.fields).toContainEqual({
+        name: "token",
+        label: "Bearer credential",
+        required: true,
+        secret: true,
+      });
+      const manualInput = {
+        expectedRevision: manual.revision,
+        idempotencyKey: randomUUID(),
+        action: {
+          type: "credentials",
+          values: {
+            mcpUrl: "https://mcp.fixture.invalid/tools",
+            token: "synthetic-bearer-never-echoed",
+          },
+        },
+      };
+      const submitManual = () =>
+        api.request(`${base}/${manual.id}/advance`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(manualInput),
+        });
+      const manualResponse = await submitManual();
+      expect(manualResponse.status).toBe(200);
+      const manualResult = await manualResponse.json();
+      expect(manualResult.state).toBe("complete");
+      expect(manualResult.credentialsCommitted).toBe(true);
+      expect(manualResult.integrationInstalled).toBe(false);
+      expect(JSON.stringify(manualResult)).not.toContain("synthetic-bearer-never-echoed");
+      const replayedManual = await submitManual();
+      expect(replayedManual.status).toBe(200);
+      expect(await replayedManual.json()).toEqual(manualResult);
+      const manualAccounts = await api.request(
+        `/v1/workspaces/${workspace.workspaceId}/connect/accounts`,
+        { headers },
+      );
+      expect(await manualAccounts.json()).toContainEqual(
+        expect.objectContaining({ id: manualResult.account.id, providerId: "mcp-bearer" }),
+      );
+      const reconnectManual = await api.request(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "mcp-bearer",
+          ownership: "personal",
+          reconnectAccountId: manualResult.account.id,
+          returnUrl,
+          idempotencyKey: randomUUID(),
+        }),
+      });
+      expect(reconnectManual.status).toBe(200);
+      const manualAgain = await reconnectManual.json();
+      for (const url of [
+        "http://mcp.fixture.invalid/tools",
+        "https://secret@mcp.fixture.invalid/tools",
+        "https://mcp.fixture.invalid/tools#fragment",
+        "https://openrouter.ai/tools",
+      ]) {
+        const invalid = await api.request(`${base}/${manualAgain.id}/advance`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            expectedRevision: manualAgain.revision,
+            idempotencyKey: randomUUID(),
+            action: { type: "credentials", values: { mcpUrl: url, token: "synthetic-new-token" } },
+          }),
+        });
+        expect(invalid.status).toBe(422);
+      }
+      const replaceManual = await api.request(`${base}/${manualAgain.id}/advance`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          expectedRevision: manualAgain.revision,
+          idempotencyKey: randomUUID(),
+          action: {
+            type: "credentials",
+            values: { mcpUrl: "https://mcp.fixture.invalid/tools", token: "synthetic-new-token" },
+          },
+        }),
+      });
+      expect(replaceManual.status).toBe(200);
+      const replacedManual = await replaceManual.json();
+      expect(replacedManual.account.id).toBe(manualResult.account.id);
+      expect(replacedManual.account.version).toBeGreaterThan(manualResult.account.version);
+    } finally {
+      as.close();
+      await mcp.close();
+    }
+  });
+
+  test("external generic MCP Connect commits credentials and attempt together and replays without exchange", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const token = randomUUID();
+    await createOrganizationApiKey(client.db, {
+      accountId: workspace.accountId,
+      name: "MCP Connect fixture",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:read", "connections:read", "connections:write"],
+    });
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: workspace.accountId,
+      externalId: "mcp-connect-fixture",
+    });
+    await grantWorkspaceAccess(client.db, {
+      ...workspace,
+      subjectId: identity.subjectId,
+      permissions: ["workspace:read", "connections:read", "connections:write"],
+    });
+    const as = startFakeAuthorizationServer({ clientIdMetadataDocumentSupported: true });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="documents:read"`,
+    });
+    const api = app();
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+      ),
+    };
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const returnUrl = "https://HOST.example:443/Done?x=%2f#fragment";
+    try {
+      const begun = await api.request(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "mcp-oauth",
+          ownership: "workspace",
+          returnUrl,
+          idempotencyKey: randomUUID(),
+        }),
+      });
+      expect(begun.status).toBe(200);
+      const attempt = await begun.json();
+      expect(attempt.state).toBe("credential_input");
+      const advanced = await api.request(`${base}/${attempt.id}/advance`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          expectedRevision: attempt.revision,
+          idempotencyKey: randomUUID(),
+          action: { type: "credentials", values: { mcpUrl: mcp.url } },
+        }),
+      });
+      expect(advanced.status).toBe(200);
+      const authorization = await advanced.json();
+      expect(authorization.state).toBe("requires_user_action");
+      const state = new URL(authorization.nextAction.url).searchParams.get("state")!;
+      const callback = () =>
+        api.request(
+          `/v1/integrations/oauth/callback?code=fixture&state=${encodeURIComponent(state)}`,
+        );
+      expect((await callback()).headers.get("location")).toBe(returnUrl);
+      const completed = await api.request(`${base}/${attempt.id}`, { headers });
+      expect(completed.status).toBe(200);
+      const result = await completed.json();
+      expect(result.state).toBe("complete");
+      expect(result.credentialsCommitted).toBe(true);
+      expect(result.integrationInstalled).toBe(false);
+      expect(result.completionRequirement).toBe("connection");
+      const accounts = await api.request(
+        `/v1/workspaces/${workspace.workspaceId}/connect/accounts`,
+        { headers },
+      );
+      expect(accounts.status).toBe(200);
+      expect(await accounts.json()).toContainEqual(
+        expect.objectContaining({
+          id: result.account.id,
+          providerId: "mcp-oauth",
+          version: result.account.version,
+        }),
+      );
+      expect(as.tokenRequests).toHaveLength(1);
+      expect((await callback()).headers.get("location")).toBe(returnUrl);
+      expect(as.tokenRequests).toHaveLength(1);
+      const reconnect = await api.request(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "mcp-oauth",
+          ownership: "workspace",
+          reconnectAccountId: result.account.id,
+          returnUrl,
+          idempotencyKey: randomUUID(),
+        }),
+      });
+      expect(reconnect.status).toBe(200);
+      const reconnectAttempt = await reconnect.json();
+      expect(reconnectAttempt.account.id).toBe(result.account.id);
+      const reconnectAdvance = await api.request(`${base}/${reconnectAttempt.id}/advance`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          expectedRevision: reconnectAttempt.revision,
+          idempotencyKey: randomUUID(),
+          action: { type: "credentials", values: { mcpUrl: mcp.url } },
+        }),
+      });
+      expect(reconnectAdvance.status).toBe(200);
+      const reconnectState = new URL(
+        (await reconnectAdvance.json()).nextAction.url,
+      ).searchParams.get("state")!;
+      expect(
+        (
+          await api.request(
+            `/v1/integrations/oauth/callback?code=fixture&state=${encodeURIComponent(reconnectState)}`,
+          )
+        ).headers.get("location"),
+      ).toBe(returnUrl);
+      const reconnected = await (
+        await api.request(`${base}/${reconnectAttempt.id}`, { headers })
+      ).json();
+      expect(reconnected.state).toBe("complete");
+      expect(reconnected.account.id).toBe(result.account.id);
+      expect(reconnected.account.version).toBeGreaterThan(result.account.version);
+      expect(as.tokenRequests).toHaveLength(2);
+    } finally {
+      as.close();
+      await mcp.close();
+    }
+  });
+
   test("oauth start/callback defaults to a verified workspace oauth2 connection and keeps PKCE verifier out of URLs", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1762,8 +2713,13 @@ describe("connections routes", () => {
       expect(authUrl.searchParams.get("code_challenge_method")).toBe("S256");
       expect(as.issuerRootRequests).toEqual([]);
       expect(authUrl.searchParams.has("code_verifier")).toBe(false);
+      expect(body.state.length).toBeLessThan(1024);
+      expect(authUrl.searchParams.get("state")).toBe(body.state);
+      const reference = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      expect(reference.kind).toBe("mcp_oauth_reference");
+      expect(reference.encryptedPkceVerifier).toBeUndefined();
 
-      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
+      const state = await readMcpOAuthState(body.state);
       expect(state?.workspaceId).toBe(workspace.workspaceId);
       expect(state?.accountId).toBe(workspace.accountId);
       expect(state?.subjectId).toBe("subject-a");
@@ -1780,6 +2736,7 @@ describe("connections routes", () => {
 
       const callback = await publicApp(client.db, {
         webBaseUrl: "http://127.0.0.1:3000",
+        integrationsOauthShortStateEnabled: false,
       }).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );
@@ -1840,9 +2797,170 @@ describe("connections routes", () => {
       expect(loaded?.metadata.mcpTools).toEqual(
         expect.arrayContaining([expect.objectContaining({ name: "search_documents" })]),
       );
+
+      const legacyStart = await app({ integrationsOauthShortStateEnabled: false }).request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ providerDomain: "mcp.example.com", mcpUrl: mcp.url }),
+        },
+      );
+      expect(legacyStart.status).toBe(200);
+      const legacyBody = (await legacyStart.json()) as { state: string };
+      expect(readSignedState(legacyBody.state, STATE_SECRET)).toMatchObject({
+        providerDomain: "mcp.example.com",
+        encryptedPkceVerifier: expect.any(String),
+      });
+      const legacyCallback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(legacyBody.state)}`,
+      );
+      expect(legacyCallback.status).toBe(302);
+      expect(legacyCallback.headers.get("location")).toContain("integration_oauth=success");
+      expect(as.tokenRequests).toHaveLength(2);
     } finally {
       mcp.close();
       as.close();
+    }
+  });
+
+  test("oauth start/callback supports legacy metadata behind a protected API catch-all", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const upstreamMcp = startTestMcpServer();
+    const tokenRequests: URLSearchParams[] = [];
+    const metadataRequests: string[] = [];
+    let origin = "";
+    const legacy = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname === "/mcp") {
+          if (request.headers.get("authorization") !== "Bearer legacy-access-token") {
+            return new Response(JSON.stringify({ error: "invalid_token" }), {
+              status: 401,
+              headers: {
+                "content-type": "application/json",
+                "www-authenticate": 'Bearer error="invalid_token", scope="documents:read"',
+              },
+            });
+          }
+          return await fetch(upstreamMcp.url, {
+            method: request.method,
+            headers: request.headers,
+            ...(request.method === "GET" || request.method === "HEAD"
+              ? {}
+              : { body: await request.arrayBuffer() }),
+          });
+        }
+        if (url.pathname.startsWith("/mcp/")) {
+          return new Response("protected API route", { status: 401 });
+        }
+        if (url.pathname.includes("oauth-protected-resource")) {
+          metadataRequests.push(url.pathname);
+          return new Response("not found", { status: 404 });
+        }
+        if (url.pathname === "/.well-known/oauth-authorization-server") {
+          metadataRequests.push(url.pathname);
+          return Response.json({
+            issuer: origin,
+            authorization_endpoint: `${origin}/authorize`,
+            token_endpoint: `${origin}/token`,
+            code_challenge_methods_supported: ["S256"],
+            token_endpoint_auth_methods_supported: ["none"],
+            client_id_metadata_document_supported: true,
+          });
+        }
+        if (url.pathname === "/token") {
+          const body = new URLSearchParams(await request.text());
+          tokenRequests.push(body);
+          return Response.json({
+            access_token: "legacy-access-token",
+            refresh_token: "legacy-refresh-token",
+            token_type: "Bearer",
+            expires_in: 3600,
+            scope: body.get("scope") ?? "documents:read",
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    origin = `http://127.0.0.1:${legacy.port}`;
+    const mcpUrl = `${origin}/mcp`;
+    try {
+      const response = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "legacy.example.com",
+            mcpUrl,
+            returnPath: "/integrations",
+          }),
+        },
+      );
+      const responseText = await response.clone().text();
+      expect(response.status, responseText).toBe(200);
+      const body = (await response.json()) as {
+        state: string;
+        authorizationUrl: string;
+      };
+      const authorizationUrl = new URL(body.authorizationUrl);
+      expect(authorizationUrl.searchParams.get("resource")).toBeNull();
+      expect(authorizationUrl.searchParams.get("scope")).toBe("documents:read");
+      expect(authorizationUrl.searchParams.get("code_challenge_method")).toBe("S256");
+      const state = await readMcpOAuthState(body.state);
+      expect(state).toMatchObject({
+        discoveryMode: "legacy_2025_03_26_metadata",
+        resource: mcpUrl,
+        resourceParameterSupported: false,
+        authorizationServerMetadataUrl: `${origin}/.well-known/oauth-authorization-server`,
+      });
+      expect(state.protectedResourceMetadataUrl).toBeUndefined();
+      expect(state.discoveryMetadataSha256).toMatch(/^[0-9a-f]{64}$/);
+
+      const callback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
+      );
+      expect(callback.status).toBe(302);
+      expect(callback.headers.get("location")).toContain("integration_oauth=success");
+      expect(tokenRequests).toHaveLength(1);
+      expect(tokenRequests[0]!.get("resource")).toBeNull();
+      expect(metadataRequests).toEqual([
+        "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-authorization-server",
+      ]);
+
+      const loaded = await loadConnectionCredentialForBroker(client.db, settings, {
+        workspaceId: workspace.workspaceId,
+        providerDomain: "legacy.example.com",
+        kind: "oauth2",
+        allowSubjectOwned: false,
+      });
+      expect(loaded?.credential).toMatchObject({
+        access_token: "legacy-access-token",
+        resource: mcpUrl,
+        resource_parameter_supported: false,
+      });
+      expect(loaded?.metadata.oauthDiscovery).toMatchObject({
+        mode: "legacy_2025_03_26_metadata",
+        resource: mcpUrl,
+        issuer: `${origin}/`,
+        authorizationServerMetadataUrl: `${origin}/.well-known/oauth-authorization-server`,
+      });
+      expect(loaded?.metadata.oauthDiscovery).not.toHaveProperty("protectedResourceMetadataUrl");
+    } finally {
+      legacy.stop(true);
+      upstreamMcp.close();
     }
   });
 
@@ -1922,6 +3040,93 @@ describe("connections routes", () => {
     }
   });
 
+  test.each([
+    ["protected_resource_metadata", 403, false],
+    ["protected_resource_metadata", 429, true],
+    ["protected_resource_metadata", 503, true],
+    ["authorization_server_metadata", 401, false],
+    ["authorization_server_metadata", 403, false],
+    ["authorization_server_metadata", 503, true],
+  ] as const)(
+    "oauth start reports %s HTTP %s (retryable: %s)",
+    async (stage, status, retryable) => {
+      if (!available) return;
+      const workspace = await freshWorkspace();
+      let origin = "";
+      const requestedPaths: string[] = [];
+      const source = Bun.serve({
+        port: 0,
+        fetch(request) {
+          const path = new URL(request.url).pathname;
+          requestedPaths.push(path);
+          if (path === "/mcp") {
+            return new Response(null, {
+              status: 401,
+              headers: {
+                "www-authenticate": `Bearer resource_metadata="${origin}/prm"`,
+              },
+            });
+          }
+          if (path === "/prm") {
+            if (stage === "authorization_server_metadata") {
+              return Response.json({ authorization_servers: [origin] });
+            }
+            return new Response("provider challenge private diagnostic", { status });
+          }
+          if (path === "/.well-known/oauth-authorization-server") {
+            return new Response("provider challenge private diagnostic", { status });
+          }
+          return new Response("not found", { status: 404 });
+        },
+      });
+      origin = `http://127.0.0.1:${source.port}`;
+      try {
+        const response = await app({ environment: "test" }).request(
+          `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+          {
+            method: "POST",
+            headers: {
+              authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              providerDomain: "denied.example.test",
+              mcpUrl: `${origin}/mcp`,
+            }),
+          },
+        );
+        const body = (await response.json()) as {
+          error: {
+            code: string;
+            message: string;
+            retryable: boolean;
+            details?: Record<string, string>;
+          };
+        };
+
+        expect(response.status).toBe(502);
+        expect(body.error).toMatchObject({
+          code: "upstream_unavailable",
+          message: `OAuth provider returned HTTP ${status} during ${stage === "protected_resource_metadata" ? "protected-resource" : "authorization-server"} discovery.`,
+          retryable,
+          details: {
+            oauthStage: stage,
+            oauthReason: `upstream_http_${status}`,
+          },
+        });
+        expect(JSON.stringify(body)).not.toContain(origin);
+        expect(JSON.stringify(body)).not.toContain("private diagnostic");
+        expect(requestedPaths).toEqual(
+          stage === "protected_resource_metadata"
+            ? ["/mcp", "/prm"]
+            : ["/mcp", "/prm", "/.well-known/oauth-authorization-server"],
+        );
+      } finally {
+        source.stop(true);
+      }
+    },
+  );
+
   test("oauth uses protected-resource metadata resource as token audience while connecting to the MCP endpoint", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1956,9 +3161,7 @@ describe("connections routes", () => {
         state: string;
         authorizationUrl: string;
       };
-      expect(
-        (readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null)?.ownership,
-      ).toBe("personal");
+      expect((await readMcpOAuthState(body.state)).ownership).toBe("personal");
       expect(new URL(body.authorizationUrl).searchParams.get("resource")).toBe("urn:test:mcp");
 
       const callback = await publicApp(client.db).request(
@@ -1985,6 +3188,73 @@ describe("connections routes", () => {
       });
       expect(loaded?.metadata.mcpToolsVerification).toMatchObject({
         status: "ok",
+      });
+    } finally {
+      mcp.close();
+      as.close();
+    }
+  });
+
+  test("oauth callback still writes a workspace connection for an API key that can start OAuth", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const token = `ogk_${randomUUID().replaceAll("-", "")}`;
+    const apiKey = await createApiKey(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      name: "runtime",
+      prefix: token.slice(0, 14),
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["connections:read", "connections:write", "workspace:read"],
+    });
+    const as = startFakeAuthorizationServer({
+      clientIdMetadataDocumentSupported: true,
+    });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource"`,
+    });
+    try {
+      const response = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "linear.app",
+            mcpUrl: mcp.url,
+            ownership: "workspace",
+            returnPath: "/integrations?connect_item=linear",
+          }),
+        },
+      );
+      const responseText = await response.clone().text();
+      expect(response.status, responseText).toBe(200);
+      const body = (await response.json()) as { state: string };
+      const state = await readMcpOAuthState(body.state);
+      expect(state.subjectId).toBe(`api_key:${apiKey.id}`);
+      expect(state.ownership).toBe("workspace");
+
+      const callback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
+      );
+      expect(callback.status).toBe(302);
+      expect(callback.headers.get("location")).toContain("integration_oauth=success");
+      expect(callback.headers.get("location")).not.toContain("integration_oauth=error");
+
+      const loaded = await loadConnectionCredentialForBroker(client.db, settings, {
+        workspaceId: workspace.workspaceId,
+        providerDomain: "linear.app",
+        kind: "oauth2",
+        subjectId: `api_key:${apiKey.id}`,
+        allowSubjectOwned: false,
+      });
+      expect(loaded?.credential).toMatchObject({
+        access_token: "mcp-access-token",
+        mcp_url: mcp.url,
       });
     } finally {
       mcp.close();
@@ -2033,7 +3303,7 @@ describe("connections routes", () => {
     try {
       expect(response.status).toBe(200);
       const body = (await response.json()) as { state: string };
-      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      const state = await readMcpOAuthState(body.state);
       const verifier = decryptEnvironmentValue(rawKey, state.encryptedPkceVerifier as string);
 
       const callback = await publicAppWithDeps(client.db, {}, { observability }).request(
@@ -2296,9 +3566,7 @@ describe("connections routes", () => {
       );
       expect(response.status).toBe(200);
       const body = (await response.json()) as { state: string };
-      expect(
-        (readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null)?.ownership,
-      ).toBe("personal");
+      expect((await readMcpOAuthState(body.state)).ownership).toBe("personal");
       const callback = await publicApp(client.db).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );
@@ -2419,7 +3687,7 @@ describe("connections routes", () => {
             scopes_supported: ["documents:read"],
           });
         }
-        if (url.pathname === "/as") {
+        if (url.pathname === "/.well-known/oauth-authorization-server/as") {
           return Response.json({
             issuer: `${origin}/as`,
             authorization_endpoint: `${origin}/authorize`,
@@ -2468,12 +3736,6 @@ describe("connections routes", () => {
         "/mcp",
         "/prm",
         "/.well-known/oauth-authorization-server/as",
-        "/as/.well-known/oauth-authorization-server",
-        "/.well-known/oauth-authorization-server",
-        "/.well-known/openid-configuration/as",
-        "/as/.well-known/openid-configuration",
-        "/.well-known/openid-configuration",
-        "/as",
         "/register",
       ]);
       expect(registrations).toEqual([
@@ -2493,18 +3755,27 @@ describe("connections routes", () => {
     }
   });
 
-  test("rejects workspace-owned hosted Slack MCP at start, on legacy reconnect, and at callback", async () => {
-    if (!available) return;
-    const workspace = await freshWorkspace();
-    const slackSettings = {
-      environment: "test" as const,
-      slackClientId: "slack-client-id",
-      slackClientSecret: "slack-client-secret",
-    };
-    const start = async (body: Record<string, unknown>) =>
-      app(slackSettings).request(
-        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
-        {
+  test.each(["personal", "workspace"] as const)(
+    "Slack MCP uses configured operator credentials with %s ownership",
+    async (ownership) => {
+      if (!available) return;
+      const workspace = await freshWorkspace();
+      const as = startFakeAuthorizationServer({
+        issuer: "https://slack.com/mcp",
+        clientIdMetadataDocumentSupported: false,
+        tokenEndpointAuthMethodsSupported: ["client_secret_post"],
+        scopesSupported: ["search:read.public", "chat:write"],
+      });
+      const mcp = startTestMcpServer({
+        requiredAuthorization: "Bearer mcp-access-token",
+        unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="search:read.public chat:write"`,
+      });
+      try {
+        const response = await app({
+          environment: "test",
+          slackClientId: "slack-client-id",
+          slackClientSecret: "slack-client-secret",
+        }).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
           method: "POST",
           headers: {
             authorization: await bearer(workspace, "subject-a", ["connections:write"]),
@@ -2512,152 +3783,57 @@ describe("connections routes", () => {
           },
           body: JSON.stringify({
             providerDomain: "slack.com",
-            mcpUrl: "https://mcp.slack.com/mcp",
+            mcpUrl: mcp.url,
+            ownership,
             returnPath: "/capabilities?connect_item=slack",
-            ...body,
           }),
-        },
-      );
+        });
 
-    // Explicit workspace ownership fails closed before discovery contacts
-    // Slack. An omitted ownership is NOT rejected: for a personal-only resource
-    // it defaults to personal, matching the fence that existed before #1240 and
-    // keeping the optional SDK field backward compatible.
-    const explicitWorkspace = await start({ ownership: "workspace" });
-    expect(explicitWorkspace.status).toBe(422);
-    expect(await explicitWorkspace.text()).toContain(
-      "Slack's hosted MCP connection is personal only",
-    );
-    const omitted = await start({});
-    expect(omitted.status).not.toBe(422);
+        const responseText = await response.clone().text();
+        expect(response.status, responseText).toBe(200);
+        const body = (await response.json()) as { state: string; authorizationUrl: string };
+        const authUrl = new URL(body.authorizationUrl);
+        expect(authUrl.searchParams.get("client_id")).toBe("slack-client-id");
+        expect(authUrl.searchParams.get("scope")).toBe("search:read.public chat:write");
+        const state = await readMcpOAuthState(body.state);
+        expect(state?.providerDomain).toBe("slack.com");
+        expect(state?.ownership).toBe(ownership);
+        expect(state?.clientRegistrationMethod).toBe("operator");
+        expect(state?.clientId).toBe("slack-client-id");
+        expect(JSON.stringify(state)).not.toContain("slack-client-secret");
 
-    // A legacy workspace-owned row cannot be renewed through reconnect either.
-    const legacy = await createConnection(client.db, {
-      accountId: workspace.accountId,
-      workspaceId: workspace.workspaceId,
-      subjectId: null,
-      providerDomain: "slack.com",
-      kind: "oauth2",
-      credentialEncrypted: encryptEnvironmentValue(rawKey, JSON.stringify({ fixture: true })),
-      metadata: { mcpUrl: "https://mcp.slack.com/mcp" },
-      createdBySubjectId: "subject-a",
-    });
-    const reconnect = await start({ connectionId: legacy.id });
-    expect(reconnect.status).toBe(422);
-    expect(await reconnect.text()).toContain("Slack's hosted MCP connection is personal only");
-
-    // State minted by an older deployment with workspace ownership must not
-    // persist shared authority during a rolling update.
-    const state = createSignedState(STATE_SECRET, {
-      accountId: workspace.accountId,
-      workspaceId: workspace.workspaceId,
-      subjectId: "subject-a",
-      ownership: "workspace",
-      providerDomain: "slack.com",
-      mcpUrl: "https://mcp.slack.com/mcp",
-      resource: "https://mcp.slack.com/mcp",
-      requestedScopes: [],
-      authorizeScopes: ["search:read.public"],
-      encryptedPkceVerifier: encryptEnvironmentValue(rawKey, "slack-verifier"),
-      clientId: "slack-client-id",
-      tokenEndpoint: "https://slack.com/api/oauth.v2.access",
-      authorizationServer: "https://slack.com",
-      issuer: "https://slack.com",
-      clientRegistrationMethod: "operator",
-      tokenEndpointAuthMethod: "client_secret_post",
-      returnPath: "/capabilities?connect_item=slack",
-    });
-    const callback = await publicApp(client.db, slackSettings).request(
-      `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`,
-    );
-    expect(callback.status).toBe(302);
-    const callbackLocation = new URL(
-      callback.headers.get("location")!,
-      "https://api.opengeni.test",
-    );
-    expect(callbackLocation.searchParams.get("integration_oauth")).toBe("error");
-    expect(callbackLocation.searchParams.get("stage")).toBe("state_verify");
-    expect(
-      await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a"),
-    ).toHaveLength(1);
-  });
-
-  test("personal Slack MCP uses configured operator credentials and remains bound to the authenticating subject", async () => {
-    if (!available) return;
-    const workspace = await freshWorkspace();
-    const as = startFakeAuthorizationServer({
-      issuer: "https://slack.com/mcp",
-      clientIdMetadataDocumentSupported: false,
-      tokenEndpointAuthMethodsSupported: ["client_secret_post"],
-      scopesSupported: ["search:read.public", "chat:write"],
-    });
-    const mcp = startTestMcpServer({
-      requiredAuthorization: "Bearer mcp-access-token",
-      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="search:read.public chat:write"`,
-    });
-    try {
-      const response = await app({
-        environment: "test",
-        slackClientId: "slack-client-id",
-        slackClientSecret: "slack-client-secret",
-      }).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
-        method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
+        const callback = await publicApp(client.db, {
+          slackClientId: "slack-client-id",
+          slackClientSecret: "slack-client-secret",
+        }).request(
+          `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
+        );
+        expect(callback.status).toBe(302);
+        const callbackLocation = new URL(
+          callback.headers.get("location")!,
+          "https://api.opengeni.test",
+        );
+        expect(callbackLocation.searchParams.get("integration_oauth")).toBe("success");
+        expect(callbackLocation.searchParams.get("ownership")).toBe(ownership);
+        const connectionId = callbackLocation.searchParams.get("connectionId");
+        expect(connectionId).not.toBeNull();
+        expect(
+          await getConnectionMetadata(client.db, workspace.workspaceId, connectionId!, "subject-a"),
+        ).toMatchObject({
+          subjectId: ownership === "personal" ? "subject-a" : null,
           providerDomain: "slack.com",
-          mcpUrl: mcp.url,
-          ownership: "personal",
-          returnPath: "/capabilities?connect_item=slack",
-        }),
-      });
-
-      const responseText = await response.clone().text();
-      expect(response.status, responseText).toBe(200);
-      const body = (await response.json()) as { state: string; authorizationUrl: string };
-      const authUrl = new URL(body.authorizationUrl);
-      expect(authUrl.searchParams.get("client_id")).toBe("slack-client-id");
-      expect(authUrl.searchParams.get("scope")).toBe("search:read.public chat:write");
-      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
-      expect(state?.providerDomain).toBe("slack.com");
-      expect(state?.ownership).toBe("personal");
-      expect(state?.clientRegistrationMethod).toBe("operator");
-      expect(state?.clientId).toBe("slack-client-id");
-      expect(JSON.stringify(state)).not.toContain("slack-client-secret");
-
-      const callback = await publicApp(client.db, {
-        slackClientId: "slack-client-id",
-        slackClientSecret: "slack-client-secret",
-      }).request(
-        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
-      );
-      expect(callback.status).toBe(302);
-      const callbackLocation = new URL(
-        callback.headers.get("location")!,
-        "https://api.opengeni.test",
-      );
-      expect(callbackLocation.searchParams.get("integration_oauth")).toBe("success");
-      expect(callbackLocation.searchParams.get("ownership")).toBe("personal");
-      const connectionId = callbackLocation.searchParams.get("connectionId");
-      expect(connectionId).not.toBeNull();
-      expect(
-        await getConnectionMetadata(client.db, workspace.workspaceId, connectionId!, "subject-a"),
-      ).toMatchObject({
-        subjectId: "subject-a",
-        providerDomain: "slack.com",
-        kind: "oauth2",
-      });
-      expect(as.tokenRequests).toHaveLength(1);
-      expect(as.tokenRequests[0]!.get("client_id")).toBe("slack-client-id");
-      expect(as.tokenRequests[0]!.get("client_secret")).toBe("slack-client-secret");
-      expect(as.tokenRequestAuthHeaders[0]).toBeNull();
-    } finally {
-      mcp.close();
-      as.close();
-    }
-  });
+          kind: "oauth2",
+        });
+        expect(as.tokenRequests).toHaveLength(1);
+        expect(as.tokenRequests[0]!.get("client_id")).toBe("slack-client-id");
+        expect(as.tokenRequests[0]!.get("client_secret")).toBe("slack-client-secret");
+        expect(as.tokenRequestAuthHeaders[0]).toBeNull();
+      } finally {
+        mcp.close();
+        as.close();
+      }
+    },
+  );
 
   test("Slack MCP rejects browser-provided OAuth clients before discovery", async () => {
     if (!available) return;
@@ -2759,7 +3935,7 @@ describe("connections routes", () => {
       expect(authUrl.searchParams.get("scope")).toBe("read write");
       expect(as.registrations).toHaveLength(1);
 
-      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
+      const state = await readMcpOAuthState(body.state);
       expect(state?.clientRegistrationMethod).toBe("dcr");
       expect(state?.clientId).toBe(`${as.url}/registered-client/1`);
 
@@ -3253,6 +4429,56 @@ describe("connections routes", () => {
         },
       );
       const body = (await response.json()) as { state: string };
+      const reference = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      const encrypted = await loadIntegrationOAuthPendingState(client.db, {
+        id: reference.id as string,
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+      });
+      expect(encrypted).not.toBeNull();
+
+      const missing = createSignedState(STATE_SECRET, {
+        kind: "mcp_oauth_reference",
+        id: randomUUID(),
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+      });
+      const missingCallback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(missing)}`,
+      );
+      expect(missingCallback.headers.get("location")).toContain("reason=state_invalid");
+
+      const wrongScope = createSignedState(STATE_SECRET, {
+        kind: "mcp_oauth_reference",
+        id: reference.id,
+        accountId: workspace.accountId,
+        workspaceId: randomUUID(),
+      });
+      const wrongScopeCallback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(wrongScope)}`,
+      );
+      expect(wrongScopeCallback.headers.get("location")).toContain("reason=state_invalid");
+
+      const expiredId = randomUUID();
+      await storeIntegrationOAuthPendingState(client.db, {
+        id: expiredId,
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        stateEncrypted: encrypted!,
+        expiresAt: new Date(Date.now() - 1000),
+      });
+      const expiredReference = createSignedState(STATE_SECRET, {
+        kind: "mcp_oauth_reference",
+        id: expiredId,
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+      });
+      const expiredReferenceCallback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(expiredReference)}`,
+      );
+      expect(expiredReferenceCallback.headers.get("location")).toContain("reason=state_invalid");
+      expect(as.tokenRequests).toHaveLength(0);
+
       const first = await publicApp(client.db).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );

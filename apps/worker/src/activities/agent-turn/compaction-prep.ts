@@ -6,8 +6,11 @@ import {
   appendWorkspaceMemory,
   composeAgentInstructions,
   requestRemoteCompactionV2,
-  serializedToolsForRemoteCompaction,
-  EmptyCompactionSummaryError,
+  preparedCompactionRequest,
+  queuePreparedCompaction,
+  compactionThresholdTokens,
+  CompactionNeededError,
+  compactionProviderRejection,
   SUMMARY_BUFFER_TOKENS,
   type ModelResponseUsage,
 } from "@opengeni/runtime";
@@ -20,7 +23,10 @@ import type {
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "../types";
-import { recordContextCompaction } from "../../observability-metrics";
+import {
+  recordContextCompaction,
+  recordContextCompactionStarted,
+} from "../../observability-metrics";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { type SessionEvent } from "@opengeni/contracts";
@@ -28,7 +34,7 @@ import { type SessionEvent } from "@opengeni/contracts";
 import { acceptsPromptCacheKeyForTurn } from "./codex";
 import {
   safeErrorDiagnostic,
-  compactionFailureReasonFromError,
+  compactionFailureTurnEventPayload,
   isCompactionSummaryFailure,
   shouldRecoverCompactionProviderFailure,
 } from "./errors";
@@ -50,10 +56,7 @@ import type {
 } from "./turn-context";
 
 export type RemoteCompactionPrefix = {
-  tools: Awaited<ReturnType<typeof serializedToolsForRemoteCompaction>>;
-  instructions: string;
-  toolsReady: boolean;
-  agent: Parameters<typeof serializedToolsForRemoteCompaction>[0] | null;
+  agent: ReturnType<ActivityServices["runtime"]["buildAgent"]> | null;
 };
 
 export type CompactionPrepDeps = {
@@ -163,9 +166,6 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   } = deps;
 
   const remotePrefix: RemoteCompactionPrefix = {
-    tools: [],
-    instructions: "",
-    toolsReady: false,
     agent: null,
   };
 
@@ -231,45 +231,16 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     resolvedModel && billingState.isCodexTurn
       ? (s: Settings, m: Array<Record<string, unknown>>) =>
           withCodexRemoteCompaction(async () => {
-            // Lazily serialize tools here so EmptyCompactionSummaryError is
-            // thrown inside the compaction try/settlement handlers, not as a
-            // raw activity failure before maybeCompactContext runs.
-            if (!remotePrefix.instructions.trim()) {
-              throw new EmptyCompactionSummaryError({
-                stage: "remote_v2_instructions",
-                reason: "agent_missing_system_instructions",
-              });
-            }
-            if (!remotePrefix.toolsReady) {
-              if (!remotePrefix.agent) {
-                throw new EmptyCompactionSummaryError({
-                  stage: "remote_v2_tools",
-                  reason: "agent_missing_for_tools",
-                });
-              }
-              try {
-                remotePrefix.tools = await serializedToolsForRemoteCompaction(remotePrefix.agent);
-              } catch (error) {
-                // Tool schemas sit before instructions in the cache prefix.
-                // Failing open to [] would reintroduce a massive pre-compact
-                // cache bust — fail closed so we never send a tools mismatch
-                // on purpose.
-                throw new EmptyCompactionSummaryError({
-                  stage: "remote_v2_tools",
-                  reason: "serialize_tools_failed",
-                  error: String(error),
-                });
-              }
-              remotePrefix.toolsReady = true;
-            }
+            if (!remotePrefix.agent) throw new Error("Compaction agent is unavailable");
+            const preparedRequest = preparedCompactionRequest(remotePrefix.agent);
             return requestRemoteCompactionV2(s, m, {
               client: resolvedModel.client,
               provider: resolvedModel.provider,
               model: turnExecutionPolicy.upstreamModelId,
-              systemInstructions: remotePrefix.instructions,
+              preparedRequest,
+              captureAgent: remotePrefix.agent,
+              signal: cancellationSignal,
               onUsage: recordCompactionUsage,
-              tools: remotePrefix.tools,
-              ...(promptCacheKey ? { promptCacheKey } : {}),
             });
           })
       : undefined;
@@ -288,6 +259,8 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   const compactionModeOptions = {
     codexCompactionMode: session.codexCompactionMode,
     isCodexSubscriptionTurn: billingState.isCodexTurn,
+    onCompactionStarted: (trigger: "auto" | "operator" | "proactive" | "overflow") =>
+      recordContextCompactionStarted(observability, trigger),
     publishLiveEvents: publishCompactionLiveEvents,
     ...(remoteCompactionRequester ? { requestRemoteCompactionV2: remoteCompactionRequester } : {}),
   } as const;
@@ -404,22 +377,16 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
           {
             clearRequestedCompaction: true,
             publishLiveEvents: publishCompactionLiveEvents,
+            providerRejection: compactionProviderRejection(error),
           },
         );
         if (!isCompactionSummaryFailure(error)) throw error;
-        const errorMessage = String(compactionFailureReasonFromError(error));
         if (
           !(await eventing.settle!({
             events: [
               {
                 type: "turn.failed",
-                payload: {
-                  error: errorMessage,
-                  code: "context_compaction_failed",
-                  retryable: false,
-                  recovery: "user_message",
-                  compacted: false,
-                },
+                payload: compactionFailureTurnEventPayload(error),
               },
               {
                 type: "session.status.changed",
@@ -517,16 +484,25 @@ export async function runPostAgentCompaction(
     agentInstructions.trim() ? agentInstructions : undefined,
   );
   if (remoteCompactionRequester) {
-    // Exact byte match with the ordinary turn prefix (CLI base_instructions).
-    // Tools serialize lazily inside the requester so setup failures settle as
-    // compaction failures rather than raw activity crashes.
-    remotePrefix.instructions = agentInstructions;
+    // The prefix is captured only after this agent passes normal SDK preparation.
     remotePrefix.agent = agent;
   }
 
   if (compactionOnlyTurn) {
     const requested = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
     let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
+    if (requested && remoteCompactionRequester && session.codexCompactionMode === "remote_v2") {
+      queuePreparedCompaction(
+        agent,
+        new CompactionNeededError({
+          trigger: "operator",
+          signalSource: "operator",
+          signalTokens: session.lastInputTokens ?? 0,
+          thresholdTokens: compactionThresholdTokens(eventing.modelRunSettings),
+        }),
+      );
+      return { ok: { compactSummarizer } };
+    }
     if (requested) {
       try {
         outcome = await waitForTurnOperation(
@@ -574,22 +550,16 @@ export async function runPostAgentCompaction(
           {
             clearRequestedCompaction: true,
             publishLiveEvents: publishCompactionLiveEvents,
+            providerRejection: compactionProviderRejection(error),
           },
         );
         if (!isCompactionSummaryFailure(error)) throw error;
-        const errorMessage = String(compactionFailureReasonFromError(error));
         if (
           !(await eventing.settle!({
             events: [
               {
                 type: "turn.failed",
-                payload: {
-                  error: errorMessage,
-                  code: "context_compaction_failed",
-                  retryable: false,
-                  recovery: "user_message",
-                  compacted: false,
-                },
+                payload: compactionFailureTurnEventPayload(error),
               },
               {
                 type: "session.status.changed",
@@ -638,6 +608,28 @@ export async function runPostAgentCompaction(
     control.turnMetricOutcome = "completed";
     control.activityStatus = "idle";
     return { exit: claimedResult({ status: "idle" }) };
+  }
+
+  if (remoteCompactionRequester && session.codexCompactionMode === "remote_v2") {
+    const forced = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
+    const thresholdTokens = compactionThresholdTokens(eventing.modelRunSettings);
+    if (
+      forced ||
+      ((attempt.triggerType === "user.message" ||
+        attempt.triggerType === "system.update.delivered") &&
+        (session.lastInputTokens ?? 0) >= thresholdTokens)
+    ) {
+      queuePreparedCompaction(
+        agent,
+        new CompactionNeededError({
+          trigger: forced ? "operator" : "threshold",
+          signalSource: forced ? "operator" : "provider",
+          signalTokens: session.lastInputTokens ?? 0,
+          thresholdTokens,
+        }),
+      );
+    }
+    return { ok: { compactSummarizer } };
   }
 
   // Pre-turn durable context compaction. When the single Codex-parity
@@ -726,12 +718,12 @@ export async function runPostAgentCompaction(
         {
           clearRequestedCompaction: forced,
           publishLiveEvents: publishCompactionLiveEvents,
+          providerRejection: compactionProviderRejection(compactError),
         },
       );
       if (!isCompactionSummaryFailure(compactError)) throw compactError;
       const deferredSteer = await settleDeferredSteerAfterCompaction();
       if (deferredSteer) return { exit: deferredSteer };
-      const errorMessage = String(compactionFailureReasonFromError(compactError));
       observability.error("context compaction failed", {
         sessionId: input.sessionId,
         turnId: attempt.turnId,
@@ -742,13 +734,7 @@ export async function runPostAgentCompaction(
           events: [
             {
               type: "turn.failed",
-              payload: {
-                error: errorMessage,
-                code: "context_compaction_failed",
-                retryable: false,
-                recovery: "user_message",
-                compacted: false,
-              },
+              payload: compactionFailureTurnEventPayload(compactError),
             },
             { type: "session.status.changed", payload: { status: "idle" } },
           ],

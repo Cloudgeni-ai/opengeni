@@ -115,3 +115,83 @@ describe("AttachedChromeCdpConnection", () => {
     expect(bridge.closed).toBe(true);
   });
 });
+
+for (const lost of [false, true]) {
+  test(
+    lost
+      ? "rejects a real retained-history gap"
+      : "drains legacy paginated event bursts without declaring history loss",
+    async () => {
+      const start = lost ? 2 : 1;
+      const events = Array.from({ length: 1001 }, (_, index) => ({
+        sequence: start + index,
+        tabId: "7",
+        sessionId: null,
+        method: "Network.loadingFinished",
+        params: {},
+      }));
+      let polls = 0;
+      let received = 0;
+      const bridge: AttachedBrowserBridgeTransport = {
+        close() {},
+        async request<T>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+          if (polls++ === 0) return { events: [], cursor: 0, truncated: false } as T;
+          const available = events.filter(
+            (event) => event.sequence > (payload.afterSequence as number),
+          );
+          const page = available.slice(0, payload.limit as number);
+          return {
+            events: page,
+            cursor: page.at(-1)?.sequence ?? events.at(-1)!.sequence,
+            truncated:
+              (payload.afterSequence as number) < start - 1 || available.length > page.length,
+          } as T;
+        },
+      };
+      const connection = new AttachedChromeCdpConnection(bridge, {
+        browserName: "Chrome",
+        browserVersion: "151",
+      });
+      connection.on("Network.loadingFinished", () => {
+        received += 1;
+      });
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        if (lost) {
+          await expect(connection.send("Browser.getVersion")).rejects.toThrow(
+            "history was truncated",
+          );
+          expect(received).toBe(0);
+        } else {
+          await expect(connection.send("Browser.getVersion")).resolves.toMatchObject({
+            product: "Chrome/151",
+          });
+          expect(received).toBe(1001);
+        }
+      } finally {
+        await connection.close();
+      }
+    },
+  );
+}
+
+test("CDP target lifecycle still detaches Chrome debugging when the driver closes", async () => {
+  const { AttachedChromeRunner } = await import("../src/attached-cdp");
+  const { AgentBrowserDriver } = await import("../src/cdp-driver");
+  const bridge = new FakeBridge();
+  const connection = new AttachedChromeCdpConnection(bridge, {
+    browserName: "Chrome",
+    browserVersion: "151",
+  });
+  await connection.send("Target.attachToTarget", { targetId: "7" });
+  const driver = new AgentBrowserDriver({
+    browserSessionId: crypto.randomUUID(),
+    controllerGeneration: "test",
+    targetLifecycle: "cdp",
+    runner: new AttachedChromeRunner(bridge, connection),
+    connect: async () => connection,
+  });
+  await driver.close();
+  expect(bridge.commands).toContainEqual({ type: "debugger.detach", tabId: "7" });
+  expect(bridge.closed).toBe(true);
+});

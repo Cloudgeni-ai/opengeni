@@ -62,6 +62,7 @@ export function createXaiSubscriptionTranscriptionProvider(input: {
       } catch {
         throw new TranscriptionServiceError({
           code: "unavailable",
+          fallbackSafe: true,
           message: "Transcription is unavailable.",
         });
       }
@@ -86,16 +87,28 @@ export function createXaiSubscriptionTranscriptionProvider(input: {
           ...(signal ? { signal } : {}),
         });
       };
+      const tokenForRequest = async (refresh: boolean) => {
+        try {
+          return await (refresh ? auth.context.refresh() : auth.context.getToken());
+        } catch {
+          throw new TranscriptionServiceError({
+            code: "unavailable",
+            message: "Reconnect the SuperGrok account to use transcription.",
+            fallbackSafe: true,
+          });
+        }
+      };
       let response: Response;
       try {
-        let token = await auth.context.getToken();
+        let token = await tokenForRequest(false);
         response = await request(token.accessToken);
-        if (response.status === 401) {
+        if (response.status === 401 || (await isXaiInvalidCredentialResponse(response))) {
           await response.body?.cancel().catch(() => undefined);
-          token = await auth.context.refresh();
+          token = await tokenForRequest(true);
           response = await request(token.accessToken);
         }
       } catch (error) {
+        if (error instanceof TranscriptionServiceError) throw error;
         throw fetchError(error);
       }
       if (!response.ok) throw responseError(response.status);
@@ -107,4 +120,37 @@ export function createXaiSubscriptionTranscriptionProvider(input: {
       };
     },
   };
+}
+
+export async function isXaiInvalidCredentialResponse(response: Response): Promise<boolean> {
+  if (response.status !== 403) return false;
+  const reader = response.clone().body?.getReader();
+  if (!reader) return false;
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      size += chunk.value.byteLength;
+      if (size > 16_384) return false;
+      chunks.push(chunk.value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const body = JSON.parse(new TextDecoder().decode(bytes));
+    return (
+      typeof body?.error === "string" &&
+      body.error.includes("[WKE=unauthenticated:bad-credentials]")
+    );
+  } catch {
+    return false;
+  } finally {
+    void reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
 }

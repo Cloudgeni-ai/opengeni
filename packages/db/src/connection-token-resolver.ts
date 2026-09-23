@@ -6,19 +6,12 @@ import {
 import type {
   ConnectionCredentialPlacement,
   ConnectionKind,
-  ConnectionCredentialsPort,
   ConnectionStatus,
   McpConnectionResourceScope,
   McpCredentialAuthNeededReason,
-  McpCredentialsRequest,
-  TurnInitiator,
-  TurnInitiatorContext,
 } from "@opengeni/contracts";
-import {
-  ConnectionUseAuthoritySnapshot,
-  type ConnectionUseAttribution,
-  type ConnectionUseAuthorizationResult,
-} from "@opengeni/contracts/connection-authority";
+
+import { type ConnectionUseAttribution } from "@opengeni/contracts/connection-authority";
 import {
   PERSONAL_GITHUB_REQUESTED_SCOPES,
   PERSONAL_GITHUB_PROVIDER_DOMAIN,
@@ -37,9 +30,9 @@ import {
 } from "@opengeni/network";
 export { isPrivateAddress } from "@opengeni/network";
 import { Buffer } from "node:buffer";
-import { isIP } from "node:net";
 import { encryptEnvironmentValue } from "./environment-crypto";
 import type { Database } from "./database";
+import { withConnectionRefreshLock } from "./connection-refresh-lock";
 import type {
   AcceptedConnectionUseContext,
   AcceptedConnectionUseResolution,
@@ -123,6 +116,8 @@ export type ResolveConnectionCredentialResult =
       connectionVersion?: number;
       /** Metadata-only owner attribution from the immediate pre-use fence. */
       connectionUseAttribution?: ConnectionUseAttribution;
+      /** Metadata-only equality key from current live authority; never credentials or authorization. */
+      operationAuthorityDigest?: string;
       /**
        * Revalidate the exact accepted attempt immediately before one target
        * provider request. Credential lookup/refresh is a separate audited
@@ -162,48 +157,15 @@ export type ResolveConnectionCredentialInput = {
   /** Defaults to header-only MCP transport. */
   credentialTarget?: "mcp" | "http_api";
   forceRefresh?: boolean;
-  /** Exact immutable accepted-work authority; never credential-bearing. */
-  connectionUseAuthority?: unknown;
+  /** Internal lookup mode. Preflight must not refresh credentials or record provider usage. */
+  credentialResolutionMode?: "execution" | "preflight";
+  /** Frozen provider authority generation captured by the calling integration/catalog. */
+  expectedAuthorityGeneration?: number;
+  /** Attribution already authorized for forwarding to a host resolver; never authorizes local use. */
+  hostConnectionUseAttribution?: ConnectionUseAttribution;
   /** Exact accepted attempt plus one stable physical-provider request id. */
   connectionUseContext?: AcceptedConnectionUseContext;
 };
-
-export type HostMcpCredentialResolverContext = {
-  accountId: string;
-  workspaceId: string;
-  sessionId: string;
-  rootSessionId: string;
-  turnId: string;
-  attemptId: string | null;
-  executionGeneration: number;
-  initiator: TurnInitiator;
-  initiatorContext: TurnInitiatorContext;
-  surface: McpCredentialsRequest["surface"];
-};
-
-export class HostMcpCredentialScopeError extends Error {
-  constructor(field: "accountId" | "workspaceId" | "sessionId") {
-    super(`host MCP credential ${field} scope mismatch`);
-    this.name = "HostMcpCredentialScopeError";
-  }
-}
-
-export class HostMcpCredentialBindingError extends Error {
-  constructor(
-    field:
-      | "provider"
-      | "providerDomain"
-      | "connectionId"
-      | "scopes"
-      | "resource"
-      | "selectedResources"
-      | "destinationUrl"
-      | "credentialPlacements",
-  ) {
-    super(`host MCP credential ${field} binding mismatch`);
-    this.name = "HostMcpCredentialBindingError";
-  }
-}
 
 const OFFICIAL_GMAIL_MCP_RESOURCE = "https://gmailmcp.googleapis.com/mcp/v1";
 const OFFICIAL_GMAIL_REST_HOST = "gmail.googleapis.com";
@@ -241,176 +203,12 @@ function isOfficialGmailRestDestination(
  * reach a request; the returned object is a fresh copy so a host cannot mutate
  * headers after resolution.
  */
-export function buildHostConnectionTokenResolver(
-  resolve: NonNullable<ConnectionCredentialsPort["mcpCredentials"]>,
-  context: HostMcpCredentialResolverContext,
-): (input: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult> {
-  return async (input) => {
-    if (input.workspaceId !== context.workspaceId) {
-      throw new HostMcpCredentialScopeError("workspaceId");
-    }
-    const destinationUrl = canonicalHttpUrl(input.destinationUrl);
-    if (
-      !destinationUrl ||
-      (!destinationHostMatchesProvider(destinationUrl, input.connectionRef.providerDomain) &&
-        !isOfficialGmailRestDestination(destinationUrl, input.connectionRef))
-    ) {
-      throw new HostMcpCredentialBindingError("destinationUrl");
-    }
-    const toolName = input.toolName ?? input.toolId;
-    const request: McpCredentialsRequest = {
-      accountId: context.accountId,
-      workspaceId: context.workspaceId,
-      sessionId: context.sessionId,
-      rootSessionId: context.rootSessionId,
-      turnId: context.turnId,
-      attemptId: context.attemptId,
-      executionGeneration: context.executionGeneration,
-      initiator: context.initiator,
-      initiatorContext: { ...context.initiatorContext },
-      surface: context.surface,
-      destinationUrl,
-      credentialTarget: input.credentialTarget ?? "mcp",
-      serverId: input.serverId,
-      connectionRef: {
-        providerDomain: input.connectionRef.providerDomain,
-        ...(input.connectionRef.authoritySource
-          ? { authoritySource: input.connectionRef.authoritySource }
-          : {}),
-        ...(input.connectionRef.provider ? { provider: input.connectionRef.provider } : {}),
-        ...(input.connectionRef.connectionId
-          ? { connectionId: input.connectionRef.connectionId }
-          : {}),
-        ...(input.connectionRef.kind ? { kind: input.connectionRef.kind } : {}),
-        ...(input.connectionRef.scopes ? { scopes: [...input.connectionRef.scopes] } : {}),
-        ...(input.connectionRef.resource ? { resource: input.connectionRef.resource } : {}),
-        ...(input.connectionRef.selectedResources
-          ? { selectedResources: copySelectedResources(input.connectionRef.selectedResources) }
-          : {}),
-        ...(input.connectionRef.subjectScope
-          ? { subjectScope: input.connectionRef.subjectScope }
-          : {}),
-      },
-      forceRefresh: input.forceRefresh === true,
-      ...(input.connectionUseAuthority !== undefined
-        ? { connectionUseAuthority: input.connectionUseAuthority }
-        : {}),
-      ...(input.connectionUseContext
-        ? { connectionUseRequestId: input.connectionUseContext.physicalRequestId }
-        : {}),
-      ...(toolName ? { toolName } : {}),
-      ...(input.subjectId ? { callerSubjectId: input.subjectId } : {}),
-    };
-    const result = await resolve(request);
-    assertHostMcpCredentialScope(result, context);
-    assertHostMcpCredentialBinding(result, input.connectionRef);
-    if (result.status === "auth_needed") {
-      const authorizationUrl = normalizedAuthorizationUrl(result.authorizationUrl);
-      return {
-        status: "auth_needed",
-        reason: result.reason,
-        providerDomain: result.providerDomain,
-        authoritySource: "host",
-        ...(result.provider ? { provider: result.provider } : {}),
-        ...(result.connectionId ? { connectionId: result.connectionId } : {}),
-        ...(result.scopes ? { scopes: [...result.scopes] } : {}),
-        ...(result.resource ? { resource: result.resource } : {}),
-        ...(result.selectedResources
-          ? { selectedResources: copySelectedResources(result.selectedResources) }
-          : {}),
-        ...(authorizationUrl ? { authorizationUrl } : {}),
-      };
-    }
-    if (result.connectionId.length === 0) {
-      throw new Error("host MCP credential returned an empty connectionId");
-    }
-    const explicitPlacements =
-      result.placements === undefined
-        ? undefined
-        : normalizedCredentialPlacements(result.placements);
-    const headers = normalizedHostCredentialHeaders(
-      result.headers,
-      explicitPlacements !== undefined,
-    );
-    if (explicitPlacements) {
-      if (!sameHeaderMap(headers, headerMapForPlacements(explicitPlacements))) {
-        throw new HostMcpCredentialBindingError("credentialPlacements");
-      }
-      if (
-        (input.credentialTarget ?? "mcp") !== "http_api" &&
-        explicitPlacements.some((placement) => placement.carrier !== "header")
-      ) {
-        throw new HostMcpCredentialBindingError("credentialPlacements");
-      }
-    }
-    const expiresAt = parseHostCredentialExpiry(result.expiresAt);
-    return {
-      status: "ok",
-      headers,
-      authoritySource: "host",
-      ...(explicitPlacements ? { placements: explicitPlacements } : {}),
-      connectionId: result.connectionId,
-      ...(expiresAt !== undefined ? { expiresAt } : {}),
-    };
-  };
-}
-
-function assertHostMcpCredentialBinding(
-  result: Awaited<ReturnType<NonNullable<ConnectionCredentialsPort["mcpCredentials"]>>>,
-  requested: McpServerConnectionRef,
-): void {
-  if (result.providerDomain !== requested.providerDomain) {
-    throw new HostMcpCredentialBindingError("providerDomain");
-  }
-  if (result.provider !== requested.provider) {
-    throw new HostMcpCredentialBindingError("provider");
-  }
-  if (requested.connectionId && result.connectionId !== requested.connectionId) {
-    throw new HostMcpCredentialBindingError("connectionId");
-  }
-  if (!sameSelectedResources(result.selectedResources, requested.selectedResources)) {
-    throw new HostMcpCredentialBindingError("selectedResources");
-  }
-  if (result.status === "ok") {
-    if (!sameStringSet(result.scopes, requested.scopes)) {
-      throw new HostMcpCredentialBindingError("scopes");
-    }
-    if (result.resource !== requested.resource) {
-      throw new HostMcpCredentialBindingError("resource");
-    }
-  }
-}
-
-function sameStringSet(left: string[] | undefined, right: string[] | undefined): boolean {
-  if (left === undefined || right === undefined) return left === right;
-  if (left.length !== right.length) return false;
-  const sortedLeft = [...left].sort();
-  const sortedRight = [...right].sort();
-  return sortedLeft.every((value, index) => value === sortedRight[index]);
-}
-
-function sameSelectedResources(
-  left: McpConnectionResourceScope[] | undefined,
-  right: McpConnectionResourceScope[] | undefined,
-): boolean {
-  if (left === undefined || right === undefined) return left === right;
-  const leftKeys = copySelectedResources(left)
-    .map((resource) => `${resource.kind}\0${resource.id}`)
-    .sort();
-  const rightKeys = copySelectedResources(right)
-    .map((resource) => `${resource.kind}\0${resource.id}`)
-    .sort();
-  return (
-    leftKeys.length === rightKeys.length &&
-    leftKeys.every((value, index) => value === rightKeys[index])
-  );
-}
 
 function copySelectedResources(
   resources: McpConnectionResourceScope[],
 ): McpConnectionResourceScope[] {
   if (resources.length === 0 || resources.length > 256) {
-    throw new Error("host MCP credential returned an invalid selected resource count");
+    throw new Error("connection credential returned an invalid selected resource count");
   }
   const seen = new Set<string>();
   return resources.map((resource) => {
@@ -420,35 +218,24 @@ function copySelectedResources(
       resource.id.length === 0 ||
       resource.id.length > 512
     ) {
-      throw new Error("host MCP credential returned an invalid selected resource");
+      throw new Error("connection credential returned an invalid selected resource");
     }
     const key = `${resource.kind}\0${resource.id}`;
     if (seen.has(key)) {
-      throw new Error("host MCP credential returned duplicate selected resources");
+      throw new Error("connection credential returned duplicate selected resources");
     }
     seen.add(key);
     return { kind: resource.kind, id: resource.id };
   });
 }
 
-function assertHostMcpCredentialScope(
-  result: { accountId: string; workspaceId: string; sessionId: string },
-  context: HostMcpCredentialResolverContext,
-): void {
-  for (const field of ["accountId", "workspaceId", "sessionId"] as const) {
-    if (result[field] !== context[field]) {
-      throw new HostMcpCredentialScopeError(field);
-    }
-  }
-}
-
-function normalizedHostCredentialHeaders(
+export function normalizedCredentialHeaders(
   headers: Record<string, string>,
   allowEmpty = false,
 ): Record<string, string> {
   const entries = Object.entries(headers);
   if ((!allowEmpty && entries.length === 0) || entries.length > 32) {
-    throw new Error("host MCP credential returned an invalid header count");
+    throw new Error("connection credential returned an invalid header count");
   }
   const normalized: Record<string, string> = {};
   for (const [name, value] of entries) {
@@ -461,10 +248,10 @@ function normalizedHostCredentialHeaders(
       FORBIDDEN_CREDENTIAL_HEADERS.has(name.toLowerCase()) ||
       name.toLowerCase().startsWith("sec-")
     ) {
-      throw new Error("host MCP credential returned an invalid header");
+      throw new Error("connection credential returned an invalid header");
     }
     if (Object.keys(normalized).some((existing) => existing.toLowerCase() === name.toLowerCase())) {
-      throw new Error("host MCP credential returned duplicate headers");
+      throw new Error("connection credential returned duplicate headers");
     }
     normalized[name] = value;
   }
@@ -546,56 +333,6 @@ function headerMapForPlacements(
   return headers;
 }
 
-function sameHeaderMap(
-  left: Readonly<Record<string, string>>,
-  right: Readonly<Record<string, string>>,
-): boolean {
-  const canonical = (headers: Readonly<Record<string, string>>) =>
-    Object.entries(headers)
-      .map(([name, value]) => [name.toLowerCase(), value] as const)
-      .sort(([leftName], [rightName]) => leftName.localeCompare(rightName));
-  const leftEntries = canonical(left);
-  const rightEntries = canonical(right);
-  return (
-    leftEntries.length === rightEntries.length &&
-    leftEntries.every(
-      ([name, value], index) =>
-        rightEntries[index]?.[0] === name && rightEntries[index]?.[1] === value,
-    )
-  );
-}
-
-function normalizedAuthorizationUrl(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new Error("host MCP credential returned an invalid authorizationUrl");
-  }
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) {
-    throw new Error("host MCP credential returned an invalid authorizationUrl");
-  }
-  return url.toString();
-}
-
-function isLoopbackHost(hostname: string): boolean {
-  if (hostname === "localhost" || hostname === "::1") return true;
-  if (isIP(hostname) !== 4) return false;
-  const [first] = hostname.split(".");
-  return first === "127";
-}
-
-function parseHostCredentialExpiry(value: string | null | undefined): Date | null | undefined {
-  if (value === undefined) return undefined;
-  if (value === null) return null;
-  const parsed = new Date(value);
-  if (!Number.isFinite(parsed.getTime())) {
-    throw new Error("host MCP credential returned an invalid expiresAt");
-  }
-  return parsed;
-}
-
 export type ConnectionBrokerDeps = {
   loadCredential: (
     db: Database,
@@ -617,13 +354,11 @@ export type ConnectionBrokerDeps = {
     subjectId?: string | null,
   ) => Promise<void>;
   refresh: typeof refreshOAuthConnectionCredential;
+  /** Test/adapter seam; standalone defaults to the database-backed refresh lock. */
+  withRefreshLock?: typeof withConnectionRefreshLock;
   encrypt: typeof encryptEnvironmentValue;
   keyBytes: typeof environmentsEncryptionKeyBytes;
   now: () => Date;
-  authorizeUse?: (
-    db: Database,
-    input: { snapshot: unknown },
-  ) => Promise<ConnectionUseAuthorizationResult>;
   authorizeAcceptedUse?: (
     db: Database,
     input: AcceptedConnectionUseContext & {
@@ -681,6 +416,7 @@ export function buildConnectionTokenResolver(
   > & { expectedAuthorityGeneration?: number };
   const load = async (
     input: CredentialLookupInput,
+    lookupDb: Database = db,
   ): Promise<ConnectionCredentialForBroker | null> => {
     const subjectOwned = input.connectionRef.subjectScope === "subject";
     if (subjectOwned && !input.subjectId) {
@@ -701,7 +437,7 @@ export function buildConnectionTokenResolver(
     if (input.connectionRef.kind !== undefined) {
       request.kind = input.connectionRef.kind;
     }
-    const credential = await deps.loadCredential(db, settings, request);
+    const credential = await deps.loadCredential(lookupDb, settings, request);
     if (!credential) return null;
     if (
       input.expectedAuthorityGeneration !== undefined &&
@@ -721,6 +457,7 @@ export function buildConnectionTokenResolver(
     destinationUrl: string,
     inputCredentialTarget: "mcp" | "http_api",
     connectionUseAttribution?: ConnectionUseAttribution,
+    recordUsage = true,
   ): Promise<ResolveConnectionCredentialResult> => {
     if (cred.status !== "active") {
       return authNeededForStatus(cred, ref);
@@ -762,7 +499,9 @@ export function buildConnectionTokenResolver(
           : {}),
       };
     }
-    await deps.recordUsed(db, cred.workspaceId, cred.id, cred.subjectId);
+    if (recordUsage) {
+      await deps.recordUsed(db, cred.workspaceId, cred.id, cred.subjectId);
+    }
     return {
       status: "ok",
       headers: material.headers,
@@ -777,6 +516,7 @@ export function buildConnectionTokenResolver(
   const performRefresh = async (
     cred: ConnectionCredentialForBroker,
     ref: McpServerConnectionRef,
+    lockedDb: Database,
   ): Promise<ConnectionCredentialForBroker> => {
     const key = deps.keyBytes(settings);
     if (!key) {
@@ -798,22 +538,28 @@ export function buildConnectionTokenResolver(
     if (refreshed.metadata !== undefined) {
       refreshRecord.metadata = refreshed.metadata;
     }
-    const persisted = await deps.recordRefresh(db, refreshRecord);
+    const persisted = await deps.recordRefresh(lockedDb, refreshRecord);
     if (persisted) {
-      const current = await load({
-        workspaceId: cred.workspaceId,
-        connectionRef: { ...ref, connectionId: cred.id },
-        ...(cred.subjectId ? { subjectId: cred.subjectId } : {}),
-      });
+      const current = await load(
+        {
+          workspaceId: cred.workspaceId,
+          connectionRef: { ...ref, connectionId: cred.id },
+          ...(cred.subjectId ? { subjectId: cred.subjectId } : {}),
+        },
+        lockedDb,
+      );
       if (current) {
         return current;
       }
     }
-    const winner = await load({
-      workspaceId: cred.workspaceId,
-      connectionRef: { ...ref, connectionId: cred.id },
-      ...(cred.subjectId ? { subjectId: cred.subjectId } : {}),
-    });
+    const winner = await load(
+      {
+        workspaceId: cred.workspaceId,
+        connectionRef: { ...ref, connectionId: cred.id },
+        ...(cred.subjectId ? { subjectId: cred.subjectId } : {}),
+      },
+      lockedDb,
+    );
     if (winner?.status === "active") {
       return winner;
     }
@@ -829,7 +575,26 @@ export function buildConnectionTokenResolver(
     if (existing) {
       return existing;
     }
-    const promise = performRefresh(cred, ref).finally(() => {
+    const promise = (deps.withRefreshLock ?? withConnectionRefreshLock)(
+      db,
+      cred,
+      async (lockedDb) => {
+        // A different worker may have rotated while this request waited. Never
+        // exchange the old token again, or switch to another authority generation.
+        const current = await load(
+          {
+            workspaceId: cred.workspaceId,
+            connectionRef: { ...ref, connectionId: cred.id },
+            ...(cred.subjectId ? { subjectId: cred.subjectId } : {}),
+          },
+          lockedDb,
+        );
+        if (!current || current.authorityGeneration !== cred.authorityGeneration)
+          throw new Error("Connection authority changed before token refresh");
+        if (current.status !== "active" || current.version !== cred.version) return current;
+        return performRefresh(current, ref, lockedDb);
+      },
+    ).finally(() => {
       if (inflight.get(key) === promise) {
         inflight.delete(key);
       }
@@ -839,10 +604,11 @@ export function buildConnectionTokenResolver(
   };
 
   return async (input) => {
+    const credentialResolutionMode = input.credentialResolutionMode ?? "execution";
     let ref = input.connectionRef;
     let subjectId = input.subjectId;
     let credentialWorkspaceId = input.workspaceId;
-    let expectedAuthorityGeneration: number | undefined;
+    let expectedAuthorityGeneration = input.expectedAuthorityGeneration;
     let connectionUseAttribution: ConnectionUseAttribution | undefined;
     if (ref.authoritySource === "host") {
       return authNeeded(ref, "unsupported_auth", ref.connectionId);
@@ -882,6 +648,16 @@ export function buildConnectionTokenResolver(
           ref.connectionId,
         );
       }
+      if (
+        expectedAuthorityGeneration !== undefined &&
+        authorization.attribution.connectionGeneration !== expectedAuthorityGeneration
+      ) {
+        return authNeeded(
+          ref,
+          authorityReasonForScope(ref.subjectScope === "subject"),
+          ref.connectionId,
+        );
+      }
       connectionUseAttribution = authorization.attribution;
       expectedAuthorityGeneration = authorization.attribution.connectionGeneration;
       const expectedPersonal = authorization.attribution.scope !== "workspace";
@@ -891,48 +667,6 @@ export function buildConnectionTokenResolver(
         ...ref,
         connectionId: authorization.attribution.connectionId,
         kind: authorization.connectionKind,
-        subjectScope: expectedPersonal ? "subject" : "workspace",
-      };
-    } else if (input.connectionUseAuthority !== undefined) {
-      const authority = ConnectionUseAuthoritySnapshot.parse(input.connectionUseAuthority);
-      const expectedPersonal = authority.scope === "user";
-      if (
-        authority.targetWorkspaceId !== input.workspaceId ||
-        authority.providerDomain.toLowerCase() !== ref.providerDomain.toLowerCase() ||
-        (ref.connectionId !== undefined && ref.connectionId !== authority.connectionId) ||
-        (ref.kind !== undefined && ref.kind !== authority.connectionKind) ||
-        (ref.subjectScope === "subject") !== expectedPersonal ||
-        !deps.authorizeUse
-      ) {
-        return authNeeded(
-          ref,
-          expectedPersonal ? "personal_authority_unavailable" : "missing_connection",
-          ref.connectionId,
-        );
-      }
-      const authorization = await deps.authorizeUse(db, { snapshot: authority });
-      if (authorization.status === "denied") {
-        return authNeeded(
-          ref,
-          expectedPersonal ? "personal_authority_unavailable" : "missing_connection",
-          authority.connectionId,
-        );
-      }
-      connectionUseAttribution = authorization.attribution;
-      expectedAuthorityGeneration = authority.connectionGeneration;
-      // Personal resources are organization-user owned and may originate in a
-      // different workspace from the session using them. Authorization is
-      // evaluated against the target workspace above; the exact credential is
-      // then loaded from its frozen physical origin, never rediscovered in the
-      // target workspace.
-      credentialWorkspaceId = expectedPersonal
-        ? authority.originWorkspaceId
-        : authority.targetWorkspaceId;
-      subjectId = authority.ownerSubjectId ?? undefined;
-      ref = {
-        ...ref,
-        connectionId: authority.connectionId,
-        kind: authority.connectionKind,
         subjectScope: expectedPersonal ? "subject" : "workspace",
       };
     }
@@ -962,7 +696,19 @@ export function buildConnectionTokenResolver(
     if (!connectionBindingMatches(cred, ref, input.destinationUrl)) {
       return authNeeded(ref, "missing_connection", cred.id);
     }
-    if (shouldRefresh(cred, input.forceRefresh === true, deps.now())) {
+    const now = deps.now();
+    if (
+      credentialResolutionMode === "preflight" &&
+      cred.kind === "oauth2" &&
+      (input.forceRefresh === true ||
+        (cred.expiresAt !== null && cred.expiresAt.getTime() <= now.getTime()))
+    ) {
+      return authNeeded(ref, "refresh_failed", cred.id);
+    }
+    if (
+      credentialResolutionMode === "execution" &&
+      shouldRefresh(cred, input.forceRefresh === true, now)
+    ) {
       try {
         cred = await refreshSingleFlight(cred, ref);
       } catch (error) {
@@ -987,7 +733,9 @@ export function buildConnectionTokenResolver(
           }
           if (!handled) {
             await deps
-              .setStatus(db, input.workspaceId, "needs_reauth", error.message, {
+              // A personal credential may originate outside the workspace
+              // consuming it. Apply the CAS to the same row we refreshed.
+              .setStatus(db, cred.workspaceId, "needs_reauth", error.message, {
                 id: cred.id,
                 version: cred.version,
                 subjectId: cred.subjectId,
@@ -1010,6 +758,7 @@ export function buildConnectionTokenResolver(
       input.destinationUrl,
       input.credentialTarget ?? "mcp",
       connectionUseAttribution,
+      credentialResolutionMode === "execution",
     );
   };
 }
@@ -1227,7 +976,7 @@ function credentialMaterialForConnection(
     };
   }
   try {
-    const headers = normalizedHostCredentialHeaders(
+    const headers = normalizedCredentialHeaders(
       stringRecord((cred.credential as { headers?: unknown }).headers) ?? {},
     );
     return { status: "ok", headers };
@@ -1380,6 +1129,15 @@ export async function refreshOAuthConnectionCredential(
   const expiresAt = expiresAtFromTokenResponse(payload, cred.expiresAt);
   const scopeText = stringValue(payload.scope);
   const returnedScopes = scopeText?.split(/[\s,]+/).filter(Boolean) ?? [];
+  // A successful Microsoft refresh proves offline access, although Microsoft
+  // reports only access-token permissions in the response's scope field.
+  if (
+    scopeText &&
+    ref.providerDomain.toLowerCase() === "graph.microsoft.com" &&
+    !returnedScopes.some((scope) => scope.toLowerCase() === "offline_access")
+  ) {
+    returnedScopes.push("offline_access");
+  }
   const refreshTokenExpiresIn =
     typeof payload.refresh_token_expires_in === "number"
       ? payload.refresh_token_expires_in
@@ -1406,7 +1164,14 @@ export async function refreshOAuthConnectionCredential(
       "Bearer",
     ...(expiresAt ? { expires_at: expiresAt.toISOString() } : {}),
     ...(resource ? { resource } : {}),
-    ...(scopeText ? { scope: scopeText } : {}),
+    ...(scopeText
+      ? {
+          scope:
+            ref.providerDomain.toLowerCase() === "graph.microsoft.com"
+              ? returnedScopes.join(" ")
+              : scopeText,
+        }
+      : {}),
     ...(refreshTokenExpiresAt ? { refresh_token_expires_at: refreshTokenExpiresAt } : {}),
     ...(clientSecret && !personalGitHub
       ? { client_secret: clientSecret, token_endpoint_auth_method: authMethod }

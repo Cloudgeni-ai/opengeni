@@ -1,8 +1,8 @@
 import {
   dbSearchPath,
-  getSettings,
+  getArtifactOutboxSettings,
   resolveNatsControlPlaneAuth,
-  type Settings,
+  type ArtifactOutboxSettings,
 } from "@opengeni/config";
 import type { EditableArtifactOutboxDispatchSummary } from "@opengeni/core";
 import { createObservability, type Observability } from "@opengeni/observability";
@@ -51,7 +51,7 @@ export type CreateEditableArtifactOutboxServiceInput = Readonly<{
 }>;
 
 export type ProductionEditableArtifactOutboxServiceOptions = Readonly<{
-  settings: Settings;
+  settings: ArtifactOutboxSettings;
   databaseUrl: string;
   declaredDatabaseRole: string;
   natsUrl: string;
@@ -360,7 +360,7 @@ export async function createOutboxSidecarFromEnvironment(
 ): Promise<Readonly<{ service: EditableArtifactOutboxService; httpPort: number }> | null> {
   const sidecar = readEditableArtifactOutboxSidecarEnvironment(environment);
   if (!sidecar) return null;
-  const settings = getSettings();
+  const settings = getArtifactOutboxSettings(environment);
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   const natsAuth: EditableArtifactHintNatsAuth = controlPlaneAuth
     ? {

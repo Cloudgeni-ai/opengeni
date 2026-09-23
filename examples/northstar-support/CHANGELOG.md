@@ -1,5 +1,305 @@
 # @opengeni/example-northstar-support
 
+## 0.0.154
+
+### Patch Changes
+
+- Updated dependencies [701ea95]
+- Updated dependencies [e9c4379]
+- Updated dependencies [d92af11]
+- Updated dependencies [a463199]
+- Updated dependencies [86c710a]
+- Updated dependencies [bf744ed]
+- Updated dependencies [2f8bc58]
+- Updated dependencies [dd3387f]
+- Updated dependencies [a463199]
+  - @opengeni/react@7.1.0
+  - @opengeni/sdk@7.1.0
+
+## 0.0.153
+
+### Patch Changes
+
+- Updated dependencies [cf9249d]
+- Updated dependencies [6d0a4de]
+- Updated dependencies [4258aeb]
+- Updated dependencies [c64a94f]
+- Updated dependencies [3b73fc0]
+- Updated dependencies [d5dba2a]
+- Updated dependencies [1c924ed]
+- Updated dependencies [667a90f]
+- Updated dependencies [c31a951]
+- Updated dependencies [f90d628]
+- Updated dependencies [47a37c8]
+- Updated dependencies [348e54d]
+- Updated dependencies [aa09567]
+- Updated dependencies [9de8e51]
+- Updated dependencies [f3920a7]
+- Updated dependencies [3fa175e]
+- Updated dependencies [132b945]
+- Updated dependencies [779b16b]
+- Updated dependencies [1cb688d]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [621201d]
+- Updated dependencies [f7e41e7]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [6b32304]
+- Updated dependencies [1bfb6a4]
+- Updated dependencies [1641006]
+- Updated dependencies [c9e2743]
+- Updated dependencies [7e2436a]
+- Updated dependencies [0bf014d]
+- Updated dependencies [c4a2775]
+- Updated dependencies [c66ba31]
+- Updated dependencies [0ea365c]
+- Updated dependencies [b88890f]
+  - @opengeni/react@7.0.0
+  - @opengeni/sdk@7.0.0
+  - @opengeni/connect@0.3.0
+
+## 0.0.152
+
+### Patch Changes
+
+- Updated dependencies [71ca29b]
+- Updated dependencies [85cafd0]
+  - @opengeni/react@6.1.0
+  - @opengeni/sdk@6.1.0
+
+## 0.0.151
+
+### Patch Changes
+
+- Updated dependencies [50ac837]
+- Updated dependencies [48c624f]
+- Updated dependencies [d5582c1]
+- Updated dependencies [49d43e6]
+- Updated dependencies [ad9dc2f]
+- Updated dependencies [750060c]
+- Updated dependencies [da4a85f]
+- Updated dependencies [46a0267]
+- Updated dependencies [efeaa9c]
+  - @opengeni/sdk@6.0.0
+  - @opengeni/react@6.0.0
+
+## 0.0.150
+
+### Patch Changes
+
+- Updated dependencies [c1ad490]
+  - @opengeni/react@5.2.0
+
+## 0.0.149
+
+### Patch Changes
+
+- Updated dependencies [0507f91]
+  - @opengeni/react@5.1.1
+
+## 0.0.148
+
+### Patch Changes
+
+- Updated dependencies [d40bd9b]
+- Updated dependencies [4e2b59d]
+- Updated dependencies [4e2b59d]
+- Updated dependencies [4e2b59d]
+- Updated dependencies [9968ae5]
+- Updated dependencies [488a69b]
+- Updated dependencies [935af4e]
+- Updated dependencies [5ef34cf]
+- Updated dependencies [d08dbb6]
+  - @opengeni/react@5.1.0
+  - @opengeni/sdk@5.1.0
+
+## 0.0.147
+
+### Patch Changes
+
+- @opengeni/react@5.0.5
+- @opengeni/sdk@5.0.5
+
+## 0.0.146
+
+### Patch Changes
+
+- Updated dependencies [3d9ab25]
+  - @opengeni/react@5.0.4
+
+## 0.0.145
+
+### Patch Changes
+
+- @opengeni/react@5.0.3
+- @opengeni/sdk@5.0.3
+
+## 0.0.144
+
+### Patch Changes
+
+- Updated dependencies [05957ee]
+  - @opengeni/react@5.0.2
+
+## 0.0.143
+
+### Patch Changes
+
+- Updated dependencies [be17b8e]
+  - @opengeni/react@5.0.1
+
+## 0.0.142
+
+### Patch Changes
+
+- Updated dependencies [cffd21b]
+- Updated dependencies [f8be7df]
+- Updated dependencies [cffd21b]
+  - @opengeni/sdk@5.0.0
+  - @opengeni/react@5.0.0
+
+## 0.0.141
+
+### Patch Changes
+
+- Updated dependencies [39adecb]
+- Updated dependencies [1b0f4f2]
+- Updated dependencies [87fbd92]
+  - @opengeni/react@4.0.2
+  - @opengeni/sdk@4.0.2
+
+## 0.0.140
+
+### Patch Changes
+
+- Updated dependencies [068be26]
+- Updated dependencies [d1cb266]
+- Updated dependencies [2fa33e4]
+  - @opengeni/sdk@4.0.1
+  - @opengeni/react@4.0.1
+
+## 0.0.139
+
+### Patch Changes
+
+- Updated dependencies [0c5e2fd]
+- Updated dependencies [231b103]
+- Updated dependencies [9827c25]
+- Updated dependencies [c915b0f]
+- Updated dependencies [5904fd1]
+- Updated dependencies [14dd6fe]
+- Updated dependencies [9d36a0f]
+  - @opengeni/react@4.0.0
+  - @opengeni/sdk@4.0.0
+
+## 0.0.138
+
+### Patch Changes
+
+- Updated dependencies [4536385]
+- Updated dependencies [0ca6728]
+- Updated dependencies [fa2b99a]
+- Updated dependencies [fa12951]
+- Updated dependencies [1fc0889]
+- Updated dependencies [d06450c]
+- Updated dependencies [d9dbd5d]
+- Updated dependencies [e271780]
+- Updated dependencies [1c4b707]
+- Updated dependencies [cc1bfe0]
+- Updated dependencies [3db0b05]
+- Updated dependencies [c90f3fc]
+- Updated dependencies [952331e]
+- Updated dependencies [ecffc88]
+- Updated dependencies [8be8a72]
+- Updated dependencies [0c39126]
+- Updated dependencies [ba890d1]
+- Updated dependencies [0c39126]
+- Updated dependencies [730b78b]
+- Updated dependencies [4708cfb]
+- Updated dependencies [575af5b]
+- Updated dependencies [e9d092a]
+- Updated dependencies [6de9fe3]
+- Updated dependencies [cda46e8]
+- Updated dependencies [ca2b4e2]
+- Updated dependencies [3673900]
+- Updated dependencies [b1d3673]
+- Updated dependencies [2fb17fd]
+- Updated dependencies [3a29372]
+- Updated dependencies [107aa14]
+- Updated dependencies [eeb5500]
+- Updated dependencies [0f3dc9a]
+- Updated dependencies [fe73da9]
+- Updated dependencies [d8a70ec]
+- Updated dependencies [f0f1e17]
+- Updated dependencies [0a81cc8]
+  - @opengeni/sdk@3.8.0
+  - @opengeni/react@3.8.0
+
+## 0.0.137
+
+### Patch Changes
+
+- Updated dependencies [6b65383]
+- Updated dependencies [6f84c02]
+  - @opengeni/sdk@3.7.0
+  - @opengeni/react@3.7.0
+
+## 0.0.136
+
+### Patch Changes
+
+- Updated dependencies [d63ee0f]
+- Updated dependencies [b420912]
+- Updated dependencies [fab39d2]
+  - @opengeni/sdk@3.6.0
+  - @opengeni/react@3.6.0
+
+## 0.0.135
+
+### Patch Changes
+
+- Updated dependencies [8b42f58]
+- Updated dependencies [0214875]
+- Updated dependencies [e2a668b]
+- Updated dependencies [9c45eae]
+  - @opengeni/sdk@3.5.1
+  - @opengeni/react@3.5.1
+
+## 0.0.134
+
+### Patch Changes
+
+- Updated dependencies [32b9de4]
+- Updated dependencies [633f9bf]
+- Updated dependencies [8f81b57]
+  - @opengeni/sdk@3.5.0
+  - @opengeni/react@3.5.0
+
+## 0.0.133
+
+### Patch Changes
+
+- Updated dependencies [b88a194]
+  - @opengeni/react@3.4.2
+
+## 0.0.132
+
+### Patch Changes
+
+- Updated dependencies [a8da2c5]
+  - @opengeni/react@3.4.1
+
+## 0.0.131
+
+### Patch Changes
+
+- Updated dependencies [2d0fad4]
+- Updated dependencies [9fe5c5b]
+- Updated dependencies [c356468]
+- Updated dependencies [dd98677]
+- Updated dependencies [9af1666]
+  - @opengeni/react@3.4.0
+  - @opengeni/sdk@3.4.0
+
 ## 0.0.130
 
 ### Patch Changes

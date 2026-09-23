@@ -13,6 +13,7 @@ import { Hono } from "hono";
 import postgres from "postgres";
 
 import { registerSkillRoutes } from "../src/routes/skills";
+import { registerPreferenceRegistryRoutes } from "../src/routes/preference-registry";
 
 const delegationSecret = "portable-skill-route-secret";
 const skillMarkdown = `---
@@ -86,6 +87,10 @@ beforeAll(async () => {
   accountId = grant.accountId;
   workspaceId = grant.workspaceId;
   app = new Hono();
+  registerPreferenceRegistryRoutes(app, {
+    db: client.db,
+    settings: testSettings({ productAccessMode: "managed", delegationSecret }),
+  } as ApiRouteDeps);
   registerSkillRoutes(
     app,
     {
@@ -110,7 +115,7 @@ async function auth(): Promise<string> {
     accountId,
     workspaceId,
     subjectId,
-    permissions: ["workspace:read", "capabilities:manage"],
+    permissions: ["workspace:read", "capabilities:manage", "workspace:admin"],
     principalKind: "human_session",
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   })}`;
@@ -128,6 +133,210 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
 }
 
 describe("portable Skill routes", () => {
+  test("permanent deletion approval replays through HTTP after the Skill is gone", async () => {
+    if (!available || !shared) return;
+    const skillId = crypto.randomUUID();
+    const created = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify({
+        skillId,
+        operationId: crypto.randomUUID(),
+        expectedRevisionId: null,
+        expectedScopeVersion: 1,
+        stableKey: `remove-${skillId}`,
+        files: [{ path: "SKILL.md", content: skillMarkdown }],
+        reason: "Removal fixture",
+      }),
+    });
+    expect(created.status).toBe(200);
+    const saved = await created.json();
+    const removalOperationId = crypto.randomUUID();
+    // Seed the same immutable pending proposal emitted by the agent lifecycle;
+    // the HTTP surface only admits human decisions, not agent writes.
+    const [proposal] = await shared.admin`INSERT INTO preference_registry_revisions
+      (account_id,preference_id,title,description,content,content_hash,conflict_strategy,
+       provenance_source,provenance_source_id,trust,created_by_subject_id,corrects_revision_id,
+       skill_files,skill_activation_mode,skill_removal_operation_id)
+      SELECT account_id,preference_id,title,description,content,content_hash,'override',
+        'agent',${crypto.randomUUID()},'untrusted_proposal',${subjectId},id,
+        skill_files,skill_activation_mode,${removalOperationId}
+      FROM preference_registry_revisions WHERE id=${saved.revisionId} RETURNING id`;
+    const skillReview = {
+      sourceOperationId: removalOperationId,
+      removalOperationId,
+      skillId,
+      revisionId: proposal!.id,
+      expectedRevisionId: saved.revisionId,
+      expectedScopeVersion: 1,
+    };
+    await shared.admin`INSERT INTO skill_write_receipts(account_id,workspace_id,operation_id,fingerprint,actor,receipt)
+      VALUES(${accountId},${workspaceId},${removalOperationId},'http-removal-fixture',
+        ${shared.admin.json({ kind: "agent" })},${shared.admin.json({ outcome: "pending", skillId, skillReview })})`;
+    const body = {
+      operationId: crypto.randomUUID(),
+      revisionId: proposal!.id,
+      expectedRevisionId: saved.revisionId,
+      expectedScopeVersion: 1,
+      removalOperationId,
+      reason: "Approve deletion",
+    };
+    const apply = () =>
+      request(`/skills/content/${skillId}/approve`, { method: "POST", body: JSON.stringify(body) });
+    const first = await apply();
+    expect(first.status).toBe(200);
+    const receipt = await first.json();
+    expect(receipt).toMatchObject({ removed: true, replayed: false });
+    expect((await request(`/skills/content/${skillId}`)).status).toBe(404);
+    const retry = await apply();
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toEqual({ ...receipt, replayed: true });
+    const changed = await request(`/skills/content/${skillId}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ ...body, reason: "Changed retry" }),
+    });
+    expect(changed.status).toBe(409);
+  });
+  test("legacy metadata-writing endpoints are retired without changing content", async () => {
+    if (!available) return;
+    const before = await request("/skills/content").then((response) => response.json());
+    for (const path of [
+      "proposals",
+      `${crypto.randomUUID()}/activate`,
+      `${crypto.randomUUID()}/correct`,
+    ]) {
+      const response = await request(`/preferences/${path}`, { method: "POST", body: "{}" });
+      expect(response.status).toBe(410);
+      expect(await response.json()).toMatchObject({ code: "SKILL_FILE_LIFECYCLE_REQUIRED" });
+    }
+    expect(await request("/skills/content").then((response) => response.json())).toEqual(before);
+  });
+  test("shared content routes preserve folders, replay saves, reject stale heads and restore history", async () => {
+    if (!available) return;
+    const skillId = crypto.randomUUID();
+    const initial = {
+      skillId,
+      operationId: crypto.randomUUID(),
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+      stableKey: `authored-${skillId}`,
+      files: [
+        { path: "SKILL.md", content: skillMarkdown },
+        { path: "references/checks.txt", content: "Original checks" },
+      ],
+      reason: "Create test Skill",
+    };
+    const create = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify(initial),
+    });
+    expect(create.status).toBe(200);
+    const first = await create.json();
+    expect(first).toMatchObject({ skillId, outcome: "applied", replayed: false });
+    const replay = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify(initial),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ revisionId: first.revisionId, replayed: true });
+    const update = {
+      ...initial,
+      operationId: crypto.randomUUID(),
+      expectedRevisionId: first.revisionId,
+      files: [{ path: "references/checks.txt", content: "Updated checks" }],
+    };
+    const saved = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify(update),
+    });
+    expect(saved.status).toBe(200);
+    const second = await saved.json();
+    const read = await request(`/skills/content/${skillId}`);
+    expect(read.status).toBe(200);
+    const currentContent = await read.json();
+    expect(currentContent.title).toBe("release-operator");
+    expect(currentContent.description).toBe("Prepare, verify, and publish a safe release.");
+    expect(currentContent.files).toEqual([
+      { path: "SKILL.md", content: skillMarkdown },
+      { path: "references/checks.txt", content: "Updated checks" },
+    ]);
+    const stale = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify({ ...update, operationId: crypto.randomUUID() }),
+    });
+    expect(stale.status).toBe(409);
+    const restore = await request(`/skills/content/${skillId}/restore`, {
+      method: "POST",
+      body: JSON.stringify({
+        operationId: crypto.randomUUID(),
+        revisionId: first.revisionId,
+        expectedRevisionId: second.revisionId,
+        expectedScopeVersion: 1,
+        reason: "Restore original checks",
+      }),
+    });
+    expect(restore.status).toBe(200);
+    expect((await restore.json()).revisionId).not.toBe(first.revisionId);
+    const restored = await request(`/skills/content/${skillId}`).then((response) =>
+      response.json(),
+    );
+    expect(restored.files).toEqual(initial.files);
+    const inventory = await request("/skills/content").then((response) => response.json());
+    expect(
+      inventory.skills.find((skill: { id: string }) => skill.id === skillId),
+    ).not.toHaveProperty("files");
+    const invalid = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify({
+        ...initial,
+        skillId: crypto.randomUUID(),
+        operationId: crypto.randomUUID(),
+        files: [{ path: "../SKILL.md", content: "Invalid" }],
+      }),
+    });
+    expect(invalid.status).toBe(400);
+    const missingFrontmatter = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify({
+        ...initial,
+        skillId: crypto.randomUUID(),
+        operationId: crypto.randomUUID(),
+        files: [{ path: "SKILL.md", content: "Instructions without metadata" }],
+      }),
+    });
+    expect(missingFrontmatter.status).toBe(400);
+    const separateMetadata = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify({
+        ...initial,
+        title: "Competing name",
+        description: "Competing summary",
+      }),
+    });
+    expect(separateMetadata.status).toBe(422);
+    const malformed = await request("/skills/content/save", { method: "POST", body: "{" });
+    expect(malformed.status).toBe(422);
+    const secondSkillId = crypto.randomUUID();
+    const additional = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify({
+        ...initial,
+        skillId: secondSkillId,
+        operationId: crypto.randomUUID(),
+        stableKey: `authored-${secondSkillId}`,
+      }),
+    });
+    expect(additional.status).toBe(200);
+    const firstPage = await request("/skills/content?limit=1").then((response) => response.json());
+    expect(firstPage.skills).toHaveLength(1);
+    expect(firstPage.nextCursor).toBeString();
+    const secondPage = await request(
+      `/skills/content?limit=1&cursor=${encodeURIComponent(firstPage.nextCursor)}`,
+    ).then((response) => response.json());
+    expect(secondPage.skills).toHaveLength(1);
+    expect(secondPage.skills[0].id).not.toBe(firstPage.skills[0].id);
+    expect((await request("/skills/content?cursor=invalid")).status).toBe(422);
+  }, 60_000);
+
   test("installs and lists an exact reviewed curated-library Skill", async () => {
     if (!available) return;
     const entry = listSkillLibraryEntries()[0]!;
@@ -334,6 +543,15 @@ describe("portable Skill routes", () => {
       capabilityId: updated.capabilityId,
       status: "uninstalled",
       remainingOwners: [],
+      skillReleases: [
+        {
+          skillId: expect.any(String),
+          revisionId: expect.any(String),
+          disposition: "deactivated",
+          eventId: expect.any(String),
+          warning: null,
+        },
+      ],
     });
   }, 60_000);
 });

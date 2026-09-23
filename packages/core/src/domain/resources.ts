@@ -22,6 +22,8 @@ import {
 import {
   areGitHubRepositoriesAllowedForWorkspace,
   requireFileForSubject,
+  withSessionRlsActorContext,
+  type SessionRlsActorContext,
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
@@ -42,7 +44,7 @@ export function validateToolRefs(tools: ToolRef[], settings: McpSettings): ToolR
       }
       throw new HTTPException(422, { message: `unknown MCP server id: ${tool.id}` });
     }
-    // Tool refs are tri-state for pack portability across deployments:
+
     //  - bare / optional:false is STRICT: the id must be configured here and
     //    runtime connection failure fails closed when preparation is demanded.
     //    Only an independent eager:true marker makes that a startup barrier.
@@ -100,13 +102,20 @@ export function withWorkspaceDefaultMcpTools(
   runtimeSettings: McpSettings,
   defaults: WorkspaceSessionToolDefaults | null,
 ): ToolRef[] {
-  if (!defaults) {
+  if (!defaults?.mcpServerIds) {
     return withDefaultEnabledCapabilityMcpTools(tools, settings, runtimeSettings);
   }
   return mergeToolRefs(
     tools,
     validateToolRefs(
-      defaults.mcpServerIds.map((id) => ({ kind: "mcp" as const, id, optional: true as const })),
+      [
+        ...defaults.mcpServerIds,
+        ...(defaults.inheritConnectedMcpServers
+          ? runtimeSettings.mcpServers
+              .filter((server) => !["opengeni", "files", "docs"].includes(server.id))
+              .map((server) => server.id)
+          : []),
+      ].map((id) => ({ kind: "mcp" as const, id, optional: true as const })),
       runtimeSettings,
     ),
   );
@@ -444,33 +453,42 @@ export async function validateFileResources(
   db: Database,
   accountId: string,
   workspaceId: string,
-  subjectId: string,
+  subjectId: string | null,
   resources: ResourceRef[],
+  privateFileContext?: SessionRlsActorContext,
 ): Promise<void> {
-  const fileIds = new Set<string>();
-  for (const resource of resources) {
-    if (resource.kind !== "file") {
-      continue;
-    }
-    if (fileIds.has(resource.fileId)) {
-      throw new HTTPException(422, { message: `duplicate file resource: ${resource.fileId}` });
-    }
-    fileIds.add(resource.fileId);
-    const file = await requireFileForSubject(db, {
-      accountId,
-      workspaceId,
-      subjectId,
-      fileId: resource.fileId,
-    }).catch(() => null);
-    if (!file) {
-      throw new HTTPException(422, { message: `unknown file resource: ${resource.fileId}` });
-    }
-    if (file.status !== "ready") {
-      throw new HTTPException(422, {
-        message: `file resource ${resource.fileId} is ${file.status}`,
-      });
-    }
-  }
+  return withSessionRlsActorContext(
+    privateFileContext ?? {
+      subjectId: subjectId ?? "service:file-resource-validation",
+      privateFileOwnerSubjectId: null,
+    },
+    async () => {
+      const fileIds = new Set<string>();
+      for (const resource of resources) {
+        if (resource.kind !== "file") {
+          continue;
+        }
+        if (fileIds.has(resource.fileId)) {
+          throw new HTTPException(422, { message: `duplicate file resource: ${resource.fileId}` });
+        }
+        fileIds.add(resource.fileId);
+        const file = await requireFileForSubject(db, {
+          accountId,
+          workspaceId,
+          subjectId: privateFileContext?.initiatingHumanSubjectId ?? subjectId,
+          fileId: resource.fileId,
+        }).catch(() => null);
+        if (!file) {
+          throw new HTTPException(422, { message: `unknown file resource: ${resource.fileId}` });
+        }
+        if (file.status !== "ready") {
+          throw new HTTPException(422, {
+            message: `file resource ${resource.fileId} is ${file.status}`,
+          });
+        }
+      }
+    },
+  );
 }
 
 function normalizeMountPath(path: string): string {

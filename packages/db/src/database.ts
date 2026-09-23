@@ -1,3 +1,4 @@
+import type { SessionAttachmentReadAccess } from "./session-file-attachments";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { eq, sql, type SQL } from "drizzle-orm";
 import type { PgDatabase, PgTransactionConfig } from "drizzle-orm/pg-core";
@@ -10,6 +11,7 @@ import {
 } from "./persistence-errors";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "./lossless-json";
 import * as schema from "./schema";
+import { startDatabaseTiming } from "./database-timing";
 
 // §7.7 driver widening (Step I). `Database` is the structural, cross-driver
 // query-layer port: every helper in this file accepts `db: Database` and uses
@@ -52,11 +54,18 @@ export type RlsContext = {
 };
 
 export type SessionRlsActorContext = {
+  /** Server-authorized session attachment scope; never taken from request JSON. */
+  sessionAttachmentReadAccess?: SessionAttachmentReadAccess;
   subjectId: string;
+  /** Host-verified personal file ownership, never a request-supplied subject. */
+  privateFileOwnerSubjectId?: string | null;
   initiatingHumanSubjectId?: string | null;
 };
 
 const sessionRlsActorContext = new AsyncLocalStorage<SessionRlsActorContext>();
+export function currentSessionAttachmentReadAccess(): SessionAttachmentReadAccess | undefined {
+  return sessionRlsActorContext.getStore()?.sessionAttachmentReadAccess;
+}
 
 export async function withSessionRlsActorContext<T>(
   actor: SessionRlsActorContext,
@@ -72,6 +81,15 @@ export async function withSessionRlsActorContext<T>(
   ) {
     throw new Error(
       "withSessionRlsActorContext: initiatingHumanSubjectId must be null or non-empty",
+    );
+  }
+  if (
+    actor.privateFileOwnerSubjectId !== undefined &&
+    actor.privateFileOwnerSubjectId !== null &&
+    !actor.privateFileOwnerSubjectId.trim()
+  ) {
+    throw new Error(
+      "withSessionRlsActorContext: privateFileOwnerSubjectId must be null or non-empty",
     );
   }
   return await sessionRlsActorContext.run(actor, fn);
@@ -389,7 +407,7 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   if (sessionActor) {
     await setSubjectRlsContext(db, sessionActor.subjectId);
     await db.execute(
-      sql`select set_config(
+      sql`select set_config('opengeni.private_file_owner', ${sessionActor.privateFileOwnerSubjectId ?? ""}, true), set_config(
         'opengeni.initiating_human_subject_id',
         ${sessionActor.initiatingHumanSubjectId ?? ""},
         true
@@ -458,32 +476,60 @@ export async function withRlsContext<T>(
   sessionTenancyFence: "shared" | "none" = "shared",
 ): Promise<T> {
   const restoreParentScope = isTransactionHandle(db);
-  return await db.transaction(async (tx) => {
-    const scoped = tx as unknown as Database;
-    const parentScope = restoreParentScope ? await readRlsContextSettings(scoped) : null;
-    await setRlsContext(scoped, context);
-    if (context.workspaceId && sessionTenancyFence === "shared") {
-      await scoped.execute(
-        sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${context.workspaceId}`}, 0))`,
-      );
-    }
-    // Defense-in-depth: read the LOCAL GUC back on THIS backend BEFORE running
-    // the scoped query. The set_config and this read share one db.transaction,
-    // which a transaction pooler pins to a single backend — so a mismatch here
-    // means the context was genuinely lost (a torn transaction / pooler backend
-    // swap), not normal operation. Without this guard such an event runs the
-    // scoped read with an empty account_id and returns zero RLS-visible rows,
-    // manufacturing a phantom "no active subscription" from a credential that is
-    // in fact active. Convert that silent false into a loud, root-cause-bearing
-    // error so the caller can retry rather than permanently mis-decide.
-    await assertRlsContextApplied(scoped, context);
-    const value = await fn(scoped);
-    // A nested transaction is a savepoint, and SET LOCAL survives successful
-    // savepoint release. Restore only the tenant scope the nested helper owns;
-    // writer/protocol capabilities intentionally remain transaction-wide.
-    if (parentScope) await restoreRlsContextSettings(scoped, parentScope);
-    return value;
-  }, transactionConfig);
+  // Callback entry includes connection admission AND BEGIN/SAVEPOINT round-trip.
+  // This is deliberately not advertised as pure pool wait.
+  const admission = startDatabaseTiming(
+    restoreParentScope ? "savepoint_admission" : "transaction_admission",
+  );
+  try {
+    return await db.transaction(async (tx) => {
+      admission("completed");
+      const setup = startDatabaseTiming("rls_setup");
+      const scoped = tx as unknown as Database;
+      let parentScope: RlsContextSettings | null;
+      try {
+        parentScope = restoreParentScope ? await readRlsContextSettings(scoped) : null;
+        await setRlsContext(scoped, context);
+        if (context.workspaceId && sessionTenancyFence === "shared") {
+          await scoped.execute(
+            sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${context.workspaceId}`}, 0))`,
+          );
+        }
+        // Defense-in-depth: read the LOCAL GUC back on THIS backend BEFORE running
+        // the scoped query. The set_config and this read share one db.transaction,
+        // which a transaction pooler pins to a single backend — so a mismatch here
+        // means the context was genuinely lost (a torn transaction / pooler backend
+        // swap), not normal operation. Without this guard such an event runs the
+        // scoped read with an empty account_id and returns zero RLS-visible rows,
+        // manufacturing a phantom "no active subscription" from a credential that is
+        // in fact active. Convert that silent false into a loud, root-cause-bearing
+        // error so the caller can retry rather than permanently mis-decide.
+        await assertRlsContextApplied(scoped, context);
+        setup("completed");
+      } catch (error) {
+        setup("failed");
+        throw error;
+      }
+      const callback = startDatabaseTiming("scoped_callback");
+      let value: T;
+      try {
+        value = await fn(scoped);
+        callback("completed");
+      } catch (error) {
+        callback("failed");
+        throw error;
+      }
+      // A nested transaction is a savepoint, and SET LOCAL survives successful
+      // savepoint release. Restore only the tenant scope the nested helper owns;
+      // writer/protocol capabilities intentionally remain transaction-wide.
+      if (parentScope) await restoreRlsContextSettings(scoped, parentScope);
+      return value;
+    }, transactionConfig);
+  } catch (error) {
+    // No-op after callback entry; only admission failures are counted here.
+    admission("failed");
+    throw error;
+  }
 }
 
 /**
@@ -715,12 +761,24 @@ export async function withSessionActivityRlsContext<T>(
   fn: (db: SessionActivityDatabase) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
   fenceMode: "shared" | "none" = "shared",
+  organizationMembershipFence = false,
 ): Promise<T> {
   await assertSessionActivityGateEntry(db);
   return await withRlsContext(
     db,
     context,
     async (scopedDb) => {
+      if (organizationMembershipFence) {
+        // Claim can inherit membership-fenced authority after locking sessions.
+        // Acquire membership before even a shared tenancy fence: an exclusive
+        // tenancy/control waiter can otherwise complete the same lock cycle.
+        await scopedDb.execute(sql`select pg_advisory_xact_lock(
+          hashtextextended(${`organization-membership:${context.accountId}`}, 0))`);
+        if (fenceMode === "shared") {
+          await scopedDb.execute(sql`select pg_advisory_xact_lock_shared(
+            hashtextextended(${`session-tenancy:${context.workspaceId}`}, 0))`);
+        }
+      }
       const gate = await beginSessionActivityGate(scopedDb, context.workspaceId);
       const value = await fn(gate.db);
       // The finalizer must never trust tenant GUCs that arbitrary callback code
@@ -733,7 +791,7 @@ export async function withSessionActivityRlsContext<T>(
       return value;
     },
     transactionConfig,
-    fenceMode,
+    organizationMembershipFence ? "none" : fenceMode,
   );
 }
 
@@ -807,10 +865,19 @@ export async function withSessionActivitySavepoint<T>(
 export async function retrySessionActivityRls<T>(
   db: Database,
   workspaceId: string,
-  options: IdempotentPersistenceTransactionOptions,
+  options: IdempotentPersistenceTransactionOptions & {
+    /** Claim can inherit membership-fenced causal authority after locking the
+     * session. Acquire that fence before tenancy/control/session instead. An
+     * enclosing transaction must preserve this same lock prefix. */
+    organizationMembershipFence?: boolean;
+  },
   fn: (db: SessionActivityDatabase) => Promise<T>,
 ): Promise<T> {
   return await runIdempotentPersistenceTransaction(options, async () => {
+    if (options.organizationMembershipFence) {
+      const context = { ...(await rlsContextForWorkspace(db, workspaceId)), workspaceId };
+      return await withSessionActivityRlsContext(db, context, fn, undefined, "shared", true);
+    }
     return await withWorkspaceSessionActivityRls(db, workspaceId, fn);
   });
 }

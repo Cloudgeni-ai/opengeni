@@ -3,10 +3,15 @@ import type {
   ConnectionCredentialsPort,
   DocumentAuthorityKind,
   EntitlementsPort,
+  KnowledgeSourceSyncRunSummary,
   ScheduledTaskTriggerType,
   TurnInitiator,
 } from "@opengeni/contracts";
-import type { Database } from "@opengeni/db";
+import type {
+  Database,
+  SessionWorkflowWakeDeliveryResult,
+  SessionAdmissionFence,
+} from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
@@ -28,7 +33,9 @@ export type WakeSessionWorkflowSignal = (input: {
   workflowId: string;
   wakeRevision: number;
   interruptionRequested?: boolean;
-}) => Promise<void>;
+  /** Called after transport acceptance, before the fallible durable ACK. */
+  onSignalAccepted?: () => void;
+}) => Promise<SessionWorkflowWakeDeliveryResult | void>;
 
 export type SignalCodexCapacityWorkflow = (input: {
   accountId: string;
@@ -249,6 +256,7 @@ export type FailSessionAttemptInput = {
    * committed claim discovered by the control lane can recover the exact
    * attempt instead of terminally failing it. */
   preClaimFailure?: PreClaimFailureDetail;
+  admissionFence?: SessionAdmissionFence;
   /** Added in v4. A claimed attempt that lost operational database access
    * before turn-start completion carries its exact immutable turn identity so
    * the DB-only control lane can recover it instead of terminally failing it. */
@@ -260,17 +268,24 @@ export type FailSessionAttemptInput = {
 };
 
 export type FailSessionAttemptResult =
+  | { action: "blocked" }
   | { action: "failed" }
   | { action: "recovering" }
   | { action: "unclaimed" }
   | { action: "terminal" }
   | { action: "stale" };
 
-export type PreClaimFailureDisposition = "retryable" | "permanent";
+export type PreClaimFailureDisposition = "retryable" | "permanent" | "blocked";
 
 export type PreClaimFailureDetail = {
   disposition: PreClaimFailureDisposition;
   code: "db_deadlock" | "db_serialization_failure" | "db_failure" | "claim_invariant";
+  sqlState?: string | null;
+  reason?:
+    | "database_claim_rejected"
+    | "initiator_membership_required"
+    | "personal_resource_grant_required";
+  retryPolicy?: "explicit_recheck";
 };
 
 export const PRE_CLAIM_FAILURE_TYPE = "OpenGeniPreClaimFailure";
@@ -341,6 +356,21 @@ export type RecoverEscapedMcpTimeoutResult = {
 export type PeekSessionWorkInput = {
   workspaceId: string;
   sessionId: string;
+  includeAdmissionFence?: boolean;
+  /** Versioned workflow observer opt-in, never a caller authorization grant. */
+  observerAccountId?: string;
+};
+
+export type SettleSessionInputWaitInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  waitTurnId: string;
+  disposition: "held" | "timeout" | "superseded";
+};
+
+export type SettleSessionInputWaitResult = {
+  action: "held" | "timeout" | "superseded" | "stale";
 };
 
 export type ExpireSessionHumanInputInput = {
@@ -378,14 +408,10 @@ export type MaybeContinueGoalInput = {
 };
 
 export type MaybeContinueGoalResult = {
-  // `held`: an agent-declared `goal_wait` hold is current. No continuation was
-  // materialized and the goal obligation stays armed; the workflow closes like
-  // `none` and the wake outbox (deadline) or any producer's signalWithStart
-  // restarts it.
-  // `deferred`: idle backoff between consecutive no-input continuations. Same
-  // shape as `held`: nothing materialized, obligation armed, a delayed outbox
-  // wake at the pacing deadline (pulled to now by any new input) restarts it.
-  action: "none" | "queue" | "continue" | "paused" | "held" | "deferred";
+  // `deferred`: idle backoff between consecutive no-input continuations.
+  // Nothing was materialized; the obligation remains armed and a delayed
+  // outbox wake at the pacing deadline restarts it.
+  action: "none" | "queue" | "continue" | "paused" | "deferred";
 };
 
 export type DispatchScheduledTaskRunInput = {
@@ -423,7 +449,9 @@ export type DispatchScheduledTaskRunResult =
         | "scheduled_authority_exhausted"
         | "scheduled_run_terminal"
         | "scheduled_execution_unrepresentable"
+        | "connection_account_unavailable"
         | "knowledge_source_paused"
+        | "legacy_source_schedule_requires_migration"
         | "incident_preflight_metadata_missing"
         | "incident_responder_under_capable"
         | "incident_data_source_unsuitable";
@@ -448,6 +476,9 @@ export type DispatchScheduledTaskRunResult =
     };
 
 export type RunKnowledgeSourceSyncBatchInput = {
+  /** Host-bound attempt only. Legacy control workflow inputs have none and cannot fetch. */
+  agent?: Extract<import("@opengeni/db").KnowledgeActor, { kind: "agent" }>;
+
   accountId: string;
   workspaceId: string;
   taskId: string;
@@ -469,7 +500,7 @@ export type DispatchAutomationRunResult =
   | { action: "failed"; reason: string }
   | { action: "not_found" };
 
-export type RunKnowledgeSourceSyncBatchResult =
+export type RunKnowledgeSourceSyncBatchResult = (
   | { action: "continue" }
   | {
       action: "complete";
@@ -481,7 +512,8 @@ export type RunKnowledgeSourceSyncBatchResult =
       action: "failed";
       bufferedWake: boolean;
       bufferedScheduledTaskRunId?: string | null;
-    };
+    }
+) & { summary?: KnowledgeSourceSyncRunSummary; errorCode?: string };
 
 type DocumentIndexIdentity = {
   accountId: string;

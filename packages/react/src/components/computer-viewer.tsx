@@ -567,7 +567,12 @@ export function ComputerViewer({
           if (relevant[0]) selectComputerSession({ sessionId: relevant[0].id, pinned: false });
         }}
         onCreate={hideGenericCreate ? undefined : createComputer}
-        onRefresh={() => void Promise.all([refreshRegistry(), refreshComputer()])}
+        onRefresh={() => {
+          if (frames.state === "error" && !generationLossSelected && !generationLossFrames) {
+            frames.reconnect();
+          }
+          void Promise.all([refreshRegistry(), refreshComputer()]);
+        }}
       />
       <InteractionInterventionBanner
         interventions={selectedInterventions}
@@ -1031,8 +1036,11 @@ function ComputerViewport(props: {
   actionRef.current = props.onAction;
   readClipboardRef.current = props.onReadClipboard;
   errorRef.current = props.onError;
+  const streamFailed = props.connectionState === "error";
   const rawInputEnabled =
-    !props.backgroundActions || props.target?.kind === "screen" || props.target?.focused === true;
+    !streamFailed &&
+    !props.machineLocked &&
+    (!props.backgroundActions || props.target?.kind === "screen" || props.target?.focused === true);
 
   const paintQueuedFrames = useCallback(() => {
     if (decodingFrameRef.current) return;
@@ -1346,7 +1354,7 @@ function ComputerViewport(props: {
     if (inputRef.current) inputRef.current.value = "";
   };
 
-  const showCanvas = props.frame !== null && !props.machineLocked;
+  const showCanvas = props.frame !== null && !props.machineLocked && !streamFailed;
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden bg-black">
       <canvas

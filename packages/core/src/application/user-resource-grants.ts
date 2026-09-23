@@ -6,7 +6,6 @@ import type {
 } from "@opengeni/contracts";
 import {
   issueSelfUserResourceGrant,
-  issueSelfLocalConnectionUseGrant,
   listSelfUserResourceAuthorities,
   revokeSelfUserResourceGrant,
   sessionTenancyProductActivated,
@@ -16,7 +15,7 @@ import { requirePermission, type AccessGrantAuthorization } from "../access";
 import type { AppDependencies } from "../dependencies";
 import { requireSessionAuthorization } from "../session-authorization";
 import {
-  requireCanonicalManagedHuman,
+  requireVerifiedOwningUser,
   SessionTenancyManagedHumanRequiredError,
 } from "./session-tenancy";
 
@@ -58,7 +57,7 @@ function requireOwnerAuthority(
   permissions: readonly Permission[],
 ): void {
   if (!authorization.canonicalLocalHumanSession) {
-    requireCanonicalManagedHuman(authorization, workspaceId);
+    requireVerifiedOwningUser(authorization, workspaceId);
   } else if (
     !authorization.contextIntegrity ||
     authorization.authenticatedSubjectId !== authorization.grant.subjectId ||
@@ -103,21 +102,7 @@ export async function issueManagedHumanUserResourceGrant(
   const modePermissions: Permission[] =
     request.mode === "session" ? ["sessions:control"] : ["sessions:create"];
   if (authorization.canonicalLocalHumanSession) {
-    requireOwnerAuthority(authorization, workspaceId, [
-      ...ISSUE_PERMISSIONS[request.resourceKind],
-      "sessions:create",
-    ]);
-    if (request.resourceKind !== "connection" || request.mode !== "always") {
-      throw new SessionTenancyManagedHumanRequiredError();
-    }
-    return await issueSelfLocalConnectionUseGrant(deps.db, {
-      accountId: authorization.grant.accountId,
-      workspaceId,
-      subjectId: authorization.grant.subjectId,
-      authorityId,
-      context: request.context,
-      workspaceSharedAcknowledged: request.workspaceSharedAcknowledged,
-    });
+    throw new SessionTenancyManagedHumanRequiredError();
   }
   await requireOwnerProductGate(deps, authorization, workspaceId, [
     ...ISSUE_PERMISSIONS[request.resourceKind],

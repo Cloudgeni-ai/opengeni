@@ -98,7 +98,7 @@ describe("Slack installation binding browser acceptance", () => {
       await page.goto(capabilitiesUrl, { waitUntil: "domcontentloaded" });
       settings = await openSlackSettings(page, "Needs attention");
       await expectText(settings, "quarantined · version 3");
-      await expectText(settings, "Legacy installations conflict");
+      await expectText(settings, "Older installations conflict");
       expect(await settings.getByRole("button", { name: "Reconnect" }).isDisabled()).toBe(true);
 
       state.bindingState = null;
@@ -114,11 +114,18 @@ describe("Slack installation binding browser acceptance", () => {
 });
 
 async function openSlackSettings(page: Page, chip: string) {
-  const row = page.getByRole("button", { name: `Slack. ${chip}`, exact: true });
+  await page.getByRole("tab", { name: "Connections", exact: true }).click();
+  const row = page
+    .locator(".og-connection-installed")
+    .getByRole("button", { name: new RegExp(`Slack.*${chip}`) });
   await row.waitFor({ state: "visible", timeout: 15_000 });
+  expect(await row.getAttribute("aria-label")).toContain(chip);
   await row.click();
   const settings = page.getByRole("region", { name: "Slack settings" });
   await settings.waitFor({ state: "visible", timeout: 15_000 });
+  expect(await settings.getByRole("button", { name: "Reconnect" }).isVisible()).toBe(false);
+  await settings.getByText("More options", { exact: true }).click();
+  await settings.getByText("Connection details", { exact: true }).click();
   return settings;
 }
 
@@ -133,6 +140,7 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
         headers: { "x-opengeni-api-contract": apiContractRevision },
         body: JSON.stringify(body),
       });
+    if (url.pathname.endsWith("/skills/search")) return json({ items: [], nextCursor: null });
     if (url.pathname === "/v1/config/client") {
       return json({
         deploymentRevision: "slack-binding-browser-test",
@@ -191,7 +199,11 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
       return json({ items: [], installations: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) return json({ skills: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/content`)
+      return json({ skills: [], nextCursor: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) return json({ plugins: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`)
+      return json({ items: [], total: 0, nextOffset: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/definitions`) {
       return json({ definitions: [] });
     }
@@ -223,9 +235,7 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
       return json({ error: { message: "blocked fixture should not be called" } }, 500);
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/social/connections`) return json([]);
-    if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
-      return json({ packs: [], installations: [] });
-    }
+
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {

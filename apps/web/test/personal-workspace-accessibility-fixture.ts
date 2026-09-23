@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { PersonalWorkspaceBadge } from "../src/components/personal-workspace-badge";
-import { WorkspaceMenuItemContent } from "../src/components/rail/switcher-block";
+import { WorkspaceMenuItemContent } from "../src/components/rail/workspace-switcher";
 import { ResourceScopePicker } from "../src/components/resource-scope-picker";
 import { SessionTenancyControl } from "../src/components/session/session-tenancy-control";
 import { SessionVisibilityPicker } from "../src/components/session-visibility-picker";

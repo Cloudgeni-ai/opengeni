@@ -22,6 +22,69 @@ const withheldMigrationNames = [
   "0374_session_event_cursors.sql",
   "0379_session_event_raw_lane_activation.sql",
   "0388_sandbox_provider_deadline_interactions.sql",
+  "0391_sandbox_provider_deadline_interaction_followup.sql",
+  "0397_sandbox_deadline_rotation_preemption.sql",
+  "0402_session_input_wait_and_background_command_results.sql",
+  "0407_connected_command_tracking_retirement.sql",
+  "0408_scheduled_session_target_index.sql",
+  "0414_scheduled_generated_producer_materialization.sql",
+  "0416_scheduled_inherited_tool_admission.sql",
+  // These cutovers patch the exact post-0299 lifecycle wrapper and build on
+  // scheduled authority withheld above. Replay them only after those originals.
+  "0437_organization_scoped_external_workspaces.sql",
+  "0438_durable_connect_attempts.sql",
+  "0439_external_identity_provisioning.sql",
+  "0440_external_workspace_member_removal.sql",
+  "0441_external_identity_membership_lifecycle.sql",
+  "0442_external_owning_user_authority.sql",
+  "0443_host_mcp_binding_registry.sql",
+  "0444_host_mcp_delegations.sql",
+  "0445_host_mcp_turn_authorities.sql",
+  "0446_host_mcp_causal_continuation.sql",
+  "0447_host_mcp_task_authorities.sql",
+  "0448_host_mcp_child_authority.sql",
+  "0449_external_identity_link_lifecycle.sql",
+  "0450_external_identity_link_work.sql",
+  "0451_external_link_preview_and_permission_ceiling.sql",
+  "0452_external_link_scheduled_origin.sql",
+  "0453_host_mcp_native_owner.sql",
+  "0454_connect_origin_authority.sql",
+  "0455_external_link_inventory_labels.sql",
+  "0456_social_connection_versions.sql",
+  "0457_canonical_session_scope_subject.sql",
+  "0458_skill_review_wire_compatibility.sql",
+  // The ledger's protected writer compiles against linked authority from 0449
+  // and validates scheduled/host authority withheld above. Replay it only once
+  // those actual prerequisites exist; do not weaken its production checks.
+  "0459_mcp_operations.sql",
+  "0461_unified_knowledge.sql",
+  // Patches the instruction writer introduced by 0461 and therefore belongs
+  // behind the same historical replay boundary.
+  "0462_agent_instruction_non_destructive_edits.sql",
+  "0466_agent_instruction_activation_preservation.sql",
+  // Compiles against the Knowledge tables and visibility helper from 0461.
+  "0468_knowledge_relationship_projection.sql",
+  "0469_knowledge_source_discovery.sql",
+  "0478_sender_owned_connections.sql",
+  // The destructive removal must follow the historical 0402/0433 readers.
+  "0482_remove_packs.sql",
+  // Patches the exact Skill lifecycle rewritten by 0461; replay after it.
+  "0488_permanent_skill_removal.sql",
+  // 0491 reads the publication column introduced by withheld 0184; 0494 patches
+  // withheld 0478, and 0496 installs a capture guard using the same 0184 column.
+  // Replay the real migrations after their prerequisites, never fake columns.
+  "0491_warm_capture_holder_reclamation.sql",
+  "0494_mcp_account_bindings.sql",
+  "0496_supervised_command_settlement.sql",
+  // Rewrites the original-file policy introduced by withheld 0461.
+  "0499_session_attachment_access.sql",
+  "0501_session_sharing_execution.sql",
+  // Reads the cursor table from withheld 0374; replay after its prerequisite.
+  "0503_session_meaningful_attention.sql",
+  // Follow the withheld signup/Knowledge prerequisites during replay.
+  "0509_verified_signup_trial_credits.sql",
+  "0510_knowledge_index_funding_wait.sql",
+  "0511_knowledge_visible_index_status.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
@@ -98,8 +161,13 @@ describe("migration 0184 sandbox drain teardown fence", () => {
       // in dependency order once the legacy claim exists. 0299 must repair the
       // replayed 0275 membership definitions before 0345 extends that exact
       // prefix with the session-tenancy fences. 0374 consumes the helper
-      // created by 0345, and 0388 drift-guards the reaper definition produced
-      // there, so both must remain behind the same withheld boundary.
+      // created by 0345, 0388 drift-guards the reaper definition produced
+      // there, 0391 extends that exact 0388 definition, and 0394 patches the
+      // resulting provider-deadline branch. The 0402 session-wait cutover also
+      // inventories the scheduled accepted-execution columns created by 0275,
+      // so it must remain behind the same withheld boundary. The 0408 target
+      // index depends on the deleted_at column introduced by 0275. Migration 0414
+      // patches the exact scheduled producer fence created by that same 0275.
       await sql`
         insert into schema_migrations (name)
         select unnest(${withheldMigrationNames}::text[])`;

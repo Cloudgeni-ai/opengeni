@@ -1,5 +1,7 @@
 # Agent Knowledge retrieval
 
+> **After migration 0461:** New retrieval uses canonical Knowledge entries and rebuildable keyword/vector projections. The legacy Documents/Memory search endpoints are retired. See [Knowledge and Agent learning](knowledge.md) for the current runtime. The older model below documents historical storage and receipts.
+
 This document is the canonical contract for the permission-first agent Knowledge
 read surface. It is a projection over authorized, ready Documents; it does not
 create another durable store, a prompt-injection path, or behavioral authority.
@@ -203,7 +205,7 @@ workspace-Memory candidates and composition facts. It cannot change
 `knowledge_memories`, structured preferences, company profile, instruction
 policy, or prompt composition.
 
-The runtime's existing Skills capability already gives selected Skills an
-always-visible bounded name/description index and lazily materializes the full
-body only when `load_skill` is called. Knowledge retrieval does not duplicate
-that descriptor catalog.
+The runtime inserts a bounded Skill name/description index into agent instructions.
+The eager `skill_read` tool returns selected files without starting a sandbox;
+lazy `skill_checkout` copies files to disk only when needed. Knowledge retrieval
+does not duplicate that descriptor catalog.

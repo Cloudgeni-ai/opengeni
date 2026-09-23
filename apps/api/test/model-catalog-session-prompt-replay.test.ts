@@ -1,6 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import { bootstrapWorkspace, createDb, type DbClient } from "@opengeni/db";
+import {
+  appendSessionEvents,
+  bootstrapWorkspace,
+  createDb,
+  createSession,
+  enqueueSessionTurn,
+  type DbClient,
+} from "@opengeni/db";
 import { signDelegatedAccessToken, type AccessGrant } from "@opengeni/contracts";
 import {
   acquireSharedTestDatabase,
@@ -177,6 +184,74 @@ afterAll(async () => {
   await client?.close();
   await shared?.release();
 }, 60_000);
+
+describe("follow-up policy inheritance", () => {
+  test("fresh draft and omitted follow-up policy use latest started model even if original was removed", async () => {
+    if (!available) throw new Error("PostgreSQL required");
+    const id = crypto.randomUUID();
+    const owner = await provisionActor({
+      accountExternalId: id,
+      workspaceExternalId: id,
+      subjectId: `user:${id}`,
+    });
+    const workspaceId = owner.workspaceId!;
+    const headers = { authorization: await bearer(owner), "content-type": "application/json" };
+    const app = buildApp(new FakeWorkflowClient());
+    await installCatalog(
+      { schemaVersion: 1, defaultModel: "scripted-model", builtInModels: ["scripted-model"] },
+      1,
+    );
+    const session = await createSession(client.db, {
+      accountId: owner.accountId,
+      workspaceId,
+      initialMessage: "original",
+      model: "removed-original-model",
+      resources: [],
+      metadata: {},
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const turn = await enqueueSessionTurn(client.db, {
+      accountId: owner.accountId,
+      workspaceId,
+      metadata: {},
+      initiator: { kind: "subject", subjectId: owner.subjectId },
+      sessionId: session.id,
+      triggerEventId: crypto.randomUUID(),
+      temporalWorkflowId: `session-${session.id}`,
+      source: "user",
+      prompt: "new model",
+      model: "scripted-model",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+      resources: [],
+      tools: [],
+      sandboxBackend: "none",
+    });
+    await appendSessionEvents(client.db, workspaceId, session.id, [
+      { type: "turn.started", turnId: turn.id, payload: {} },
+    ]);
+    const draft = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${session.id}/composer-draft`,
+      { headers },
+    );
+    expect(draft.status).toBe(200);
+    expect(await draft.json()).toMatchObject({ model: "scripted-model", reasoningEffort: "high" });
+    const response = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${session.id}/steer`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ text: "continue", clientEventId: crypto.randomUUID() }),
+      },
+    );
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({
+      turn: { model: "scripted-model", reasoningEffort: "high" },
+    });
+  });
+});
 
 describe("model catalog prompt receipt replay (real PostgreSQL)", () => {
   test("replays committed Send and Steer before a removed deployment model is resolved", async () => {

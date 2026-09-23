@@ -1,21 +1,83 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import {
   publishableWorkspacePackages,
+  repoRoot,
   topologicallySortedPackages,
   type WorkspacePackage,
 } from "./publishable-workspaces";
 
-export function nextCanaryVersion(baseVersion: string, lastCanary: string | null): string {
+export function workflowCanarySequence(runId?: string, runAttempt?: string): number {
+  if (runId === undefined && runAttempt === undefined) return 0;
+  if (!runId || !runAttempt || !/^[1-9]\d*$/.test(runId) || !/^[1-9]\d*$/.test(runAttempt)) {
+    throw new Error("Canary workflow run identity is invalid");
+  }
+  const attempt = Number(runAttempt);
+  const sequence = Number(runId) * 1000 + attempt;
+  if (attempt >= 1000 || !Number.isSafeInteger(sequence)) {
+    throw new Error("Canary workflow run identity exceeds the safe sequence range");
+  }
+  return sequence;
+}
+
+export function nextCanaryVersion(
+  baseVersion: string,
+  lastCanary: string | null,
+  minimumSequence = 0,
+): string {
+  if (!Number.isSafeInteger(minimumSequence) || minimumSequence < 0) {
+    throw new Error("Canary minimum sequence is invalid");
+  }
   const base = baseVersion.replace(/-canary\.\d+$/, "");
   const prefix = `${base}-canary.`;
   if (lastCanary && lastCanary.startsWith(prefix)) {
     const n = Number(lastCanary.slice(prefix.length));
-    if (Number.isInteger(n) && n >= 0) return `${prefix}${n + 1}`;
+    if (Number.isSafeInteger(n) && n >= 0) {
+      if (minimumSequence > 0 && n >= minimumSequence) {
+        throw new Error("Canary workflow attempt is superseded; dispatch a new publication run");
+      }
+      const next = Math.max(n + 1, minimumSequence);
+      if (!Number.isSafeInteger(next)) throw new Error("Canary sequence exhausted");
+      return `${prefix}${next}`;
+    }
   }
-  return `${prefix}0`;
+  return `${prefix}${minimumSequence}`;
+}
+
+export function planCanaryVersions(
+  packages: readonly { name: string; version: string }[],
+  tags: ReadonlyMap<string, string | null>,
+  fixedGroups: readonly (readonly string[])[],
+  minimumSequence = 0,
+): Map<string, string> {
+  const versions = new Map(
+    packages.map((pkg) => [
+      pkg.name,
+      nextCanaryVersion(pkg.version, tags.get(pkg.name) ?? null, minimumSequence),
+    ]),
+  );
+  for (const group of fixedGroups) {
+    if (group.length === 0) continue;
+    const planned = group.map((name) => {
+      const version = versions.get(name);
+      if (!version) throw new Error(`Fixed canary package is not publishable: ${name}`);
+      return version;
+    });
+    const base = planned[0]!.replace(/-canary\.\d+$/, "");
+    if (planned.some((version) => !version.startsWith(`${base}-canary.`))) {
+      throw new Error(
+        `Fixed canary packages must share a committed base version: ${group.join(", ")}`,
+      );
+    }
+    const next = Math.max(
+      ...planned.map((version) => Number(version.slice(`${base}-canary.`.length))),
+    );
+    for (const name of group) versions.set(name, `${base}-canary.${next}`);
+  }
+  return versions;
 }
 
 function npmCanaryTag(name: string): string | null {
@@ -45,8 +107,19 @@ export function main(): void {
     throw new Error("NODE_AUTH_TOKEN is required to publish canary packages");
   }
   const packages = topologicallySortedPackages(publishableWorkspacePackages());
+  const config = JSON.parse(readFileSync(join(repoRoot, ".changeset/config.json"), "utf8")) as {
+    fixed?: string[][];
+  };
+  const versions = planCanaryVersions(
+    packages,
+    new Map(packages.map((pkg) => [pkg.name, npmCanaryTag(pkg.name)])),
+    config.fixed ?? [],
+    // Registry tags can lag reserved/staged versions. Each workflow attempt
+    // therefore starts in a fresh range without guessing or overwriting them.
+    workflowCanarySequence(process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT),
+  );
   for (const pkg of packages) {
-    const next = nextCanaryVersion(pkg.version, npmCanaryTag(pkg.name));
+    const next = versions.get(pkg.name)!;
     writeVersion(pkg, next);
     process.stdout.write(`${pkg.name}@${next}\n`);
   }
@@ -57,6 +130,23 @@ export function main(): void {
   for (const pkg of packages) {
     run("npm", ["publish", "--tag", "canary", "--access", "public"], pkg.dir);
   }
+  mkdirSync(".release", { recursive: true });
+  writeFileSync(
+    ".release/site-package-versions.json",
+    JSON.stringify(
+      Object.fromEntries(
+        packages
+          .filter((pkg) =>
+            ["@opengeni/sdk", "@opengeni/react", "@opengeni/codemode", "@opengeni/ogtool"].includes(
+              pkg.name,
+            ),
+          )
+          .map((pkg) => [pkg.name, JSON.parse(readFileSync(pkg.packagePath, "utf8")).version]),
+      ),
+      null,
+      2,
+    ),
+  );
 }
 
 if (import.meta.main) main();

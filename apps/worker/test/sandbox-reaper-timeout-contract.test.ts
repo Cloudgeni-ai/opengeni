@@ -144,10 +144,11 @@ describe("sandbox reaper per-box timeout contract", () => {
       "utf8",
     );
     expect(dbSource.match(/archive_capture_deadline_at - clock_timestamp\(\)/gu)).toHaveLength(2);
-    expect(dbSource.match(/extendSandboxTransitionDeadline\(/gu)).toHaveLength(3);
-    expect(dbSource).toContain(
-      "hardDeadline = startedAt + SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS",
-    );
+    expect(
+      dbSource.match(/new SandboxTransitionWaitBudget\(captureWaitMs, startedAt\)/gu),
+    ).toHaveLength(2);
+    expect(dbSource.match(/waitBudget.observeCapture\(/gu)).toHaveLength(2);
+    expect(dbSource.match(/now >= waitBudget.deadline/gu)).toHaveLength(2);
     expect(dbSource).toContain("captureWaitMs > 0");
   });
 

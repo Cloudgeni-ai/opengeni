@@ -38,6 +38,16 @@ export function isTitleEvent(event: Pick<SessionEvent, "type">): boolean {
   return event.type === "session.title_set";
 }
 
+function isSessionDetailEvent(event: Pick<SessionEvent, "type">): boolean {
+  return (
+    isTitleEvent(event) ||
+    event.type.startsWith("session.command.") ||
+    event.type.startsWith("session.wait.") ||
+    event.type === "session.status.changed" ||
+    event.type === "system.update.pending"
+  );
+}
+
 /** Fetch one session (with optional polling), live-patching its title on `session.title_set`. */
 export function useSession(
   sessionId: string | null | undefined,
@@ -99,10 +109,28 @@ export function useSession(
     [base, override],
   );
 
+  const sharedEvents = options.events;
+
   // Live-patch the title on auto (agent) + cross-client (user/agent) renames so
   // the UI reflects the new title without polling or a full re-fetch.
   const onTitleEvent = useCallback(
     (event: SessionEvent) => {
+      // Reconciliation emits only the last matching member of a shared batch.
+      // A later title must not hide an earlier command activity change.
+      if (
+        sharedEvents?.some(
+          (item) =>
+            item.sessionId === sessionId &&
+            !isTitleEvent(item) &&
+            isSessionDetailEvent(item) &&
+            item.sequence > (base?.lastSequence ?? -1),
+        )
+      ) {
+        void refresh();
+      } else if (!isTitleEvent(event)) {
+        if (!base || event.sequence > base.lastSequence) void refresh();
+        return;
+      }
       // The fetched session row is the authoritative title projection through
       // lastSequence. Shared feeds may replay that historical tail after the
       // fetch; applying it would undo a row-only migration quarantine. Only an
@@ -122,9 +150,9 @@ export function useSession(
         return { ...next, title, titleSource: source };
       });
     },
-    [base],
+    [base, refresh, sharedEvents, sessionId],
   );
-  useSessionEventTrigger(client, workspaceId, sessionId, isTitleEvent, onTitleEvent, {
+  useSessionEventTrigger(client, workspaceId, sessionId, isSessionDetailEvent, onTitleEvent, {
     enabled,
     ...(options.events !== undefined ? { events: options.events } : {}),
   });

@@ -3,13 +3,18 @@
 import { cp, mkdir, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeManagedCodemodeClient } from "./build-managed-codemode-client";
 
 type ProcessTarget = "api" | "worker" | "artifact-materializer" | "artifact-outbox";
 
 export const RUNTIME_SKILL_ASSET_DIRECTORY_NAMES = [
   "curated_skill_library",
+  "bundled_default_skills",
   "bundled_artifact_skills",
+  "bundled_project_skills",
+  "bundled_site_skills",
   "bundled_video_skills",
+  "bundled_management_skills",
 ] as const;
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -108,6 +113,7 @@ async function buildWorker(): Promise<void> {
     join(outdir, "workflow-bundle.js"),
   );
   await copyRuntimeSkillAssets(repositoryRoot, outdir);
+  await writeManagedCodemodeClient(repositoryRoot, join(outdir, "assets/codemode-client.json"));
 }
 
 async function buildArtifactSidecar(

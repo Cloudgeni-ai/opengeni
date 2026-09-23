@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import {
   createDb,
@@ -7,6 +7,8 @@ import {
   listSocialConnections,
   listSocialPosts,
   loadSocialConnectionCredential,
+  beginConnectAttempt,
+  getConnectAttempt,
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -261,6 +263,101 @@ async function connect(
 }
 
 describe("social connector end-to-end flow", () => {
+  for (const providerId of ["x", "reddit"] as const)
+    test(`${providerId}: durable Connect stores one credential and returns the exact host URL on replay`, async () => {
+      if (!available) throw new Error("Real PostgreSQL fixture required");
+      const workspace = await freshWorkspace();
+      const provider = fakeProvider();
+      const deps = { db: client.db, settings, providerFetch: provider.fetchImpl };
+      const scope = { ...workspace, subjectId: "operator" };
+      const id = randomUUID();
+      const started = await startSocialOAuth(deps, {
+        ...scope,
+        connectAttemptId: id,
+        personalOwnershipAllowed: false,
+        requestUrl: "https://api.opengeni.test/connect",
+        payload: { provider: providerId, ownership: "workspace" },
+      });
+      const returnUrl = "https://HOST.example:443/settings?opaque=%2f#social";
+      await beginConnectAttempt(client.db, scope, {
+        idempotencyKey: randomUUID(),
+        requestDigest: "a".repeat(64),
+        returnUrl,
+        attempt: {
+          id,
+          workspaceId: workspace.workspaceId,
+          providerId,
+          ownership: "workspace",
+          revision: 1,
+          state: "requires_user_action",
+          credentialsCommitted: false,
+          integrationInstalled: false,
+          completionRequirement: "connection",
+          nextAction: { type: "authorize", url: started.authorizationUrl! },
+          expiresAt: started.expiresAt,
+        },
+      });
+      const callback = () =>
+        completeSocialOAuthCallback(deps, {
+          state: started.state,
+          code: "fixture-code",
+          requestUrl: "https://api.opengeni.test/v1/social/oauth/callback",
+        });
+      expect(await callback()).toEqual({ redirectTo: returnUrl, exactReturn: true });
+      expect((await getConnectAttempt(client.db, scope, id)).attempt).toMatchObject({
+        state: "complete",
+        credentialsCommitted: true,
+        account: { providerId },
+      });
+      const callCount = provider.calls.length;
+      expect(await callback()).toEqual({ redirectTo: returnUrl, exactReturn: true });
+      expect(provider.calls.length).toBe(callCount);
+      expect(await listSocialConnections(client.db, workspace.workspaceId)).toHaveLength(1);
+      const observed = (await getConnectAttempt(client.db, scope, id)).attempt.account!;
+      expect(observed.version).toBe(1);
+      async function reconnectFromObserved() {
+        const reconnectId = randomUUID();
+        const navigation = await startSocialOAuth(deps, {
+          ...scope,
+          connectAttemptId: reconnectId,
+          personalOwnershipAllowed: false,
+          requestUrl: "https://api.opengeni.test/connect",
+          payload: { provider: providerId, ownership: "workspace" },
+        });
+        await beginConnectAttempt(client.db, scope, {
+          idempotencyKey: randomUUID(),
+          requestDigest: "b".repeat(64),
+          returnUrl,
+          attempt: {
+            id: reconnectId,
+            workspaceId: workspace.workspaceId,
+            providerId,
+            ownership: "workspace",
+            revision: 1,
+            state: "requires_user_action",
+            credentialsCommitted: false,
+            integrationInstalled: false,
+            account: observed,
+            completionRequirement: "connection",
+            nextAction: { type: "authorize", url: navigation.authorizationUrl! },
+            expiresAt: navigation.expiresAt,
+          },
+        });
+        await completeSocialOAuthCallback(deps, {
+          state: navigation.state,
+          code: "reconnect-code",
+          requestUrl: "https://api.opengeni.test/v1/social/oauth/callback",
+        });
+        return (await getConnectAttempt(client.db, scope, reconnectId)).attempt;
+      }
+      expect(await reconnectFromObserved()).toMatchObject({
+        state: "complete",
+        account: { version: 2, id: observed.id },
+      });
+      // A second browser holding the old account revision cannot overwrite it.
+      expect((await reconnectFromObserved()).state).not.toBe("complete");
+      expect((await listSocialConnections(client.db, workspace.workspaceId))[0]!.version).toBe(2);
+    });
   test("x: connect stores an encrypted bundle and a usable connection", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

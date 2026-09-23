@@ -66,6 +66,8 @@ describe("principal transition contract", () => {
       "setManualRepos([])",
       "setSelectedRepoIds(new Set())",
       "setSelectedCapabilityToolIds(new Set())",
+      "seenCapabilityToolIds.current = new Set()",
+      "appliedWorkspaceToolDefaultsKey.current = null",
       "setWorkspaceStateOwnerId(workspaceId)",
       "sessionChannelProjectionAuthority.clearWorkspace(previousWorkspaceId)",
     ]) {
@@ -91,10 +93,7 @@ describe("principal transition contract", () => {
   });
 
   test("access bootstrap is synchronously fenced by principal generation", () => {
-    const accessLoad = sourceBetween(
-      "void Promise.all([client.getAccessContext(), client.listWorkspaces(), selfContextPromise])",
-      "const selectedInstalledRepositories",
-    );
+    const accessLoad = sourceBetween("void Promise.all([", "const selectedInstalledRepositories");
     expect(accessLoad).toContain(
       "ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)",
     );
@@ -102,7 +101,7 @@ describe("principal transition contract", () => {
       accessLoad.indexOf("setAccessContext(context)"),
     );
     expect(accessLoad.indexOf("ownsPrincipalTransition(")).toBeLessThan(
-      accessLoad.indexOf('toast.error("Failed to load workspace access"'),
+      accessLoad.indexOf("setAccessError(presentation)"),
     );
   });
 
@@ -171,9 +170,16 @@ describe("principal transition contract", () => {
     }
   });
 
+  test("workspace deletion wires authoritative end-state reconciliation", () => {
+    const deletion = sourceBetween("async function deleteWorkspace(", "const refreshGitHub");
+    expect(deletion).toContain("deleteWorkspaceWithReconciliation({");
+    expect(deletion).toContain("client.deleteWorkspace(workspaceId)");
+    expect(deletion).toContain("client.getWorkspace(workspaceId)");
+  });
+
   test("mutation callers do not toast, refresh, or announce stale results", () => {
     expect(workspaceSettingsSource).toContain(
-      "const updated = await context.setWorkspaceInferenceControl(workspaceId, action)",
+      "await context.setWorkspaceInferenceControl(workspaceId, action)",
     );
     expect(transcriptionSettingsSource).toContain(
       "const updated = await context.updateWorkspaceSettings(workspaceId",

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import type { Settings } from "@opengeni/config";
 import {
@@ -16,6 +16,8 @@ import {
 } from "@opengeni/contracts/personal-github";
 import {
   createDb,
+  createOrganizationApiKey,
+  ensureExternalIdentity,
   deleteWorkspace,
   ensureManagedAccessForUser,
   listConnectionsMetadata,
@@ -129,6 +131,7 @@ async function bearer(
 function githubFixture() {
   const tokenRequests: URLSearchParams[] = [];
   const repositoryRequests: Array<{ url: string; redirect: RequestRedirect | undefined }> = [];
+  const branchRequests: Array<{ url: string; redirect: RequestRedirect | undefined }> = [];
   let githubUserId = 123456;
   let scopes = "repo";
   let repositoryUnauthorizedOnce = false;
@@ -181,12 +184,20 @@ function githubFixture() {
       repositoryRequests.push({ url: url.toString(), redirect: init?.redirect });
       return Response.json(repository);
     }
+    if (
+      url.origin === PERSONAL_GITHUB_API_ORIGIN &&
+      url.pathname === "/repos/Cloudgeni-ai/opengeni/branches"
+    ) {
+      branchRequests.push({ url: url.toString(), redirect: init?.redirect });
+      return Response.json([{ name: "feature/picker" }, { name: "main" }]);
+    }
     return new Response("not found", { status: 404 });
   };
   return {
     fetch,
     tokenRequests,
     repositoryRequests,
+    branchRequests,
     setGitHubUserId(value: number) {
       githubUserId = value;
     },
@@ -311,6 +322,10 @@ describe("personal GitHub OAuth", () => {
     expect(catalog.selection).toMatchObject({ selectionGeneration: 0, repositories: [] });
     expect(fixture.repositoryRequests[0]).toMatchObject({ redirect: "manual" });
     expect(new URL(fixture.repositoryRequests[0]!.url).searchParams.get("per_page")).toBe("50");
+    const branchPath = `${basePath}/987654321/branches`;
+    const unselectedBranches = await app.request(branchPath, { headers });
+    expect(unselectedBranches.status).toBe(404);
+    expect(fixture.branchRequests).toHaveLength(0);
 
     const replacementBody = JSON.stringify({
       expectedConnectionAuthorityGeneration: catalog.selection.connectionAuthorityGeneration,
@@ -349,6 +364,20 @@ describe("personal GitHub OAuth", () => {
       selectionGeneration: 1,
     });
 
+    const branches = await app.request(`${branchPath}?cursor=2&limit=2`, { headers });
+    expect(branches.status).toBe(200);
+    expect(await branches.json()).toEqual({
+      branches: [
+        { name: "feature/picker", isDefault: false },
+        { name: "main", isDefault: true },
+      ],
+      nextCursor: 3,
+    });
+    expect(fixture.branchRequests).toEqual([expect.objectContaining({ redirect: "manual" })]);
+    const branchUrl = new URL(fixture.branchRequests[0]!.url);
+    expect(branchUrl.searchParams.get("page")).toBe("2");
+    expect(branchUrl.searchParams.get("per_page")).toBe("2");
+
     const verified = await app.request(`${basePath}/verify`, {
       method: "POST",
       headers,
@@ -377,6 +406,64 @@ describe("personal GitHub OAuth", () => {
     expect(denied.status).toBe(422);
     expect(fixture.repositoryRequests).toHaveLength(beforeDenied);
   }, 60_000);
+
+  test("embedded GitHub uses external owning-user authority and an exact durable callback", async () => {
+    if (!available) throw new Error("PostgreSQL required");
+    const workspace = await freshWorkspace();
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: workspace.accountId,
+      externalId: "github-product-user",
+    });
+    const token = randomBytes(24).toString("hex");
+    await createOrganizationApiKey(client.db, {
+      accountId: workspace.accountId,
+      name: "GitHub embedding",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:read", "connections:read", "connections:write"],
+    });
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-opengeni-access-key": EDGE_ACCESS_KEY,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+      ),
+    };
+    const github = githubFixture();
+    const server = testApp(github);
+    const base = `/v1/workspaces/${identity.personalWorkspaceId}/connect/attempts`;
+    const returnUrl = "https://HOST.example:443/finish?x=%2f#GitHub";
+    const begin = await server.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "github-personal",
+        ownership: "personal",
+        returnUrl,
+        idempotencyKey: randomUUID(),
+      }),
+    });
+    expect(begin.status).toBe(200);
+    const attempt = await begin.json();
+    const authorization = new URL(attempt.nextAction.url);
+    expect(authorization.searchParams.get("code_challenge_method")).toBe("S256");
+    const invokeCallback = () =>
+      server.request(
+        `/v1/integrations/github-personal/oauth/callback?${new URLSearchParams({ code: "fixture-code", state: authorization.searchParams.get("state")! })}`,
+      );
+    expect((await invokeCallback()).headers.get("location")).toBe(returnUrl);
+    expect(await (await server.request(`${base}/${attempt.id}`, { headers })).json()).toMatchObject(
+      {
+        state: "complete",
+        completionRequirement: "connection",
+        account: { ownership: "personal", providerId: "github-personal" },
+      },
+    );
+    expect((await invokeCallback()).headers.get("location")).toBe(returnUrl);
+    expect(github.tokenRequests).toHaveLength(1);
+  });
 
   test("connects one verified user-owned account with PKCE and encrypted credentials", async () => {
     if (!available) return;

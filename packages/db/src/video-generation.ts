@@ -926,6 +926,11 @@ export async function settleVideoGenerationReady(
         if (operation.expectedArtifactId === operation.expectedFileId) {
           throw new Error("Video artifact and File identities must be distinct");
         }
+        // The durable provider operation owns this write, including when its
+        // original session has since disappeared. Ordinary file reads stay scoped.
+        await tx.execute(
+          sql`SELECT set_config('opengeni.private_file_owner',${operation.privateFileOwnerSubjectId ?? ""},true)`,
+        );
         const now = new Date();
         await tx.insert(schema.files).values({
           id: input.fileId,
@@ -1265,6 +1270,15 @@ export async function getVideoGenerationOperationSummary(
 ): Promise<import("@opengeni/contracts").VideoGenerationOperationSummary | null> {
   const operation = await getVideoGenerationOperation(db, workspaceId, operationId);
   if (!operation) return null;
+  if (operation.privateFileOwnerSubjectId) {
+    const [context] = await withWorkspaceRls(db, workspaceId, (tx) =>
+      rawRows<{ owner: string | null }>(
+        tx,
+        sql`SELECT nullif(current_setting('opengeni.private_file_owner',true),'') AS owner`,
+      ),
+    );
+    if (context?.owner !== operation.privateFileOwnerSubjectId) return null;
+  }
   const terminal = inArrayValue(operation.status, [
     "completed",
     "provider_failed",

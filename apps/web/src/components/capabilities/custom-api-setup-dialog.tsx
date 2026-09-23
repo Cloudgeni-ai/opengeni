@@ -90,14 +90,13 @@ export function CustomApiSetupDialog({
         <DialogHeader>
           <DialogTitle>
             {state.intent === "create"
-              ? "Connect custom API"
+              ? "Connect an API"
               : state.intent === "reconnect"
                 ? `Reconnect ${state.editingInstance?.displayName ?? "custom API"}`
                 : `Review updates for ${state.editingInstance?.displayName ?? "custom API"}`}
           </DialogTitle>
           <DialogDescription>
-            Detection and review never install anything. A Connection may be created only after
-            authentication is required, and installation remains a separate final action.
+            Choose the tools to enable and connect your account.
           </DialogDescription>
         </DialogHeader>
 
@@ -128,8 +127,7 @@ export function CustomApiSetupDialog({
                 aria-describedby="custom-api-url-help"
               />
               <p id="custom-api-url-help" className="text-2xs leading-4 text-fg-subtle">
-                OpenGeni first tries a bounded OpenAPI document, then a GraphQL endpoint. No
-                workspace mutation occurs during detection.
+                Enter your API address to find the available tools.
               </p>
             </div>
 
@@ -141,7 +139,7 @@ export function CustomApiSetupDialog({
               className="group rounded-xl border border-border bg-bg/50 p-3"
             >
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium text-fg">
-                Advanced protocol options
+                Connection details
                 <ChevronDownIcon className="size-4 text-fg-subtle transition-transform group-open:rotate-180" />
               </summary>
               <div className="mt-4 grid gap-4">
@@ -191,6 +189,7 @@ export function CustomApiSetupDialog({
                     />
                     <Field
                       id="custom-graphql-name"
+                      suppressAutofill
                       label="API name (optional)"
                       value={state.draft.graphqlName}
                       placeholder="Issue tracker API"
@@ -211,7 +210,7 @@ export function CustomApiSetupDialog({
                 ) : (
                   <SearchIcon />
                 )}
-                Detect and preview
+                Find tools
               </Button>
             </DialogFooter>
           </form>
@@ -286,7 +285,7 @@ function AuthenticationStep({
             <Choice
               selected={state.draft.ownership === "personal"}
               title="Personal"
-              description="Only you and explicitly delegated runs"
+              description="Your messages and personal schedules"
               onClick={() => onDraftChange({ ownership: "personal", existingConnectionId: "" })}
             />
             <Choice
@@ -445,6 +444,7 @@ function NewCredentialFields({
               </div>
               <Field
                 id="custom-credential-name"
+                suppressAutofill
                 label="Credential name"
                 value={state.draft.credentialName}
                 placeholder="X-API-Key"
@@ -508,6 +508,7 @@ function ReviewStep({
       <div className="grid gap-4 rounded-xl border border-border bg-bg/50 p-4">
         <Field
           id="custom-display-name"
+          suppressAutofill
           label="Instance label"
           value={state.draft.displayName}
           placeholder={preview.name}
@@ -561,8 +562,8 @@ function ReviewStep({
           <h3 className="font-semibold text-fg">Update review</h3>
           <p className="mt-1 leading-5 text-fg-muted">
             {diff.digestChanged
-              ? "The immutable digest changed."
-              : "The immutable digest is unchanged."}{" "}
+              ? "The API definition has changed."
+              : "The API definition is unchanged."}{" "}
             {diff.addedTools.length} added, {diff.removedTools.length} removed,{" "}
             {diff.unchangedTools} unchanged tools.
           </p>
@@ -668,6 +669,7 @@ function Field({
   placeholder,
   type = "text",
   autoComplete,
+  suppressAutofill,
 }: {
   id: string;
   label: string;
@@ -676,6 +678,7 @@ function Field({
   placeholder?: string;
   type?: string;
   autoComplete?: string;
+  suppressAutofill?: boolean;
 }) {
   return (
     <div className="grid gap-1.5">
@@ -687,6 +690,7 @@ function Field({
         placeholder={placeholder}
         type={type}
         autoComplete={autoComplete}
+        suppressAutofill={suppressAutofill}
       />
     </div>
   );

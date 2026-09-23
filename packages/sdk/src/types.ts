@@ -1,4 +1,22 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
+export type {
+  SessionMessageSearchRequest,
+  SessionMessageSearchMatch,
+  SessionMessageSearchResponse,
+} from "./session-message-search";
+
+export type BundledSkillId =
+  | "builtin:opengeni-help"
+  | "builtin:opengeni-client"
+  | "builtin:opengeni-visualize"
+  | "builtin:document-parsing"
+  | "builtin:opengeni-skills"
+  | "builtin:opengeni-projects"
+  | "builtin:opengeni-documents"
+  | "builtin:opengeni-spreadsheets"
+  | "builtin:opengeni-presentations"
+  | "builtin:opengeni-sites"
+  | "builtin:opengeni-video-generation";
 
 // Hand-written mirrors of the public wire shapes in `@opengeni/contracts`.
 // Ordinary SDK entries stay framework-agnostic and do not import the contracts
@@ -70,6 +88,80 @@ export type GatewayRealtimeConnectResponse = {
   initialItems: GatewayRealtimeInitialItem[];
   instructions: string;
   replay: false;
+};
+
+export type ToolGatewayIdentity = {
+  serverId: string;
+  toolName: string;
+};
+
+export type ToolGatewayCatalogEntry = {
+  identity: ToolGatewayIdentity;
+  modelName: string;
+  codemodePath: string[];
+  title?: string | undefined;
+  description?: string | undefined;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown> | undefined;
+  annotations?: Record<string, unknown> | undefined;
+  icons?: Array<Record<string, unknown>> | undefined;
+  source: "opengeni" | "files" | "docs" | "mcp" | "codex_apps" | "interaction";
+  approval: "none" | "human" | "policy";
+};
+
+export type ToolGatewayCatalog = {
+  version: 1;
+  accountId: string;
+  workspaceId: string;
+  generation: number;
+  digest: string;
+  createdAt: string;
+  entries: ToolGatewayCatalogEntry[];
+};
+
+export type ToolGatewayResult = {
+  content: Array<{ type: string; [key: string]: unknown }>;
+  structuredContent?: Record<string, unknown> | undefined;
+  isError?: boolean | undefined;
+  _meta?: Record<string, unknown> | undefined;
+  [key: string]: unknown;
+};
+
+export type ToolGatewayCallRequest = {
+  operationId?: string | undefined;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  arguments: Record<string, unknown>;
+  siteArtifactId?: string | undefined;
+  siteVersionId?: string | undefined;
+  approvalToken?: string | undefined;
+};
+
+export type ToolGatewayApprovalRequest = {
+  operationId: string;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  arguments: Record<string, unknown>;
+};
+
+export type ToolGatewayApprovalResponse = {
+  operationId: string;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  approvalToken: string;
+  expiresAt: string;
+};
+
+export type ToolGatewayCallResponse = {
+  operationId: string;
+  catalogDigest: string;
+  result: ToolGatewayResult;
+};
+
+export type ToolGatewayDeclarationsResponse = {
+  catalogDigest: string;
+  moduleSpecifier: string;
+  source: string;
 };
 
 export type ActivateCodexRealtimeConnectionRequest = {
@@ -500,11 +592,13 @@ export type ToolRef = {
 export type SessionToolPolicy = {
   mode: "workspace_default" | "explicit" | "inherited";
   inheritedFromSessionId: string | null;
+  excludedMcpServerIds?: string[] | undefined;
 };
 
 export type UpdateSessionToolPolicyRequest =
   | {
       mode: "workspace_default";
+      excludedMcpServerIds?: string[] | undefined;
       expectedVersion: number;
     }
   | {
@@ -537,10 +631,18 @@ export type SessionEffectiveToolPolicy = {
   idsTruncated: boolean;
 };
 
+export type SessionGoalReportRequirement = { id: string; title: string };
+export type SessionGoalReportDelivery = {
+  requirementId: string;
+  artifactId: string;
+  inspectionReceiptId: string;
+};
+
 export type GoalSpec = {
   text: string;
   successCriteria?: string | undefined;
   rootConstraints?: string[] | undefined;
+  reportRequirements?: SessionGoalReportRequirement[] | undefined;
   maxAutoContinuations?: number | undefined;
   mutationPolicy?: SessionGoalMutationPolicy | undefined;
 };
@@ -563,6 +665,23 @@ export type SessionMcpCredentialUpdateInput = {
   headers: Record<string, string>;
 };
 
+export type RotateSessionMcpCredentialsRequest = {
+  operationKey: string;
+  updates: Array<{
+    id: string;
+    expectedCredentialVersion: number;
+    expectedServerUrl: string;
+    headers: Record<string, string>;
+  }>;
+};
+
+export type RotateSessionMcpCredentialsReceipt = {
+  operationKey: string;
+  sessionId: string;
+  servers: Array<{ id: string; credentialVersion: number }>;
+  appliedAt: string;
+};
+
 export type SessionMcpApprovalPolicy = boolean | string[];
 
 export type SessionMcpServerMetadata = {
@@ -580,9 +699,17 @@ export type UpdateSessionMcpApprovalPolicyRequest = {
 };
 
 export type UpdateSessionMcpApprovalPolicyResponse = {
-  server: SessionMcpServerMetadata;
+  server: SessionMcpApprovalPolicyTarget;
   effectiveFrom: "next_attempt";
 };
+
+export type SessionMcpApprovalPolicyTarget =
+  | SessionMcpServerMetadata
+  | {
+      id: string;
+      source: "workspace";
+      requireApproval: SessionMcpApprovalPolicy;
+    };
 
 export type ConnectionKind = "oauth2" | "api_key" | "app_install" | "delegated";
 export type ConnectionStatus = "active" | "needs_reauth" | "revoked" | "error";
@@ -602,15 +729,20 @@ export type UserResourceDelegation = {
   resourceVersionId?: string | null | undefined;
 };
 
-export type McpConnectionAuthoritySelection = {
+export type McpConnectionAccountSelection = {
   serverId: string;
   connectionId: string;
-  userDelegation: UserResourceDelegation;
 };
 
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
+  accountSelection?: "all_eligible" | undefined;
   authoritySource?: "host" | undefined;
+  /** accepted_turn is configuration-only; each accepted owner must select a grant. */
+  hostBinding?:
+    | { bindingId: string; generation: number }
+    | { selection: "accepted_turn" }
+    | undefined;
   provider?: string | undefined;
   providerDomain: string;
   kind?: ConnectionKind | undefined;
@@ -796,6 +928,7 @@ export type FikenInstallRequest = {
 };
 
 export type FikenOAuthStartRequest = {
+  returnPath?: string | undefined;
   /** Existing Fiken connection to re-authorize in place (reconnect). */
   connectionId?: string | undefined;
 };
@@ -1094,6 +1227,8 @@ export type OAuthStartRequest = {
   resource?: string | undefined;
   requestedScopes?: string[] | undefined;
   returnPath?: string | undefined;
+  /** Exact trusted-host destination; requires verified external-user mode. */
+  returnUrl?: string | undefined;
   connectionId?: string | undefined;
   ownership?: ConnectionOwnership | undefined;
   oauthClient?:
@@ -1230,17 +1365,20 @@ export type ForkSessionResponse = {
 };
 
 export type SessionBackgroundCommandActivity = {
+  unavailableCount?: number | undefined;
   state: "running" | "stopping";
   count: number;
 };
 
 export type SessionBackgroundCommand = {
+  observationStatus?: "unavailable" | undefined;
   id: string;
   workspaceId: string;
   sessionId: string;
   provider: "managed" | "connected_machine";
   state: "running" | "stopping" | "exited" | "lost";
   commandPreview: string;
+  commandText?: string | undefined;
   cancelRequestedAt: string | null;
   exitCode: number | null;
   settlementReason: string | null;
@@ -1259,11 +1397,34 @@ export type CancelSessionBackgroundCommandResult = {
 };
 
 export type Session = {
+  /** Detail-only dispatch evidence; delivery does not prove turn execution. */
+  dispatchWait?:
+    | {
+        state: "pending" | "acknowledged" | "unavailable";
+        attempts: number;
+        nextAttemptAt: string | null;
+        lastError: string | null;
+      }
+    | null
+    | undefined;
+  /** Detail-only failure evidence through lastSequence; independent of timeline paging. */
+  failureDiagnostics?:
+    | {
+        eventId: string;
+        sequence: number;
+        turnId: string | null;
+        occurredAt: string;
+        payload: unknown;
+      }
+    | null
+    | undefined;
+  bundledSkillIds?: BundledSkillId[] | undefined;
   id: string;
   workspaceId: string;
   accountId: string;
   status: SessionStatus;
   backgroundCommandActivity?: SessionBackgroundCommandActivity | undefined;
+  hasSchedules?: boolean | undefined;
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;
@@ -1308,6 +1469,7 @@ export type Session = {
   firstPartyMcpPermissions: string[] | null;
   firstPartyMcpTools: FirstPartyMcpToolName[];
   mcpServers: SessionMcpServerMetadata[];
+  mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
   parentSessionId: string | null;
   /** Immutable server-authored nested-agent lineage and policy snapshot. */
   rootSessionId: string;
@@ -1323,11 +1485,15 @@ export type Session = {
   queueHeadPosition: number;
   queueTailPosition: number;
   effectiveControl: EffectiveSessionControl;
+  /** Current durable input wait; an elapsed deadline does not prove a new turn started. */
+  inputWait?: { deadlineAt: string; reason: string } | null | undefined;
   lastSequence: number;
   /** Multi-account Codex (P1): the account this session is pinned to (null ⇒ follow workspace active). */
   codexPinnedCredentialId?: string | null;
   /** Multi-account Codex (P1): the account the most recent turn ran on (the "Running on:" indicator). */
   codexLastCredentialId?: string | null;
+  /** Accepted current-turn account, separate from future session preferences. */
+  codexCurrentSelection?: { credentialId: string | null; waiting: boolean } | null | undefined;
   /**
    * Frozen at create. `remote_v2` ⇒ Codex remote compaction + Codex-only model
    * admission; `portable` ⇒ plaintext compaction and free provider switching.
@@ -1357,6 +1523,7 @@ export type Session = {
         totalDescendants: number;
         runningDescendants: number;
         queuedDescendants: number;
+        waitingDescendants?: number | undefined;
         attentionDescendants: number;
         pausedDescendants: number;
         failedDescendants: number;
@@ -1377,6 +1544,12 @@ export type Session = {
    * list and lineage reads for `requires_action` sessions; null otherwise.
    */
   requiresActionSince?: string | null | undefined;
+  /** Agent access scope; absent on servers before the agent-access release. */
+  agentAccess?: SessionAgentAccess | undefined;
+  /** Opaque end-user label; null when the session carries none. */
+  scopeSubjectId?: SessionScopeSubjectId | null | undefined;
+  /** Memory scope; absent on servers before the agent-access release. */
+  memoryScope?: SessionMemoryScope | undefined;
   createdAt: string;
   updatedAt: string;
 };
@@ -1393,6 +1566,14 @@ export type SessionListResponse = {
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
+  /** Present only when the server recognized and applied additive list filters. */
+  filtersApplied?: true;
+  /** Effective server ordering. Name: ASCII-space trim, ASCII case fold,
+   * UTF-8 byte order, id ASC. Date keys and id ties are DESC. */
+  sortBy?: "updatedAt" | "createdAt" | "name" | "archivedAt";
+  archiveStatus?: "active" | "archived" | "all";
+  /** Server-resolved Site origin filter, when requested. */
+  originSiteId?: string;
   sessions: Session[];
   nextCursor: string | null;
 };
@@ -1531,6 +1712,7 @@ export type LineageNode = {
 };
 
 export type SessionLineageResponse = {
+  sessionHasSchedules?: boolean | undefined;
   ancestors: SessionSummary[];
   children: LineageNode[];
   truncated: boolean;
@@ -1652,7 +1834,17 @@ export type HumanInputOption = {
   description?: string | null | undefined;
 };
 
+export type SkillReviewReference = {
+  removalOperationId?: string | undefined;
+  sourceOperationId: string;
+  skillId: string;
+  revisionId: string;
+  expectedRevisionId: string | null;
+  expectedScopeVersion: number;
+};
+
 export type HumanInputQuestion = {
+  skillReview?: SkillReviewReference | null | undefined;
   id: string;
   kind: HumanInputQuestionKind;
   prompt: string;
@@ -1753,8 +1945,14 @@ export const SESSION_EVENT_TYPES = [
   "sandbox.operation.failed",
   "session.command.backgrounded",
   "session.command.finished",
+  "session.wait.started",
+  "session.wait.finished",
   "sandbox.command.output.delta",
   "artifact.created",
+  "knowledge.confirmation.recovered",
+  "instruction.confirmation.recovered",
+  "knowledge.source.prepared",
+  "knowledge.source.failed",
   "goal.set",
   "goal.updated",
   "goal.progress",
@@ -1806,6 +2004,7 @@ export const SESSION_EVENT_TYPES = [
   "session.tool_policy.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
+  "codex.account.selection.changed",
   // credential allocator metadata-only per-turn credential selection audit.
   "codex.credential.selected",
   // Bounded, identity-free deterministic shadow/replay decision.
@@ -1985,6 +2184,10 @@ export type SessionEventPage = {
 
 export type ToolAuthNeededPayload = {
   serverId: string;
+  /** Configured connector for recovery; serverId retains the execution alias. */
+  canonicalServerId?: string | undefined;
+  /** Scope of the exact failed account, not the canonical catalog default. */
+  connectionSubjectScope?: "workspace" | "subject" | undefined;
   toolName?: string | null | undefined;
   providerDomain: string;
   provider?: string | undefined;
@@ -2076,7 +2279,14 @@ export type CodexFleetDecisionEventPayload = {
   actual: {
     outcome: "selected" | "waiting" | "none";
     candidateKey: string | null;
-    reason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+    reason:
+      | "lease_reused"
+      | "pin"
+      | "rotation"
+      | "active"
+      | "all_capped"
+      | "allocator_disabled"
+      | "none";
   };
   comparison: CodexFleetShadowComparison;
   replay: {
@@ -2227,11 +2437,16 @@ export type FsTreeNode = {
   truncated: boolean;
 };
 export type FsEncoding = "utf8" | "base64";
+export type FileSystemRouteIdentity = {
+  epoch: number;
+  root: string;
+};
 export type FsListRequest = {
   path?: string;
   depth?: number;
   maxEntries?: number;
   includeHidden?: boolean;
+  route?: FileSystemRouteIdentity;
 };
 export type FsListResponse = {
   root: FsTreeNode;
@@ -2244,6 +2459,7 @@ export type FsReadRequest = {
   path: string;
   encoding?: FsEncoding;
   maxBytes?: number;
+  route?: FileSystemRouteIdentity;
 };
 export type FsReadResponse = {
   path: string;
@@ -2268,26 +2484,36 @@ export type FsWriteRequest = {
   content: string;
   overwrite?: boolean;
   createParents?: boolean;
+  route?: FileSystemRouteIdentity;
 };
 export type FsWriteResponse = {
   path: string;
   sizeBytes: number;
   revision: number;
 };
-export type FsDeleteRequest = { path: string; recursive?: boolean };
+export type FsDeleteRequest = {
+  path: string;
+  recursive?: boolean;
+  route?: FileSystemRouteIdentity;
+};
 export type FsDeleteResponse = { revision: number };
 export type FsMoveRequest = {
   path: string;
   newPath: string;
   overwrite?: boolean;
   createParents?: boolean;
+  route?: FileSystemRouteIdentity;
 };
 export type FsMoveResponse = {
   path: string;
   newPath: string;
   revision: number;
 };
-export type FsMkdirRequest = { path: string; recursive?: boolean };
+export type FsMkdirRequest = {
+  path: string;
+  recursive?: boolean;
+  route?: FileSystemRouteIdentity;
+};
 export type FsMkdirResponse = { path: string; revision: number };
 
 // A2 Git request/response (the Pierre-diff feed).
@@ -2635,6 +2861,9 @@ export type IncidentTelemetryPreflightInput = Omit<
 };
 
 export type ScheduledTaskAgentConfig = {
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
+  knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
+  bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
   resources: ResourceRef[];
   tools: ToolRef[];
@@ -2693,6 +2922,8 @@ export type ScheduledTask = {
   accountId: string;
   workspaceId: string;
   name: string;
+  /** Immutable execution owner; null for workspace/service tasks. */
+  ownerSubjectId: string | null;
   status: ScheduledTaskStatus;
   schedule: ScheduledTaskScheduleSpec;
   temporalScheduleId: string;
@@ -2702,7 +2933,6 @@ export type ScheduledTask = {
   agentConfig: ScheduledTaskAgentConfig;
   createdBy?: TurnInitiator | undefined;
   createdByContext?: TurnInitiatorContext | undefined;
-  personalConnections?: McpPersonalConnectionSummary[] | undefined;
   authorityRevision: number;
   executionDigest: string;
   targetSessionId: string | null;
@@ -2718,6 +2948,9 @@ export type ScheduledTask = {
 };
 
 export type CreateSessionRequest = {
+  /** Omitted: defaults/inheritance; []: no bundled guidance. Children cannot widen. */
+  bundledSkillIds?: BundledSkillId[] | undefined;
+  excludedMcpServerIds?: string[] | undefined;
   // Optional UUID preallocated by an embedding host so it can durably link its
   // projection before OpenGeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
@@ -2737,7 +2970,9 @@ export type CreateSessionRequest = {
   policyRole?: string | undefined;
   resources?: ResourceRef[] | undefined;
   /** Inline skills fixed onto this session; omitted children inherit them. */
-  skills?: SessionSkill[] | undefined;
+  skills?: SessionSkillInput[] | undefined;
+  /** Installed session-selected Skill identities to freeze onto this session at creation. */
+  installedSkillIds?: string[] | undefined;
   tools?: ToolRef[] | undefined;
   metadata?: Record<string, unknown> | undefined;
   model?: string | undefined;
@@ -2767,10 +3002,13 @@ export type CreateSessionRequest = {
   // Exact actor-private pre-session draft revision represented by this create.
   // The server consumes only this revision after durable initialization.
   expectedNewSessionDraftRevision?: number | undefined;
+  agentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   maxNestedAgentDepth?: number | undefined;
   firstPartyMcpPermissions?: string[] | undefined;
   firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
+  mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   /** Atomically attach the server-derived personal Variable Set/Rig closure to the initial turn. */
   personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
@@ -2780,7 +3018,21 @@ export type CreateSessionRequest = {
   //   - "new":     mint a fresh singleton box (group ≡ the new session's id).
   //   - {groupId}: join a SPECIFIC sibling group in THIS workspace (manager fan-out).
   sandbox?: "shared" | "new" | { groupId: string } | undefined;
+  // --- Agent access scope, end-user label, memory scope ---------------------
+  // Mirror of the contracts additions that land with the session agent-access
+  // release. Which other sessions the agent may reach; defaults to "workspace"
+  // on the platform (the chat facade defaults to "session").
+  agentAccess?: SessionAgentAccess | undefined;
+  /** Opaque end-user label inside the workspace. Not a subject, not authority. */
+  /** Select identity with server-side asUser(), not session creation data. */
+  scopeSubjectId?: never;
+  /** Which Memory the agent reads and where it saves; "user" requires `scopeSubjectId`. */
+  memoryScope?: SessionMemoryScope | undefined;
 };
+
+export type SessionAgentAccess = "session" | "user" | "workspace";
+export type SessionScopeSubjectId = string;
+export type SessionMemoryScope = "workspace" | "user" | "off";
 
 // --- Access, workspaces, API keys -------------------------------------------
 
@@ -2848,13 +3100,24 @@ export type KnownPermission = (typeof KNOWN_PERMISSIONS)[number];
 export type Permission = KnownPermission | (string & {});
 
 export type FirstPartyMcpToolName =
+  | "knowledge_search"
+  | "knowledge_prepare_save"
+  | "knowledge_get"
+  | "knowledge_browse"
+  | "knowledge_save"
+  | "knowledge_retain_file"
+  | "knowledge_retain_message"
+  | "knowledge_archive"
+  | "instruction_policy_save"
+  | "instruction_policy_get"
   | "set_session_title"
   | "goal_set"
   | "goal_update"
   | "goal_progress"
-  | "goal_wait"
+  | "wait_for_input"
   | "goal_complete"
   | "goal_pause"
+  | "goal_resume"
   | "memory_search"
   | "memory_save"
   | "memory_correct"
@@ -2883,6 +3146,14 @@ export type FirstPartyMcpToolName =
   | "run_on"
   | "sandbox_provision"
   | "connected_machine_remove"
+  | "connected_machine_enroll_token"
+  | "project_list"
+  | "project_get"
+  | "project_create"
+  | "project_update"
+  | "project_reorder"
+  | "project_delete"
+  | "session_set_project"
   | "rig_list"
   | "rig_get"
   | "rig_propose_change"
@@ -2892,6 +3163,8 @@ export type FirstPartyMcpToolName =
   | "session_get"
   | "session_events"
   | "session_wait"
+  | "command_read"
+  | "command_wait"
   | "session_create"
   | "session_send_message"
   | "session_pause"
@@ -2981,9 +3254,12 @@ export type FirstPartyMcpToolName =
   | "sandbox_file_publish"
   | "artifacts_list"
   | "artifacts_get_source"
+  | "artifacts_prepare_upload"
   | "artifacts_create"
   | "artifacts_publish"
   | "artifacts_rollback"
+  | "artifacts_archive"
+  | "artifacts_restore"
   | "editable_artifact_list"
   | "editable_artifact_create"
   | "editable_artifact_import"
@@ -3052,6 +3328,7 @@ export type ModelCostClassV1 = "free" | "credits" | "subscription" | "workspace"
 export type ModelPricingV1 = {
   inputMicrosPerMillionTokens: number;
   cachedInputMicrosPerMillionTokens?: number | undefined;
+  cacheWriteMicrosPerMillionTokens?: number | undefined;
   outputMicrosPerMillionTokens: number;
   marginBps?: number | undefined;
 };
@@ -3242,6 +3519,12 @@ export type CodexConnectionStatus = {
     label?: string | null;
     chatgptAccountId?: string | null;
   } | null;
+  /** Live model-catalog probe result for the active account only. */
+  activeAccountValid?: boolean;
+  /** Cached readiness of any account in the effective worker pool. */
+  poolReady?: boolean;
+  /** Cached unpinned worker routability; rotation-off remains active-pointer-only. */
+  workerRoutable?: boolean;
   /** How many Codex accounts the workspace has connected. */
   accountCount?: number;
   source?: WorkspaceCodexSubscriptionSource;
@@ -3437,6 +3720,15 @@ export type CodexAccountsResponse = {
 
 export type OrganizationCodexAccountsResponse = Omit<CodexAccountsResponse, "apps" | "source">;
 
+/** Session-authorized choices: the accepted pool for a capacity wait, otherwise
+ * the current pool for the next turn. Current execution may use another pool. */
+export type SessionCodexAccountsResponse = Omit<CodexAccountsResponse, "apps" | "source"> & {
+  currentSelection: { credentialId: string | null; waiting: boolean } | null;
+  currentAccount: CodexAccount | null;
+  pinnedAccountId: string | null;
+  lastAccountId: string | null;
+};
+
 export type CodexAppsUpdate = {
   credentialId: string | null;
   version: number;
@@ -3471,11 +3763,12 @@ export type CodexConnectPoll =
     };
 
 /** Explicit authority of one connected SuperGrok/xAI subscription account. */
-export type SuperGrokAccountScope = "workspace" | "user";
+export type SuperGrokAccountScope = "workspace" | "user" | "organization";
 
 /** Metadata-only connected SuperGrok account. Secret OAuth material never crosses the API. */
 export type SuperGrokAccount = {
   id: string;
+  plan?: string | null;
   scope: SuperGrokAccountScope;
   subject: string;
   email?: string | null;
@@ -3506,6 +3799,8 @@ export type SuperGrokRotationSettings = {
 
 /** GET /supergrok/accounts — visible accounts plus the workspace active pointer. */
 export type SuperGrokAccountsResponse = {
+  source?: "workspace" | "user" | "organization";
+  organizationId?: string;
   accounts: SuperGrokAccount[];
   activeAccountId: string | null;
   settings: SuperGrokRotationSettings;
@@ -3582,7 +3877,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-organization-recovery-custody-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-09-plugins-and-skills-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -3616,6 +3911,8 @@ export type ClientConfig = {
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
   productAccessMode: ProductAccessMode;
+  /** Client-safe hint for whether the console should offer Stripe checkout. */
+  billingMode?: BillingMode | undefined;
   managedAuthSessionSetMode: "legacy" | "dual" | "broker";
   auth: ClientAuthConfig;
   analytics: {
@@ -3640,6 +3937,7 @@ export type ClientConfig = {
 /** Client-safe voice-input capability projection. */
 export type ClientVoiceInputConfig = {
   available: boolean;
+  providers?: VoiceInputProviderId[] | undefined;
   maxDurationSeconds: number;
   maxSizeBytes: number;
   acceptedMimeTypes: string[];
@@ -3829,7 +4127,7 @@ export type UserResourceAuthoritySummary = {
   grants: UserResourceAuthorityGrant[];
 };
 export type ListUserResourceAuthoritiesOptions = {
-  resourceKind: UserResourceKind;
+  resourceKind: Exclude<UserResourceKind, "connection">;
   cursor?: string | undefined;
   limit?: number | undefined;
 };
@@ -3841,7 +4139,7 @@ export type ListUserResourceAuthoritiesResponse = {
 export type IssueUserResourceGrantRequest =
   | {
       scope: "user";
-      resourceKind: UserResourceKind;
+      resourceKind: Exclude<UserResourceKind, "connection">;
       mode: "session";
       context: "user_private" | "workspace_shared";
       sessionId: string;
@@ -3850,7 +4148,7 @@ export type IssueUserResourceGrantRequest =
     }
   | {
       scope: "user";
-      resourceKind: UserResourceKind;
+      resourceKind: Exclude<UserResourceKind, "connection">;
       mode: "always";
       context: "user_private" | "workspace_shared";
       sessionId?: null | undefined;
@@ -4019,6 +4317,16 @@ export type CreateOrganizationRequest = {
 export type CreateOrganizationResponse = {
   organization: OrganizationSummary;
   workspaceId: string;
+};
+export type CreateAdditionalOrganizationRequest = {
+  name: string;
+  workspaceName: string;
+  operationId: string;
+};
+export type CreateAdditionalOrganizationResponse = {
+  organization: OrganizationSummary;
+  workspaceId: string;
+  personalWorkspaceId: string;
 };
 export type UpdateOrganizationNameRequest = {
   name: string;
@@ -4209,6 +4517,8 @@ export type Workspace = {
   agentInstructions: string | null;
   settings: Record<string, unknown>;
   inferenceControl: {
+    timer?: WorkspacePauseTimer | null | undefined;
+    serverTime?: string | undefined;
     state: "active" | "paused";
     revision: number;
     reason: string | null;
@@ -4247,8 +4557,9 @@ export type WorkspaceSessionDefaults = {
 };
 
 export type WorkspaceSessionToolDefaults = {
-  mcpServerIds: string[];
-  firstPartyMcpTools: FirstPartyMcpToolName[];
+  inheritConnectedMcpServers?: boolean | undefined;
+  mcpServerIds?: string[];
+  firstPartyMcpTools?: FirstPartyMcpToolName[];
 };
 
 export type WorkspaceSlackReactionSummonSettings = {
@@ -4297,15 +4608,29 @@ export type UpdateSlackChannelRoutesRequest = {
   routes: Array<{ slackChannelId: string; targetWorkspaceId: string | null }>;
 };
 
+export type VoiceInputProviderId =
+  | "supergrok-subscription"
+  | "codex-subscription"
+  | "openai"
+  | "azure-openai";
+
 export type WorkspaceVoiceInputSettings = {
   enabled: boolean;
+  preferredProvider?: VoiceInputProviderId | null | undefined;
+  fallbackEnabled?: boolean | undefined;
 };
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
-  sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
+  sessionToolDefaults?:
+    | {
+        mcpServerIds?: string[] | null;
+        firstPartyMcpTools?: FirstPartyMcpToolName[] | null;
+        inheritConnectedMcpServers?: boolean | null;
+      }
+    | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -4349,6 +4674,13 @@ export type UpdateWorkspaceRequest = {
   agentInstructions?: string | null | undefined;
 };
 
+/**
+ * Organization API key access tier, derived by the server from the key's
+ * permissions: `full` administers the organization, `read` only inventories
+ * shared workspaces and reads their sessions, events, and files.
+ */
+export type OrganizationApiKeyAccess = "full" | "read";
+
 export type ApiKey = {
   id: string;
   accountId: string;
@@ -4357,6 +4689,8 @@ export type ApiKey = {
   description: string | null;
   prefix: string;
   permissions: Permission[];
+  /** Organization keys only; omitted for workspace-scoped keys. */
+  access?: OrganizationApiKeyAccess | undefined;
   expiresAt: string | null;
   revokedAt: string | null;
   lastUsedAt: string | null;
@@ -4381,10 +4715,38 @@ export type CreateOrganizationApiKeyRequest = {
   name: string;
   description?: string | undefined;
   expiresAt?: string | undefined;
+  /** Omitted means `full`. */
+  access?: OrganizationApiKeyAccess | undefined;
 };
 
 export type ListApiKeysResponse = {
   apiKeys: ApiKey[];
+};
+
+// --- Organization-wide session list (org API key or organization owner) -----------------------
+
+export type ListOrganizationSessionsOptions = {
+  /** Page size, 1..200; the server default is 50. */
+  limit?: number | undefined;
+  /** `nextCursor` from the previous page. */
+  cursor?: string | undefined;
+  /** Keep only sessions labelled with this exact end user. */
+  scopeSubjectId?: string | undefined;
+  /** Keep only sessions in this exact lifecycle state. */
+  status?: SessionStatus | undefined;
+  signal?: AbortSignal | undefined;
+};
+
+/**
+ * One page of `GET /v1/organizations/:organizationId/sessions`. Rows come from
+ * every shared workspace the caller may read, each carrying its
+ * `workspaceId`; personal workspaces are never included and private sessions
+ * stay invisible. A page may be shorter than `limit` while `nextCursor` is
+ * still set, so follow `nextCursor` until it is null.
+ */
+export type OrganizationSessionListResponse = {
+  sessions: Session[];
+  nextCursor: string | null;
 };
 
 // A person (or API key) with access to a workspace. `subjectId` is
@@ -4564,7 +4926,7 @@ export type SessionGoalContinuation = {
   observedRevision: number;
   nextAttemptAt: string | null;
   lastError: string | null;
-  /** Agent-stated reason for a `held_for_input` hold; null otherwise. */
+  /** Agent-stated reason for a `wait_for_input` hold; null otherwise. */
   holdReason?: string | null | undefined;
 };
 
@@ -4577,6 +4939,8 @@ export type SessionGoal = {
   text: string;
   successCriteria: string | null;
   rootConstraints: string[];
+  /** Optional for older-server/source compatibility; current servers always supply this projection. */
+  reportRequirements?: SessionGoalReportRequirement[] | undefined;
   evidence: string | null;
   rationale: string | null;
   pausedReason: string | null;
@@ -4697,6 +5061,8 @@ export type ComposerDraft = {
 };
 
 export type NewSessionDraftOptions = {
+  agentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
+  excludedMcpServerIds?: string[] | undefined;
   visibility?: SessionVisibility | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   targetSandboxId?: string | undefined;
@@ -4730,6 +5096,8 @@ export type NewSessionDraft = {
   model: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
+  /** Absent on legacy drafts; null records an explicit Default-project selection. */
+  selectedProjectChannelId?: string | null | undefined;
   options: NewSessionDraftOptions;
   selectionHistory: NewSessionSelectionHistory;
   updatedAt: string | null;
@@ -4764,6 +5132,8 @@ export type SessionSystemUpdateKind =
   | "goal_continuation"
   | "agent_message"
   | "agent_steer_instruction"
+  | "session_wait_timeout"
+  | "background_command_result"
   | "child_terminal_result"
   | "media_generation_result"
   | "child_requires_action"
@@ -4779,6 +5149,30 @@ export type SessionSystemUpdateState =
   | "superseded"
   | "failed";
 
+export type SessionSystemUpdatePayload =
+  | {
+      type: "session_wait_timeout";
+      waitTurnId: string;
+      deadlineAt: string;
+      reason: string;
+      [key: string]: unknown;
+    }
+  | {
+      type: "background_command_result";
+      commandId: string;
+      state: "exited" | "lost";
+      exitCode: number | null;
+      reason: string;
+      outputLocator: {
+        eventType: "sandbox.command.output.delta";
+        commandId: string;
+      };
+      [key: string]: unknown;
+    }
+  | ({
+      type: Exclude<SessionSystemUpdateKind, "session_wait_timeout" | "background_command_result">;
+    } & Record<string, unknown>);
+
 export type SessionSystemUpdate = {
   id: string;
   sessionId: string;
@@ -4787,13 +5181,59 @@ export type SessionSystemUpdate = {
   sourceId: string;
   dedupeKey: string;
   summary: string;
-  payload: Record<string, unknown>;
+  payload: SessionSystemUpdatePayload;
   lineage: Record<string, unknown>;
   state: SessionSystemUpdateState;
   deliveredTurnId: string | null;
   deliveredHistoryItemId: string | null;
   deliveredAt: string | null;
   createdAt: string;
+};
+
+export type SessionRetryRequest = {
+  clientEventId: string;
+  failureEventId: string;
+  model?: string;
+  reasoningEffort?: ReasoningEffort;
+  latencyMode?: LatencyMode;
+};
+
+export type SandboxRecoverySelection = {
+  version: 1;
+  sessionId: string;
+  sandboxGroupId: string;
+  leaseId: string;
+  routeEpoch: number;
+  authorityEpoch: number;
+  leaseEpoch: number;
+  workspaceGeneration: number;
+  archiveGeneration: number;
+  artifactId: string;
+  revision: string;
+  capturedAt: string;
+};
+export type SandboxRecoveryProjection = {
+  version: 1;
+  status: "unsupported" | "blocked" | "eligible" | "consent_accepted" | "restoring" | "restored";
+  reason: string | null;
+  checkpoint: SandboxRecoverySelection | null;
+  operationId: string | null;
+};
+export type SandboxRecoveryRequest = {
+  operationId: string;
+  acceptHistoricalCheckpoint: true;
+  selection: SandboxRecoverySelection;
+};
+export type SandboxRecoveryResponse = {
+  outcome: "accepted" | "replayed";
+  operationId: string;
+  recovery: SandboxRecoveryProjection;
+};
+
+export type SessionRetryResponse = {
+  outcome: "accepted" | "replayed";
+  turnId: string;
+  failureEventId: string;
 };
 
 export type SessionControlResponse = {
@@ -4803,6 +5243,20 @@ export type SessionControlResponse = {
   wakeCount: number;
   cancelledSessionCount: number;
   cancelledTurnCount: number;
+};
+
+export type WorkspacePauseTimer = {
+  id: string;
+  action: "pause" | "resume";
+  dueAt: string;
+  pauseForSeconds: number | null;
+};
+export type WorkspacePauseTimerRequest = {
+  action: "set" | "cancel";
+  pauseInSeconds?: number | undefined;
+  pauseForSeconds?: number | null | undefined;
+  clientEventId: string;
+  expectedRevision: number;
 };
 
 export type WorkspaceInferenceControlResponse = {
@@ -4822,7 +5276,7 @@ export type WorkspaceControlEvent = {
   type: "workspace.control.changed";
   scope: "workspace" | "session";
   rootSessionId: string | null;
-  action: "pause" | "resume";
+  action: "pause" | "resume" | "timer_set" | "timer_cancelled";
   automatic: boolean;
   reason: string | null;
   actor: string;
@@ -4892,7 +5346,7 @@ export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expecte
   controlEtag?: string;
   modelContext?: string;
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
-  connectionAuthorities?: McpConnectionAuthoritySelection[];
+  connectionAccounts?: McpConnectionAccountSelection[];
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
 };
 
@@ -4917,6 +5371,7 @@ export type SaveNewSessionDraftRequest = Omit<
 
 /** Input shape for agent config on create/update (server applies defaults). */
 export type ScheduledTaskAgentConfigInput = {
+  knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   prompt: string;
   resources?: ResourceRef[] | undefined;
   tools?: ToolRef[] | undefined;
@@ -4933,12 +5388,16 @@ export type ScheduledTaskAgentConfigInput = {
 };
 
 export type CreateAgentScheduledTaskRequest = {
+  agentLearning?: {
+    scope: "workspace" | "personal";
+    settings: import("./knowledge").AgentLearningOverrides;
+  };
   name: string;
   schedule: ScheduledTaskScheduleSpec;
   action?: { kind: "agent_turn" } | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
-  connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
@@ -4968,7 +5427,7 @@ export type UpdateScheduledTaskRequest = {
   schedule?: ScheduledTaskScheduleSpec | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
-  connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
@@ -5318,7 +5777,15 @@ export type ProposeRigChangeRequest =
 
 export type FileStatus = "pending_upload" | "ready" | "failed" | "expired" | "deleted";
 
+export type FileListRequest = {
+  scope?: "all" | "workspace" | "personal";
+  limit?: number;
+  cursor?: string;
+};
+export type FileListResponse = { files: FileAsset[]; nextCursor: string | null };
+
 export type FileAsset = {
+  scope?: "workspace" | "personal" | undefined;
   id: string;
   workspaceId: string;
   status: FileStatus;
@@ -5580,6 +6047,7 @@ export type RetainedArtifactDownload = {
 };
 
 export type CreateFileUploadRequest = {
+  scope?: "workspace" | "personal";
   filename: string;
   contentType: string;
   sizeBytes: number;
@@ -5610,6 +6078,7 @@ export type FileDownloadUrlResponse = {
 export type FileUploadData = Blob | ArrayBuffer | Uint8Array | string;
 
 export type UploadFileInput = {
+  scope?: "workspace" | "personal";
   filename: string;
   contentType: string;
   data: FileUploadData;
@@ -5972,314 +6441,26 @@ export type WorkspaceMemorySearchResponse = {
   results: WorkspaceMemorySearchResult[];
 };
 
-// --- Capability packs ---------------------------------------------------------
-
-export type CapabilityPackConnectorAuthModel =
-  | "oauth2_authorization_code_pkce"
-  | "oauth2_authorization_code"
-  | "api_key"
-  | "credential_ref";
-
-export type CapabilityPackConnector = {
-  id: string;
-  name: string;
-  category: string;
-  authModel: CapabilityPackConnectorAuthModel;
-  providers: string[];
-  scopes: string[];
-  required: boolean;
-  metadata: Record<string, unknown>;
-};
-
-export type CapabilityPackKnowledge = {
-  type: "document_base";
-  id: string;
-  name: string;
-  description: string | null;
-  required: boolean;
-};
-
-export type CapabilityPackScheduledTaskTemplate = {
-  id: string;
-  name: string;
-  description: string;
-  defaultSchedule: ScheduledTaskScheduleSpec;
-  defaultRunMode: ScheduledTaskRunMode;
-  defaultOverlapPolicy: ScheduledTaskOverlapPolicy;
-  prompt?: string | undefined;
-};
-
-export type CapabilityPackAutomationTemplate = {
-  id: string;
-  name: string;
-  description: string;
-  adapterId: string;
-  eventTypes: string[];
-  sessionTemplate: {
-    prompt: string;
-    instructions: string | null;
-    resources: ResourceRef[];
-    skills: CapabilityPackSkill[];
-    tools: ToolRef[];
-    firstPartyMcpTools: string[];
-    firstPartyMcpPermissions: Permission[];
-    model: string | null;
-    reasoningEffort: ReasoningEffort | null;
-    sandboxBackend: SandboxBackend | null;
-    policyRole: string | null;
-    metadata: Record<string, unknown>;
-  };
-  configuration: Record<string, unknown>;
-  connectionRequirement: string | null;
-};
-
-export type CapabilityPackSkillFile = {
+export type SkillArtifactFile = {
   path: string;
   content: string;
 };
 
-export type CapabilityPackSkill = {
+export type SkillArtifactDefinition = {
   name: string;
   description?: string | undefined;
-  files: CapabilityPackSkillFile[];
+  /** Omitted means workspace-wide; session_selected requires explicit session attachment. */
+  activationMode?: "workspace_managed" | "session_selected" | undefined;
+  files: SkillArtifactFile[];
 };
 
-export type SessionSkill = CapabilityPackSkill;
-
-export type CapabilityPackVariableSetSpec = {
-  description: string;
-  requiredVariables: string[];
-  required: boolean;
-};
-
-export type CapabilityPackComponentReference =
-  | {
-      key: string;
-      kind: "plugin";
-      pluginKey: string;
-      version: string;
-      manifestDigest: string;
-      required: boolean;
-    }
-  | {
-      key: string;
-      kind: "skill";
-      capabilityId: string;
-      contentSha256: string;
-      required: boolean;
-    }
-  | {
-      key: string;
-      kind: "integration";
-      capabilityId: string;
-      instanceKey: string;
-      revisionId: string;
-      contentSha256: string;
-      required: boolean;
-    }
-  | {
-      key: string;
-      kind: "facet";
-      capabilityId: string;
-      instanceKey: string;
-      facetKey: string;
-      bindingKey: string;
-      configDigest: string;
-      required: boolean;
-    };
-
-export type CapabilityPackRigRequirement = {
+export type SessionSkill = Omit<SkillArtifactDefinition, "activationMode">;
+/** SKILL.md owns metadata; supplied legacy fields must exactly match it. */
+export type SkillArtifactDefinitionInput = Omit<SkillArtifactDefinition, "name" | "description"> & {
+  name?: string | undefined;
   description?: string | undefined;
-  required: boolean;
-  rigId?: string | undefined;
-  requireVerified: boolean;
 };
-
-export type CapabilityPack = {
-  id: string;
-  name: string;
-  description: string;
-  role: string;
-  category: string;
-  version: string;
-  sandboxImage?: string | undefined;
-  sandboxProviderImages?:
-    | {
-        modal?: { imageId: string } | undefined;
-      }
-    | undefined;
-  skills: CapabilityPackSkill[];
-  components: CapabilityPackComponentReference[];
-  rig?: CapabilityPackRigRequirement | undefined;
-  tools: ToolRef[];
-  connectors: CapabilityPackConnector[];
-  knowledge: CapabilityPackKnowledge[];
-  scheduledTaskTemplates: CapabilityPackScheduledTaskTemplate[];
-  automationTemplates?: CapabilityPackAutomationTemplate[] | undefined;
-  variableSet?: CapabilityPackVariableSetSpec | undefined;
-  metadata: Record<string, unknown>;
-};
-
-/** Input shape for registering a pack manifest (server applies defaults). */
-export type RegisterCapabilityPackRequest = {
-  id: string;
-  name: string;
-  description: string;
-  role: string;
-  category: string;
-  version: string;
-  sandboxImage?: string | undefined;
-  sandboxProviderImages?:
-    | {
-        modal?: { imageId: string } | undefined;
-      }
-    | undefined;
-  skills?:
-    | {
-        name: string;
-        description?: string | undefined;
-        files: CapabilityPackSkillFile[];
-      }[]
-    | undefined;
-  components?:
-    | (
-        | {
-            key: string;
-            kind: "plugin";
-            pluginKey: string;
-            version: string;
-            manifestDigest: string;
-            required?: boolean | undefined;
-          }
-        | {
-            key: string;
-            kind: "skill";
-            capabilityId: string;
-            contentSha256: string;
-            required?: boolean | undefined;
-          }
-        | {
-            key: string;
-            kind: "integration";
-            capabilityId: string;
-            instanceKey: string;
-            revisionId: string;
-            contentSha256: string;
-            required?: boolean | undefined;
-          }
-        | {
-            key: string;
-            kind: "facet";
-            capabilityId: string;
-            instanceKey: string;
-            facetKey: string;
-            bindingKey: string;
-            configDigest: string;
-            required?: boolean | undefined;
-          }
-      )[]
-    | undefined;
-  rig?:
-    | {
-        description?: string | undefined;
-        required?: boolean | undefined;
-        rigId?: string | undefined;
-        requireVerified?: boolean | undefined;
-      }
-    | undefined;
-  tools?: ToolRef[] | undefined;
-  connectors?:
-    | {
-        id: string;
-        name: string;
-        category: string;
-        authModel: CapabilityPackConnectorAuthModel;
-        providers?: string[] | undefined;
-        scopes?: string[] | undefined;
-        required?: boolean | undefined;
-        metadata?: Record<string, unknown> | undefined;
-      }[]
-    | undefined;
-  knowledge?:
-    | {
-        type: "document_base";
-        id: string;
-        name: string;
-        description?: string | null | undefined;
-        required?: boolean | undefined;
-      }[]
-    | undefined;
-  scheduledTaskTemplates?:
-    | {
-        id: string;
-        name: string;
-        description: string;
-        defaultSchedule: ScheduledTaskScheduleSpec;
-        defaultRunMode?: ScheduledTaskRunMode | undefined;
-        defaultOverlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
-        prompt?: string | undefined;
-      }[]
-    | undefined;
-  automationTemplates?:
-    | {
-        id: string;
-        name: string;
-        description: string;
-        adapterId: string;
-        eventTypes: string[];
-        sessionTemplate: {
-          prompt: string;
-          instructions?: string | null | undefined;
-          resources?: ResourceRef[] | undefined;
-          skills?: CapabilityPackSkill[] | undefined;
-          tools?: ToolRef[] | undefined;
-          firstPartyMcpTools?: string[] | undefined;
-          firstPartyMcpPermissions?: Permission[] | undefined;
-          model?: string | null | undefined;
-          reasoningEffort?: ReasoningEffort | null | undefined;
-          sandboxBackend?: SandboxBackend | null | undefined;
-          policyRole?: string | null | undefined;
-          metadata?: Record<string, unknown> | undefined;
-        };
-        configuration?: Record<string, unknown> | undefined;
-        connectionRequirement?: string | null | undefined;
-      }[]
-    | undefined;
-  variableSet?:
-    | {
-        description: string;
-        requiredVariables?: string[] | undefined;
-        required?: boolean | undefined;
-      }
-    | undefined;
-  metadata?: Record<string, unknown> | undefined;
-};
-
-export type WorkspaceRegisteredPack = {
-  accountId: string;
-  workspaceId: string;
-  pack: CapabilityPack;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type PackInstallationStatus = "installing" | "active" | "needs_attention" | "disabled";
-
-export type PackInstallation = {
-  id: string;
-  accountId: string;
-  workspaceId: string;
-  packId: string;
-  status: PackInstallationStatus;
-  version: number;
-  manifestSnapshot: CapabilityPack | null;
-  manifestDigest: string | null;
-  selectedRigId: string | null;
-  installedBySubjectId: string | null;
-  metadata: Record<string, unknown>;
-  enabledAt: string;
-  updatedAt: string;
-};
+export type SessionSkillInput = Omit<SkillArtifactDefinitionInput, "activationMode">;
 
 // --- OpenGeni Review Bot ------------------------------------------------------------
 
@@ -6395,102 +6576,9 @@ export type PrReviewManagedGitHubSetup = {
   missing: string[];
 };
 
-export type EnablePackRequest = {
-  variableSetId?: string | undefined;
-  /** @deprecated use variableSetId */
-  environmentId?: string | undefined;
-  metadata?: Record<string, unknown> | undefined;
-};
-
-export type PackComponentResolutionStatus = "ready" | "missing" | "mismatch";
-
-export type PackComponentResolution = {
-  key: string;
-  kind: "plugin" | "skill" | "integration" | "facet" | "inline_skill";
-  capabilityId: string;
-  required: boolean;
-  status: PackComponentResolutionStatus;
-  expectedDigest: string;
-  actualDigest: string | null;
-  resolvedId: string | null;
-  label: string;
-};
-
-export type PackRigResolution = {
-  required: boolean;
-  status: "not_required" | "ready" | "missing" | "mismatch" | "unverified";
-  requestedRigId: string | null;
-  rigId: string | null;
-  rigVersionId: string | null;
-  name: string | null;
-  image: string | null;
-};
-
-export type PreviewPackInstallationRequest = {
-  rigId?: string | undefined;
-  variableSetId?: string | undefined;
-};
-
-export type PackInstallationPreview = {
-  packId: string;
-  packVersion: string;
-  manifestDigest: string;
-  installationVersion: number | null;
-  action: "install" | "update" | "repair";
-  ready: boolean;
-  blockers: string[];
-  components: PackComponentResolution[];
-  rig: PackRigResolution;
-  variableSetId: string | null;
-  legacyInlineSkillCount: number;
-  legacySandboxImage: string | null;
-};
-
-export type InstallPackRequest = {
-  expectedManifestDigest: string;
-  expectedInstallationVersion?: number | undefined;
-  rigId?: string | undefined;
-  variableSetId?: string | undefined;
-  idempotencyKey: string;
-  metadata?: Record<string, unknown> | undefined;
-};
-
-export type PackUninstallPreview = {
-  packId: string;
-  installed: boolean;
-  installationVersion: number | null;
-  components: Array<{
-    key: string;
-    kind: "plugin" | "skill" | "integration" | "facet" | "inline_skill";
-    capabilityId: string;
-    retainedByOtherOwners: boolean;
-  }>;
-};
-
-export type UninstallPackRequest = {
-  expectedInstallationVersion: number;
-  idempotencyKey: string;
-};
-
-export type UninstallPackResult = {
-  packId: string;
-  status: "not_installed" | "uninstalled";
-  retainedComponents: string[];
-};
-
-export type ListPacksResponse = {
-  packs: CapabilityPack[];
-  installations: PackInstallation[];
-};
-
-export type GetPackResponse = {
-  pack: CapabilityPack;
-  installation: PackInstallation | null;
-};
-
 // --- Capabilities ---------------------------------------------------------------
 
-export type CapabilityKind = "pack" | "mcp" | "api" | "skill" | "plugin";
+export type CapabilityKind = "mcp" | "api" | "skill" | "plugin";
 
 export type CapabilitySource =
   | "built_in"
@@ -6589,6 +6677,7 @@ export type CapabilityCatalogItem = {
   /** The connection backing this enabled installation, or null when none is involved. */
   connectionRef: {
     connectionId?: string | undefined;
+    accountSelection?: "all_eligible" | undefined;
     authoritySource?: "host" | undefined;
     providerDomain: string;
     kind: string;
@@ -6633,6 +6722,7 @@ export type CreateCapabilityCatalogItemRequest = {
 };
 
 export type EnableCapabilityRequest = {
+  onlyIfUninstalled?: boolean | undefined;
   config?: Record<string, unknown> | undefined;
   metadata?: Record<string, unknown> | undefined;
   connectionRef?: McpServerConnectionRef | undefined;
@@ -6652,7 +6742,7 @@ export type DiscoverMcpCapabilitiesResponse = {
 
 export type SkillImportSource = "github" | "skills_sh";
 
-export type SkillInstallationSource = "library" | "github" | "skills_sh" | "pack";
+export type SkillInstallationSource = "library" | "github" | "skills_sh";
 
 export type PreviewSkillImportRequest = {
   url: string;
@@ -6665,6 +6755,7 @@ export type SkillImportFileSummary = {
 };
 
 export type SkillImportPreview = {
+  markdown?: string;
   source: SkillImportSource;
   sourceUrl: string;
   repositoryUrl: string;
@@ -6696,6 +6787,7 @@ export type InstallLibrarySkillRequest = {
 };
 
 export type InstalledSkill = {
+  skillReceipt?: import("./skills").SkillWriteReceipt | undefined;
   capabilityId: string;
   pluginId: string;
   pluginVersionId: string;
@@ -6713,7 +6805,7 @@ export type InstalledSkill = {
 };
 
 export type CapabilityComponentOwner = {
-  kind: "direct" | "plugin" | "pack" | "migration";
+  kind: "direct" | "plugin" | "migration";
   id: string;
   removable: boolean;
 };
@@ -6760,6 +6852,7 @@ export type UninstallSkillRequest = {
 };
 
 export type UninstallSkillResult = {
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   capabilityId: string;
   status: "not_installed" | "uninstalled" | "retained_by_other_owners";
   remainingOwners: CapabilityComponentOwner[];
@@ -7099,6 +7192,9 @@ export type InstallPluginRequest = {
 };
 
 export type InstalledPlugin = {
+  skillPublications?: import("./skills").SkillPublicationReceipt[] | undefined;
+  skillWrites?: import("./skills").SkillWriteReceipt[] | undefined;
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   pluginKey: string;
   version: string;
   pluginId: string;
@@ -7116,6 +7212,7 @@ export type PluginInstallationSummary = {
   description: string;
   category: string;
   tags: string[];
+  logoUrl?: string | null | undefined;
   sourceUrl: string | null;
   manifestDigest: string;
   installationVersion: number;
@@ -7129,24 +7226,34 @@ export type ListInstalledPluginsResponse = {
   plugins: PluginInstallationSummary[];
 };
 
+export type PluginUninstallComponentImpact = {
+  capabilityId: string;
+  kind: "skill" | "integration" | "mcp";
+  retainedByOtherOwners: boolean;
+  name: string;
+  disposition: "removed" | "retained" | "inactive";
+  retentionReasons: Array<"other_owners" | "customized" | "re_scoped" | "registry_unavailable">;
+  remainingOwners: Array<{ kind: "direct" | "plugin" | "migration"; name: string }>;
+  skillId?: string | undefined;
+};
+
 export type PluginUninstallPreview = {
   pluginKey: string;
   installed: boolean;
   version: string | null;
   installationVersion: number | null;
-  components: Array<{
-    capabilityId: string;
-    kind: "skill" | "integration" | "mcp";
-    retainedByOtherOwners: boolean;
-  }>;
+  previewToken?: string | undefined;
+  components: PluginUninstallComponentImpact[];
 };
 
 export type UninstallPluginRequest = {
   expectedInstallationVersion: number;
+  expectedPreviewToken?: string | undefined;
   idempotencyKey: string;
 };
 
 export type UninstallPluginResult = {
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   pluginKey: string;
   status: "not_installed" | "uninstalled";
   retainedComponents: string[];
@@ -7210,6 +7317,61 @@ export type GitHubAppInfo = {
 
 export type GitHubRepositoriesResponse = {
   repositories: GitHubRepository[];
+};
+
+export type GitHubActionPolicyDecision = "allow" | "ask" | "block";
+export type GitHubActionPolicyEffectiveDecision = GitHubActionPolicyDecision | "mixed";
+export type GitHubActionPolicyGroup = "routine" | "review" | "merge";
+
+export type GitHubActionPolicyActor =
+  | { kind: "workspace_app"; installationId: number }
+  | { kind: "personal"; connectionId: string };
+
+export type GitHubActionPolicyActorState = GitHubActionPolicyActor & {
+  label: string;
+  groups: Record<GitHubActionPolicyGroup, GitHubActionPolicyEffectiveDecision>;
+};
+
+export type GitHubActionPoliciesResponse = {
+  enabled: boolean;
+  actors: GitHubActionPolicyActorState[];
+};
+
+export type UpdateGitHubActionPolicyRequest = {
+  actor: GitHubActionPolicyActor;
+  group: GitHubActionPolicyGroup;
+  decision: GitHubActionPolicyDecision;
+};
+
+export type VerifyPublicGitHubRepositoryRefRequest = {
+  url: string;
+  ref: string;
+};
+
+export type VerifyPublicGitHubRepositoryRefResponse = {
+  owner: string;
+  name: string;
+  fullName: string;
+  canonicalUrl: string;
+  cloneUrl: string;
+  defaultBranch: string;
+  ref: string;
+  commitSha: string;
+};
+
+export type GitHubRepositoryBranch = {
+  name: string;
+  isDefault: boolean;
+};
+
+export type ListGitHubRepositoryBranchesOptions = {
+  cursor?: number | undefined;
+  limit?: number | undefined;
+};
+
+export type GitHubRepositoryBranchesResponse = {
+  branches: GitHubRepositoryBranch[];
+  nextCursor: number | null;
 };
 
 export type CreateGitHubAppManifestRequest = {
@@ -7317,6 +7479,8 @@ export type InsightsModelUsageRow = {
   creditUsd: number;
   estimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
 };
 
 export type InsightsSeriesPoint = {
@@ -7324,6 +7488,8 @@ export type InsightsSeriesPoint = {
   modelCostUsd: number;
   estimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
   warmSeconds: number;
   inputTokens: number;
   outputTokens: number;
@@ -7355,6 +7521,8 @@ export type InsightsSpendDriver = {
   creditUsd: number;
   estimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
   tokens: number;
   cacheHitPct: number;
   pctOfCreditUsd: number;
@@ -7400,6 +7568,8 @@ export type InsightsScheduleRow = {
   creditUsd: number | null;
   estimatedProviderUsd: number | null;
   estimatedProviderCostKnownCalls: number | null;
+  equivalentCreditUsd: number | null;
+  equivalentCreditCostKnownCalls: number | null;
   tokens: number | null;
   cacheHitPct: number | null;
   billing: InsightsBillingPath | null;
@@ -7424,6 +7594,7 @@ export type InsightsModelCallRow = {
   totalTokens: number | null;
   creditUsd: number;
   estimatedProviderUsd: number | null;
+  equivalentCreditUsd: number | null;
   pricingSource: InsightsPricingSource | null;
 };
 
@@ -7484,6 +7655,10 @@ export type WorkspaceInsightsSnapshot = {
   priorEstimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
   priorEstimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  priorEquivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
+  priorEquivalentCreditCostKnownCalls: number;
   modelCalls: number;
   priorInputTokens: number;
   priorTotalTokens: number;
@@ -7551,7 +7726,7 @@ export type UserMessageEventInput = {
     controlEtag?: string | undefined;
     expectedDraftRevision?: number | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
-    connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
+    connectionAccounts?: McpConnectionAccountSelection[] | undefined;
     personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   };
 };
@@ -7614,7 +7789,18 @@ export type MachineState =
   | "display_unavailable"
   | "enrolling";
 
-export type MachineKind = "modal" | "selfhosted" | "opensandbox";
+export type MachineKind =
+  | "docker"
+  | "modal"
+  | "local"
+  | "daytona"
+  | "runloop"
+  | "e2b"
+  | "blaxel"
+  | "cloudflare"
+  | "vercel"
+  | "selfhosted"
+  | "opensandbox";
 
 export type MachineConnectionAuthority = {
   state: "not_applicable" | "unclaimed" | "active" | "expired";
@@ -7635,6 +7821,7 @@ export type MachineRuntimeCapabilities = {
   browserBridge: boolean;
   operationResourcePolicy: boolean;
   operationCpuQuota: boolean;
+  transactionalFsWrite: boolean;
 };
 
 export type MachineUpdateStatus =
@@ -7900,3 +8087,39 @@ export type EnrollTokenExchangeRequest = {
 export type EnrollTokenExchangeResponse = {
   credentials: EnrollmentCredentials;
 };
+
+export type ModelConnectionAccessPolicy = {
+  allowedModels: string[] | null;
+  allowedWorkspaces: string[] | null;
+  allowPersonalWorkspaces: boolean;
+  version: number;
+};
+export type ModelConnectionAccessResponse = {
+  policy: ModelConnectionAccessPolicy;
+  models: Array<{ id: string; label: string }>;
+  workspaces: Array<{ id: string; name: string }>;
+  personalWorkspacesSupported: boolean;
+};
+
+export type ConnectorToolPermission = "allow" | "ask" | "block";
+export type ConnectorToolPermissionEntry = {
+  name: string;
+  title?: string | undefined;
+  description?: string | undefined;
+  group: "read" | "write" | "other";
+  permission: ConnectorToolPermission;
+  inherited: boolean;
+  approvalRequired: boolean;
+};
+export type ConnectorToolPermissionsResponse = {
+  connectionId: string;
+  serverId: string;
+  defaultPermission: ConnectorToolPermission | null;
+  tools: ConnectorToolPermissionEntry[];
+  discoveryError: string | null;
+  canManage: boolean;
+};
+export type UpdateConnectorToolPermissionsRequest = {
+  connectionId: string;
+  permission: ConnectorToolPermission;
+} & ({ target: "default" } | { target: "tools"; toolNames: string[] });

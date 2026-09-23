@@ -125,6 +125,12 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         action: item.action,
         text: item.text,
       };
+    case "knowledge":
+      return {
+        kind: item.kind, id: item.id, turnId: item.turnId,
+        occurredAt: item.occurredAt, status: item.status, outcome: item.outcome,
+        fileId: item.fileId ?? null, filename: item.filename ?? null, entryId: item.entryId ?? null,
+      };
     case "memory":
       return {
         kind: item.kind,

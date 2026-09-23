@@ -11,7 +11,7 @@ export function PersonalWorkspaceBadge({
     <span
       aria-hidden={decorative || undefined}
       className={cn(
-        "shrink-0 rounded-full border border-brand/35 bg-brand/10 px-1.5 py-0.5 text-[10px] font-medium leading-none text-brand",
+        "shrink-0 rounded-full border border-brand/35 bg-brand/10 px-1.5 py-0.5 text-2xs font-medium text-[var(--og-color-accent-strong)]",
         className,
       )}
     >

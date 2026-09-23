@@ -33,7 +33,7 @@ import {
   type MachineMetricsRow,
 } from "@opengeni/db";
 import { MachineView, MetricSample, type MachinesResponse } from "@opengeni/contracts";
-import { managedSessionGroupBackend } from "@opengeni/core";
+import { managedSessionGroupBackend, sessionGroupMachinePresentation } from "@opengeni/core";
 import { selfhostedHeartbeatLiveness } from "@opengeni/runtime/sandbox";
 
 export type MachinesServices = {
@@ -112,6 +112,7 @@ function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineVi
       browserBridge: capability("browserBridge"),
       operationResourcePolicy: capability("operationResourcePolicy"),
       operationCpuQuota: capability("operationCpuQuota"),
+      transactionalFsWrite: capability("transactionalFsWrite"),
     },
     update,
   };
@@ -257,23 +258,24 @@ export async function listMachines(
   if (session && groupBackend) {
     const groupActive = activeSandboxId === null;
     const groupLease = await readLease(db, workspaceId, session.sandboxGroupId);
+    const presentation = sessionGroupMachinePresentation(groupBackend);
+    const localHost = groupBackend === "local";
     machines.push(
       MachineView.parse({
         sandboxId: session.sandboxGroupId,
         enrollmentId: null,
-        name: "session sandbox",
-        kind: groupBackend === "opensandbox" ? "opensandbox" : "modal",
+        name: presentation.name,
+        kind: presentation.kind,
         state: "online",
         active: groupActive,
         isSessionGroup: true,
         workspaceGeneration: groupLease?.workspaceGeneration ?? null,
         archiveGeneration: groupLease?.archiveGeneration ?? null,
         archiveComplete: groupLease?.archiveComplete ?? false,
-        // The Modal group box is a cloud Linux box; its precise OS/arch is not
-        // surfaced as a metric, so the dashboard shows the canonical linux/x86_64.
-        os: "linux",
-        arch: "x86_64",
-        hasDisplay: false,
+        // A local sandbox is this machine. Other managed providers run a Linux box.
+        os: localHost ? process.platform : "linux",
+        arch: localHost ? process.arch : "x86_64",
+        hasDisplay: localHost,
         desktopUnavailableReason: null,
         allowScreenControl: false,
         sharedSessionCount: 1,

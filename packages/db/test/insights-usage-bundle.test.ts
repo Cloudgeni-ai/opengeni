@@ -274,6 +274,15 @@ function instrumentedDb(statements: string[]): { db: Database; close: () => Prom
 }
 
 describe("Workspace Insights usage bundle", () => {
+  test("materializes only the reused current window", async () => {
+    const source = await Bun.file(
+      new URL("../src/insights-usage-bundle.ts", import.meta.url),
+    ).text();
+    expect(source).toContain("current_visible as materialized");
+    expect(source).not.toContain("prior_visible");
+    expect(source).not.toContain("month_visible");
+  });
+
   test("matches the nine legacy reads for shared/private and workspace-level usage", async () => {
     if (!shared || !client) return;
     const seeded = await fixture();
@@ -348,9 +357,10 @@ describe("Workspace Insights usage bundle", () => {
       (total, statement) => total + (statement.match(new RegExp(source, "g"))?.length ?? 0),
       0,
     );
-    const bundleQueries = bundledStatements.filter((statement) => statement.includes(source));
+    const projection = "visible_workspace_insights_usage_projection";
+    const bundleQueries = bundledStatements.filter((statement) => statement.includes(projection));
     const bundledInvocations = bundleQueries.reduce(
-      (total, statement) => total + (statement.match(new RegExp(source, "g"))?.length ?? 0),
+      (total, statement) => total + (statement.match(new RegExp(projection, "g"))?.length ?? 0),
       0,
     );
     expect(legacyInvocations).toBe(9);

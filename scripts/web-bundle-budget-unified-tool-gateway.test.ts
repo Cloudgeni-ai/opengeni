@@ -1,0 +1,36 @@
+import { describe, expect, test } from "bun:test";
+
+import {
+  EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
+  KIB,
+  TIMELINE_ANNOTATION_UX_RAW_BUDGET,
+  TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT,
+  UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET,
+  UNIFIED_TOOL_GATEWAY_BROWSER_RAW_MEASUREMENT,
+} from "./web-bundle-budget-unified-tool-gateway";
+
+describe("unified tool gateway web bundle budget", () => {
+  test("retains the lazy unified-tool-gateway browser envelope", () => {
+    expect(UNIFIED_TOOL_GATEWAY_BROWSER_RAW_MEASUREMENT).toBe(2_290_677);
+    expect(UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET).toBe(2238 * KIB);
+    expect(
+      UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET - UNIFIED_TOOL_GATEWAY_BROWSER_RAW_MEASUREMENT,
+    ).toBe(1_035);
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBeGreaterThanOrEqual(
+      UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET,
+    );
+  });
+  test("fits the measured subscription SDK and session graph with bounded headroom", () => {
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBeGreaterThanOrEqual(2272 * KIB);
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET - 2_324_500).toBeGreaterThanOrEqual(2_028);
+  });
+  test("fits the measured session-history graph with bounded headroom", () => {
+    expect(TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(2_350_418);
+    expect(TIMELINE_ANNOTATION_UX_RAW_BUDGET).toBe(2297 * KIB);
+    expect(TIMELINE_ANNOTATION_UX_RAW_BUDGET - TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(1_710);
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBe(2297 * KIB);
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET - TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(
+      1_710,
+    );
+  });
+});

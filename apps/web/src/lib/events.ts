@@ -1,6 +1,7 @@
-import { buildTimeline, humanizeFailureReason, type TimelineItem } from "@opengeni/react";
+import { buildTimeline, presentFailure, type TimelineItem } from "@opengeni/react";
 
 import type { Session, SessionEvent, SessionStatus } from "@/types";
+import { isStructuralSandboxFailure } from "./sandbox-failure";
 
 // Only "cancelled" is terminal for the console: a FAILED session is revivable
 // by sending it a new message (the API transitions failed -> queued and
@@ -60,43 +61,150 @@ export function projectSessionTimeline(
 }
 
 export type SessionFailureSummary = {
-  /** Human-readable reason from the most recent turn.failed event, if any. */
+  /** Human-readable reason from the latest recorded failure boundary, if any. */
   reason: string | null;
+  safetyRefusal?: boolean;
   /** When the most recent failure happened. */
   failedAt: string | null;
-  /** Same-turn recovery attempts recorded by the control plane. */
-  recoveryCount: number;
-  /** Total failed turns in the log — > 1 means the session failed before and was revived. */
-  failedTurnCount: number;
+  /** Exact durable event identity; independent of history hydration or clock precision. */
+  failureEventId?: string | null;
+  /** Final consecutive automatic-recovery streak, not total recoveries in a turn or session. */
+  consecutiveRecoveryCount: number | null;
+  detailsTruncated?: boolean;
+  /** Typed sandbox evidence suppresses generic execution/model remedies, never grants recovery. */
+  structuralSandboxFailure?: boolean;
 };
 
 /**
  * Failure honesty for the session header/banner: the latest failure reason
- * plus the same-turn recovery history (`turn.recovery.requested`).
+ * and the final consecutive retry streak when explicitly recorded by the worker.
  */
 export function summarizeSessionFailure(
   events: SessionEvent[],
-  _sessionStatus: SessionStatus,
+  sessionStatus: SessionStatus,
+  diagnostics?: Session["failureDiagnostics"],
+  diagnosticsThrough = diagnostics?.sequence ?? 0,
 ): SessionFailureSummary {
+  // A detail read owns current failure identity even when the timeline has been
+  // cleared or paged into older history. Legacy servers omit this field.
+  events = events.filter(
+    (event) =>
+      !event.duplicateOfEventId && (!event.turnAssociation || event.turnAssociation === "current"),
+  );
+  const newerEvents = events.filter((event) => event.sequence > diagnosticsThrough);
+  const newerFailure = newerEvents.some(
+    (event) =>
+      event.type === "turn.failed" ||
+      (event.type === "session.status.changed" &&
+        (event.payload as Record<string, unknown>)?.code === "pre_claim_failure" &&
+        (event.payload as Record<string, unknown>)?.status === "failed" &&
+        (!event.turnId || event.turnId !== diagnostics?.turnId)),
+  );
+  if (sessionStatus === "failed" && diagnostics !== undefined && !newerFailure) {
+    const payload =
+      diagnostics?.payload && typeof diagnostics.payload === "object"
+        ? (diagnostics.payload as Record<string, unknown>)
+        : {};
+    const presentation = presentFailure(payload);
+    return {
+      reason:
+        presentation.reason ??
+        (payload.code === "pre_claim_failure"
+          ? "The session failed before a turn could start. No error details were recorded."
+          : null),
+      safetyRefusal: presentation.safetyRefusal,
+      failedAt: diagnostics?.occurredAt ?? null,
+      failureEventId: diagnostics?.eventId ?? null,
+      consecutiveRecoveryCount: failureRecoveryStreak(payload),
+      ...(structuralSandboxFailure(payload, events, diagnostics?.turnId, diagnostics?.sequence)
+        ? { structuralSandboxFailure: true }
+        : {}),
+      ...((payload.projection as { truncatedFields?: unknown[] } | undefined)?.truncatedFields
+        ?.length
+        ? { detailsTruncated: true }
+        : {}),
+    };
+  }
+  if (diagnostics !== undefined && newerFailure) events = newerEvents;
   let reason: string | null = null;
+  let safetyRefusal = false;
   let failedAt: string | null = null;
-  let recoveryCount = 0;
-  let failedTurnCount = 0;
+  let failureEventId: string | null = null;
+  let consecutiveRecoveryCount: number | null = null;
+  let latestFailedTurnId: string | null = null;
+  let structuralFailure = false;
   for (const event of events) {
-    if (event.type === "turn.recovery.requested") {
-      recoveryCount += 1;
-    }
     if (event.type === "turn.failed") {
-      failedTurnCount += 1;
+      latestFailedTurnId = event.turnId ?? null;
       const payload =
         event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
           ? (event.payload as Record<string, unknown>)
           : {};
-      reason = humanizeFailureReason(failurePayloadMessage(payload) ?? null) ?? reason;
+      consecutiveRecoveryCount = failureRecoveryStreak(payload);
+      const presentation = presentFailure(payload);
+      reason = presentation.reason;
+      safetyRefusal = presentation.safetyRefusal;
       failedAt = event.occurredAt;
+      failureEventId = event.id;
+      structuralFailure = structuralSandboxFailure(payload, events, event.turnId, event.sequence);
+    }
+    if (event.type === "session.status.changed") {
+      const payload = event.payload as Record<string, unknown>;
+      if (
+        payload?.status === "failed" &&
+        payload.code === "pre_claim_failure" &&
+        (!event.turnId || event.turnId !== latestFailedTurnId)
+      ) {
+        // An unclaimed machine update has no turn.failed event. Its status is a
+        // new failure boundary, never evidence that an older provider error
+        // happened again. Preserve a paired same-turn diagnostic when present.
+        consecutiveRecoveryCount = failureRecoveryStreak(payload);
+        const presentation = presentFailure(payload);
+        reason =
+          presentation.reason ??
+          "The session failed before a turn could start. No error details were recorded.";
+        safetyRefusal = presentation.safetyRefusal;
+        failedAt = event.occurredAt;
+        failureEventId = event.id;
+        structuralFailure = structuralSandboxFailure(payload, events, event.turnId, event.sequence);
+      }
     }
   }
-  return { reason, failedAt, recoveryCount, failedTurnCount };
+  return {
+    reason,
+    safetyRefusal,
+    failedAt,
+    failureEventId,
+    consecutiveRecoveryCount,
+    ...(structuralFailure ? { structuralSandboxFailure: true } : {}),
+  };
+}
+
+function structuralSandboxFailure(
+  payload: Record<string, unknown>,
+  events: SessionEvent[],
+  turnId: string | null | undefined,
+  sequence: number | undefined,
+): boolean {
+  if (isStructuralSandboxFailure(payload)) return true;
+  if (!turnId || sequence === undefined) return false;
+  // A provisioning failure belongs only to its exact failed turn. A later
+  // successful/new provision supersedes it; prose and unrelated history do not.
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index]!;
+    if (event.turnId !== turnId || event.sequence > sequence) continue;
+    const detail = event.payload as Record<string, unknown> | null;
+    if (detail?.name !== "sandbox.provision") continue;
+    if (event.type === "sandbox.operation.failed") return isStructuralSandboxFailure(detail);
+    if (event.type === "sandbox.operation.started" || event.type === "sandbox.operation.completed")
+      return false;
+  }
+  return false;
+}
+
+function failureRecoveryStreak(payload: Record<string, unknown>): number | null {
+  const value = payload.providerRecoveryCount;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 export function reasoningSummaryText(payload: unknown): string {

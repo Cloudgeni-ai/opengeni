@@ -1,3 +1,6 @@
+import { acceptSessionFileAttachments } from "./session-file-attachments";
+import { withLatestStartedSessionPolicy } from "./session-execution-policy";
+import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
@@ -13,6 +16,7 @@ import {
   stableJson,
   turnExecutionPolicyAuditMetadata,
   type McpPersonalConnectionDelegation,
+  type McpConnectionAccountBinding,
   type DraftTimelineAnnotation,
   type LatencyMode,
   type ReasoningEffort,
@@ -30,7 +34,12 @@ import {
   type PersonalResourceAttachmentIntent,
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
-import { setSubjectRlsContext, type Database, type SessionActivityDatabase } from "./database";
+import {
+  withSessionRlsActorContext,
+  setSubjectRlsContext,
+  type Database,
+  type SessionActivityDatabase,
+} from "./database";
 import {
   fromPostgresLosslessJson,
   fromPostgresLosslessText,
@@ -346,14 +355,15 @@ async function personalConnectionDelegationsForAgentActor(
   db: Database,
   workspaceId: string,
   actor: Extract<SessionCommandActor, { type: "agent_attempt" }>,
-  targetSessionId: string,
 ): Promise<{
   delegations: McpPersonalConnectionDelegation[];
+  mcpAccountBindings: McpConnectionAccountBinding[] | null;
   connectionAuthoritySubjectId: string | null;
 }> {
   const [row] = await db
     .select({
       delegations: schema.sessionTurns.personalConnectionDelegations,
+      mcpAccountBindings: schema.sessionTurns.mcpAccountBindings,
       initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
     })
     .from(schema.sessionTurns)
@@ -376,22 +386,11 @@ async function personalConnectionDelegationsForAgentActor(
       `Agent authority turn has malformed personal MCP delegation state: ${actor.sessionId}/${actor.turnId}`,
     );
   }
-  // Agent messages and Agent Steer create new accepted work. A once grant is
-  // already bound to the caller turn, while a session grant may be projected
-  // only into another turn of that exact session. Always grants can cross the
-  // direct parent/child boundary subject to the live admission fences.
-  const delegations = parsed.data
-    .filter((delegation) => {
-      const authority = delegation.userDelegation;
-      if (!authority) return true;
-      if (authority.mode === "once") return false;
-      if (authority.mode === "session") return authority.sessionId === targetSessionId;
-      return true;
-    })
-    .map((delegation) => ({ ...delegation }));
-  const activated = delegations.filter((delegation) => delegation.userDelegation);
-  if (activated.length === 0) {
-    return { delegations, connectionAuthoritySubjectId: null };
+  // New agent work inherits the exact originating turn's sender and accounts.
+  const delegations = parsed.data.map((delegation) => ({ ...delegation }));
+  const mcpAccountBindings = parseAcceptedMcpAccountBindings(row.mcpAccountBindings);
+  if (delegations.length === 0) {
+    return { delegations, mcpAccountBindings, connectionAuthoritySubjectId: null };
   }
   const connectionAuthoritySubjectId = row.initiatingHumanSubjectId;
   if (!connectionAuthoritySubjectId) {
@@ -399,14 +398,14 @@ async function personalConnectionDelegationsForAgentActor(
       `Agent authority turn lost its causal human: ${actor.sessionId}/${actor.turnId}`,
     );
   }
-  for (const delegation of activated) {
+  for (const delegation of delegations) {
     if (delegation.ownerSubjectId !== connectionAuthoritySubjectId) {
       throw new SessionControlInvariantError(
         `Agent authority turn causal human does not own retained connection authority: ${actor.sessionId}/${actor.turnId}`,
       );
     }
   }
-  return { delegations, connectionAuthoritySubjectId };
+  return { delegations, mcpAccountBindings, connectionAuthoritySubjectId };
 }
 
 async function xaiAuthorityForAgentActor(
@@ -1758,6 +1757,7 @@ export async function submitHumanPromptInTransaction(
     /** Record the admitted run's durable usage fact in this transaction. */
     recordAgentRunUsage?: boolean;
     personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+    mcpAccountBindings?: McpConnectionAccountBinding[] | null;
     personalResourceAttachment?: PersonalResourceAttachmentIntent;
     mcpCredentialUpdates?: Array<{
       id: string;
@@ -1766,6 +1766,9 @@ export async function submitHumanPromptInTransaction(
     /** Trusted database-only admission seam. It runs only after a completed
      * operation replay has been ruled out; throwing rolls the prompt back. */
     beforeFreshPromptCommit?: (tx: Database) => Promise<void>;
+    /** Backend-only authority capture, atomic with the newly accepted turn. */
+    captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
+
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
   },
@@ -1821,7 +1824,9 @@ export async function submitHumanPromptInTransaction(
     mirrorToRealtime: input.mirrorToRealtime ?? true,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
     personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+    mcpAccountBindings: input.mcpAccountBindings ?? null,
     personalResourceAttachment: input.personalResourceAttachment ?? null,
+
     ...(input.actor.type === "service"
       ? {
           serviceInitiator: {
@@ -1875,7 +1880,9 @@ export async function submitHumanPromptInTransaction(
     throw new SessionControlConflictError();
   }
 
-  const session = await lockSession(db, input.workspaceId, input.sessionId);
+  const storedSession = await lockSession(db, input.workspaceId, input.sessionId);
+  const [session] = await withLatestStartedSessionPolicy(db, input.workspaceId, [storedSession]);
+  if (!session) throw new Error("Session disappeared during prompt admission");
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",
@@ -1910,6 +1917,7 @@ export async function submitHumanPromptInTransaction(
     !isQueueEditSubmission &&
     before.state === "active" &&
     session.status === "requires_action" &&
+    !session.admissionBlock &&
     session.activeTurnId !== null
       ? "steer"
       : input.delivery;
@@ -1956,9 +1964,15 @@ export async function submitHumanPromptInTransaction(
           resources: withCanonicalResourceMountPaths(
             input.composerDraftResources ?? input.resources,
           ),
-          model: input.model ?? session.model,
-          reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
-          latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
+          model: input.turnExecutionPolicy?.productModelId ?? input.model ?? session.model,
+          reasoningEffort:
+            input.turnExecutionPolicy?.reasoningEffort ??
+            input.reasoningEffort ??
+            (session.reasoningEffort as ReasoningEffort),
+          latencyMode:
+            input.turnExecutionPolicy?.latencyMode ??
+            input.latencyMode ??
+            (session.latencyMode as LatencyMode),
         })
     ) {
       throw new QueueCommandConflictError(
@@ -2063,9 +2077,7 @@ export async function submitHumanPromptInTransaction(
     : (frozenInitiator.initiatingHumanSubjectId ??
       (frozenInitiator.initiator.kind === "subject" ? frozenInitiator.initiator.subjectId : null));
   if (
-    (input.personalConnectionDelegations ?? []).some(
-      (delegation) => delegation.userDelegation !== undefined,
-    ) ||
+    (input.personalConnectionDelegations ?? []).length > 0 ||
     input.personalResourceAttachment !== undefined
   ) {
     if (!acceptedInitiatingHumanSubjectId) {
@@ -2156,9 +2168,15 @@ export async function submitHumanPromptInTransaction(
           resources: input.resources,
           tools: [],
           toolsProvided: false,
-          model: input.model ?? session.model,
-          reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
-          latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
+          model: input.turnExecutionPolicy?.productModelId ?? input.model ?? session.model,
+          reasoningEffort:
+            input.turnExecutionPolicy?.reasoningEffort ??
+            input.reasoningEffort ??
+            (session.reasoningEffort as ReasoningEffort),
+          latencyMode:
+            input.turnExecutionPolicy?.latencyMode ??
+            input.latencyMode ??
+            (session.latencyMode as LatencyMode),
           sandboxBackend: session.sandboxBackend,
           metadata: input.turnExecutionPolicy
             ? metadataWithTurnExecutionPolicyV1(input.turnMetadata ?? {}, input.turnExecutionPolicy)
@@ -2169,6 +2187,9 @@ export async function submitHumanPromptInTransaction(
           personalConnectionDelegations: editedSourceTurn
             ? editedSourceTurn.personalConnectionDelegations
             : (input.personalConnectionDelegations ?? []),
+          mcpAccountBindings: editedSourceTurn
+            ? editedSourceTurn.mcpAccountBindings
+            : parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
           xaiProviderAccountAuthoritySnapshot,
           createdAt: now,
           updatedAt: now,
@@ -2179,6 +2200,7 @@ export async function submitHumanPromptInTransaction(
     )
     .returning();
   if (!turn) throw new SessionControlInvariantError("Prompt turn was not inserted");
+  await input.captureTurnAuthority?.(db, turn.id);
   let committedTurn = turn;
   const personalResourceExpectedAuthorityEpoch =
     input.personalResourceAttachment?.expectedAuthorityEpoch;
@@ -2372,7 +2394,9 @@ export async function submitHumanPromptInTransaction(
   );
   const noCurrentAfter =
     effectiveDelivery === "steer" ? liveCurrentTurnId === null : !session.activeTurnId;
-  const nextStatus = noCurrentAfter ? "queued" : session.status;
+  const nextStatus = noCurrentAfter
+    ? "queued"
+    : (session.admissionBlock?.previousStatus ?? session.status);
   if (nextStatus !== session.status) {
     eventValues.push({
       accountId: input.accountId,
@@ -2388,6 +2412,24 @@ export async function submitHumanPromptInTransaction(
     .insert(schema.sessionEvents)
     .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
     .returning();
+  // Shared acceptance boundary covers ordinary Send/Steer and realtime. Only the
+  // verified human command can share original uploads; inherited agent identity
+  // is deliberately insufficient. Events must exist before grant provenance is checked.
+  if (input.actor.type === "human" && input.actor.subjectId === input.subjectId) {
+    await withSessionRlsActorContext(
+      { subjectId: input.subjectId, privateFileOwnerSubjectId: input.subjectId },
+      () =>
+        acceptSessionFileAttachments(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          subjectId: input.subjectId,
+          resources: [...ResourceRef.array().parse(session.resources), ...input.resources],
+        }),
+    );
+  }
+
   if (input.actor.type === "human" && input.mirrorToRealtime !== false) {
     await mirrorSessionRealtimeContextInTransaction(db, {
       accountId: input.accountId,
@@ -2419,6 +2461,7 @@ export async function submitHumanPromptInTransaction(
       tools: session.tools,
       activeTurnId: effectiveDelivery === "steer" ? liveCurrentTurnId : session.activeTurnId,
       status: nextStatus,
+      admissionBlock: null,
       queueVersion,
       queueHeadPosition: 0,
       queueTailPosition: ordered.length,
@@ -2621,7 +2664,6 @@ export async function sendAgentMessageInTransaction(
     db,
     input.workspaceId,
     input.actor,
-    input.targetSessionId,
   );
   const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
   const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
@@ -2675,6 +2717,7 @@ export async function sendAgentMessageInTransaction(
               ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
             },
             personalConnectionDelegations,
+            mcpAccountBindings: inheritedConnectionAuthority.mcpAccountBindings,
             xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
             state: "pending",
           },
@@ -2734,7 +2777,11 @@ export async function sendAgentMessageInTransaction(
   }
   const eventIds = insertedEvents.map((event) => event.id);
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
-  const runnable = !realtimeActive && session.activeTurnId === null && effective.state === "active";
+  const runnable =
+    !session.admissionBlock &&
+    !realtimeActive &&
+    session.activeTurnId === null &&
+    effective.state === "active";
   const wake = runnable
     ? await registerInternalUpdateWakeInTransaction(db, {
         accountId: input.accountId,
@@ -2871,7 +2918,6 @@ export async function steerAgentSessionInTransaction(
     db,
     input.workspaceId,
     input.actor,
-    input.targetSessionId,
   );
   const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
   const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
@@ -2960,6 +3006,7 @@ export async function steerAgentSessionInTransaction(
               ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
             },
             personalConnectionDelegations,
+            mcpAccountBindings: inheritedConnectionAuthority.mcpAccountBindings,
             xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
             state: "pending",
           },
@@ -3069,7 +3116,10 @@ export async function steerAgentSessionInTransaction(
     .update(schema.sessions)
     .set({
       activeTurnId: supersession.liveCurrentTurnId,
-      status: supersession.liveCurrentTurnId ? session.status : "queued",
+      status: supersession.liveCurrentTurnId
+        ? (session.admissionBlock?.previousStatus ?? session.status)
+        : "queued",
+      admissionBlock: null,
       lastSequence: sequence,
       updatedAt: now,
     })

@@ -1,4 +1,9 @@
-import { ActivityCancellationType, proxyActivities } from "@temporalio/workflow";
+import {
+  ActivityCancellationType,
+  ActivityFailure,
+  ApplicationFailure,
+  proxyActivities,
+} from "@temporalio/workflow";
 import type * as activities from "../activities";
 import {
   KNOWLEDGE_SOURCE_SYNC_ACTIVITY_HEARTBEAT_TIMEOUT_MS,
@@ -20,6 +25,7 @@ type WorkflowControlActivities = Pick<
   | "recoverDispatch"
   | "recoverEscapedMcpTimeout"
   | "settleSessionInterruptions"
+  | "settleSessionInputWait"
 >;
 
 /**
@@ -159,6 +165,14 @@ export const knowledgeSourceSyncActivity = proxyActivities<
 });
 
 export function workflowFailureMessage(error: unknown): string {
+  if (
+    error instanceof ActivityFailure &&
+    error.activityType === "runAgentTurn" &&
+    error.cause instanceof ApplicationFailure &&
+    error.cause.type === "TurnExecutionPolicyDefinitionMismatchError"
+  ) {
+    return error.cause.message;
+  }
   if (error instanceof Error) {
     return error.message;
   }

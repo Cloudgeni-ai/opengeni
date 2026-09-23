@@ -164,6 +164,8 @@ export type InsightsView = {
     creditUsd: number;
     estimatedProviderUsd: number;
     estimatedProviderCostKnownCalls: number;
+    equivalentCreditUsd: number;
+    equivalentCreditCostKnownCalls: number;
     totalTokens: number;
     creditsPathCalls: number;
     externalCalls: number;
@@ -184,10 +186,13 @@ export type InsightsView = {
     tokenCoveragePct: number;
     estimatedProviderUsd: number;
     pricingCoveragePct: number;
+    equivalentCreditUsd: number;
+    equivalentPricingCoveragePct: number;
   };
   deltas: {
     modelPct: number | null;
     estimatedPct: number | null;
+    equivalentPct: number | null;
     warmPct: number | null;
     tokensPct: number | null;
     cachePts: number;
@@ -235,6 +240,8 @@ export function buildInsightsView(
       creditUsd: number;
       estimatedProviderUsd: number;
       estimatedProviderCostKnownCalls: number;
+      equivalentCreditUsd: number;
+      equivalentCreditCostKnownCalls: number;
       totalTokens: number;
       creditsPathCalls: number;
       externalCalls: number;
@@ -251,6 +258,8 @@ export function buildInsightsView(
       creditUsd: 0,
       estimatedProviderUsd: 0,
       estimatedProviderCostKnownCalls: 0,
+      equivalentCreditUsd: 0,
+      equivalentCreditCostKnownCalls: 0,
       totalTokens: 0,
       creditsPathCalls: 0,
       externalCalls: 0,
@@ -263,6 +272,8 @@ export function buildInsightsView(
     existing.creditUsd += row.creditUsd;
     existing.estimatedProviderUsd += row.estimatedProviderUsd;
     existing.estimatedProviderCostKnownCalls += row.estimatedProviderCostKnownCalls;
+    existing.equivalentCreditUsd += row.equivalentCreditUsd;
+    existing.equivalentCreditCostKnownCalls += row.equivalentCreditCostKnownCalls;
     existing.totalTokens += row.totalTokens;
     existing.creditsPathCalls += row.billing === "opengeni_credits" ? row.calls : 0;
     existing.externalCalls += row.billing === "external" ? row.calls : 0;
@@ -307,10 +318,16 @@ export function buildInsightsView(
       tokenCoveragePct: coveragePct(tokenKnownCalls, calls),
       estimatedProviderUsd,
       pricingCoveragePct: coveragePct(snap.estimatedProviderCostKnownCalls, snap.modelCalls),
+      equivalentCreditUsd: snap.equivalentCreditUsd,
+      equivalentPricingCoveragePct: coveragePct(
+        snap.equivalentCreditCostKnownCalls,
+        snap.modelCalls,
+      ),
     },
     deltas: {
       modelPct: pctDelta(creditUsd, priorCreditUsd),
       estimatedPct: pctDelta(estimatedProviderUsd, snap.priorEstimatedProviderUsd),
+      equivalentPct: pctDelta(snap.equivalentCreditUsd, snap.priorEquivalentCreditUsd),
       warmPct: pctDelta(snap.warmSeconds, snap.priorWarmSeconds),
       tokensPct: pctDelta(totalTokens, snap.priorTotalTokens),
       cachePts: cacheHitPct - snap.priorCacheHitPct,

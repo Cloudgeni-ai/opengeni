@@ -70,6 +70,14 @@ export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceM
     };
   }, [beginLoad]);
 
+  useEffect(() => {
+    const changed = () => {
+      void refresh();
+    };
+    window.addEventListener("model-connections-changed", changed);
+    return () => window.removeEventListener("model-connections-changed", changed);
+  }, [refresh]);
+
   const rows = useMemo(() => sortPickerRows(projectPickerRows(models)), [models]);
 
   return {

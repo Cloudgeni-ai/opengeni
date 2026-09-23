@@ -27,6 +27,7 @@ import {
   blobKey,
   BoxExitingError,
   captureWorkspaceRevision,
+  captureWhileIdle,
   changeFingerprint,
   isBoxExitingError,
   isUnderResidueDir,
@@ -36,6 +37,7 @@ import {
   PER_FILE_CONTENT_GUARD_BYTES,
   PER_FILE_DIFF_GUARD_BYTES,
   readCaptureRepository,
+  retainedCaptureBlobRefs,
   RESIDUE_DIRS,
   WHOLE_CAPTURE_GUARD_BYTES,
 } from "../src/activities/workspace-capture";
@@ -444,6 +446,41 @@ describe("workspace-capture — GC key-math", () => {
     blobKeys,
   });
 
+  test("latest retained refs survive both delayed predecessor GC and successor GC", () => {
+    const unchangedHash = "a".repeat(64);
+    const staleHash = "b".repeat(64);
+    const latestKey = blobKey("ws", "sess", `${crypto.randomUUID()}/${unchangedHash}`);
+    const staleKey = blobKey("ws", "sess", `${crypto.randomUUID()}/${staleHash}`);
+    const latest = row("latest", [latestKey]);
+    const stale = row("stale", [staleKey]);
+    // This delete plan can remain in flight while a new turn begins.
+    const predecessorGc = computeWorkspaceCaptureGcPlan([latest, stale], 1);
+    const refs = retainedCaptureBlobRefs("ws", "sess", latest.blobKeys);
+    expect(refs.get(unchangedHash)).toBe(latestKey);
+    expect(refs.has(staleHash)).toBe(false);
+    expect(predecessorGc.deleteBlobKeys).toEqual([staleKey]);
+    // Reusing the latest key also keeps it alive when its original row expires.
+    const successor = row("successor", [...refs.values()]);
+    expect(computeWorkspaceCaptureGcPlan([successor, latest], 1).deleteBlobKeys).toEqual([]);
+  });
+
+  test("reuse recognizes legacy and namespaced hashes without adopting other sessions' keys", () => {
+    const legacyHash = "a".repeat(64);
+    const modernHash = "b".repeat(64);
+    const legacy = blobKey("ws", "sess", legacyHash);
+    const modern = blobKey("ws", "sess", `${crypto.randomUUID()}/${modernHash}`);
+    const refs = retainedCaptureBlobRefs("ws", "sess", [
+      legacy,
+      modern,
+      blobKey("ws", "other-session", "c".repeat(64)),
+      blobKey("ws", "sess", "not-a-content-hash"),
+    ]);
+    expect([...refs.entries()]).toEqual([
+      [legacyHash, legacy],
+      [modernHash, modern],
+    ]);
+  });
+
   test("evicts revisions beyond keep-N and deletes their per-revision keys", () => {
     // newest-first: 12 rows, keep 10 → 2 evicted (the two oldest = last two).
     const rows = Array.from({ length: 12 }, (_, i) => row(`r${11 - i}`, [`blob-${11 - i}`]));
@@ -653,6 +690,91 @@ describe("workspace-capture — manifest & event serialization", () => {
 });
 
 describe("workspace-capture — pre-service skip gates", () => {
+  test("queued work skips capture entirely", async () => {
+    let started = false;
+    await captureWhileIdle({
+      hasPendingWork: async () => true,
+      capture: async () => {
+        started = true;
+      },
+    });
+    expect(started).toBe(false);
+  });
+
+  test("a hung queue lookup cannot hold up finalization", async () => {
+    const started = performance.now();
+    let captured = false;
+    await captureWhileIdle({
+      hasPendingWork: () => new Promise(() => {}),
+      capture: async () => {
+        captured = true;
+      },
+    });
+    expect(captured).toBe(false);
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+
+  test("owner cancellation interrupts a hung queue lookup", async () => {
+    const owner = new AbortController();
+    let captured = false;
+    await captureWhileIdle({
+      signal: owner.signal,
+      hasPendingWork: () => {
+        queueMicrotask(() => owner.abort());
+        return new Promise(() => {});
+      },
+      capture: async () => {
+        captured = true;
+      },
+    });
+    expect(captured).toBe(false);
+  });
+
+  test("new work interrupts a stalled provider read, including a lost wake event", async () => {
+    let pending = false;
+    let reads = 0;
+    let releaseRead!: (session: ChannelASession) => void;
+    const startedAt = performance.now();
+    await captureWhileIdle({
+      hasPendingWork: async () => pending,
+      capture: (signal) =>
+        captureWorkspaceRevision({
+          ...baseInput(),
+          settings: testSettings({ workspaceCaptureEnabled: true }),
+          signal,
+          objectStorage: forbiddenStorage(),
+          openReadSession: async () => {
+            reads += 1;
+            pending = true;
+            return await new Promise<ChannelASession>((resolve) => {
+              releaseRead = resolve;
+            });
+          },
+        }),
+    });
+    expect(reads).toBe(1);
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+    // The uncancellable provider response arrives after the turn can proceed.
+    // Its aborted continuation must not access the database or publish a cache.
+    releaseRead(dummySession);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  test("an idle capture finishes and releases its queue poller", async () => {
+    let checks = 0;
+    await captureWhileIdle({
+      hasPendingWork: async () => {
+        checks += 1;
+        return false;
+      },
+      capture: async (signal) => {
+        expect(signal.aborted).toBe(false);
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(checks).toBe(1);
+  });
+
   test("an already-cancelled Steer/Pause owner returns before touching storage or db", async () => {
     const controller = new AbortController();
     controller.abort(new Error("STEER"));
@@ -666,13 +788,39 @@ describe("workspace-capture — pre-service skip gates", () => {
   });
 
   test("flag off → returns without touching storage or db", async () => {
+    let opened = false;
     await expect(
       captureWorkspaceRevision({
         ...baseInput(),
         settings: testSettings({ workspaceCaptureEnabled: false }),
         objectStorage: forbiddenStorage(),
+        openReadSession: async () => {
+          opened = true;
+          return await new Promise<ChannelASession>(() => {});
+        },
       }),
     ).resolves.toBeUndefined();
+    expect(opened).toBe(false);
+  });
+
+  test("capture failure keeps its stage visible without exposing provider errors", async () => {
+    const warnings: string[] = [];
+    await captureWorkspaceRevision({
+      ...baseInput(),
+      settings: testSettings({ workspaceCaptureEnabled: true }),
+      objectStorage: forbiddenStorage(),
+      openReadSession: async () => {
+        throw new Error("provider unavailable: secret-token-and-private-path");
+      },
+      observability: {
+        warn: (message: string) => warnings.push(message),
+        incrementCounter: () => {},
+        incrementGauge: () => {},
+      } as unknown as typeof observability,
+    });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("stage=open_read_session reason=operation_failed");
+    expect(warnings[0]).not.toContain("secret-token");
   });
 
   test("storage null → returns without touching db", async () => {

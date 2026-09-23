@@ -25,7 +25,7 @@ never `git clone`s a repo onto the machine.
 | Crate                     | Role                                                                                                                         |
 |---|---|
 | `opengeni-agent-proto`    | Generated wire-protocol types (Rust side of the codegen).                                                                    |
-| `opengeni-agent`          | The binary: `run`/`connect`/`connections`/`disconnect`/`service`/`update`/`uninstall`, plus the exact-attempt `codemode list | call` client; multi-deployment dial, RPC dispatch, supervisor. |
+| `opengeni-agent`          | The binary: `run`/`connect`/`connections`/`disconnect`/`service`/`update`/`uninstall`, plus the exact-attempt `codemode list | show | call` client; multi-deployment dial, RPC dispatch, supervisor. |
 | `opengeni-agent-platform` | Per-OS `Platform` + the `service` (systemd/launchd/SCM) renderer.                                                            |
 | `opengeni-agent-stream`   | Relay-edge stream transport + pty/framebuffer pumps.                                                                         |
 | `opengeni-agent-update`   | Self-update: signed-manifest discovery, minisign+sha256 verify, atomic replace, rollback.                                    |
@@ -140,6 +140,11 @@ opengeni-agent connect --force --api-url https://<deployment> --workspace-id <wo
 ```
 
 ## Wire protocol — single source of truth
+
+For native large-file editor writes, see [transactional uploads](TRANSACTIONAL-WRITES.md):
+the independent capability gate, exact upload lifecycle, supported Linux file
+semantics, and restart/lost-ack restrictions. `op_stream` alone does not imply
+transactional filesystem support.
 
 The protocol is defined **once** in [`proto/opengeni_agent.proto`](proto/opengeni_agent.proto)
 (proto3, package `opengeni.agent.v1`) and code-generated to **both** stacks so the

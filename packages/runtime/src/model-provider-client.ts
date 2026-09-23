@@ -27,6 +27,7 @@ import {
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
 import { ReplayableJsonOpenAI } from "./replayable-json-body";
 import { recordModelTransportStarted } from "./model-preparation-diagnostics";
+import { captureProviderRequestBody } from "./model-request-capture";
 
 let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
 
@@ -376,12 +377,14 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     // The attempt-local observer durably checkpoints provider dispatch before
     // this process can place request bytes on the network.
     await recordModelTransportStarted();
+    const capture = captureProviderRequestBody(provider, input, init);
     const started = performance.now();
     try {
-      const response = await inner(input, init);
+      const response = await inner(input, capture.init);
       recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
       return response;
     } catch (error) {
+      capture.cancel();
       recordModelCallMetric(provider, "failed", started);
       throw error;
     }

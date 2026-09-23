@@ -30,6 +30,8 @@ export default defineConfig({
     "src/accounts.tsx",
     "src/composer.ts",
     "src/session.ts",
+    "src/connect.ts",
+    "src/sites.ts",
     "src/session-ui.ts",
     "src/machines.ts",
     "src/model-policy.ts",
@@ -49,5 +51,6 @@ export default defineConfig({
   external,
   esbuildOptions(options) {
     options.jsx = "automatic";
+    options.loader = { ...options.loader, ".ico": "dataurl" };
   },
 });

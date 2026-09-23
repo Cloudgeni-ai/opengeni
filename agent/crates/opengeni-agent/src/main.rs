@@ -56,6 +56,7 @@ mod service;
 mod supervisor;
 mod uninstall;
 mod update;
+mod uploads;
 
 use std::{path::Path, sync::Arc};
 
@@ -111,7 +112,11 @@ fn main() -> std::process::ExitCode {
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            error!(error = %e, "agent exited with an error");
+            if let Some(error) = e.downcast_ref::<codemode::CodemodeError>() {
+                eprintln!("{}", error.receipt());
+            } else {
+                error!(error = %e, "agent exited with an error");
+            }
             std::process::ExitCode::FAILURE
         }
     }

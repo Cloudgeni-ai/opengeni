@@ -203,6 +203,28 @@ The routes live below
 `workspace:read`. Draft creation, legacy import, activation, and rollback require
 `workspace:admin`.
 
+The agent-facing `instruction_policy_save` surface is deliberately an edit
+contract rather than a complete-document save. The agent must read the active
+content and exact baseline before every change, then choose one mode:
+
+- `append` is the normal mode for a new rule. It preserves the active content
+  byte-for-byte and inserts only the blank-line separator needed before the new
+  text;
+- `edit` replaces one exact `oldText` occurrence with `newText`, which may be
+  empty for a removal. A missing, repeated, or complete-document anchor fails
+  closed.
+
+Agents cannot replace the complete instruction. An authorized human can use the
+manual workspace editor when a whole-policy rewrite is genuinely intended.
+Every agent mode retains the active-head revision and activation-version
+compare-and-set. A stale baseline, invalid edit shape, ambiguous or whole-policy
+anchor, or result outside the agent-authored destination budget creates no
+revision. During a rolling deployment, an older application request without
+`editMode` is accepted only when its proposed content preserves the complete
+active instruction byte-for-byte. Unsafe older pending revisions and explicit
+replacement revisions cannot be activated after the preservation guard is
+installed.
+
 ## Session role binding and accepted-turn snapshots
 
 `CreateSessionRequest.policyRole` binds one normalized policy role to the
@@ -285,13 +307,16 @@ from the human editor limit:
 
 | Author | Surface | Limit |
 | --- | --- | --- |
-| Agent | `remember` lane `instruction_policy`, `instruction_policy_propose`, `task_note_promote_instruction_policy` | `AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (600) |
+| Agent | `instruction_policy_save` supplied text and resulting instruction; legacy `remember`/proposal/promotion paths | `AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (600) |
 | Agent | `remember` lane `preference`, `preference_propose`, `task_note_promote_preference` | `AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS` (1,200) |
 | Human | Workspace State editor, HTTP/SDK policy routes | `WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (262,144) |
 
 The constants and the actionable rejection messages live in
 [`packages/contracts/src/agent-authored-durable-text.ts`](../packages/contracts/src/agent-authored-durable-text.ts).
-The direct proposal surfaces are bounded by the request contracts. Task-note
+The direct proposal surfaces are bounded by the request contracts. Native
+instruction edits bound each supplied text and the complete result, so an append
+cannot grow the standing prompt past the same limit and no path truncates stored
+content. Task-note
 promotion is bounded in
 [`packages/db/src/company-brain-governed-writes.ts`](../packages/db/src/company-brain-governed-writes.ts)
 instead, because there the content is the note rather than a request field: a

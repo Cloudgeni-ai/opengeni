@@ -1,3 +1,4 @@
+import { prepareComputerNativeExecutable } from "./computer-native-executable";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type {
@@ -8,7 +9,7 @@ import type {
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 
-export const COMPUTER_NATIVE_PROTOCOL_VERSION = 2 as const;
+export const COMPUTER_NATIVE_PROTOCOL_VERSION = 3 as const;
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024;
@@ -117,6 +118,10 @@ export interface ComputerNativeTransport {
   targets(): Promise<NativeComputerTarget[]>;
   observe(targetId: string): Promise<NativeComputerObservation>;
   capture(targetId: string, options?: NativeComputerCaptureOptions): Promise<NativeComputerFrame>;
+  captureStill(
+    targetId: string,
+    options: NativeComputerCaptureOptions,
+  ): Promise<NativeComputerFrame>;
   startCapture(targetId: string, options: NativeComputerCaptureOptions): Promise<void>;
   stopCapture(targetId: string): Promise<void>;
   clipboard(): Promise<NativeComputerClipboard>;
@@ -160,6 +165,7 @@ export class ComputerNativeClient implements ComputerNativeTransport {
     requestTimeoutMs: number,
     captureTimeoutMs: number,
     handshake: NativeComputerHandshake,
+    private readonly cleanupExecutable: () => Promise<void>,
   ) {
     this.process = process;
     this.requestTimeoutMs = requestTimeoutMs;
@@ -176,7 +182,8 @@ export class ComputerNativeClient implements ComputerNativeTransport {
       options.captureTimeoutMs ?? DEFAULT_CAPTURE_TIMEOUT_MS,
       "captureTimeoutMs",
     );
-    const child = spawn(options.binaryPath, [...(options.arguments ?? [])], {
+    const executable = await prepareComputerNativeExecutable(options.binaryPath);
+    const child = spawn(executable.path, [...(options.arguments ?? [])], {
       stdio: ["pipe", "pipe", "pipe"],
       ...(options.cwd ? { cwd: options.cwd } : {}),
       env: options.env ?? process.env,
@@ -187,6 +194,7 @@ export class ComputerNativeClient implements ComputerNativeTransport {
       requestTimeoutMs,
       captureTimeoutMs,
       placeholderHandshake(),
+      executable.cleanup,
     );
     client.bindProcess();
     try {
@@ -226,6 +234,18 @@ export class ComputerNativeClient implements ComputerNativeTransport {
         targetId: boundedString(targetId, "targetId", 512),
         ...(options ? { options } : {}),
       },
+      parseFrame,
+      this.captureTimeoutMs,
+    );
+  }
+
+  async captureStill(
+    targetId: string,
+    options: NativeComputerCaptureOptions,
+  ): Promise<NativeComputerFrame> {
+    return await this.request(
+      "capture_still",
+      { targetId: boundedString(targetId, "targetId", 512), options },
       parseFrame,
       this.captureTimeoutMs,
     );
@@ -283,14 +303,21 @@ export class ComputerNativeClient implements ComputerNativeTransport {
   private async performClose(): Promise<void> {
     this.rejectPending(new Error("native computer client closed"));
     this.process.stdin.end();
-    if (await waitForProcessClose(this.process, 3_000)) return;
+    if (await waitForProcessClose(this.process, 3_000)) {
+      await this.cleanupExecutable();
+      return;
+    }
     this.process.kill("SIGKILL");
     if (!(await waitForProcessClose(this.process, 3_000))) {
       throw new Error("native computer helper did not exit after SIGKILL");
     }
+    await this.cleanupExecutable();
   }
 
   private bindProcess(): void {
+    this.process.once("close", () => {
+      void this.cleanupExecutable().catch(() => undefined);
+    });
     this.process.stdout.on("data", (chunk: Buffer) => this.onData(chunk));
     this.process.stdout.on("end", () => {
       if (!this.closing) this.fail(new Error("native computer helper closed stdout"));

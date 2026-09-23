@@ -11,7 +11,11 @@ import {
   recoverSessionDispatch,
   type DbClient,
 } from "@opengeni/db";
-import type { AccessGrant, SessionEvent } from "@opengeni/contracts";
+import {
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  type AccessGrant,
+  type SessionEvent,
+} from "@opengeni/contracts";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -135,6 +139,8 @@ describe("goal_update idempotency", () => {
         ...baseGrant.metadata,
         delegated: true,
         sessionId: session.id,
+        // A session-scoped grant registers only its signed selection.
+        firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
         turnId: firstClaim.turn.id,
         attemptId,
         executionGeneration,

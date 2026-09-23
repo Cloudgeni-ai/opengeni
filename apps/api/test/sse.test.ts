@@ -25,9 +25,23 @@ describe("SSE server-side backpressure", () => {
     expect((await reader.read()).done).toBeTrue();
   });
 
-  test("rejects a frame larger than the entire byte queue", async () => {
+  test("delivers an oversized frame intact while blocking the following frame", async () => {
     const channel = createByteBoundedSseStream({ maxQueuedBytes: 4 });
-    await expect(channel.write("12345")).rejects.toThrow("cannot fit");
+    const text = `data: ${"界🙂".repeat(40_000)}\n\n`;
+    expect(await channel.write(text)).toBeTrue();
+    let settled = false;
+    const nextWrite = channel.write("next").then((value) => {
+      settled = true;
+      return value;
+    });
+    await Promise.resolve();
+    expect(settled).toBeFalse();
+    const reader = channel.stream.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe(text);
+    expect(await nextWrite).toBeTrue();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("next");
+    channel.close();
+    expect((await reader.read()).done).toBeTrue();
   });
 
   test("consumer cancellation wakes a capacity-blocked writer", async () => {

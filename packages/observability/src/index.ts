@@ -1,6 +1,24 @@
 import { createHash } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 import { SandboxBackend } from "@opengeni/contracts";
+import {
+  currentTraceContext,
+  validTraceContext,
+  admissionTraceContext,
+  type TraceContext,
+} from "./trace-context";
+import { ExportQueue } from "./export-queue";
+import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
+export type { FailureDiagnosticInput } from "./failure-diagnostic";
+export {
+  currentTraceContext,
+  withTraceContext,
+  parseTraceparent,
+  traceparent,
+  admissionTraceContext,
+  linkCurrentSpanToAdmission,
+  type TraceContext,
+} from "./trace-context";
 
 export type AttributeValue = string | number | boolean | null | undefined;
 export type Attributes = Record<string, AttributeValue>;
@@ -13,6 +31,9 @@ export type ObservabilitySettings = {
   observabilityMetricsEnabled: boolean;
   observabilityOtlpEndpoint?: string | undefined;
   observabilityOtlpHeaders: string;
+  /** Explicit restricted OTLP logs destination; never falls back to the public exporter. */
+  observabilityDiagnosticsEndpoint?: string | undefined;
+  observabilityDiagnosticsHeaders?: string | undefined;
   sandboxOwnershipEnabled?: boolean | undefined;
   sandboxLazyProvisionEnabled?: boolean | undefined;
   rigVerificationLeaseOwnershipEnabled?: boolean | undefined;
@@ -27,6 +48,7 @@ export type ObservabilityOptions = {
 export type Span = {
   traceId: string;
   spanId: string;
+  addLink?: (context: TraceContext) => void;
   end: (input?: { attributes?: Attributes; error?: unknown }) => void;
 };
 
@@ -45,6 +67,25 @@ export function sandboxLeaseTelemetryKey(workspaceId: string, sandboxGroupId: st
     .update(workspaceId)
     .update("\0")
     .update(sandboxGroupId)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
+/** Content-free lookup key for a worker execution attempt, never a metric label.
+ * Operators derive it from authorized session/attempt records to find a trace
+ * without publishing raw tenancy or conversation identifiers to telemetry. */
+export function turnExecutionTelemetryKey(
+  workspaceId: string,
+  sessionId: string,
+  attemptId: string,
+): string {
+  return `turn_${createHash("sha256")
+    .update("opengeni:turn-execution-telemetry:v1\0")
+    .update(workspaceId)
+    .update("\0")
+    .update(sessionId)
+    .update("\0")
+    .update(attemptId)
     .digest("hex")
     .slice(0, 32)}`;
 }
@@ -111,26 +152,6 @@ const SANDBOX_OPERATION_NAMES = new Set([
  * credential, name, or content, may ever become a label here.
  */
 export const TENANCY_COMPATIBILITY_LANES = [
-  /**
-   * A provider connection carrying `authority_scope = 'legacy_user'` was
-   * resolved for accepted use: a personal row with no common authority or
-   * grant, admitted through `legacy_user_compatibility` provenance instead of
-   * an explicit delegation. Migration 0256 backfilled the existing rows, but
-   * its `bind_connection_authority` trigger still classifies a NEW personal
-   * connection this way whenever the inserting subject has no active
-   * organization membership, so this counter is expected to stay above zero
-   * until that classification changes. That is the finding, not a defect.
-   */
-  "connection_legacy_user",
-  /**
-   * A workspace-scope connection ref carried no connection id, so the
-   * accepted-use authority (migration 0279) could not identify the exact row
-   * and the request fell back to the unprivileged pre-snapshot resolution.
-   * This lane writes no `connection_use_audit_facts` row and leaves no durable
-   * trace of any kind, so a use counter is the only possible evidence it was
-   * taken at all.
-   */
-  "connection_pre_snapshot_ref",
   /**
    * A NEW persistable `/workspace` mutation was refused because the writer
    * behind it has no recorded authority (`authority_unattributed`): either a
@@ -481,7 +502,20 @@ export type SandboxOperationMetricObservation = {
   op: string;
   outcome: "ok" | "not_found" | "failed";
   durationMs: number;
+  materializationFailureReason?: string;
 };
+
+const MATERIALIZATION_FAILURE_REASONS = new Set([
+  "path_not_visible",
+  "command_failed",
+  "command_pending",
+  "invalid_response",
+  "command_error",
+]);
+const MATERIALIZATION_FAILURE_METRIC = {
+  name: "opengeni_sandbox_materialization_verification_failures_total",
+  help: "Sandbox destination visibility-check failures by bounded reason; exact command evidence is retained in the session failure event.",
+} as const;
 
 export function createObservability(
   settings: ObservabilitySettings,
@@ -496,12 +530,33 @@ type MetricRegistration = {
 };
 
 export class Observability {
+  private spanBatch: unknown[] = [];
+  private spanBatchScheduled = false;
+  private readonly diagnosticQueue = new ExportQueue((outcome) => {
+    this.incrementCounter({
+      name: "opengeni_diagnostic_exports_total",
+      help: "Protected diagnostic export outcomes.",
+      labels: { outcome },
+    });
+  });
   private readonly registry = new Registry();
   private readonly counters = new Map<string, Counter<string>>();
   private readonly gauges = new Map<string, Gauge<string>>();
   private readonly histograms = new Map<string, Histogram<string>>();
   private readonly registrations = new Map<string, MetricRegistration>();
-  private readonly pendingExports = new Set<Promise<void>>();
+  private readonly exportQueue = new ExportQueue((outcome) => {
+    this.incrementCounter({
+      name: "opengeni_telemetry_exports_total",
+      help: "Bounded telemetry export outcomes.",
+      labels: { outcome },
+    });
+    if (outcome === "failed")
+      this.warn("OTLP span export failed", {
+        errorClass: "TelemetryExportError",
+        errorCode: "otlp_export_failed",
+        origin: "observability",
+      });
+  }, 8);
   private readonly now: () => number;
   private readonly exporter: (
     url: string,
@@ -540,6 +595,27 @@ export class Observability {
       });
       this.registerSandboxRolloutConfig();
       this.registerTenancyCompatibilityLanes();
+      if (["worker", "worker-control", "worker-turn", "api"].includes(options.component)) {
+        // Publish the finite series at startup so a first failure has a zero
+        // baseline and healthy zeroes differ from a missing instrumentation path.
+        for (const backend of [...SANDBOX_OPERATION_BACKENDS, "unknown"]) {
+          for (const reason of [...MATERIALIZATION_FAILURE_REASONS, "unknown"]) {
+            this.incrementCounter({
+              ...MATERIALIZATION_FAILURE_METRIC,
+              labels: { backend, reason },
+              amount: 0,
+            });
+          }
+        }
+      }
+      if (options.component === "worker" || options.component === "worker-control") {
+        for (const outcome of WORKFLOW_WAKE_OUTCOMES) {
+          this.incrementCounter({ ...WORKFLOW_WAKE_METRIC, labels: { outcome }, amount: 0 });
+        }
+        for (const reason of [...WORKFLOW_WAKE_ADMISSION_BLOCKERS, "unknown"]) {
+          this.incrementCounter({ ...WORKFLOW_WAKE_BLOCKER_METRIC, labels: { reason }, amount: 0 });
+        }
+      }
     }
   }
 
@@ -617,6 +693,7 @@ export class Observability {
       }
       return;
     }
+    const context = currentTraceContext();
     const record = {
       timestamp: new Date(this.now()).toISOString(),
       level,
@@ -625,6 +702,7 @@ export class Observability {
       environment: this.settings.environment,
       component: this.options.component,
       ...cleanAttributes(publicAttributes),
+      ...(context ? { traceId: context.traceId, spanId: context.spanId } : {}),
     };
     const serialized = JSON.stringify(record);
     if (level === "warn") {
@@ -636,14 +714,39 @@ export class Observability {
     }
   }
 
-  startSpan(name: string, attributes: Attributes = {}): Span {
-    const traceId = randomHex(16);
+  startSpan(
+    name: string,
+    attributes: Attributes = {},
+    options: { parent?: TraceContext | null; links?: TraceContext[]; startTimeMs?: number } = {},
+  ): Span {
+    const parent =
+      options.parent === null
+        ? undefined
+        : validTraceContext(options.parent ?? currentTraceContext());
+    const links = (options.links ?? []).slice(0, 8).flatMap((link) => {
+      const valid = validTraceContext(link);
+      return valid ? [valid] : [];
+    });
+    const traceId = parent?.traceId ?? randomHex(16);
     const spanId = randomHex(8);
-    const startMs = this.now();
+    const now = this.now();
+    const startMs = Number.isFinite(options.startTimeMs)
+      ? Math.min(now, Math.max(0, options.startTimeMs!))
+      : now;
     let ended = false;
     return {
       traceId,
       spanId,
+      addLink: (context) => {
+        const valid = validTraceContext(context);
+        if (
+          !ended &&
+          valid &&
+          links.length < 8 &&
+          !links.some((link) => link.traceId === valid.traceId && link.spanId === valid.spanId)
+        )
+          links.push(valid);
+      },
       end: (input = {}) => {
         if (ended) {
           return;
@@ -657,7 +760,9 @@ export class Observability {
         this.exportSpan({
           traceId,
           spanId,
-          name,
+          ...(parent ? { parentSpanId: parent.spanId } : {}),
+          links,
+          name: boundedOtlpString(name),
           startMs,
           endMs: this.now(),
           attributes: {
@@ -792,11 +897,70 @@ export class Observability {
     return await this.registry.metrics();
   }
 
-  /** Wait for every OTLP export accepted before or during this drain. */
-  async flush(): Promise<void> {
-    while (this.pendingExports.size > 0) {
-      await Promise.allSettled([...this.pendingExports]);
+  /** Emit a content-free anchor after successful, non-replayed admission. */
+  recordAdmissionTrace(eventId: string): void {
+    const identity = admissionTraceContext(eventId);
+    if (!identity) return;
+    const current = currentTraceContext();
+    const now = this.now();
+    this.exportSpan({
+      ...identity,
+      name: "api.turn.admitted",
+      startMs: now,
+      endMs: now,
+      attributes: {},
+      links: current ? [current] : [],
+    });
+  }
+
+  /** Emit a closed protected record independently of application persistence. */
+  recordFailureDiagnostic(input: FailureDiagnosticInput): string {
+    const record = failureDiagnostic(input, this.settings.deploymentRevision);
+    const endpoint = this.settings.observabilityDiagnosticsEndpoint;
+    if (!endpoint) {
+      this.incrementCounter({
+        name: "opengeni_diagnostic_exports_total",
+        help: "Protected diagnostic export outcomes.",
+        labels: { outcome: "disabled" },
+      });
+      return record.diagnosticId;
     }
+    const context = currentTraceContext();
+    const body = {
+      resourceLogs: [
+        {
+          resource: { attributes: otlpAttributes(this.resourceAttributes) },
+          scopeLogs: [
+            {
+              scope: { name: "@opengeni/observability/diagnostics", version: "1" },
+              logRecords: [
+                {
+                  timeUnixNano: millisToNanos(this.now()),
+                  severityNumber: 17,
+                  severityText: "ERROR",
+                  ...(context ? { traceId: context.traceId, spanId: context.spanId } : {}),
+                  body: { stringValue: JSON.stringify(record) },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    this.diagnosticQueue.enqueue(() =>
+      this.exporter(
+        `${endpoint.replace(/\/$/, "")}/v1/logs`,
+        body,
+        parseHeaders(this.settings.observabilityDiagnosticsHeaders ?? ""),
+      ),
+    );
+    return record.diagnosticId;
+  }
+
+  /** Best-effort bounded drain, including when a custom transport never settles. */
+  async flush(timeoutMs = 1_000): Promise<void> {
+    this.submitSpanBatch();
+    await Promise.all([this.exportQueue.flush(timeoutMs), this.diagnosticQueue.flush(timeoutMs)]);
   }
 
   private counter(name: string, help: string, labelNames: string[]): Counter<string> {
@@ -868,6 +1032,8 @@ export class Observability {
   private exportSpan(span: {
     traceId: string;
     spanId: string;
+    parentSpanId?: string;
+    links: TraceContext[];
     name: string;
     startMs: number;
     endMs: number;
@@ -877,7 +1043,6 @@ export class Observability {
     if (!this.settings.observabilityOtlpEndpoint) {
       return;
     }
-    const endpoint = `${this.settings.observabilityOtlpEndpoint.replace(/\/$/, "")}/v1/traces`;
     const body = {
       resourceSpans: [
         {
@@ -894,6 +1059,8 @@ export class Observability {
                 {
                   traceId: span.traceId,
                   spanId: span.spanId,
+                  ...(span.parentSpanId ? { parentSpanId: span.parentSpanId } : {}),
+                  links: span.links,
                   name: span.name,
                   kind: 1,
                   startTimeUnixNano: millisToNanos(span.startMs),
@@ -907,22 +1074,29 @@ export class Observability {
         },
       ],
     };
-    let pendingExport: Promise<void>;
-    pendingExport = Promise.resolve()
-      .then(() =>
-        this.exporter(endpoint, body, parseHeaders(this.settings.observabilityOtlpHeaders)),
-      )
-      .catch(() => {
-        this.warn("OTLP span export failed", {
-          errorClass: "TelemetryExportError",
-          errorCode: "otlp_export_failed",
-          origin: "observability",
-        });
-      })
-      .finally(() => {
-        this.pendingExports.delete(pendingExport);
+    this.spanBatch.push(body.resourceSpans[0]);
+    if (!this.spanBatchScheduled) {
+      this.spanBatchScheduled = true;
+      queueMicrotask(() => {
+        this.spanBatchScheduled = false;
+        this.submitSpanBatch();
       });
-    this.pendingExports.add(pendingExport);
+    }
+    if (this.spanBatch.length >= 32) this.submitSpanBatch();
+  }
+
+  private submitSpanBatch(): void {
+    if (!this.spanBatch.length || !this.settings.observabilityOtlpEndpoint) return;
+    const resourceSpans = this.spanBatch;
+    this.spanBatch = [];
+    const endpoint = `${this.settings.observabilityOtlpEndpoint.replace(/\/$/, "")}/v1/traces`;
+    this.exportQueue.enqueue(() =>
+      this.exporter(
+        endpoint,
+        { resourceSpans },
+        parseHeaders(this.settings.observabilityOtlpHeaders),
+      ),
+    );
   }
 }
 
@@ -957,6 +1131,19 @@ export function sandboxOperationMetricObserver(
         labels: { backend, op },
         value: Math.max(0, observation.durationMs) / 1_000,
       });
+      if (
+        op === "materializeEntry" &&
+        observation.outcome === "failed" &&
+        observation.materializationFailureReason
+      ) {
+        const reason = MATERIALIZATION_FAILURE_REASONS.has(observation.materializationFailureReason)
+          ? observation.materializationFailureReason
+          : "unknown";
+        observability.incrementCounter({
+          ...MATERIALIZATION_FAILURE_METRIC,
+          labels: { backend, reason },
+        });
+      }
     } catch {
       try {
         observability.incrementCounter({
@@ -968,6 +1155,45 @@ export function sandboxOperationMetricObserver(
         // The metrics registry itself is unhealthy. Product execution remains
         // authoritative and must not inherit an observability failure.
       }
+    }
+  };
+}
+
+/** Capture waits remain separate from physical provider-call accounting. */
+export function sandboxCaptureWaitMetricObserver(observability: Observability) {
+  return (observation: {
+    backend: string;
+    op: string;
+    outcome: "ok" | "failed";
+    durationMs: number;
+    captureWaitStage: "admission" | "provider";
+  }): void => {
+    const stage = observation.captureWaitStage;
+    if (stage !== "admission" && stage !== "provider") return;
+    if (!Number.isFinite(observation.durationMs) || observation.durationMs < 0) return;
+    const backend = SANDBOX_OPERATION_BACKENDS.has(observation.backend)
+      ? observation.backend
+      : "unknown";
+    const op = SANDBOX_OPERATION_NAMES.has(observation.op) ? observation.op : "unknown";
+    const outcome = observation.outcome === "ok" ? "completed" : "failed";
+    try {
+      observability.observeHistogram({
+        name: "opengeni_sandbox_capture_wait_duration_seconds",
+        help: "Workspace capture gate wait duration across every routed operation, not only startup.",
+        labels: { backend, op, stage, outcome },
+        value: observation.durationMs / 1_000,
+      });
+      observability
+        .startSpan(
+          `sandbox.capture_wait.${stage}`,
+          { backend, outcome },
+          {
+            startTimeMs: Date.now() - observation.durationMs,
+          },
+        )
+        .end({ ...(outcome === "failed" ? { error: true } : {}) });
+    } catch {
+      // Diagnostics never alter capture admission or physical settlement.
     }
   };
 }
@@ -1131,6 +1357,87 @@ function boundedMetricEnum(allowed: ReadonlySet<string>, value: string): string 
   return allowed.has(value) ? value : "unknown";
 }
 
+const WORKFLOW_WAKE_ADMISSION_BLOCKERS = new Set([
+  "pending_agent_steer",
+  "pending_prompt_turn",
+  "pending_quiescence",
+  "pending_machine_input",
+  "pending_input_wait",
+]);
+const WORKFLOW_WAKE_OUTCOMES = [
+  "signal_accepted",
+  "acknowledged",
+  "pending_admission",
+  "unconfirmed",
+  "failed",
+] as const;
+const WORKFLOW_WAKE_METRIC = {
+  name: "opengeni_session_workflow_wake_observations_total",
+  help: "Workflow wake dispatch observations; signal acceptance overlaps with admission outcomes, and retries are counted again.",
+};
+const WORKFLOW_WAKE_BLOCKER_METRIC = {
+  name: "opengeni_session_workflow_wake_admission_blockers_total",
+  help: "Workflow wake dispatch attempts awaiting durable admission, by bounded blocker; repeated revisions count again.",
+};
+
+/** Dispatcher observations count attempts, including repeated observations of
+ * the same revision. Transport acceptance is never an admission receipt. */
+export function recordWorkflowWakeReconciliation(
+  observability: Observability,
+  result: {
+    signaled: number;
+    delivered: number;
+    pendingAdmission: number;
+    unconfirmed: number;
+    failed: number;
+    pendingAdmissionBlockers: Record<string, number | undefined>;
+  },
+): void {
+  const count = (value: number | undefined) =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  try {
+    for (const [outcome, amount] of [
+      ["signal_accepted", result.signaled],
+      ["acknowledged", result.delivered],
+      ["pending_admission", result.pendingAdmission],
+      ["unconfirmed", result.unconfirmed],
+      ["failed", result.failed],
+    ] as const) {
+      observability.incrementCounter({
+        ...WORKFLOW_WAKE_METRIC,
+        labels: { outcome },
+        amount: count(amount),
+      });
+      if (count(amount) > 0) {
+        // Use the reviewed public telemetry vocabulary. Arbitrary aggregate
+        // property names are intentionally omitted by the external sink.
+        observability.info("Session workflow wake dispatch observed", {
+          surface: "session_workflow_wake",
+          outcome,
+          attempts: count(amount),
+        });
+      }
+    }
+    for (const [blocker, amount] of Object.entries(result.pendingAdmissionBlockers)) {
+      if (count(amount) === 0) continue;
+      const reason = boundedMetricEnum(WORKFLOW_WAKE_ADMISSION_BLOCKERS, blocker);
+      observability.incrementCounter({
+        ...WORKFLOW_WAKE_BLOCKER_METRIC,
+        labels: { reason },
+        amount: count(amount),
+      });
+      observability.info("Session workflow wake admission pending", {
+        surface: "session_workflow_wake",
+        outcome: "pending_admission",
+        reason,
+        attempts: count(amount),
+      });
+    }
+  } catch {
+    recordObserverFailure(observability, "session_workflow_wake");
+  }
+}
+
 function boundedMetricDuration(durationMs: number): number {
   return Number.isFinite(durationMs) ? Math.max(0, durationMs) / 1_000 : 0;
 }
@@ -1162,7 +1469,7 @@ export function logStartupDependencyRetry(
 ): void {
   const dependency = PUBLIC_STARTUP_DEPENDENCIES.has(event.label) ? event.label : "Dependency";
   observability.warn(
-    `Startup dependency ${dependency} connection failed; retrying (${event.attempt}/${event.attempts} in ${event.delayMs}ms)`,
+    `Startup dependency ${dependency} check failed; retrying (${event.attempt}/${event.attempts} in ${event.delayMs}ms)`,
     {
       dependency,
       attempt: event.attempt,
@@ -1200,6 +1507,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       ...projectStartupDependencyAttributes(attributes),
       ...projectPublicChannelADiagnosticAttributes(attributes),
       ...projectApiFatalDiagnosticAttributes(attributes),
+      ...projectSnapshotDiagnosticAttributes(attributes),
       ...projectPublicDiagnosticAttributes(attributes),
     };
   }
@@ -1271,6 +1579,55 @@ function projectPublicChannelADiagnosticAttributes(attributes: Attributes): Attr
       ? { sandboxLeaseKey }
       : {}),
   };
+}
+
+function projectSnapshotDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "SnapshotOperationError") return {};
+  const projected: Attributes = {};
+  const causeName = attributes.causeName;
+  if (
+    typeof causeName === "string" &&
+    ["SnapshotTimeoutError", "SandboxProviderCaptureTimeoutError", "SandboxProviderError"].includes(
+      causeName,
+    )
+  )
+    projected.causeName = causeName;
+  const name = attributes.providerErrorName;
+  if (
+    typeof name === "string" &&
+    [
+      "ClientError",
+      "TimeoutError",
+      "ConnectionError",
+      "AuthError",
+      "NotFoundError",
+      "InvalidError",
+      "RemoteError",
+      "AbortError",
+    ].includes(name)
+  )
+    projected.providerErrorName = name;
+  const grpc = attributes.providerGrpcCode;
+  if (
+    name === "ClientError" &&
+    typeof grpc === "number" &&
+    Number.isInteger(grpc) &&
+    grpc >= 0 &&
+    grpc <= 16
+  )
+    projected.providerGrpcCode = grpc;
+  const http = attributes.providerHttpStatus;
+  if (typeof http === "number" && Number.isInteger(http) && http >= 100 && http <= 599)
+    projected.providerHttpStatus = http;
+  if (typeof attributes.providerRetryable === "boolean")
+    projected.providerRetryable = attributes.providerRetryable;
+  const leaseKey = attributes.sandboxLeaseKey;
+  if (typeof leaseKey === "string" && /^slk_[0-9a-f]{32}$/.test(leaseKey))
+    projected.sandboxLeaseKey = leaseKey;
+  const epoch = attributes.leaseEpoch;
+  if (typeof epoch === "number" && Number.isSafeInteger(epoch) && epoch >= 0)
+    projected.leaseEpoch = epoch;
+  return projected;
 }
 
 function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {
@@ -1409,6 +1766,7 @@ async function defaultExporter(
       ...headers,
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(1_000),
   });
   if (!response.ok) {
     throw new Error(`OTLP endpoint returned HTTP ${response.status}`);

@@ -7,6 +7,14 @@ use crate::{
     NativeClipboardAction,
 };
 
+#[cfg(target_os = "macos")]
+use opengeni_agent_macos_ffi::with_autorelease_pool;
+
+#[cfg(not(target_os = "macos"))]
+fn with_autorelease_pool<T>(operation: impl FnOnce() -> T) -> T {
+    operation()
+}
+
 const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
 
 /// Long-lived text clipboard handle for one native helper/graphical seat.
@@ -21,7 +29,7 @@ pub(crate) struct NativeClipboardController {
 
 impl NativeClipboardController {
     pub(crate) fn open() -> NativeAdapterResult<Self> {
-        let clipboard = Clipboard::new().map_err(map_read_error)?;
+        let clipboard = with_autorelease_pool(Clipboard::new).map_err(map_read_error)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(clipboard)),
         })
@@ -30,21 +38,23 @@ impl NativeClipboardController {
     pub(crate) async fn read(&self) -> NativeAdapterResult<NativeClipboard> {
         let inner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
-            let mut clipboard = inner.lock().map_err(|_| poisoned())?;
-            match clipboard.get_text() {
-                Ok(text) => {
-                    let (text, truncated) = bounded_text(text);
-                    Ok(NativeClipboard {
-                        text: Some(text),
-                        truncated,
-                    })
+            with_autorelease_pool(|| {
+                let mut clipboard = inner.lock().map_err(|_| poisoned())?;
+                match clipboard.get_text() {
+                    Ok(text) => {
+                        let (text, truncated) = bounded_text(text);
+                        Ok(NativeClipboard {
+                            text: Some(text),
+                            truncated,
+                        })
+                    }
+                    Err(ClipboardError::ContentNotAvailable) => Ok(NativeClipboard {
+                        text: None,
+                        truncated: false,
+                    }),
+                    Err(error) => Err(map_read_error(error)),
                 }
-                Err(ClipboardError::ContentNotAvailable) => Ok(NativeClipboard {
-                    text: None,
-                    truncated: false,
-                }),
-                Err(error) => Err(map_read_error(error)),
-            }
+            })
         })
         .await
         .map_err(|error| {
@@ -91,11 +101,13 @@ impl NativeClipboardController {
         }
         let inner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
-            inner
-                .lock()
-                .map_err(|_| poisoned())?
-                .set_text(text)
-                .map_err(map_mutation_error)
+            with_autorelease_pool(|| {
+                inner
+                    .lock()
+                    .map_err(|_| poisoned())?
+                    .set_text(text)
+                    .map_err(map_mutation_error)
+            })
         })
         .await
         .map_err(|error| {
@@ -108,11 +120,13 @@ impl NativeClipboardController {
     async fn clear(&self) -> NativeAdapterResult<()> {
         let inner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
-            inner
-                .lock()
-                .map_err(|_| poisoned())?
-                .clear()
-                .map_err(map_mutation_error)
+            with_autorelease_pool(|| {
+                inner
+                    .lock()
+                    .map_err(|_| poisoned())?
+                    .clear()
+                    .map_err(map_mutation_error)
+            })
         })
         .await
         .map_err(|error| {

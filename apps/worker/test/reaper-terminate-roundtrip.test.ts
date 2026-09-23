@@ -17,13 +17,14 @@
 // this test does not mock @opengeni/runtime globally and poison unrelated tests.
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testSettings } from "@opengeni/testing";
 import * as runtime from "@opengeni/runtime";
 import {
   SandboxProviderCaptureTimeoutError,
+  awaitProviderCaptureWithLatePublication,
   terminateProviderBox,
 } from "../src/activities/sandbox-lease";
 
@@ -78,6 +79,88 @@ const observability = {
 } as never;
 
 describe("reaper terminate envelope→resume round-trip preserves sandboxId", () => {
+  test.skipIf(process.platform !== "linux").each([false, true])(
+    "disk-backed drain owns its spool through publication (failure=%s)",
+    async (failPublication) => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-spool-drain-"));
+      writeFileSync(join(root, "retained.txt"), "retained workspace");
+      let deleted = false;
+      let spoolPath: string | undefined;
+      const client = {
+        backendId: "docker",
+        async deserializeSessionState(state: Record<string, unknown>) {
+          return { ...state };
+        },
+        async resume(state: Record<string, unknown>) {
+          return {
+            state,
+            persistWorkspace: async () => {
+              throw new Error("whole archive capture forbidden");
+            },
+            delete: async () => {
+              deleted = true;
+            },
+          };
+        },
+      };
+      try {
+        const operation = terminateProviderBox(
+          testSettings({ sandboxBackend: "docker", sandboxOwnershipEnabled: true }),
+          {
+            sandboxGroupId: "spool-drain",
+            leaseEpoch: 4,
+            backend: "docker",
+            instanceId: "docker-spool",
+            resumeBackendId: "docker",
+            resumeState: {
+              backendId: "docker",
+              sessionState: {
+                providerState: {
+                  containerId: "docker-spool",
+                  workspaceRootPath: root,
+                  workspaceRootOwned: true,
+                },
+              },
+            },
+          } as never,
+          observability,
+          async (archive) => {
+            if (!archive || typeof archive === "string")
+              throw new Error("expected disk-backed archive");
+            spoolPath = archive.spool.path;
+            expect(existsSync(spoolPath)).toBe(true);
+            expect(deleted).toBe(false);
+            const payload = JSON.parse(readFileSync(spoolPath, "utf8"));
+            expect(payload.files).toEqual([
+              { path: "retained.txt", data: Buffer.from("retained workspace").toString("base64") },
+            ]);
+            if (failPublication) throw new Error("synthetic publication failure");
+            return { wrote: true };
+          },
+          (() => client) as never,
+          undefined,
+          "stable-provider-request",
+          "capture_required",
+          undefined,
+          true,
+        );
+        if (failPublication)
+          await expect(operation).rejects.toThrow("synthetic publication failure");
+        else
+          expect(await operation).toEqual({
+            terminated: true,
+            providerMissingBeforeCapture: false,
+          });
+        expect(deleted).toBe(!failPublication);
+        expect(spoolPath).toBeDefined();
+        expect(existsSync(spoolPath!)).toBe(false);
+        expect(readFileSync(join(root, "retained.txt"), "utf8")).toBe("retained workspace");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("normalizes the SDK local ID and cold-commits an unavailable process-local workspace", async () => {
     const clientBuilds: string[] = [];
     const localClient = {
@@ -330,79 +413,190 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     expect(deleteCalls).toEqual(["sb-published"]);
   });
 
-  test("a generic provider timeout preserves and late-publishes the exact capture without teardown", async () => {
-    let resolveCapture!: (bytes: Uint8Array) => void;
-    const providerCapture = new Promise<Uint8Array>((resolve) => {
-      resolveCapture = resolve;
+  test("late publication rejection is never mistaken for capture rejection", async () => {
+    let resolveCapture!: (value: string) => void;
+    let resolveFailure!: () => void;
+    const observed = new Promise<void>((resolve) => {
+      resolveFailure = resolve;
     });
-    let deleteCount = 0;
-    const client = {
-      backendId: "modal",
-      async deserializeSessionState(state: Record<string, unknown>) {
-        return { ...state };
-      },
-      async resume(state: { sandboxId?: unknown }) {
-        return {
-          state: { sandboxId: state.sandboxId },
-          exec: async () => ({ stdout: TEST_WORKSPACE_FINGERPRINT }),
-          persistWorkspace: async () => await providerCapture,
-          kill: async () => {},
-          closed: false,
-          modal: { images: { delete: async () => {} } },
-        };
-      },
-      async resumeExact(state: { sandboxId?: unknown }) {
-        return await this.resume(state);
-      },
-      async delete() {
-        deleteCount += 1;
-      },
-    };
-    let resolvePublished!: () => void;
-    const published = new Promise<void>((resolve) => {
-      resolvePublished = resolve;
-    });
-    let publishedArchive: string | null = null;
-    const operation = terminateProviderBox(
-      testSettings({
-        sandboxBackend: "modal",
-        sandboxOwnershipEnabled: true,
-        sandboxSnapshotTimeoutMs: 10,
-      }),
-      {
-        sandboxGroupId: "group-late-capture",
-        leaseEpoch: 3,
-        backend: "modal",
-        instanceId: "sb-late-capture",
-        resumeBackendId: "modal",
-        resumeState: {
-          backendId: "modal",
-          sessionState: { providerState: { sandboxId: "sb-late-capture" } },
+    let captureFailures = 0;
+    const timeout = new SandboxProviderCaptureTimeoutError("group", "modal", 10, 1, "sb");
+    await expect(
+      awaitProviderCaptureWithLatePublication({
+        capture: new Promise<string>((resolve) => {
+          resolveCapture = resolve;
+        }),
+        timeoutMs: 10,
+        timeoutError: timeout,
+        publishLate: async () => {
+          throw new Error("spool cleanup failed");
         },
-      } as never,
-      observability,
-      async (archive) => {
-        publishedArchive = archive;
-        resolvePublished();
-        return { wrote: true };
-      },
-      (() => client) as never,
-    );
-
-    await expect(operation).rejects.toBeInstanceOf(SandboxProviderCaptureTimeoutError);
-    expect(deleteCount).toBe(0);
-    resolveCapture(
-      new TextEncoder().encode('MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-late"}'),
-    );
-    await Promise.race([
-      published,
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("late capture did not publish")), 1_000),
-      ),
-    ]);
-    expect(publishedArchive).not.toBeNull();
-    expect(deleteCount).toBe(0);
+        observeLateFailure: () => {
+          captureFailures++;
+        },
+        observeLatePublicationFailure: () => {
+          resolveFailure();
+        },
+      }),
+    ).rejects.toBe(timeout);
+    resolveCapture("successful snapshot");
+    await observed;
+    expect(captureFailures).toBe(0);
   });
+
+  test.each(["success", "failure"])(
+    "a timed-out capture settles safely after late %s",
+    async (outcome) => {
+      let resolveCapture!: (bytes: Uint8Array) => void;
+      let rejectCapture!: (error: Error) => void;
+      const providerCapture = new Promise<Uint8Array>((resolve, reject) => {
+        resolveCapture = resolve;
+        rejectCapture = reject;
+      });
+      let releaseCount = 0;
+      let resolveReleased!: () => void;
+      const released = new Promise<void>((resolve) => {
+        resolveReleased = resolve;
+      });
+      let deleteCount = 0;
+      const client = {
+        backendId: "modal",
+        async deserializeSessionState(state: Record<string, unknown>) {
+          return { ...state };
+        },
+        async resume(state: { sandboxId?: unknown }) {
+          return {
+            state: { sandboxId: state.sandboxId },
+            exec: async () => ({ stdout: TEST_WORKSPACE_FINGERPRINT }),
+            persistWorkspace: async () => await providerCapture,
+            kill: async () => {},
+            closed: false,
+            modal: { images: { delete: async () => {} } },
+          };
+        },
+        async resumeExact(state: { sandboxId?: unknown }) {
+          return await this.resume(state);
+        },
+        async delete() {
+          deleteCount += 1;
+        },
+      };
+      let resolvePublished!: () => void;
+      const published = new Promise<void>((resolve) => {
+        resolvePublished = resolve;
+      });
+      let publishedArchive: string | null = null;
+      const operation = terminateProviderBox(
+        testSettings({
+          sandboxBackend: "modal",
+          sandboxOwnershipEnabled: true,
+          sandboxSnapshotTimeoutMs: 10,
+        }),
+        {
+          sandboxGroupId: "group-late-capture",
+          leaseEpoch: 3,
+          backend: "modal",
+          instanceId: "sb-late-capture",
+          resumeBackendId: "modal",
+          resumeState: {
+            backendId: "modal",
+            sessionState: { providerState: { sandboxId: "sb-late-capture" } },
+          },
+        } as never,
+        observability,
+        async (archive) => {
+          publishedArchive = archive;
+          resolvePublished();
+          return { wrote: true };
+        },
+        (() => client) as never,
+        undefined,
+        undefined,
+        "capture_required",
+        undefined,
+        false,
+        async () => {
+          releaseCount++;
+          resolveReleased();
+        },
+      );
+
+      await expect(operation).rejects.toBeInstanceOf(SandboxProviderCaptureTimeoutError);
+      expect(deleteCount).toBe(0);
+      expect(releaseCount).toBe(0);
+      if (outcome === "success") {
+        resolveCapture(
+          new TextEncoder().encode('MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-late"}'),
+        );
+      } else {
+        rejectCapture(new Error("provider capture failed"));
+      }
+      await Promise.race([
+        outcome === "success" ? published : released,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("late capture did not publish")), 1_000),
+        ),
+      ]);
+      expect(releaseCount).toBe(outcome === "success" ? 0 : 1);
+      if (outcome === "success") expect(publishedArchive).not.toBeNull();
+      else expect(publishedArchive).toBeNull();
+      expect(deleteCount).toBe(0);
+    },
+  );
+
+  test.each(["capture", "publish", "delete"])(
+    "releases an unpublished claim only for a settled capture failure (%s)",
+    async (phase) => {
+      const client = makeFakeModalClient();
+      const resume = client.resumeExact;
+      client.resumeExact = async (state) => {
+        const session = await resume(state);
+        if (phase === "capture")
+          session.persistWorkspace = async () => {
+            throw new Error("capture failed");
+          };
+        return session;
+      };
+      let deleted = false;
+      client.delete = async () => {
+        deleted = true;
+        throw new Error("delete failed");
+      };
+      let released = 0;
+      await expect(
+        terminateProviderBox(
+          testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true }),
+          {
+            sandboxGroupId: "failed-capture",
+            leaseEpoch: 3,
+            backend: "modal",
+            instanceId: "sb-failed",
+            resumeBackendId: "modal",
+            resumeState: {
+              backendId: "modal",
+              sessionState: { providerState: { sandboxId: "sb-failed" } },
+            },
+          } as never,
+          observability,
+          async () => {
+            if (phase === "publish") throw new Error("publish failed");
+            return { wrote: true };
+          },
+          (() => client) as never,
+          undefined,
+          undefined,
+          "capture_required",
+          undefined,
+          false,
+          async () => {
+            released++;
+          },
+        ),
+      ).rejects.toThrow(`${phase} failed`);
+      expect(released).toBe(phase === "capture" ? 1 : 0);
+      expect(deleted).toBe(phase === "delete");
+    },
+  );
 
   test("a Modal warming-death record uses the exact attributed instance without guessing an envelope", async () => {
     const directTerminateCalls: string[] = [];
@@ -700,69 +894,99 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     expect(persistCalls).toEqual([]);
   });
 
-  test("a persistWorkspace failure does NOT terminate the box (re-throws → lease stays draining)", async () => {
-    resumeCalls.length = 0;
-    deleteCalls.length = 0;
+  test.each([false, true])(
+    "capture failure releases its claim without terminating even if logging throws (%s)",
+    async (throwingLogger) => {
+      resumeCalls.length = 0;
+      deleteCalls.length = 0;
 
-    // A client whose resumed session FAILS to snapshot (provider snapshot error).
-    const failClient = {
-      backendId: "modal",
-      async deserializeSessionState(state: Record<string, unknown>) {
-        return { ...state, ownsSandbox: true };
-      },
-      async resume() {
-        resumeCalls.push("sb-nosnap");
-        return {
-          state: { sandboxId: "sb-nosnap" },
-          kill: async () => {},
-          closed: false,
-          exec: async () => ({ stdout: TEST_WORKSPACE_FINGERPRINT }),
-          persistWorkspace: async () => {
-            throw new Error("Modal snapshot_filesystem persistence timed out.");
+      // A client whose resumed session FAILS to snapshot (provider snapshot error).
+      const failClient = {
+        backendId: "modal",
+        async deserializeSessionState(state: Record<string, unknown>) {
+          return { ...state, ownsSandbox: true };
+        },
+        async resume() {
+          resumeCalls.push("sb-nosnap");
+          return {
+            state: { sandboxId: "sb-nosnap" },
+            kill: async () => {},
+            closed: false,
+            exec: async () => ({ stdout: TEST_WORKSPACE_FINGERPRINT }),
+            persistWorkspace: async () => {
+              throw new Error("Modal snapshot_filesystem persistence timed out.");
+            },
+          };
+        },
+        async resumeExact() {
+          return await this.resume();
+        },
+        async serializeSessionState(state: Record<string, unknown>) {
+          return { ...state };
+        },
+        async delete(state: { sandboxId?: unknown }) {
+          deleteCalls.push(state?.sandboxId as string | undefined);
+        },
+      };
+
+      const established = {
+        client: failClient,
+        session: {},
+        sessionState: { sandboxId: "sb-nosnap", appName: "app", imageTag: "tag" },
+        instanceId: "sb-nosnap",
+        backendId: "modal",
+      };
+      const resumeState = await runtime.serializeEstablishedSandboxEnvelope(established as never);
+      const lease = {
+        sandboxGroupId: "group-nosnap",
+        leaseEpoch: 1,
+        backend: "modal",
+        instanceId: "sb-nosnap",
+        resumeBackendId: "modal",
+        resumeState,
+      };
+      const settings = testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true });
+
+      const persistArchive = async () => ({ wrote: true as const });
+      let released = false;
+      const warnings: any[] = [];
+      const captureLogger = {
+        info() {},
+        warn(_message: string, fields: unknown) {
+          warnings.push(fields);
+          if (throwingLogger) throw Error("log sink failed");
+        },
+      };
+
+      // The snapshot failure must propagate (so the caller skips + leaves the lease
+      // draining); the box is NEVER terminated with un-captured files. The failing
+      // client is injected explicitly (no global @opengeni/runtime mock).
+      await expect(
+        terminateProviderBox(
+          settings,
+          lease as never,
+          captureLogger as never,
+          persistArchive,
+          ((backend: string) => (backend === "modal" ? failClient : undefined)) as never,
+          undefined,
+          undefined,
+          "capture_required",
+          undefined,
+          false,
+          async () => {
+            released = true;
           },
-        };
-      },
-      async resumeExact() {
-        return await this.resume();
-      },
-      async serializeSessionState(state: Record<string, unknown>) {
-        return { ...state };
-      },
-      async delete(state: { sandboxId?: unknown }) {
-        deleteCalls.push(state?.sandboxId as string | undefined);
-      },
-    };
-
-    const established = {
-      client: failClient,
-      session: {},
-      sessionState: { sandboxId: "sb-nosnap", appName: "app", imageTag: "tag" },
-      instanceId: "sb-nosnap",
-      backendId: "modal",
-    };
-    const resumeState = await runtime.serializeEstablishedSandboxEnvelope(established as never);
-    const lease = {
-      sandboxGroupId: "group-nosnap",
-      leaseEpoch: 1,
-      backend: "modal",
-      instanceId: "sb-nosnap",
-      resumeBackendId: "modal",
-      resumeState,
-    };
-    const settings = testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true });
-
-    const persistArchive = async () => ({ wrote: true as const });
-
-    // The snapshot failure must propagate (so the caller skips + leaves the lease
-    // draining); the box is NEVER terminated with un-captured files. The failing
-    // client is injected explicitly (no global @opengeni/runtime mock).
-    await expect(
-      terminateProviderBox(settings, lease as never, observability, persistArchive, ((
-        backend: string,
-      ) => (backend === "modal" ? failClient : undefined)) as never),
-    ).rejects.toThrow(/snapshot_filesystem persistence timed out/);
-    expect(deleteCalls).toHaveLength(0); // box deliberately NOT terminated
-  });
+          "workspace-nosnap",
+        ),
+      ).rejects.toThrow(/snapshot_filesystem persistence timed out/);
+      expect(deleteCalls).toHaveLength(0); // box deliberately NOT terminated
+      expect(released).toBe(true);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0].errorClass).toBe("SnapshotOperationError");
+      expect(warnings[0].sandboxLeaseKey).toMatch(/^slk_[0-9a-f]{32}$/);
+      expect(warnings[0].leaseEpoch).toBe(1);
+    },
+  );
 
   test("provider NotFound before capture is returned as typed missing-workspace evidence", async () => {
     const notFoundClient = {

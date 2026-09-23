@@ -122,7 +122,7 @@ export function FormField({
   return (
     <label
       data-slot="form-field"
-      className={cn("grid min-w-0 gap-1.5 text-xs font-medium text-fg-subtle", className)}
+      className={cn("grid min-w-0 gap-1.5 text-sm font-medium text-fg-subtle", className)}
       {...props}
     >
       <span>{label}</span>

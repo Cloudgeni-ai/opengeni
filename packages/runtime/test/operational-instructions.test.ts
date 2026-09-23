@@ -1,9 +1,89 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import { buildOpenGeniAgent } from "../src/index";
+import { buildOpenGeniAgent, CODEMODE_PROGRAMMATIC_DIRECTIVE } from "../src/index";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 
 describe("provider-neutral operational instructions", () => {
+  test("routes missing integrations through one provider-neutral human setup flow", () => {
+    const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf("# Integration setup");
+    const end = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf("# Session coordination", start);
+    const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
+    expect(start).toBeGreaterThan(-1);
+    expect(guidance).toContain("`capability_catalog_search`");
+    expect(guidance).toContain("`capability_authorization_request`");
+    expect(guidance).toContain("Use available integration tools directly");
+    expect(guidance).toContain("`setup.nextAction`");
+    expect(guidance).toContain("does not need integration-management permission");
+    expect(guidance).toContain("authenticated human must authorize");
+    expect(guidance).not.toMatch(/github|gmail|slack|atlassian/i);
+    expect(guidance.length).toBeLessThan(1000);
+  });
+
+  test("asks about out-of-scope architecture without blocking authorized choices", () => {
+    const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
+      "Decide the design before building it.",
+    );
+    const end = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf("# Destructive Actions", start);
+    const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(guidance).toContain("check whether OpenGeni already provides the capability natively");
+    expect(guidance).toContain(
+      "a Site reaches the model and workspace tools through the host bridge",
+    );
+    expect(guidance).toContain(
+      "Follow the project's established architecture and choices the user has already authorized or delegated",
+    );
+    expect(guidance).toContain(
+      "Ask before making a new external commitment or materially departing from the established architecture beyond the authorized scope",
+    );
+    expect(guidance).toContain("do not start parallel work that assumes the unresolved choice");
+    expect(guidance).toContain("The absence of a native path alone does not require a question");
+    expect(guidance).not.toContain(
+      "Do not commit to a host, provider, or credential the user did not name",
+    );
+    expect(guidance.length).toBeLessThan(1000);
+  });
+
+  test("allows Connect cards for established or delegated designs", () => {
+    const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf("# Integration setup");
+    const end = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf("# Session coordination", start);
+    const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
+    expect(guidance).toContain(
+      "A card is for an integration required by the authorized design, including established or delegated choices",
+    );
+    expect(guidance).toContain("Resolve out-of-scope architecture choices before requesting setup");
+  });
+
+  test("separates command observation from conversation and diagnostic reads concisely", () => {
+    const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
+      "Use `session_events` for conversation history",
+    );
+    const end = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf("If the user asks to create", start);
+    const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(guidance).toContain("Cursors only paginate");
+    expect(guidance).toContain("Audit reads do not acknowledge command completion");
+    expect(guidance).toContain("`command_read`");
+    expect(guidance).toContain("`command_wait`");
+    expect(guidance).toContain("`command_input` only to send input");
+    expect(guidance).toContain("a running read does not");
+    expect(guidance).toContain("Earlier tool results and delivered messages never change");
+    expect(guidance.length).toBeLessThan(1600);
+  });
+
+  test("prefers the attempt-provided native Codemode client over an older installed CLI", () => {
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "prefer the connection-bound native client even if an older `ogtool` is installed",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("OPENGENI_CODEMODE_NATIVE_CLIENT");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("OPENGENI_CODEMODE_CLIENT_MODULE");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "do not import the older image-baked package",
+    );
+  });
+
   test("does not carry Codex-only runtime language", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("You are Codex");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("GPT-5");
@@ -18,7 +98,7 @@ describe("provider-neutral operational instructions", () => {
   test("teaches OpenGeni sandbox file links with optional line numbers", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.py](sandbox:/workspace/app.py:12)");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "[My Report.md](<sandbox:/workspace/My Project/My Report.md:3>)",
+      "[My Component.ts](<sandbox:/workspace/My Project/My Component.ts:3>)",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "a Connected Machine instead uses its host-native workspace root",
@@ -29,7 +109,9 @@ describe("provider-neutral operational instructions", () => {
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.py](sandbox:/home/u/proj/app.py:12)");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.ts](<sandbox:C:/repo/app.ts:12>)");
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Never link directly to `/tmp`");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "In managed sandboxes, never link directly to `/tmp`",
+    );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "or any file outside the current workspace",
     );
@@ -37,9 +119,51 @@ describe("provider-neutral operational instructions", () => {
       "copy it into the current workspace before responding",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("canonical sandbox path");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "absolute file links may point outside the working directory",
+    );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("a host path");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("host-absolute paths");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not provide ranges of lines.");
+  });
+
+  test("routes direct and secondary reports before local-file formatting guidance", () => {
+    const reportRouting = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
+      "User-facing reports are durable document Artifacts by default",
+    );
+    const localLinks = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
+      "When referencing a real local source file",
+    );
+    expect(reportRouting).toBeGreaterThan(-1);
+    expect(localLinks).toBeGreaterThan(reportRouting);
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "including audit or summary reports produced while doing another task",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Read the opengeni-documents Skill and create the native document artifact before authoring",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "including reports discovered after a goal was created",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Inspect the relevant final artifact head after the last edit",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("artifact reference returned by the tools");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("My Report.md");
+  });
+
+  test("keeps failed report delivery incomplete without banning legitimate local links", () => {
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "If artifact creation, inspection, access, or delivery tooling is unavailable or fails",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("leave report delivery incomplete");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Do not silently fall back to a sandbox link",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Ordinary in-chat answers, brief progress updates, internal worker findings, source-code navigation, and explicitly requested local-file workflows do not become report deliverables",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.py](sandbox:/workspace/app.py:12)");
   });
 
   test("is non-configurable and precedes every workspace persona", () => {
@@ -76,5 +200,32 @@ describe("provider-neutral operational instructions", () => {
       "A `goal.completed` event records goal state but is not a terminal child result",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("continuation segment settlements");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("pausing an ancestor also stops you");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Keep the accepted update/turn ID");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "an older in-flight turn finishing does not prove your input was consumed",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not repeatedly send unconsumed input");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Preserve explicit human pauses and approvals",
+    );
+  });
+
+  test("holds an unchanged external wait during the status turn without stalling useful work", () => {
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Do not end with only a status reply and leave an immediate continuation",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "only when further progress genuinely depends on unchanged work already in flight",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Do not use `wait_for_input` for work you can still advance or for a blocker that requires a human decision.",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "after calling `wait_for_input`, end without another final or status restatement unless you found material new information",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "except for the unchanged-wait `wait_for_input` continuation described above",
+    );
   });
 });

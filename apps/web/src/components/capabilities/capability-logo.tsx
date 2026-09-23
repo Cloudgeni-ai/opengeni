@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { capabilityMonogram } from "@/lib/capabilities";
 import { cn } from "@/lib/utils";
@@ -23,7 +23,7 @@ export function CapabilityLogo({
   size?: "sm" | "md" | "lg";
   className?: string;
   /** Optional reviewed initials for named products; catalog rows derive them from the name. */
-  fallback?: string;
+  fallback?: ReactNode;
 }) {
   const [failed, setFailed] = useState(false);
   // A new src (e.g. switching the sheet to another item) gets a fresh attempt.

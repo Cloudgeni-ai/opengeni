@@ -138,7 +138,9 @@ export function useGoal(
       return;
     }
     if (sharedFeed) {
-      setLoading(false);
+      // A shared log supplies invalidations, not the authoritative goal snapshot.
+      setLoading(true);
+      void load();
       return () => {
         retireLoads();
       };

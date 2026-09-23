@@ -1,4 +1,5 @@
 import type {
+  FileSystemRouteIdentity,
   FsChangedPayload,
   FsReadResponse,
   FsTreeNode,
@@ -84,6 +85,9 @@ export type UseSandboxFilesOptions = ClientOverride & {
   events?: SessionEvent[] | undefined;
   /** Initial path to list (workspace root by default). */
   rootPath?: string | undefined;
+  /** Exact capability identity for the selected filesystem route. A route/root
+   * change resets this hook and makes stale provider requests fail retryably. */
+  route?: FileSystemRouteIdentity | undefined;
   /** Hold off the initial list (e.g. panel collapsed). Default true. */
   enabled?: boolean | undefined;
   /** Pause live reads/invalidation while preserving the last rendered result. */
@@ -169,8 +173,12 @@ function normalizeRoot(root: string): string {
   return normalized === "." ? "" : normalized;
 }
 
+function isAbsoluteTreePath(path: string): boolean {
+  return path.startsWith("/") || /^[A-Za-z]:\//u.test(path);
+}
+
 function joinTreeRoot(root: string, path: string): string {
-  if (!root || path.startsWith("/")) return path;
+  if (!root || isAbsoluteTreePath(path)) return path;
   return root === "/" ? `/${path}` : `${root}/${path}`;
 }
 
@@ -301,6 +309,7 @@ const FS_LIST_BATCH_REQUEST_LIMIT = 16;
 function initialDirectoryFrontier(rootPath: string, repoPaths: readonly string[]): string[] {
   const root = normalizeRoot(rootPath);
   const rootParts = root.split("/").filter(Boolean);
+  const rootPrefix = root.startsWith("//") ? "//" : root.startsWith("/") ? "/" : "";
   const paths = new Set<string>();
   for (const repoPath of repoPaths) {
     const canonicalRepoPath = joinTreeRoot(root, normalizeRoot(repoPath));
@@ -308,7 +317,7 @@ function initialDirectoryFrontier(rootPath: string, repoPaths: readonly string[]
     if (rootParts.some((part, index) => parts[index] !== part)) continue;
     for (let depth = rootParts.length + 1; depth <= parts.length; depth += 1) {
       const path = parts.slice(0, depth).join("/");
-      paths.add(root.startsWith("/") ? `/${path}` : path);
+      paths.add(`${rootPrefix}${path}`);
     }
   }
   // A workspace with hundreds of repositories should remain lazy. This still
@@ -491,6 +500,15 @@ export function useSandboxFiles(
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const active = options.active ?? true;
   const rootPath = options.rootPath ?? "";
+  const routeEpoch = options.route?.epoch ?? null;
+  const routeRoot = options.route?.root ?? null;
+  const route = useMemo<FileSystemRouteIdentity | undefined>(
+    () =>
+      routeEpoch !== null && routeRoot !== null
+        ? { epoch: routeEpoch, root: routeRoot }
+        : undefined,
+    [routeEpoch, routeRoot],
+  );
   const repoPathsKey = [
     ...new Set((options.repoPaths?.length ? options.repoPaths : [rootPath]).map(normalizeRoot)),
   ].join("\u0000");
@@ -503,7 +521,7 @@ export function useSandboxFiles(
   const acceptsEventReadsRef = useRef(acceptsEventReads);
   acceptsEventReadsRef.current = acceptsEventReads;
   const hasLiveIoFence = options.liveness !== undefined;
-  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${rootPath}\u0000${repoPathsKey}`;
+  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${rootPath}\u0000${repoPathsKey}\u0000${routeEpoch ?? ""}\u0000${routeRoot ?? ""}`;
 
   const [tree, setTree] = useState<FileTreeNode[]>([]);
   // A ref mirror of the current tree — lets the optimistic path snapshot the
@@ -597,6 +615,7 @@ export function useSandboxFiles(
       const listRequests = [rootPath, ...frontierPaths].map((path) => ({
         path,
         depth: 1,
+        ...(route ? { route } : {}),
       }));
       // Root plus the bounded repository frontier share one API request, one
       // direct holder, and one provider attach. The old per-directory fan-out
@@ -677,7 +696,7 @@ export function useSandboxFiles(
       if (refreshGenerationRef.current === generation) setGitLoading(false);
       if (refreshAbortRef.current === refreshAbort) refreshAbortRef.current = null;
     }
-  }, [client, workspaceId, sessionId, rootPath, repoPaths, applyStatus]);
+  }, [client, workspaceId, sessionId, rootPath, repoPaths, route, applyStatus]);
 
   // Seed (or re-seed) the tree from a turn-end capture — the COLD/offline paint,
   // zero Channel-A calls. The tree index is workspace-relative (`treeIndex`); the
@@ -737,7 +756,7 @@ export function useSandboxFiles(
         const listed = await client.fsList(
           workspaceId,
           sessionId,
-          { path, depth: 1 },
+          { path, depth: 1, ...(route ? { route } : {}) },
           { signal: identitySignal },
         );
         if (identityGenerationRef.current !== identityGeneration) return;
@@ -757,7 +776,7 @@ export function useSandboxFiles(
         }
       }
     },
-    [client, workspaceId, sessionId, capture, source, applyStatus],
+    [client, workspaceId, sessionId, capture, source, route, applyStatus],
   );
 
   const readFile = useCallback(
@@ -850,9 +869,14 @@ export function useSandboxFiles(
         }
         throw new Error("Captured file download failed after refreshing its URL.");
       }
-      return await client.fsRead(workspaceId, sessionId, { path }, { signal });
+      return await client.fsRead(
+        workspaceId,
+        sessionId,
+        { path, ...(route ? { route } : {}) },
+        { signal },
+      );
     },
-    [client, workspaceId, sessionId, capture, source],
+    [client, workspaceId, sessionId, capture, source, route],
   );
 
   // TARGETED reconcile of a single directory — re-list ONE parent at depth 1 and
@@ -874,7 +898,12 @@ export function useSandboxFiles(
       // visible to update; they re-list fresh on the next expand).
       if (!parentIsLoaded(treeRef.current, path, rootPath)) return;
       try {
-        const listed = await client.fsList(workspaceId, sessionId, { path, depth: 1 }, { signal });
+        const listed = await client.fsList(
+          workspaceId,
+          sessionId,
+          { path, depth: 1, ...(route ? { route } : {}) },
+          { signal },
+        );
         if (identityGenerationRef.current !== identityGeneration) return;
         const children = (listed.root.children ?? []).map((node) => fsNodeToTree(node));
         if (path === normalizeRoot(rootPath)) {
@@ -892,7 +921,7 @@ export function useSandboxFiles(
         // root-refresh here (that would collapse the tree the user is working in).
       }
     },
-    [client, workspaceId, sessionId, rootPath, applyStatus],
+    [client, workspaceId, sessionId, rootPath, route, applyStatus],
   );
 
   // Reconcile the visible directory frontier through bounded batch requests.
@@ -915,7 +944,13 @@ export function useSandboxFiles(
           const listed = await client.fsListBatch(
             workspaceId,
             sessionId,
-            { requests: chunk.map((path) => ({ path, depth: 1 })) },
+            {
+              requests: chunk.map((path) => ({
+                path,
+                depth: 1,
+                ...(route ? { route } : {}),
+              })),
+            },
             { signal },
           );
           if (identityGenerationRef.current !== identityGeneration) return;
@@ -943,7 +978,7 @@ export function useSandboxFiles(
         }
       }
     },
-    [client, workspaceId, sessionId, rootPath, applyStatus],
+    [client, workspaceId, sessionId, rootPath, route, applyStatus],
   );
 
   // Run a Channel-A op behind an OPTIMISTIC tree edit. `apply` splices the change
@@ -1027,7 +1062,7 @@ export function useSandboxFiles(
             const live = await client.fsRead(
               workspaceId,
               sessionId,
-              { path },
+              { path, ...(route ? { route } : {}) },
               { signal: identitySignal },
             );
             if (identityGenerationRef.current !== identityGeneration) {
@@ -1046,12 +1081,13 @@ export function useSandboxFiles(
             path,
             content,
             overwrite: true,
+            ...(route ? { route } : {}),
           });
         },
         exists ? [] : [parent],
       );
     },
-    [client, workspaceId, sessionId, tree, rootPath, runOptimistic],
+    [client, workspaceId, sessionId, tree, rootPath, route, runOptimistic],
   );
 
   const createFile = useCallback(
@@ -1072,11 +1108,12 @@ export function useSandboxFiles(
             path,
             content: "",
             overwrite: false,
+            ...(route ? { route } : {}),
           }),
         [parent],
       );
     },
-    [client, workspaceId, sessionId, rootPath, runOptimistic],
+    [client, workspaceId, sessionId, rootPath, route, runOptimistic],
   );
 
   const createDir = useCallback(
@@ -1094,11 +1131,16 @@ export function useSandboxFiles(
       await runOptimistic(
         "create folder",
         (nodes) => insertNode(nodes, parent, node, rootPath),
-        () => client.fsMkdir(workspaceId, sessionId, { path, recursive: true }),
+        () =>
+          client.fsMkdir(workspaceId, sessionId, {
+            path,
+            recursive: true,
+            ...(route ? { route } : {}),
+          }),
         [parent],
       );
     },
-    [client, workspaceId, sessionId, rootPath, runOptimistic],
+    [client, workspaceId, sessionId, rootPath, route, runOptimistic],
   );
 
   const deleteEntry = useCallback(
@@ -1107,11 +1149,16 @@ export function useSandboxFiles(
       await runOptimistic(
         "delete",
         (nodes) => removeNode(nodes, path, rootPath),
-        () => client.fsDelete(workspaceId, sessionId, { path, recursive }),
+        () =>
+          client.fsDelete(workspaceId, sessionId, {
+            path,
+            recursive,
+            ...(route ? { route } : {}),
+          }),
         [parentWithinTree(path, rootPath)],
       );
     },
-    [client, workspaceId, sessionId, rootPath, runOptimistic],
+    [client, workspaceId, sessionId, rootPath, route, runOptimistic],
   );
 
   const moveEntry = useCallback(
@@ -1133,11 +1180,12 @@ export function useSandboxFiles(
             path,
             newPath,
             overwrite: opts?.overwrite ?? false,
+            ...(route ? { route } : {}),
           }),
         to === from ? [from] : [from, to],
       );
     },
-    [client, workspaceId, sessionId, rootPath, runOptimistic],
+    [client, workspaceId, sessionId, rootPath, route, runOptimistic],
   );
 
   // Initial paint + reset on identity change. Source selection:

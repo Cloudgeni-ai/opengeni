@@ -22,6 +22,7 @@ import {
   getWorkspaceOpenRouterCustomModelForExecution,
   listSessionMcpServerMetadata,
   listSessionMcpServersForRun,
+  getSessionAttemptMcpApprovalPolicies,
   listWorkspaceGatewayCustomModels,
   listWorkspaceOpenRouterCustomModels,
   workspaceCodexSubscriptionActive,
@@ -47,10 +48,24 @@ export async function settingsWithSessionMcpServersForRun(
   },
 ): Promise<Settings> {
   const encryptionKey = environmentsEncryptionKeyBytes(settings);
+  const policies = await getSessionAttemptMcpApprovalPolicies(
+    db,
+    workspaceId,
+    sessionId,
+    attemptId,
+  );
+  const policySettings = {
+    ...settings,
+    mcpServers: settings.mcpServers.map((server) =>
+      Object.hasOwn(policies, server.id)
+        ? { ...server, requireApproval: policies[server.id] }
+        : server,
+    ),
+  };
   if (!encryptionKey) {
     const metadata = await listSessionMcpServerMetadata(db, workspaceId, sessionId);
     if (metadata.length === 0) {
-      return settings;
+      return policySettings;
     }
     if (metadata.some((server) => server.headerNames.length > 0)) {
       throw new Error(
@@ -69,7 +84,7 @@ export async function settingsWithSessionMcpServersForRun(
   // overlaid into settings. A session projection read earlier in the turn can
   // be stale after a concurrent mcpCredentialUpdates renewal.
   options?.onResolvedServers?.(servers);
-  return settingsWithSessionMcpServers(settings, servers);
+  return settingsWithSessionMcpServers(policySettings, servers);
 }
 
 export function settingsWithSessionMcpServers(
@@ -149,7 +164,10 @@ export async function settingsWithWorkspaceGatewayCredential(
   settings: Settings,
   retainedProductModelId?: string | null,
 ): Promise<Settings> {
-  const activeCustomModels = await listWorkspaceGatewayCustomModels(db, { accountId, workspaceId });
+  const activeCustomModels = await listWorkspaceGatewayCustomModels(db, {
+    accountId,
+    workspaceId,
+  });
   const retainedUpstreamModelId = retainedProductModelId?.startsWith(
     WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   )
@@ -170,7 +188,12 @@ export async function settingsWithWorkspaceGatewayCredential(
       ? [...activeCustomModels, retainedCustomModel]
       : activeCustomModels;
   const catalogSettings = withWorkspaceGatewayCatalogProvider(settings, customModels);
-  const apiKey = await loadWorkspaceVercelAiGatewayApiKey(db, settings, workspaceId);
+  const apiKey = await loadWorkspaceVercelAiGatewayApiKey(
+    db,
+    settings,
+    workspaceId,
+    retainedProductModelId,
+  );
   return apiKey
     ? withWorkspaceGatewayCredential(catalogSettings, apiKey, customModels)
     : catalogSettings;
@@ -207,7 +230,12 @@ export async function settingsWithWorkspaceOpenRouterCredential(
       ? [...activeCustomModels, retainedCustomModel]
       : activeCustomModels;
   const catalogSettings = withWorkspaceOpenRouterCatalogProvider(settings, customModels);
-  const apiKey = await loadWorkspaceOpenRouterApiKey(db, settings, workspaceId);
+  const apiKey = await loadWorkspaceOpenRouterApiKey(
+    db,
+    settings,
+    workspaceId,
+    retainedProductModelId,
+  );
   return apiKey
     ? withWorkspaceOpenRouterCredential(catalogSettings, apiKey, customModels)
     : catalogSettings;

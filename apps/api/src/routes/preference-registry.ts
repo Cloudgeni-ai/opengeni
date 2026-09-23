@@ -1,8 +1,5 @@
 import {
-  ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
-  CorrectPreferenceRegistryRequest,
-  CreatePreferenceRegistryProposalRequest,
   DeactivatePreferenceRegistryRequest,
   PreferenceRegistryConflictResponse,
   PreferenceRegistryDetailResponse,
@@ -11,7 +8,6 @@ import {
   PreferenceRegistryListQuery,
   PreferenceRegistryListResponse,
   PreferenceRegistryMutationResponse,
-  PreferenceRegistryRecord,
   PreferenceRegistrySnapshot,
   RejectPreferenceRegistryProposalRequest,
   SupersedePreferenceRegistryRequest,
@@ -26,10 +22,7 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
-  activatePreferenceRegistryRevision,
   changePreferenceRegistryScope,
-  correctPreferenceRegistry,
-  createPreferenceRegistryProposal,
   deactivatePreferenceRegistry,
   getOrCreatePreferenceRegistrySnapshot,
   getPreferenceRegistryDetail,
@@ -214,34 +207,20 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
     }
   });
 
-  app.post(`${base}/proposals`, async (context) => {
-    const workspaceId = context.req.param("workspaceId");
-    const access = await requireAccessGrantAuthorization(
-      context,
-      deps,
-      workspaceId,
-      "workspace:read",
-    );
-    const { grant } = access;
-    const request = await parseBody(context, CreatePreferenceRegistryProposalRequest);
-    authorizePreferenceRegistryScopeMutation(access, request.scope);
-    try {
+  // Retain an explicit migration response, not a second single-text writer.
+  for (const path of ["/proposals", "/:preferenceId/activate", "/:preferenceId/correct"]) {
+    app.post(`${base}${path}`, async (context) => {
+      await requireAccessGrant(context, deps, context.req.param("workspaceId"), "workspace:read");
       return context.json(
-        PreferenceRegistryRecord.parse(
-          await createPreferenceRegistryProposal(deps.db, {
-            ...request,
-            accountId: grant.accountId,
-            workspaceId,
-            actorSubjectId: grant.subjectId,
-            principalKind: grant.principalKind,
-          }),
-        ),
-        201,
+        {
+          code: "SKILL_FILE_LIFECYCLE_REQUIRED",
+          message:
+            "Use the Skill content save, approve, or restore API. Skill metadata comes from SKILL.md frontmatter; this legacy endpoint makes no change.",
+        },
+        410,
       );
-    } catch (error) {
-      return preferenceError(context, error);
-    }
-  });
+    });
+  }
 
   app.get(`${base}/summary`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
@@ -295,66 +274,6 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             preferenceId: id,
           });
       return context.json(PreferenceRegistryDetailResponse.parse(detail));
-    } catch (error) {
-      return preferenceError(context, error);
-    }
-  });
-
-  app.post(`${base}/:preferenceId/activate`, async (context) => {
-    const workspaceId = context.req.param("workspaceId");
-    const access = await requireAccessGrantAuthorization(
-      context,
-      deps,
-      workspaceId,
-      "workspace:read",
-    );
-    const { grant } = access;
-    const id = preferenceId(context);
-    const request = await parseBody(context, ActivatePreferenceRegistryRevisionRequest);
-    try {
-      return context.json(
-        PreferenceRegistryMutationResponse.parse(
-          await activatePreferenceRegistryRevision(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            actorSubjectId: grant.subjectId,
-            principalKind: grant.principalKind,
-            preferenceId: id,
-            authorizeScope: (scope) => authorizePreferenceRegistryScopeMutation(access, scope),
-            ...request,
-          }),
-        ),
-      );
-    } catch (error) {
-      return preferenceError(context, error);
-    }
-  });
-
-  app.post(`${base}/:preferenceId/correct`, async (context) => {
-    const workspaceId = context.req.param("workspaceId");
-    const access = await requireAccessGrantAuthorization(
-      context,
-      deps,
-      workspaceId,
-      "workspace:read",
-    );
-    const { grant } = access;
-    const id = preferenceId(context);
-    const request = await parseBody(context, CorrectPreferenceRegistryRequest);
-    try {
-      return context.json(
-        PreferenceRegistryMutationResponse.parse(
-          await correctPreferenceRegistry(deps.db, {
-            ...request,
-            accountId: grant.accountId,
-            workspaceId,
-            actorSubjectId: grant.subjectId,
-            principalKind: grant.principalKind,
-            preferenceId: id,
-            authorizeScope: (scope) => authorizePreferenceRegistryScopeMutation(access, scope),
-          }),
-        ),
-      );
     } catch (error) {
       return preferenceError(context, error);
     }

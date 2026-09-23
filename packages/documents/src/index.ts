@@ -1,3 +1,5 @@
+export { knowledgeIndexChunks } from "./knowledge-index";
+export type { KnowledgeIndexChunk } from "./knowledge-index";
 import type { Settings } from "@opengeni/config";
 import {
   KnowledgeProviderCitation,
@@ -35,6 +37,8 @@ import {
   OrganizationDocumentAuthorityReclassification,
 } from "@opengeni/contracts";
 import {
+  claimKnowledgeDocumentPreparation,
+  completeKnowledgeDocumentPreparation,
   createPersonalDocumentAuthority,
   getFilesForSubject,
   resolveDocumentOriginalFileForSubject,
@@ -62,6 +66,7 @@ import {
   KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN,
 } from "@opengeni/contracts";
 import { projectKnowledgeRecord } from "./knowledge-projection";
+import { knowledgeIndexChunks } from "./knowledge-index";
 
 export { projectKnowledgeRecord } from "./knowledge-projection";
 
@@ -298,28 +303,19 @@ export type EffectiveKnowledgeBrowseInput = {
   agentAuthority?: AgentDocumentAuthorityContext | undefined;
 };
 
-export type DocumentIndexHooks = {
-  beforeEmbed?: (input: {
-    accountId: string;
-    workspaceId: string;
-    documentId: string;
-    chunkCount: number;
-  }) => Promise<void>;
-};
-
 export class LiteParseDocumentParser implements DocumentParser {
   readonly name = DEFAULT_DOCUMENT_PARSER;
   private parseQueue: Promise<void> = Promise.resolve();
 
   async parse(bytes: Uint8Array, file: FileAsset): Promise<ParsedDocument> {
     const text = isTextLike(file)
-      ? Buffer.from(bytes).toString("utf8").replace(/\0/g, " ").trim()
+      ? Buffer.from(bytes).toString("utf8")
       : await this.parseWithLiteParse(bytes);
     if (!text.trim()) {
       throw new Error(`Parsed document is empty: ${file.filename}`);
     }
     return {
-      text: text.trim(),
+      text,
       metadata: {
         parser: this.name,
         filename: file.filename,
@@ -334,7 +330,7 @@ export class LiteParseDocumentParser implements DocumentParser {
       const parser = new LiteParse({ ocrEnabled: true, numWorkers: 1, quiet: true });
       const result = await parser.parse(Buffer.from(bytes));
       const text = typeof result?.text === "string" ? result.text : "";
-      return text.replace(/\0/g, " ").trim();
+      return text;
     });
   }
 
@@ -2078,7 +2074,6 @@ export async function indexDocumentNow(
   workspaceId: string,
   documentId: string,
   services: DocumentServices = createDocumentServices(),
-  hooks: DocumentIndexHooks = {},
   access?: DocumentAccessFilter,
 ): Promise<Document> {
   const [loadedDocument] = await withDocumentRls(
@@ -2095,13 +2090,7 @@ export async function indexDocumentNow(
         .limit(1),
   );
   if (!loadedDocument) throw new Error(`Document not found: ${documentId}`);
-  let document: DocumentRow = loadedDocument;
-  const file = await requireReadyFile(db, {
-    accountId: document.accountId,
-    workspaceId,
-    subjectId: cleanString(document.createdBy) ?? null,
-    fileId: document.fileId,
-  });
+  const document: DocumentRow = loadedDocument;
   await withDocumentRls(db, workspaceId, access, async (scopedDb) => {
     await scopedDb
       .update(schema.documents)
@@ -2116,98 +2105,52 @@ export async function indexDocumentNow(
       );
   });
   try {
-    const object = await retryWhileMissing(async () =>
-      objectStorage.getObjectBytes(file.objectKey),
-    );
-    if (!object) throw new Error("document source object is missing");
-    const bytes = object.bytes;
-    const parsed = await services.parser.parse(bytes, file);
-    // Knowledge drops (curationStatus 'pending') are curated between parse and
-    // chunking when a provider is enabled, so chunk metadata and base placement
-    // reflect the curated truth. Disabled curation leaves caller metadata intact;
-    // enabled-provider failures remain fail-soft through the heuristic fallback.
-    if (document.curationStatus === "pending") {
-      document = await curateDroppedDocument(db, services, document, parsed, file);
-    }
-    const chunks = services.chunker.chunk(parsed, file);
-    await hooks.beforeEmbed?.({
+    const identity = {
       accountId: document.accountId,
-      workspaceId: document.workspaceId,
-      documentId,
-      chunkCount: chunks.length,
-    });
-    const embeddings = await services.embedder.embedMany(chunks.map((chunk) => chunk.text));
-    if (embeddings.length !== chunks.length) {
-      throw new Error(
-        `Embedding provider returned ${embeddings.length} embeddings for ${chunks.length} chunks`,
-      );
-    }
-    await withDocumentRls(
-      db,
       workspaceId,
-      access,
-      async (scopedDb) =>
-        await scopedDb.transaction(async (tx) => {
-          await tx
-            .delete(schema.documentChunks)
-            .where(
-              and(
-                eq(schema.documentChunks.workspaceId, workspaceId),
-                eq(schema.documentChunks.documentId, documentId),
-              ),
-            );
-          if (chunks.length > 0) {
-            await tx.insert(schema.documentChunks).values(
-              chunks.map((chunk, index) => ({
-                accountId: document.accountId,
-                workspaceId: document.workspaceId,
-                documentId,
-                baseId: document.baseId,
-                fileId: file.id,
-                authorityKind: document.authorityKind,
-                authorityWorkspaceId: document.authorityWorkspaceId,
-                authoritySubjectId: document.authoritySubjectId,
-                chunkIndex: index,
-                text: chunk.text,
-                metadata: {
-                  ...chunk.metadata,
-                  documentTitle: document.title,
-                  sourceKind: document.sourceKind,
-                  sourceUri: document.sourceUri,
-                  sourceExternalId: document.sourceExternalId,
-                  sourceTitle: document.sourceTitle,
-                  sourceAuthor: document.sourceAuthor,
-                  sourceCreatedAt: document.sourceCreatedAt?.toISOString() ?? null,
-                  sourceUpdatedAt: document.sourceUpdatedAt?.toISOString() ?? null,
-                  sourceVersion: document.sourceVersion,
-                  aclTags: document.aclTags,
-                },
-                embedding: validateEmbedding(
-                  embeddings[index] ?? [],
-                  services.embedder.dimensions,
-                  services.embedder.model,
-                ),
-                embeddingModel: services.embedder.model,
-              })),
-            );
-          }
-          await tx
-            .update(schema.documents)
-            .set({
-              status: "ready",
-              parser: services.parser.name,
-              chunkCount: chunks.length,
-              error: null,
-              updatedAt: new Date(),
-            })
-            .where(
-              and(
-                eq(schema.documents.workspaceId, workspaceId),
-                eq(schema.documents.id, documentId),
-              ),
-            );
-        }),
-    );
+      documentId,
+      fileId: document.fileId,
+    };
+    const preparation = await claimKnowledgeDocumentPreparation(db, identity);
+    let chunkCount = 0;
+    if (preparation.status === "prepare") {
+      const file = preparation.file;
+      const object = await retryWhileMissing(() => objectStorage.getObjectBytes(file.objectKey));
+      if (!object) throw new Error("document source object is missing");
+      const bytes = object.bytes;
+      if (bytes.length !== file.sizeBytes) throw new Error("document source size changed");
+      const sourceVersion = createHash("sha256").update(bytes).digest("hex");
+      if (file.sha256 && file.sha256 !== sourceVersion)
+        throw new Error("document source hash changed");
+      const parsed = await services.parser.parse(bytes, file);
+      // Preparation copies source text. Findings and grouping use ordinary agents
+      // and the same task policy as every other Knowledge write. Embeddings are
+      // produced by the restartable canonical projection worker, not this adapter.
+      await completeKnowledgeDocumentPreparation(db, {
+        ...identity,
+        leaseId: preparation.leaseId,
+        title: document.title,
+        content: parsed.text,
+        sourceVersion,
+      });
+      for (const _chunk of knowledgeIndexChunks({ title: document.title, content: parsed.text }))
+        chunkCount++;
+    }
+    await withDocumentRls(db, workspaceId, access, async (scopedDb) => {
+      await scopedDb
+        .update(schema.documents)
+        .set({
+          status: "ready",
+          parser: services.parser.name,
+          chunkCount,
+          error: null,
+          ...(document.curationStatus === "pending" ? { curationStatus: "none" as const } : {}),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId)),
+        );
+    });
   } catch (error) {
     const [failed] = await withDocumentRls(
       db,
@@ -2238,142 +2181,6 @@ export async function indexDocumentNow(
 }
 
 type DocumentRow = typeof schema.documents.$inferSelect;
-
-async function curateDroppedDocument(
-  db: Database,
-  services: DocumentServices,
-  document: DocumentRow,
-  parsed: ParsedDocument,
-  file: FileAsset,
-): Promise<DocumentRow> {
-  // `none` is an explicit disabled-curation policy. Do not silently replace
-  // it with heuristics: indexing still proceeds, but the drop remains an
-  // ordinary uncured document with its caller-supplied title and metadata.
-  if (!services.curator) {
-    const [updated] = await withDocumentRls(
-      db,
-      document.workspaceId,
-      { viewerSubjectId: document.authoritySubjectId },
-      async (scopedDb) =>
-        await scopedDb
-          .update(schema.documents)
-          .set({
-            curationStatus: "none",
-            summary: null,
-            topics: [],
-            curation: null,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(schema.documents.workspaceId, document.workspaceId),
-              eq(schema.documents.id, document.id),
-            ),
-          )
-          .returning(),
-    );
-    return updated ?? document;
-  }
-  const bases = await listDocumentBases(db, document.workspaceId);
-  const candidates: DocumentCurationCandidateBase[] = bases
-    .filter((base) => base.id !== document.baseId)
-    .map((base) => ({
-      id: base.id,
-      name: base.name,
-      description: base.description,
-    }));
-  const input: DocumentCurationInput = {
-    text: parsed.text.slice(0, DOCUMENT_CURATION_MAX_INPUT_CHARS),
-    filename: file.filename,
-    title: document.title,
-    bases: candidates,
-  };
-  let outcome: DocumentCurationOutcome;
-  let model: string;
-  let failure: string | null = null;
-  try {
-    outcome = await services.curator.curate(input);
-    model = services.curator.model;
-  } catch (error) {
-    failure = error instanceof Error ? error.message : String(error);
-    console.warn("document curation failed; applying heuristic fallback", {
-      workspaceId: document.workspaceId,
-      documentId: document.id,
-      error: failure,
-    });
-    outcome = heuristicCuration(input, file.contentType);
-    model = "heuristic";
-  }
-  const suggestedBase = candidates.find((base) => base.id === outcome.targetBaseId) ?? null;
-  let moveToBaseId: string | null = null;
-  if (
-    suggestedBase &&
-    failure === null &&
-    outcome.confidence >= DOCUMENT_CURATION_AUTO_FILE_CONFIDENCE
-  ) {
-    // The (workspace, base, file) unique index means a same-file twin already
-    // in the target base blocks the move; keep it as a suggestion instead.
-    const conflict = await withDocumentRls(
-      db,
-      document.workspaceId,
-      { viewerSubjectId: document.authoritySubjectId },
-      async (scopedDb) =>
-        await scopedDb
-          .select({ id: schema.documents.id })
-          .from(schema.documents)
-          .where(
-            and(
-              eq(schema.documents.workspaceId, document.workspaceId),
-              eq(schema.documents.baseId, suggestedBase.id),
-              eq(schema.documents.fileId, document.fileId),
-            ),
-          )
-          .limit(1),
-    );
-    if (conflict.length === 0) {
-      moveToBaseId = suggestedBase.id;
-    }
-  }
-  const curation: DocumentCuration = {
-    suggestedBaseId: suggestedBase?.id ?? null,
-    suggestedBaseName: suggestedBase?.name ?? null,
-    confidence: outcome.confidence,
-    reason: failure ? `curation failed (${failure}); heuristic fallback applied` : outcome.reason,
-    originalTitle: document.title,
-    model,
-  };
-  const curationStatus: DocumentCurationStatus = failure
-    ? "failed"
-    : moveToBaseId
-      ? "auto_filed"
-      : "suggested";
-  const [updated] = await withDocumentRls(
-    db,
-    document.workspaceId,
-    { viewerSubjectId: document.authoritySubjectId },
-    async (scopedDb) =>
-      await scopedDb
-        .update(schema.documents)
-        .set({
-          title: outcome.title ?? document.title,
-          summary: outcome.summary,
-          topics: outcome.topics,
-          ...(outcome.sourceKind ? { sourceKind: outcome.sourceKind } : {}),
-          ...(moveToBaseId ? { baseId: moveToBaseId } : {}),
-          curationStatus,
-          curation,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(schema.documents.workspaceId, document.workspaceId),
-            eq(schema.documents.id, document.id),
-          ),
-        )
-        .returning(),
-  );
-  return updated ?? document;
-}
 
 export async function searchDocuments(
   db: Database,

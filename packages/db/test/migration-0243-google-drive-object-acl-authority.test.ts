@@ -466,6 +466,14 @@ describe("migration 0243 Google Drive object ACL authority", () => {
         }),
       ).toEqual([]);
     };
+    expect(
+      await getFilesForSubject(client!.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        subjectId: null,
+        fileIds: [sharedFile.id],
+      }),
+    ).toEqual([]);
     const expectAllowed = async (): Promise<void> => {
       const file = await requireFileForSubject(client!.db, {
         accountId: account!.id,

@@ -1,4 +1,6 @@
 export type ModelPickerBillingClass =
+  // Legacy public identifier for the OpenGeni presentation group, including
+  // free deployment models. Never use this UI grouping to decide settlement.
   | "opengeni_credits"
   | "external"
   | "codex_subscription"
@@ -37,15 +39,12 @@ export type ModelPickerBillingCandidate = {
 export function modelPickerBillingClassFor(
   model: ModelPickerBillingCandidate,
 ): ModelPickerBillingClass {
-  if (model.cost === "credits") return "opengeni_credits";
+  if (model.cost === "credits" || model.cost === "free") return "opengeni_credits";
   if (model.cost === "workspace") return "byok";
   if (model.cost === "organization") return "organization_byok";
   const source = model.source;
   const credential = model.credentialSource;
   const payer = model.billing?.upstreamPayer;
-  if (model.billing?.metering === "external" && payer === "deployment") {
-    return "external";
-  }
   if (
     source === "supergrok" ||
     (credential?.kind === "connected_subscription" && credential.provider === "xai")

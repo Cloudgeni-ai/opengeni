@@ -43,6 +43,8 @@ export function ConfirmDialog({
   description,
   children,
   confirmLabel,
+  confirmDisabled = false,
+  pendingLabel = "Working…",
   cancelLabel = "Cancel",
   cancelAutoFocus = false,
   destructive = true,
@@ -60,6 +62,8 @@ export function ConfirmDialog({
   children?: ReactNode;
   /** Verb + object: "Delete environment", "Revoke key". */
   confirmLabel: string;
+  confirmDisabled?: boolean;
+  pendingLabel?: string;
   cancelLabel?: string;
   /** Opt in when the safe/default action must receive initial focus. */
   cancelAutoFocus?: boolean;
@@ -77,6 +81,7 @@ export function ConfirmDialog({
   const [pending, setPending] = useState(false);
 
   const confirm = async () => {
+    if (pending || confirmDisabled) return;
     setPending(true);
     try {
       const result = await onConfirm();
@@ -125,10 +130,10 @@ export function ConfirmDialog({
             type="button"
             variant={destructive ? "destructive" : "default"}
             className="min-h-11"
-            disabled={pending}
+            disabled={pending || confirmDisabled}
             onClick={() => void confirm()}
           >
-            {pending ? "Working…" : confirmLabel}
+            {pending ? pendingLabel : confirmLabel}
           </Button>
         </DialogFooter>
       </DialogContent>

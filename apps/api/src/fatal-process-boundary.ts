@@ -15,7 +15,8 @@ export type ApiFatalReasonKind =
   | "symbol"
   | "undefined";
 
-type ApiFatalObservability = Pick<Observability, "error" | "flush" | "startSpan">;
+type ApiFatalObservability = Pick<Observability, "error" | "flush" | "startSpan"> &
+  Partial<Pick<Observability, "recordFailureDiagnostic">>;
 
 type ApiFatalProcess = {
   on: (
@@ -69,10 +70,24 @@ export function installApiFatalProcessBoundary(
     reporting = true;
 
     const diagnostic = apiFatalDiagnostic(event, phase, reason, correlationId);
-    const message = apiFatalMessage(diagnostic);
+    let message = apiFatalMessage(diagnostic);
     const activeObservability = observability;
     try {
       if (activeObservability) {
+        try {
+          const diagnosticId = activeObservability.recordFailureDiagnostic?.({
+            code: FATAL_ERROR_CODES[event],
+            stage: phase,
+            retryDecision: "not_retryable",
+            error: reason,
+          });
+          if (diagnosticId) {
+            diagnostic.correlationId = diagnosticId;
+            message = apiFatalMessage(diagnostic);
+          }
+        } catch {
+          // Never replace the required fatal exit with an observer failure.
+        }
         let logged = false;
         try {
           activeObservability.error(message, diagnostic);

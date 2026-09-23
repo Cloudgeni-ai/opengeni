@@ -86,6 +86,33 @@ restarts, or reinterprets current work. A small
 `session.mcp.approval_policy.updated` event tells other clients to reload the
 authoritative session metadata.
 
+## Deterministic approval regression fixture
+
+Run the real worker approval fixture without a model subscription:
+
+```bash
+bun test --timeout 300000 ./test/integration/worker-activity.integration.ts -t 'a requireApproval session MCP tool'
+```
+
+The existing `@opengeni/testing` local MCP server records harmless search calls
+in memory, and `ScriptedModel` deterministically requests that tool. The test
+uses real Postgres, NATS, production runtime preparation, durable interruption
+state, and the human decision acceptance lifecycle. It covers both Approve and
+Reject, a root/parent/child lineage, parent request/resolution notices, a stale
+call id, decision replay before and after settlement, a separate human Pause,
+and resuming with a fresh runtime. Approval executes one call; rejection executes
+none. Accepting approval while paused must not admit an execution attempt.
+
+The driver submits the human actor's decision directly to the storage acceptance
+lifecycle, outside the scripted agent. This is a worker integration regression,
+not proof of browser/API authorization, Temporal delivery, or live staging UX.
+Those boundaries have separate coverage in `packages/db/test/child-lifecycle-notices.test.ts`,
+`test/integration/temporal-workflow.integration.ts`, and the API/UI approval
+suites. A live browser run must still use a human-authorized decision and verify
+the actual approval card; asking an agent to write "approval needed" is not a
+tool-approval test. The fixture is loopback-only and is not a deployed staging
+endpoint.
+
 ## Storage and rotation
 
 Credential headers are encrypted in `session_mcp_servers.headers_encrypted` with
@@ -100,7 +127,8 @@ OpenGeni connection row. Opaque host ids are accepted; standalone connection
 lookups still use their ordinary UUID ids. A session server may use static
 headers, a connection ref, or neither.
 
-Credentials rotate through a `user.message` payload:
+Credentials can still rotate as part of an accepted `user.message` payload;
+that existing Send/Steer behavior is unchanged:
 
 ```json
 {
@@ -122,6 +150,122 @@ successful rotation replaces the encrypted header map and increments
 The connection ref is likewise immutable for the session server. To switch an
 endpoint to a different host connection, create a new session attachment rather
 than treating credential rotation as a connection-rebinding operation.
+
+### Standalone inline credential rotation
+
+An authenticated host can replace credentials without sending a message:
+
+```http
+POST /v1/workspaces/:workspaceId/sessions/:sessionId/mcp-credentials/rotate
+Content-Type: application/json
+
+{
+  "operationKey": "11111111-1111-4111-8111-111111111111",
+  "updates": [{
+    "id": "crm",
+    "expectedCredentialVersion": 1,
+    "expectedServerUrl": "https://tools.example.test/mcp",
+    "headers": { "Authorization": "Bearer synthetic-example" }
+  }]
+}
+```
+
+This strict request accepts 1–64 unique existing server IDs. Header names are
+trimmed, checked for case-insensitive duplicates, and lowercased for request
+identity; header values are not trimmed. Updates and header names are sorted
+before computing their keyed fingerprint. Each header map replaces the entire
+previous map. The URL must match the stored destination exactly. An unknown
+server, changed destination, stale version, duplicate ID, or a server with a
+`connectionRef` rejects the whole operation. This does not create, rebind, or
+change approval policy, allowed tools, connection authority, or recovery policy.
+
+Both `sessions:control` and `mcp_servers:attach` are required. Existing session
+visibility/ownership checks and the optional host callback apply, using the
+distinct `session.mcp.credentials.rotate` authorization operation. A host may
+deny rotation while allowing `session.control`. Agent-attempt credentials are
+not accepted; there is no MCP or Codemode rotation tool. Current authorization
+is revalidated in the mutation transaction, including before receipt replay.
+
+Fresh operations require no accepted/pending credential-consuming work:
+nonterminal turns, live attempts, interrupted attempts without physical
+quiescence, pending machine input, attempt-owned
+in-flight workspace admissions, and active/starting realtime prevent rotation.
+Checks and persistence use the canonical membership/tenancy/control/session
+lock order shared with admission and claim. A historical failed turn, dormant
+goal/schedule, retained historical tool/run receipt, or open viewer alone does not prevent rotation. Work admitted
+after commit uses the new credentials normally. Rotation never edits an
+accepted attempt or refreshes an already-prepared client.
+
+The stable receipt is:
+
+```json
+{
+  "operationKey": "11111111-1111-4111-8111-111111111111",
+  "sessionId": "22222222-2222-4222-8222-222222222222",
+  "servers": [{ "id": "crm", "credentialVersion": 2 }],
+  "appliedAt": "2026-01-01T00:00:00.000Z"
+}
+```
+
+The existing durable command-receipt ledger scopes the key by authenticated
+actor, account/workspace, session, and operation. An exact replay returns the
+original receipt without another write, even after later activity or rotation.
+Reusing that scoped key with different normalized input is a 409. Version,
+destination, and quiescence conflicts are also 409; malformed/brokered requests
+are 422. Existing authentication/session denial statuses remain applicable.
+
+Headers use the existing AES-GCM encryption. Receipt fingerprints use
+domain-separated HMACs, never plaintext or unkeyed hashes of credentials. No
+secret values, header names, ciphertexts, or fingerprints are returned in the
+receipt or added to session events/history. Replacing the deployment encryption
+key makes old receipt verification unavailable: replay returns explicit 503
+`credential_rotation_receipt_key_unavailable`, not a misleading payload conflict
+or a second write. There is no key ring or automatic receipt-key migration.
+Operators must account for existing encrypted credentials and receipt replay
+availability before replacing the encryption key.
+
+The SDK method is `OpenGeniClient.rotateSessionMcpCredentials`. Neither API nor
+SDK retries this mutation automatically. After an ambiguous response, reconcile
+with the same operation key and exact normalized request; do not mint a fresh
+key blindly. No user message, turn, workflow wake, retry, or implicit Resume is
+created. In particular, this operation grants no permission to replay an
+outcome-unknown external tool call or resume a failed turn.
+
+## Connector permission settings
+
+The workspace connector detail sheet loads the server's current MCP tool catalog
+through `GET /v1/workspaces/:workspaceId/capabilities/:capabilityId/tool-permissions`.
+`PATCH` on the same route accepts the displayed connection identity, `allow`,
+`ask`, or `block`, and an explicit target: `target: "default"` changes the server
+default; `target: "tools"` requires a bounded `toolNames` list of unprefixed tool
+names. Tool targets reject the reserved name `*`. A connector advertising that
+literal tool name omits it from editable groups with an explicit discovery notice;
+the server default still governs it. `OpenGeniClient.getConnectorToolPermissions` and
+`updateConnectorToolPermissions` expose the same contract.
+
+Policies require `capabilities:manage`; agent attempts and services cannot change
+them. Personal connections additionally require the authenticated owning human.
+Credential lookup and tool discovery use the existing connection broker and
+pinned network transport. Discovery never invokes a tool. A failed discovery
+leaves saved policies intact and offers reconnect/retry. A changed connection
+identity rejects an outdated settings write. Host-owned MCP credentials retain
+host-managed settings.
+
+The UI groups tools by optional MCP annotations. Destructive annotations take
+precedence over a read-only annotation; unannotated tools appear separately.
+These are presentation hints, never permission authority. A group change writes
+explicit overrides for its currently listed tools. The server wildcard default
+covers future tools; a more-specific policy still wins. The UI's Allow does not
+remove session or deployment approval requirements, or action-specific policy.
+Changes are captured by subsequent attempts, never injected into an active one.
+
+Credential-free and encrypted-header MCP servers use the existing stable
+`session-mcp:<server id>:<sha256 of endpoint URL>` identity. This identity changes
+when the destination changes. Native connections use the broker-resolved exact
+connection id, including subject-owned generic refs. Both normal model calls
+and Codemode enforce the same frozen connector policies before provider calls.
+Codemode Ask returns its typed approval-required error and must be invoked via
+the normal model tool path to request human approval.
 
 ## Connector action policy enforcement
 
@@ -200,12 +344,17 @@ startup choice. Approval/human-input resumes and editable-artifact turns remain
 fully prepared because continuation requires their exact prior execution/catalog
 identity.
 
-For model MCP execution, the worker also supplies attempt-bound connector policy
-hooks to the runtime. The runtime wraps converted MCP function tools and every
-sandbox clone, evaluates approval before interruption, rechecks durable
-admission immediately before invocation, and commits completion or uncertainty
-afterward. This wrapper does not change tool selection, connector visibility,
-the shared Codemode catalog/executor, or Slack interaction progress delivery.
+The worker supplies attempt-bound connector policy hooks to the runtime before
+the attempt catalog is frozen. The canonical gateway lifecycle evaluates exact
+arguments during prepare, before Codemode's execution-start marker; performs
+durable begin at the actual executor boundary; and settles completed versus
+not-executed or uncertain afterward. Model MCP and Codemode therefore share the
+same connection-backed policy path. The model SDK wrapper remains only the
+ordinary human-approval projection for Ask and propagates the exact approved
+call id on resume. Dedicated provider adapters may classify their result or
+thrown failure, but do not run a second connector-policy lifecycle. None of this
+changes tool selection, connector visibility, request-time credential/live
+authority checks, or Slack interaction progress delivery.
 
 ## Dedicated-read invariant
 

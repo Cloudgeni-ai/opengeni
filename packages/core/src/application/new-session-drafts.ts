@@ -1,3 +1,5 @@
+import { fileOwnerContextForAccess } from "../domain/file-owner";
+import { withSessionRlsActorContext } from "@opengeni/db";
 import {
   NewSessionDraft,
   SaveNewSessionDraftRequest,
@@ -11,11 +13,13 @@ import {
   getSandbox,
   getVariableSet,
   NewSessionDraftAccessError,
+  newSessionDraftSelectedProjectChannelId,
   newSessionDraftToolsProvided,
   newSessionSelectionHistory,
   publicNewSessionDraftOptions,
   requireFileForSubject,
   saveNewSessionDraftInTransaction,
+  reusableNewSessionRepositoryResource,
   withWorkspaceSubjectRls,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
@@ -28,7 +32,11 @@ import {
   validateGitHubRepositorySelection,
   validateToolRefs,
 } from "../domain/resources";
-import { hasPermission } from "../access";
+import {
+  hasPermission,
+  externalAttributionForAuthorization,
+  type AccessGrantAuthorization,
+} from "../access";
 import { assertConfiguredModel, assertWorkspaceModelPolicyAllows } from "../domain/sessions";
 
 type NewSessionDraftDependencies = Pick<AppDependencies, "settings" | "db" | "objectStorage">;
@@ -41,6 +49,7 @@ function mapNewSessionDraft(
   row: Awaited<ReturnType<typeof getNewSessionDraftInTransaction>>,
 ): NewSessionDraftValue | null {
   if (!row) return null;
+  const selectedProjectChannelId = newSessionDraftSelectedProjectChannelId(row);
   return NewSessionDraft.parse({
     revision: row.revision,
     text: row.text,
@@ -50,6 +59,7 @@ function mapNewSessionDraft(
     model: row.model,
     reasoningEffort: row.reasoningEffort,
     latencyMode: row.latencyMode,
+    ...(selectedProjectChannelId !== undefined ? { selectedProjectChannelId } : {}),
     options: publicNewSessionDraftOptions(row),
     selectionHistory: newSessionSelectionHistory(row),
     updatedAt: row.updatedAt.toISOString(),
@@ -177,7 +187,7 @@ async function hydrateNewSessionDraft(
 }
 
 /** Read the authenticated actor's server-authoritative pre-session composer state. */
-export async function getActorNewSessionDraft(
+async function getActorNewSessionDraftInFileScope(
   deps: Pick<NewSessionDraftDependencies, "settings" | "db">,
   grant: AccessGrant,
   workspaceId: string,
@@ -212,7 +222,7 @@ export async function getActorNewSessionDraft(
  * draft may represent incomplete options, while no invalid option can become a
  * session without passing that single canonical create boundary.
  */
-export async function saveActorNewSessionDraft(
+async function saveActorNewSessionDraftInFileScope(
   deps: NewSessionDraftDependencies,
   grant: AccessGrant,
   workspaceId: string,
@@ -224,6 +234,7 @@ export async function saveActorNewSessionDraft(
    * the historical bare-membership fence.
    */
   canonicalManagedHumanSession = false,
+  externalAuthorization?: AccessGrantAuthorization,
 ): Promise<NewSessionDraftValue> {
   const input = SaveNewSessionDraftRequest.parse(rawInput);
   // The pre-marker client contract required `tools` and had no
@@ -245,7 +256,16 @@ export async function saveActorNewSessionDraft(
       message: "object storage is not configured",
     });
   }
-  await validateFileResources(deps.db, grant.accountId, workspaceId, grant.subjectId, resources);
+  await validateFileResources(
+    deps.db,
+    grant.accountId,
+    workspaceId,
+    grant.subjectId,
+    resources,
+    externalAuthorization
+      ? await fileOwnerContextForAccess(deps, externalAuthorization, "sessions:create")
+      : undefined,
+  );
   assertConfiguredModel(deps.settings, input.model);
   await assertWorkspaceModelPolicyAllows(deps.db, deps.settings, workspaceId, input.model);
 
@@ -264,6 +284,9 @@ export async function saveActorNewSessionDraft(
           model: input.model,
           reasoningEffort: input.reasoningEffort,
           latencyMode: input.latencyMode,
+          ...(input.selectedProjectChannelId !== undefined
+            ? { selectedProjectChannelId: input.selectedProjectChannelId }
+            : {}),
           options: input.options,
           // Only managed people are removed through removeWorkspaceMember().
           // API keys and delegated service actors (for example the first-party
@@ -274,7 +297,9 @@ export async function saveActorNewSessionDraft(
           // all, so the human-removal fence above must fall back to the
           // organization-membership pointer for them — and only for the
           // canonical managed-cookie session that owns it.
-          personalWorkspaceOwnerException: canonicalManagedHumanSession,
+          personalWorkspaceOwnerException:
+            canonicalManagedHumanSession ||
+            externalAttributionForAuthorization(externalAuthorization, grant) !== null,
         }),
       ),
     );
@@ -285,4 +310,68 @@ export async function saveActorNewSessionDraft(
     }
     throw error;
   }
+}
+
+export async function getActorNewSessionDraft(
+  deps: Parameters<typeof getActorNewSessionDraftInFileScope>[0],
+  grant: AccessGrant,
+  workspaceId: string,
+  authorization?: AccessGrantAuthorization,
+): Promise<NewSessionDraftValue> {
+  const actor = authorization
+    ? await fileOwnerContextForAccess(deps, authorization, "sessions:read")
+    : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+  return withSessionRlsActorContext(actor, () =>
+    getActorNewSessionDraftInFileScope(deps, grant, workspaceId),
+  );
+}
+export async function saveActorNewSessionDraft(
+  ...args: Parameters<typeof saveActorNewSessionDraftInFileScope>
+): Promise<NewSessionDraftValue> {
+  const [deps, grant, , , , authorization] = args;
+  const actor = authorization
+    ? await fileOwnerContextForAccess(deps, authorization, "sessions:create")
+    : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+  return withSessionRlsActorContext(actor, () => saveActorNewSessionDraftInFileScope(...args));
+}
+
+/** Reuse the website's actor/workspace selections without consuming its draft. */
+export async function getActorNewSessionDefaults(
+  deps: Parameters<typeof getActorNewSessionDraft>[0],
+  grant: AccessGrant,
+  workspaceId: string,
+) {
+  const draft = await getActorNewSessionDraft(deps, grant, workspaceId);
+  const options = draft.options;
+  return {
+    // Revision zero is a synthetic empty form, not a user's model preference.
+    ...(draft.revision > 0
+      ? {
+          model: draft.model,
+          reasoningEffort: draft.reasoningEffort,
+          latencyMode: draft.latencyMode,
+        }
+      : {}),
+    resources: draft.resources.flatMap((resource) =>
+      resource.kind === "repository" ? [reusableNewSessionRepositoryResource(resource)] : [],
+    ),
+    ...(draft.toolsProvided
+      ? { tools: draft.tools }
+      : options.excludedMcpServerIds
+        ? { excludedMcpServerIds: options.excludedMcpServerIds }
+        : {}),
+    ...(options.firstPartyMcpTools ? { firstPartyMcpTools: options.firstPartyMcpTools } : {}),
+    ...(options.firstPartyMcpPermissions
+      ? { firstPartyMcpPermissions: options.firstPartyMcpPermissions }
+      : {}),
+    ...(options.variableSetIds ? { variableSetIds: options.variableSetIds } : {}),
+    ...(options.rigId ? { rigId: options.rigId } : {}),
+    ...(options.sandboxBackend ? { sandboxBackend: options.sandboxBackend } : {}),
+    ...(options.targetSandboxId
+      ? {
+          targetSandboxId: options.targetSandboxId,
+          ...(options.workingDir ? { workingDir: options.workingDir } : {}),
+        }
+      : {}),
+  };
 }

@@ -2,6 +2,7 @@ import { describe, expect, jest, test } from "bun:test";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import {
   AuthApiError,
+  apiErrorFromResponseBody,
   authHeadersForAccessKey,
   configureManagedActorEpoch,
   configureClientAuth,
@@ -25,6 +26,150 @@ import {
 } from "./api";
 
 describe("web API auth helpers", () => {
+  test.each(["text", "json"] as const)(
+    "managed actor %s preserves decoding and single body consumption",
+    async (method) => {
+      let cleanups = 0;
+      const response = managedActorTrackedResponse(
+        new Response('\uFEFF{"label":"café 🌍"}'),
+        new AbortController().signal,
+        () => cleanups++,
+      );
+      expect(response instanceof Response).toBe(true);
+      expect(response.bodyUsed).toBe(false);
+      expect(await response[method]()).toEqual(
+        method === "json" ? { label: "café 🌍" } : '{"label":"café 🌍"}',
+      );
+      expect(response.bodyUsed).toBe(true);
+      expect(cleanups).toBe(1);
+      await expect(response[method]()).rejects.toBeInstanceOf(TypeError);
+    },
+  );
+
+  test.each(["text", "json"] as const)(
+    "managed actor %s rejects locked and canceled bodies without exposing bytes",
+    async (method) => {
+      const response = managedActorTrackedResponse(
+        new Response('{"secret":"old actor"}'),
+        new AbortController().signal,
+        () => {},
+      );
+      const reader = response.body!.getReader();
+      await expect(response[method]()).rejects.toBeInstanceOf(TypeError);
+      reader.releaseLock();
+      await response.body!.cancel();
+      await expect(response[method]()).rejects.toBeInstanceOf(TypeError);
+    },
+  );
+
+  test.each(["text", "json"] as const)(
+    "managed actor %s preserves a genuine stream failure",
+    async (method) => {
+      const failure = new Error("synthetic transport failure");
+      const source = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.error(failure);
+        },
+      });
+      let cleanups = 0;
+      const response = managedActorTrackedResponse(
+        new Response(source),
+        new AbortController().signal,
+        () => cleanups++,
+      );
+      await expect(response[method]()).rejects.toBe(failure);
+      expect(cleanups).toBe(1);
+      expect(source.locked).toBe(false);
+    },
+  );
+
+  test("managed actor JSON still rejects malformed JSON", async () => {
+    const response = managedActorTrackedResponse(
+      new Response("not JSON"),
+      new AbortController().signal,
+      () => {},
+    );
+    await expect(response.json()).rejects.toBeInstanceOf(SyntaxError);
+    expect(response.bodyUsed).toBe(true);
+  });
+
+  test.each([
+    ["DELETE", 204],
+    ["POST", 205],
+    ["GET", 304],
+    ["HEAD", 200],
+  ] as const)(
+    "preserves bodyless %s %i responses with native empty streams",
+    async (method, status) => {
+      const originalFetch = globalThis.fetch;
+      const cancel = jest.fn();
+      const response = new Response(null, {
+        status,
+        headers: { "content-type": "application/json", "x-test-response": "preserved" },
+      });
+      // Model native browser responses that expose a stream despite their HTTP semantics.
+      Object.defineProperty(response, "body", {
+        value: new ReadableStream({ cancel }),
+      });
+      globalThis.fetch = (async () => response) as unknown as typeof fetch;
+      try {
+        configureManagedActorEpoch("bodyless-response-test");
+        const result = await managedActorFetch("https://api.example.test/v1/resource", { method });
+        expect(result.status).toBe(status);
+        expect(result.headers.get("x-test-response")).toBe("preserved");
+        expect(result.body).toBeNull();
+        expect(cancel).toHaveBeenCalledTimes(1);
+        expect(managedActorMutationBusySnapshot()).toBe(false);
+        configureManagedActorEpoch(null);
+        expect(cancel).toHaveBeenCalledTimes(1);
+      } finally {
+        configureManagedActorEpoch(null);
+        globalThis.fetch = originalFetch;
+      }
+    },
+  );
+
+  test("SDK goal deletion accepts a 204 with an empty native stream", async () => {
+    const originalFetch = globalThis.fetch;
+    const cancel = jest.fn();
+    const response = new Response(null, { status: 204 });
+    Object.defineProperty(response, "body", { value: new ReadableStream({ cancel }) });
+    globalThis.fetch = (async () => response) as unknown as typeof fetch;
+    try {
+      configureManagedActorEpoch("bodyless-goal-test");
+      await createOpenGeniClient().deleteGoal("workspace-test", "session-test");
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(managedActorMutationBusySnapshot()).toBe(false);
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("preserves structured retry and outcome ambiguity from API error envelopes", () => {
+    const error = apiErrorFromResponseBody(
+      503,
+      JSON.stringify({
+        error: {
+          status: 503,
+          code: "service_unavailable",
+          message: "Tool settlement is unknown",
+          retryable: false,
+          outcomeUnknown: true,
+          details: { code: "tool_outcome_unknown", operationId: "operation-1" },
+        },
+      }),
+    );
+    expect(error).toMatchObject({
+      status: 503,
+      code: "service_unavailable",
+      message: "Tool settlement is unknown",
+      retryable: false,
+      outcomeUnknown: true,
+      details: { code: "tool_outcome_unknown", operationId: "operation-1" },
+    });
+  });
+
   test("bounds browser event streams only on HTTP/1", () => {
     expect(shouldBoundBrowserSseForProtocol("http/1.0")).toBe(true);
     expect(shouldBoundBrowserSseForProtocol("http/1.1")).toBe(true);
@@ -422,6 +567,40 @@ describe("web API auth helpers", () => {
     }
   });
 
+  test("owns stale response cleanup rejection after the native body aborts", async () => {
+    const originalFetch = globalThis.fetch;
+    let release!: (response: Response) => void;
+    globalThis.fetch = (() =>
+      new Promise<Response>((resolve) => {
+        release = resolve;
+      })) as unknown as typeof fetch;
+    try {
+      configureManagedActorEpoch("aborted-body-old");
+      const pending = managedActorFetch("https://api.example.test/v1/workspaces");
+      configureManagedActorEpoch("aborted-body-new");
+      release(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new DOMException("BodyStreamBuffer was aborted", "AbortError"));
+            },
+          }),
+          { headers: { "x-opengeni-actor-epoch": "aborted-body-old" } },
+        ),
+      );
+      await expect(pending).rejects.toMatchObject({
+        name: "AbortError",
+        message: "Ignored a response from the previous browser account",
+      });
+      // Let the runner observe any unhandled cleanup rejection after the
+      // caller has already received the intentional stale-account error.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("aborts every concurrent pre-header request when the actor rotates", async () => {
     const originalFetch = globalThis.fetch;
     const observedSignals: AbortSignal[] = [];
@@ -629,11 +808,12 @@ describe("web API auth helpers", () => {
     }
   });
 
-  test("drains finite JSON before exposing it and releases the native source lock", async () => {
+  test("fully consumes finite JSON before exposing detached bytes", async () => {
     const originalFetch = globalThis.fetch;
     const observed: { signal?: AbortSignal | null } = {};
     let bodyController!: ReadableStreamDefaultController<Uint8Array>;
     let source!: ReadableStream<Uint8Array>;
+    let nativeResponse!: Response;
     globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       observed.signal = init?.signal ?? null;
       source = new ReadableStream<Uint8Array>({
@@ -641,9 +821,10 @@ describe("web API auth helpers", () => {
           bodyController = controller;
         },
       });
-      return new Response(source, {
+      nativeResponse = new Response(source, {
         headers: { "content-type": "application/json" },
       });
+      return nativeResponse;
     }) as unknown as typeof fetch;
 
     try {
@@ -663,7 +844,7 @@ describe("web API auth helpers", () => {
       bodyController.close();
       const response = await pending;
       expect(observed.signal?.aborted).toBe(false);
-      expect(source.locked).toBe(false);
+      expect(nativeResponse.bodyUsed).toBe(true);
       await expect(response.json()).resolves.toEqual({ ok: true });
     } finally {
       configureManagedActorEpoch(null);
@@ -809,38 +990,49 @@ describe("web API auth helpers", () => {
     }
   });
 
-  test("aborts a finite JSON drain when the accepted actor changes", async () => {
-    const originalFetch = globalThis.fetch;
-    const observed: { signal?: AbortSignal | null } = {};
-    let source!: ReadableStream<Uint8Array>;
-    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      observed.signal = init?.signal ?? null;
-      source = new ReadableStream<Uint8Array>({
-        start(controller) {
-          init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), {
-            once: true,
-          });
-          controller.enqueue(new TextEncoder().encode('{"partial":'));
-        },
-      });
-      return new Response(source, {
-        headers: { "content-type": "application/json" },
-      });
-    }) as unknown as typeof fetch;
+  test.each(["actor", "caller", "document"] as const)(
+    "aborts a partial finite JSON drain on %s retirement",
+    async (retirement) => {
+      const originalFetch = globalThis.fetch;
+      const observed: { signal?: AbortSignal | null } = {};
+      const caller = new AbortController();
+      let source!: ReadableStream<Uint8Array>;
+      globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        observed.signal = init?.signal ?? null;
+        source = new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), {
+              once: true,
+            });
+            controller.enqueue(new TextEncoder().encode('{"partial":'));
+          },
+        });
+        return new Response(source, {
+          headers: { "content-type": "application/json" },
+        });
+      }) as unknown as typeof fetch;
 
-    try {
-      configureManagedActorEpoch("14");
-      const pending = managedActorFetch("https://api.example.test/v1/workspaces");
-      await Promise.resolve();
-      configureManagedActorEpoch("15");
-      expect(observed.signal?.aborted).toBe(true);
-      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-      expect(source.locked).toBe(false);
-    } finally {
-      configureManagedActorEpoch(null);
-      globalThis.fetch = originalFetch;
-    }
-  });
+      try {
+        configureManagedActorEpoch("14");
+        const pending = managedActorFetch("https://api.example.test/v1/workspaces", {
+          method: "PUT",
+          signal: caller.signal,
+        });
+        await Promise.resolve();
+        expect(managedActorMutationBusySnapshot()).toBe(true);
+        if (retirement === "actor") configureManagedActorEpoch("15");
+        else if (retirement === "caller")
+          caller.abort(new DOMException("caller stopped", "AbortError"));
+        else handleManagedActorPageHide(false);
+        expect(observed.signal?.aborted).toBe(true);
+        await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+        expect(managedActorMutationBusySnapshot()).toBe(false);
+      } finally {
+        configureManagedActorEpoch(null);
+        globalThis.fetch = originalFetch;
+      }
+    },
+  );
 
   test("keeps detached JSON actor-bound and retargets caller aborts after the native drain", async () => {
     const originalFetch = globalThis.fetch;
@@ -951,7 +1143,29 @@ describe("web API auth helpers", () => {
     expect(resolveApiBaseUrl("https://opengeni.example.com/")).toBe("https://opengeni.example.com");
   });
 
-  test("reloads once when the API revision differs from the web bundle revision", () => {
+  test("matching source-SHA deployment identities never request a reload or write its guard", () => {
+    const sourceSha = "a".repeat(40);
+    const fakeStorage = {
+      getItem: jest.fn(() => null),
+      setItem: jest.fn(),
+    };
+    for (let read = 0; read < 2; read += 1) {
+      expect(
+        shouldReloadForDeploymentRevision(
+          { deploymentRevision: sourceSha },
+          sourceSha,
+          fakeStorage,
+        ),
+      ).toBe(false);
+    }
+    expect(fakeStorage.getItem).not.toHaveBeenCalled();
+    expect(fakeStorage.setItem).not.toHaveBeenCalled();
+  });
+
+  test("genuinely stale source-SHA bundles still reload once for each API revision", () => {
+    const apiSha = "a".repeat(40);
+    const staleBundleSha = "b".repeat(40);
+    const nextApiSha = "c".repeat(40);
     const storage = new Map<string, string>();
     const fakeStorage = {
       getItem: (key: string) => storage.get(key) ?? null,
@@ -960,16 +1174,33 @@ describe("web API auth helpers", () => {
       },
     };
     expect(
-      shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "web-sha", fakeStorage),
+      shouldReloadForDeploymentRevision(
+        { deploymentRevision: apiSha },
+        staleBundleSha,
+        fakeStorage,
+      ),
     ).toBe(true);
+    expect(storage.get(`opengeni.reloadForRevision:${apiSha}`)).toBe(staleBundleSha);
     expect(
-      shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "web-sha", fakeStorage),
+      shouldReloadForDeploymentRevision(
+        { deploymentRevision: apiSha },
+        staleBundleSha,
+        fakeStorage,
+      ),
     ).toBe(false);
     expect(
-      shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "api-sha", fakeStorage),
+      shouldReloadForDeploymentRevision({ deploymentRevision: apiSha }, apiSha, fakeStorage),
     ).toBe(false);
+    expect(shouldReloadForDeploymentRevision({ deploymentRevision: apiSha }, "", fakeStorage)).toBe(
+      false,
+    );
+    expect(storage.size).toBe(1);
     expect(
-      shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "", fakeStorage),
+      shouldReloadForDeploymentRevision({ deploymentRevision: nextApiSha }, apiSha, fakeStorage),
+    ).toBe(true);
+    expect(storage.get(`opengeni.reloadForRevision:${nextApiSha}`)).toBe(apiSha);
+    expect(
+      shouldReloadForDeploymentRevision({ deploymentRevision: nextApiSha }, apiSha, fakeStorage),
     ).toBe(false);
   });
 

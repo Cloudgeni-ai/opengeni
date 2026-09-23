@@ -1,3 +1,4 @@
+import { readReasoningConfiguration } from "@opengeni/codex";
 import {
   applyContextCompaction,
   getActiveSessionHistoryItemsPaged,
@@ -21,6 +22,7 @@ import {
   sanitizeHistoryItemsForModel,
   summarizeForCompaction,
   type CompactionItem,
+  type CompactionProviderRejection,
 } from "@opengeni/runtime";
 import { contextInputBudgetTokens, type Settings } from "@opengeni/config";
 import type { SessionEvent } from "@opengeni/contracts";
@@ -99,6 +101,8 @@ export async function maybeCompactContext(
      * append again — the event is already durable.
      */
     publishLiveEvents?: (events: SessionEvent[]) => Promise<void>;
+    /** Observe the durable start immediately after its attempt-fenced commit. */
+    onCompactionStarted?: (trigger: "auto" | "operator" | "proactive" | "overflow") => void;
     /** Materialize retained screenshot receipts only in the attempt-local model view. */
     materializeHistory?: (items: CompactionItem[]) => Promise<CompactionItem[]>;
     /** Turn-scoped attachment/modality view; canonical persisted rows stay untouched. */
@@ -208,6 +212,7 @@ export async function maybeCompactContext(
       `turn attempt was fenced while recording context compaction start: ${started.reason}`,
     );
   }
+  options.onCompactionStarted?.(trigger);
   await options.publishLiveEvents?.(started.events);
 
   if (useRemoteV2) {
@@ -257,6 +262,12 @@ export async function settleFailedContextCompactionLandmark(
   options: {
     clearRequestedCompaction?: boolean;
     publishLiveEvents?: (events: SessionEvent[]) => Promise<void>;
+    /**
+     * Closed identifier record of a definitive provider rejection. Carried on
+     * the visible `compaction.skipped` landmark so the timeline can name the
+     * rejected field instead of offering a retry that cannot succeed.
+     */
+    providerRejection?: CompactionProviderRejection | null;
   } = {},
 ): Promise<Extract<MaybeCompactResult, { compacted: false }>> {
   const settled = await settleSkippedAfterStart(db, scope, options, "summarization_failed");
@@ -284,6 +295,7 @@ async function settleSkippedAfterStart(
   },
   options: {
     clearRequestedCompaction?: boolean;
+    providerRejection?: CompactionProviderRejection | null;
   },
   reason:
     | "no_history"
@@ -301,6 +313,7 @@ async function settleSkippedAfterStart(
     // an operator `/compact` flag — auto/overflow never set one.
     requirePendingRequest: false,
     clearRequestedCompaction,
+    ...(options.providerRejection ? { providerRejection: options.providerRejection } : {}),
   });
   if (!skipped.recorded) {
     throw new TurnAttemptFencedError(
@@ -359,10 +372,18 @@ async function compactContextRemoteV2(
     rewrittenToolOutputs = retry.rewrittenToolOutputs;
     compactionItem = await options.requestRemoteCompactionV2(settings, retry.input);
   }
-  const replacementHistory = buildRemoteV2ReplacementHistory(canonicalItems, compactionItem);
+  const retainedTokens = await retentionTokenCounts(canonicalItems, projectForWire);
+  const replacementHistory = buildRemoteV2ReplacementHistory(
+    canonicalItems,
+    compactionItem,
+    (item) => retainedTokens.get(item) ?? estimateTokens([item]),
+  );
   const estimatedTokensAfter = estimateTokens(await projectForWire(replacementHistory));
   const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
-  const tailItem = replacementHistory.at(-1);
+  const summaryIndex =
+    replacementHistory.length -
+    (readReasoningConfiguration(replacementHistory.at(-1) ?? {}) ? 2 : 1);
+  const tailItem = replacementHistory[summaryIndex];
   if (!tailItem) {
     throw new EmptyCompactionSummaryError({
       stage: "remote_v2_replacement",
@@ -376,7 +397,10 @@ async function compactContextRemoteV2(
     turnId: scope.turnId,
     expectedExecutionGeneration: scope.executionGeneration,
     expectedAttemptId: scope.attemptId,
-    replacementItems: replacementHistory.slice(0, -1),
+    replacementItems: replacementHistory.slice(0, summaryIndex),
+    ...(replacementHistory.length > summaryIndex + 1
+      ? { trailingItems: replacementHistory.slice(summaryIndex + 1) }
+      : {}),
     summaryItem: tailItem as Record<string, unknown>,
     ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
     eventPayload: {
@@ -430,11 +454,19 @@ async function compactContextPortable(
   const estimatedTokensBefore = estimateTokens(items);
   const summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
   const summaryBody = summarized.summaryBody;
-  const replacementHistory = buildCompactionReplacementHistory(canonicalItems, summaryBody);
+  const retainedTokens = await retentionTokenCounts(canonicalItems, projectForWire);
+  const replacementHistory = buildCompactionReplacementHistory(
+    canonicalItems,
+    summaryBody,
+    (item) => retainedTokens.get(item) ?? estimateTokens([item]),
+  );
   const estimatedTokensAfter = estimateTokens(await projectForWire(replacementHistory));
   const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
   const previousReplacementFingerprint = latestCompactionReplacementFingerprint(canonicalItems);
-  const summaryItem = replacementHistory.at(-1);
+  const summaryIndex =
+    replacementHistory.length -
+    (readReasoningConfiguration(replacementHistory.at(-1) ?? {}) ? 2 : 1);
+  const summaryItem = replacementHistory[summaryIndex];
   if (!summaryItem) {
     // Started already fanout; settle visibly so the landmark cannot stick on
     // "Compacting…". This is not an operator-request clear path.
@@ -453,7 +485,10 @@ async function compactContextPortable(
     turnId: scope.turnId,
     expectedExecutionGeneration: scope.executionGeneration,
     expectedAttemptId: scope.attemptId,
-    replacementItems: replacementHistory.slice(0, -1),
+    replacementItems: replacementHistory.slice(0, summaryIndex),
+    ...(replacementHistory.length > summaryIndex + 1
+      ? { trailingItems: replacementHistory.slice(summaryIndex + 1) }
+      : {}),
     summaryItem: summaryItem as Record<string, unknown>,
     ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
     eventPayload: {
@@ -575,4 +610,18 @@ export function isExactContextLengthExceeded(
     isExactContextLengthExceeded(record.error, seen) ||
     isExactContextLengthExceeded(record.diagnostics, seen)
   );
+}
+
+/** Charge retained uploads by their projected image context, not reference text. */
+async function retentionTokenCounts(
+  items: CompactionItem[],
+  project: (items: CompactionItem[]) => Promise<CompactionItem[]>,
+): Promise<Map<CompactionItem, number>> {
+  const counts = new Map<CompactionItem, number>();
+  for (const item of items) {
+    if (item.role === "user" || item.role === "developer") {
+      counts.set(item, estimateTokens(await project([item])));
+    }
+  }
+  return counts;
 }

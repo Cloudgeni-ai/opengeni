@@ -3,10 +3,15 @@ import {
   ListPersonalGitHubRepositoriesResponse,
   PersonalGitHubConnectionStatusResponse,
   PersonalGitHubOAuthStartRequest,
+  PersonalGitHubRepositoryId,
   PersonalGitHubRepositorySelectionState,
   ReplacePersonalGitHubRepositorySelectionsRequest,
   VerifyPersonalGitHubRepositorySelectionsRequest,
 } from "@opengeni/contracts/personal-github";
+import {
+  ListGitHubRepositoryBranchesQuery,
+  GitHubRepositoryBranchesResponse,
+} from "@opengeni/contracts/github-repository-contracts";
 import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -23,7 +28,10 @@ import {
   type PersonalGitHubRepositorySelectionState as DbPersonalGitHubRepositorySelectionState,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { assertPersonalConnectionOwnerPrincipal } from "../connection-ownership";
+import {
+  assertPersonalConnectionOwnerPrincipal,
+  requireLegacyOAuthActor,
+} from "../connection-ownership";
 import {
   completePersonalGitHubOAuthCallback,
   listPersonalGitHubConnections,
@@ -31,6 +39,7 @@ import {
   startPersonalGitHubOAuth,
 } from "../integrations/personal-github";
 import {
+  listLivePersonalGitHubRepositoryBranches,
   listLivePersonalGitHubRepositories,
   personalGitHubRepositoryProviderHttpError,
   PersonalGitHubRepositoryProviderError,
@@ -58,6 +67,7 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.post("/v1/workspaces/:workspaceId/connections/github/oauth/start", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    requireLegacyOAuthActor(access);
     assertPersonalConnectionOwnerPrincipal(access, "My GitHub account");
     const payload = PersonalGitHubOAuthStartRequest.parse(await c.req.json().catch(() => ({})));
     return c.json(
@@ -73,6 +83,7 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.post("/v1/workspaces/:workspaceId/connections/:connectionId/github/reconnect", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    requireLegacyOAuthActor(access);
     assertPersonalConnectionOwnerPrincipal(access, "My GitHub account");
     const payload = PersonalGitHubOAuthStartRequest.omit({ connectionId: true }).parse(
       await c.req.json().catch(() => ({})),
@@ -187,6 +198,39 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     },
   );
 
+  app.get(
+    "/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories/:repositoryId/branches",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const connectionId = c.req.param("connectionId");
+      const access = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "connections:read",
+      );
+      assertPersonalConnectionOwnerPrincipal(access, "My GitHub repositories");
+      const query = ListGitHubRepositoryBranchesQuery.parse(c.req.query());
+      const repositoryId = PersonalGitHubRepositoryId.parse(c.req.param("repositoryId"));
+      try {
+        return c.json(
+          GitHubRepositoryBranchesResponse.parse(
+            await listLivePersonalGitHubRepositoryBranches(deps, {
+              accountId: access.grant.accountId,
+              workspaceId,
+              subjectId: access.grant.subjectId,
+              connectionId,
+              repositoryId,
+              query,
+            }),
+          ),
+        );
+      } catch (error) {
+        throw personalGitHubRepositoryRouteError(error);
+      }
+    },
+  );
+
   app.post(
     "/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories/verify",
     async (c) => {
@@ -249,6 +293,8 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       ...(state ? { state } : {}),
       ...(error ? { error } : {}),
     });
+    if (result.exactReturn)
+      return new Response(null, { status: 302, headers: { Location: result.redirectTo } });
     return c.redirect(result.redirectTo, 302);
   });
 }

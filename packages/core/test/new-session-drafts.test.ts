@@ -23,6 +23,7 @@ import type { ApiRouteDeps, SessionWorkflowClient } from "../src";
 import { createSessionForRequest } from "../src/domain/sessions";
 import {
   getActorNewSessionDraft,
+  getActorNewSessionDefaults,
   saveActorNewSessionDraft,
 } from "../src/application/new-session-drafts";
 
@@ -97,6 +98,7 @@ describe("core new-session draft hydration", () => {
         model: settings.openaiModel,
         reasoningEffort: settings.openaiReasoningEffort,
         latencyMode: "standard",
+        selectedProjectChannelId: null,
         options: { visibility: "workspace" },
       },
     );
@@ -305,6 +307,7 @@ describe("core new-session draft hydration", () => {
         model: "scripted-model",
         reasoningEffort: "high",
         latencyMode: "fast",
+        selectedProjectChannelId: null,
         options: {
           sandboxBackend: "selfhosted",
           targetSandboxId: crypto.randomUUID(),
@@ -320,9 +323,24 @@ describe("core new-session draft hydration", () => {
     expect(hydrated.resources).toEqual([resources[0], resources[2]]);
     expect(hydrated.tools).toEqual([mcp("opengeni")]);
     expect(hydrated.toolsProvided).toBe(true);
+    expect(hydrated.selectedProjectChannelId).toBeNull();
     expect(hydrated.options).toEqual({});
     expect(hydrated.model).toBe("scripted-model");
     expect(hydrated.reasoningEffort).toBe("high");
     expect(hydrated.latencyMode).toBe("fast");
+    const defaults = await getActorNewSessionDefaults({ db, settings }, grant, workspaceId);
+    expect(defaults).toEqual({
+      resources: [resources[0], resources[2]],
+      tools: [mcp("opengeni")],
+      model: "scripted-model",
+      reasoningEffort: "high",
+      latencyMode: "fast",
+    });
+    const other = await getActorNewSessionDefaults(
+      { db, settings },
+      { ...grant, subjectId: `user:other-${crypto.randomUUID()}` },
+      workspaceId,
+    );
+    expect(other).toEqual({ resources: [] });
   }, 180_000);
 });

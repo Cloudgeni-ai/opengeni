@@ -25,6 +25,7 @@ export function useOneDriveIntegration({
   refreshRevision?: number;
 }): IntegrationAdapter {
   return useIntegrationDefinitionRow({
+    ownership: "personal",
     id: "onedrive",
     name: "OneDrive",
     description: "Files, folders, and sharing links in a connected OneDrive account.",

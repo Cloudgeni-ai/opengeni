@@ -159,9 +159,19 @@ export function useComputerFrameStream(
       pendingFrame = null;
     };
 
+    const clearRecoveryTimers = () => {
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (expiryTimer) clearTimeout(expiryTimer);
+      reconnectTimer = null;
+      expiryTimer = null;
+    };
+
     const scheduleReconnect = () => {
       if (disposed || reconnectTimer) return;
-      if (failures >= MAX_AUTOMATIC_RECONNECTS_WITHOUT_A_FRAME) return;
+      if (failures >= MAX_AUTOMATIC_RECONNECTS_WITHOUT_A_FRAME) {
+        clearRecoveryTimers();
+        return;
+      }
       const delay = Math.min(5_000, 250 * 2 ** Math.min(failures, 5));
       failures += 1;
       setResult((current) => ({ ...current, state: "reconnecting" }));
@@ -177,6 +187,7 @@ export function useComputerFrameStream(
       setResult((current) => ({ ...current, state: "error", error }));
       clearSocket();
       if (reconnectAutomatically) scheduleReconnect();
+      else clearRecoveryTimers();
     };
 
     const onOpen = (source: ComputerFrameWebSocket) => {
@@ -295,8 +306,7 @@ export function useComputerFrameStream(
 
     const onClose = (source: ComputerFrameWebSocket) => {
       if (disposed || source !== socket) return;
-      clearSocket();
-      scheduleReconnect();
+      fail(new Error("Desktop view lost connection."));
     };
 
     const connectSocket = () => {
@@ -366,6 +376,9 @@ export function useComputerFrameStream(
           throw new Error("desktop attachment does not match the requested resource");
         }
         controllerGeneration = attachment.controllerGeneration;
+        // A fresh attachment owns a new producer whose sequence can restart.
+        // Transport reconnects reuse the attachment and retain their sequence fence.
+        latestRef.current = { key: "", sequence: -1 };
         activeAttachment = attachment;
         activeStream = attachment.stream;
         attachmentExpiresAt = Date.parse(attachment.expiresAt);
@@ -406,8 +419,7 @@ export function useComputerFrameStream(
       disposed = true;
       pendingFrame = null;
       attachmentAbort.abort();
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (expiryTimer) clearTimeout(expiryTimer);
+      clearRecoveryTimers();
       clearSocket(true);
     };
   }, [client, enabled, nonce, options.computerSessionId, options.targetId, workspaceId]);

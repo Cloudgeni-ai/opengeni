@@ -13,6 +13,8 @@ export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride & {
    * UseFileAttachmentsResult.addFiles} (the explicit picker / drop path)
    * bypasses it.
    */
+  /** Retain original uploads in the chat owner’s personal scope when private. */
+  scope?: "workspace" | "personal";
   pasteFilter?: ((file: File) => boolean) | undefined;
 };
 
@@ -52,6 +54,12 @@ export type UseFileAttachmentsResult = {
   addFromPaste: (event: { clipboardData: DataTransfer | null }) => void;
   /** Restore already-ready server assets without recreating browser-local bytes. */
   restoreReadyFiles: (files: Iterable<FileAsset>) => void;
+  /**
+   * Resolve a ready image's short-lived server preview URL on demand. Optional
+   * for upload-only embedded clients; local object-URL previews remain usable
+   * without it.
+   */
+  loadPreview?: ((id: string, signal?: AbortSignal) => Promise<string | undefined>) | undefined;
   /**
    * Re-run the upload for a `failed` attachment, in place (same id, same
    * source file). No-op for an id that isn't a known failed upload.
@@ -114,6 +122,8 @@ export function useFileAttachments(
   const { client, workspaceId } = useEmbeddedFileAttachments(options);
   const pasteFilter = options.pasteFilter ?? isImage;
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
   // Keep the source File per attachment id so a failed upload can be retried
   // in place. Cleared on remove/clear so it never outlives its attachment.
   const sources = useRef<Map<string, File>>(new Map());
@@ -204,6 +214,7 @@ export function useFileAttachments(
           filename: file.name || "file",
           contentType: file.type || "application/octet-stream",
           data: file,
+          ...(options.scope ? { scope: options.scope } : {}),
         })
         .then((asset) => {
           if (scopeGeneration.current !== generation) return;
@@ -244,7 +255,7 @@ export function useFileAttachments(
           );
         });
     },
-    [client, workspaceId],
+    [client, workspaceId, options.scope],
   );
 
   const addFiles = useCallback(
@@ -353,6 +364,31 @@ export function useFileAttachments(
     [workspaceId],
   );
 
+  const loadPreview = useCallback(
+    async (id: string, signal?: AbortSignal): Promise<string | undefined> => {
+      const generation = scopeGeneration.current;
+      const attachment = attachmentsRef.current.find((candidate) => candidate.id === id);
+      const createDownloadUrl = client.createFileDownloadUrl;
+      if (
+        !attachment ||
+        attachment.status !== "ready" ||
+        !attachment.file ||
+        !attachment.contentType.startsWith("image/") ||
+        typeof createDownloadUrl !== "function" ||
+        signal?.aborted
+      ) {
+        return undefined;
+      }
+      const fileId = attachment.file.id;
+      const signed = await createDownloadUrl.call(client, workspaceId, fileId, { signal });
+      if (scopeGeneration.current !== generation || signal?.aborted) return undefined;
+      const current = attachmentsRef.current.find((candidate) => candidate.id === id);
+      if (current?.status !== "ready" || current.file?.id !== fileId) return undefined;
+      return signed.url;
+    },
+    [client, workspaceId],
+  );
+
   const remove = useCallback(
     (id: string) => {
       sources.current.delete(id);
@@ -394,6 +430,7 @@ export function useFileAttachments(
     addFiles,
     addFromPaste,
     restoreReadyFiles,
+    ...(typeof client.createFileDownloadUrl === "function" ? { loadPreview } : {}),
     retry,
     retainPreview,
     remove,

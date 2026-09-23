@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 
 import {
+  ACTIVE_WORK_ACTION_ICON_RAW_BUDGET,
+  ACTIVE_WORK_ACTION_ICON_RAW_MEASUREMENT,
+  CODEX_CAPACITY_LIVE_STATUS_RAW_BUDGET,
+  CODEX_CAPACITY_LIVE_STATUS_RAW_MEASUREMENT,
   DIRECT_SESSION_RAW_BUDGET,
   DIRECT_SESSION_RAW_MEASUREMENT,
   EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
@@ -14,8 +19,14 @@ import {
   MINIMUM_RAW_HEADROOM_BYTES,
   ORGANIZATION_CODEX_INHERITANCE_RAW_BUDGET,
   ORGANIZATION_CODEX_INHERITANCE_RAW_MEASUREMENT,
+  ORGANIZATION_INVITATION_CONTINUATION_RAW_BUDGET,
+  ORGANIZATION_INVITATION_CONTINUATION_RAW_MEASUREMENT,
   SCHEDULED_CONNECTED_MACHINE_RAW_BUDGET,
   SCHEDULED_CONNECTED_MACHINE_RAW_MEASUREMENT,
+  SIDEBAR_DENSITY_CURRENT_MAIN_BROWSER_RAW_BUDGET,
+  SIDEBAR_DENSITY_CURRENT_MAIN_BROWSER_RAW_MEASUREMENT,
+  SETUP_ACCOUNT_QUERY_COMPATIBILITY_RAW_BUDGET,
+  SETUP_ACCOUNT_QUERY_COMPATIBILITY_RAW_MEASUREMENT,
   ORGANIZATION_API_KEYS_CURRENT_MAIN_RAW_BUDGET,
   ORGANIZATION_API_KEYS_CURRENT_MAIN_RAW_MEASUREMENT,
   PR_REVIEW_EXECUTION_MODEL_RAW_BUDGET,
@@ -27,6 +38,8 @@ import {
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_RAW_MEASUREMENT,
   SESSION_READ_CANCELLATION_RAW_BUDGET,
   SESSION_READ_CANCELLATION_RAW_MEASUREMENT,
+  SESSION_WAIT_COMMAND_WAKE_RAW_BUDGET,
+  SESSION_WAIT_COMMAND_WAKE_RAW_MEASUREMENT,
   TIMELINE_HARDENING_CURRENT_MAIN_RAW_BUDGET,
   TIMELINE_HARDENING_CURRENT_MAIN_RAW_MEASUREMENT,
   TIMELINE_HARDENING_MERGE_TREE_RAW_BUDGET,
@@ -43,6 +56,27 @@ import {
 } from "./web-bundle-budget-policy";
 
 describe("web bundle budget policy", () => {
+  test("calibrates only the measured session artifact navigation gzip envelope", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    expect(source).toContain("wholeKibEnvelope(656_741, 1.5 * kib)");
+    const envelope = wholeKibEnvelope(656_741, 1.5 * KIB);
+    expect(envelope).toBe(643 * KIB);
+    expect(envelope - 656_774).toBeGreaterThanOrEqual(1.5 * KIB);
+    // Keep the unrelated hard limits pinned while adding the measured gzip cost.
+    for (const limit of [
+      "initialRaw: 1485 * kib",
+      "initialGzip: 405 * kib",
+      "initialFileGzip: 79 * kib",
+      "initialFiles: 17",
+      "directSessionRaw: Math.max(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET, wholeKibEnvelope(2_329_400))",
+      "directSessionFiles: 31",
+      "lazyChunkRaw: 800 * kib",
+      "lazyChunkGzip: 240 * kib",
+      "cssGzip: wholeKibEnvelope(35_411)",
+    ])
+      expect(source).toContain(limit);
+  });
+
   test("retains at least one KiB above the combined personal GitHub and current-main graph", () => {
     expect(DIRECT_SESSION_RAW_MEASUREMENT).toBe(2_219_469);
     expect(DIRECT_SESSION_RAW_BUDGET).toBe(2169 * KIB);
@@ -123,7 +157,21 @@ describe("web bundle budget policy", () => {
         PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_RAW_BUDGET,
         ORGANIZATION_CODEX_INHERITANCE_RAW_BUDGET,
         MODEL_CATALOG_GATEWAY_OPENROUTER_RAW_BUDGET,
+        ORGANIZATION_INVITATION_CONTINUATION_RAW_BUDGET,
+        CODEX_CAPACITY_LIVE_STATUS_RAW_BUDGET,
+        SIDEBAR_DENSITY_CURRENT_MAIN_BROWSER_RAW_BUDGET,
+        SETUP_ACCOUNT_QUERY_COMPATIBILITY_RAW_BUDGET,
+        SESSION_WAIT_COMMAND_WAKE_RAW_BUDGET,
+        ACTIVE_WORK_ACTION_ICON_RAW_BUDGET,
       ),
+    );
+  });
+
+  test("retains one KiB headroom above the shared active-work action icon graph", () => {
+    expect(ACTIVE_WORK_ACTION_ICON_RAW_MEASUREMENT).toBe(2_284_597);
+    expect(ACTIVE_WORK_ACTION_ICON_RAW_BUDGET).toBe(2233 * KIB);
+    expect(ACTIVE_WORK_ACTION_ICON_RAW_BUDGET - ACTIVE_WORK_ACTION_ICON_RAW_MEASUREMENT).toBe(
+      1_995,
     );
   });
 
@@ -215,5 +263,51 @@ describe("web bundle budget policy", () => {
       MODEL_CATALOG_GATEWAY_OPENROUTER_RAW_BUDGET -
         MODEL_CATALOG_GATEWAY_OPENROUTER_RAW_MEASUREMENT,
     ).toBe(1_401);
+  });
+
+  test("retains the exact organization-invitation continuation envelope", () => {
+    expect(ORGANIZATION_INVITATION_CONTINUATION_RAW_MEASUREMENT).toBe(2_277_646);
+    expect(ORGANIZATION_INVITATION_CONTINUATION_RAW_BUDGET).toBe(2226 * KIB);
+    expect(
+      ORGANIZATION_INVITATION_CONTINUATION_RAW_BUDGET -
+        ORGANIZATION_INVITATION_CONTINUATION_RAW_MEASUREMENT,
+    ).toBe(1_778);
+  });
+
+  test("retains the exact authoritative Codex capacity-status envelope", () => {
+    expect(CODEX_CAPACITY_LIVE_STATUS_RAW_MEASUREMENT).toBe(2_279_737);
+    expect(CODEX_CAPACITY_LIVE_STATUS_RAW_BUDGET).toBe(2228 * KIB);
+    expect(CODEX_CAPACITY_LIVE_STATUS_RAW_BUDGET - CODEX_CAPACITY_LIVE_STATUS_RAW_MEASUREMENT).toBe(
+      1_735,
+    );
+  });
+
+  test("retains the exact sidebar-density and current-main configured-browser envelope", () => {
+    expect(SIDEBAR_DENSITY_CURRENT_MAIN_BROWSER_RAW_MEASUREMENT).toBe(2_279_505);
+    expect(SIDEBAR_DENSITY_CURRENT_MAIN_BROWSER_RAW_BUDGET).toBe(2228 * KIB);
+    expect(
+      SIDEBAR_DENSITY_CURRENT_MAIN_BROWSER_RAW_BUDGET -
+        SIDEBAR_DENSITY_CURRENT_MAIN_BROWSER_RAW_MEASUREMENT,
+    ).toBe(1_967);
+  });
+
+  test("retains the exact setup-account query compatibility envelope", () => {
+    expect(SETUP_ACCOUNT_QUERY_COMPATIBILITY_RAW_MEASUREMENT).toBe(2_281_164);
+    expect(SETUP_ACCOUNT_QUERY_COMPATIBILITY_RAW_BUDGET).toBe(2229 * KIB);
+    expect(
+      SETUP_ACCOUNT_QUERY_COMPATIBILITY_RAW_BUDGET -
+        SETUP_ACCOUNT_QUERY_COMPATIBILITY_RAW_MEASUREMENT,
+    ).toBe(1_332);
+  });
+
+  test("retains the exact session-wait and command-wake lifecycle envelope", () => {
+    expect(SESSION_WAIT_COMMAND_WAKE_RAW_MEASUREMENT).toBe(2_281_673);
+    expect(SESSION_WAIT_COMMAND_WAKE_RAW_BUDGET).toBe(2230 * KIB);
+    expect(SESSION_WAIT_COMMAND_WAKE_RAW_BUDGET - SESSION_WAIT_COMMAND_WAKE_RAW_MEASUREMENT).toBe(
+      1_847,
+    );
+    expect(
+      SESSION_WAIT_COMMAND_WAKE_RAW_BUDGET - SESSION_WAIT_COMMAND_WAKE_RAW_MEASUREMENT,
+    ).toBeGreaterThanOrEqual(MINIMUM_RAW_HEADROOM_BYTES);
   });
 });

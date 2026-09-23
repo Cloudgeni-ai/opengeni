@@ -26,10 +26,15 @@ import {
   type ForkSessionContentResult,
 } from "@opengeni/db";
 import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
-import { requirePermission, type AccessGrantAuthorization } from "../access";
+import {
+  requirePermission,
+  hasVerifiedOwningUserAuthorization,
+  type AccessGrantAuthorization,
+} from "../access";
 import { requireSessionAuthorization } from "../session-authorization";
 import type { AppDependencies } from "../dependencies";
 import { validateVariableSetAttachment } from "../domain/environments";
+import { externalContinuationCommitAuthorizer } from "./external-continuation";
 
 type SessionTenancyDependencies = Pick<
   AppDependencies,
@@ -64,6 +69,18 @@ export function requireCanonicalManagedHuman(
   }
 }
 
+export function requireVerifiedOwningUser(
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+): void {
+  if (
+    !hasVerifiedOwningUserAuthorization(authorization) ||
+    authorization.grant.workspaceId !== workspaceId
+  ) {
+    throw new SessionTenancyManagedHumanRequiredError();
+  }
+}
+
 export async function getManagedHumanSessionCreateCapabilities(
   deps: Pick<SessionTenancyDependencies, "db">,
   authorization: AccessGrantAuthorization,
@@ -71,7 +88,7 @@ export async function getManagedHumanSessionCreateCapabilities(
 ): Promise<SessionTenancyCreateCapabilities> {
   requirePermission(authorization.grant, "sessions:create");
   try {
-    requireCanonicalManagedHuman(authorization, workspaceId);
+    requireVerifiedOwningUser(authorization, workspaceId);
   } catch (error) {
     if (error instanceof SessionTenancyManagedHumanRequiredError) {
       return SessionTenancyCreateCapabilities.parse({
@@ -132,7 +149,7 @@ async function requireSessionTenancyMutationGate(
   // These checks are deliberately target-free. A rejected principal must not
   // cause a session lookup or embedding-host callback that distinguishes a
   // missing, shared, or another owner's private session.
-  requireCanonicalManagedHuman(authorization, workspaceId);
+  requireVerifiedOwningUser(authorization, workspaceId);
   for (const permission of permissions) requirePermission(authorization.grant, permission);
   if (!(await sessionTenancyProductActivated(deps.db, workspaceId))) {
     throw new SessionTenancyNotActivatedError();
@@ -234,6 +251,7 @@ export async function updateManagedHumanSessionVisibility(
   request: UpdateSessionVisibilityRequest,
   authorizationSurface: SessionAuthorizationSurface = "core",
 ): Promise<UpdateSessionVisibilityResponse> {
+  const beforeCommit = externalContinuationCommitAuthorizer(authorization);
   await requireSessionTenancyMutationGate(deps, authorization, workspaceId, ["sessions:control"]);
   await requireSessionAuthorization(deps, authorization.grant, {
     sessionId,
@@ -250,6 +268,7 @@ export async function updateManagedHumanSessionVisibility(
         targetVisibility: sessionVisibilityFromPublic(request.visibility),
         expectedAuthorityEpoch: request.expectedAuthorityEpoch,
         operationKey: request.idempotencyKey,
+        ...(beforeCommit ? { beforeCommit } : {}),
       }),
   );
   const response = UpdateSessionVisibilityResponse.parse({
@@ -284,15 +303,18 @@ export async function forkManagedHumanSession(
     "sessions:read",
     "sessions:create",
   ]);
+  const beforeCommit = externalContinuationCommitAuthorizer(authorization);
   const forkInput = {
     sourceWorkspaceId: workspaceId,
     sourceSessionId,
+    ...(request.sourceEventId ? { sourceEventId: request.sourceEventId } : {}),
     actorSubjectId: authorization.grant.subjectId,
     destinationWorkspaceId: workspaceId,
     destinationVisibility:
       request.visibility === "private" ? ("user_private" as const) : ("workspace_shared" as const),
     workspaceSharedAcknowledged: request.workspaceSharedAcknowledged,
     operationKey: request.idempotencyKey,
+    ...(beforeCommit ? { beforeCommit } : {}),
     ...(request.rigId !== undefined || request.variableSetIds !== undefined
       ? {
           runtimeRequest: {

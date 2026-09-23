@@ -12,6 +12,7 @@ import {
   createDb,
   createXaiSubscriptionCredential,
   disconnectXaiSubscriptionCredential,
+  disconnectXaiSubscriptionCredentialAndRepick,
   getXaiCapacityWaitForSession,
   getXaiRotationSettings,
   getXaiSessionAccountPin,
@@ -392,6 +393,67 @@ describe("migration 0234 xAI subscription authority", () => {
     expect(revoked?.revokedAt).toBeInstanceOf(Date);
   }, 180_000);
 
+  test("disconnect clears manual and policy pins in workspace and user pools", async () => {
+    if (!shared || !client) return;
+    for (const scope of ["workspace", "user"] as const) {
+      const fixture = await seedWorkspace();
+      const subjectId = fixture.subjects[0]!;
+      const created = await createXaiSubscriptionCredential(client.db, {
+        ...fixture,
+        subjectId,
+        scope,
+        secret: { version: 1, accessToken: "disconnect-fixture" },
+        encryptionKey,
+        providerAccountId: crypto.randomUUID(),
+        label: "Disconnect fixture",
+      });
+      const pins = [];
+      for (const pinSource of ["manual", "policy"] as const) {
+        const session = await seedSessionTurn(fixture, created.authoritySnapshot);
+        const input = {
+          ...fixture,
+          subjectId,
+          sessionId: session.sessionId,
+          authoritySnapshot: created.authoritySnapshot,
+        };
+        const pin = await setXaiSessionAccountPin(client.db, {
+          ...input,
+          credentialId: created.account.id,
+          pinSource,
+        });
+        pins.push({ input, pin });
+      }
+      expect(
+        await disconnectXaiSubscriptionCredentialAndRepick(client.db, {
+          ...fixture,
+          subjectId,
+          credentialId: created.account.id,
+          authoritySnapshot: created.authoritySnapshot,
+        }),
+      ).toMatchObject({ disconnected: true, newActiveCredentialId: null });
+      for (const { input, pin } of pins) {
+        const [stored] = await shared.admin`
+          select pinned_credential_id, pin_source, version
+          from xai_session_account_pins where id = ${pin.id}`;
+        expect(stored).toMatchObject({
+          pinned_credential_id: null,
+          pin_source: null,
+          version: pin.version + 1,
+        });
+        if (scope === "workspace") {
+          await expect(
+            setXaiSessionAccountPin(client.db, {
+              ...input,
+              credentialId: null,
+              pinSource: null,
+              expectedVersion: pin.version,
+            }),
+          ).rejects.toThrow("xAI session pin changed");
+        }
+      }
+    }
+  }, 180_000);
+
   test("serializes rotating OAuth refresh tokens across concurrent sessions", async () => {
     if (!shared || !client) return;
     const fixture = await seedWorkspace();
@@ -506,7 +568,7 @@ describe("migration 0234 xAI subscription authority", () => {
       }),
     ).toBe(true);
 
-    const recoveredAt = new Date(resetAt.getTime() + 1);
+    const recoveredAt = new Date(checkedAt.getTime() + 1);
     expect(
       await updateXaiQuotaMetadata(client.db, {
         workspaceId: fixture.workspaceId,
@@ -516,8 +578,23 @@ describe("migration 0234 xAI subscription authority", () => {
         quotaResetAt: null,
         quotaCheckedAt: recoveredAt,
         exhaustedUntil: null,
+        expectedExhaustedUntil: resetAt,
+        expectedQuotaCheckedAt: checkedAt,
       }),
     ).toBe(true);
+    expect(
+      await updateXaiQuotaMetadata(client.db, {
+        workspaceId: fixture.workspaceId,
+        subjectId: subjectId!,
+        credentialId: cooling.id,
+        quotaUsedPercent: 100,
+        quotaResetAt: resetAt,
+        quotaCheckedAt: new Date(recoveredAt.getTime() + 1),
+        exhaustedUntil: resetAt,
+        expectedExhaustedUntil: resetAt,
+        expectedQuotaCheckedAt: checkedAt,
+      }),
+    ).toBe(false);
     const secondTurn = await seedSessionTurn(fixture);
     const recoveredLease = await acquireXaiCredentialLease(client.db, {
       ...fixture,
@@ -950,7 +1027,7 @@ describe("migration 0234 xAI subscription authority", () => {
       attemptId: turn.attemptId,
       workflowId: turn.workflowId,
       authoritySnapshot: workspaceSnapshot,
-      earliestResetAt: new Date(Date.now() + 30_000),
+      earliestResetAt: new Date(Date.now() + 86_400_000),
       failurePayload: {
         error: "all connected SuperGrok subscriptions are unavailable",
         code: "xai_capacity_unavailable",
@@ -959,6 +1036,9 @@ describe("migration 0234 xAI subscription authority", () => {
     expect(armed.action).toBe("waiting");
     if (armed.action !== "waiting") throw new Error("xAI capacity waiter did not arm");
     const waiter = armed.waiter;
+    // External resets must be detected without waiting until tomorrow's reset.
+    expect(waiter.nextCheckAt.getTime() - waiter.createdAt.getTime()).toBeLessThanOrEqual(60_000);
+    expect(waiter.nextCheckAt.getTime()).toBeLessThan(waiter.earliestResetAt!.getTime());
     expect(waiter).toMatchObject({
       status: "waiting",
       generation: 1,

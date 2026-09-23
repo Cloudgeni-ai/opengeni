@@ -12,6 +12,10 @@ const SESSION_ID = "00000000-0000-4000-8000-000000000002";
 const OTHER_WORKSPACE_ID = "00000000-0000-4000-8000-000000000004";
 
 let sessions: Session[] = [];
+const listAgentTopology = mock(async (..._args: unknown[]) => ({
+  sessions: [] as Array<Record<string, unknown>>,
+  nextCursor: null as string | null,
+}));
 let permissions = ["sessions:read", "sessions:control"];
 const refresh = mock(async () => undefined);
 const railRefresh = mock(async () => undefined);
@@ -48,12 +52,22 @@ mock.module("@opengeni/react", () => ({
 }));
 
 mock.module("@tanstack/react-router", () => ({
-  Link: ({ children }: { children: ReactNode }) => <a href="#">{children}</a>,
+  Link: ({
+    children,
+    params,
+  }: {
+    children: ReactNode;
+    params?: { workspaceId?: string; sessionId?: string };
+  }) => (
+    <a href={`/workspaces/${params?.workspaceId}/sessions/${params?.sessionId ?? ""}`}>
+      {children}
+    </a>
+  ),
 }));
 
 mock.module("@/context", () => ({
   useAppContext: () => ({
-    client: { updateSessionArchive, cancelSession },
+    client: { updateSessionArchive, cancelSession, listAgentTopology },
     accessContext: {
       workspaceGrants: [{ workspaceId: WORKSPACE_ID, permissions }],
     },
@@ -78,6 +92,8 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  listAgentTopology.mockReset();
+  listAgentTopology.mockResolvedValue({ sessions: [], nextCursor: null });
   sessions = [brokenSession()];
   permissions = ["sessions:read", "sessions:control"];
   refresh.mockClear();
@@ -342,6 +358,183 @@ describe("For you broken-session actions", () => {
     try {
       expect(buttonWithText(container, "Dismiss")).not.toBeNull();
       expect(buttonWithText(container, "Stop workstream")).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+});
+
+describe("For you exact waiting agent navigation", () => {
+  test("offers discovery when a truncated tree has no known waiting descendants", async () => {
+    sessions[0]!.treeStats!.attentionDescendants = 0;
+    sessions[0]!.treeStats!.truncated = true;
+    listAgentTopology.mockResolvedValueOnce({
+      sessions: [
+        {
+          id: "late-child",
+          title: "Reviewer beyond summary",
+          status: "requires_action",
+          pause: { state: "active" },
+        },
+      ],
+      nextCursor: null,
+    });
+    const { container, root } = await renderPriorityRoute();
+    try {
+      expect(listAgentTopology).not.toHaveBeenCalled();
+      const check = buttonWithText(container, "Check waiting agents");
+      expect(check).not.toBeNull();
+      await act(async () => check!.click());
+      expect(container.textContent).toContain("Reviewer beyond summary");
+      expect(container.querySelector('a[href$="/sessions/late-child"]')).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("loads authorized child pages on demand while preserving the parent failure", async () => {
+    sessions[0]!.treeStats!.attentionDescendants = 2;
+    listAgentTopology.mockResolvedValueOnce({
+      sessions: [
+        {
+          id: "child-one",
+          title: "Waiting reviewer",
+          status: "requires_action",
+          pause: { state: "active" },
+        },
+      ],
+      nextCursor: "next-page",
+    });
+    listAgentTopology.mockResolvedValueOnce({
+      sessions: [
+        {
+          id: "child-two",
+          title: "Paused reviewer",
+          status: "requires_action",
+          pause: { state: "paused" },
+        },
+      ],
+      nextCursor: null,
+    });
+    const { container, root } = await renderPriorityRoute();
+    try {
+      expect(listAgentTopology).not.toHaveBeenCalled();
+      await act(async () => {
+        buttonWithText(container, "Show waiting agents")!.click();
+      });
+      expect(listAgentTopology).toHaveBeenCalledWith(WORKSPACE_ID, {
+        rootSessionId: SESSION_ID,
+        statuses: ["requires_action"],
+        limit: 20,
+      });
+      const child = [...container.querySelectorAll("a")].find(
+        (link) => link.textContent === "Waiting reviewer",
+      );
+      expect(child?.getAttribute("href")).toBe(`/workspaces/${WORKSPACE_ID}/sessions/child-one`);
+      expect(container.textContent).toContain("Broken deployment");
+      expect(container.textContent).toContain("since update");
+      await act(async () => {
+        buttonWithText(container, "Load more waiting agents")!.click();
+      });
+      expect(listAgentTopology.mock.calls[1]?.[1]).toMatchObject({ cursor: "next-page" });
+      expect(container.textContent).toContain("Paused; request still pending");
+      expect(container.textContent).toContain("Waiting reviewer");
+      await act(async () => {
+        buttonWithText(container, "Refresh waiting agents")!.click();
+      });
+      expect(container.textContent).not.toContain("Waiting reviewer");
+      expect(container.textContent).toContain("No waiting agents were found");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("does not call a partial empty page empty and labels results retained after a failed refresh", async () => {
+    sessions[0]!.treeStats!.attentionDescendants = 1;
+    listAgentTopology.mockResolvedValueOnce({ sessions: [], nextCursor: "more" });
+    listAgentTopology.mockResolvedValueOnce({
+      sessions: [
+        {
+          id: "child-one",
+          title: "Previously checked child",
+          status: "requires_action",
+          pause: { state: "active" },
+        },
+      ],
+      nextCursor: null,
+    });
+    listAgentTopology.mockRejectedValueOnce(new Error("refresh unavailable"));
+    const { container, root } = await renderPriorityRoute();
+    try {
+      await act(async () => buttonWithText(container, "Show waiting agents")!.click());
+      expect(container.textContent).not.toContain("No waiting agents were found");
+      await act(async () => buttonWithText(container, "Load more waiting agents")!.click());
+      await act(async () => buttonWithText(container, "Refresh waiting agents")!.click());
+      expect(container.textContent).toContain("Previously checked child");
+      expect(container.textContent).toContain("The listed agents are from the previous check.");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("ignores child discovery from a workspace that has been left", async () => {
+    sessions[0]!.treeStats!.attentionDescendants = 1;
+    let resolveOld!: (page: { sessions: Array<Record<string, unknown>>; nextCursor: null }) => void;
+    const pending = new Promise<{ sessions: Array<Record<string, unknown>>; nextCursor: null }>(
+      (resolve) => {
+        resolveOld = resolve;
+      },
+    );
+    listAgentTopology.mockImplementationOnce(() => pending);
+    const { container, root } = await renderPriorityRoute();
+    try {
+      await act(async () => {
+        buttonWithText(container, "Show waiting agents")!.click();
+      });
+      await act(async () => {
+        root.render(<PriorityRoute workspaceId={OTHER_WORKSPACE_ID} />);
+      });
+      await act(async () => {
+        resolveOld({
+          sessions: [
+            {
+              id: "old-child",
+              title: "Previous workspace child",
+              status: "requires_action",
+              pause: { state: "active" },
+            },
+          ],
+          nextCursor: null,
+        });
+        await pending;
+      });
+      expect(container.textContent).not.toContain("Previous workspace child");
+      expect(buttonWithText(container, "Show waiting agents")).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("presents retry when child discovery fails", async () => {
+    sessions[0]!.treeStats!.attentionDescendants = 1;
+    listAgentTopology.mockRejectedValueOnce(new Error("unavailable"));
+    const { container, root } = await renderPriorityRoute();
+    try {
+      await act(async () => {
+        buttonWithText(container, "Show waiting agents")!.click();
+      });
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+        "could not be loaded",
+      );
+      await act(async () => {
+        buttonWithText(container, "Refresh waiting agents")!.click();
+      });
+      expect(container.querySelector('[role="alert"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();

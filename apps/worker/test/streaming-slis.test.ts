@@ -1,10 +1,12 @@
-import { describe, expect, test } from "bun:test";
-import { createObservability } from "@opengeni/observability";
+import { describe, expect, spyOn, test } from "bun:test";
+import { createObservability, withTraceContext } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
 import {
+  initializeContextCompactionMetrics,
   ModelRequestLifecycleMetrics,
   recordBatchFlush,
   recordContextCompaction,
+  recordContextCompactionStarted,
   recordCompanyBrainContributions,
   recordModelInputTokens,
   recordModelRequestPhase,
@@ -16,6 +18,7 @@ import {
   recordTurnSandboxEstablishPolicy,
   recordTurnStartupMilestone,
   recordTurnStartupPhase,
+  recordToolPreparationPhase,
   recordTurnWorkerPreparationTotal,
   StreamTimingMetrics,
   sessionEventBatchSizeClass,
@@ -305,6 +308,48 @@ describe("turn startup phase diagnostics", () => {
     expect(metrics).not.toContain("credentialId");
   });
 
+  test("exposes a trace-only claim lookup before the execution root ends", async () => {
+    const observability = worker();
+    const root = observability.startSpan("worker.run_agent_segment");
+    const spans = spyOn(observability, "startSpan");
+    const correlationId = "turn_0123456789abcdef0123456789abcdef";
+    try {
+      withTraceContext(root, () =>
+        recordTurnStartupPhase(observability, {
+          phase: "claim_and_policy",
+          provider: "codex-subscription",
+          backend: "modal",
+          outcome: "completed",
+          durationSeconds: 0.5,
+          executionCorrelationId: correlationId,
+        }),
+      );
+      expect(spans.mock.calls[0]?.[1]).toMatchObject({ correlationId });
+      expect(spans.mock.results[0]?.value.traceId).toBe(root.traceId);
+      for (const [phase, key] of [
+        ["claim_and_policy", "raw-session-id"],
+        ["tool_preparation", correlationId],
+      ] as const) {
+        recordTurnStartupPhase(observability, {
+          phase,
+          provider: "codex-subscription",
+          backend: "modal",
+          outcome: "completed",
+          durationSeconds: 0.1,
+          executionCorrelationId: key,
+        });
+        expect(spans.mock.calls.at(-1)?.[1]).not.toHaveProperty("correlationId");
+      }
+      const metrics = await observability.prometheusMetrics();
+      expect(metrics).not.toContain(correlationId);
+      expect(metrics).not.toContain("correlationId");
+      expect(metrics).not.toContain("raw-session-id");
+    } finally {
+      spans.mockRestore();
+      root.end();
+    }
+  });
+
   test("separates lazy request preparation from the durable request-start audit", async () => {
     const observability = worker();
     recordTurnStartupPhase(observability, {
@@ -356,6 +401,30 @@ describe("turn startup phase diagnostics", () => {
     );
     expect(metrics).toMatch(
       /opengeni_turn_startup_phase_duration_seconds_count\{[^}]*phase="tool_attempt_catalog_persist"[^}]*\} 1\b/,
+    );
+  });
+
+  test("background tool preparation cannot inflate startup histograms", async () => {
+    const observability = worker();
+    for (const execution of ["blocking", "background"] as const) {
+      recordToolPreparationPhase(observability, {
+        phase: "optional_connect",
+        execution,
+        provider: "codex-subscription",
+        backend: "modal",
+        outcome: "completed",
+        durationSeconds: execution === "blocking" ? 0.01 : 30,
+      });
+    }
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_turn_startup_phase_duration_seconds_count\{[^}]*phase="tool_optional_connect"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_turn_startup_phase_duration_seconds_sum\{[^}]*phase="tool_optional_connect"[^}]*\} 0\.01\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_tool_background_preparation_duration_seconds_sum\{[^}]*phase="optional_connect"[^}]*\} 30\b/,
     );
   });
 
@@ -480,19 +549,47 @@ describe("context-pressure signals", () => {
     expect(metrics).toMatch(/opengeni_model_input_tokens_count\{[^}]*provider="openai"[^}]*\} 1\b/);
   });
 
-  test("compaction counter increments by trigger", async () => {
+  test("publishes every closed compaction trigger at zero before the first event", async () => {
     const observability = worker();
+    initializeContextCompactionMetrics(observability);
+
+    const metrics = await observability.prometheusMetrics();
+    for (const trigger of ["auto", "operator", "proactive", "overflow"]) {
+      expect(metrics).toMatch(
+        new RegExp(
+          `opengeni_context_compaction_starts_total\\{[^}]*trigger="${trigger}"[^}]*\\} 0\\b`,
+        ),
+      );
+      expect(metrics).toMatch(
+        new RegExp(`opengeni_context_compactions_total\\{[^}]*trigger="${trigger}"[^}]*\\} 0\\b`),
+      );
+    }
+  });
+
+  test("compaction lifecycle metrics update by trigger", async () => {
+    const observability = worker();
+    initializeContextCompactionMetrics(observability);
+    recordContextCompactionStarted(observability, "auto");
+    initializeContextCompactionMetrics(observability);
+    recordContextCompactionStarted(observability, "operator");
     recordContextCompaction(observability, "overflow");
     recordContextCompaction(observability, "overflow");
     recordContextCompaction(observability, "operator");
 
     const metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(
+      /opengeni_context_compaction_starts_total\{[^}]*trigger="auto"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_context_compaction_starts_total\{[^}]*trigger="operator"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
       /opengeni_context_compactions_total\{[^}]*trigger="overflow"[^}]*\} 2\b/,
     );
     expect(metrics).toMatch(
       /opengeni_context_compactions_total\{[^}]*trigger="operator"[^}]*\} 1\b/,
     );
+    expect(metrics).not.toContain("opengeni_context_compaction_last_event_timestamp_seconds");
   });
 
   test("Company Brain exposure metrics use only bounded classification labels", async () => {

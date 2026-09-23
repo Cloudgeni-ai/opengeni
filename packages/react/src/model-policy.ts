@@ -116,6 +116,12 @@ export function labelReasoningEffort(effort: ReasoningEffort): string {
   return effort.slice(0, 1).toUpperCase() + effort.slice(1);
 }
 
+/** Payment prompts must use cost policy, never the presentation group. */
+export function modelUsesCredits(model: ClientModel | undefined): boolean {
+  if (model?.cost !== undefined) return model.cost === "credits";
+  return model?.billing?.metering === "opengeni_credits";
+}
+
 export function payerSummaryForModel(model: ClientModel): string {
   if (model.cost === "free") {
     return "Free in this deployment";
@@ -130,6 +136,9 @@ export function payerSummaryForModel(model: ClientModel): string {
   }
   if (model.cost === "workspace") {
     return workspaceProviderPayerSummary(model);
+  }
+  if (model.cost === "organization") {
+    return organizationProviderPayerSummary(model);
   }
 
   // Older client-config payloads do not carry `cost`; preserve their existing
@@ -149,14 +158,19 @@ export function payerSummaryForModel(model: ClientModel): string {
   if (billing.upstreamPayer === "workspace") {
     return workspaceProviderPayerSummary(model);
   }
-  return "External provider · no OpenGeni credits";
+  if (billing.upstreamPayer === "organization") {
+    return organizationProviderPayerSummary(model);
+  }
+  return billing.upstreamPayer === "deployment"
+    ? "OpenGeni · no model credits"
+    : "External provider · no OpenGeni credits";
 }
 
 export function advancedSourceSummary(model: ClientModel): string | null {
   const source = model.credentialSource;
   if (!source) {
     return model.billing?.metering === "external" && model.billing.upstreamPayer === "deployment"
-      ? "Deployment route · no authentication"
+      ? "Deployment-provided connection"
       : null;
   }
   if (source.kind === "connected_subscription") {
@@ -191,12 +205,19 @@ function workspaceProviderPayerSummary(model: ClientModel): string {
   return "Billed to the workspace provider account";
 }
 
+function organizationProviderPayerSummary(model: ClientModel): string {
+  if (model.provider === "organization-openrouter") {
+    return "Billed to the organization OpenRouter account";
+  }
+  if (model.provider === "organization-gateway") {
+    return "Billed to the organization Vercel account";
+  }
+  return "Billed to the organization provider account";
+}
+
 export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerModelRow[] {
   return models
-    .filter((catalog) => {
-      const billingClass = billingClassForModel(catalog);
-      return billingClass === "opengeni_credits" || catalog.credentialReadiness.status === "ready";
-    })
+    .filter((catalog) => catalog.credentialReadiness.status === "ready")
     .map((catalog) => {
       const billingClass = billingClassForModel(catalog);
       return {
@@ -250,9 +271,11 @@ export function findPickerRow<TCatalog extends ClientModel>(
 
 export function groupPickerRowsByBillingClass(
   rows: PickerModelRow[],
+  options?: { codexOnly?: boolean },
 ): Array<{ billingClass: PickerBillingClass; label: string; rows: PickerModelRow[] }>;
 export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
   rows: PickerModelRow<TCatalog>[],
+  options?: { codexOnly?: boolean },
 ): Array<{
   billingClass: PickerBillingClass;
   label: string;
@@ -260,6 +283,7 @@ export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
 }>;
 export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
   rows: PickerModelRow<TCatalog>[],
+  options?: { codexOnly?: boolean },
 ): Array<{
   billingClass: PickerBillingClass;
   label: string;
@@ -282,6 +306,24 @@ export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
       label: row.billingClassLabel,
       rows: [row],
     });
+  }
+  const codexIndex = groups.findIndex((group) => group.billingClass === "codex_subscription");
+  const codex = groups[codexIndex];
+  const selectableOpenGeni = groups
+    .find((group) => group.billingClass === "opengeni_credits")
+    ?.rows.filter((row) => row.selectable);
+  // Presentation only: never change the catalog/default model ordering or selection.
+  const onlyFreeOpenGeni =
+    selectableOpenGeni !== undefined &&
+    selectableOpenGeni.length > 0 &&
+    selectableOpenGeni.every((row) => row.catalog.cost === "free");
+  if (
+    codex &&
+    codex.rows.some((row) => row.selectable) &&
+    (options?.codexOnly || onlyFreeOpenGeni)
+  ) {
+    groups.splice(codexIndex, 1);
+    groups.unshift(codex);
   }
   return groups;
 }

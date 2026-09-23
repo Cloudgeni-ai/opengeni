@@ -91,9 +91,17 @@ OPENGENI_MODAL_TIMEOUT_SECONDS=900
 
 When explaining Modal, say OpenGeni selects the Modal sandbox backend through the OpenAI Agents SDK extension. Do not imply that all Docker-only mounting or networking behavior is identical unless runtime code proves it.
 
+For materialization visibility failures, inspect `modal-materialization-verification.ts`
+and `modal-command-session.ts` under runtime sandbox providers. The fixed read-only
+probe owns an ephemeral provider cursor, not its surrounding mutation's retained
+command alias. Terminal status and the marker are required; deadline/cancellation
+ends observation without proving process termination. Do not add clone/turn retries
+or weaken retained-command persistence to follow a setup probe. See run-lifecycle
+and the authenticated materialization diagnostic for exact current behavior.
+
 ### Private-registry sandbox images
 
-By default `OPENGENI_MODAL_IMAGE_REF` (and any pack `sandboxImage` that overrides it) is
+By default `OPENGENI_MODAL_IMAGE_REF` is
 pulled UNAUTHENTICATED — the Agents-extension backend calls `Image.fromRegistry(tag)` with
 no secret, so the image must be a PUBLIC registry tag. To run a PRIVATE image (a cloud-hosted
 ACR/ECR/GCR digest), set `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET` to the name of a Modal Secret
@@ -131,7 +139,6 @@ Common resource behavior:
 - File resources become object-storage-backed mounts, commonly under `files/<file-id>`.
 - Uploaded files are read-only. Agents should copy them before modifying.
 - Bundled infrastructure skills may be made available under `.agents/` through the Agents SDK skills capability.
-- Enabled capability packs may add skills to the same `.agents/` skill index and may declare a `sandboxImage` that overrides `OPENGENI_DOCKER_IMAGE`/`OPENGENI_MODAL_IMAGE_REF` for the workspace's sessions (one image-declaring pack per workspace; see `docs/packs.md`).
 
 Always trace resource flow end to end:
 

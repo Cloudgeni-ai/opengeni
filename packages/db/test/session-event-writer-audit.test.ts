@@ -106,6 +106,10 @@ function parseSourceFile(path: string, source: string): SourceFile {
 }
 
 const expectedWriters: Record<string, ExpectedWriter> = {
+  "packages/db/src/index.ts#switchSessionCodexAccount": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/index.ts#armCodexCapacityWait": {
     inserts: 1,
     contract: "canonical",
@@ -178,8 +182,16 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#holdSessionGoalContinuationWithEvent": {
+  "packages/db/src/index.ts#waitForSessionInputWithEvent": {
     inserts: 1,
+    contract: "canonical",
+  },
+  "packages/db/src/index.ts#settleSessionInputWaitInActivity": {
+    inserts: 2,
+    contract: "canonical",
+  },
+  "packages/db/src/index.ts#backgroundCommandTerminalMutation": {
+    inserts: 3,
     contract: "canonical",
   },
   "packages/db/src/index.ts#rejectSessionGoalRevisionWithEvent": {
@@ -212,6 +224,11 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
     requiresControlRevalidation: true,
   },
+  "packages/db/src/index.ts#recoverSessionWorkFailedBeforeAttemptClaim": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/index.ts#commitSessionAttemptQuiescence": {
     inserts: 2,
     contract: "canonical",
@@ -233,10 +250,14 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
   },
   "packages/db/src/index.ts#settleCodexCredentialFailover": {
-    inserts: 1,
+    inserts: 2,
     contract: "canonical",
   },
   "packages/db/src/index.ts#requestSessionTurnRecovery": {
+    inserts: 1,
+    contract: "canonical",
+  },
+  "packages/db/src/index.ts#blockSessionWorkBeforeAttemptClaim": {
     inserts: 1,
     contract: "canonical",
   },
@@ -271,7 +292,15 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  "packages/db/src/session-command-output.ts#appendSessionCommandOutput": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/session-control.ts#mutateSessionControlInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+  },
+  "packages/db/src/session-retry.ts#retryFailedSessionInTransaction": {
     inserts: 1,
     contract: "canonical",
   },
@@ -322,6 +351,8 @@ const expectedWriters: Record<string, ExpectedWriter> = {
 };
 
 const genericControlWriters = new Set([
+  // Preference changes do not admit inference; waiter reconciliation rechecks Pause.
+  "packages/db/src/index.ts#switchSessionCodexAccount",
   "packages/db/src/index.ts#acceptSessionApprovalDecision",
   "packages/db/src/index.ts#acceptSessionHumanInputResponse",
   "packages/db/src/index.ts#appendSessionEvents",
@@ -383,8 +414,12 @@ const expectedOutboxWriters: Record<
 
 const expectedFailedChildOutboxCallers = [
   "applySessionTurnSettlement",
+  // arm owns the canonical child-lifecycle prefix (including parent session)
+  // before atomically emitting a false-capacity-recovery terminal boundary.
+  "armCodexCapacityWait",
   "failSessionWorkBeforeAttemptClaim",
   "recoverSessionDispatch",
+  "settleCodexCredentialFailover",
 ];
 const expectedSharedFailedChildOutboxCallers = [
   "enqueueFailedChildOutboxForTurnTx",
@@ -432,7 +467,8 @@ function productionTypeScriptFiles(): string[] {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (
         entry.isDirectory() &&
-        ["node_modules", "dist", "coverage", "test", "tests", "__tests__"].includes(entry.name)
+        (["node_modules", "dist", "coverage", "test", "tests", "__tests__"].includes(entry.name) ||
+          entry.name.startsWith(".native-closure-"))
       ) {
         continue;
       }
@@ -876,7 +912,7 @@ describe("session_events writer inventory", () => {
     );
   });
 
-  test("every production session-row writer requires the explicit activity gate", () => {
+  test("every production session-row writer has an activity gate or exact maintenance boundary", () => {
     const violations: string[] = [];
     const gateWrappers = [
       "withSessionActivityRlsContext",
@@ -886,6 +922,7 @@ describe("session_events writer inventory", () => {
       "retrySessionActivityRls",
       "withWorkspaceSessionEventActivityRls",
       "retryWorkspaceSessionEventActivityPersistence",
+      "withSessionCodexCapacityMutation",
     ];
 
     for (const path of productionTypeScriptFiles()) {
@@ -910,6 +947,28 @@ describe("session_events writer inventory", () => {
         const key = `${file}#${enclosing.name}`;
         if (checked.has(key)) return;
         checked.add(key);
+        if (key === "packages/db/src/skill-config-migration.ts#migrateLegacySkillConfigurations") {
+          // The parser-backed maintenance migration cannot use the runtime
+          // Drizzle activity handle. Its only writer updates dormant Skill
+          // configuration inside the drained, table-locked owner transaction.
+          // Pin its explicit owner/window guard; do not exempt other writers.
+          const guards = callPositions(enclosing.node, "assertSkillConfigurationMaintenanceWindow");
+          expect(guards, key).toHaveLength(1);
+          expect(guards[0], key).toBeLessThan(nodeStart(node));
+          expect(source).toContain("pg_get_userbyid(c.relowner)=current_user");
+          expect(source).toContain("c.relrowsecurity AND NOT c.relforcerowsecurity");
+          expect(source).toContain("to_regclass('pg_temp.skill_metadata_0426') IS NOT NULL");
+          expect(source).toContain("IN SHARE ROW EXCLUSIVE MODE");
+          const callers = productionTypeScriptFiles()
+            .filter(
+              (candidate) =>
+                candidate !== path &&
+                readFileSync(candidate, "utf8").includes("migrateLegacySkillConfigurations("),
+            )
+            .map((candidate) => relative(repoRoot, candidate).replaceAll("\\", "/"));
+          expect(callers).toEqual(["packages/db/src/migrate.ts"]);
+          return;
+        }
         const body = enclosing.node.body;
         if (!body) {
           violations.push(`${key} has no function body`);

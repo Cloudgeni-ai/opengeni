@@ -34,6 +34,34 @@ function fakeProcess() {
 }
 
 describe("API fatal process boundary", () => {
+  test("passes the original cause to the protected diagnostic boundary before flushing and exiting", async () => {
+    const runtime = fakeProcess();
+    const source = new TypeError("SECRET_CANARY", { cause: new Error("nested SECRET_CANARY") });
+    const steps: string[] = [];
+    const boundary = installApiFatalProcessBoundary({
+      process: runtime.process,
+      observability: {
+        recordFailureDiagnostic: (input) => {
+          expect(input.error).toBe(source);
+          expect(input.stage).toBe("startup");
+          steps.push("capture");
+          return "protected-diagnostic-id";
+        },
+        error: (message, attributes) => {
+          expect(message).not.toContain("SECRET_CANARY");
+          expect(attributes?.correlationId).toBe("protected-diagnostic-id");
+          steps.push("public");
+        },
+        startSpan: () => ({ traceId: "a".repeat(32), spanId: "b".repeat(16), end: () => {} }),
+        flush: async () => {
+          steps.push("flush");
+        },
+      },
+    });
+    await boundary.reportStartupFailure(source);
+    expect(steps).toEqual(["capture", "public", "flush"]);
+    expect(runtime.exits).toEqual([1]);
+  });
   test("reports an unhandled rejection with closed structural facts and no rejection content", async () => {
     const sentinel = "API_FATAL_PRIVATE_SENTINEL_76d324";
     const runtime = fakeProcess();

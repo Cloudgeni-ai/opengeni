@@ -367,6 +367,8 @@ struct WorkspaceLink<P: Platform> {
     /// `None` between generations (frames drop; replay heals — fire-and-forget
     /// by protocol design).
     bulk_tx: BulkLane,
+    /// Upload identity is local to this exact connection/process instance.
+    uploads: Arc<std::sync::Mutex<crate::uploads::Uploads>>,
 }
 
 impl<P: Platform> WorkspaceLink<P> {
@@ -380,6 +382,7 @@ impl<P: Platform> WorkspaceLink<P> {
             epoch: Arc::new(EpochCell::default()),
             shutdown: ShutdownSignal::default(),
             bulk_tx: Arc::new(std::sync::RwLock::new(None)),
+            uploads: Arc::new(std::sync::Mutex::new(crate::uploads::Uploads::default())),
         }
     }
 
@@ -1005,6 +1008,47 @@ impl<P: Platform + 'static> Supervisor<P> {
             .await;
             return;
         }
+        if crate::uploads::handles(&request) {
+            let uploads = link.uploads.clone();
+            let platform = link.platform.clone();
+            let epoch = link.epoch.clone();
+            let shutdown = link.shutdown.clone();
+            let global_shutdown = self.shutdown.clone();
+            let client = client.clone();
+            rpc_tasks.spawn(async move {
+                let response = tokio::task::spawn_blocking(move || {
+                    uploads.lock().expect("upload registry").serve(
+                        platform.as_ref(),
+                        &request,
+                        &|| {
+                            if shutdown.is_requested() || global_shutdown.is_requested() {
+                                0
+                            } else {
+                                epoch.load()
+                            }
+                        },
+                    )
+                })
+                .await;
+                match response {
+                    Ok(response) => {
+                        publish_response(&client, reply, response, label, max_payload).await;
+                    }
+                    Err(error) => {
+                        warn!(%error, "transactional upload task failed; outcome unknown");
+                        publish_response(
+                            &client,
+                            reply,
+                            crate::uploads::unknown_response(request_id),
+                            label,
+                            max_payload,
+                        )
+                        .await;
+                    }
+                }
+            });
+            return;
+        }
         match route {
             Route::Liveness => {
                 debug!(request_id = %request_id, op = label, "serving liveness rpc outside admission");
@@ -1607,6 +1651,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             browser_bridge: self.browser_bridge.is_some(),
             operation_resource_policy: link.platform.operation_resource_policy_supported(),
             operation_cpu_quota: link.platform.operation_cpu_quota_supported(),
+            transactional_fs_write: link.platform.transactional_fs_write_supported(),
         }
     }
 
@@ -2725,6 +2770,161 @@ mod tests {
 
         shutdown.request();
         let _ = tokio::time::timeout(Duration::from_secs(5), run).await;
+    }
+
+    /// Real control RPC proof: bounded chunks, exact epoch, private staging,
+    /// terminal receipt, and lost final acknowledgement replay without frames.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::too_many_lines)] // one linear wire scenario
+    async fn transactional_write_full_wire_round_trip() {
+        use opengeni_agent_platform::NativePlatform;
+        use v1::{control_request::Op, control_response::Result as ResultBody};
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!("SKIP transactional_write_full_wire_round_trip: no nats-server");
+            return;
+        };
+        let dir = tempfile::tempdir().expect("synthetic directory");
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let client = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let mut credentials = it::test_credentials(&url);
+        credentials.last_known_epoch = 7;
+        let definition = SupervisorLink::new(
+            "upload-wire-test",
+            Arc::new(NativePlatform::with_root(dir.path())),
+            credentials,
+        )
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID);
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let mut events = client
+            .subscribe(link.events_subject())
+            .await
+            .expect("events");
+        let mut frames = client
+            .subscribe(link.op_subject("fsw-wire-test"))
+            .await
+            .expect("frames");
+        let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
+        assert!(supervisor.capabilities(&link).await.transactional_fs_write);
+        let shutdown = supervisor.shutdown_handle();
+        let run = tokio::spawn(async move { supervisor.run().await });
+        assert!(
+            it::wait_for_event(&mut events, Duration::from_secs(10), |e| matches!(
+                e.event,
+                Some(Event::Heartbeat(_))
+            ))
+            .await,
+            "agent online"
+        );
+
+        let call = |op, epoch| {
+            let client = client.clone();
+            let subject = link.rpc_subject();
+            async move {
+                let request = ControlRequest {
+                    request_id: "fsw-wire-test".into(),
+                    epoch,
+                    resource_policy: None,
+                    op: Some(op),
+                };
+                let reply = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    client.request(subject, request.encode_to_vec().into()),
+                )
+                .await
+                .expect("RPC deadline")
+                .expect("RPC reply");
+                ControlResponse::decode(reply.payload.as_ref()).expect("decoded reply")
+            }
+        };
+        let bytes = vec![b'x'; 2 * 1024 * 1024 + 11];
+        let start = Op::OpStart(v1::OpStart {
+            op: Some(v1::op_start::Op::FsWrite(v1::FsWriteBegin {
+                path: "document".into(),
+                expected_absent: true,
+                content_size: Some(bytes.len() as u64),
+                content_digest: blake3::hash(&bytes).to_hex().to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+        assert_eq!(
+            call(start.clone(), 0)
+                .await
+                .error
+                .expect("epoch fence")
+                .code,
+            v1::ErrorCode::Fenced as i32
+        );
+        assert!(call(start, 7).await.error.is_none());
+        assert!(!dir.path().join("document").exists());
+        for (seq, body) in bytes.chunks(512 * 1024).enumerate() {
+            let offset = seq * 512 * 1024;
+            let last = offset + body.len() == bytes.len();
+            let chunk = Op::WriteChunk(v1::WriteChunk {
+                op_id: "fsw-wire-test".into(),
+                seq: seq as u64,
+                offset: offset as u64,
+                bytes: body.to_vec().into(),
+                last,
+            });
+            assert_eq!(
+                call(chunk.clone(), 6)
+                    .await
+                    .error
+                    .expect("stale fence")
+                    .code,
+                v1::ErrorCode::Fenced as i32
+            );
+            let response = call(chunk.clone(), 7).await;
+            assert!(
+                matches!(response.result, Some(ResultBody::WriteChunk(_))),
+                "{:?}",
+                response.error
+            );
+            assert!(
+                call(chunk, 7).await.error.is_none(),
+                "lost acknowledgement replay"
+            );
+            if !last {
+                assert!(!dir.path().join("document").exists());
+            }
+        }
+        let query = call(
+            Op::OpQuery(v1::OpQuery {
+                op_id: "fsw-wire-test".into(),
+            }),
+            7,
+        )
+        .await;
+        let Some(ResultBody::OpStatus(status)) = query.result else {
+            panic!("query status");
+        };
+        assert_eq!(status.state, v1::OpState::Complete as i32);
+        assert_eq!(status.write_offset, bytes.len() as u64);
+        assert_eq!(
+            status.exit.expect("receipt").digests["content"],
+            blake3::hash(&bytes).to_hex().to_string()
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("document")).expect("published"),
+            bytes
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), frames.next())
+                .await
+                .is_err(),
+            "uploads emit no OpFrames"
+        );
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("shutdown")
+            .expect("supervisor")
+            .expect("clean run");
     }
 
     /// Test-only integration helpers (a throwaway local nats-server + event

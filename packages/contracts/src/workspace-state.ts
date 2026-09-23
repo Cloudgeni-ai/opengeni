@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { KnowledgeEntryKind, KnowledgeEntryScope } from "./knowledge-entries";
 
 import {
   WorkspaceInstructionPolicyKind,
@@ -10,76 +11,13 @@ import {
 } from "./workspace-instruction-policies";
 
 export const WORKSPACE_STATE_MAX_ACTIVE_POLICY_HEADS = 32;
-export const WORKSPACE_STATE_MAX_BASES = 24;
-export const WORKSPACE_STATE_MAX_TOPICS = 24;
-export const WORKSPACE_STATE_MAX_GAPS = 16;
-export const WORKSPACE_STATE_BASE_NAME_MAX_CHARS = 160;
-export const WORKSPACE_STATE_TOPIC_MAX_CHARS = 96;
-export const WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT = 100;
+export const WORKSPACE_STATE_KNOWLEDGE_SAMPLE_LIMIT = 50;
 export const WORKSPACE_STATE_EXPORT_SCHEMA_VERSION = 1;
 
 const Count = z.number().int().nonnegative();
 
 export const WorkspaceStateQuery = z.object({ attemptId: z.string().uuid().optional() }).strict();
 export type WorkspaceStateQuery = z.infer<typeof WorkspaceStateQuery>;
-
-export const WorkspaceStateDocumentStatusCounts = z
-  .object({
-    queued: Count,
-    indexing: Count,
-    ready: Count,
-    failed: Count,
-  })
-  .strict();
-export type WorkspaceStateDocumentStatusCounts = z.infer<typeof WorkspaceStateDocumentStatusCounts>;
-
-export const WorkspaceStateSourceKindCounts = z
-  .object({
-    manual_upload: Count,
-    meeting_transcript: Count,
-    repository: Count,
-    email: Count,
-    chat: Count,
-    document: Count,
-    web: Count,
-    other: Count,
-  })
-  .strict();
-export type WorkspaceStateSourceKindCounts = z.infer<typeof WorkspaceStateSourceKindCounts>;
-
-export const WorkspaceStateDocumentAuthorityKindCounts = z
-  .object({
-    organization: Count,
-    workspace: Count,
-    personal: Count,
-  })
-  .strict();
-export type WorkspaceStateDocumentAuthorityKindCounts = z.infer<
-  typeof WorkspaceStateDocumentAuthorityKindCounts
->;
-
-export const WorkspaceStateMemoryStatusCounts = z
-  .object({
-    proposed: Count,
-    approved: Count,
-    rejected: Count,
-    active: Count,
-    superseded: Count,
-    archived: Count,
-  })
-  .strict();
-export type WorkspaceStateMemoryStatusCounts = z.infer<typeof WorkspaceStateMemoryStatusCounts>;
-
-export const WorkspaceStateMemoryKindCounts = z
-  .object({
-    semantic: Count,
-    episodic: Count,
-    procedural: Count,
-    decision: Count,
-    preference: Count,
-  })
-  .strict();
-export type WorkspaceStateMemoryKindCounts = z.infer<typeof WorkspaceStateMemoryKindCounts>;
 
 export const WorkspaceStatePolicyHead = z
   .object({
@@ -144,75 +82,27 @@ export const WorkspaceStatePreferences = z
   })
   .strict();
 
-export const WorkspaceStateKnowledgeBase = z
-  .object({
-    id: z.string().uuid(),
-    name: z.string().min(1).max(WORKSPACE_STATE_BASE_NAME_MAX_CHARS),
-    visibleDocumentCount: Count,
-    statusCounts: WorkspaceStateDocumentStatusCounts,
-    latestUpdatedAt: z.string().datetime().nullable(),
-  })
-  .strict();
-
-export const WorkspaceStateTopic = z
-  .object({
-    name: z.string().min(1).max(WORKSPACE_STATE_TOPIC_MAX_CHARS),
-    documentCount: Count,
-  })
-  .strict();
-
-export const WorkspaceStateGapCode = z.enum([
-  "no_document_bases",
-  "no_visible_documents",
-  "failed_documents",
-  "processing_documents",
-  "missing_topic_coverage",
-  "no_memory_records",
-  "pending_memory_review",
-  "partial_inventory",
-]);
-export type WorkspaceStateGapCode = z.infer<typeof WorkspaceStateGapCode>;
-
-export const WorkspaceStateGap = z
-  .object({
-    code: WorkspaceStateGapCode,
-    severity: z.enum(["info", "warning"]),
-    relatedCount: Count.nullable(),
-  })
-  .strict();
-export type WorkspaceStateGap = z.infer<typeof WorkspaceStateGap>;
-
+/** Published metadata only; exact content, revisions and evidence use Knowledge. */
 export const WorkspaceStateKnowledgeAvailable = z
   .object({
     availability: z.literal("available"),
+    authority: z.literal("knowledge_entries"),
     coverage: z.enum(["complete", "partial"]),
-    baseCount: Count,
-    bases: z.array(WorkspaceStateKnowledgeBase).max(WORKSPACE_STATE_MAX_BASES),
-    basesTruncated: z.boolean(),
-    inspectedVisibleDocumentCount: Count,
-    documentStatusCounts: WorkspaceStateDocumentStatusCounts,
-    sourceKindCounts: WorkspaceStateSourceKindCounts,
-    authorityKindCounts: WorkspaceStateDocumentAuthorityKindCounts,
-    topics: z.array(WorkspaceStateTopic).max(WORKSPACE_STATE_MAX_TOPICS),
-    topicsTruncated: z.boolean(),
-    latestDocumentUpdatedAt: z.string().datetime().nullable(),
-    memorySample: z
-      .object({
-        recordCount: Count.max(WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT),
-        sampleLimit: z.literal(WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT),
-        limitReached: z.boolean(),
-        statusCounts: WorkspaceStateMemoryStatusCounts,
-        kindCounts: WorkspaceStateMemoryKindCounts,
-        preferenceAuthority: z
+    sampleLimit: z.literal(WORKSPACE_STATE_KNOWLEDGE_SAMPLE_LIMIT),
+    entries: z
+      .array(
+        z
           .object({
-            kindCountSource: z.literal("knowledge_memories_legacy_observations"),
-            activeAuthority: z.literal("structured_preference_registry"),
+            id: z.uuid(),
+            revisionId: z.uuid(),
+            title: z.string(),
+            kind: KnowledgeEntryKind,
+            scope: KnowledgeEntryScope,
+            updatedAt: z.string().datetime({ offset: true }),
           })
           .strict(),
-        latestUpdatedAt: z.string().datetime().nullable(),
-      })
-      .strict(),
-    gaps: z.array(WorkspaceStateGap).max(WORKSPACE_STATE_MAX_GAPS),
+      )
+      .max(WORKSPACE_STATE_KNOWLEDGE_SAMPLE_LIMIT),
   })
   .strict();
 

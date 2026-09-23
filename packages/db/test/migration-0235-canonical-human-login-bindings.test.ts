@@ -176,20 +176,22 @@ describe("migration 0235 canonical human identities and login bindings", () => {
       providerAccountId: userId,
       reason: "Attach verified password login",
     });
-    await createVerifiedBinding(userId, "github", `github-${userId}`);
+    // Exercise the generic lifecycle seam. Managed Google/GitHub inserts now
+    // atomically link in 0477 and are covered by managed-sign-in security tests.
+    await createVerifiedBinding(userId, "test-oidc", `oidc-${userId}`);
     const second = await applyCanonicalHumanIdentityOperation(client.db, {
       operationId: crypto.randomUUID(),
       authUserId: userId,
       expectedIdentityRevision: first.identity.activeIdentity.identityRevision,
       operationType: "link",
-      providerId: "github",
-      providerAccountId: `github-${userId}`,
-      reason: "Attach verified GitHub login",
+      providerId: "test-oidc",
+      providerAccountId: `oidc-${userId}`,
+      reason: "Attach verified test OIDC login",
     });
     expect(second.identity.loginBindings).toHaveLength(2);
     expect(second.identity.loginBindings.map((binding) => binding.providerId).sort()).toEqual([
-      "github",
       "password",
+      "test-oidc",
     ]);
 
     const passwordBinding = second.identity.loginBindings.find(
@@ -372,20 +374,23 @@ describe("migration 0235 canonical human identities and login bindings", () => {
     });
   });
 
-  test("contains provider-account collisions as a deterministic cross-human dispute", async () => {
+  test("contains generic provider-account collisions as a deterministic cross-human dispute", async () => {
     if (!shared || !client) return;
     const firstUser = await createAuthUser({ name: "First Collision Human" });
     const secondUser = await createAuthUser({ name: "Second Collision Human" });
     const firstIdentity = await ensureCanonicalHumanIdentityForAuthUser(client.db, firstUser);
     const secondIdentity = await ensureCanonicalHumanIdentityForAuthUser(client.db, secondUser);
     const providerAccountId = `collision-${crypto.randomUUID()}`;
-    await createVerifiedBinding(firstUser, "github", providerAccountId);
+    // This is the legacy generic collision-containment seam, not managed OAuth:
+    // 0477 rejects Google/GitHub collisions before insertion without a dispute.
+    const providerId = "test-oidc";
+    await createVerifiedBinding(firstUser, providerId, providerAccountId);
     const linked = await applyCanonicalHumanIdentityOperation(client.db, {
       operationId: crypto.randomUUID(),
       authUserId: firstUser,
       expectedIdentityRevision: firstIdentity.identityRevision,
       operationType: "link",
-      providerId: "github",
+      providerId,
       providerAccountId,
       reason: "Attach first collision claimant",
     });
@@ -396,19 +401,19 @@ describe("migration 0235 canonical human identities and login bindings", () => {
         identityRevision: linked.identity.activeIdentity.identityRevision,
         authRevision: linked.identity.activeIdentity.authRevision,
       },
-      linked.identity.loginBindings.find((binding) => binding.providerId === "github")!,
+      linked.identity.loginBindings.find((binding) => binding.providerId === providerId)!,
     );
     await shared.admin`
       update auth_identities
       set user_id = ${secondUser}, updated_at = now()
-      where provider_id = 'github' and account_id = ${providerAccountId}
+      where provider_id = ${providerId} and account_id = ${providerAccountId}
     `;
     const disputed = await applyCanonicalHumanIdentityOperation(client.db, {
       operationId: crypto.randomUUID(),
       authUserId: secondUser,
       expectedIdentityRevision: secondIdentity.identityRevision,
       operationType: "link",
-      providerId: "github",
+      providerId,
       providerAccountId,
       reason: "Contain conflicting verified claimant",
     });

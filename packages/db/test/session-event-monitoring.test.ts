@@ -2,11 +2,13 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { SESSION_EVENT_RAW_DELTA_TYPES, resolveSessionEventTypeFilters } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { eq } from "drizzle-orm";
+import type postgres from "postgres";
 import {
   bootstrapWorkspace,
   createDb,
   createSession,
   listSessionEventPage,
+  SESSION_EVENT_DB_PAGE_MAX_BYTES,
   withWorkspaceRls,
 } from "../src";
 import * as schema from "../src/schema";
@@ -108,6 +110,101 @@ afterAll(async () => {
 }, 60_000);
 
 describe("session event monitoring (real PostgreSQL)", () => {
+  test.each(["before", "after"] as const)(
+    "reads 1,000 full events %s with bounded round trips and unchanged cursors",
+    async (direction) => {
+      const observed = createDb(shared.appUrl, { max: 1 });
+      const driver = (observed.db as unknown as { $client: postgres.Sql }).$client;
+      let eventQueries = 0;
+      driver.options.debug = (_connection, query) => {
+        if (query.includes('from "session_events"')) eventQueries += 1;
+      };
+      try {
+        const options = {
+          direction,
+          after: 0,
+          before: 200001,
+          limit: 1000,
+          payloadMode: "full" as const,
+        };
+        const page = await listSessionEventPage(observed.db, workspaceId, sessionId, options);
+        // Four metadata reads plus four byte-bounded payload reads, including
+        // continuation lookahead. The former 64-row default needs 32 reads.
+        expect(eventQueries).toBe(8);
+        eventQueries = 0;
+        const smallBatches = await listSessionEventPage(observed.db, workspaceId, sessionId, {
+          ...options,
+          batchSize: 64,
+        });
+        expect(eventQueries).toBe(32);
+        expect(page).toEqual(smallBatches);
+        expect(page.events).toHaveLength(1000);
+        expect(page.fullPayloadsExact).toBeTrue();
+        expect(page.hasMore).toBeTrue();
+        expect(page.truncatedBy).toBe("count");
+        expect(page.bytes).toBe(Buffer.byteLength(JSON.stringify(page.events), "utf8"));
+        expect(page.bytes).toBeLessThanOrEqual(SESSION_EVENT_DB_PAGE_MAX_BYTES);
+        const first = direction === "before" ? 199001 : 1;
+        expect(page.events.map((event) => event.sequence)).toEqual(
+          Array.from({ length: 1000 }, (_, index) => first + index),
+        );
+        expect(page.nextBefore).toBe(direction === "before" ? first : null);
+        expect(page.nextAfter).toBe(direction === "after" ? first + 999 : null);
+      } finally {
+        await observed.close();
+      }
+    },
+  );
+
+  test.each(["before", "after"] as const)(
+    "preserves the byte bound and continuation %s with large full payloads",
+    async (direction) => {
+      const fixture = await createFixture(`large-page-${direction}`);
+      const payload = { output: "x".repeat(60_000) };
+      await shared.admin`
+        insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+        select ${fixture.accountId}, ${fixture.workspaceId}, ${fixture.sessionId}, sequence,
+          'agent.toolCall.output', ${shared.admin.json(payload)}
+        from generate_series(1, 300) as sequence`;
+      const options = { direction, limit: 1000, payloadMode: "full" as const };
+      const page = await listSessionEventPage(
+        client.db,
+        fixture.workspaceId,
+        fixture.sessionId,
+        options,
+      );
+      const smallBatches = await listSessionEventPage(
+        client.db,
+        fixture.workspaceId,
+        fixture.sessionId,
+        {
+          ...options,
+          batchSize: 64,
+        },
+      );
+      expect(page).toEqual(smallBatches);
+      expect(page.truncatedBy).toBe("bytes");
+      expect(page.hasMore).toBeTrue();
+      expect(page.fullPayloadsExact).toBeTrue();
+      expect(page.events.length).toBeGreaterThan(1);
+      expect(page.events.length).toBeLessThan(64);
+      expect(page.bytes).toBeLessThanOrEqual(SESSION_EVENT_DB_PAGE_MAX_BYTES);
+      expect(page.bytes).toBe(Buffer.byteLength(JSON.stringify(page.events), "utf8"));
+      expect(
+        page.events.every((event) => JSON.stringify(event.payload) === JSON.stringify(payload)),
+      ).toBeTrue();
+      const next = await listSessionEventPage(client.db, fixture.workspaceId, fixture.sessionId, {
+        ...options,
+        ...(direction === "before" ? { before: page.nextBefore! } : { after: page.nextAfter! }),
+      });
+      if (direction === "before") {
+        expect(next.events.at(-1)!.sequence).toBe(page.events[0]!.sequence - 1);
+      } else {
+        expect(next.events[0]!.sequence).toBe(page.events.at(-1)!.sequence + 1);
+      }
+    },
+  );
+
   test("reads the newest semantic tail without materializing 200,000 raw deltas", async () => {
     const page = await listSessionEventPage(client.db, workspaceId, sessionId, {
       direction: "before",

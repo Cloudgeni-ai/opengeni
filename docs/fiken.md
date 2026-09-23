@@ -8,8 +8,10 @@ the agent reaches Fiken through host-side `fiken_*` tools on the first-party
 MCP surface. No Fiken data or credential ever enters the sandbox.
 
 Both lanes sit behind the deployment integrations kill switch: with
-`OPENGENI_INTEGRATIONS_ENABLED=false` (the default) the install, OAuth start,
-and callback routes all 404.
+`OPENGENI_INTEGRATIONS_ENABLED=false` the install, OAuth start, and callback
+routes all 404. Configuration remains fail-closed by default outside the local
+launcher; `bun run dev` enables integrations and persists a worktree-local OAuth
+state secret unless the operator explicitly sets the switch to false.
 
 ## The two connect lanes
 
@@ -68,6 +70,17 @@ Registered on the first-party `opengeni` MCP surface
 surfaces (`social_*`, `slack_bot_*`), `fiken_*` tools are **explicit-only**:
 they are excluded from `DEFAULT_FIRST_PARTY_MCP_TOOLS` and must be selected by
 the session's tool policy, and they are independently permission-gated.
+
+Catalog connection state and session tool selection are separate. An active
+workspace connection stays enabled in the catalog. Agent discovery offers the
+existing setup card's **Add tools** action when Fiken is connected but not
+selected for that conversation; it does not request credentials again. The
+human's selection and successful session OAuth return both add the Fiken tools
+through the version-fenced session tool-policy update, preserving existing
+choices. Send a new message to use the updated selection. Discovery reports
+ready only when a selected Fiken tool is present in the exact current attempt;
+missing runtime tools alone do not imply failed authorization. A connection
+marked `needs_reauth` still requires reconnection.
 
 | Tool | Permission | Notes |
 | --- | --- | --- |

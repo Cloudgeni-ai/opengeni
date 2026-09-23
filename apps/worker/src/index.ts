@@ -9,8 +9,10 @@ import {
 } from "@opengeni/config";
 import {
   assertRuntimeDatabasePosture,
+  isRetryableRuntimeDatabaseStartupError,
   countSessionRecoveryBacklog,
   createDb,
+  getContextCompactionPendingSummary,
   markSessionWorkflowWakeDelivered,
   type Database,
   type RuntimeDatabasePostureOptions,
@@ -56,9 +58,11 @@ import {
   type WorkerLifecycleState,
 } from "./http";
 import {
+  initializeContextCompactionMetrics,
   initializeWorkerOutcomeMetrics,
   normalizeTurnTaskQueueStats,
   observabilityEventLogger,
+  startContextCompactionPendingMonitor,
   startSessionRecoveryMonitor,
   startTurnCapacityMonitor,
   type TurnTaskQueueStats,
@@ -115,6 +119,8 @@ export {
 // no-op — so the Schedule is registered EXACTLY ONCE per deployment regardless
 // of replica count.
 const SANDBOX_REAPER_SCHEDULE_ID = "opengeni-sandbox-lease-reaper";
+export const KNOWLEDGE_INDEXING_SCHEDULE_ID = "opengeni-knowledge-indexing";
+export const KNOWLEDGE_INDEXING_PERIOD_MS = 15_000;
 export const FILE_UPLOAD_REAPER_SCHEDULE_ID = "opengeni-file-upload-reaper";
 export const FILE_UPLOAD_REAPER_PERIOD_MS = 15 * 60 * 1_000;
 export const SITE_AUTH_MAINTENANCE_SCHEDULE_ID = "opengeni-site-auth-maintenance";
@@ -225,6 +231,9 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
     options.activityDependencies?.observability ??
     createObservability(settings, { component: `worker-${options.role}` });
   initializeWorkerOutcomeMetrics(observability);
+  if (options.role === "turn") {
+    initializeContextCompactionMetrics(observability);
+  }
   if (options.role === "turn" && options.workflowBundle) {
     throw new Error("workflowBundle is valid only for the control worker role");
   }
@@ -370,6 +379,7 @@ export async function createWorkerWorkflowSignaler(
       workflowId,
       wakeRevision,
       interruptionRequested,
+      onSignalAccepted,
     }) => {
       if (interruptionRequested) {
         await temporal.workflow.signalWithStart("sessionWorkflow", {
@@ -389,7 +399,8 @@ export async function createWorkerWorkflowSignaler(
           signal: "queueChanged",
         });
       }
-      await markSessionWorkflowWakeDelivered(db, {
+      onSignalAccepted?.();
+      return await markSessionWorkflowWakeDelivered(db, {
         accountId,
         workspaceId,
         sessionId,
@@ -607,6 +618,46 @@ export async function registerSandboxReaperSchedule(
   }
 }
 
+/** Register the deployment-wide worker for rebuildable Knowledge search projections. */
+export async function registerKnowledgeIndexingSchedule(
+  settings: Settings,
+  observability: Observability,
+): Promise<{ registered: boolean; close: () => Promise<void> }> {
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
+  const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
+  try {
+    await temporal.schedule.create({
+      scheduleId: KNOWLEDGE_INDEXING_SCHEDULE_ID,
+      spec: { intervals: [{ every: KNOWLEDGE_INDEXING_PERIOD_MS }] },
+      action: {
+        type: "startWorkflow",
+        workflowType: "knowledgeIndexingWorkflow",
+        taskQueue: settings.temporalTaskQueue,
+        args: [],
+      },
+      policies: {
+        overlap: ScheduleOverlapPolicy.SKIP,
+        catchupWindow: "1m",
+        pauseOnFailure: false,
+      },
+    });
+    observability.info("Registered the global Knowledge indexer Schedule", {
+      scheduleId: KNOWLEDGE_INDEXING_SCHEDULE_ID,
+      indexingPeriodMs: KNOWLEDGE_INDEXING_PERIOD_MS,
+    });
+    return { registered: true, close: async () => connection.close() };
+  } catch (error) {
+    if (error instanceof ScheduleAlreadyRunning) {
+      observability.info("Global Knowledge indexer Schedule already registered", {
+        scheduleId: KNOWLEDGE_INDEXING_SCHEDULE_ID,
+      });
+      return { registered: false, close: async () => connection.close() };
+    }
+    await connection.close().catch(() => undefined);
+    throw error;
+  }
+}
+
 /**
  * Register the one provider-neutral expired direct-upload cleanup Schedule.
  * Unlike sandbox GC this is always registered: file uploads can be enabled in
@@ -800,6 +851,9 @@ export async function createOpenGeniWorkerService(
   let workerBundle: Awaited<ReturnType<typeof createOpenGeniWorker>> | undefined;
   let turnCapacityMonitor: ReturnType<typeof startTurnCapacityMonitor> | undefined;
   let sessionRecoveryMonitor: ReturnType<typeof startSessionRecoveryMonitor> | undefined;
+  let contextCompactionPendingMonitor:
+    | ReturnType<typeof startContextCompactionPendingMonitor>
+    | undefined;
   const schedules: Array<{ close: () => Promise<void> }> = [];
   let httpServer: ReturnType<typeof startWorkerHttpServer> | undefined;
   let memoryPressureGuard: TurnWorkerMemoryPressureGuard | undefined;
@@ -888,6 +942,10 @@ export async function createOpenGeniWorkerService(
         observability,
         read: async () => await countSessionRecoveryBacklog(options.activityDependencies.db),
       });
+      contextCompactionPendingMonitor = startContextCompactionPendingMonitor({
+        observability,
+        read: async () => await getContextCompactionPendingSummary(options.activityDependencies.db),
+      });
     }
 
     if (workerOwnsInternalSchedules(options.role, options.internalSchedules)) {
@@ -895,6 +953,13 @@ export async function createOpenGeniWorkerService(
         await retryStartupDependency(
           "Temporal schedule (sandbox reaper)",
           () => registerSandboxReaperSchedule(settings, observability),
+          { ...retryOptions, onRetry },
+        ),
+      );
+      schedules.push(
+        await retryStartupDependency(
+          "Temporal schedule (Knowledge indexing)",
+          () => registerKnowledgeIndexingSchedule(settings, observability),
           { ...retryOptions, onRetry },
         ),
       );
@@ -946,6 +1011,7 @@ export async function createOpenGeniWorkerService(
     await Promise.allSettled([
       turnCapacityMonitor?.close(),
       sessionRecoveryMonitor?.close(),
+      contextCompactionPendingMonitor?.close(),
       workerBundle?.connection.close(),
       signaler?.close(),
       ...schedules.map((schedule) => schedule.close()),
@@ -969,6 +1035,7 @@ export async function createOpenGeniWorkerService(
       await Promise.allSettled([
         turnCapacityMonitor?.close(),
         sessionRecoveryMonitor?.close(),
+        contextCompactionPendingMonitor?.close(),
         activeWorkerBundle.connection.close(),
         activeSignaler?.close(),
         ...schedules.map((schedule) => schedule.close()),
@@ -1096,7 +1163,7 @@ export async function startWorker() {
     await retryStartupDependency(
       "PostgreSQL runtime posture",
       () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
-      { ...retryOptions, onRetry },
+      { ...retryOptions, onRetry, shouldRetry: isRetryableRuntimeDatabaseStartupError },
     );
     bus = await retryStartupDependency(
       "NATS",

@@ -36,7 +36,7 @@ export function WorkspaceNameDialog(props: {
             <DialogTitle>{creating ? "New workspace" : "Rename workspace"}</DialogTitle>
             <DialogDescription>
               {creating
-                ? "A separate space with its own sessions, environments, packs, and API keys."
+                ? "A separate space with its own sessions, environments, Plugins, and API keys."
                 : "The new name shows everywhere this workspace appears."}
             </DialogDescription>
           </DialogHeader>

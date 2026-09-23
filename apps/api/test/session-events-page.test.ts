@@ -262,7 +262,7 @@ describe("session event byte-bounded HTTP pages", () => {
     expect(invalidResultMode.status).toBe(400);
   });
 
-  test("returns exact oversized forensic payloads without widening ordinary full reads", async () => {
+  test("returns exact oversized payloads for both forensic and ordinary full reads", async () => {
     if (!available) return;
     const { workspaceId, sessionId, authorization } = await fixture();
     const [session] = await admin<Array<{ accountId: string }>>`
@@ -305,28 +305,27 @@ describe("session event byte-bounded HTTP pages", () => {
     expect(ordinaryFull.status).toBe(200);
     const ordinaryBody = (await ordinaryFull.json()) as Array<{ type: string; payload: unknown }>;
     expect(ordinaryBody).toHaveLength(2);
-    expect(ordinaryBody[1]?.payload).not.toEqual(outputPayload);
-    expect(sessionEventPayloadTruncation(ordinaryBody[1]?.payload)?.surface).toBe(
-      "http_projection",
-    );
+    expect(ordinaryBody[1]?.payload).toEqual(outputPayload);
+    expect(sessionEventPayloadTruncation(ordinaryBody[1]?.payload)).toBeNull();
     expect(ordinaryFull.headers.get("X-OpenGeni-Forensic-Exact")).toBe("false");
   });
 
-  test("projects a page-stranding legacy row and advances the forensic cursor", async () => {
+  test("delivers an oversized chat message intact and resumes after its exact cursor", async () => {
     if (!available) return;
     const { workspaceId, sessionId, authorization } = await fixture();
     const [session] = await admin<
       Array<{ accountId: string }>
     >`select account_id as "accountId" from sessions where id = ${sessionId}`;
+    const text = `HEAD-${"p".repeat(3 * 1024 * 1024)}-TAIL`;
     await admin`
       insert into session_events (
         account_id, workspace_id, session_id, sequence, type, payload
       ) values (
         ${session!.accountId}, ${workspaceId}, ${sessionId}, 1,
-        'agent.message.delta',
+        'agent.message.completed',
         ${admin.json({
           id: "legacy-page-stranding-output",
-          output: `HEAD-${"p".repeat(3 * 1024 * 1024)}-TAIL`,
+          text,
         })}
       ), (
         ${session!.accountId}, ${workspaceId}, ${sessionId}, 2,
@@ -339,17 +338,25 @@ describe("session event byte-bounded HTTP pages", () => {
     );
     expect(response.status).toBe(200);
     const body = (await response.json()) as Array<{ sequence: number; payload: unknown }>;
-    expect(body).toHaveLength(2);
+    expect(body).toHaveLength(1);
     expect(body[0]?.sequence).toBe(1);
-    expect(sessionEventPayloadTruncation(body[0]?.payload)?.surface).toBe(
-      "database_read_projection",
-    );
-    expect(JSON.stringify(body)).toContain("HEAD-");
-    expect(JSON.stringify(body)).toContain("-TAIL");
+    expect((body[0]!.payload as { text: string }).text).toBe(text);
+    expect(sessionEventPayloadTruncation(body[0]?.payload)).toBeNull();
     expect(response.headers.get("X-OpenGeni-Forensic-Exact")).toBe("false");
-    expect(response.headers.get("X-OpenGeni-Next-After")).toBe("2");
-    expect(response.headers.get("X-OpenGeni-Has-More")).toBe("false");
-    expect(Number(response.headers.get("X-OpenGeni-Page-Bytes"))).toBeLessThanOrEqual(1024 * 1024);
+    expect(response.headers.get("X-OpenGeni-Next-After")).toBe("1");
+    expect(response.headers.get("X-OpenGeni-Has-More")).toBe("true");
+    expect(Number(response.headers.get("X-OpenGeni-Page-Bytes"))).toBeGreaterThan(1024 * 1024);
+    expect(response.headers.get("X-OpenGeni-Page-Max-Bytes")).toBe(
+      response.headers.get("X-OpenGeni-Page-Bytes"),
+    );
+    const next = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?payloadMode=full&after=1&limit=2&compact=true`,
+      { headers: { authorization } },
+    );
+    expect(next.status).toBe(200);
+    const nextBody = (await next.json()) as Array<{ sequence: number }>;
+    expect(nextBody.map((event) => event.sequence)).toEqual([2]);
+    expect(next.headers.get("X-OpenGeni-Has-More")).toBe("false");
   });
 
   test("compact pages expose exact bytes and advance through coalescedUntil", async () => {

@@ -30,6 +30,7 @@ export type PendingSessionVisibilityAttempt = SessionTenancyTarget & {
 };
 
 export type PendingSessionForkAttempt = SessionTenancyTarget & {
+  sourceEventId?: string;
   visibility: SessionVisibility;
   workspaceSharedAcknowledged: boolean;
   idempotencyKey: string;

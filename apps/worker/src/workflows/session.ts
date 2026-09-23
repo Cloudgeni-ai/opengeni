@@ -95,6 +95,14 @@ export function deferredResultMayContinue(entryWakeups: number, currentWakeups: 
   return currentWakeups !== entryWakeups;
 }
 
+/** A typed activity cancellation is recoverable unless its exact-attempt
+ * redispatch budget was atomically exhausted. */
+export function cancelledAttemptRecoveryMayContinue(
+  action: activities.RecoverDispatchResult["action"],
+): boolean {
+  return action !== "exceeded";
+}
+
 /**
  * Bound repeated failures that happen before an attempt row exists. The
  * activity mirrors this deterministic delay into the durable wake outbox, so
@@ -221,7 +229,15 @@ export function preClaimFailureDetail(error: unknown): PreClaimFailureDetail | u
   ) {
     return undefined;
   }
-  const detail = cause.details?.[0] as { disposition?: unknown; code?: unknown } | undefined;
+  const detail = cause.details?.[0] as
+    | {
+        disposition?: unknown;
+        code?: unknown;
+        sqlState?: unknown;
+        reason?: unknown;
+        retryPolicy?: unknown;
+      }
+    | undefined;
   if (
     detail?.code !== "db_deadlock" &&
     detail?.code !== "db_serialization_failure" &&
@@ -231,6 +247,27 @@ export function preClaimFailureDetail(error: unknown): PreClaimFailureDetail | u
     return undefined;
   }
   const disposition = detail.disposition;
+  if (disposition === "blocked") {
+    if (
+      detail.code !== "db_failure" ||
+      detail.retryPolicy !== "explicit_recheck" ||
+      (detail.reason !== "database_claim_rejected" &&
+        detail.reason !== "initiator_membership_required" &&
+        detail.reason !== "personal_resource_grant_required") ||
+      !(
+        detail.sqlState === null ||
+        (typeof detail.sqlState === "string" && /^[0-9A-Z]{5}$/.test(detail.sqlState))
+      )
+    )
+      return undefined;
+    return {
+      disposition,
+      code: detail.code,
+      reason: detail.reason,
+      sqlState: detail.sqlState,
+      retryPolicy: "explicit_recheck",
+    };
+  }
   if (disposition !== "retryable" && disposition !== "permanent") return undefined;
   if (
     (detail.code === "db_deadlock" || detail.code === "db_serialization_failure") &&
@@ -340,8 +377,14 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   // every new run records v2 and uses the activity-owned receipt contract.
   const receiptGatedCancellation = patched("session-attempt-quiescence-v2");
   const writerSetQuiescenceRecovery = patched("session-attempt-writer-set-quiescence-v1");
+  const preserveQuiescenceWake = patched("session-quiescence-reconciliation-wake-v1");
   const staleControlSignalIsOnlyWakeHint = patched("session-control-stale-wake-v1");
   const unclaimedAttemptRecovery = patched("session-unclaimed-attempt-recovery-v1");
+  let durableAdmissionBlocking = false;
+  // PR #2208 changed a typed-cancelled result from a plain re-peek into a
+  // recoverDispatch activity. Version that new command so histories which
+  // already recorded the legacy re-peek remain deterministic on replay.
+  const cancelledAttemptRecovery = patched("session-cancelled-attempt-recovery-v1");
   const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue, receiptGatedCancellation);
   let approvalWakeups = 0;
   let interruptionWakeups = 0;
@@ -548,10 +591,29 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     const closeSignalVersion = signalVersion;
     const closeNonControlSignalVersion = nonControlSignalVersion;
     const workflowId = workflowInfo().workflowId;
+    // Re-evaluate at the changed command, not only workflow entry. A replay
+    // without the marker keeps its old shape; the next live admission cycle
+    // can activate this fix without waiting for continueAsNew.
+    durableAdmissionBlocking = patched("session-durable-admission-block-v1");
+    const safeObservation = patched("session-safe-control-observation-v1");
     const peek = await activity.peekSessionWork({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
+      ...(durableAdmissionBlocking ? { includeAdmissionFence: true } : {}),
+      ...(safeObservation ? { observerAccountId: input.accountId } : {}),
     });
+    if (peek.kind === "unavailable" || peek.kind === "attempt-owned") {
+      // No terminal/idle projection and no successor dispatch. Restoration
+      // need not produce a wake, so retain the observer with a bounded timer
+      // instead of closing and stranding durable work. Signals interrupt the
+      // wait; continue-as-new above bounds history, never business execution.
+      await condition(() => signalVersion !== closeSignalVersion, "30s");
+      continue;
+    }
+    if (peek.kind === "admission-blocked") {
+      if (signalVersion !== closeSignalVersion || pendingQuiescenceProofs.size > 0) continue;
+      return;
+    }
     if (peek.kind === "interruption-pending") {
       const settlement = await activity.settleSessionInterruptions({
         accountId: input.accountId,
@@ -572,6 +634,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       continue;
     }
     if (peek.kind === "cancellation-wait") {
+      // The receipt wake can arrive while reconciliation returns an older pending result.
+      const beforeReconciliationSignalVersion = signalVersion;
       if (writerSetQuiescenceRecovery) {
         const reconciliation = await activity.reconcileSessionAttemptQuiescence({
           accountId: input.accountId,
@@ -588,7 +652,9 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // genuinely slow, close this workflow run rather than consuming a turn
       // slot or churning control activities; the outbox uses signalWithStart to
       // restart this exact workflow after the receipt commits.
-      const seenSignalVersion = signalVersion;
+      const seenSignalVersion = preserveQuiescenceWake
+        ? beforeReconciliationSignalVersion
+        : signalVersion;
       const woke = await condition(() => signalVersion !== seenSignalVersion, "5s");
       if (woke) continue;
       // Close only against the same signal snapshot. A proof signal accepted
@@ -600,6 +666,30 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     if (peek.kind === "capacity-wait") {
       await waitForProviderCapacity(peek.ref);
       continue;
+    }
+    if (peek.kind === "sandbox-lifecycle-wait") {
+      // The recovering turn carries an exact group/epoch marker. Do not reserve
+      // another turn-worker slot while the same draining lease still owns that
+      // transition. The draining->cold commit enqueues a durable workflow wake
+      // for this exact marker; keep only the standard five-second close-race
+      // window so a signal or an already-completed transition is not lost.
+      const seenSignalVersion = signalVersion;
+      const woke = await condition(() => signalVersion !== seenSignalVersion, "5s");
+      if (woke) continue;
+      const finalPeek = await activity.peekSessionWork({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        ...(safeObservation ? { observerAccountId: input.accountId } : {}),
+      });
+      if (
+        finalPeek.kind !== "sandbox-lifecycle-wait" ||
+        finalPeek.ref.sandboxGroupId !== peek.ref.sandboxGroupId ||
+        finalPeek.ref.leaseEpoch !== peek.ref.leaseEpoch
+      ) {
+        continue;
+      }
+      if (signalVersion !== closeSignalVersion) continue;
+      return;
     }
     if (peek.kind === "approval-wait") {
       const seenApprovalWakeups = approvalWakeups;
@@ -644,6 +734,49 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       }
       continue;
     }
+    if (peek.kind === "input-wait") {
+      const settlement = await activity.settleSessionInputWait({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        waitTurnId: peek.waitTurnId,
+        disposition: peek.disposition,
+      });
+      if (settlement.action !== "held") continue;
+
+      // The durable outbox owns the long deadline. Keep this workflow run open
+      // only for the same bounded close-race window used by ordinary idle; any
+      // signal is a hint to re-peek PostgreSQL truth.
+      const seenWakeups = wakeups;
+      const seenApprovalWakeups = approvalWakeups;
+      const seenInterruptionWakeups = interruptionWakeups;
+      const woke = await condition(
+        () =>
+          interruptionWakeups !== seenInterruptionWakeups ||
+          wakeups !== seenWakeups ||
+          approvalWakeups !== seenApprovalWakeups,
+        "5s",
+      );
+      if (woke) continue;
+      const finalPeek = await activity.peekSessionWork({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        ...(safeObservation ? { observerAccountId: input.accountId } : {}),
+      });
+      if (
+        finalPeek.kind !== "input-wait" ||
+        finalPeek.disposition !== "held" ||
+        finalPeek.waitTurnId !== peek.waitTurnId
+      ) {
+        continue;
+      }
+      await activity.markSessionIdle({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      });
+      if (signalVersion !== closeSignalVersion) continue;
+      return;
+    }
     if (peek.kind === "idle") {
       let continuation: activities.MaybeContinueGoalResult = { action: "none" };
       try {
@@ -663,11 +796,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         });
       }
       if (continuation.action === "continue" || continuation.action === "queue") continue;
-      // `none`, `paused`, `held`, and `deferred` all close this run below. A
-      // held or deferred (idle-backoff) goal keeps its durable obligation
-      // armed; the delayed wake-outbox row at the hold/pacing deadline, pending
-      // machine input, a human prompt, or any producer's signalWithStart
-      // restarts the workflow. No Temporal timer is used for pacing.
+      // `none`, `paused`, and `deferred` all close this run below. A deferred
+      // idle-backoff goal keeps its durable obligation armed; the delayed
+      // wake-outbox row at the pacing deadline or any producer signal restarts
+      // the workflow. No Temporal timer is used for pacing.
       const seenWakeups = wakeups;
       const seenApprovalWakeups = approvalWakeups;
       const seenInterruptionWakeups = interruptionWakeups;
@@ -682,6 +814,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const finalPeek = await activity.peekSessionWork({
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
+        ...(safeObservation ? { observerAccountId: input.accountId } : {}),
       });
       if (finalPeek.kind !== "idle") continue;
       await activity.markSessionIdle({
@@ -698,7 +831,15 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       peek.kind === "approval-pending"
         ? ({ kind: "approval", triggerEventId: peek.triggerEventId } as const)
         : ({ kind: "next" } as const);
-    if (!(await runTurn(input.accountId, input.workspaceId, input.sessionId, trigger))) {
+    if (
+      !(await runTurn(
+        input.accountId,
+        input.workspaceId,
+        input.sessionId,
+        trigger,
+        "admissionFence" in peek ? peek.admissionFence : undefined,
+      ))
+    ) {
       if (signalVersion !== closeSignalVersion) continue;
       return;
     }
@@ -709,6 +850,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     workspaceId: string,
     sessionId: string,
     trigger: activities.RunAgentTurnInput["trigger"],
+    admissionFence?: activities.FailSessionAttemptInput["admissionFence"],
   ): Promise<boolean> {
     const capacityWaitEntryBaseline = { wakeups, capacityWakeups };
     // Capture every admission-relevant signal before activity dispatch. A
@@ -991,6 +1133,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
                   ? { preClaimFailureDisposition: admissionFailureDisposition }
                   : {}),
                 ...(admissionFailure ? { preClaimFailure: admissionFailure } : {}),
+                ...(durableAdmissionBlocking && admissionFence ? { admissionFence } : {}),
                 ...(postClaimDatabaseRecovery ? { postClaimDatabaseRecovery } : {}),
                 trigger,
                 error: workflowFailureMessage(outcome.error),
@@ -1052,8 +1195,33 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       return true;
     }
 
-    if (outcome.result.status === "failed" || outcome.result.status === "cancelled") {
-      return outcome.result.status === "cancelled";
+    if (outcome.result.status === "failed") {
+      return false;
+    }
+
+    if (outcome.result.status === "cancelled") {
+      // Histories created before session-cancelled-attempt-recovery-v1 must
+      // preserve the old command sequence. Their durable state is still safe:
+      // operator recovery or a later fresh workflow run can close a stranded
+      // owner, while new histories use the bounded exact-attempt transaction.
+      if (!cancelledAttemptRecovery) return true;
+      // A typed cancellation is normally observed through the control-signal
+      // branch above, after Pause/Steer has durably fenced the attempt. A
+      // worker can nevertheless return the same shape after a shutdown or a
+      // stale settlement race without closing its attempt row. Blindly
+      // re-peeking then retries forever against `turn.status = running` and
+      // strands every later prompt. Reconcile the exact attempt through the
+      // same bounded, generation-fenced redispatch transaction used after an
+      // activity heartbeat loss. If the attempt actually settled meanwhile,
+      // the transaction is a stale no-op and the next peek observes truth.
+      const recovery = await activity.recoverDispatch({
+        accountId,
+        workspaceId,
+        sessionId,
+        attemptId: outcome.result.attemptId,
+        timeoutType: "HEARTBEAT",
+      });
+      return cancelledAttemptRecoveryMayContinue(recovery.action);
     }
 
     if (outcome.result.capacityWait) {

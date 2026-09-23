@@ -14,6 +14,7 @@ import { CopyButton } from "../components/copy-button";
 import { cn } from "../lib/cn";
 import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
 import { useForcedDefaultOpen } from "./disclosure-context";
+import { useTimelineSearchReveal } from "../components/timeline-search";
 import { useEntranceAnimation } from "./entrance";
 import { useFoldMemory, type FoldRestingState } from "./fold-memory";
 import {
@@ -115,6 +116,8 @@ type ReplaceTurnSummaryFacets = Readonly<{
 export type TurnSummaryFacetConfiguration = ModifyTurnSummaryFacets | ReplaceTurnSummaryFacets;
 
 export type TurnSummaryOptions = Readonly<{
+  /** Experimental compact live activity reel. */
+  rolling?: boolean;
   facets?: TurnSummaryFacetConfiguration;
 }>;
 
@@ -123,8 +126,8 @@ export type TurnSummaryProps = {
   items: ActivityItem[];
   /**
    * The settled verdict — or absent for a completed CLUSTER of a still-running
-   * turn, which folds neutrally: no verdict glyph (the turn has none yet), a
-   * quiet pulse dot in its place so alignment and the running feel both hold.
+   * turn, which folds neutrally. Only unfinished activity inside this summary
+   * animates; the parent turn may still be composing a response elsewhere.
    */
   outcome?: TurnOutcome | undefined;
   /** A short failure reason shown inline on a failed chip (never hidden). */
@@ -133,6 +136,7 @@ export type TurnSummaryProps = {
   durationMs?: number | undefined;
   /** Start expanded. */
   defaultOpen?: boolean | undefined;
+  liveHeader?: ReactNode;
   /**
    * A nested fold — a cluster or sub-turn INSIDE an already-expanded turn. It
    * drops the bordered/filled chip and renders as a plain disclosure node on the
@@ -187,6 +191,7 @@ export function TurnSummary({
   failureText,
   durationMs,
   defaultOpen,
+  liveHeader,
   bare,
   facets: facetConfiguration,
   settleFold,
@@ -198,6 +203,7 @@ export function TurnSummary({
   // An explicit `defaultOpen` always wins; otherwise an ancestor may seed it
   // (screenshot instrumentation); otherwise the turn starts folded.
   const forcedDefaultOpen = useForcedDefaultOpen();
+  const searchReveal = useTimelineSearchReveal();
   const foldMemory = useFoldMemory();
   // A remembered resting state outranks author defaults: a fold that already
   // finished its settle collapse (or that the reader closed) mounts closed
@@ -311,6 +317,18 @@ export function TurnSummary({
     }
     // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [settleFold]);
+  useEffect(() => {
+    if (!searchReveal) return;
+    clearSettleTimers();
+    settleArmedRef.current = false;
+    setSettling(false);
+    setSettlePhase(false);
+    setNestSuppressLatch(false);
+    setOpen(true);
+    rememberResting("open");
+    // Search is an explicit, persistent reader action, not a new fold default.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchReveal]);
   const onOpenChange = (next: boolean) => {
     // The reader took over — cancel the pending auto-collapse for good.
     // Clear settle CSS phase immediately (fast collapse) but keep nest latch
@@ -443,7 +461,7 @@ export function TurnSummary({
             />
             {/* Completion is the quiet default and needs no repeated glyph. Failed,
             cancelled, and still-running folds retain a visible state marker. */}
-            {outcome === "complete" ? null : (
+            {outcome === "complete" || (!outcome && (liveHeader || context.settled)) ? null : (
               <span
                 className={cn(
                   "inline-flex shrink-0 items-center justify-center",
@@ -463,21 +481,23 @@ export function TurnSummary({
             <span
               className={cn("min-w-0 flex-1 truncate", bare ? "text-og-sm" : "text-og-fg-muted")}
             >
-              {facets.map(({ facet, result }, index) => (
-                <FacetRenderBoundary key={facet.id}>
-                  <>
-                    {index > 0 ? " · " : null}
-                    <span aria-label={result.ariaLabel} title={result.title}>
-                      {result.icon ? (
-                        <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
-                          {result.icon}
+              {liveHeader && !open
+                ? liveHeader
+                : facets.map(({ facet, result }, index) => (
+                    <FacetRenderBoundary key={facet.id}>
+                      <>
+                        {index > 0 ? " · " : null}
+                        <span aria-label={result.ariaLabel} title={result.title}>
+                          {result.icon ? (
+                            <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
+                              {result.icon}
+                            </span>
+                          ) : null}
+                          {result.content}
                         </span>
-                      ) : null}
-                      {result.content}
-                    </span>
-                  </>
-                </FacetRenderBoundary>
-              ))}
+                      </>
+                    </FacetRenderBoundary>
+                  ))}
               {outcome === "failed" && failureText ? (
                 <span className="text-og-status-failed"> · {failureText}</span>
               ) : null}
@@ -571,9 +591,14 @@ function createTurnSummaryContext(
 const BUILT_IN_TURN_SUMMARY_FACETS: readonly TurnSummaryFacet[] = Object.freeze([
   {
     id: "steps",
-    summarize: ({ items }) => ({
-      content: `${items.length} ${items.length === 1 ? "step" : "steps"}`,
-    }),
+    summarize: ({ items }) => {
+      const count = items.filter((item) => item.kind !== "startup-phase").length;
+      return count
+        ? { content: `${count} ${count === 1 ? "step" : "steps"}` }
+        : items.length
+          ? { content: "Preparation" }
+          : null;
+    },
   },
   {
     id: "files",

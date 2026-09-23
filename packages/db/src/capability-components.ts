@@ -1,10 +1,12 @@
+import type { SkillActor } from "@opengeni/contracts";
 import { and, eq, inArray, sql, type SQLWrapper } from "drizzle-orm";
 
 import type { Database } from "./database";
+import { releaseOrphanedSkillHeads, type SkillSourceReleaseReceipt } from "./skill-source-release";
 import * as schema from "./schema";
 
 export type CapabilityComponentOwnerIdentity = {
-  kind: "direct" | "plugin" | "pack" | "migration";
+  kind: "direct" | "plugin" | "migration";
   id: string;
 };
 
@@ -17,17 +19,15 @@ export class CapabilityComponentVersionConflictError extends Error {
 }
 
 /**
- * An owner row is runtime-effective only while its lifecycle-owning Plugin or
- * v2 Pack installation is active. Direct, migration, and legacy textual Pack
- * ownership is intrinsic so the rolling migration does not hide pre-v2 shared
- * components before those Packs are reinstalled into the normalized ledger.
+ * Plugin ownership is effective only while its installation is active.
+ * Direct and migration ownership is intrinsic.
  */
 export function effectiveCapabilityOwnerSql(
   ownerKind: SQLWrapper,
   ownerId: SQLWrapper,
 ): ReturnType<typeof sql> {
   return sql`(
-    ${ownerKind} not in ('plugin', 'pack')
+    ${ownerKind} in ('direct', 'migration')
     or (
       ${ownerKind} = 'plugin'
       and exists (
@@ -36,21 +36,10 @@ export function effectiveCapabilityOwnerSql(
           and owning_plugin.status = 'active'
       )
     )
-    or (
-      ${ownerKind} = 'pack'
-      and (
-        ${ownerId} !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-        or exists (
-          select 1 from ${schema.packInstallations} owning_pack
-          where owning_pack.id::text = ${ownerId}
-            and owning_pack.status = 'active'
-        )
-      )
-    )
   )`;
 }
 
-/** Serialize one workspace-local component identity across direct, Plugin, and Pack installers. */
+/** Serialize one workspace-local component identity across direct and Plugin installers. */
 export async function lockCapabilityComponentIdentity(
   db: Database,
   workspaceId: string,
@@ -102,19 +91,22 @@ export async function assertCapabilityComponentVersionCanChange(
   }
 }
 
-/**
- * Delete physically ownerless facet installations and disable now-empty child
- * components. Inactive lifecycle owners still preserve storage: a Pack may
- * have claimed a component while its installation is pending or repairing,
- * even though that owner is intentionally hidden from runtime reads.
- */
 export async function cleanupOrphanedCapabilityComponents(
   db: Database,
   workspaceId: string,
   facetInstallationIds: string[],
-): Promise<void> {
+  skillActor?: SkillActor,
+  lockedSkillHeadIds?: readonly string[],
+): Promise<SkillSourceReleaseReceipt[]> {
   const uniqueIds = [...new Set(facetInstallationIds)];
-  if (uniqueIds.length === 0) return;
+  if (uniqueIds.length === 0) return [];
+  // Source refresh locks the installation before the canonical Skill head.
+  // Use the same order here before taking any newly introduced head locks.
+  await db.execute(sql`SELECT p.id FROM capability_plugin_installations p
+    WHERE p.workspace_id=${workspaceId}::uuid AND p.id IN (
+      SELECT f.plugin_installation_id FROM capability_facet_installations f
+      WHERE f.workspace_id=${workspaceId}::uuid AND f.id=ANY(string_to_array(${uniqueIds.join(",")},',')::uuid[])
+    ) ORDER BY p.id FOR UPDATE`);
   const orphanRows = await db
     .select({
       facetInstallationId: schema.capabilityFacetInstallations.id,
@@ -123,14 +115,22 @@ export async function cleanupOrphanedCapabilityComponents(
     .from(schema.capabilityFacetInstallations)
     .where(
       and(
+        eq(schema.capabilityFacetInstallations.workspaceId, workspaceId),
         inArray(schema.capabilityFacetInstallations.id, uniqueIds),
         sql`not exists (
           select 1 from ${schema.capabilityComponentOwners} owner
           where owner.facet_installation_id = ${schema.capabilityFacetInstallations.id}
         )`,
       ),
-    );
-  if (orphanRows.length === 0) return;
+    )
+    .for("update");
+  if (orphanRows.length === 0) return [];
+  const skillReleases = await releaseOrphanedSkillHeads(db, {
+    workspaceId,
+    facetInstallationIds: orphanRows.map((row) => row.facetInstallationId),
+    ...(skillActor ? { skillActor } : {}),
+    ...(lockedSkillHeadIds !== undefined ? { lockedHeadIds: lockedSkillHeadIds } : {}),
+  });
   await db.delete(schema.capabilityFacetInstallations).where(
     inArray(
       schema.capabilityFacetInstallations.id,
@@ -163,4 +163,5 @@ export async function cleanupOrphanedCapabilityComponents(
         ),
       );
   }
+  return skillReleases;
 }

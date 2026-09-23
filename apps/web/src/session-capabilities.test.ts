@@ -13,6 +13,9 @@ describe("session capability product groups", () => {
     );
     expect(groupedIds).toHaveLength(firstPartySessionToolOptions.length);
     expect(groups.some((group) => group.id === "other")).toBe(false);
+    expect(groups.find((group) => group.toolIds.includes("command_wait"))?.toolIds).toContain(
+      "command_read",
+    );
   });
 
   test("keeps native files and knowledge out of connected apps", () => {

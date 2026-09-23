@@ -8,6 +8,7 @@ import {
   effortOptionsForModel,
   groupPickerRowsByBillingClass,
   payerSummaryForModel,
+  modelUsesCredits,
   projectPickerRows,
 } from "../src/model-policy";
 
@@ -36,6 +37,136 @@ function catalogModel(
 }
 
 describe("model-policy", () => {
+  test.each([
+    {
+      name: "free-only with blocked paid",
+      paid: false,
+      codex: true,
+      free: true,
+      codexOnly: false,
+      first: "Codex",
+    },
+    {
+      name: "selectable paid",
+      paid: true,
+      codex: true,
+      free: true,
+      codexOnly: false,
+      first: "OpenGeni",
+    },
+    {
+      name: "no usable Codex",
+      paid: false,
+      codex: false,
+      free: true,
+      codexOnly: false,
+      first: "OpenGeni",
+    },
+    {
+      name: "no selectable OpenGeni",
+      paid: false,
+      codex: true,
+      free: false,
+      codexOnly: false,
+      first: "OpenGeni",
+    },
+    {
+      name: "Codex-only session",
+      paid: false,
+      codex: true,
+      free: false,
+      codexOnly: true,
+      first: "Codex",
+    },
+    {
+      name: "Codex-only without usable Codex",
+      paid: false,
+      codex: false,
+      free: false,
+      codexOnly: true,
+      first: "OpenGeni",
+    },
+  ])("conditionally promotes the UI group: $name", ({ paid, codex, free, codexOnly, first }) => {
+    const rows = projectPickerRows([
+      catalogModel({ id: "free", label: "Free", source: "opengeni", cost: "free" }),
+      catalogModel({ id: "paid", label: "Paid", source: "opengeni", cost: "credits" }),
+      catalogModel({ id: "codex/test", label: "Codex", source: "codex", cost: "subscription" }),
+    ]).map((row, index) => ({
+      ...row,
+      selectable: [free, paid, codex][index]!,
+      unavailableReason: [free, paid, codex][index] ? null : "Blocked by workspace policy",
+    }));
+    const snapshot = structuredClone(rows);
+    const groups = groupPickerRowsByBillingClass(rows, { codexOnly });
+    expect(groups[0]?.label).toBe(first);
+    expect(groups.flatMap((group) => group.rows)).toHaveLength(3);
+    expect(groups.flatMap((group) => group.rows).find((row) => row.id === "paid")).toEqual(rows[1]);
+    expect(rows).toEqual(snapshot);
+    expect(groupPickerRowsByBillingClass(rows.slice(0, 2))[0]?.label).toBe("OpenGeni");
+  });
+
+  test("unknown legacy cost is not treated as free", () => {
+    const rows = projectPickerRows([
+      catalogModel({ id: "legacy", label: "Legacy", source: "opengeni" }),
+      catalogModel({ id: "codex/test", label: "Codex", source: "codex" }),
+    ]);
+    expect(groupPickerRowsByBillingClass(rows).map((group) => group.label)).toEqual([
+      "OpenGeni",
+      "Codex",
+    ]);
+  });
+
+  test("credit notices follow cost policy rather than the OpenGeni group", () => {
+    for (const cost of ["free", "credits", "workspace", "organization", "subscription"] as const) {
+      const model = catalogModel({
+        id: "model",
+        label: "Model",
+        cost,
+        billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+      });
+      expect(modelUsesCredits(model)).toBe(cost === "credits");
+    }
+    expect(modelUsesCredits(undefined)).toBe(false);
+    expect(
+      modelUsesCredits(
+        catalogModel({
+          id: "legacy",
+          label: "Legacy",
+          billing: { upstreamPayer: "deployment", metering: "external" },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      modelUsesCredits(
+        catalogModel({
+          id: "legacy",
+          label: "Legacy",
+          billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+        }),
+      ),
+    ).toBe(true);
+  });
+  test("omits deployment models that have no credential", () => {
+    const model = catalogModel({
+      id: "openrouter/starter:free",
+      label: "Starter",
+      cost: "free",
+      billing: { upstreamPayer: "deployment", metering: "external" },
+      credentialReadiness: {
+        status: "not_ready",
+        reason: "missing_credential",
+        basis: "configuration",
+        checkedAt: null,
+      },
+      availability: {
+        status: "unavailable",
+        selectable: false,
+        reason: "missing_credential",
+        checkedAt: null,
+      },
+    });
+    expect(projectPickerRows([model])).toEqual([]);
+  });
   test("labels organization provider billing separately from workspace BYOK", () => {
     const model = catalogModel({
       id: "organization-openrouter/openai/gpt-org",
@@ -48,6 +179,13 @@ describe("model-policy", () => {
     });
     expect(billingClassForModel(model)).toBe("organization_byok");
     expect(projectPickerRows([model])[0]?.billingClassLabel).toBe("Organization providers");
+    expect(payerSummaryForModel(model)).toBe("Billed to the organization OpenRouter account");
+    expect(payerSummaryForModel({ ...model, cost: undefined })).toBe(
+      "Billed to the organization OpenRouter account",
+    );
+    expect(payerSummaryForModel({ ...model, provider: "organization-gateway" })).toBe(
+      "Billed to the organization Vercel account",
+    );
   });
   test("omits disconnected subscription and workspace Gateway rails", () => {
     const rows = projectPickerRows([
@@ -118,23 +256,23 @@ describe("model-policy", () => {
     expect(billingClassForModel(workspaceModel)).toBe("byok");
     expect(payerSummaryForModel(workspaceModel)).toBe("Billed to the workspace OpenRouter account");
     expect(advancedSourceSummary(workspaceModel)).toBe("Workspace OpenRouter connection");
-    expect(billingClassForModel(deploymentModel)).toBe("external");
+    expect(billingClassForModel(deploymentModel)).toBe("opengeni_credits");
     expect(payerSummaryForModel(deploymentModel)).toBe("Free in this deployment");
   });
 
-  test("labels an anonymous deployment route as External", () => {
+  test("groups an anonymous deployment route under OpenGeni without assuming free access", () => {
     const model = catalogModel({
       id: "opencode/x-preview-f-free",
       label: "OpenCode Ox Alpha",
       billing: { upstreamPayer: "deployment", metering: "external" },
     });
-    expect(billingClassForModel(model)).toBe("external");
+    expect(billingClassForModel(model)).toBe("opengeni_credits");
     expect(projectPickerRows([model])[0]).toMatchObject({
-      billingClass: "external",
-      billingClassLabel: "External",
+      billingClass: "opengeni_credits",
+      billingClassLabel: "OpenGeni",
     });
-    expect(advancedSourceSummary(model)).toBe("Deployment route · no authentication");
-    expect(payerSummaryForModel(model)).toBe("External provider · no OpenGeni credits");
+    expect(advancedSourceSummary(model)).toBe("Deployment-provided connection");
+    expect(payerSummaryForModel(model)).toBe("OpenGeni · no model credits");
   });
 
   test("uses deployment cost before upstream settlement in the payer summary", () => {

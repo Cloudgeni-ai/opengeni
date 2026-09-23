@@ -1,5 +1,7 @@
 import {
   Children,
+  createContext,
+  useContext,
   isValidElement,
   memo,
   useEffect,
@@ -13,17 +15,23 @@ import {
 import ReactMarkdown, {
   defaultUrlTransform,
   type Components,
+  type ExtraProps,
   type UrlTransform,
 } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { PanelsTopLeftIcon } from "lucide-react";
+import { ActivityDisclosure } from "../timeline/shared";
 import { cn } from "../lib/cn";
 import { tableElementToTsv } from "../lib/clipboard";
 import { prefersReducedMotion } from "../lib/motion";
 import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
 import { CopyButton } from "./copy-button";
+import { PreviewLoading } from "./preview-loading";
+import type { observeMarkdownTableLayout } from "./markdown-table-layout";
 import { softenStreamingMarkdown } from "./soften-streaming-markdown";
 import { createStreamReveal, rehypeStreamReveal, type StreamReveal } from "./stream-reveal";
 import { TooltipProvider } from "./tooltip";
+import { searchMatchOffset, type TimelineSearchTarget } from "./timeline-search";
 
 /**
  * The default renderer for chat message bodies in {@link MessageTimeline}.
@@ -39,7 +47,22 @@ import { TooltipProvider } from "./tooltip";
  * the tokens land. Consumers who want a different renderer can still pass
  * `renderMessageText` to `MessageTimeline` to override this entirely.
  */
+export type MarkdownInteractiveBlock = { kind: "html" | "site"; content: string };
+const InteractiveContext = createContext<{
+  source: string;
+  streaming?: boolean | undefined;
+  render?: (block: MarkdownInteractiveBlock) => ReactNode;
+  renderImage?: (image: { src: string; alt: string }) => ReactNode;
+}>({ source: "" });
+
 export type MarkdownProps = {
+  /** Resolve a retained-file reference to the host's authenticated artifact page. */
+  artifactHref?: ((artifactId: string) => string) | undefined;
+  /** Reveals a bounded source excerpt; closing Find retains it until explicit restore. */
+  searchTarget?: TimelineSearchTarget | null | undefined;
+  renderImage?: ((image: { src: string; alt: string }) => ReactNode) | undefined;
+  /** Host opt-in for assistant-authored interactive fences. */
+  renderInteractiveBlock?: ((block: MarkdownInteractiveBlock) => ReactNode) | undefined;
   children: string;
   className?: string | undefined;
   /**
@@ -170,7 +193,7 @@ const baseComponents: Components = {
     </code>
   ),
   // Fenced code — quiet mono block (no card / no nested vertical scroll).
-  pre: ({ children }) => <MarkdownCodeBlock>{children}</MarkdownCodeBlock>,
+  pre: InteractiveCodeBlock,
   // Tables stay unboxed (hairline rules); hover reveals a TSV copy control.
   table: ({ children, ...props }) => <MarkdownTable {...props}>{children}</MarkdownTable>,
   thead: ({ children, ...props }) => <thead {...props}>{children}</thead>,
@@ -190,65 +213,91 @@ const baseComponents: Components = {
       {children}
     </td>
   ),
-  img: ({ alt, src, ...props }) =>
-    src ? (
-      <img
-        alt={alt ?? ""}
-        src={src}
-        className="my-3 max-w-full rounded-og-md border border-og-border"
-        {...props}
-      />
-    ) : alt ? (
-      <span className="text-og-fg-subtle" aria-disabled="true">
-        {alt}
-      </span>
-    ) : null,
+  img: MarkdownImage,
 };
 
 const MARKDOWN_LINK_CLASS =
   "break-words font-medium text-og-accent-strong underline-offset-2 hover:underline";
 
-function markdownComponents(onSandboxFile: MarkdownProps["onSandboxFile"]): Components {
-  return {
-    ...baseComponents,
-    a: ({ children, href, ...props }) => {
-      const location = sandboxFileLocationFromHref(href);
-      if (location !== null) {
-        return (
-          <SandboxMarkdownLink location={location} onSandboxFile={onSandboxFile}>
-            {children}
-          </SandboxMarkdownLink>
-        );
-      }
-      if (isSandboxHref(href) || !href) {
-        return (
-          <span
-            className="break-words font-medium text-og-fg-subtle underline decoration-dotted underline-offset-2"
-            aria-disabled="true"
-            title={
-              isSandboxHref(href)
-                ? "This sandbox file reference is invalid"
-                : "This link is unavailable"
-            }
-          >
-            {children}
-          </span>
-        );
-      }
-      return (
+// Keep renderer component types stable: rebuilding them remounts paragraphs,
+// destroys native selections, and resets embedded media on host updates.
+const MarkdownLinkContext = createContext<Pick<MarkdownProps, "onSandboxFile" | "artifactHref">>(
+  {},
+);
+
+const markdownComponents: Components = {
+  ...baseComponents,
+  p: ({ children, node, ...props }) => {
+    const containsArtifact = node?.children.some(
+      (child) =>
+        child.type === "element" &&
+        child.tagName === "img" &&
+        typeof child.properties.src === "string" &&
+        retainedImageId(child.properties.src),
+    );
+    const Tag = containsArtifact ? "div" : "p";
+    return (
+      <Tag className="my-2.5 leading-7 first:mt-0 last:mb-0" {...props}>
+        {children}
+      </Tag>
+    );
+  },
+  a: ({ children, href, ...props }) => {
+    const { onSandboxFile, artifactHref } = useContext(MarkdownLinkContext);
+    const artifactId = href ? retainedImageId(href) : null;
+    if (artifactId) {
+      const destination = artifactHref?.(artifactId);
+      return destination ? (
         <a
           className={MARKDOWN_LINK_CLASS}
+          href={defaultUrlTransform(destination)}
           target="_blank"
           rel="noreferrer noopener"
-          href={href}
-          {...props}
         >
           {children}
         </a>
+      ) : (
+        <span title="This artifact requires a workspace-aware host">
+          {children} (artifact unavailable)
+        </span>
       );
-    },
-  };
-}
+    }
+    const location = sandboxFileLocationFromHref(href);
+    if (location !== null) {
+      return (
+        <SandboxMarkdownLink location={location} onSandboxFile={onSandboxFile}>
+          {children}
+        </SandboxMarkdownLink>
+      );
+    }
+    if (isSandboxHref(href) || !href) {
+      return (
+        <span
+          className="break-words text-og-fg-subtle"
+          aria-disabled="true"
+          title={
+            isSandboxHref(href)
+              ? "This sandbox file reference is invalid"
+              : "This link is unavailable"
+          }
+        >
+          {children} (link unavailable)
+        </span>
+      );
+    }
+    return (
+      <a
+        className={MARKDOWN_LINK_CLASS}
+        target="_blank"
+        rel="noreferrer noopener"
+        href={href}
+        {...props}
+      >
+        {children}
+      </a>
+    );
+  },
+};
 
 function SandboxMarkdownLink({
   location,
@@ -342,8 +391,30 @@ export function sandboxFilePathFromHref(href: string | undefined): string | null
   return sandboxFileLocationFromHref(href)?.path ?? null;
 }
 
+export function retainedImageId(src: string): string | null {
+  return (
+    /^artifact:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
+      .exec(src)?.[1]
+      ?.toLowerCase() ?? null
+  );
+}
+function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
+  const { renderImage } = useContext(InteractiveContext);
+  if (!src) return <span>{alt ?? "Image unavailable"}</span>;
+  if (retainedImageId(src))
+    return renderImage ? (
+      <>{renderImage({ src, alt: alt ?? "" })}</>
+    ) : (
+      <span>{alt || "Image"} (preview unavailable)</span>
+    );
+  return <img src={src} alt={alt ?? ""} loading="lazy" className="my-3 max-w-full rounded-og-md" />;
+}
+
 const markdownUrlTransform: UrlTransform = (url, key, node) =>
-  key === "href" && node.tagName === "a" && isSandboxHref(url) ? url : defaultUrlTransform(url);
+  (key === "href" && node.tagName === "a" && (isSandboxHref(url) || retainedImageId(url))) ||
+  (key === "src" && node.tagName === "img" && retainedImageId(url))
+    ? url
+    : defaultUrlTransform(url);
 
 /** How long after the stream ends the reveal pipeline stays for trailing animations. */
 /** Trailing ink window after stream end — keep ≥ {@link INK_FADE_MS}. */
@@ -381,6 +452,58 @@ function fenceLanguage(children: ReactNode): string | null {
   return found;
 }
 
+function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"> & ExtraProps) {
+  const { source, render, streaming } = useContext(InteractiveContext);
+  const language = fenceLanguage(children);
+  if (render && (language === "opengeni-html" || language === "opengeni-site")) {
+    const start = node?.position?.start.offset;
+    const end = node?.position?.end.offset;
+    const original =
+      start !== undefined && end !== undefined && end <= source.length
+        ? source.slice(start, end)
+        : "";
+    const lines = original.trimEnd().split("\n");
+    const opening = lines[0]?.match(/^ {0,3}([\x60]{3,}|~{3,})/);
+
+    const closing = lines
+      .at(-1)
+      ?.replace(/^\s*(?:>\s*)+/, "")
+      .trim();
+    const complete =
+      opening &&
+      lines.length > 1 &&
+      closing &&
+      closing.length >= opening[1]!.length &&
+      [...closing].every((c) => c === opening[1]![0]);
+    if (!complete) {
+      return (
+        <div role="status" aria-live="polite" aria-busy={streaming === true} className="my-3">
+          {streaming ? (
+            <PreviewLoading />
+          ) : (
+            <ActivityDisclosure
+              icon={<PanelsTopLeftIcon aria-hidden className="size-3.5" />}
+              title="Preview incomplete"
+              running={false}
+              expandable={false}
+              preview="Generation stopped before the preview was ready."
+            />
+          )}
+        </div>
+      );
+    }
+    return (
+      <>
+        {render({
+          kind: language === "opengeni-html" ? "html" : "site",
+          content: nodeText(children).replace(/\n$/, ""),
+        })}
+      </>
+    );
+  }
+  return <MarkdownCodeBlock>{children}</MarkdownCodeBlock>;
+}
+
 function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
   const code = nodeText(children).replace(/\n$/, "");
   const language = fenceLanguage(children);
@@ -411,9 +534,34 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
 }
 
 function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutRef<"table">) {
-  const tableRef = useRef<HTMLTableElement | null>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const tableRef = useRef<HTMLTableElement>(null);
+  const layoutRef = useRef<ReturnType<typeof observeMarkdownTableLayout>>(undefined);
+  useEffect(() => {
+    const wrapper = wrapperRef.current;
+    const table = tableRef.current;
+    if (!wrapper?.closest("[data-og-wide-table-message]") || !table) return;
+    let disposed = false;
+    // Ordinary tables remain usable even if this optional layout chunk fails.
+    void import("./markdown-table-layout")
+      .then(({ observeMarkdownTableLayout }) => {
+        if (!disposed) layoutRef.current = observeMarkdownTableLayout(wrapper, table);
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      layoutRef.current?.disconnect();
+      layoutRef.current = undefined;
+    };
+  }, []);
+  // ReactMarkdown recreates table children even when only later prose changes.
+  // Remeasure genuine content changes without collapsing the expanded wrapper
+  // between cleanup and the asynchronous observer-module import on each update.
+  useEffect(() => {
+    layoutRef.current?.measure();
+  }, [children]);
   return (
-    <div className="group/copy relative mt-3 max-w-full first:mt-0">
+    <div ref={wrapperRef} className="group/copy relative mt-3 max-w-full first:mt-0">
       <div className="pointer-events-none absolute top-0 right-0 z-10">
         <div className="pointer-events-auto">
           <CopyButton
@@ -436,7 +584,15 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
   );
 }
 
-function MarkdownImpl({ children, className, streaming = false, onSandboxFile }: MarkdownProps) {
+function MarkdownImpl({
+  children,
+  artifactHref,
+  className,
+  streaming = false,
+  onSandboxFile,
+  renderInteractiveBlock,
+  renderImage,
+}: MarkdownProps) {
   // Tip-ink engine for THIS body: created on the first streaming render, kept
   // through a short linger after the stream ends (so the last age window can
   // finish), then dropped so settled bodies pay zero cost. Observing during
@@ -525,32 +681,107 @@ function MarkdownImpl({ children, className, streaming = false, onSandboxFile }:
   // fences don't snap to final GFM one commit before the crystallize morph.
   // Reveal identity still tracks the true source (`children`).
   const parseText = streaming || revealActive ? softenStreamingMarkdown(children) : children;
-  const components = useMemo(() => markdownComponents(onSandboxFile), [onSandboxFile]);
+  const linkContext = useMemo(
+    () => ({ onSandboxFile, artifactHref }),
+    [onSandboxFile, artifactHref],
+  );
+
+  const interactiveContext = useMemo(
+    () => ({
+      source: children,
+      streaming,
+      ...(renderInteractiveBlock ? { render: renderInteractiveBlock } : {}),
+      ...(renderImage ? { renderImage } : {}),
+    }),
+    [children, streaming, renderInteractiveBlock, renderImage],
+  );
 
   // `min-w-0` lets the prose shrink inside flex parents (message bubbles) so
   // long links and code blocks wrap/scroll instead of forcing overflow.
   return (
-    <TooltipProvider delayDuration={400}>
-      <div
-        ref={bodyRef}
-        className={cn(
-          "og-markdown-body min-w-0 break-words",
-          settling && "og-markdown-settle",
-          className,
-        )}
-      >
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={rehypePlugins}
-          components={components}
-          urlTransform={markdownUrlTransform}
-        >
-          {parseText}
-        </ReactMarkdown>
-      </div>
-    </TooltipProvider>
+    <MarkdownLinkContext.Provider value={linkContext}>
+      <InteractiveContext.Provider value={interactiveContext}>
+        <TooltipProvider delayDuration={400}>
+          <div
+            ref={bodyRef}
+            className={cn(
+              "og-markdown-body min-w-0 break-words",
+              settling && "og-markdown-settle",
+              className,
+            )}
+          >
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              rehypePlugins={rehypePlugins}
+              components={markdownComponents}
+              urlTransform={markdownUrlTransform}
+            >
+              {parseText}
+            </ReactMarkdown>
+          </div>
+        </TooltipProvider>
+      </InteractiveContext.Provider>
+    </MarkdownLinkContext.Provider>
   );
 }
 
 /** Memoized so streaming re-renders of the parent don't re-parse settled bodies. */
-export const Markdown = memo(MarkdownImpl);
+export const Markdown = memo(function SearchableMarkdown(props: MarkdownProps) {
+  const [retained, setRetained] = useState<{ text: string; target: TimelineSearchTarget } | null>(
+    null,
+  );
+  if (
+    props.searchTarget &&
+    (retained?.target !== props.searchTarget || retained.text !== props.children)
+  ) {
+    setRetained({ text: props.children, target: props.searchTarget });
+  }
+  // Closing Find only removes the highlight. Retain the source window so a huge
+  // formatted message cannot replace it and unexpectedly move the reading point.
+  const target = props.searchTarget ?? (retained?.text === props.children ? retained.target : null);
+  if (!target) return <MarkdownImpl {...props} />;
+  const offset = searchMatchOffset(props.children, target);
+  if (offset < 0)
+    return props.searchTarget ? (
+      <div role="status">This match is no longer in the message source.</div>
+    ) : (
+      <MarkdownImpl {...props} />
+    );
+  // Bound mounted text even for multi-megabyte messages. Do not split a UTF-16 pair
+  // at excerpt edges; the selected range itself is validated against the source.
+  let start = Math.max(0, offset - 240);
+  let end = Math.min(props.children.length, offset + target.query.length + 240);
+  if (start > 0 && /[\uDC00-\uDFFF]/.test(props.children[start]!)) start--;
+  if (end < props.children.length && /[\uDC00-\uDFFF]/.test(props.children[end]!)) end++;
+  const MatchTag = props.searchTarget ? "mark" : "span";
+  return (
+    <div className={cn("og-markdown-body min-w-0 break-words", props.className)}>
+      <div data-og-annotation-chrome="" className="text-xs opacity-70">
+        Match in message source · Excerpt stays in place when Find closes
+        <button
+          type="button"
+          disabled={!!props.searchTarget}
+          title={props.searchTarget ? "Close Find to show the formatted message" : undefined}
+          className="ml-2 inline-flex min-h-7 items-center rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted outline-hidden hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:min-h-11 disabled:opacity-50"
+          onClick={() => setRetained(null)}
+        >
+          Show formatted message
+        </button>
+      </div>
+      <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+        {start > 0 ? "…" : ""}
+        {props.children.slice(start, offset)}
+        <MatchTag
+          data-og-search-occurrence={target.occurrence ?? 0}
+          data-og-search-sequence={target.sequence}
+          data-og-search-query={target.query}
+          data-og-search-offset={offset}
+        >
+          {props.children.slice(offset, offset + target.query.length)}
+        </MatchTag>
+        {props.children.slice(offset + target.query.length, end)}
+        {end < props.children.length ? "…" : ""}
+      </div>
+    </div>
+  );
+});

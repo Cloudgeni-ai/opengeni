@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/artifact-client";
+import { OpenGeniEmbeddingClient } from "../src/embedding-client";
 import { OpenGeniApiError, OpenGeniSecureContextRequiredError } from "../src/errors";
 import {
   OPENGENI_API_CONTRACT_REVISION,
@@ -382,6 +383,11 @@ describe("OpenGeniClient access + workspaces", () => {
     const invitationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const membershipId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     const operationId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await client.createAdditionalOrganization({
+      name: "Product team",
+      workspaceName: "General",
+      operationId,
+    });
     await client.listOrganizationInvitations({
       cursor: invitationId,
       limit: 25,
@@ -419,6 +425,7 @@ describe("OpenGeniClient access + workspaces", () => {
     });
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
+        "POST /v1/organizations/additional",
         "GET /v1/organization-invitations",
         `GET /v1/organizations/${organizationId}/invitations`,
         `POST /v1/organizations/${organizationId}/invitations`,
@@ -430,11 +437,16 @@ describe("OpenGeniClient access + workspaces", () => {
         `PATCH /v1/organizations/${organizationId}/retention-policy`,
       ],
     );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      name: "Product team",
+      workspaceName: "General",
+      operationId,
+    });
+    expect(new URL(requests[2]!.url).searchParams.get("cursor")).toBe(invitationId);
+    expect(new URL(requests[2]!.url).searchParams.get("limit")).toBe("25");
     expect(new URL(requests[1]!.url).searchParams.get("cursor")).toBe(invitationId);
     expect(new URL(requests[1]!.url).searchParams.get("limit")).toBe("25");
-    expect(new URL(requests[0]!.url).searchParams.get("cursor")).toBe(invitationId);
-    expect(new URL(requests[0]!.url).searchParams.get("limit")).toBe("25");
-    expect(JSON.parse(requests[6]!.body!)).toEqual({
+    expect(JSON.parse(requests[7]!.body!)).toEqual({
       kind: "suspend",
       expectedAuthorizationRevision: 2,
       operationId,
@@ -1412,6 +1424,25 @@ describe("OpenGeniClient files", () => {
     );
   });
 
+  test("listFiles preserves ownership filters and the opaque page cursor", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ files: [], nextCursor: null }));
+    expect(
+      await client.listFiles(WORKSPACE_ID, {
+        scope: "personal",
+        limit: 12,
+        cursor: "opaque/page+cursor",
+      }),
+    ).toEqual({ files: [], nextCursor: null });
+    const url = new URL(requests[0]!.url);
+    expect(requests[0]!.method).toBe("GET");
+    expect(url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/files`);
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      scope: "personal",
+      limit: "12",
+      cursor: "opaque/page+cursor",
+    });
+  });
+
   test("reads retained metadata and one authenticated bounded API range", async () => {
     const metadata = {
       available: true as const,
@@ -1640,6 +1671,20 @@ describe("OpenGeniClient files", () => {
 });
 
 describe("OpenGeniClient documents", () => {
+  test("omits undefined Knowledge entry query values", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ id: DOCUMENT_ID }));
+    // JavaScript callers can still pass explicit undefined values even though
+    // exactOptionalPropertyTypes keeps TypeScript callers from doing so.
+    await client.getKnowledgeEntry(WORKSPACE_ID, DOCUMENT_ID, {
+      revisionId: undefined,
+      view: undefined,
+    } as never);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/knowledge/entries/${DOCUMENT_ID}`,
+    );
+  });
+
   test("bases, documents, reindex, and search", async () => {
     const { client, requests } = makeClient((request) =>
       request.url.endsWith("/search")
@@ -1655,28 +1700,28 @@ describe("OpenGeniClient documents", () => {
     await client.getDocumentOriginalFile(WORKSPACE_ID, DOCUMENT_ID);
     await client.createDocumentOriginalFileDownloadUrl(WORKSPACE_ID, DOCUMENT_ID);
     await client.reindexDocument(WORKSPACE_ID, BASE_ID, DOCUMENT_ID);
-    const search = await client.searchDocuments(WORKSPACE_ID, BASE_ID, {
-      query: "rollback steps",
-      limit: 3,
-    });
-    const knowledgeSearch = await client.searchKnowledge(WORKSPACE_ID, {
-      query: "decision",
-      mode: "keyword",
-      authorityKinds: ["organization"],
-      limit: 2,
-    });
-    await client.listKnowledgeMemories(WORKSPACE_ID, {
-      status: "approved",
+    await client.listKnowledgeEntries(WORKSPACE_ID, {
+      view: "published",
       query: "azure",
       limit: 5,
     });
-    await client.getKnowledgeMemory(WORKSPACE_ID, DOCUMENT_ID);
-    await client.createKnowledgeMemory(WORKSPACE_ID, {
-      text: "Prefer reviewed memory.",
-      kind: "decision",
+    await client.getKnowledgeEntry(WORKSPACE_ID, DOCUMENT_ID);
+    await client.saveKnowledgeEntry(WORKSPACE_ID, {
+      operationId: FILE_ID,
+      entryId: DOCUMENT_ID,
+      expectedVersion: 0,
+      entry: {
+        title: "Renewal decision",
+        content: "Retain the renewal decision.",
+        kind: "decision",
+      },
     });
-    await client.updateKnowledgeMemory(WORKSPACE_ID, DOCUMENT_ID, {
-      status: "approved",
+    await client.reviewKnowledgeEntry(WORKSPACE_ID, {
+      operationId: FILE_ID,
+      entryId: DOCUMENT_ID,
+      revisionId: BASE_ID,
+      expectedVersion: 1,
+      decision: "approve",
     });
     await client.createKnowledgeDrop(WORKSPACE_ID, {
       text: "meeting notes",
@@ -1716,8 +1761,6 @@ describe("OpenGeniClient documents", () => {
       limit: 4,
       cursor: "organization-reclassification-cursor",
     });
-    expect(search.results).toEqual([]);
-    expect(knowledgeSearch.results).toEqual([]);
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
         `POST /v1/workspaces/${WORKSPACE_ID}/document-bases`,
@@ -1729,12 +1772,10 @@ describe("OpenGeniClient documents", () => {
         `GET /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/original-file`,
         `POST /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/original-file/download-url`,
         `POST /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}/documents/${DOCUMENT_ID}/reindex`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}/search`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/search`,
-        `GET /v1/workspaces/${WORKSPACE_ID}/knowledge/memories`,
-        `GET /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/${DOCUMENT_ID}`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/memories`,
-        `PATCH /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/${DOCUMENT_ID}`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/entries/search`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/knowledge/entries/${DOCUMENT_ID}`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/entries`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/entries/${DOCUMENT_ID}/review`,
         `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/drops`,
         `POST /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/move`,
         `POST /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/authority-reclassifications`,
@@ -1746,28 +1787,33 @@ describe("OpenGeniClient documents", () => {
       ],
     );
     expect(JSON.parse(requests[9]!.body!)).toEqual({
-      query: "rollback steps",
-      limit: 3,
+      view: "published",
+      query: "azure",
+      limit: 5,
     });
-    expect(JSON.parse(requests[10]!.body!)).toEqual({
-      query: "decision",
-      mode: "keyword",
-      authorityKinds: ["organization"],
-      limit: 2,
+    expect(JSON.parse(requests[11]!.body!)).toEqual({
+      operationId: FILE_ID,
+      entryId: DOCUMENT_ID,
+      expectedVersion: 0,
+      entry: {
+        title: "Renewal decision",
+        content: "Retain the renewal decision.",
+        kind: "decision",
+      },
     });
-    expect(new URL(requests[11]!.url).searchParams.get("status")).toBe("approved");
+    expect(JSON.parse(requests[12]!.body!)).toEqual({
+      operationId: FILE_ID,
+      revisionId: BASE_ID,
+      expectedVersion: 1,
+      decision: "approve",
+    });
     expect(JSON.parse(requests[13]!.body!)).toEqual({
-      text: "Prefer reviewed memory.",
-      kind: "decision",
-    });
-    expect(JSON.parse(requests[14]!.body!)).toEqual({ status: "approved" });
-    expect(JSON.parse(requests[15]!.body!)).toEqual({
       text: "meeting notes",
       visibility: "private",
       agentAccess: false,
     });
-    expect(JSON.parse(requests[16]!.body!)).toEqual({});
-    expect(JSON.parse(requests[17]!.body!)).toEqual({
+    expect(JSON.parse(requests[14]!.body!)).toEqual({});
+    expect(JSON.parse(requests[15]!.body!)).toEqual({
       operationId: FILE_ID,
       expectedAuthority: {
         kind: "workspace",
@@ -1777,23 +1823,23 @@ describe("OpenGeniClient documents", () => {
       },
       targetAuthorityKind: "personal",
     });
-    expect(new URL(requests[18]!.url).searchParams.get("limit")).toBe("1");
-    expect(new URL(requests[18]!.url).searchParams.get("cursor")).toBe("opaque-cursor");
-    expect(JSON.parse(requests[19]!.body!)).toEqual({
+    expect(new URL(requests[16]!.url).searchParams.get("limit")).toBe("1");
+    expect(new URL(requests[16]!.url).searchParams.get("cursor")).toBe("opaque-cursor");
+    expect(JSON.parse(requests[17]!.body!)).toEqual({
       runId: BASE_ID,
       operationId: FILE_ID,
       batchSize: 10,
     });
-    expect(Object.fromEntries(new URL(requests[20]!.url).searchParams)).toEqual({
+    expect(Object.fromEntries(new URL(requests[18]!.url).searchParams)).toEqual({
       limit: "2",
       cursor: "backfill-run-cursor",
     });
-    expect(Object.fromEntries(new URL(requests[21]!.url).searchParams)).toEqual({
+    expect(Object.fromEntries(new URL(requests[19]!.url).searchParams)).toEqual({
       limit: "3",
       operationCursor: "operation-cursor",
       receiptCursor: "receipt-cursor",
     });
-    expect(Object.fromEntries(new URL(requests[22]!.url).searchParams)).toEqual({
+    expect(Object.fromEntries(new URL(requests[20]!.url).searchParams)).toEqual({
       limit: "4",
       cursor: "organization-reclassification-cursor",
     });
@@ -1806,75 +1852,6 @@ describe("OpenGeniClient documents", () => {
       [`DELETE /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}/documents/${DOCUMENT_ID}`],
     );
     expect(requests[0]!.body).toBeNull();
-  });
-});
-
-describe("OpenGeniClient packs", () => {
-  test("list, register, inspect, install, uninstall, and delete (204)", async () => {
-    const { client, requests } = makeClient((request) => {
-      if (request.method === "DELETE" && request.url.endsWith("/packs/acme")) {
-        return new Response(null, { status: 204 });
-      }
-      if (request.url.endsWith("/packs") && request.method === "GET") {
-        return jsonResponse({ packs: [], installations: [] });
-      }
-      return jsonResponse({ pack: { id: "acme" }, installation: null });
-    });
-    await client.listPacks(WORKSPACE_ID);
-    await client.registerPack(WORKSPACE_ID, {
-      id: "acme",
-      name: "Acme",
-      description: "d",
-      role: "devops",
-      category: "infra",
-      version: "1.0.0",
-    });
-    await client.getPack(WORKSPACE_ID, "acme");
-    await client.enablePack(WORKSPACE_ID, "acme", {
-      environmentId: ENVIRONMENT_ID,
-    });
-    await client.previewPackInstallation(WORKSPACE_ID, "acme", {
-      variableSetId: ENVIRONMENT_ID,
-    });
-    await client.installPack(WORKSPACE_ID, "acme", {
-      expectedManifestDigest: "a".repeat(64),
-      idempotencyKey: "44444444-4444-4444-8444-444444444444",
-    });
-    await client.previewPackUninstall(WORKSPACE_ID, "acme");
-    await client.uninstallPack(WORKSPACE_ID, "acme", {
-      expectedInstallationVersion: 1,
-      idempotencyKey: "55555555-5555-4555-8555-555555555555",
-    });
-    await client.listPackInstallations(WORKSPACE_ID);
-    await client.deletePack(WORKSPACE_ID, "acme");
-    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
-      [
-        `GET /v1/workspaces/${WORKSPACE_ID}/packs`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/packs`,
-        `GET /v1/workspaces/${WORKSPACE_ID}/packs/acme`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/packs/acme/enable`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/packs/acme/installation-preview`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/packs/acme/install`,
-        `GET /v1/workspaces/${WORKSPACE_ID}/packs/acme/uninstall-preview`,
-        `DELETE /v1/workspaces/${WORKSPACE_ID}/packs/acme/installation`,
-        `GET /v1/workspaces/${WORKSPACE_ID}/packs/installations`,
-        `DELETE /v1/workspaces/${WORKSPACE_ID}/packs/acme`,
-      ],
-    );
-    expect(JSON.parse(requests[3]!.body!)).toEqual({
-      environmentId: ENVIRONMENT_ID,
-    });
-    expect(JSON.parse(requests[4]!.body!)).toEqual({
-      variableSetId: ENVIRONMENT_ID,
-    });
-    expect(JSON.parse(requests[5]!.body!)).toEqual({
-      expectedManifestDigest: "a".repeat(64),
-      idempotencyKey: "44444444-4444-4444-8444-444444444444",
-    });
-    expect(JSON.parse(requests[7]!.body!)).toEqual({
-      expectedInstallationVersion: 1,
-      idempotencyKey: "55555555-5555-4555-8555-555555555555",
-    });
   });
 });
 
@@ -2119,6 +2096,12 @@ describe("OpenGeniClient github", () => {
       returnPath: `/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
     });
     await client.listGitHubRepositories(WORKSPACE_ID);
+    await client.getGitHubActionPolicies(WORKSPACE_ID);
+    await client.updateGitHubActionPolicy(WORKSPACE_ID, {
+      actor: { kind: "workspace_app", installationId: 123 },
+      group: "routine",
+      decision: "allow",
+    });
     await client.syncGitHubRepositories(WORKSPACE_ID);
     await client.unlinkGitHubInstallation(WORKSPACE_ID, 123);
     await client.createGitHubAppManifest(WORKSPACE_ID, {
@@ -2128,6 +2111,8 @@ describe("OpenGeniClient github", () => {
       [
         `GET /v1/workspaces/${WORKSPACE_ID}/github/app`,
         `GET /v1/workspaces/${WORKSPACE_ID}/github/repositories`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/github/action-policies`,
+        `PATCH /v1/workspaces/${WORKSPACE_ID}/github/action-policies`,
         `POST /v1/workspaces/${WORKSPACE_ID}/github/repositories/sync`,
         `DELETE /v1/workspaces/${WORKSPACE_ID}/github/installations/123`,
         `POST /v1/workspaces/${WORKSPACE_ID}/github/app-manifest`,
@@ -2136,6 +2121,11 @@ describe("OpenGeniClient github", () => {
     expect(new URL(requests[0]!.url).searchParams.get("returnPath")).toBe(
       `/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
     );
+    expect(JSON.parse(requests[3]!.body!)).toEqual({
+      actor: { kind: "workspace_app", installationId: 123 },
+      group: "routine",
+      decision: "allow",
+    });
     expect(client.githubConnectUrl(WORKSPACE_ID, "signed-state")).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/github/connect?state=signed-state`,
     );
@@ -2225,6 +2215,48 @@ describe("OpenGeniClient external workspace provisioning", () => {
 });
 
 describe("OpenGeniClient billing", () => {
+  test("organization usage pages have a separate bounded request without rereading the summary", async () => {
+    const response = {
+      accountId: "acc-1",
+      period: "ytd" as const,
+      since: "2026-01-01T00:00:00.000Z",
+      until: "2026-09-14T12:00:00.000Z",
+      granularity: "day" as const,
+      totals: [
+        {
+          eventType: "model.cost",
+          unit: "usd_micros",
+          quantity: "9007199254740993",
+          eventCount: "1",
+        },
+      ],
+      buckets: [],
+      workspaces: [],
+      nextWorkspaceCursor: null,
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    expect(
+      await client.getOrganizationUsageSummary({
+        accountId: "acc-1",
+        period: "ytd",
+      }),
+    ).toEqual(response);
+    expect(requests).toHaveLength(1);
+    expect(new URL(requests[0]!.url).pathname).toBe("/v1/billing/usage-summary");
+    expect(new URL(requests[0]!.url).searchParams.get("period")).toBe("ytd");
+    expect(new URL(requests[0]!.url).searchParams.get("accountId")).toBe("acc-1");
+    await client.getOrganizationUsageWorkspacePage({
+      accountId: "acc-1",
+      period: "ytd",
+      until: response.until,
+      afterWorkspaceId: WORKSPACE_ID,
+    });
+    expect(requests).toHaveLength(2);
+    expect(new URL(requests[1]!.url).pathname).toBe("/v1/billing/usage-workspaces");
+    expect(new URL(requests[1]!.url).searchParams.get("afterWorkspaceId")).toBe(WORKSPACE_ID);
+    expect(new URL(requests[1]!.url).searchParams.get("until")).toBe(response.until);
+  });
+
   test("billing reads pass account/workspace selectors as query params", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({
@@ -2289,6 +2321,27 @@ describe("OpenGeniClient connections", () => {
       ...overrides,
     };
   }
+
+  test("recovers a connection creation result without sending credentials", async () => {
+    const connection = fakeConnection({ status: "revoked" });
+    const { fetch, requests } = recordingFetch(() => jsonResponse({ connection }));
+    const client = new OpenGeniEmbeddingClient({
+      baseUrl: "https://api.example.test",
+      apiKey: "og_test_key",
+      fetch,
+    }).asUser("alice");
+    const operationId = "d4226368-95d9-4eca-9dd3-1df27dd81891";
+    expect(await client.getConnectionCreationResult(WORKSPACE_ID, operationId)).toEqual(connection);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("GET");
+    expect(new URL(requests[0]!.url).pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/connections/operations/${operationId}`,
+    );
+    expect(requests[0]!.body).toBeNull();
+    expect(
+      JSON.parse(decodeURIComponent(requests[0]!.headers["x-opengeni-external-actor"]!)),
+    ).toEqual({ mode: "external", identity: { externalId: "alice", source: "default" } });
+  });
 
   test("list/create/update/delete round-trip through their unwrapped connection shape", async () => {
     const connection = fakeConnection();

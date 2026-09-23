@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
-  FIRST_PARTY_MCP_TOOL_NAMES,
+  FIRST_PARTY_REMOTE_MCP_TOOL_NAMES,
   type AccessGrant,
   type SessionToolPolicy,
   type ToolRef,
@@ -123,7 +123,9 @@ function explicitTools(tools: ToolRef[], expectedVersion: number): UpdateSession
   return {
     mode: "explicit",
     tools,
-    firstPartyMcpTools: [...FIRST_PARTY_MCP_TOOL_NAMES],
+    firstPartyMcpTools: [
+      ...new Set([...DEFAULT_FIRST_PARTY_MCP_TOOLS, ...FIRST_PARTY_REMOTE_MCP_TOOL_NAMES]),
+    ],
     expectedVersion,
   };
 }
@@ -178,6 +180,77 @@ describe("durable session tool-policy updates", () => {
     const persisted = await getSession(firstDb, owner.workspaceId, created.id);
     expect(persisted?.toolPolicyVersion).toBe(2);
     expect(persisted?.tools).toEqual([OPENGENI, DOCS]);
+  }, 180_000);
+
+  test("persists connector exclusions without resetting builtins or freezing future defaults", async () => {
+    if (!available) return;
+    const owner = await workspace("connector-exclusions");
+    const created = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI, OPTIONAL_DOCS],
+      toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
+    });
+    const bus = new MemoryEventBus();
+    const updated = await updateSessionToolPolicy(
+      deps(firstDb, bus),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      {
+        mode: "workspace_default",
+        excludedMcpServerIds: ["docs"],
+        expectedVersion: 1,
+      },
+    );
+    expect(updated.toolPolicy).toEqual({
+      mode: "workspace_default",
+      inheritedFromSessionId: null,
+      excludedMcpServerIds: ["docs"],
+    });
+    expect(updated.firstPartyMcpTools).toEqual(created.firstPartyMcpTools);
+    expect(updated.tools).toEqual(created.tools);
+    expect((await getSession(firstDb, owner.workspaceId, created.id))?.toolPolicy).toEqual(
+      updated.toolPolicy,
+    );
+    expect(bus.published[0]?.[0]).toMatchObject({
+      payload: { after: { excludedMcpServerIds: ["docs"], excludedMcpServerCount: 1 } },
+    });
+    const reenabled = await updateSessionToolPolicy(
+      deps(firstDb, bus),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      {
+        mode: "workspace_default",
+        excludedMcpServerIds: [],
+        expectedVersion: 2,
+      },
+    );
+    expect(reenabled.toolPolicy).toEqual({
+      mode: "workspace_default",
+      inheritedFromSessionId: null,
+    });
+    expect(reenabled.tools).toEqual(created.tools);
+  }, 180_000);
+
+  test("preserves exact disconnected selections when another explicit connector changes", async () => {
+    if (!available) return;
+    const owner = await workspace("disconnected-explicit-selection");
+    const disconnected: ToolRef = { kind: "mcp", id: "old-connector", optional: true };
+    const created = await session(firstDb, { ...owner, tools: [OPENGENI, DOCS, disconnected] });
+    const updated = await updateSessionToolPolicy(
+      deps(firstDb, new MemoryEventBus()),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      explicitTools([OPENGENI, disconnected], 1),
+    );
+    expect(updated.tools).toEqual([OPENGENI, disconnected]);
+    await expect(
+      updateSessionToolPolicy(
+        deps(firstDb, new MemoryEventBus()),
+        grant(owner.workspaceId, owner.accountId),
+        created.id,
+        explicitTools([OPENGENI, { ...disconnected, optional: false }], 2),
+      ),
+    ).rejects.toMatchObject({ status: 422 });
   }, 180_000);
 
   test("rejects unknown optional refs instead of silently dropping them", async () => {

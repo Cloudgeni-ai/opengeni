@@ -9,11 +9,16 @@ import {
   useEffect,
   useMemo,
   useState,
+  lazy,
+  Suspense,
   type ReactNode,
 } from "react";
 
 import { useAppContext } from "@/context";
 import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
+import { OPEN_SESSION_SEARCH_EVENT } from "@/lib/session-search-route";
+
+const SessionSearchDialog = lazy(() => import("@/components/session/session-search-dialog"));
 
 const RAIL_COLLAPSED_KEY = "opengeni.rail.collapsed";
 const RAIL_WIDTH_KEY = "opengeni.rail.width";
@@ -98,6 +103,20 @@ export function RailProvider({
 }) {
   const navigate = useNavigate();
   const appContext = useAppContext();
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchMounted, setSearchMounted] = useState(false);
+  useEffect(() => {
+    const open = (event: Event) => {
+      if ((event as CustomEvent<{ workspaceId?: string }>).detail?.workspaceId !== workspaceId)
+        return;
+      setSearchMounted(true);
+      setSearchOpen(true);
+      setDrawerOpen(false);
+    };
+    window.addEventListener(OPEN_SESSION_SEARCH_EVENT, open);
+    return () => window.removeEventListener(OPEN_SESSION_SEARCH_EVENT, open);
+  }, [workspaceId]);
+  useEffect(() => setSearchOpen(false), [workspaceId, appContext.accessContext.subjectId]);
   const [collapsed, setCollapsedState] = useState<boolean>(() => readStoredCollapsed());
   const [width, setWidthState] = useState<number>(() => readStoredWidth());
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -219,5 +238,19 @@ export function RailProvider({
     ],
   );
 
-  return <RailContext.Provider value={value}>{children}</RailContext.Provider>;
+  return (
+    <RailContext.Provider value={value}>
+      {children}
+      {searchMounted ? (
+        <Suspense fallback={null}>
+          <SessionSearchDialog
+            key={`${appContext.accessContext.subjectId}:${workspaceId}`}
+            workspaceId={workspaceId}
+            open={searchOpen}
+            onOpenChange={setSearchOpen}
+          />
+        </Suspense>
+      ) : null}
+    </RailContext.Provider>
+  );
 }

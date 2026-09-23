@@ -43,7 +43,9 @@ export function VerificationLog({ verification }: { verification: RigChangeVerif
         <CheckResults label="Platform checks" results={platformCheckResults} />
       ) : null}
 
-      {checkResults.length > 0 ? <CheckResults label="Rig checks" results={checkResults} /> : null}
+      {checkResults.length > 0 ? (
+        <CheckResults label="Sandbox Environment checks" results={checkResults} />
+      ) : null}
 
       {verification.log ? (
         <div className="grid gap-1.5">

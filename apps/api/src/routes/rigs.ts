@@ -51,7 +51,7 @@ async function parseRigRequest<T>(c: Context, schema: ZodType<T>, label: string)
   throw new ApiHttpError(422, {
     code: "validation_failed",
     message: imageOverrideUnsupported
-      ? "Rig base-image overrides are not supported; Rigs use the deployment-managed platform sandbox."
+      ? "Sandbox Environment base-image overrides are not supported; Sandbox Environments use the deployment-managed platform sandbox."
       : `Invalid ${label}.`,
     retryable: false,
     details: {
@@ -77,7 +77,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId, permission);
     const rigId = c.req.param("rigId");
     if (!rigId) {
-      throw new HTTPException(400, { message: "rig id is required" });
+      throw new HTTPException(400, { message: "sandbox environment id is required" });
     }
     const rig = await requireRigForApi(db, authorization.grant, rigId);
     if (
@@ -126,7 +126,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       // The verifying transition already committed. Keep its deterministic
       // attempt identity retryable instead of reporting an opaque 5xx after a
       // durable mutation or inventing a second attempt after an ambiguous start.
-      deps.observability?.warn("rig change verification start failed", {
+      deps.observability?.warn("sandbox environment change verification start failed", {
         workspaceId,
         changeId,
         attempt,
@@ -163,11 +163,14 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       // Creation already committed. The rig remains fully usable through its
       // runtime setup fallback and can be re-verified explicitly; never turn a
       // successful create into an unretryable 5xx because Temporal was down.
-      deps.observability?.warn("initial rig provider-image verification start failed", {
-        workspaceId,
-        versionId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      deps.observability?.warn(
+        "initial sandbox environment provider-image verification start failed",
+        {
+          workspaceId,
+          versionId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
       return false;
     }
   }
@@ -183,7 +186,11 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
     const grant = authorization.grant;
     requirePermission(grant, "rigs:manage");
-    const payload = await parseRigRequest(c, CreateRigRequest, "Rig create request");
+    const payload = await parseRigRequest(
+      c,
+      CreateRigRequest,
+      "Sandbox Environment create request",
+    );
     const allowOrganization =
       payload.scope === "organization" &&
       authorization.accountGrant?.permissions.includes("account:admin") === true;
@@ -222,7 +229,11 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "missing permission: account:admin",
       });
     }
-    const payload = await parseRigRequest(c, UpdateRigRequest, "Rig update request");
+    const payload = await parseRigRequest(
+      c,
+      UpdateRigRequest,
+      "Sandbox Environment update request",
+    );
     return c.json(await updateRigForApi({ db }, grant, rig, payload, { allowOrganization }));
   });
 
@@ -254,7 +265,11 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/versions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:manage");
-    const payload = await parseRigRequest(c, RigDefinitionEditPayload, "Rig version request");
+    const payload = await parseRigRequest(
+      c,
+      RigDefinitionEditPayload,
+      "Sandbox Environment version request",
+    );
     const version = await createRigVersionForApi({ db }, grant, rig, payload);
     const started = await tryStartInitialVersionVerification(rig.workspaceId, version.id);
     if (!started) c.header("OpenGeni-Rig-Verification", "deferred");
@@ -289,7 +304,11 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/changes", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:use");
-    const request = await parseRigRequest(c, ProposeRigChangeRequest, "Rig change request");
+    const request = await parseRigRequest(
+      c,
+      ProposeRigChangeRequest,
+      "Sandbox Environment change request",
+    );
     const change = await proposeRigChangeForApi({ db }, grant, rig, request);
     const verification = await startChangeVerification(rig.workspaceId, change.id);
     if (!verification.started) c.header("OpenGeni-Rig-Verification", "deferred");
@@ -336,7 +355,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const { rig } = await requireRigMutation(c, workspaceId, "rigs:use");
     if (!rig.activeVersion) {
-      return c.json({ error: "rig has no active version" }, 422);
+      return c.json({ error: "sandbox environment has no active version" }, 422);
     }
     await startVersionVerification(rig.workspaceId, rig.activeVersion.id);
     return c.json({ ok: true, versionId: rig.activeVersion.id }, 202);

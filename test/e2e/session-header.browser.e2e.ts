@@ -1,6 +1,17 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import AxeBuilder from "@axe-core/playwright";
-import { createDb, createSession, updateSessionTitleWithEvent } from "@opengeni/db";
+import {
+  createDb,
+  createSession,
+  updateSessionTitleWithEvent,
+  initializeSessionStartAtomically,
+  claimSessionWorkForAttempt,
+  waitForSessionInputWithEvent,
+  applySessionTurnSettlement,
+  settleSessionInputWait,
+  claimPendingSessionWorkflowWakes,
+  markSessionWorkflowWakeFailed,
+} from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import {
@@ -178,6 +189,175 @@ describe("responsive production session header", () => {
     await shared?.release();
   }, 60_000);
 
+  test("a durable wait becomes queued on timeout without retaining an older idle projection", async () => {
+    const session = await createSession(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: "Ship the PR",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      clientEventId: `initial:${session.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(dbClient.db, fixture.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("wait fixture turn not claimed");
+    await waitForSessionInputWithEvent(dbClient.db, fixture.workspaceId, session.id, {
+      reason: "Waiting for CI to finish",
+      timeoutSeconds: 600,
+      command: {
+        accountId: fixture.accountId,
+        actor: {
+          type: "agent_attempt",
+          sessionId: session.id,
+          turnId: claimed.turn.id,
+          attemptId,
+          executionGeneration: claimed.turn.executionGeneration,
+        },
+        operationKey: crypto.randomUUID(),
+      },
+    });
+    await applySessionTurnSettlement(dbClient.db, fixture.workspaceId, {
+      sessionId: session.id,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { reason: "wait_for_input" } }],
+    });
+    const context = await configuredContext(browser, {
+      viewport: { width: 1440, height: 900 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    try {
+      const page = await context.newPage();
+      await page.goto(`${webBaseUrl}/workspaces/${fixture.workspaceId}/sessions/${session.id}`);
+      const header = page.locator("header");
+      const waitStatus = page.locator("[data-session-wait-status]");
+      await waitStatus.getByText("Waiting for CI to finish", { exact: true }).waitFor();
+      expect(await waitStatus.innerText()).toContain("Checks again at");
+      expect(await header.locator("[data-session-wait-badge]").innerText()).toBe("Waiting");
+      const waitLabel = page
+        .locator(`a[href="/workspaces/${fixture.workspaceId}/sessions/${session.id}"]`)
+        .first();
+      await waitLabel.waitFor();
+      expect(await waitLabel.getAttribute("aria-label")).toContain("Waiting ·");
+      expect(await waitLabel.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+      await page.screenshot({ path: "/tmp/opengeni-wait-live-route.png", fullPage: true });
+      await shared.admin`update sessions set input_wait_until = now() - interval '1 second' where id = ${session.id}`;
+      const settled = await settleSessionInputWait(dbClient.db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: session.id,
+        waitTurnId: claimed.turn.id,
+        disposition: "timeout",
+      });
+      await publishDurableSessionEvents(bus, fixture.workspaceId, session.id, settled.events);
+      await header.getByText("Queued", { exact: true }).waitFor();
+      await waitStatus.waitFor({ state: "detached" });
+      await page.locator("[data-session-dispatch-wait]").waitFor();
+      expect(await header.innerText()).not.toContain("Waiting ·");
+      expect(await header.innerText()).not.toContain("Idle");
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("queued dispatch is visible as waiting and clears after real worker admission", async () => {
+    const session = await createSession(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: "Explain queued work",
+      title: "Queued dispatch check",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      clientEventId: `initial:${session.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const wake = (await claimPendingSessionWorkflowWakes(dbClient.db, 1000)).find(
+      (entry) => entry.sessionId === session.id,
+    );
+    if (!wake) throw new Error("queued dispatch wake missing");
+    await markSessionWorkflowWakeFailed(dbClient.db, wake, "Control worker unavailable");
+    for (const width of [1280, 390]) {
+      const context = await configuredContext(browser, {
+        viewport: { width, height: 850 },
+        extraHTTPHeaders: ownerHeaders,
+      });
+      try {
+        const page = await context.newPage();
+        await page.goto(sessionUrl({ ...fixture, sessionId: session.id }));
+        const status = page.locator("[data-session-dispatch-wait]");
+        await status.waitFor();
+        expect(await status.innerText()).toContain("No agent turn is running");
+        await status.getByText("Start details", { exact: true }).click();
+        expect(await status.innerText()).toContain("Control worker unavailable");
+        expect(await status.locator(".animate-spin").count()).toBe(0);
+        expect(await status.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+          true,
+        );
+        if (width >= 640) {
+          const row = page
+            .locator(`a[href="/workspaces/${fixture.workspaceId}/sessions/${session.id}"]`)
+            .first();
+          await row.waitFor();
+          expect(await row.getAttribute("aria-label")).toContain("waiting to run");
+          expect(await row.locator(".animate-spin").count()).toBe(0);
+          expect((await row.boundingBox())?.height).toBeLessThanOrEqual(32);
+        }
+        await page.screenshot({
+          path: `/tmp/opengeni-queued-dispatch-${width}.png`,
+          fullPage: true,
+        });
+        if (width === 390) {
+          const claimed = await claimSessionWorkForAttempt(dbClient.db, fixture.workspaceId, {
+            sessionId: session.id,
+            workflowId: `session-${session.id}`,
+            workflowRunId: crypto.randomUUID(),
+            attemptId: crypto.randomUUID(),
+            dispatchId: crypto.randomUUID(),
+            trigger: { kind: "next" },
+          });
+          if (claimed.action !== "claimed") throw new Error("queued turn not admitted");
+          // No fake status patch: the route's queued-only read must observe the
+          // real admission even if its live notification is unavailable.
+          await status.waitFor({ state: "detached", timeout: 25_000 });
+        }
+      } finally {
+        await context.close();
+      }
+    }
+  }, 90_000);
+
   test("keeps deep ancestry, primary title, Back, and every action inside the shell", async () => {
     const matrix = [
       {
@@ -247,6 +427,9 @@ describe("responsive production session header", () => {
           animations: "disabled",
         });
 
+        await header
+          .locator("[aria-label='Session title'], button[title$='click to rename']")
+          .waitFor();
         const metrics = await sessionHeaderMetrics(page);
         expect(metrics.documentOverflow).toBe(false);
         expect(metrics.headerOverflow).toBe(false);
@@ -339,6 +522,9 @@ describe("responsive production session header", () => {
       await page.goto(sessionUrl(fixture));
       const header = page.locator("header");
       await header.waitFor();
+      await header
+        .locator("[aria-label='Session title'], button[title$='click to rename']")
+        .waitFor();
       const metrics = await sessionHeaderMetrics(page);
       expect(metrics.paddingTop).toBeGreaterThanOrEqual(24);
       expect(metrics.paddingLeft).toBeGreaterThanOrEqual(12);
@@ -413,6 +599,60 @@ describe("responsive production session header", () => {
         from sessions
         where workspace_id = ${fixture.workspaceId} and id = ${created.id}`;
       expect(row).toEqual({ title: semanticTitle, titleSource: "agent" });
+      expect(pageErrors.get(context)).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 30_000);
+
+  test("pending titles use safe prompt text or a unique session reference", async () => {
+    const safePromptLine = "Fix default session naming behavior";
+    const urlLeading = await createSession(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: `https://homeserver.example.test/workspaces/one/sessions/two\n${safePromptLine}`,
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const sensitiveOnly = await createSession(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: "API_TOKEN=super-secret-value",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const context = await configuredContext(browser, {
+      viewport: { width: 1440, height: 900 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    try {
+      const page = await context.newPage();
+      await page.goto(sessionUrl({ ...fixture, sessionId: urlLeading.id }));
+
+      const titleButton = page.locator("header button[title$='click to rename']");
+      await titleButton.waitFor();
+      expect((await titleButton.textContent())?.trim()).toBe(safePromptLine);
+      expect(await page.getByText(safePromptLine, { exact: true }).count()).toBeGreaterThan(0);
+      expect(await page.getByText("New conversation", { exact: true }).count()).toBe(0);
+
+      await page.goto(sessionUrl({ ...fixture, sessionId: sensitiveOnly.id }));
+      await titleButton.waitFor();
+      expect((await titleButton.textContent())?.trim()).toBe(
+        `Conversation ${sensitiveOnly.id.slice(0, 13)}`,
+      );
+      expect(await page.getByText("New conversation", { exact: true }).count()).toBe(0);
+      const displayedTitles = await page
+        .locator("[data-session-row-title], header button[title$='click to rename']")
+        .allTextContents();
+      expect(displayedTitles.join(" ")).not.toContain("super-secret-value");
       expect(pageErrors.get(context)).toEqual([]);
     } finally {
       await context.close();
@@ -541,6 +781,7 @@ async function expectBreadcrumbState(
   breadcrumb: ReturnType<Page["getByRole"]>,
   state: "loading" | "unavailable",
 ): Promise<void> {
+  await breadcrumb.getByRole("link", { name: new RegExp(`ancestry ${state}`) }).waitFor();
   expect(await breadcrumb.getByRole("link").getAttribute("aria-label")).toContain(
     `ancestry ${state}`,
   );
@@ -551,7 +792,7 @@ async function assertHeaderKeyboardOrder(page: Page): Promise<void> {
     page.getByRole("button", { name: "Open navigation" }),
     page.getByRole("navigation", { name: "Session ancestry" }).getByRole("link").first(),
     page.locator("header [aria-label='Session title'], header button[title$='click to rename']"),
-    page.getByRole("button", { name: /^(Pin|Unpin) session$/ }),
+    page.locator("header").getByRole("button", { name: /^(Pin|Unpin) session$/ }),
     page.getByRole("button", { name: /Open workstream controls$/ }),
     page.getByRole("button", { name: /session panel$/ }),
   ];

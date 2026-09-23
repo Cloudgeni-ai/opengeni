@@ -7,6 +7,7 @@ import {
   getWorkspaceInsights,
   normalizeWorkspaceInsightsFilter,
   WorkspaceInsightsFilterValidationError,
+  type InsightsPhaseObservation,
 } from "../src/domain/insights";
 
 const WORKSPACE = "33333333-3333-4333-8333-333333333333";
@@ -112,6 +113,60 @@ describe("getWorkspaceInsights", () => {
       floor,
     };
   }
+
+  test("timing preserves results, parallel helpers, and failure identity", async () => {
+    const { modelBundle, usageBundle, machines } = stubEmptyWorkspace();
+    const settings = testSettings({ sandboxSelfhostedEnabled: false });
+    const input = {
+      workspaceId: WORKSPACE,
+      range: "week" as const,
+      now: new Date("2026-07-15T12:00:00.000Z"),
+    };
+    const expected = await getWorkspaceInsights(db, settings, input);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let modelStarted = false;
+    modelBundle.mockImplementation(async () => {
+      modelStarted = true;
+      await gate;
+      return emptyModelBundle();
+    });
+    usageBundle.mockImplementation(async () => {
+      expect(modelStarted).toBe(true);
+      release();
+      return emptyUsageBundle();
+    });
+    const events: InsightsPhaseObservation[] = [];
+    expect(
+      await getWorkspaceInsights(db, settings, input, (event) => {
+        events.push(event);
+        throw new Error("observer");
+      }),
+    ).toEqual(expected);
+    expect(events.map((event) => event.phase).sort()).toEqual(
+      [
+        "require_workspace",
+        "model_bundle",
+        "usage_bundle",
+        "live_warm",
+        "scheduled_tasks",
+        "session_depth",
+        "floor_sessions",
+        "attached_sessions",
+        "scheduled_fires",
+      ].sort(),
+    );
+    expect(machines).not.toHaveBeenCalled();
+    const original = new Error("helper failure");
+    modelBundle.mockRejectedValue(original);
+    await expect(
+      getWorkspaceInsights(db, settings, input, () => {
+        throw new Error("observer");
+      }),
+    ).rejects.toBe(original);
+  });
 
   test("normalizes empty and valid boundary filters before analytical reads", async () => {
     const { modelBundle } = stubEmptyWorkspace();
@@ -302,6 +357,8 @@ describe("getWorkspaceInsights", () => {
           pricedCostMicros: 0,
           estimatedProviderCostMicros: 8,
           estimatedProviderCostKnownCalls: 1,
+          equivalentCreditCostMicros: 9,
+          equivalentCreditCostKnownCalls: 1,
         },
       ],
       factBuckets: new Map([
@@ -311,6 +368,8 @@ describe("getWorkspaceInsights", () => {
             costMicros: 0,
             estimatedProviderCostMicros: 8,
             estimatedProviderCostKnownCalls: 1,
+            equivalentCreditCostMicros: 9,
+            equivalentCreditCostKnownCalls: 1,
             inputTokens: 100,
             outputTokens: 50,
             cachedTokens: 10,
@@ -345,6 +404,7 @@ describe("getWorkspaceInsights", () => {
           totalTokens: 150,
           pricedCostMicros: 0,
           estimatedProviderCostMicros: 8,
+          equivalentCreditCostMicros: 9,
           pricingSource: "configured_list_price",
         },
       ],
@@ -359,24 +419,29 @@ describe("getWorkspaceInsights", () => {
     expect(snapshot.creditUsd).toBe(0);
     expect(snapshot.estimatedProviderUsd).toBe(0.000008);
     expect(snapshot.estimatedProviderCostKnownCalls).toBe(1);
+    expect(snapshot.equivalentCreditUsd).toBe(0.000009);
+    expect(snapshot.equivalentCreditCostKnownCalls).toBe(1);
     expect(snapshot.modelCalls).toBe(2);
     expect(snapshot.models[0]).toMatchObject({
       totalTokens: 150,
       cacheInputTokens: 20,
       creditUsd: 0,
       estimatedProviderUsd: 0.000008,
+      equivalentCreditUsd: 0.000009,
     });
     expect(snapshot.series[11]).toMatchObject({
       label: "11:00",
       totalTokens: 150,
       cacheHitPct: 50,
       estimatedProviderUsd: 0.000008,
+      equivalentCreditUsd: 0.000009,
     });
     expect(snapshot.recentCalls[0]).toMatchObject({
       occurredAt: "2026-07-15T11:00:00.000Z",
       billing: "external",
       creditUsd: 0,
       estimatedProviderUsd: 0.000008,
+      equivalentCreditUsd: 0.000009,
       pricingSource: "configured_list_price",
     });
   });
@@ -392,6 +457,8 @@ describe("getWorkspaceInsights", () => {
           pricedCostMicros: 0,
           estimatedProviderCostMicros: 0,
           estimatedProviderCostKnownCalls: 0,
+          equivalentCreditCostMicros: 0,
+          equivalentCreditCostKnownCalls: 0,
           totalTokens: 10,
           cachedTokens: 0,
           cacheInputTokens: 0,
@@ -418,6 +485,7 @@ describe("getWorkspaceInsights", () => {
           totalTokens: 10,
           pricedCostMicros: 0,
           estimatedProviderCostMicros: null,
+          equivalentCreditCostMicros: null,
           pricingSource: null,
         },
       ],

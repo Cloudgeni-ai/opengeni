@@ -25,19 +25,12 @@ import {
   enableCapabilityInstallation,
   getActiveSessionHistoryItems,
   getBillingBalance,
-  getCapabilityInstallation,
-  getKnowledgeMemory,
-  hashMemoryText,
-  MEMORY_VISIBLE_RECORD_CAP,
   getSession,
-  getPackInstallation,
   getScheduledTask,
   getSessionGoal,
   getVariableSetValuesForRun,
-  grantWorkspaceAccess,
   listGitHubInstallationAccessForWorkspace,
   initializeSessionStartAtomically,
-  listInstalledPortableSkills,
   listSessionEvents,
   listScheduledTasks,
   listOutstandingSessionSystemUpdates,
@@ -48,14 +41,12 @@ import {
   recordStripeWebhookEvent,
   recordUsageEvent,
   persistAttemptToolCatalog,
-  requireFile,
   requireSession,
   saveRunState,
   setSessionGoalStatus,
   sumUsageQuantity,
   synchronizeCanonicalHumanLoginBindings,
   updateScheduledTask,
-  updateWorkspaceSettings,
   upsertCapabilityCatalogItem,
   withWorkspaceSessionActivityRls,
   withWorkspaceRls,
@@ -90,16 +81,9 @@ import {
   waitFor,
   type TestServices,
 } from "@opengeni/testing";
-import { prepareAgentTools } from "@opengeni/runtime";
+import { prefixedMcpToolName, prepareAgentTools } from "@opengeni/runtime";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { buildTimeline } from "../../packages/react/src/timeline";
-import {
-  createDocumentServices,
-  DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
-  DEFAULT_DOCUMENT_EMBEDDING_MODEL,
-  getDocumentChunk,
-  searchDocuments,
-} from "../../packages/documents/src";
 import { submitTestHumanPrompt } from "./helpers/session-control";
 
 async function setSessionStatus(
@@ -257,7 +241,7 @@ describe("API component integration", () => {
         body: JSON.stringify({ initialMessage, model: "scripted-model" }),
         headers: { "content-type": "application/json" },
       });
-      expect(response.status).toBe(202);
+      expect(response.status, await response.clone().text()).toBe(202);
       return (await response.json()) as {
         id: string;
         updatedAt: string;
@@ -363,6 +347,36 @@ describe("API component integration", () => {
       pinned: [{ id: pinnedTarget.id }],
       sessions: [],
     });
+    const currentDateFiltered = await app.request(
+      workspacePath(
+        workspaceId,
+        "/sessions?view=page&updatedFrom=2026-09-04T00%3A00%3A00.000Z&updatedBefore=2026-09-05T00%3A00%3A00.000Z",
+      ),
+    );
+    expect(currentDateFiltered.status).toBe(200);
+    expect((await currentDateFiltered.json()).filtersApplied).toBe(true);
+    for (const name of ["updatedFrom", "updatedBefore", "createdFrom", "createdBefore"]) {
+      const response = await app.request(
+        workspacePath(workspaceId, `/sessions?view=page&${name}=2026-09-04T00%3A00%3A00.000001Z`),
+      );
+      expect(response.status).toBe(400);
+      expect(await response.text()).toContain("millisecond precision");
+    }
+
+    expect(
+      (await app.request(workspacePath(workspaceId, "/sessions?view=page&createdByKind=subject")))
+        .status,
+    ).toBe(400);
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            workspaceId,
+            "/sessions?view=page&updatedFrom=2026-09-05T00%3A00%3A00.000Z&updatedBefore=2026-09-04T00%3A00%3A00.000Z",
+          ),
+        )
+      ).status,
+    ).toBe(400);
     expect(
       (await app.request(workspacePath(workspaceId, "/sessions?view=page&cursor=not-a-cursor")))
         .status,
@@ -412,6 +426,16 @@ describe("API component integration", () => {
         )
       ).status,
     ).toBe(200);
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            workspaceId,
+            `/sessions?view=page&limit=1&channelId=null&cursor=${encodeURIComponent(firstPage.nextCursor!)}`,
+          ),
+        )
+      ).status,
+    ).toBe(400);
 
     const unpinned = await setPin({ pinned: false, expectedVersion: 1 });
     expect(unpinned.status).toBe(200);
@@ -887,7 +911,7 @@ describe("API component integration", () => {
     expect(await isSessionCompactionRequested(dbClient.db, workspaceId, session.id)).toBe(true);
   });
 
-  test("registers session-scoped goal MCP tools only for session-bound grants", async () => {
+  test("registers session lifecycle MCP tools only for session-bound grants", async () => {
     const settings = testSettings({ databaseUrl: services.databaseUrl });
     const baseGrant = await bootstrapMcpGrant(dbClient.db);
     const session = await createSession(dbClient.db, {
@@ -934,7 +958,7 @@ describe("API component integration", () => {
       resumeBoxById: fakeResumeBoxById,
     };
 
-    // Without the worker-asserted sessionId claim, goal tools do not exist.
+    // Without the worker-asserted sessionId claim, lifecycle tools do not exist.
     const sessionlessMcp = buildOpenGeniMcpServer(mcpDeps, baseGrant);
     await expect(callMcpTool(sessionlessMcp, "goal_set", { text: "x" })).rejects.toThrow(
       "MCP tool not registered",
@@ -949,6 +973,15 @@ describe("API component integration", () => {
         turnId: claimed.turn.id,
         attemptId,
         executionGeneration: claimed.turn.executionGeneration,
+        firstPartyMcpTools: [
+          "goal_set",
+          "goal_update",
+          "goal_progress",
+          "wait_for_input",
+          "goal_pause",
+          "goal_resume",
+          "goal_complete",
+        ],
       },
     };
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
@@ -997,42 +1030,40 @@ describe("API component integration", () => {
     });
     expect(progress.operationId).toBeTruthy();
 
-    // goal_wait: self-only, exact-attempt fenced, bounded deadline, and
-    // idempotent per (turn, exact arguments) without a caller key.
+    // wait_for_input: self-only, exact-attempt fenced, bounded relative timeout,
+    // and idempotent per (turn, exact arguments) without a caller key.
     const waitArgs = {
       reason: "two child sessions are still implementing their slices",
-      untilSeconds: 900,
+      timeoutSeconds: 900,
     };
     const held = await callMcpTool<{
       status: string;
-      goalId: string;
-      untilAt: string;
+      deadlineAt: string;
       operationId: string;
       replay: boolean;
       nextAction: string;
-    }>(mcp, "goal_wait", waitArgs);
-    expect(held).toMatchObject({ status: "held", replay: false });
-    expect(held.goalId).toBeTruthy();
-    expect(new Date(held.untilAt).getTime()).toBeGreaterThan(Date.now() + 800_000);
-    expect(held.nextAction).toContain("End your turn now");
-    const heldReplay = await callMcpTool<{ replay: boolean; untilAt: string }>(
+    }>(mcp, "wait_for_input", waitArgs);
+    expect(held).toMatchObject({ status: "waiting_for_input", replay: false });
+    expect(new Date(held.deadlineAt).getTime()).toBeGreaterThan(Date.now() + 800_000);
+    expect(held.nextAction).toContain("runtime yields this turn");
+    const heldReplay = await callMcpTool<{ replay: boolean; deadlineAt: string }>(
       mcp,
-      "goal_wait",
+      "wait_for_input",
       waitArgs,
     );
-    expect(heldReplay).toMatchObject({ replay: true, untilAt: held.untilAt });
+    expect(heldReplay).toMatchObject({ replay: true, deadlineAt: held.deadlineAt });
     await expect(
-      callMcpTool(mcp, "goal_wait", { reason: "too short", untilSeconds: 5 }),
+      callMcpTool(mcp, "wait_for_input", { reason: "too short", timeoutSeconds: 5 }),
     ).rejects.toThrow();
-    const [heldGoalRow] = await dbClient.db.execute<{
-      continuation_hold_turn_id: string | null;
-      continuation_hold_until: string | Date | null;
+    const [waitRow] = await dbClient.db.execute<{
+      input_wait_turn_id: string | null;
+      input_wait_until: string | Date | null;
     }>(sql`
-      select continuation_hold_turn_id, continuation_hold_until
-      from session_goals
-      where workspace_id = ${grant.workspaceId} and session_id = ${session.id}`);
-    expect(heldGoalRow?.continuation_hold_turn_id).toBe(claimed.turn.id);
-    expect(new Date(heldGoalRow!.continuation_hold_until!).toISOString()).toBe(held.untilAt);
+      select input_wait_turn_id, input_wait_until
+      from sessions
+      where workspace_id = ${grant.workspaceId} and id = ${session.id}`);
+    expect(waitRow?.input_wait_turn_id).toBe(claimed.turn.id);
+    expect(new Date(waitRow!.input_wait_until!).toISOString()).toBe(held.deadlineAt);
 
     const pausedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_pause", {
       rationale: "waiting on upstream fix",
@@ -1061,6 +1092,22 @@ describe("API component integration", () => {
       text: "upstream fixed; finish the job",
       outcome: "applied",
     });
+
+    const resumedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
+    expect(resumedGoal).toMatchObject({ changed: true, resource: { state: "active" } });
+    const alreadyActive = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
+    expect(alreadyActive).toMatchObject({ changed: false, resource: { state: "active" } });
+
+    for (const pausedReason of ["user_pause", "api", "agent", "limits", "max_auto_continuations"]) {
+      await setSessionGoalStatus(dbClient.db, baseGrant.workspaceId, session.id, {
+        status: "paused",
+        pausedReason,
+      });
+      const resumed = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
+      expect(resumed).toMatchObject({ changed: true, resource: { state: "active" } });
+      const goal = await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id);
+      expect(goal).toMatchObject({ autoContinuations: 0, noProgressStreak: 0, pausedReason: null });
+    }
 
     const completedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_complete", {
       evidence: "CI green for 3 consecutive runs",
@@ -1097,9 +1144,9 @@ describe("API component integration", () => {
       "goal.set",
       "goal.updated",
       "goal.progress",
-      "goal.held",
       "goal.paused",
       "goal.updated",
+      ...Array(6).fill("goal.resumed"),
       "goal.completed",
       "goal.set",
     ]);
@@ -1794,7 +1841,7 @@ describe("API component integration", () => {
     });
   });
 
-  test("managed credit gate blocks document indexing before enqueueing work", async () => {
+  test("managed credit gate accepts a document before embedding funds are available", async () => {
     const delegationSecret = "test-managed-document-credit-secret";
     const app = createApp({
       settings: {
@@ -1809,11 +1856,7 @@ describe("API component integration", () => {
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
-      documentIndexer: {
-        indexDocument: async () => {
-          throw new Error("document indexer should not run without credits");
-        },
-      },
+      documentIndexer: { indexDocument: async () => undefined },
     });
     const access = await bootstrapWorkspace(dbClient.db, {
       accountExternalSource: "test:managed-document-credit",
@@ -1844,16 +1887,45 @@ describe("API component integration", () => {
     expect(baseResponse.status).toBe(201);
     const base = (await baseResponse.json()) as { id: string };
 
-    const blocked = await app.request(
+    const content = "document awaiting embedding funds";
+    const begin = await app.request(workspacePath(workspaceId, "/files/uploads"), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({
+        filename: "pending-funds.txt",
+        contentType: "text/plain",
+        sizeBytes: new TextEncoder().encode(content).byteLength,
+      }),
+    });
+    expect(begin.status).toBe(201);
+    const upload = (await begin.json()) as {
+      fileId: string;
+      uploadId: string;
+      putUrl: string;
+      requiredHeaders: Record<string, string>;
+    };
+    const put = await fetch(upload.putUrl, {
+      method: "PUT",
+      body: content,
+      headers: upload.requiredHeaders,
+    });
+    expect(put.ok).toBe(true);
+    const complete = await app.request(
+      workspacePath(workspaceId, `/files/uploads/${upload.uploadId}/complete`),
+      { method: "POST", headers },
+    );
+    expect(complete.status).toBe(200);
+
+    const accepted = await app.request(
       workspacePath(workspaceId, `/document-bases/${base.id}/documents`),
       {
         method: "POST",
         headers: { "content-type": "application/json", ...headers },
-        body: JSON.stringify({ fileId: crypto.randomUUID() }),
+        body: JSON.stringify({ fileId: upload.fileId }),
       },
     );
-    expect(blocked.status).toBe(402);
-    expect(await blocked.text()).toContain("insufficient OpenGeni credits");
+    expect(accepted.status).toBe(201);
+    expect((await accepted.json()) as { status: string }).toMatchObject({ status: "queued" });
   });
 
   test("managed credit gate allows schedule creation but blocks manual trigger without credits", async () => {
@@ -3171,7 +3243,11 @@ describe("API component integration", () => {
       const prepared = await prepareAgentTools(runtimeSettings, [{ kind: "mcp", id: mcpServerId }]);
       try {
         const tools = await prepared.mcpServers[0]!.listTools();
-        expect(tools.map((tool) => tool.name)).toContain(`${mcpServerId}__search_documents`);
+        expect(tools.map((tool) => tool.name).sort()).toEqual(
+          ["search_documents", "fetch_document"]
+            .map((name) => prefixedMcpToolName(mcpServerId, name))
+            .sort(),
+        );
       } finally {
         await prepared.close();
       }
@@ -3345,11 +3421,17 @@ describe("API component integration", () => {
           subjectScope: "workspace",
         });
         const tools = await prepared.mcpServers[0]!.listTools();
-        expect(tools.map((tool) => tool.name)).toContain(`${mcpServerId}__search_documents`);
-        const result = await prepared.mcpServers[0]!.callTool(`${mcpServerId}__search_documents`, {
-          query: "broker",
-        });
+        expect(tools.map((tool) => tool.name).sort()).toEqual(
+          ["search_documents", "fetch_document"]
+            .map((name) => prefixedMcpToolName(mcpServerId, name))
+            .sort(),
+        );
+        const result = await prepared.mcpServers[0]!.callTool(
+          prefixedMcpToolName(mcpServerId, "search_documents"),
+          { query: "broker" },
+        );
         expect(JSON.stringify(result)).toContain("found document for broker");
+        expect(mcp.calls.at(-1)).toEqual({ tool: "search_documents", args: { query: "broker" } });
       } finally {
         await prepared.close();
       }
@@ -3689,622 +3771,6 @@ describe("API component integration", () => {
       since: startOfUtcMonth(),
     });
     expect(after).toBe(before);
-  });
-
-  test("creates marketing social scheduled tasks from connected accounts only", async () => {
-    workflow = new FakeWorkflowClient();
-    const app = createApp({
-      settings: firstPartyMcpSettings(services.databaseUrl),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: workflow,
-    });
-    const suffix = crypto.randomUUID();
-    const workspaceId = await defaultWorkspaceId(app);
-
-    const enabled = await app.request(
-      workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/enable"),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(enabled.status).toBeLessThan(300);
-
-    const activeResponse = await app.request(workspacePath(workspaceId, "/social/connections"), {
-      method: "POST",
-      body: JSON.stringify({
-        provider: "linkedin",
-        accountHandle: `active-${suffix}`,
-        accountName: "Active Company",
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(activeResponse.status).toBe(201);
-    const activeConnection = (await activeResponse.json()) as { id: string };
-
-    const disabledResponse = await app.request(workspacePath(workspaceId, "/social/connections"), {
-      method: "POST",
-      body: JSON.stringify({
-        provider: "linkedin",
-        accountHandle: `disabled-${suffix}`,
-        accountName: "Disabled Company",
-        status: "disabled",
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(disabledResponse.status).toBe(201);
-    const disabledConnection = (await disabledResponse.json()) as {
-      id: string;
-    };
-
-    const created = await app.request(
-      workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/scheduled-tasks"),
-      {
-        method: "POST",
-        body: JSON.stringify({
-          connectionIds: [],
-          documentBaseIds: [],
-          timeZone: "UTC",
-          hour: 9,
-          minute: 0,
-        }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    const createdBody = await created.text();
-    expect(created.status, createdBody).toBe(201);
-    const task = JSON.parse(createdBody) as {
-      metadata: Record<string, unknown>;
-      agentConfig: { metadata: Record<string, unknown> };
-    };
-    expect(task.metadata.socialConnectionIds).toEqual([activeConnection.id]);
-    expect(task.agentConfig.metadata.socialConnectionIds).toEqual([activeConnection.id]);
-    expect(task.metadata.socialConnectionIds).not.toContain(disabledConnection.id);
-    expect(workflow.synced).toHaveLength(1);
-  });
-
-  test("registers workspace packs from manifests and installs them", async () => {
-    const app = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        environmentsEncryptionKey: environmentsTestKey,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const workspaceId = await defaultWorkspaceId(app);
-    const packId = `infra-test-${crypto.randomUUID().slice(0, 8)}`;
-    const manifest = {
-      id: packId,
-      name: "Infra test pack",
-      description: "Registered from a manifest payload in tests.",
-      role: "infrastructure",
-      category: "deployment",
-      version: "0.1.0",
-      scheduledTaskTemplates: [
-        {
-          id: "drift-daily",
-          name: "Daily drift check",
-          description: "Compare expected state against live state.",
-          defaultSchedule: {
-            type: "calendar",
-            timeZone: "UTC",
-            hour: 6,
-            minute: 0,
-          },
-          defaultRunMode: "new_session_per_run",
-          defaultOverlapPolicy: "skip",
-          prompt: "Run the daily drift check.",
-        },
-      ],
-      environment: {
-        description: "Cloud credentials for substrate work.",
-        requiredVariables: ["CLOUD_TOKEN"],
-        required: true,
-      },
-    };
-
-    const registered = await app.request(workspacePath(workspaceId, "/packs"), {
-      method: "POST",
-      body: JSON.stringify(manifest),
-      headers: { "content-type": "application/json" },
-    });
-    expect(registered.status).toBe(201);
-    const registeredBody = (await registered.json()) as {
-      pack: { id: string; scheduledTaskTemplates: Array<{ prompt?: string }> };
-    };
-    expect(registeredBody.pack.id).toBe(packId);
-    expect(registeredBody.pack.scheduledTaskTemplates[0]?.prompt).toBe(
-      "Run the daily drift check.",
-    );
-
-    const replaced = await app.request(workspacePath(workspaceId, "/packs"), {
-      method: "POST",
-      body: JSON.stringify({ ...manifest, version: "0.1.1" }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(replaced.status).toBe(200);
-
-    const builtInCollision = await app.request(workspacePath(workspaceId, "/packs"), {
-      method: "POST",
-      body: JSON.stringify({
-        ...manifest,
-        id: "marketing-social-daily-analysis",
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(builtInCollision.status).toBe(409);
-
-    const listed = await app.request(workspacePath(workspaceId, "/packs"));
-    expect(listed.status).toBe(200);
-    const listedBody = (await listed.json()) as {
-      packs: Array<{ id: string; version: string }>;
-    };
-    expect(listedBody.packs.map((pack) => pack.id)).toContain(packId);
-    expect(listedBody.packs.find((pack) => pack.id === packId)?.version).toBe("0.1.1");
-
-    const enabledWithoutEnvironment = await app.request(
-      workspacePath(workspaceId, `/packs/${packId}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(enabledWithoutEnvironment.status).toBe(422);
-
-    const environmentResponse = await app.request(workspacePath(workspaceId, "/environments"), {
-      method: "POST",
-      body: JSON.stringify({
-        name: `cloud-${crypto.randomUUID().slice(0, 8)}`,
-        variables: [{ name: "OTHER_TOKEN", value: "value-1" }],
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(environmentResponse.status).toBe(201);
-    const environment = (await environmentResponse.json()) as { id: string };
-
-    const enabledMissingVariable = await app.request(
-      workspacePath(workspaceId, `/packs/${packId}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({ environmentId: environment.id }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(enabledMissingVariable.status).toBe(422);
-    expect(await enabledMissingVariable.text()).toContain("CLOUD_TOKEN");
-
-    const genericPackEnable = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(genericPackEnable.status).toBe(409);
-    expect(await genericPackEnable.text()).toContain("Pack installation preview flow");
-
-    const setVariable = await app.request(
-      workspacePath(workspaceId, `/environments/${environment.id}/variables/CLOUD_TOKEN`),
-      {
-        method: "PUT",
-        body: JSON.stringify({ value: "cloud-token-value" }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(setVariable.status).toBeLessThan(300);
-
-    const enabled = await app.request(workspacePath(workspaceId, `/packs/${packId}/enable`), {
-      method: "POST",
-      body: JSON.stringify({ environmentId: environment.id }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(enabled.status).toBe(201);
-    const installation = (await enabled.json()) as {
-      status: string;
-      metadata: Record<string, unknown>;
-    };
-    expect(installation.status).toBe("active");
-    expect(installation.metadata.packVersion).toBe("0.1.1");
-    expect(installation.metadata.variableSetId).toBe(environment.id);
-
-    const catalogResponse = await app.request(workspacePath(workspaceId, "/capabilities"));
-    expect(catalogResponse.status).toBe(200);
-    const catalog = (await catalogResponse.json()) as {
-      items: Array<{
-        id: string;
-        kind: string;
-        source: string;
-        enabled: boolean;
-      }>;
-    };
-    expect(catalog.items.find((item) => item.id === `pack:${packId}`)).toMatchObject({
-      kind: "pack",
-      source: "manual",
-      enabled: true,
-    });
-
-    // Pack lifecycle remains owned by the dedicated Pack route even after the
-    // Pack is active; the generic capability path cannot mutate the install.
-    const capabilityEnable = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(capabilityEnable.status).toBe(409);
-    expect(await capabilityEnable.text()).toContain("Pack installation preview flow");
-    const installationAfterCapabilityEnable = await getPackInstallation(
-      dbClient.db,
-      workspaceId,
-      packId,
-    );
-    expect(installationAfterCapabilityEnable?.metadata.variableSetId).toBe(environment.id);
-
-    const deletedBuiltIn = await app.request(
-      workspacePath(workspaceId, "/packs/marketing-social-daily-analysis"),
-      { method: "DELETE" },
-    );
-    expect(deletedBuiltIn.status).toBe(409);
-
-    // Once the required variable disappears, the dedicated Pack enable path
-    // re-validates the stored attachment and refuses.
-    const removeVariable = await app.request(
-      workspacePath(workspaceId, `/environments/${environment.id}/variables/CLOUD_TOKEN`),
-      { method: "DELETE" },
-    );
-    expect(removeVariable.status).toBeLessThan(300);
-    const capabilityEnableMissingVariable = await app.request(
-      workspacePath(workspaceId, `/packs/${packId}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(capabilityEnableMissingVariable.status).toBe(422);
-    expect(await capabilityEnableMissingVariable.text()).toContain("CLOUD_TOKEN");
-
-    const deleted = await app.request(workspacePath(workspaceId, `/packs/${packId}`), {
-      method: "DELETE",
-    });
-    expect(deleted.status).toBe(204);
-    const missing = await app.request(workspacePath(workspaceId, `/packs/${packId}`));
-    expect(missing.status).toBe(404);
-    const installationAfterDelete = await getPackInstallation(dbClient.db, workspaceId, packId);
-    expect(installationAfterDelete?.status).toBe("disabled");
-    // Pack lifecycle is dedicated. The MCP-only generic installation ledger
-    // must not retain a shadow Pack row after uninstall.
-    const capabilityInstallationAfterDelete = await getCapabilityInstallation(
-      dbClient.db,
-      workspaceId,
-      `pack:${packId}`,
-    );
-    expect(capabilityInstallationAfterDelete).toBeNull();
-  });
-
-  test("installs platform-base Packs through explicit Rigs and shares identical inline Skills", async () => {
-    const app = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        environmentsEncryptionKey: environmentsTestKey,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const workspaceId = await defaultWorkspaceId(app);
-    const suffix = crypto.randomUUID().slice(0, 8);
-    const skillName = `infra-ops-${suffix}`;
-    const packManifest = (id: string) => ({
-      id,
-      name: `Pack ${id}`,
-      description: "Pack with an explicit Rig on the deployment platform base.",
-      role: "infrastructure",
-      category: "infrastructure",
-      version: "0.1.0",
-      skills: [
-        {
-          name: skillName,
-          description: "Operate infrastructure with the pack runbook.",
-          files: [
-            {
-              path: "SKILL.md",
-              content: `---\nname: ${skillName}\ndescription: Operate infrastructure.\n---\n# Infra ops\n`,
-            },
-            { path: "references/runbook.md", content: "Runbook." },
-          ],
-        },
-      ],
-      metadata: {
-        sandboxImage: "example.invalid/spoofed:latest",
-        sandboxProviderImages: {
-          modal: { imageId: "im-abcdefghijklmnopqrstuv" },
-        },
-        skills: ["spoofed-skill"],
-      },
-    });
-    const packA = `img-a-${suffix}`;
-    const packB = `img-b-${suffix}`;
-    for (const packId of [packA, packB]) {
-      const registered = await app.request(workspacePath(workspaceId, "/packs"), {
-        method: "POST",
-        body: JSON.stringify(packManifest(packId)),
-        headers: { "content-type": "application/json" },
-      });
-      expect(registered.status).toBe(201);
-    }
-
-    // Packs that compose runtime components cannot use the legacy enable
-    // paths. This test selects an explicit Rig through the installation flow.
-    const legacyEnableA = await app.request(workspacePath(workspaceId, `/packs/${packA}/enable`), {
-      method: "POST",
-      body: JSON.stringify({}),
-      headers: { "content-type": "application/json" },
-    });
-    expect(legacyEnableA.status).toBe(409);
-    expect(await legacyEnableA.text()).toContain("Pack installation flow");
-    const capabilityEnableB = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packB}`)}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(capabilityEnableB.status).toBe(409);
-
-    const previewWithoutRig = await app.request(
-      workspacePath(workspaceId, `/packs/${packA}/installation-preview`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(previewWithoutRig.status).toBe(200);
-    expect(await previewWithoutRig.json()).toMatchObject({
-      ready: true,
-      rig: { required: false, status: "not_required" },
-      legacyInlineSkillCount: 1,
-      legacySandboxImage: null,
-    });
-
-    const createRig = async (name: string): Promise<{ id: string }> => {
-      const response = await app.request(workspacePath(workspaceId, "/rigs"), {
-        method: "POST",
-        body: JSON.stringify({
-          name,
-          setupScript: "true",
-          checks: [],
-          credentialHooks: [],
-          defaultVariableSetIds: [],
-        }),
-        headers: { "content-type": "application/json" },
-      });
-      const body = await response.text();
-      expect(response.status, body).toBe(201);
-      return JSON.parse(body) as { id: string };
-    };
-    const [rigA, rigB] = await Promise.all([
-      createRig(`Pack A ${suffix}`),
-      createRig(`Pack B ${suffix}`),
-    ]);
-
-    const previewPack = async (
-      packId: string,
-      rigId: string,
-    ): Promise<{
-      manifestDigest: string;
-      installationVersion: number | null;
-      ready: boolean;
-      components: Array<{
-        key: string;
-        kind: string;
-        status: string;
-        resolvedId: string | null;
-      }>;
-    }> => {
-      const response = await app.request(
-        workspacePath(workspaceId, `/packs/${packId}/installation-preview`),
-        {
-          method: "POST",
-          body: JSON.stringify({ rigId }),
-          headers: { "content-type": "application/json" },
-        },
-      );
-      const body = await response.text();
-      expect(response.status, body).toBe(200);
-      return JSON.parse(body) as {
-        manifestDigest: string;
-        installationVersion: number | null;
-        ready: boolean;
-        components: Array<{
-          key: string;
-          kind: string;
-          status: string;
-          resolvedId: string | null;
-        }>;
-      };
-    };
-    const installPack = async (
-      packId: string,
-      rigId: string,
-      preview: Awaited<ReturnType<typeof previewPack>>,
-    ): Promise<{ status: string; selectedRigId: string | null; version: number }> => {
-      const response = await app.request(workspacePath(workspaceId, `/packs/${packId}/install`), {
-        method: "POST",
-        body: JSON.stringify({
-          expectedManifestDigest: preview.manifestDigest,
-          ...(preview.installationVersion === null
-            ? {}
-            : { expectedInstallationVersion: preview.installationVersion }),
-          rigId,
-          idempotencyKey: crypto.randomUUID(),
-        }),
-        headers: { "content-type": "application/json" },
-      });
-      const body = await response.text();
-      expect(response.status, body).toBe(preview.installationVersion === null ? 201 : 200);
-      return JSON.parse(body) as {
-        status: string;
-        selectedRigId: string | null;
-        version: number;
-      };
-    };
-
-    const previewA = await previewPack(packA, rigA.id);
-    expect(previewA).toMatchObject({ ready: true, installationVersion: null });
-    expect(previewA.components).toEqual([
-      expect.objectContaining({
-        key: `inline-skill/${skillName}`,
-        kind: "inline_skill",
-        status: "ready",
-      }),
-    ]);
-    const installedA = await installPack(packA, rigA.id, previewA);
-    expect(installedA).toMatchObject({ status: "active", selectedRigId: rigA.id });
-
-    const previewB = await previewPack(packB, rigB.id);
-    expect(previewB).toMatchObject({ ready: true, installationVersion: null });
-    expect(previewB.components).toEqual([
-      expect.objectContaining({
-        key: `inline-skill/${skillName}`,
-        kind: "inline_skill",
-        status: "ready",
-      }),
-    ]);
-    expect(previewB.components[0]?.resolvedId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-    );
-    const installedB = await installPack(packB, rigB.id, previewB);
-    expect(installedB).toMatchObject({ status: "active", selectedRigId: rigB.id });
-    expect(
-      (await listInstalledPortableSkills(dbClient.db, workspaceId)).filter(
-        (skill) => skill.name === skillName,
-      ),
-    ).toHaveLength(1);
-
-    // The catalog surfaces skill names without accepting image metadata or
-    // leaking skill file content.
-    const catalogResponse = await app.request(workspacePath(workspaceId, "/capabilities"));
-    const catalog = (await catalogResponse.json()) as {
-      items: Array<{ id: string; metadata: Record<string, unknown> }>;
-    };
-    const packAItem = catalog.items.find((item) => item.id === `pack:${packA}`);
-    expect(packAItem?.metadata.sandboxImage).toBeUndefined();
-    expect(packAItem?.metadata.sandboxProviderImages).toBeUndefined();
-    expect(packAItem?.metadata.skills).toEqual([skillName]);
-    expect(JSON.stringify(packAItem?.metadata)).not.toContain("spoofed");
-    expect(JSON.stringify(packAItem?.metadata)).not.toContain("Runbook.");
-
-    // V2 Packs cannot be disabled or unregistered through legacy paths while
-    // their component ownership ledger is active.
-    const disabledA = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packA}`)}/disable`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(disabledA.status).toBe(409);
-    expect(await disabledA.text()).toContain("Pack uninstall preview flow");
-    const unregisterActiveA = await app.request(workspacePath(workspaceId, `/packs/${packA}`), {
-      method: "DELETE",
-    });
-    expect(unregisterActiveA.status).toBe(409);
-
-    const uninstallPreviewAResponse = await app.request(
-      workspacePath(workspaceId, `/packs/${packA}/uninstall-preview`),
-    );
-    expect(uninstallPreviewAResponse.status).toBe(200);
-    const uninstallPreviewA = (await uninstallPreviewAResponse.json()) as {
-      installed: boolean;
-      installationVersion: number;
-      components: Array<{
-        key: string;
-        kind: string;
-        retainedByOtherOwners: boolean;
-      }>;
-    };
-    expect(uninstallPreviewA).toMatchObject({ installed: true });
-    expect(uninstallPreviewA.components).toEqual([
-      expect.objectContaining({
-        key: `inline-skill/${skillName}`,
-        kind: "inline_skill",
-        retainedByOtherOwners: true,
-      }),
-    ]);
-    const uninstallAResponse = await app.request(
-      workspacePath(workspaceId, `/packs/${packA}/installation`),
-      {
-        method: "DELETE",
-        body: JSON.stringify({
-          expectedInstallationVersion: uninstallPreviewA.installationVersion,
-          idempotencyKey: crypto.randomUUID(),
-        }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    const uninstallABody = await uninstallAResponse.text();
-    expect(uninstallAResponse.status, uninstallABody).toBe(200);
-    expect(JSON.parse(uninstallABody)).toMatchObject({
-      packId: packA,
-      status: "uninstalled",
-    });
-    expect(
-      (await listInstalledPortableSkills(dbClient.db, workspaceId)).filter(
-        (skill) => skill.name === skillName,
-      ),
-    ).toHaveLength(1);
-
-    const unregisterA = await app.request(workspacePath(workspaceId, `/packs/${packA}`), {
-      method: "DELETE",
-    });
-    expect(unregisterA.status).toBe(204);
-
-    const uninstallPreviewBResponse = await app.request(
-      workspacePath(workspaceId, `/packs/${packB}/uninstall-preview`),
-    );
-    expect(uninstallPreviewBResponse.status).toBe(200);
-    const uninstallPreviewB = (await uninstallPreviewBResponse.json()) as {
-      installationVersion: number;
-      components: Array<{ retainedByOtherOwners: boolean }>;
-    };
-    expect(uninstallPreviewB.components).toEqual([
-      expect.objectContaining({ retainedByOtherOwners: false }),
-    ]);
-    const uninstallBResponse = await app.request(
-      workspacePath(workspaceId, `/packs/${packB}/installation`),
-      {
-        method: "DELETE",
-        body: JSON.stringify({
-          expectedInstallationVersion: uninstallPreviewB.installationVersion,
-          idempotencyKey: crypto.randomUUID(),
-        }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    const uninstallBBody = await uninstallBResponse.text();
-    expect(uninstallBResponse.status, uninstallBBody).toBe(200);
-    expect(JSON.parse(uninstallBBody)).toMatchObject({
-      packId: packB,
-      status: "uninstalled",
-      retainedComponents: [],
-    });
-    expect(
-      (await listInstalledPortableSkills(dbClient.db, workspaceId)).filter(
-        (skill) => skill.name === skillName,
-      ),
-    ).toHaveLength(0);
   });
 
   test("keeps scheduled task persistence consistent when schedule sync fails", async () => {
@@ -6020,1738 +5486,114 @@ describe("API component integration", () => {
     ]);
   });
 
-  test("indexes uploaded files into document bases and searches them", async () => {
+  // Source preparation, scope isolation, and agent MCP publication/review are
+  // exercised against real Postgres in apps/api/test/knowledge-*.test.ts. These
+  // HTTP checks pin the cutover and public entry lifecycle, replacing the old
+  // document-index and Memory authoring API fixtures.
+  test("retired Memory and document search routes direct callers to Knowledge", async () => {
     const app = createApp({
-      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
     const access = await defaultAccessContext(app);
     const workspaceId = access.defaultWorkspaceId!;
-    const accountId = access.defaultAccountId!;
-    const uploadResponse = await app.request(workspacePath(workspaceId, "/files/uploads"), {
-      method: "POST",
-      body: JSON.stringify({
-        filename: "network-runbook.txt",
-        contentType: "text/plain",
-        sizeBytes: 67,
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    const upload = (await uploadResponse.json()) as {
-      fileId: string;
-      uploadId: string;
-      putUrl: string;
-      requiredHeaders: Record<string, string>;
-    };
-    const body = "Private endpoint failures are fixed by updating the network policy.";
-    await fetch(upload.putUrl, {
-      method: "PUT",
-      body,
-      headers: upload.requiredHeaders,
-    });
-    expect(
-      (
-        await app.request(
-          workspacePath(workspaceId, `/files/uploads/${upload.uploadId}/complete`),
-          { method: "POST" },
-        )
-      ).status,
-    ).toBe(200);
-
-    const baseResponse = await app.request(workspacePath(workspaceId, "/document-bases"), {
-      method: "POST",
-      body: JSON.stringify({
-        name: "Runbooks",
-        description: "Operational docs",
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(baseResponse.status).toBe(201);
-    const base = (await baseResponse.json()) as { id: string; name: string };
-    expect(base.name).toBe("Runbooks");
-
-    const addResponse = await app.request(
-      workspacePath(workspaceId, `/document-bases/${base.id}/documents`),
-      {
-        method: "POST",
-        body: JSON.stringify({
-          fileId: upload.fileId,
-          sourceKind: "meeting_transcript",
-          sourceUri: "https://meetings.example.test/network-runbook",
-          sourceTitle: "Network policy review",
-          sourceAuthor: "platform team",
-          aclTags: ["platform", "private"],
-        }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(addResponse.status).toBe(201);
-    const document = (await addResponse.json()) as {
-      id: string;
-      status: string;
-      chunkCount: number;
-      sourceKind: string;
-      sourceTitle: string | null;
-      aclTags: string[];
-    };
-    expect(document.status).toBe("ready");
-    expect(document.chunkCount).toBe(1);
-    expect(document.sourceKind).toBe("meeting_transcript");
-    expect(document.sourceTitle).toBe("Network policy review");
-    expect(document.aclTags).toEqual(["platform", "private"]);
-
-    const readyRetryResponse = await app.request(
-      workspacePath(workspaceId, `/document-bases/${base.id}/documents/${document.id}/reindex`),
-      { method: "POST" },
-    );
-    expect(readyRetryResponse.status).toBe(422);
-    expect(await readyRetryResponse.text()).toContain("only failed documents can be retried");
-
-    const listResponse = await app.request(
-      workspacePath(workspaceId, `/document-bases/${base.id}/documents`),
-    );
-    expect(listResponse.status).toBe(200);
-    expect(await listResponse.json()).toHaveLength(1);
-
-    const searchResponse = await app.request(
-      workspacePath(workspaceId, `/document-bases/${base.id}/search`),
-      {
-        method: "POST",
-        body: JSON.stringify({
-          query: "network policy",
-          limit: 3,
-          mode: "keyword",
-          sourceKinds: ["meeting_transcript"],
-          aclTags: ["platform"],
-        }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(searchResponse.status).toBe(200);
-    const search = (await searchResponse.json()) as {
-      results: Array<{
-        text: string;
-        title: string;
-        matchType: string;
-        sourceKind: string;
-        aclTags: string[];
-      }>;
-    };
-    expect(search.results[0]?.text).toContain("network policy");
-    expect(search.results[0]?.title).toBe("Network policy review");
-    expect(search.results[0]?.matchType).toBe("keyword");
-    expect(search.results[0]?.sourceKind).toBe("meeting_transcript");
-    expect(search.results[0]?.aclTags).toEqual(["platform", "private"]);
-
-    const knowledgeSearchResponse = await app.request(
-      workspacePath(workspaceId, "/knowledge/search"),
-      {
-        method: "POST",
-        body: JSON.stringify({
-          query: "private endpoint",
-          baseIds: [base.id],
-          mode: "hybrid",
-          aclTags: ["private"],
-        }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(knowledgeSearchResponse.status).toBe(200);
-    const knowledgeSearch = (await knowledgeSearchResponse.json()) as {
-      results: Array<{ text: string }>;
-    };
-    expect(knowledgeSearch.results[0]?.text).toContain("Private endpoint");
-
-    const originalWarn = console.warn;
-    const warnings: unknown[][] = [];
-    console.warn = (...args: unknown[]) => {
-      warnings.push(args);
-    };
-    try {
-      const fallbackResults = await searchDocuments(
-        dbClient.db,
-        {
-          accountId,
-          workspaceId,
-          query: "network policy",
-          baseIds: [base.id],
-          mode: "hybrid",
-        },
-        {
-          embedder: {
-            model: DEFAULT_DOCUMENT_EMBEDDING_MODEL,
-            dimensions: DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
-            embedMany: async () => {
-              throw new Error("not used in search");
-            },
-            embedQuery: async () => {
-              throw new Error("embedding unavailable");
-            },
-          },
-        },
-      );
-      expect(fallbackResults[0]?.matchType).toBe("keyword");
-      expect(fallbackResults[0]?.text).toContain("network policy");
-      expect(warnings[0]?.[0]).toBe(
-        "document hybrid search vector component failed; falling back to keyword search",
-      );
-      expect(warnings[0]?.[1]).toMatchObject({
-        workspaceId,
-        error: "embedding unavailable",
+    for (const [method, path] of [
+      ["GET", "/knowledge/memories"],
+      ["POST", "/knowledge/memories"],
+      ["POST", "/knowledge/search"],
+    ] as const) {
+      const response = await app.request(workspacePath(workspaceId, path), {
+        method,
+        ...(method === "POST"
+          ? { body: "{}", headers: { "content-type": "application/json" } }
+          : {}),
       });
-    } finally {
-      console.warn = originalWarn;
+      expect(response.status).toBe(410);
     }
-
-    const readdResponse = await app.request(
-      workspacePath(workspaceId, `/document-bases/${base.id}/documents`),
-      {
-        method: "POST",
-        body: JSON.stringify({
-          fileId: upload.fileId,
-          sourceKind: "document",
-          sourceAuthor: "security team",
-          aclTags: ["platform"],
-        }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(readdResponse.status).toBe(200);
-    const readded = (await readdResponse.json()) as {
-      id: string;
-      sourceKind: string;
-      sourceAuthor: string | null;
-      aclTags: string[];
-    };
-    expect(readded.id).toBe(document.id);
-    expect(readded.sourceKind).toBe("document");
-    expect(readded.sourceAuthor).toBe("security team");
-    expect(readded.aclTags).toEqual(["platform"]);
-
-    const deleteResponse = await app.request(
-      workspacePath(workspaceId, `/document-bases/${base.id}/documents/${document.id}`),
-      { method: "DELETE" },
-    );
-    expect(deleteResponse.status).toBe(204);
-    expect(await deleteResponse.text()).toBe("");
-
-    const deletedListResponse = await app.request(
-      workspacePath(workspaceId, `/document-bases/${base.id}/documents`),
-    );
-    expect(deletedListResponse.status).toBe(200);
-    expect(await deletedListResponse.json()).toEqual([]);
-
-    const deletedSearchResponse = await app.request(
-      workspacePath(workspaceId, `/document-bases/${base.id}/search`),
-      {
-        method: "POST",
-        body: JSON.stringify({ query: "network policy", limit: 3 }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(deletedSearchResponse.status).toBe(200);
-    const deletedSearch = (await deletedSearchResponse.json()) as {
-      results: unknown[];
-    };
-    expect(deletedSearch.results).toEqual([]);
-
-    await expect(requireFile(dbClient.db, workspaceId, upload.fileId)).resolves.toMatchObject({
-      id: upload.fileId,
-      filename: "network-runbook.txt",
-    });
-
-    const missingDeleteResponse = await app.request(
-      workspacePath(workspaceId, `/document-bases/${base.id}/documents/${document.id}`),
-      { method: "DELETE" },
-    );
-    expect(missingDeleteResponse.status).toBe(404);
   });
 
-  test("creates, reviews, and searches workspace knowledge memories", async () => {
+  test("Knowledge HTTP retains exact sources, groups findings, and preserves correction history", async () => {
     const app = createApp({
-      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const workspaceId = await defaultWorkspaceId(app);
-
-    const proposedResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
-      method: "POST",
-      body: JSON.stringify({
-        // Explicit `proposed` keeps this the legacy curated-review lane; the
-        // default status is now `active` (the memory write gate).
-        status: "proposed",
-        text: "Use Azure Blob for production object storage.",
-        kind: "decision",
-        confidence: 0.92,
-        sourceRefs: [{ kind: "external", id: "adr-42", title: "ADR 42" }],
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(proposedResponse.status).toBe(201);
-    const proposed = (await proposedResponse.json()) as {
-      id: string;
-      status: string;
-      kind: string;
-      workspaceId: string;
-    };
-    expect(proposed.status).toBe("proposed");
-    expect(proposed.kind).toBe("decision");
-    expect(proposed.workspaceId).toBe(workspaceId);
-
-    const approvedSearchBefore = await app.request(
-      workspacePath(workspaceId, "/knowledge/memories?status=approved&query=Azure"),
-    );
-    expect(approvedSearchBefore.status).toBe(200);
-    expect(await approvedSearchBefore.json()).toHaveLength(0);
-
-    const approvedResponse = await app.request(
-      workspacePath(workspaceId, `/knowledge/memories/${proposed.id}`),
-      {
-        method: "PATCH",
-        body: JSON.stringify({ status: "approved", reviewedBy: "operator" }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(approvedResponse.status).toBe(200);
-    const approved = (await approvedResponse.json()) as {
-      id: string;
-      status: string;
-      reviewedBy: string | null;
-      reviewedAt: string | null;
-    };
-    expect(approved.id).toBe(proposed.id);
-    expect(approved.status).toBe("approved");
-    expect(approved.reviewedBy).toBe("operator");
-    expect(approved.reviewedAt).toBeTruthy();
-
-    const approvedSearchAfter = await app.request(
-      workspacePath(workspaceId, "/knowledge/memories?status=approved&query=Azure"),
-    );
-    expect(approvedSearchAfter.status).toBe(200);
-    const memories = (await approvedSearchAfter.json()) as Array<{
-      id: string;
-      text: string;
-    }>;
-    expect(memories[0]?.id).toBe(proposed.id);
-    expect(memories[0]?.text).toContain("Azure Blob");
-
-    const invalidLimitResponse = await app.request(
-      workspacePath(workspaceId, "/knowledge/memories?limit=abc"),
-    );
-    expect(invalidLimitResponse.status).toBe(400);
-    const invalidStatusResponse = await app.request(
-      workspacePath(workspaceId, "/knowledge/memories?status=pending"),
-    );
-    expect(invalidStatusResponse.status).toBe(400);
-
-    const reproposedResponse = await app.request(
-      workspacePath(workspaceId, `/knowledge/memories/${proposed.id}`),
-      {
-        method: "PATCH",
-        body: JSON.stringify({ status: "proposed" }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(reproposedResponse.status).toBe(200);
-    const reproposed = (await reproposedResponse.json()) as {
-      status: string;
-      reviewedBy: string | null;
-      reviewedAt: string | null;
-    };
-    expect(reproposed.status).toBe("proposed");
-    expect(reproposed.reviewedBy).toBeNull();
-    expect(reproposed.reviewedAt).toBeNull();
-  });
-
-  test("workspace memory REST lifecycle: create(active)/list/search/pin/archive/edit + settings", async () => {
-    const app = createApp({
-      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const workspaceId = await defaultWorkspaceId(app);
-
-    // Create defaults to active (memory write gate: sanitized + embedded).
-    const createResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
-      method: "POST",
-      body: JSON.stringify({
-        text: "Staging deploys from main only, via opengeni-ops.",
-        kind: "procedural",
-        metadata: { source: "rest-lifecycle" },
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(createResponse.status).toBe(201);
-    const created = (await createResponse.json()) as {
-      id: string;
-      status: string;
-      pinned: boolean;
-      usageCount: number;
-      metadata: Record<string, unknown>;
-    };
-    expect(created.status).toBe("active");
-    expect(created.pinned).toBe(false);
-    expect(created.metadata).toMatchObject({
-      source: "rest-lifecycle",
-      origin: "human",
-    });
-
-    // List (active) shows it.
-    const listResponse = await app.request(
-      workspacePath(workspaceId, "/knowledge/memories?status=active"),
-    );
-    expect(listResponse.status).toBe(200);
-    expect(
-      ((await listResponse.json()) as Array<{ id: string }>).some((m) => m.id === created.id),
-    ).toBe(true);
-
-    // Hybrid search finds it and bumps usage.
-    const searchResponse = await app.request(
-      workspacePath(workspaceId, "/knowledge/memories/search"),
-      {
-        method: "POST",
-        body: JSON.stringify({ query: "how do we deploy staging" }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(searchResponse.status).toBe(200);
-    const search = (await searchResponse.json()) as {
-      results: Array<{
-        memory: { id: string; usageCount: number };
-        score: number;
-      }>;
-    };
-    const found = search.results.find((r) => r.memory.id === created.id);
-    expect(found).toBeTruthy();
-    expect(found!.memory.usageCount).toBe(1);
-
-    // Pin.
-    const pinResponse = await app.request(
-      workspacePath(workspaceId, `/knowledge/memories/${created.id}`),
-      {
-        method: "PATCH",
-        body: JSON.stringify({ pinned: true }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(pinResponse.status).toBe(200);
-    expect(((await pinResponse.json()) as { pinned: boolean }).pinned).toBe(true);
-
-    // Edit text: PATCH bypasses dedup only; accepted bytes remain exact while
-    // hash/embed metadata is refreshed.
-    const editedSecret = "AKIAIOSFODNN7EXAMPLE";
-    const editResponse = await app.request(
-      workspacePath(workspaceId, `/knowledge/memories/${created.id}`),
-      {
-        method: "PATCH",
-        body: JSON.stringify({
-          text: `Staging deploys from the release branch now with ${editedSecret}.`,
-        }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(editResponse.status).toBe(200);
-    const edited = (await editResponse.json()) as { text: string };
-    expect(edited.text).toContain("release branch");
-    expect(edited.text).toContain(editedSecret);
-    const [editedRow] = await dbClient.db.execute<{
-      textHash: string | null;
-      embeddingModel: string | null;
-      hasEmbedding: boolean;
-    }>(dbSql`
-      select text_hash as "textHash", embedding_model as "embeddingModel", embedding is not null as "hasEmbedding"
-      from knowledge_memories
-      where id = ${created.id}
-    `);
-    expect(editedRow?.textHash).toBe(hashMemoryText(edited.text));
-    expect(editedRow?.embeddingModel).toBeTruthy();
-    expect(editedRow?.hasEmbedding).toBe(true);
-
-    // Status transitions preserve the already-accepted exact text too.
-    const activateSecret = "AKIAIOSFODNN7EXAMPLE";
-    const proposedActiveResponse = await app.request(
-      workspacePath(workspaceId, "/knowledge/memories"),
-      {
-        method: "POST",
-        body: JSON.stringify({
-          status: "proposed",
-          text: `Activate this note with ${activateSecret}.`,
-        }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(proposedActiveResponse.status).toBe(201);
-    const proposedActive = (await proposedActiveResponse.json()) as {
-      id: string;
-    };
-    const activatedResponse = await app.request(
-      workspacePath(workspaceId, `/knowledge/memories/${proposedActive.id}`),
-      {
-        method: "PATCH",
-        body: JSON.stringify({ status: "active" }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(activatedResponse.status).toBe(200);
-    const activated = (await activatedResponse.json()) as {
-      text: string;
-      status: string;
-    };
-    expect(activated.status).toBe("active");
-    expect(activated.text).toContain(activateSecret);
-    const [activatedRow] = await dbClient.db.execute<{
-      textHash: string | null;
-      embeddingModel: string | null;
-      hasEmbedding: boolean;
-    }>(dbSql`
-      select text_hash as "textHash", embedding_model as "embeddingModel", embedding is not null as "hasEmbedding"
-      from knowledge_memories
-      where id = ${proposedActive.id}
-    `);
-    expect(activatedRow?.textHash).toBe(hashMemoryText(activated.text));
-    expect(activatedRow?.embeddingModel).toBeTruthy();
-    expect(activatedRow?.hasEmbedding).toBe(true);
-
-    const approveSecret = "AKIAIOSFODNN7EXAMPLE";
-    const proposedApprovedResponse = await app.request(
-      workspacePath(workspaceId, "/knowledge/memories"),
-      {
-        method: "POST",
-        body: JSON.stringify({
-          status: "proposed",
-          text: `Approve this note with ${approveSecret}.`,
-        }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(proposedApprovedResponse.status).toBe(201);
-    const proposedApproved = (await proposedApprovedResponse.json()) as {
-      id: string;
-    };
-    const approvedTransitionResponse = await app.request(
-      workspacePath(workspaceId, `/knowledge/memories/${proposedApproved.id}`),
-      {
-        method: "PATCH",
-        body: JSON.stringify({ status: "approved" }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(approvedTransitionResponse.status).toBe(200);
-    const approvedTransition = (await approvedTransitionResponse.json()) as {
-      text: string;
-      status: string;
-    };
-    expect(approvedTransition.status).toBe("approved");
-    expect(approvedTransition.text).toContain(approveSecret);
-    const [approvedTransitionRow] = await dbClient.db.execute<{
-      textHash: string | null;
-      embeddingModel: string | null;
-      hasEmbedding: boolean;
-    }>(dbSql`
-      select text_hash as "textHash", embedding_model as "embeddingModel", embedding is not null as "hasEmbedding"
-      from knowledge_memories
-      where id = ${proposedApproved.id}
-    `);
-    expect(approvedTransitionRow?.textHash).toBe(hashMemoryText(approvedTransition.text));
-    expect(approvedTransitionRow?.embeddingModel).toBeTruthy();
-    expect(approvedTransitionRow?.hasEmbedding).toBe(true);
-    for (const id of [proposedActive.id, proposedApproved.id]) {
-      const cleanupVisible = await app.request(
-        workspacePath(workspaceId, `/knowledge/memories/${id}`),
-        {
-          method: "PATCH",
-          body: JSON.stringify({ status: "archived" }),
-          headers: { "content-type": "application/json" },
-        },
-      );
-      expect(cleanupVisible.status).toBe(200);
-    }
-
-    // PATCH status into the agent-visible set enforces the workspace cap.
-    const cappedResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
-      method: "POST",
-      body: JSON.stringify({
-        status: "proposed",
-        text: "A proposed row to activate at cap.",
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(cappedResponse.status).toBe(201);
-    const capped = (await cappedResponse.json()) as { id: string };
-    try {
-      await dbClient.db.execute(dbSql`
-        insert into knowledge_memories (account_id, workspace_id, status, kind, scope, text, text_hash)
-        select (select account_id from workspaces where id = ${workspaceId}::uuid), ${workspaceId}::uuid,
-               'active', 'semantic', 'workspace', 'patch-capfill ' || g, 'patch-caphash-' || g
-        from generate_series(1, ${MEMORY_VISIBLE_RECORD_CAP}) as g
-      `);
-      const activateAtCap = await app.request(
-        workspacePath(workspaceId, `/knowledge/memories/${capped.id}`),
-        {
-          method: "PATCH",
-          body: JSON.stringify({ status: "active" }),
-          headers: { "content-type": "application/json" },
-        },
-      );
-      expect(activateAtCap.status).toBe(400);
-      expect(await activateAtCap.text()).toContain("visible memory is full");
-    } finally {
-      await dbClient.db.execute(dbSql`
-        delete from knowledge_memories
-        where workspace_id = ${workspaceId}::uuid
-          and (text like 'patch-capfill %' or id = ${capped.id})
-      `);
-    }
-
-    const archiveResponse = await app.request(
-      workspacePath(workspaceId, `/knowledge/memories/${created.id}`),
-      {
-        method: "PATCH",
-        body: JSON.stringify({ status: "archived" }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(archiveResponse.status).toBe(200);
-    expect(((await archiveResponse.json()) as { status: string }).status).toBe("archived");
-    // Archived rows drop out of search.
-    const afterArchive = await app.request(
-      workspacePath(workspaceId, "/knowledge/memories/search"),
-      {
-        method: "POST",
-        body: JSON.stringify({ query: "deploy staging" }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(
-      (
-        (await afterArchive.json()) as {
-          results: Array<{ memory: { id: string } }>;
-        }
-      ).results.some((r) => r.memory.id === created.id),
-    ).toBe(false);
-
-    // Invalid params → 400 not 500.
-    const overLong = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
-      method: "POST",
-      body: JSON.stringify({ text: "x".repeat(5000) }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(overLong.status).toBe(400);
-    const badSearch = await app.request(workspacePath(workspaceId, "/knowledge/memories/search"), {
-      method: "POST",
-      body: JSON.stringify({ notAQuery: true }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(badSearch.status).toBe(400);
-
-    // Settings default off, PATCH round-trips + preserves unknown keys.
-    const beforeSettings = await app.request(workspacePath(workspaceId, ""));
-    const workspaceBefore = (await beforeSettings.json()) as {
-      settings: Record<string, unknown>;
-    };
-    expect(workspaceBefore.settings.memoryEnabled ?? false).toBe(false);
-
-    const seedUnknown = await app.request(workspacePath(workspaceId, "/settings"), {
-      method: "PATCH",
-      body: JSON.stringify({ someFutureKey: "keep-me" }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(seedUnknown.status).toBe(200);
-    const enableResponse = await app.request(workspacePath(workspaceId, "/settings"), {
-      method: "PATCH",
-      body: JSON.stringify({ memoryEnabled: true }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(enableResponse.status).toBe(200);
-    const enabled = (await enableResponse.json()) as {
-      settings: Record<string, unknown>;
-    };
-    expect(enabled.settings.memoryEnabled).toBe(true);
-    expect(enabled.settings.someFutureKey).toBe("keep-me");
-  });
-
-  test("drops raw text into the Default base, auto-curates it, and enforces visibility + agent access", async () => {
-    const app = createApp({
-      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
     const access = await defaultAccessContext(app);
-    const workspaceId = access.defaultWorkspaceId!;
-    const accountId = access.defaultAccountId!;
-
-    // Private, agent-blocked text drop: no base, no metadata — the server
-    // creates the Default base, and heuristic curation names + summarizes it.
-    const dropResponse = await app.request(workspacePath(workspaceId, "/knowledge/drops"), {
-      method: "POST",
-      body: JSON.stringify({
-        text: "Vendor Contract Renewal\n\nThe Acme contract renews on 2026-09-01. Cancellation window is 30 days.",
-        visibility: "private",
-        agentAccess: false,
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(dropResponse.status).toBe(201);
-    const drop = (await dropResponse.json()) as {
-      id: string;
-      baseId: string;
-      status: string;
-      title: string;
-      summary: string | null;
-      curationStatus: string;
-      visibility: string;
-      agentAccess: boolean;
-      createdBy: string | null;
-      chunkCount: number;
-    };
-    expect(drop.status).toBe("ready");
-    expect(drop.title).toBe("Vendor Contract Renewal");
-    expect(drop.summary).toContain("Acme");
-    // Heuristic curator never auto-files (confidence 0) → suggestion state.
-    expect(drop.curationStatus).toBe("suggested");
-    expect(drop.visibility).toBe("private");
-    expect(drop.agentAccess).toBe(false);
-    expect(drop.createdBy).toBe("dev");
-    expect(drop.chunkCount).toBeGreaterThan(0);
-
-    const basesResponse = await app.request(workspacePath(workspaceId, "/document-bases"));
-    const bases = (await basesResponse.json()) as Array<{
-      id: string;
-      name: string;
-    }>;
-    const defaultBase = bases.find((base) => base.name === "Default");
-    expect(defaultBase).toBeDefined();
-    expect(drop.baseId).toBe(defaultBase!.id);
-
-    // The creating subject still sees their private drop in list + search.
-    const defaultBaseDocs = (await (
-      await app.request(workspacePath(workspaceId, `/document-bases/${defaultBase!.id}/documents`))
-    ).json()) as Array<{ id: string }>;
-    expect(defaultBaseDocs.map((document) => document.id)).toContain(drop.id);
-    const ownerSearch = (await (
-      await app.request(workspacePath(workspaceId, "/knowledge/search"), {
+    const base = workspacePath(access.defaultWorkspaceId!, "/knowledge/entries");
+    const save = async (entryId: string, expectedVersion: number, entry: unknown) => {
+      const response = await app.request(base, {
         method: "POST",
-        body: JSON.stringify({ query: "contract renews", mode: "keyword" }),
         headers: { "content-type": "application/json" },
-      })
-    ).json()) as { results: Array<{ documentId: string }> };
-    expect(ownerSearch.results.map((result) => result.documentId)).toContain(drop.id);
-
-    // The agent retrieval surface never sees it: private AND agent-blocked.
-    const agentBlocked = await searchDocuments(dbClient.db, {
-      accountId,
-      workspaceId,
-      query: "contract renews",
-      mode: "keyword",
-      access: { agentOnly: true },
-    });
-    expect(agentBlocked.map((result) => result.documentId)).not.toContain(drop.id);
-
-    // A default drop (workspace-visible, agents allowed) IS agent-searchable.
-    const publicDropResponse = await app.request(workspacePath(workspaceId, "/knowledge/drops"), {
-      method: "POST",
-      body: JSON.stringify({
-        text: "Onboarding Checklist\n\nBadge, laptop, accounts, and a buddy for week one.",
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(publicDropResponse.status).toBe(201);
-    const publicDrop = (await publicDropResponse.json()) as {
-      id: string;
-      visibility: string;
-      agentAccess: boolean;
-    };
-    expect(publicDrop.visibility).toBe("workspace");
-    expect(publicDrop.agentAccess).toBe(true);
-    const agentVisible = await searchDocuments(dbClient.db, {
-      accountId,
-      workspaceId,
-      query: "onboarding checklist",
-      mode: "keyword",
-      access: { agentOnly: true },
-    });
-    expect(agentVisible.map((result) => result.documentId)).toContain(publicDrop.id);
-
-    // Filing out of the Default base: explicit move lands the document (and its
-    // chunks) in the target base and marks it filed.
-    const contractsBase = (await (
-      await app.request(workspacePath(workspaceId, "/document-bases"), {
-        method: "POST",
-        body: JSON.stringify({ name: "Contracts" }),
-        headers: { "content-type": "application/json" },
-      })
-    ).json()) as { id: string };
-    const moveResponse = await app.request(
-      workspacePath(workspaceId, `/documents/${drop.id}/move`),
-      {
-        method: "POST",
-        body: JSON.stringify({ targetBaseId: contractsBase.id }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(moveResponse.status).toBe(200);
-    const moved = (await moveResponse.json()) as {
-      baseId: string;
-      curationStatus: string;
-    };
-    expect(moved.baseId).toBe(contractsBase.id);
-    expect(moved.curationStatus).toBe("auto_filed");
-    const movedSearch = (await (
-      await app.request(workspacePath(workspaceId, `/document-bases/${contractsBase.id}/search`), {
-        method: "POST",
-        body: JSON.stringify({ query: "contract renews", mode: "keyword" }),
-        headers: { "content-type": "application/json" },
-      })
-    ).json()) as { results: Array<{ documentId: string; baseId: string }> };
-    expect(movedSearch.results.map((result) => result.documentId)).toContain(drop.id);
-
-    // A move without a stored target and without an explicit one is a 422.
-    const noTargetMove = await app.request(
-      workspacePath(workspaceId, `/documents/${publicDrop.id}/move`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(noTargetMove.status).toBe(422);
-  });
-
-  test("serializes concurrent first knowledge drops into one Default base", async () => {
-    const delegationSecret = "test-knowledge-drop-delegation";
-    const grant = await bootstrapMcpGrant(dbClient.db);
-    const app = createApp({
-      settings: {
-        ...objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
-        productAccessMode: "configured",
-        delegationSecret,
-      },
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const workspaceId = grant.workspaceId;
-    const authorization = await signDelegatedBearer(delegationSecret, grant, {
-      subjectId: grant.subjectId,
-      permissions: grant.permissions,
-    });
-    const responses = await Promise.all(
-      Array.from({ length: 6 }, (_, index) =>
-        app.request(workspacePath(workspaceId, "/knowledge/drops"), {
-          method: "POST",
-          body: JSON.stringify({
-            text: `Concurrent knowledge note ${index}\n\nThis drop must share one deterministic Default base.`,
-          }),
-          headers: { authorization, "content-type": "application/json" },
-        }),
-      ),
-    );
-    expect(responses.map((response) => response.status)).toEqual(Array(6).fill(201));
-    const documents = (await Promise.all(responses.map((response) => response.json()))) as Array<{
-      id: string;
-      baseId: string;
-    }>;
-    expect(new Set(documents.map((document) => document.baseId)).size).toBe(1);
-
-    const bases = (await (
-      await app.request(workspacePath(workspaceId, "/document-bases"), {
-        headers: { authorization },
-      })
-    ).json()) as Array<{ id: string; name: string }>;
-    const defaultBases = bases.filter((base) => base.name.trim().toLowerCase() === "default");
-    expect(defaultBases).toHaveLength(1);
-    expect(documents[0]?.baseId).toBe(defaultBases[0]?.id);
-    const listed = (await (
-      await app.request(
-        workspacePath(workspaceId, `/document-bases/${defaultBases[0]!.id}/documents`),
-        { headers: { authorization } },
-      )
-    ).json()) as Array<{ id: string }>;
-    expect(listed.map((document) => document.id).sort()).toEqual(
-      documents.map((document) => document.id).sort(),
-    );
-  });
-
-  test("enforces subject-aware privacy across REST, search, agent retrieval, and re-add", async () => {
-    const delegationSecret = "test-delegation-secret";
-    const app = createApp({
-      settings: {
-        ...objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
-        productAccessMode: "configured",
-        delegationSecret,
-      },
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const owner = await bootstrapWorkspace(dbClient.db, {
-      accountExternalSource: "test:documents-subjects",
-      accountExternalId: crypto.randomUUID(),
-      accountName: "Document subjects",
-      workspaceExternalSource: "test:documents-subjects",
-      workspaceExternalId: crypto.randomUUID(),
-      workspaceName: "Document subject workspace",
-      subjectId: `test:document-owner:${crypto.randomUUID()}`,
-      subjectLabel: "Document owner",
-    });
-    const ownerGrant = owner.workspaceGrants[0]!;
-    const otherSubject = `test:document-other:${crypto.randomUUID()}`;
-    await grantWorkspaceAccess(dbClient.db, {
-      accountId: ownerGrant.accountId,
-      workspaceId: ownerGrant.workspaceId,
-      subjectId: otherSubject,
-      subjectLabel: "Other subject",
-      permissions: allWorkspacePermissions,
-    });
-    const ownerHeaders = {
-      authorization: await signDelegatedBearer(delegationSecret, ownerGrant, {
-        subjectId: ownerGrant.subjectId,
-        permissions: allWorkspacePermissions,
-      }),
-    };
-    const otherHeaders = {
-      authorization: await signDelegatedBearer(delegationSecret, ownerGrant, {
-        subjectId: otherSubject,
-        permissions: allWorkspacePermissions,
-      }),
-    };
-    const path = (suffix: string) => workspacePath(ownerGrant.workspaceId, suffix);
-
-    const deniedOrganizationDrop = await app.request(path("/knowledge/drops"), {
-      method: "POST",
-      headers: { ...otherHeaders, "content-type": "application/json" },
-      body: JSON.stringify({
-        text: "Workspace authority cannot publish this account-wide.",
-        authorityKind: "organization",
-      }),
-    });
-    expect(deniedOrganizationDrop.status).toBe(403);
-    expect(await deniedOrganizationDrop.text()).toContain("missing permission: account:admin");
-
-    const accountAdminToken = await signDelegatedAccessToken(delegationSecret, {
-      accountId: ownerGrant.accountId,
-      workspaceId: ownerGrant.workspaceId,
-      subjectId: ownerGrant.subjectId,
-      permissions: [...allAccountPermissions, ...allWorkspacePermissions],
-      principalKind: "human_session",
-      exp: Math.floor(Date.now() / 1000) + 60,
-    });
-    const organizationDrop = await app.request(path("/knowledge/drops"), {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${accountAdminToken}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        text: "Account administrators can publish this organization runbook.",
-        authorityKind: "organization",
-      }),
-    });
-    expect(organizationDrop.status).toBe(201);
-    const organizationDocument = (await organizationDrop.json()) as {
-      id: string;
-      baseId: string;
-      fileId: string;
-      authorityKind: string;
-      authorityWorkspaceId: string | null;
-      authoritySubjectId: string | null;
-    };
-    expect(organizationDocument).toMatchObject({
-      authorityKind: "organization",
-      authorityWorkspaceId: null,
-      authoritySubjectId: null,
-    });
-
-    const deniedOrganizationReadd = await app.request(
-      path(`/document-bases/${organizationDocument.baseId}/documents`),
-      {
-        method: "POST",
-        headers: { ...otherHeaders, "content-type": "application/json" },
         body: JSON.stringify({
-          fileId: organizationDocument.fileId,
-          title: "Workspace authority must not rewrite organization metadata",
+          operationId: crypto.randomUUID(),
+          entryId,
+          expectedVersion,
+          scope: "workspace",
+          entry,
         }),
-      },
-    );
-    expect(deniedOrganizationReadd.status).toBe(403);
-    expect(await deniedOrganizationReadd.text()).toContain("missing permission: account:admin");
-    const deniedOrganizationDelete = await app.request(
-      path(`/document-bases/${organizationDocument.baseId}/documents/${organizationDocument.id}`),
-      { method: "DELETE", headers: otherHeaders },
-    );
-    expect(deniedOrganizationDelete.status).toBe(403);
-    expect(await deniedOrganizationDelete.text()).toContain("missing permission: account:admin");
-
-    const dropResponse = await app.request(path("/knowledge/drops"), {
-      method: "POST",
-      headers: { ...ownerHeaders, "content-type": "application/json" },
-      body: JSON.stringify({
-        text: "Subject-only contract details must never cross the grant boundary.",
-        title: "Subject-only contract",
-        visibility: "private",
-        agentAccess: true,
-      }),
-    });
-    expect(dropResponse.status).toBe(201);
-    const drop = (await dropResponse.json()) as {
-      id: string;
-      baseId: string;
-      fileId: string;
-      status: string;
-      visibility: string;
-      agentAccess: boolean;
+      });
+      expect(response.status).toBe(201);
+      return (await response.json()) as { revisionId: string; outcome: string };
     };
-    expect(drop).toMatchObject({
-      visibility: "private",
-      agentAccess: true,
-      status: "ready",
+    const groupId = crypto.randomUUID();
+    await save(groupId, 0, {
+      title: "Network operations",
+      kind: "group",
+      content: "Network policies and incidents",
     });
-
-    const ownerList = await app.request(path(`/document-bases/${drop.baseId}/documents`), {
-      headers: ownerHeaders,
+    const sourceId = crypto.randomUUID();
+    const text =
+      "NETWORK RUNBOOK\n  Fix private endpoint failures by updating the network policy.\n";
+    const source = await save(sourceId, 0, {
+      title: "Network runbook",
+      kind: "source",
+      content: text,
+      source: { kind: "manual", retention: "full_text" },
+      groupIds: [groupId],
     });
-    expect(ownerList.status).toBe(200);
-    expect(
-      ((await ownerList.json()) as Array<{ id: string }>).map((document) => document.id).sort(),
-    ).toEqual([organizationDocument.id, drop.id].sort());
-    const otherList = await app.request(path(`/document-bases/${drop.baseId}/documents`), {
-      headers: otherHeaders,
-    });
-    expect(otherList.status).toBe(200);
-    expect((await otherList.json()) as Array<{ id: string }>).toEqual([
-      expect.objectContaining({ id: organizationDocument.id }),
-    ]);
-
-    const ownerSearch = await app.request(path("/knowledge/search"), {
-      method: "POST",
-      headers: { ...ownerHeaders, "content-type": "application/json" },
-      body: JSON.stringify({ query: "contract details", mode: "keyword" }),
-    });
-    expect(ownerSearch.status).toBe(200);
-    const ownerResults = (await ownerSearch.json()) as {
-      results: Array<{ documentId: string; chunkId: string }>;
-    };
-    expect(ownerResults.results.map((result) => result.documentId)).toContain(drop.id);
-    const otherSearch = await app.request(path("/knowledge/search"), {
-      method: "POST",
-      headers: { ...otherHeaders, "content-type": "application/json" },
-      body: JSON.stringify({ query: "contract details", mode: "keyword" }),
-    });
-    expect(otherSearch.status).toBe(200);
-    expect(await otherSearch.json()).toEqual({ results: [] });
-
-    const ownerAgentResults = await searchDocuments(dbClient.db, {
-      accountId: ownerGrant.accountId,
-      workspaceId: ownerGrant.workspaceId,
-      query: "contract details",
-      mode: "keyword",
-      access: { agentOnly: true, viewerSubjectId: ownerGrant.subjectId },
-    });
-    expect(ownerAgentResults.map((result) => result.documentId)).toContain(drop.id);
-    const otherAgentResults = await searchDocuments(dbClient.db, {
-      accountId: ownerGrant.accountId,
-      workspaceId: ownerGrant.workspaceId,
-      query: "contract details",
-      mode: "keyword",
-      access: { agentOnly: true, viewerSubjectId: otherSubject },
-    });
-    expect(otherAgentResults.map((result) => result.documentId)).not.toContain(drop.id);
-    const anonymousAgentResults = await searchDocuments(dbClient.db, {
-      accountId: ownerGrant.accountId,
-      workspaceId: ownerGrant.workspaceId,
-      query: "contract details",
-      mode: "keyword",
-      access: { agentOnly: true },
-    });
-    expect(anonymousAgentResults.map((result) => result.documentId)).not.toContain(drop.id);
-    const chunkId = ownerAgentResults.find((result) => result.documentId === drop.id)?.chunkId;
-    expect(chunkId).toBeTruthy();
-    await expect(
-      getDocumentChunk(dbClient.db, ownerGrant.accountId, ownerGrant.workspaceId, chunkId!, {
-        agentOnly: true,
-        viewerSubjectId: ownerGrant.subjectId,
-      }),
-    ).resolves.toMatchObject({ documentId: drop.id });
-    await expect(
-      getDocumentChunk(dbClient.db, ownerGrant.accountId, ownerGrant.workspaceId, chunkId!, {
-        agentOnly: true,
-        viewerSubjectId: otherSubject,
-      }),
-    ).resolves.toBeNull();
-
-    const otherReadd = await app.request(path(`/document-bases/${drop.baseId}/documents`), {
-      method: "POST",
-      headers: { ...otherHeaders, "content-type": "application/json" },
-      body: JSON.stringify({
-        fileId: drop.fileId,
-        visibility: "workspace",
-        agentAccess: false,
-        title: "forged re-add",
-      }),
-    });
-    expect(otherReadd.status).toBe(404);
-
-    const ownerReadd = await app.request(path(`/document-bases/${drop.baseId}/documents`), {
-      method: "POST",
-      headers: { ...ownerHeaders, "content-type": "application/json" },
-      body: JSON.stringify({
-        fileId: drop.fileId,
-        visibility: "workspace",
-        agentAccess: false,
-        title: "owner metadata refresh",
-      }),
-    });
-    expect(ownerReadd.status).toBe(200);
-    expect(await ownerReadd.json()).toMatchObject({
-      id: drop.id,
-      title: "owner metadata refresh",
-      visibility: "private",
-      agentAccess: true,
-    });
-
-    await dbClient.db.execute(dbSql`
-      update documents
-      set status = 'failed', error = 'subject-aware retry fixture', updated_at = now()
-      where workspace_id = ${ownerGrant.workspaceId} and id = ${drop.id}
-    `);
-    const otherReindex = await app.request(
-      path(`/document-bases/${drop.baseId}/documents/${drop.id}/reindex`),
-      { method: "POST", headers: otherHeaders },
-    );
-    expect(otherReindex.status).toBe(404);
-    const ownerReindex = await app.request(
-      path(`/document-bases/${drop.baseId}/documents/${drop.id}/reindex`),
-      { method: "POST", headers: ownerHeaders },
-    );
-    expect(ownerReindex.status).toBe(200);
-
-    const otherMove = await app.request(path(`/documents/${drop.id}/move`), {
-      method: "POST",
-      headers: { ...otherHeaders, "content-type": "application/json" },
-      body: JSON.stringify({ targetBaseId: drop.baseId }),
-    });
-    expect(otherMove.status).toBe(404);
-    const otherDelete = await app.request(
-      path(`/document-bases/${drop.baseId}/documents/${drop.id}`),
-      { method: "DELETE", headers: otherHeaders },
-    );
-    expect(otherDelete.status).toBe(404);
-    const ownerDelete = await app.request(
-      path(`/document-bases/${drop.baseId}/documents/${drop.id}`),
-      { method: "DELETE", headers: ownerHeaders },
-    );
-    expect(ownerDelete.status).toBe(204);
-  });
-
-  test("keeps provider=none drops uncured instead of applying heuristic fallback", async () => {
-    const app = createApp({
-      settings: {
-        ...objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
-        documentCurationProvider: "none",
-      },
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const workspaceId = await defaultWorkspaceId(app);
-    const response = await app.request(workspacePath(workspaceId, "/knowledge/drops"), {
-      method: "POST",
-      body: JSON.stringify({
-        text: "The title should remain caller supplied when curation is disabled.",
-        title: "Caller supplied title",
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(response.status).toBe(201);
-    expect(await response.json()).toMatchObject({
-      title: "Caller supplied title",
-      summary: null,
-      topics: [],
-      curationStatus: "none",
-      curation: null,
-      sourceKind: "manual_upload",
-    });
-  });
-
-  test("reindex returns queued document state when production indexer enqueues async work", async () => {
-    let indexCalls = 0;
-    const app = createApp({
-      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-      documentIndexer: {
-        indexDocument: async () => {
-          indexCalls += 1;
-        },
-      },
-    });
-    const workspaceId = await defaultWorkspaceId(app);
-    const uploadResponse = await app.request(workspacePath(workspaceId, "/files/uploads"), {
-      method: "POST",
-      body: JSON.stringify({
-        filename: "async-reindex.txt",
-        contentType: "text/plain",
-        sizeBytes: 13,
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    const upload = (await uploadResponse.json()) as {
-      fileId: string;
-      uploadId: string;
-      putUrl: string;
-      requiredHeaders: Record<string, string>;
-    };
-    await fetch(upload.putUrl, {
-      method: "PUT",
-      body: "Async reindex",
-      headers: upload.requiredHeaders,
-    });
-    expect(
-      (
-        await app.request(
-          workspacePath(workspaceId, `/files/uploads/${upload.uploadId}/complete`),
-          { method: "POST" },
-        )
-      ).status,
-    ).toBe(200);
-
-    const baseResponse = await app.request(workspacePath(workspaceId, "/document-bases"), {
-      method: "POST",
-      body: JSON.stringify({ name: "Async reindex docs" }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(baseResponse.status).toBe(201);
-    const base = (await baseResponse.json()) as { id: string };
-    const addResponse = await app.request(
-      workspacePath(workspaceId, `/document-bases/${base.id}/documents`),
-      {
-        method: "POST",
-        body: JSON.stringify({ fileId: upload.fileId }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(addResponse.status).toBe(201);
-    const document = (await addResponse.json()) as {
-      id: string;
-      status: string;
-      error: string | null;
-    };
-    expect(document.status).toBe("queued");
-    expect(indexCalls).toBe(1);
-
-    await dbClient.db.execute(dbSql`
-      update documents
-      set status = 'failed', error = 'temporary indexing failure', updated_at = now()
-      where workspace_id = ${workspaceId} and id = ${document.id}
-    `);
-    const reindexResponse = await app.request(
-      workspacePath(workspaceId, `/document-bases/${base.id}/documents/${document.id}/reindex`),
-      { method: "POST" },
-    );
-    expect(reindexResponse.status).toBe(200);
-    const reindexed = (await reindexResponse.json()) as {
-      id: string;
-      status: string;
-      error: string | null;
-    };
-    expect(reindexed.id).toBe(document.id);
-    expect(reindexed.status).toBe("queued");
-    expect(reindexed.error).toBeNull();
-    expect(indexCalls).toBe(2);
-  });
-
-  test("document indexing enforces exact chunk limits before embedding", async () => {
-    const delegationSecret = "test-document-limit-delegation";
-    const grant = await bootstrapMcpGrant(dbClient.db);
-    const app = createApp({
-      settings: {
-        ...objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
-        productAccessMode: "configured",
-        delegationSecret,
-        usageLimitsMode: "static",
-        staticUsageLimitsJson: JSON.stringify({
-          maxDocumentIndexedChunksPerWorkspace: 2,
-        }),
-      },
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-      documentServices: {
-        parser: {
-          name: "test-text",
-          parse: async (bytes, file) => ({
-            text: new TextDecoder().decode(bytes),
-            metadata: {
-              filename: file.filename,
-              contentType: file.contentType,
-            },
-          }),
-        },
-        chunker: {
-          chunk: (parsed, file) =>
-            parsed.text.match(/.{1,8}/g)!.map((text, index) => ({
-              text,
-              metadata: { filename: file.filename, chunkIndex: index },
-            })),
-        },
-        embedder: {
-          model: "test-embedder",
-          dimensions: 3,
-          embedMany: async () => {
-            throw new Error("embedder should not run after document chunk cap fails");
-          },
-          embedQuery: async () => [0, 0, 0],
-        },
-      },
-    });
-    const workspaceId = grant.workspaceId;
-    const accountId = grant.accountId;
-    const authorization = await signDelegatedBearer(delegationSecret, grant, {
-      subjectId: grant.subjectId,
-      permissions: grant.permissions,
-    });
-    const oversizedBody = "This document is intentionally long enough to become many chunks.";
-    const uploadResponse = await app.request(workspacePath(workspaceId, "/files/uploads"), {
-      method: "POST",
-      body: JSON.stringify({
-        filename: "oversized-doc.txt",
-        contentType: "text/plain",
-        sizeBytes: new TextEncoder().encode(oversizedBody).byteLength,
-      }),
-      headers: { authorization, "content-type": "application/json" },
-    });
-    expect(uploadResponse.status).toBe(201);
-    const upload = (await uploadResponse.json()) as {
-      fileId: string;
-      uploadId: string;
-      putUrl: string;
-      requiredHeaders: Record<string, string>;
-    };
-    await fetch(upload.putUrl, {
-      method: "PUT",
-      body: oversizedBody,
-      headers: upload.requiredHeaders,
-    });
-    expect(
-      (
-        await app.request(
-          workspacePath(workspaceId, `/files/uploads/${upload.uploadId}/complete`),
-          { method: "POST", headers: { authorization } },
-        )
-      ).status,
-    ).toBe(200);
-
-    const baseResponse = await app.request(workspacePath(workspaceId, "/document-bases"), {
-      method: "POST",
-      body: JSON.stringify({ name: "Limited docs" }),
-      headers: { authorization, "content-type": "application/json" },
-    });
-    expect(baseResponse.status).toBe(201);
-    const base = (await baseResponse.json()) as { id: string };
-    const usageBefore = await sumUsageQuantity(dbClient.db, {
-      accountId,
-      workspaceId,
-      eventType: "document.indexed",
-      since: startOfUtcMonth(),
-    });
-
-    const addResponse = await app.request(
-      workspacePath(workspaceId, `/document-bases/${base.id}/documents`),
-      {
-        method: "POST",
-        body: JSON.stringify({ fileId: upload.fileId }),
-        headers: { authorization, "content-type": "application/json" },
-      },
-    );
-    expect(addResponse.status).toBe(201);
-    const document = (await addResponse.json()) as {
-      status: string;
-      chunkCount: number;
-      error: string | null;
-    };
-    expect(document.status).toBe("failed");
-    expect(document.chunkCount).toBe(0);
-    expect(document.error).toContain("monthly document indexing limit reached (2 chunks)");
-    const usageAfter = await sumUsageQuantity(dbClient.db, {
-      accountId,
-      workspaceId,
-      eventType: "document.indexed",
-      since: startOfUtcMonth(),
-    });
-    expect(usageAfter).toBe(usageBefore);
-  });
-
-  test("serves indexed documents through the built-in MCP endpoint", async () => {
-    const appSettings = {
-      ...objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
-      delegationSecret: "test-delegation-secret",
-    };
-    const app = createApp({
-      settings: appSettings,
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const mcpApp = createApp({
-      settings: {
-        ...appSettings,
-        productAccessMode: "configured",
-      },
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const server = Bun.serve({
-      port: 0,
-      hostname: "127.0.0.1",
-      fetch: mcpApp.fetch,
-    });
-    const settings = {
-      ...appSettings,
-      opengeniMcpInternalUrl: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
-      mcpServers: [
+    expect(source.outcome).toBe("published");
+    const entryId = crypto.randomUUID();
+    const entry = {
+      title: "Private endpoint recovery",
+      kind: "incident",
+      content: "Update the network policy.",
+      groupIds: [groupId],
+      evidence: [
         {
-          id: "docs",
-          name: "Document Search",
-          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp/docs`,
-          allowedTools: [
-            "search_documents",
-            "fetch_document_chunk",
-            "list_document_bases",
-            "memory_propose",
-          ],
-          timeoutMs: undefined,
-          cacheToolsList: false,
-        },
-        {
-          id: "files",
-          name: "Files",
-          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp/files`,
-          allowedTools: ["files_get_download_url"],
-          timeoutMs: undefined,
-          cacheToolsList: false,
+          entryId: sourceId,
+          revisionId: source.revisionId,
+          quote: "Fix private endpoint failures by updating the network policy.",
         },
       ],
     };
-    let prepared: Awaited<ReturnType<typeof prepareAgentTools>> | null = null;
-    try {
-      const access = await defaultAccessContext(app);
-      const workspaceId = access.defaultWorkspaceId!;
-      const accountId = access.defaultAccountId!;
-      const accessGrant = access.workspaceGrants.find(
-        (candidate) => candidate.workspaceId === workspaceId,
-      )!;
-      const serverSession = await createSession(dbClient.db, {
-        accountId,
-        workspaceId,
-        initialMessage: "server-attributed docs MCP session",
-        resources: [],
-        metadata: {},
-        model: "scripted-model",
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-      });
-      await initializeSessionStartAtomically(dbClient.db, {
-        accountId,
-        workspaceId,
-        sessionId: serverSession.id,
-        clientEventId: `initial:${serverSession.id}`,
-        reasoningEffortFallback: "low",
-        createdEventPayload: {},
-      });
-      const serverAttempt = await claimCreatedSessionForRun(
-        dbClient.db,
-        accessGrant,
-        serverSession.id,
-      );
-      const forgedSession = await createSession(dbClient.db, {
-        accountId,
-        workspaceId,
-        initialMessage: "forged attribution target",
-        resources: [],
-        metadata: {},
-        model: "scripted-model",
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-      });
-      const uploadResponse = await app.request(workspacePath(workspaceId, "/files/uploads"), {
-        method: "POST",
-        body: JSON.stringify({
-          filename: "mcp-runbook.txt",
-          contentType: "text/plain",
-          sizeBytes: 60,
-        }),
-        headers: { "content-type": "application/json" },
-      });
-      const upload = (await uploadResponse.json()) as {
-        fileId: string;
-        uploadId: string;
-        putUrl: string;
-        requiredHeaders: Record<string, string>;
-      };
-      await fetch(upload.putUrl, {
-        method: "PUT",
-        body: "MCP document search returns private endpoint runbook chunks.",
-        headers: upload.requiredHeaders,
-      });
-      expect(
-        (
-          await app.request(
-            workspacePath(workspaceId, `/files/uploads/${upload.uploadId}/complete`),
-            { method: "POST" },
-          )
-        ).status,
-      ).toBe(200);
-      const baseResponse = await app.request(workspacePath(workspaceId, "/document-bases"), {
-        method: "POST",
-        body: JSON.stringify({ name: "MCP Runbooks" }),
-        headers: { "content-type": "application/json" },
-      });
-      const base = (await baseResponse.json()) as { id: string };
-      expect(
-        (
-          await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/documents`), {
-            method: "POST",
-            body: JSON.stringify({ fileId: upload.fileId }),
-            headers: { "content-type": "application/json" },
-          })
-        ).status,
-      ).toBe(201);
-
-      prepared = await prepareAgentTools(
-        settings,
-        [
-          { kind: "mcp", id: "docs" },
-          { kind: "mcp", id: "files" },
-        ],
-        {
-          accountId,
-          workspaceId,
-          sessionId: serverSession.id,
-          turnId: serverAttempt.turnId,
-          attemptId: serverAttempt.attemptId,
-          executionGeneration: serverAttempt.executionGeneration,
-          subjectId: "test:mcp-client",
-        },
-      );
-      const docsServer = prepared.mcpServers[0]!;
-      const filesServer = prepared.mcpServers[1]!;
-      const docTools = await docsServer.listTools();
-      expect(docTools.map((tool) => tool.name)).toContain("docs__search_documents");
-      const fileTools = await filesServer.listTools();
-      expect(fileTools.map((tool) => tool.name)).toEqual(["files__files_get_download_url"]);
-
-      const result = await docsServer.callTool("docs__search_documents", {
-        query: "private endpoint",
-        baseIds: [base.id],
-        limit: 3,
-      });
-      expect(JSON.stringify(result)).toContain("private endpoint runbook");
-
-      const proposedMemory = JSON.parse(
-        mcpText(
-          await docsServer.callTool("docs__memory_propose", {
-            text: "Private endpoint MCP memory should be reviewed.",
-            kind: "decision",
-            createdBySessionId: forgedSession.id,
-          }),
-        ),
-      ) as McpMutationReceiptType;
-      expect(proposedMemory).toMatchObject({
-        operation: "memory_propose",
-        outcome: "created",
-        changed: true,
-        resource: { type: "knowledge_memory", state: "proposed" },
-      });
-      expect(JSON.stringify(proposedMemory)).not.toContain(
-        "Private endpoint MCP memory should be reviewed.",
-      );
-      expect(
-        await getKnowledgeMemory(dbClient.db, workspaceId, proposedMemory.resource.id),
-      ).toMatchObject({
-        text: "Private endpoint MCP memory should be reviewed.",
-        createdBySessionId: serverSession.id,
-      });
-      expect(
-        (await getKnowledgeMemory(dbClient.db, workspaceId, proposedMemory.resource.id))
-          ?.createdBySessionId,
-      ).not.toBe(forgedSession.id);
-
-      const downloadResult = await filesServer.callTool("files__files_get_download_url", {
-        fileId: upload.fileId,
-      });
-      const downloadPayload = JSON.parse(mcpText(downloadResult)) as {
-        file: { id: string; filename: string };
-        downloadUrl: { url: string };
-      };
-      expect(downloadPayload.file).toMatchObject({
-        id: upload.fileId,
-        filename: "mcp-runbook.txt",
-      });
-      const downloaded = await fetch(downloadPayload.downloadUrl.url);
-      expect(downloaded.status).toBe(200);
-      expect(await downloaded.text()).toContain("private endpoint runbook");
-
-      const pendingUploadResponse = await app.request(
-        workspacePath(workspaceId, "/files/uploads"),
-        {
-          method: "POST",
-          body: JSON.stringify({
-            filename: "pending-mcp.txt",
-            contentType: "text/plain",
-            sizeBytes: 7,
-          }),
-          headers: { "content-type": "application/json" },
-        },
-      );
-      const pendingUpload = (await pendingUploadResponse.json()) as {
-        fileId: string;
-      };
-      expect(
-        mcpText(
-          await filesServer.callTool("files__files_get_download_url", {
-            fileId: pendingUpload.fileId,
-          }),
-        ),
-      ).toContain("file is pending_upload");
-      expect(
-        mcpText(
-          await filesServer.callTool("files__files_get_download_url", {
-            fileId: crypto.randomUUID(),
-          }),
-        ),
-      ).toContain("File not found");
-    } finally {
-      await prepared?.close().catch(() => undefined);
-      server.stop(true);
-    }
-  });
-
-  test("exposes workspace memory tools through first-party MCP only when enabled and session-bound", async () => {
-    const appSettings = testSettings({
-      databaseUrl: services.databaseUrl,
-      delegationSecret: "test-delegation-secret",
-    });
-    const documentServices = createDocumentServices(appSettings);
-    const mcpApp = createApp({
-      settings: {
-        ...appSettings,
-        productAccessMode: "configured",
-      },
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-      documentServices,
-    });
-    const server = Bun.serve({
-      port: 0,
-      hostname: "127.0.0.1",
-      fetch: mcpApp.fetch,
-    });
-    const settings = {
-      ...appSettings,
-      opengeniMcpInternalUrl: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
-      mcpServers: [
-        {
-          id: "opengeni",
-          name: "OpenGeni",
-          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
-          allowedTools: ["memory_search", "memory_save", "memory_correct"],
-          timeoutMs: undefined,
-          cacheToolsList: false,
-        },
-      ],
+    await save(entryId, 0, entry);
+    const found = (await (await app.request(`${base}?query=endpoint&mode=keyword`)).json()) as {
+      entries: { id: string }[];
     };
-    let prepared: Awaited<ReturnType<typeof prepareAgentTools>> | null = null;
-    try {
-      const grant = await bootstrapMcpGrant(dbClient.db);
-      const workspaceId = grant.workspaceId;
-      const accountId = grant.accountId;
-      const session = await createSession(dbClient.db, {
-        accountId,
-        workspaceId,
-        initialMessage: "workspace memory MCP session",
-        resources: [],
-        metadata: {},
-        model: "scripted-model",
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-      });
-      await initializeSessionStartAtomically(dbClient.db, {
-        accountId,
-        workspaceId,
-        sessionId: session.id,
-        clientEventId: `initial:${session.id}`,
-        reasoningEffortFallback: "low",
-        createdEventPayload: {},
-      });
-      const sessionAttempt = await claimCreatedSessionForRun(dbClient.db, grant, session.id);
-
-      prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {
-        accountId,
-        workspaceId,
-        sessionId: session.id,
-        turnId: sessionAttempt.turnId,
-        attemptId: sessionAttempt.attemptId,
-        executionGeneration: sessionAttempt.executionGeneration,
-        subjectId: "test:mcp-memory-disabled",
-        firstPartyTools: ["memory_search", "memory_save", "memory_correct"],
-      });
-      expect((await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name)).toEqual([]);
-      await prepared.close();
-      prepared = null;
-
-      // A workspace that stored the retired opt-out must still work normally:
-      // the value is accepted and ignored, and every other setting on the bag
-      // keeps its stored meaning.
-      await updateWorkspaceSettings(dbClient.db, workspaceId, {
-        memoryEnabled: true,
-        memoryPromptMode: "legacy_standing",
-      });
-
-      prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {
-        accountId,
-        workspaceId,
-        subjectId: "test:mcp-memory-sessionless",
-      });
-      expect((await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name)).toEqual([]);
-      await prepared.close();
-      prepared = null;
-
-      prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {
-        accountId,
-        workspaceId,
-        sessionId: session.id,
-        turnId: sessionAttempt.turnId,
-        attemptId: sessionAttempt.attemptId,
-        executionGeneration: sessionAttempt.executionGeneration,
-        subjectId: "test:mcp-memory-enabled",
-        firstPartyTools: ["memory_search", "memory_save", "memory_correct"],
-      });
-      const memoryTools = (await prepared.mcpServers[0]!.listTools())
-        .map((tool) => tool.name)
-        .sort();
-      // The stored legacy prompt-mode value is ignored. Workspace Memory itself
-      // is enabled, so the exact live agent attempt receives autonomous writes.
-      expect(memoryTools).toEqual([
-        "opengeni__memory_correct",
-        "opengeni__memory_save",
-        "opengeni__memory_search",
-      ]);
-    } finally {
-      await prepared?.close().catch(() => undefined);
-      server.stop(true);
-    }
+    expect(found.entries.map((item) => item.id)).toContain(entryId);
+    const members = (await (await app.request(`${base}?groupId=${groupId}`)).json()) as {
+      entries: { id: string }[];
+    };
+    expect(members.entries.map((item) => item.id).sort()).toEqual([sourceId, entryId].sort());
+    await save(entryId, 1, {
+      ...entry,
+      content: "Update the network policy and verify endpoint connectivity.",
+    });
+    const current = (await (await app.request(`${base}/${entryId}`)).json()) as {
+      revision: { entry: { content: string; evidence: { revisionId: string }[] } };
+    };
+    expect(current.revision.entry.content).toContain("verify endpoint connectivity");
+    expect(current.revision.entry.evidence[0]?.revisionId).toBe(source.revisionId);
+    const original = (await (await app.request(`${base}/${sourceId}`)).json()) as {
+      revision: { entry: { content: string } };
+    };
+    expect(original.revision.entry.content).toBe(text);
+    const history = await app.request(`${base}/${entryId}/history`);
+    expect(history.status).toBe(200);
+    expect(JSON.stringify(await history.json())).toContain("Update the network policy.");
   });
 
   test("manages workspace environments with write-only values", async () => {
@@ -8456,7 +6298,7 @@ describe("API component integration", () => {
       model: string;
       temporalWorkflowId: string;
       environmentId: string | null;
-    }>(mcp, "session_get", { sessionId: createdReceipt.resource.id });
+    }>(mcp, "session_get", { sessionId: createdReceipt.resource.id, detail: "full" });
     expect(created.status).toBe("queued");
     expect(created.model).toBe("scripted-model");
     expect(created.temporalWorkflowId).toBe(`session-${created.id}`);
@@ -8473,19 +6315,34 @@ describe("API component integration", () => {
     const fetched = await callMcpTool<{
       id: string;
       environmentId: string | null;
-    }>(mcp, "session_get", { sessionId: created.id });
+    }>(mcp, "session_get", { sessionId: created.id, detail: "full" });
     expect(fetched.id).toBe(created.id);
     expect(fetched.environmentId).toBeNull();
+    const compact = await callMcpTool<{ id: string; goal: { status: string; summary: string } }>(
+      mcp,
+      "session_get",
+      { sessionId: created.id },
+    );
+    expect(compact.goal).toEqual({ status: "active", summary: "staging deployed" });
+    expect(compact).not.toHaveProperty("effectiveToolPolicy");
+    expect(compact).not.toHaveProperty("initialMessage");
     await expect(
       callMcpTool(mcp, "session_get", { sessionId: crypto.randomUUID() }),
     ).rejects.toThrow("session not found");
 
+    const conversation = await callMcpTool<{ view: string; events: unknown[] }>(
+      mcp,
+      "session_events",
+      { sessionId: created.id },
+    );
+    expect(conversation.view).toBe("conversation");
+    expect(conversation.events).toEqual([]);
     const timeline = await callMcpTool<{
       events: Array<{ type: string; sequence: number }>;
       direction: "before";
       nextBefore: number;
       nextAfter: null;
-    }>(mcp, "session_events", { sessionId: created.id });
+    }>(mcp, "session_events", { sessionId: created.id, view: "debug" });
     // The MCP monitoring read omits the human prompt while its turn is unclaimed;
     // the exact row remains in forensic mode and in the REST events API.
     expect(timeline.events.map((event) => event.type)).toEqual([
@@ -8518,6 +6375,7 @@ describe("API component integration", () => {
     }>(mcp, "session_events", {
       sessionId: created.id,
       after: lastTimelineSequence,
+      view: "debug",
     });
     expect(caughtUp.events).toHaveLength(0);
     expect(caughtUp.direction).toBe("after");
@@ -9595,6 +7453,33 @@ describe("API component integration", () => {
     expect(catalogResponse.status).toBe(200);
     expect(await catalogResponse.json()).toEqual(environment.catalog);
 
+    const staleOperationId = crypto.randomUUID();
+    const stale = await app.request(`${base}/calls`, {
+      method: "POST",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({
+        operationId: staleOperationId,
+        catalogDigest: "f".repeat(64),
+        identity: { serverId: "crm", toolName: "search_documents" },
+        arguments: { query: "stale catalog" },
+      }),
+    });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      error: {
+        code: "conflict",
+        retryable: true,
+        details: { code: "codemode_catalog_stale" },
+      },
+    });
+    expect(
+      (
+        await app.request(`${base}/calls/${staleOperationId}`, {
+          headers: { authorization },
+        })
+      ).status,
+    ).toBe(404);
+
     const operationId = crypto.randomUUID();
     const request = {
       operationId,
@@ -10154,13 +8039,11 @@ describe("API component integration", () => {
     const plain = await requireSession(dbClient.db, grant.workspaceId, plainReceipt.resource.id);
     expect(plain.sandboxBackend).toBe("none");
 
-    // The fix: targetSandboxId is now declared on the session_create inputSchema,
-    // so the MCP SDK no longer strips it before the handler runs — it reaches
-    // createSessionForRequest's seedTargetSandbox path. With backend:"none" the
-    // seed guard rejects (you cannot pin a machine for a sandbox-less session),
-    // which PROVES the value flowed end-to-end. Before the fix the unknown key
-    // was dropped and this create would have succeeded, silently swallowing the
-    // agent's machine-targeting request.
+    // targetSandboxId is declared on the session_create inputSchema, so the MCP
+    // SDK does not strip it before the handler runs. The synthetic unknown id
+    // reaches createSessionForRequest's ordinary workspace-scoped route
+    // validator, which proves the value flowed end-to-end. A backend:"none"
+    // home does not bypass target ownership or liveness checks.
     await expectMcpOrchestrationFailure(
       mcp,
       "session_create",
@@ -10171,7 +8054,7 @@ describe("API component integration", () => {
         machineTarget: { targetSandboxId: crypto.randomUUID() },
       },
       "session_create_rejected",
-      "cannot target a machine for a session with no sandbox",
+      "not found in this workspace",
     );
   });
 
@@ -10432,6 +8315,7 @@ describe("API component integration", () => {
         turnId: claimed.turn.id,
         attemptId,
         executionGeneration: claimed.turn.executionGeneration,
+        firstPartyMcpTools: ["variable_set_get_variable"],
       },
     };
 
@@ -10643,80 +8527,6 @@ describe("API component integration", () => {
       {},
     );
     expect(noBase).toMatchObject({ installUrl: null, linkUrl: null });
-  });
-
-  test("pack enable validates and stores environment attachments", async () => {
-    const app = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        environmentsEncryptionKey: environmentsTestKey,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const workspaceId = await defaultWorkspaceId(app);
-    const environment = await createTestEnvironment(app, workspaceId, {});
-
-    const unknownAttachment = await app.request(
-      workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/enable"),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ environmentId: crypto.randomUUID() }),
-      },
-    );
-    expect(unknownAttachment.status).toBe(422);
-
-    const enabled = await app.request(
-      workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/enable"),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ environmentId: environment.id }),
-      },
-    );
-    expect([200, 201]).toContain(enabled.status);
-    const installation = (await enabled.json()) as {
-      metadata: Record<string, unknown>;
-    };
-    expect(installation.metadata.variableSetId).toBe(environment.id);
-
-    // Re-enabling without environmentId keeps the stored attachment.
-    const reenabled = await app.request(
-      workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/enable"),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
-      },
-    );
-    expect(reenabled.status).toBe(200);
-    const reenabledInstallation = (await reenabled.json()) as {
-      metadata: Record<string, unknown>;
-    };
-    expect(reenabledInstallation.metadata.variableSetId).toBe(environment.id);
-
-    // Back-compat: an installation enabled BEFORE the Variable Set rename stored
-    // the attachment under the legacy `metadata.environmentId` key. Simulate that
-    // legacy row, then re-enable empty and assert the attachment is still
-    // inherited (the environmentId fallback), not silently dropped.
-    await dbClient.db.execute(dbSql`
-      update pack_installations set metadata = ${JSON.stringify({ environmentId: environment.id })}::jsonb
-      where workspace_id = ${workspaceId} and pack_id = 'marketing-social-daily-analysis'`);
-    const reenabledLegacy = await app.request(
-      workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/enable"),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
-      },
-    );
-    expect(reenabledLegacy.status).toBe(200);
-    const reenabledLegacyInstallation = (await reenabledLegacy.json()) as {
-      metadata: Record<string, unknown>;
-    };
-    expect(reenabledLegacyInstallation.metadata.variableSetId).toBe(environment.id);
   });
 
   test("file download MCP tool reports unconfigured object storage", async () => {
@@ -11209,25 +9019,4 @@ function objectStorageSettings(databaseUrl: string, endpoint: string) {
 
 function startOfUtcMonth(date = new Date()): Date {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
-}
-
-function firstPartyMcpSettings(databaseUrl: string) {
-  return testSettings({
-    databaseUrl,
-    mcpServers: [
-      {
-        id: "opengeni",
-        name: "OpenGeni",
-        url: "http://127.0.0.1:8000/v1/mcp",
-        cacheToolsList: true,
-      },
-      {
-        id: "docs",
-        name: "Document Search",
-        url: "http://127.0.0.1:8000/v1/mcp/docs",
-        allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases"],
-        cacheToolsList: false,
-      },
-    ],
-  });
 }

@@ -7,6 +7,7 @@ import {
   acceptSessionHumanInputResponse,
   addSessionSystemUpdate,
   activateSessionRealtimeConnectionInTransaction,
+  appendSessionEvents,
   appendSessionEventsForTurnAttempt,
   appendSessionRealtimeOutboundInTransaction,
   applySessionTurnSettlement,
@@ -1249,8 +1250,10 @@ describe("session realtime ledger", () => {
 
   test("atomically admits one idempotent ordinary turn on the same session without changing hierarchy", async () => {
     const value = await fixture();
+    const priorTurnId = crypto.randomUUID();
     await transaction(value.owner.workspaceId, async (tx) => {
       await tx.insert(schema.sessionTurns).values({
+        id: priorTurnId,
         accountId: value.grant.accountId,
         workspaceId: value.owner.workspaceId,
         sessionId: value.session.id,
@@ -1271,6 +1274,13 @@ describe("session realtime ledger", () => {
         finishedAt: new Date(),
       });
     });
+    await appendSessionEvents(client.db, value.owner.workspaceId, value.session.id, [
+      {
+        type: "turn.started",
+        turnId: priorTurnId,
+        payload: {},
+      },
+    ]);
     const first = await claimInitial(value);
     await complete(value, first.claimed.connection);
     await proveProviderStarted(value, first.claimed.connection);

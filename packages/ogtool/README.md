@@ -1,5 +1,21 @@
 # `@opengeni/ogtool`
 
+Managed sandboxes receive the CLI and ESM client from the exact worker release,
+independently of their baked image. Per-command `PATH` selects the delivered CLI;
+`OPENGENI_CODEMODE_CLIENT_MODULE` selects the matching module for persistent Bun
+programs:
+
+```ts
+const { tools, openGeni } = await import(process.env.OPENGENI_CODEMODE_CLIENT_MODULE!);
+```
+
+Do not bypass these selections with `/usr/local/bin/ogtool` or an image-baked
+`@opengeni/codemode` import. The immutable client directory is content-addressed;
+transfer and reuse verify every byte. Missing build assets or unavailable file
+ingress fail setup with an actionable error, never by accepting a different
+catalog digest, installing `latest`, or replacing a warm sandbox. Catalog and
+operation requests still use the same attempt bearer and public journal.
+
 `ogtool` is the bundled command-line wrapper for one exact OpenGeni execution attempt's Codemode
 surface. It uses the same `@opengeni/codemode` client and frozen tool catalog as Bun programs;
 it does not rediscover or proxy MCP servers. Stock OpenGeni sandbox images include this exact
@@ -23,13 +39,59 @@ to disk. `ogtool doctor` reports the selected delivery mode without printing the
 
 Commands:
 
-- `ogtool list`
+- `ogtool list` — all authorized callable paths and short descriptions, one tool per line
+- `ogtool list --json` — compact JSON with `catalogDigest`, `total`, `offset`, `nextOffset`, and `tools: [{path, description}]`
+- `ogtool list [--json] [--query <substring>] [--limit <1..100>] [--offset <integer>]`
+- `ogtool list --full` — the previous full catalog JSON, including identity and schemas
+- `ogtool show <tool-path-or-model-name>` — one tool's details and schemas as JSON
 - `ogtool call <tool-path-or-model-name> [json-object]`
 - `ogtool declarations [output-file]`
 - `ogtool doctor`
 - `ogtool --version`
 
+Start with `list`, then use `show docs.search` before constructing a call. Compact
+descriptions collapse whitespace and use at most 160 Unicode code points, including
+an ellipsis when shortened; a missing/empty description falls back to the title.
+Text mode displays C0, C1, and DEL control characters as literal `\uNNNN` escapes
+so descriptions and title fallbacks cannot execute terminal control sequences.
+This is text-only presentation:
+catalog content, query matching, and explicit JSON/full/schema output remain unchanged.
+Catalog order and callable paths are preserved. Compact output contains no identities,
+schemas, approval annotations, or attempt IDs. JSON includes the frozen catalog digest
+so a machine caller can detect a changed catalog between pages.
+
+Both default text and `--json` list every authorized catalog entry. There is no
+aggregate stdout byte cap and no default pagination: compactness comes from omitting
+per-tool schemas and shortening summaries, never dropping tools or truncating paths.
+For compatibility, `--limit` accepts 1 through 100 as a strictly opt-in row limit;
+`--offset` alone returns all remaining matching tools. Count/offset metadata remains
+available for callers that explicitly request a slice.
+
+`--query` is a literal, case-sensitive substring match against the callable path or
+full whitespace-normalized description (title fallback), including text beyond the
+displayed summary. An empty query matches all tools. `total` counts filtered matches;
+`--offset` is a nonnegative safe integer within that filtered order, not the unfiltered
+catalog. Follow the returned `nextOffset` when explicitly limiting rows.
+Keep the query unchanged and verify the JSON
+`catalogDigest` is unchanged when walking pages. `nextOffset: null` means finished.
+Empty/no-match/past-end pages return no tools and no next offset; text still prints
+the total/offset footer. Both `--flag value` and `--flag=value` are supported.
+
+`--full` rejects `--json`, `--query`, `--limit`, and `--offset`, including explicitly
+supplied defaults. Unknown/duplicate flags and extra arguments are errors.
+`show` accepts the same exact path/model-name/identity aliases as `call`
+and rejects unknown or ambiguous names. Its JSON output (including the final newline)
+is limited to 64 KiB; oversized details fail without partial output or schema
+truncation. Use `list --full` redirected to a file, or `declarations <output-file>`,
+for larger schemas. Existing scripts parsing the old `list` JSON must use `list --full`.
+
+The Connected Machine fallback, `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode`,
+supports the same `list`, `list --json`, `list --full`, and `show` discovery behavior.
+It does not provide the JavaScript CLI's `declarations` command.
+
 The HTTP client submits a caller-chosen operation id and polls the durable result. A lost response
 therefore cannot silently replay a side effect. `@opengeni/ogtool` also re-exports the typed
 `@opengeni/codemode` client for application code. Codemode is a projection of the attempt's one
-tool authority, not a second tool or credential surface.
+tool authority, not a second tool or credential surface. Aborting the CLI/client wait stops only
+local observation; it does not cancel a journaled server operation, which must be reconciled by the
+same operation id or settled by the owning attempt lifecycle.

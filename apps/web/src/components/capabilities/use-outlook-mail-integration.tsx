@@ -25,6 +25,7 @@ export function useOutlookMailIntegration({
   refreshRevision?: number;
 }): IntegrationAdapter {
   return useIntegrationDefinitionRow({
+    ownership: "personal",
     id: "outlook-mail",
     name: "Outlook Mail",
     description: "Read, send, and organize mail in a connected Outlook mailbox.",

@@ -2,7 +2,15 @@ import * as React from "react";
 
 import { cn } from "@/lib/utils";
 
-function Input({ className, type, ...props }: React.ComponentProps<"input">) {
+function Input({
+  className,
+  type,
+  suppressAutofill = false,
+  ...props
+}: React.ComponentProps<"input"> & {
+  /** Resource labels are not a person's identity or a saved credential. */
+  suppressAutofill?: boolean;
+}) {
   return (
     <input
       type={type}
@@ -14,6 +22,9 @@ function Input({ className, type, ...props }: React.ComponentProps<"input">) {
         className,
       )}
       {...props}
+      {...(suppressAutofill
+        ? { autoComplete: "off", "data-1p-ignore": true, "data-lpignore": "true" }
+        : {})}
     />
   );
 }

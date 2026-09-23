@@ -26,9 +26,12 @@
  * Alternatives this analyzer also accepts: setting the tenant GUC around the
  * statement, disabling RLS on the table for the window, or activating a policy
  * that is pinned to the exact table owner and a transaction-local capability.
+ * The latter may be set inside the statement or by the exact governed batched-
+ * migration runner contract before the statement executes.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { batchedBackfillTransactionLocalSetting } from "../packages/db/src/migration-runner-settings";
 
 export const MIGRATIONS_DIR = "packages/db/drizzle";
 
@@ -260,6 +263,7 @@ const ROUTINE_AS_DOLLAR = /\bAS\s+(\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$)/i;
  * backfill. `EXECUTE format($ddl$ UPDATE ... $ddl$)` still looks like a write.
  */
 export function stripRoutineBodies(statement: string): string {
+  statement = stripCatalogRoutinePatchLiterals(statement);
   let out = "";
   let index = 0;
   while (index < statement.length) {
@@ -287,6 +291,41 @@ export function stripRoutineBodies(statement: string): string {
     index = close + tag.length;
   }
   return out;
+}
+
+/** A quoted replacement used only to patch pg_get_functiondef is routine
+ * source, not an executed migration query. Keep arbitrary EXECUTE strings and
+ * every actual query outside the replacement visible to the guard. */
+function stripCatalogRoutinePatchLiterals(statement: string): string {
+  const assignments = /\b([a-z_]\w*)\s*:=\s*(\$[a-z_]\w*\$|\$\$)([\s\S]*?)\2\s*;/gi;
+  return statement.replace(assignments, (whole, variable: string, _tag: string) => {
+    const outside = statement.replace(whole, `${variable} := NULL;`);
+    const use = new RegExp(
+      `\\bEXECUTE\\s+replace\\(\\s*([a-z_]\\w*)\\s*,\\s*[a-z_]\\w*\\s*,\\s*${variable}\\s*\\)\\s*;`,
+      "i",
+    ).exec(outside);
+    if (!use) return whole;
+    const definition = use[1]!;
+    const writes = [...outside.matchAll(new RegExp(`\\b${definition}\\s*:=\\s*([^;]+);`, "gi"))];
+    if (!writes.some((match) => /^pg_get_functiondef\s*\(/i.test(match[1]!.trim()))) return whole;
+    if (
+      writes.some(
+        (match) =>
+          !new RegExp(`^(?:pg_get_functiondef\\s*\\(|replace\\(\\s*${definition}\\s*,)`, "i").test(
+            match[1]!.trim(),
+          ),
+      )
+    )
+      return whole;
+    // Declaration and the one assignment/use are the only permitted references
+    // to the replacement variable. Additional execution or data flow is opaque.
+    const remainder = outside
+      .replace(use[0], "")
+      .replace(new RegExp(`\\b${variable}\\s*:=\\s*NULL\\s*;`, "i"), "")
+      .replace(new RegExp(`\\b${variable}\\s+text\\s*;`, "i"), "");
+    if (new RegExp(`\\b${variable}\\b`, "i").test(remainder)) return whole;
+    return `${variable} := NULL; /* catalog routine replacement omitted */`;
+  });
 }
 
 const DDL_ONLY =
@@ -374,6 +413,7 @@ function ownerCapabilityPolicy(statement: string): OwnerCapabilityPolicy | null 
 function activatedOwnerCapabilityTables(
   statement: string,
   policies: ReadonlyMap<string, OwnerCapabilityPolicy>,
+  runnerCapabilityGuc?: string,
 ): Set<string> {
   const activeGucs = new Set<string>();
   for (const match of statement.matchAll(
@@ -381,6 +421,7 @@ function activatedOwnerCapabilityTables(
   )) {
     activeGucs.add(match[1]!);
   }
+  if (runnerCapabilityGuc) activeGucs.add(runnerCapabilityGuc);
   return new Set(
     [...policies.values()]
       .filter((policy) => activeGucs.has(policy.guc))
@@ -405,6 +446,12 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
 
   for (const file of files) {
     const raw = readFileSync(join(migrationsDir, file), "utf8");
+    const runnerSetting = batchedBackfillTransactionLocalSetting(file);
+    const runnerCapabilityGuc =
+      runnerSetting?.value === "1" &&
+      /^-- deployment-mode: (?:rolling|maintenance)\r?\n-- opengeni:batched-backfill\b/u.test(raw)
+        ? runnerSetting.guc.slice("opengeni.".length)
+        : undefined;
     // Owner-only posture window and tenant GUC state are per-file: the runner
     // executes one file as one implicit transaction.
     const unforced = new Set<string>();
@@ -497,7 +544,11 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
       if (tenantGuc) continue;
 
       const executable = isBlock ? stripRoutineBodies(statement) : statement;
-      const ownerVisible = activatedOwnerCapabilityTables(executable, ownerCapabilityPolicies);
+      const ownerVisible = activatedOwnerCapabilityTables(
+        executable,
+        ownerCapabilityPolicies,
+        runnerCapabilityGuc,
+      );
       const opaque = [...forced].filter(
         (table) =>
           enabled.has(table) &&

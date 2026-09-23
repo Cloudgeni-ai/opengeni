@@ -17,6 +17,8 @@ import {
   MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
   MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES,
   boundModelToolOutputItem,
+  canonicalizePersistedHistoryItem,
+  normalizedCodexRequestBody,
   codexRequestStorage,
   codexSubscriptionFetch,
   type CodexRequestContext,
@@ -393,6 +395,34 @@ function xaiProviderJson(): string {
 }
 
 describe("pinned Responses large-output boundary", () => {
+  test("hosted search status survives persisted history, SDK conversion and Codex wire normalization", async () => {
+    const { getInputItems } = await pinnedResponsesModule();
+    for (const status of ["completed", "in_progress", "failed"] as const) {
+      const source = {
+        type: "hosted_tool_call" as const,
+        id: "ws_synthetic",
+        name: "web_search_call",
+        status,
+        providerData: {
+          type: "web_search_call",
+          id: "ws_synthetic",
+          action: { type: "search", query: "synthetic documentation" },
+        },
+      };
+      const persisted = JSON.parse(JSON.stringify(canonicalizePersistedHistoryItem(source)));
+      const wire = normalizedCodexRequestBody({ input: getInputItems([persisted]) }, (s) => s);
+      expect(wire.input).toEqual([
+        {
+          type: "web_search_call",
+          status,
+          action: source.providerData.action,
+        },
+      ]);
+      expect(source.status).toBe(status);
+      expect(persisted.status).toBe(status);
+    }
+  });
+
   test("serializes a 10,000-part mixed bounded result entirely inside the pinned wire union", async () => {
     const { getInputItems } = await pinnedResponsesModule();
     const raw = {
@@ -1191,6 +1221,54 @@ function multiProviderSettings(overrides: Parameters<typeof testSettings>[0] = {
 const FIREWORKS_MODEL = "accounts/fireworks/models/glm-5p2";
 
 describe("buildModelInstance — chat vs responses Model selection per provider api", () => {
+  test("Nemotron reasoning selection reaches the OpenRouter Chat wire", async () => {
+    const settings = testSettings({
+      openrouterApiKey: "test-key",
+      modelProvidersJson: "[]",
+      resolvedOpenRouterModelsJson: undefined,
+    });
+    const { provider, model: configured } = resolveModelProvider(
+      settings,
+      "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+    );
+    for (const effort of ["low", "medium"] as const) {
+      let captured: Record<string, unknown> = {};
+      const client = new OpenAI({
+        apiKey: "test",
+        maxRetries: 0,
+        fetch: async (_input, init) => {
+          captured = JSON.parse(await requestBodyText(init?.body));
+          return new Response(
+            JSON.stringify({
+              id: "chatcmpl-test",
+              object: "chat.completion",
+              created: 0,
+              model: configured.upstreamModelId,
+              choices: [
+                { index: 0, finish_reason: "stop", message: { role: "assistant", content: "OK" } },
+              ],
+              usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+      const model = buildModelInstance(provider, client, configured.upstreamModelId);
+      await getOrCreateTrace(() =>
+        model.getResponse({
+          input: "Reply OK",
+          modelSettings: { reasoning: { effort } },
+          tools: [],
+          handoffs: [],
+          outputType: "text",
+          tracing: false,
+        } as never),
+      );
+      expect(captured.model).toBe(configured.upstreamModelId);
+      expect(captured.reasoning_effort).toBe(effort);
+    }
+  });
+
   const client = new OpenAI({ apiKey: "test" });
 
   test("a chat provider yields an OpenAIChatCompletionsModel", () => {
@@ -2131,12 +2209,12 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       encryptedReasoning:
         resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
     });
-    // hostedWebSearch off removes only web search; structured human input is a
-    // provider-neutral built-in on every agent.
+    // hostedWebSearch off removes only web search; structured human input
+    // and built-in skill loading are provider-neutral on every agent.
     expect(webSearchHostedTools(agent)).toHaveLength(0);
     expect(
       ((agent as { tools?: Array<{ name?: unknown }> }).tools ?? []).map((tool) => tool.name),
-    ).toEqual([HUMAN_INPUT_TOOL_NAME]);
+    ).toEqual([HUMAN_INPUT_TOOL_NAME, "skill_read"]);
     // encryptedReasoning off (chat wire API) → no providerData.include.
     expect(
       (agent as { modelSettings: { providerData?: unknown } }).modelSettings.providerData,

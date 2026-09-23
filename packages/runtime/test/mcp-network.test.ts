@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
+import { CODEMODE_ARGUMENTS_MAX_BYTES } from "@opengeni/contracts";
 import {
   MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS,
   MCP_MAX_INBOUND_REQUEST_BYTES,
@@ -327,6 +328,8 @@ describe("MCP network and payload boundary", () => {
   });
 
   test("bounds inbound request bodies before SDK parsing", async () => {
+    expect(MCP_MAX_INBOUND_REQUEST_BYTES).toBeGreaterThan(CODEMODE_ARGUMENTS_MAX_BYTES);
+
     const exact = await boundedMcpRequest(
       new Request("https://example.test/mcp", {
         method: "POST",

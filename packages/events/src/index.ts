@@ -1,6 +1,5 @@
 import {
   boundSessionEvent,
-  boundSessionEventPayload,
   boundWorkspaceControlEvent,
   sessionEventJsonBytes,
   sessionEventPayloadTruncation,
@@ -900,9 +899,12 @@ export function formatSse<T extends { sequence: number; type: string }>(
 ): string {
   const trustedId =
     Number.isSafeInteger(idSequence) && idSequence >= event.sequence ? idSequence : event.sequence;
+  // Legacy type strings may not be legal SSE field values. Keep the canonical
+  // event unchanged in JSON; only the transport dispatch name needs a fallback.
+  const dispatchType = /[\r\n]/u.test(event.type) ? "session.event.envelope_omitted" : event.type;
   return [
     `id: ${trustedId}`,
-    `event: ${event.type}`,
+    `event: ${dispatchType}`,
     `data: ${JSON.stringify(event)}`,
     "",
     "",
@@ -938,33 +940,14 @@ export function formatWorkspaceControlEventSse(event: WorkspaceControlEvent): st
   return formatted;
 }
 
-/** Defensively bounds historical rows before they become one SSE frame. */
+/** Serialize exact durable content; the SSE queue backpressures whole frames. */
 export function formatSessionEventSse(
   event: SessionEvent,
   coveredThrough = event.sequence,
 ): string {
-  const bounded = boundSessionEventForSurface(event, "sse_legacy_guard");
-  const formatted = formatSse(bounded, coveredThrough);
-  if (new TextEncoder().encode(formatted).byteLength > SESSION_EVENT_SSE_FRAME_MAX_BYTES) {
-    // The payload normalizer targets 60 KiB, so this fallback is reachable only
-    // for a malformed legacy event with oversized non-payload envelope fields.
-    const minimal: SessionEvent = {
-      ...bounded,
-      type: bounded.type.slice(0, 256) as SessionEvent["type"],
-      payload: boundSessionEventPayload(
-        {
-          preview: "[legacy event envelope omitted at SSE frame boundary]",
-          // The complete event has already crossed the non-invoking bounded
-          // projection above. Do not re-read an untrusted source accessor merely
-          // to populate optional diagnostic accounting in this last-resort path.
-          originalPayloadBytes: null,
-        },
-        { surface: "sse_legacy_guard", maxBytes: 4096 },
-      ),
-    };
-    return formatSse(minimal, coveredThrough);
-  }
-  return formatted;
+  // Session content is not a diagnostic preview. Page replay and coalescing
+  // bound accumulation without rewriting an individual durable event.
+  return formatSse(event, coveredThrough);
 }
 
 /**
@@ -1011,13 +994,13 @@ export function sessionEventBatchesByBytes(
   return batches;
 }
 
-/** Return one count+byte-bounded HTTP page and truthful continuation facts. */
+/** Select whole HTTP events; one oversized event travels alone with its cursor. */
 export function boundSessionEventHttpPage(
   events: readonly SessionEvent[],
   options: {
     direction: "after" | "before";
     maxBytes?: number;
-    /** Exact mode is restricted to already-canonical forensic REST rows. */
+    /** Bounded previews are opt-in for diagnostic consumers, never chat. */
     eventProjection?: "bounded" | "exact";
     /** Out-of-band raw coverage for events synthesized by trusted coalescing. */
     coveredThroughBySequence?: ReadonlyMap<number, number>;
@@ -1032,14 +1015,14 @@ export function boundSessionEventHttpPage(
   const selected: SessionEvent[] = [];
   let bytes = 2; // []
   const projected =
-    options.eventProjection === "exact"
+    options.eventProjection !== "bounded"
       ? [...events]
       : events.map((event) => boundSessionEventForSurface(event, "http_projection"));
   const candidates = options.direction === "after" ? projected : [...projected].reverse();
   for (const event of candidates) {
     const eventBytes = sessionEventJsonBytes(event);
     const separator = selected.length === 0 ? 0 : 1;
-    if (bytes + separator + eventBytes > maxBytes) break;
+    if (selected.length > 0 && bytes + separator + eventBytes > maxBytes) break;
     selected.push(event);
     bytes += separator + eventBytes;
   }

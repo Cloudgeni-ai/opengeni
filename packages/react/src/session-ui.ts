@@ -8,13 +8,19 @@ export type {
   HumanInputFormProps,
 } from "./components/human-input-form";
 export { HumanInputSurface } from "./components/human-input-surface";
+export { ApprovalSurface } from "./components/approval-surface";
+export type { ApprovalSurfaceProps, ApprovalSurfaceMessages } from "./components/approval-surface";
 export type { HumanInputSurfaceProps } from "./components/human-input-surface";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export type { TimelineSearchTarget } from "./components/timeline-search";
 export { createOlderHistoryLoadReceipt } from "./older-history";
 export type { OlderHistoryLoader, OlderHistoryLoadReceipt } from "./older-history";
 export { UserMessageBody, userMessageLikelyNeedsDisclosure } from "./components/user-message-body";
-export type { UserMessageBodyProps } from "./components/user-message-body";
+export type {
+  UserMessageBodyProps,
+  UserMessageDisclosureLabels,
+} from "./components/user-message-body";
 export { BUILT_IN_TURN_SUMMARY_FACET_IDS } from "./timeline/turn-summary";
 export type {
   BuiltInTurnSummaryFacetId,
@@ -25,6 +31,8 @@ export type {
   TurnSummaryOptions,
 } from "./timeline/turn-summary";
 export { QueueSurface } from "./components/queue-surface";
+export { SessionConversation } from "./components/session-conversation";
+export type { SessionConversationProps } from "./components/session-conversation";
 export type { QueueSurfaceProps } from "./components/queue-surface";
 export {
   SessionChrome,
@@ -38,3 +46,11 @@ export type {
   SessionChromeSignalId,
   SessionChromeSignalTone,
 } from "./components/session-chrome";
+export { SessionCommandsPanel } from "./components/session-commands-panel";
+export { SessionCommands } from "./components/session-commands";
+
+export { KnowledgeActivityProvider } from "./timeline/knowledge-receipt";
+export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";
+export { StartupTimings } from "./timeline/startup-timings";
+export { useStartupDetails, setStartupDetails } from "./timeline/startup-preference";
+export type { GenieLoadingOptions } from "./timeline/genie-loading";

@@ -26,6 +26,10 @@ import { defineConfig } from "tsup";
 // than inlined. drizzle-orm and postgres stay normal runtime deps, externalized.
 export default defineConfig({
   entry: {
+    "connect-attempts": "src/connect-attempts.ts",
+    "capability-reconciliation": "src/capability-reconciliation.ts",
+    "organization-integration-policy": "src/organization-integration-policy.ts",
+    "workspace-tool-defaults": "src/workspace-tool-defaults.ts",
     index: "src/index.ts",
     "managed-auth-session-sets": "src/managed-auth-session-sets.ts",
     schema: "src/schema.ts",
@@ -37,6 +41,11 @@ export default defineConfig({
     "video-generation": "src/video-generation.ts",
     "session-tenancy": "src/session-tenancy.ts",
     "session-background-commands": "src/session-background-commands.ts",
+    "session-command-output": "src/session-command-output.ts",
+    "session-mcp-credential-rotation": "src/session-mcp-credential-rotation.ts",
+    "retained-provider-commands": "src/retained-provider-commands.ts",
+    "session-event-slices": "src/session-event-slices.ts",
+    "mcp-operations": "src/mcp-operations.ts",
   },
   format: ["esm"],
   target: "es2022",

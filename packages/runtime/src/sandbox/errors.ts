@@ -133,3 +133,23 @@ export class SandboxProviderUnavailableError extends Error {
     this.backend = backend;
   }
 }
+
+/** A numeric Modal SDK session id names an adapter-local handle, not a durable
+ * process. Only missing_handle is a reopenable PTY conflict; other observation
+ * failures retain their unknown outcome and must not request input replay. */
+export class ModalProcessObservationUnavailableError extends Error {
+  readonly name = "ModalProcessObservationUnavailableError";
+  readonly reason: "missing_handle" | "unsupported_handle_map" | "terminal_recovery_failed";
+  constructor(
+    providerSessionId: number,
+    options?: ErrorOptions & {
+      reason?: "missing_handle" | "unsupported_handle_map" | "terminal_recovery_failed";
+    },
+  ) {
+    super(
+      `Modal command ${providerSessionId} observation unavailable; its SDK handle is missing or terminal output could not be recovered. Do not replay the command or treat it as exited.`,
+      options,
+    );
+    this.reason = options?.reason ?? "terminal_recovery_failed";
+  }
+}

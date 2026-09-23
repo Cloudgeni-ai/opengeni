@@ -563,7 +563,7 @@ export class BrowserControlServer {
             }
           : {}),
       });
-      return new Response(frame.data.slice().buffer, {
+      return new Response(new Uint8Array(frame.data), {
         status: 200,
         headers: {
           "cache-control": "no-store",
@@ -690,7 +690,7 @@ export class BrowserControlServer {
             }
           : {}),
       });
-      return new Response(frame.data.slice().buffer, {
+      return new Response(new Uint8Array(frame.data), {
         status: 200,
         headers: {
           "cache-control": "no-store",

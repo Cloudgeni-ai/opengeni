@@ -424,6 +424,8 @@ export type ComposerState = {
   /** Newly captured annotation the review surface should focus. */
   annotationReviewTargetId?: string | null | undefined;
   clearAnnotationReviewTarget?: (() => void) | undefined;
+  /** Focus an annotation, or the first incomplete note when omitted. */
+  requestAnnotationReview?: ((id?: string) => void) | undefined;
   /** Read the current draft synchronously before a destructive replacement. */
   hasDraftContent: () => boolean;
   /** Append the draft behind prompts already visible in the queue. */
@@ -675,6 +677,8 @@ export function useComposer(
   const [acceptedControl, setAcceptedControl] = useState<EffectiveSessionControl | null>(null);
   const [resuming, setResuming] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  // Background draft reads recover independently of Send/Steer/control failures.
+  const [draftReadError, setDraftReadError] = useState<Error | null>(null);
   const [draft, setDraft] = useState<ComposerDraft | null>(null);
   const [draftLoading, setDraftLoading] = useState(Boolean(sessionId) && durableDrafts);
   const [draftSaving, setDraftSaving] = useState(false);
@@ -792,6 +796,7 @@ export function useComposer(
     setAcceptedControl(null);
     setResuming(false);
     setError(null);
+    setDraftReadError(null);
     setDraft(null);
     setDraftLoading(Boolean(sessionId) && durableDrafts);
     setDraftSaving(false);
@@ -918,6 +923,7 @@ export function useComposer(
       if (targetKeyRef.current !== targetKey) return;
       if (!sessionId || !durableDrafts) {
         setDraftLoading(false);
+        setDraftReadError(null);
         return;
       }
       let retry = draftReadRetryRef.current;
@@ -991,6 +997,8 @@ export function useComposer(
         if (retry.timer !== null) clearTimeout(retry.timer);
         retry.failures = 0;
         retry.timer = null;
+        // Recovery also counts when the server returns the same draft revision.
+        setDraftReadError(null);
         const currentRevision = draftRef.current?.revision ?? -1;
         // Reconnect and client-generation effects can legitimately ask for the
         // draft again. A same-revision response is not new authority: publishing
@@ -1043,12 +1051,18 @@ export function useComposer(
         }
       } catch (cause) {
         if (
+          !requestAbort.signal.aborted &&
           generation === targetGeneration.current &&
           targetKeyRef.current === targetKey &&
           readTicket === draftReadGeneration.current
         ) {
-          setError(asError(cause));
+          const problem = asError(cause);
+          const timedOut = problem.name === "TimeoutError";
+          setDraftReadError(
+            timedOut ? new Error("Draft sync timed out. Retrying…", { cause }) : problem,
+          );
           if (
+            timedOut ||
             cause instanceof TypeError ||
             (cause && typeof cause === "object" && "retryable" in cause && cause.retryable === true)
           ) {
@@ -1461,9 +1475,10 @@ export function useComposer(
               ...(wireInput.mcpCredentialUpdates
                 ? { mcpCredentialUpdates: wireInput.mcpCredentialUpdates }
                 : {}),
-              ...(wireInput.connectionAuthorities
-                ? { connectionAuthorities: wireInput.connectionAuthorities }
+              ...(wireInput.connectionAccounts
+                ? { connectionAccounts: wireInput.connectionAccounts }
                 : {}),
+
               ...(wireInput.personalResourceAttachment
                 ? { personalResourceAttachment: wireInput.personalResourceAttachment }
                 : {}),
@@ -1737,9 +1752,7 @@ export function useComposer(
             ...(input.mcpCredentialUpdates
               ? { mcpCredentialUpdates: input.mcpCredentialUpdates }
               : {}),
-            ...(input.connectionAuthorities
-              ? { connectionAuthorities: input.connectionAuthorities }
-              : {}),
+            ...(input.connectionAccounts ? { connectionAccounts: input.connectionAccounts } : {}),
             ...(input.personalResourceAttachment
               ? { personalResourceAttachment: input.personalResourceAttachment }
               : {}),
@@ -2458,6 +2471,20 @@ export function useComposer(
     setAnnotationReviewTargetId(null);
   }, []);
 
+  const requestAnnotationReview = useCallback((id?: string) => {
+    const current = annotationsRef.current;
+    if (current.length === 0) {
+      setAnnotationReviewTargetId(null);
+      return;
+    }
+    if (id && current.some((annotation) => annotation.id === id)) {
+      setAnnotationReviewTargetId(id);
+      return;
+    }
+    const incomplete = current.find((annotation) => annotation.note.trim().length === 0);
+    setAnnotationReviewTargetId(incomplete?.id ?? current[0]!.id);
+  }, []);
+
   const updatePolicy = useCallback(
     (next: ComposerPolicy): void => {
       if (targetKeyRef.current !== targetKey) return;
@@ -2623,6 +2650,7 @@ export function useComposer(
   const clearError = useCallback(() => {
     if (targetKeyRef.current !== targetKey) return;
     setError(null);
+    setDraftReadError(null);
     setDraftConflict(null);
   }, [targetKey]);
   // `valueRef` is the synchronous composer authority. React state exists to
@@ -2643,6 +2671,7 @@ export function useComposer(
     removeAnnotation,
     annotationReviewTargetId: identityMatches ? annotationReviewTargetId : null,
     clearAnnotationReviewTarget,
+    requestAnnotationReview,
     hasDraftContent,
     send,
     optimisticMessages: visibleOptimisticMessages,
@@ -2689,7 +2718,7 @@ export function useComposer(
     resolveDraftConflict,
     restoredResources: identityMatches ? restoredResources : [],
     removeRestoredResource,
-    error: identityMatches ? error : null,
+    error: identityMatches ? (error ?? draftReadError) : null,
     clearError,
   };
 }

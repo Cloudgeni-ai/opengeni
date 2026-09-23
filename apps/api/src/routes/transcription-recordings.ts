@@ -5,6 +5,7 @@ import {
   resolveWorkspaceVoiceInputEnabled,
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
   TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS,
+  WorkspaceVoiceInputSettings,
   type TranscriptionRecordingErrorCode,
   type TranscriptionRecordingResponse,
   type UploadTranscriptionRecordingChunkResponse,
@@ -58,6 +59,7 @@ type RecordingAuthority = {
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  voiceInput?: WorkspaceVoiceInputSettings | undefined;
 };
 
 class RecordingProcessingError extends Error {
@@ -357,6 +359,8 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
       let authority: RecordingAuthority | null = null;
       let attemptId: string | null = null;
       let segmentNumber: number | null = null;
+      let attemptedProvider: string | null = null;
+      let fallbackAllowed = false;
       try {
         authority = await requireRecordingAuthority(c, deps, true);
         const service = deps.transcription;
@@ -372,6 +376,8 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
         }
         const selectedProvider = service.selectProvider
           ? await service.selectProvider({
+              preferredProvider: authority.voiceInput?.preferredProvider,
+              fallbackEnabled: authority.voiceInput?.fallbackEnabled,
               workspaceId: authority.workspaceId,
               subjectId: authority.subjectId,
             })
@@ -395,6 +401,8 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
           );
         }
         segmentNumber = claim.segment.segmentNumber;
+        attemptedProvider = claim.segment.providerId;
+        fallbackAllowed = claim.fallbackAllowed === true;
         const segmentKey = claim.segment.objectKey;
         const stored = deps.objectStorage
           ? await retryWhileMissing(async () => deps.objectStorage!.getObjectBytes(segmentKey))
@@ -452,12 +460,32 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
       } catch (error) {
         if (authority && attemptId && segmentNumber !== null) {
           const failure = processingFailure(error);
+          // Only an explicit rejection may move an untouched recording to another vendor.
+          // The database fences this against stale attempts and completed segments.
+          const fallbackProviderId =
+            fallbackAllowed &&
+            error instanceof TranscriptionServiceError &&
+            error.fallbackSafe &&
+            authority.voiceInput?.fallbackEnabled !== false &&
+            attemptedProvider &&
+            deps.transcription?.selectProvider
+              ? await Promise.resolve(
+                  deps.transcription.selectProvider({
+                    workspaceId: authority.workspaceId,
+                    subjectId: authority.subjectId,
+                    preferredProvider: authority.voiceInput?.preferredProvider,
+                    excludedProviders: [attemptedProvider],
+                    afterProvider: attemptedProvider,
+                  }),
+                ).catch(() => null)
+              : null;
           const persisted = await failTranscriptionRecordingSegment(deps.db, {
             workspaceId: authority.workspaceId,
             subjectId: authority.subjectId,
             recordingId: uuidParam(c, "recordingId"),
             segmentNumber,
             attemptId,
+            fallbackProviderId,
             errorCode: failure.code,
             retryable: failure.retryable,
           }).catch(() => null);
@@ -505,14 +533,15 @@ async function requireRecordingAuthority(
     throw new TranscriptionRecordingNotFoundError("Workspace not found");
   }
   const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+  const workspace = await getWorkspace(deps.db, workspaceId);
   if (requirePolicy) {
-    const workspace = await getWorkspace(deps.db, workspaceId);
     if (!workspace) throw new TranscriptionRecordingNotFoundError("Workspace not found");
     if (resolveWorkspaceVoiceInputEnabled(workspace.settings) === false) {
       throw new RecordingProcessingError("Voice input is disabled", "policy_blocked", false);
     }
   }
   return {
+    voiceInput: WorkspaceVoiceInputSettings.safeParse(workspace?.settings.voiceInput).data,
     accountId: grant.accountId,
     workspaceId,
     subjectId: grant.subjectId,

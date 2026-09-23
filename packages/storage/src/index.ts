@@ -1,4 +1,4 @@
-import type { Settings } from "@opengeni/config";
+import type { ObjectStorageSettings } from "@opengeni/config";
 import { RETAINED_OUTPUT_MAX_PAGE_BYTES, type FileAsset } from "@opengeni/contracts";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -43,6 +43,12 @@ export type ObjectHead = {
   /** Opaque provider generation/etag used only for conditional internal reads. */
   VersionToken?: string;
 };
+
+export {
+  uploadWorkspaceArchiveSpool,
+  downloadWorkspaceArchiveSpool,
+  WorkspaceArchiveStorageError,
+} from "./workspace-archive-spool";
 
 export type ObjectStorage = {
   bucket: string;
@@ -102,6 +108,19 @@ export type ObjectStorage = {
     body: Uint8Array;
     sha256?: string | null;
   }) => Promise<void>;
+  /**
+   * Unconditional authenticated upload from a bounded byte stream. May overwrite
+   * an existing key; this is NOT an atomic create-only operation. Callers needing
+   * write isolation must supply a fresh unique key and verify stored content.
+   */
+  putObjectStream?: (args: {
+    key: string;
+    contentType: string;
+    chunks: AsyncIterable<Uint8Array>;
+    byteSize: number;
+    sha256?: string;
+    signal?: AbortSignal;
+  }) => Promise<void>;
   /** Atomic create-only raw PUT. Returns false when the key already exists. */
   putObjectIfAbsent?: (args: {
     key: string;
@@ -118,7 +137,7 @@ export type ObjectStorage = {
     contentType: string;
     chunks: AsyncIterable<Uint8Array>;
     byteSize: number;
-    sha256: string;
+    sha256?: string;
     signal?: AbortSignal;
   }) => Promise<boolean>;
   /**
@@ -132,7 +151,7 @@ export type ObjectStorage = {
   deleteObject: (key: string) => Promise<void>;
 };
 
-export function createObjectStorage(settings: Settings): ObjectStorage | null {
+export function createObjectStorage(settings: ObjectStorageSettings): ObjectStorage | null {
   if (settings.objectStorageBackend === "azure-blob") {
     return createAzureBlobObjectStorage(settings);
   }
@@ -142,7 +161,7 @@ export function createObjectStorage(settings: Settings): ObjectStorage | null {
   return createS3CompatibleObjectStorage(settings);
 }
 
-function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | null {
+function createS3CompatibleObjectStorage(settings: ObjectStorageSettings): ObjectStorage | null {
   if (
     settings.objectStorageBackend === "s3-compatible" &&
     (!settings.objectStorageEndpoint ||
@@ -244,7 +263,7 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
             Key: args.key,
             ContentType: args.contentType,
             Body: args.body,
-            Metadata: { sha256: args.sha256 },
+            Metadata: args.sha256 ? { sha256: args.sha256 } : undefined,
             IfNoneMatch: "*",
           }),
         );
@@ -252,6 +271,52 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
       } catch (error) {
         if (isS3VersionMismatch(error)) return false;
         throw error;
+      }
+    },
+    async putObjectStream(args) {
+      const body = Readable.from(args.chunks, {
+        objectMode: false,
+        highWaterMark: INTERNAL_STREAM_BUFFER_BYTES,
+      });
+      // A producer error can leave the HTTP request waiting for its advertised
+      // ContentLength. Abort this request explicitly; never abort the caller's
+      // controller or rely on provider timeouts to settle the failed upload.
+      const request = new AbortController();
+      let producerFailed = false;
+      let producerError: unknown;
+      const onBodyError = (error: unknown) => {
+        producerFailed = true;
+        producerError = error;
+        request.abort(error);
+      };
+      const onCallerAbort = () => request.abort(args.signal?.reason);
+      body.once("error", onBodyError);
+      // Keep an error listener through asynchronous destruction, then release it.
+      const detachBodyError = () => body.off("error", onBodyError);
+      body.once("close", detachBodyError);
+      args.signal?.addEventListener("abort", onCallerAbort, { once: true });
+      if (args.signal?.aborted) onCallerAbort();
+      try {
+        await requestClient.send(
+          new PutObjectCommand({
+            Bucket: settings.objectStorageBucket,
+            Key: args.key,
+            ContentType: args.contentType,
+            ContentLength: args.byteSize,
+            Body: body,
+            Metadata: args.sha256 ? { sha256: args.sha256 } : undefined,
+          }),
+          { abortSignal: request.signal },
+        );
+        if (producerFailed) throw producerError;
+      } catch (error) {
+        // The SDK commonly rejects with AbortError after our producer abort;
+        // preserve the original integrity/source failure for its caller.
+        if (producerFailed) throw producerError;
+        throw error;
+      } finally {
+        args.signal?.removeEventListener("abort", onCallerAbort);
+        body.destroy();
       }
     },
     async putObjectStreamIfAbsent(args) {
@@ -263,7 +328,7 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
             ContentType: args.contentType,
             ContentLength: args.byteSize,
             Body: Readable.from(args.chunks),
-            Metadata: { sha256: args.sha256 },
+            Metadata: args.sha256 ? { sha256: args.sha256 } : undefined,
             IfNoneMatch: "*",
           }),
           args.signal ? { abortSignal: args.signal } : undefined,
@@ -457,7 +522,7 @@ function isS3VersionMismatch(error: unknown): boolean {
   return metadata?.httpStatusCode === 412;
 }
 
-function createGcsObjectStorage(settings: Settings): ObjectStorage {
+function createGcsObjectStorage(settings: ObjectStorageSettings): ObjectStorage {
   const client = new GcsClient(gcsClientOptions(settings));
   const bucket = client.bucket(settings.objectStorageBucket);
   return {
@@ -507,7 +572,7 @@ function createGcsObjectStorage(settings: Settings): ObjectStorage {
       try {
         await bucket.file(args.key).save(Buffer.from(args.body), {
           contentType: args.contentType,
-          metadata: { metadata: { sha256: args.sha256 } },
+          ...(args.sha256 ? { metadata: { metadata: { sha256: args.sha256 } } } : {}),
           preconditionOpts: { ifGenerationMatch: 0 },
         });
         return true;
@@ -516,12 +581,29 @@ function createGcsObjectStorage(settings: Settings): ObjectStorage {
         throw error;
       }
     },
+    async putObjectStream(args) {
+      const destination = bucket.file(args.key).createWriteStream({
+        resumable: false,
+        contentType: args.contentType,
+        highWaterMark: INTERNAL_STREAM_BUFFER_BYTES,
+        ...(args.sha256 ? { metadata: { metadata: { sha256: args.sha256 } } } : {}),
+      });
+      const source = Readable.from(args.chunks, {
+        objectMode: false,
+        highWaterMark: INTERNAL_STREAM_BUFFER_BYTES,
+      });
+      if (args.signal) {
+        await pipeline(source, destination, { signal: args.signal });
+      } else {
+        await pipeline(source, destination);
+      }
+    },
     async putObjectStreamIfAbsent(args) {
       const destination = bucket.file(args.key).createWriteStream({
         resumable: false,
         contentType: args.contentType,
         highWaterMark: INTERNAL_STREAM_BUFFER_BYTES,
-        metadata: { metadata: { sha256: args.sha256 } },
+        ...(args.sha256 ? { metadata: { metadata: { sha256: args.sha256 } } } : {}),
         preconditionOpts: { ifGenerationMatch: 0 },
       });
       try {
@@ -624,7 +706,7 @@ function isGcsVersionMismatch(error: unknown): boolean {
   return Boolean(error) && typeof error === "object" && (error as { code?: unknown }).code === 412;
 }
 
-function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null {
+function createAzureBlobObjectStorage(settings: ObjectStorageSettings): ObjectStorage | null {
   const sharedKey = azureSharedKeyCredential(settings);
   const requestServiceClient = settings.objectStorageAzureConnectionString
     ? BlobServiceClient.fromConnectionString(settings.objectStorageAzureConnectionString)
@@ -700,7 +782,7 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
       try {
         await blobClient.upload(body, body.byteLength, {
           blobHTTPHeaders: { blobContentType: args.contentType },
-          metadata: { sha256: args.sha256 },
+          ...(args.sha256 ? { metadata: { sha256: args.sha256 } } : {}),
           conditions: { ifNoneMatch: "*" },
         });
         return true;
@@ -709,16 +791,42 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
         throw error;
       }
     },
-    async putObjectStreamIfAbsent(args) {
+    async putObjectStream(args) {
       const blobClient = requestContainerClient.getBlockBlobClient(args.key);
+      const source = Readable.from(args.chunks, {
+        objectMode: false,
+        highWaterMark: INTERNAL_STREAM_BUFFER_BYTES,
+      });
       try {
         await blobClient.uploadStream(
-          Readable.from(args.chunks),
+          source,
           INTERNAL_STREAM_BUFFER_BYTES,
           INTERNAL_STREAM_CONCURRENCY,
           {
             blobHTTPHeaders: { blobContentType: args.contentType },
-            metadata: { sha256: args.sha256 },
+            ...(args.sha256 ? { metadata: { sha256: args.sha256 } } : {}),
+            ...(args.signal ? { abortSignal: args.signal } : {}),
+          },
+        );
+      } finally {
+        source.destroy();
+      }
+    },
+    async putObjectStreamIfAbsent(args) {
+      const blobClient = requestContainerClient.getBlockBlobClient(args.key);
+      // Azure's buffer scheduler expects Buffer chunks, not object-mode Uint8Arrays.
+      const source = Readable.from(args.chunks, {
+        objectMode: false,
+        highWaterMark: INTERNAL_STREAM_BUFFER_BYTES,
+      });
+      try {
+        await blobClient.uploadStream(
+          source,
+          INTERNAL_STREAM_BUFFER_BYTES,
+          INTERNAL_STREAM_CONCURRENCY,
+          {
+            blobHTTPHeaders: { blobContentType: args.contentType },
+            ...(args.sha256 ? { metadata: { sha256: args.sha256 } } : {}),
             conditions: { ifNoneMatch: "*" },
             ...(args.signal ? { abortSignal: args.signal } : {}),
           },
@@ -727,6 +835,8 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
       } catch (error) {
         if (isAzureVersionMismatch(error)) return false;
         throw error;
+      } finally {
+        source.destroy();
       }
     },
     async headFile(file) {
@@ -826,7 +936,7 @@ function isAzureVersionMismatch(error: unknown): boolean {
   );
 }
 
-function azureSharedKeyCredential(settings: Settings): StorageSharedKeyCredential {
+function azureSharedKeyCredential(settings: ObjectStorageSettings): StorageSharedKeyCredential {
   if (settings.objectStorageAzureConnectionString) {
     const parsed = parseConnectionString(settings.objectStorageAzureConnectionString);
     if (parsed.AccountName && parsed.AccountKey) {
@@ -845,7 +955,7 @@ function azureSharedKeyCredential(settings: Settings): StorageSharedKeyCredentia
   );
 }
 
-function azureBlobServiceUrl(settings: Settings): string {
+function azureBlobServiceUrl(settings: ObjectStorageSettings): string {
   if (settings.objectStorageAzureEndpoint) {
     return settings.objectStorageAzureEndpoint.replace(/\/+$/, "");
   }
@@ -868,7 +978,7 @@ function parseConnectionString(value: string): Record<string, string> {
   );
 }
 
-function gcsClientOptions(settings: Settings): StorageOptions {
+function gcsClientOptions(settings: ObjectStorageSettings): StorageOptions {
   const options: StorageOptions = {
     ...(settings.objectStorageGcsProjectId
       ? { projectId: settings.objectStorageGcsProjectId }

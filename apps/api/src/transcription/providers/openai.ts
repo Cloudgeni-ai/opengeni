@@ -53,6 +53,7 @@ function audioBlob(audio: Uint8Array, mimeType: string): Blob {
 export function responseError(status: number): TranscriptionServiceError {
   if (status === 401 || status === 403) {
     return new TranscriptionServiceError({
+      fallbackSafe: true,
       code: "unavailable",
       message: "Transcription is unavailable.",
     });

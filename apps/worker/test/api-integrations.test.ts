@@ -2,8 +2,13 @@ import { describe, expect, test } from "bun:test";
 import type { ApiIntegrationRuntime, ResolveConnectionCredentialResult } from "@opengeni/db";
 import { prepareAgentTools } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
+import type { McpConnectionAccountBinding } from "@opengeni/contracts";
+import {
+  expandApiIntegrationAccountRoutes,
+  expandMcpAccountRoutes,
+} from "../src/activities/mcp-account-routes";
 
-import { buildApiIntegrationServersForTurn } from "../src/activities/api-integrations";
+import { buildApiIntegrationMcpServers as buildApiIntegrationServersForTurn } from "@opengeni/core";
 
 function integration(): ApiIntegrationRuntime {
   return {
@@ -32,6 +37,7 @@ function integration(): ApiIntegrationRuntime {
       scopes: ["inventory.read"],
       subjectScope: "workspace",
     },
+    connectionAuthorityGeneration: 7,
     allowedTools: ["list_items"],
     requireApproval: [],
     revision: {
@@ -75,11 +81,175 @@ const authority = {
 };
 
 describe("installed API Integration worker adapters", () => {
+  test("one integration exposes personal and workspace routes with exact preflight generations", async () => {
+    const item = integration();
+    const bindings: McpConnectionAccountBinding[] = ["subject", "workspace"].map((scope, index) => {
+      const subjectScope = scope as "subject" | "workspace";
+      const connectionId =
+        index === 0
+          ? "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+          : "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+      return {
+        serverId: `inventory-account-${index}`,
+        canonicalServerId: item.serverId,
+        connectionId,
+        originWorkspaceId: "11111111-1111-4111-8111-111111111111",
+        subjectScope,
+        ownerSubjectId: index === 0 ? "human:alice" : null,
+        accountLabel: index === 0 ? "Alice" : "Team",
+        providerDomain: item.providerDomain,
+        kind: "oauth2",
+        connectionRef: { ...item.connectionRef!, connectionId, subjectScope },
+        connectionAuthorityGeneration: 11 + index,
+      };
+    });
+    const routed = expandMcpAccountRoutes({
+      settings: testSettings({
+        mcpServers: [
+          {
+            id: item.serverId,
+            url: item.baseUrl,
+            connectionRef: item.connectionRef!,
+          },
+        ],
+      }),
+      tools: [{ kind: "mcp", id: item.serverId }],
+      bindings,
+    });
+    const integrations = expandApiIntegrationAccountRoutes({
+      integrations: [item],
+      bindings,
+      tools: routed.tools,
+    });
+    const resolutions: Array<{
+      serverId: string;
+      connectionId?: string;
+      generation?: number;
+      mode?: string;
+    }> = [];
+    const localMcpServers = buildApiIntegrationServersForTurn({
+      settings: routed.settings,
+      integrations,
+      authority,
+      resolveCredential: async (request) => {
+        resolutions.push({
+          serverId: request.serverId,
+          connectionId: request.connectionRef.connectionId,
+          generation: request.expectedAuthorityGeneration,
+          mode: request.credentialResolutionMode,
+        });
+        return {
+          status: "ok",
+          connectionId: request.connectionRef.connectionId!,
+          headers: { Authorization: "Bearer synthetic" },
+        };
+      },
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ items: [] }), {
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    const prepared = await prepareAgentTools(routed.settings, routed.tools, {
+      localMcpServers,
+      mcpAccountLabels: routed.accountLabels,
+    });
+    try {
+      for (const [index, server] of prepared.mcpServers.entries()) {
+        const [tool] = await server.listTools();
+        expect(tool?.description).toContain(index === 0 ? "Personal: Alice" : "Workspace: Team");
+        await localMcpServers[index]!.preflightCall!("list_items", {});
+        await server.callTool(tool!.name, {});
+      }
+      expect(resolutions).toEqual(
+        bindings.flatMap((binding) =>
+          ["preflight", "execution"].map((mode) => ({
+            serverId: binding.serverId,
+            connectionId: binding.connectionId,
+            generation: binding.connectionAuthorityGeneration,
+            mode,
+          })),
+        ),
+      );
+      expect(integrations.map((value) => value.serverId)).toEqual(
+        bindings.map((binding) => binding.serverId),
+      );
+      expect(() =>
+        expandApiIntegrationAccountRoutes({
+          integrations: [item],
+          tools: routed.tools,
+          bindings: [{ ...bindings[0]!, connectionAuthorityGeneration: undefined }],
+        }),
+      ).toThrow("no authority generation");
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  test("preflights exact credentials and provider authorization without provider I/O", async () => {
+    const item = integration();
+    const resolvedDestinations: string[] = [];
+    const resolvedModes: Array<string | undefined> = [];
+    const resolvedGenerations: Array<number | undefined> = [];
+    let providerAuthorizations = 0;
+    let providerCalls = 0;
+    const settings = testSettings({
+      mcpServers: [
+        {
+          id: item.serverId,
+          name: item.name,
+          url: item.baseUrl,
+          allowedTools: item.allowedTools,
+          connectionRef: item.connectionRef!,
+        },
+      ],
+    });
+    const [registration] = buildApiIntegrationServersForTurn({
+      settings,
+      integrations: [item],
+      authority,
+      resolveCredential: async (request): Promise<ResolveConnectionCredentialResult> => {
+        resolvedDestinations.push(request.destinationUrl);
+        resolvedModes.push(request.credentialResolutionMode);
+        resolvedGenerations.push(request.expectedAuthorityGeneration);
+        return {
+          status: "ok",
+          connectionId: item.connectionRef!.connectionId!,
+          headers: { Authorization: "Bearer preflight-only" },
+          authorizeProviderRequest: async () => {
+            providerAuthorizations += 1;
+            return true;
+          },
+        };
+      },
+      fetchImpl: async () => {
+        providerCalls += 1;
+        return Response.json({ items: [] });
+      },
+    });
+
+    await registration!.preflightCall!("list_items", {});
+
+    expect(registration!.approvalAuthority).toMatchObject({
+      kind: "api_integration",
+      instanceId: item.instanceId,
+      instanceVersion: item.instanceVersion,
+      revisionId: item.revision.id,
+      connectionRef: item.connectionRef,
+    });
+    expect(resolvedDestinations).toEqual(["https://127.0.0.1/v1/items"]);
+    expect(resolvedModes).toEqual(["preflight"]);
+    expect(resolvedGenerations).toEqual([item.connectionAuthorityGeneration]);
+    expect(providerAuthorizations).toBe(1);
+    expect(providerCalls).toBe(0);
+  });
+
   test("uses the exact attempt resolver, local MCP registry, and provider transport", async () => {
     const resolved: Array<{
       destinationUrl: string;
       credentialTarget: string | undefined;
       forceRefresh: boolean;
+      credentialResolutionMode: string | undefined;
+      expectedAuthorityGeneration: number | undefined;
     }> = [];
     const requests: Array<{
       url: string;
@@ -110,13 +280,19 @@ describe("installed API Integration worker adapters", () => {
           destinationUrl: request.destinationUrl,
           credentialTarget: request.credentialTarget,
           forceRefresh: request.forceRefresh === true,
+          credentialResolutionMode: request.credentialResolutionMode,
+          expectedAuthorityGeneration: request.expectedAuthorityGeneration,
         });
         return {
           status: "ok",
           connectionId: item.connectionRef!.connectionId!,
           headers: { Authorization: "Bearer exact-attempt" },
           placements: [
-            { carrier: "header", name: "Authorization", value: "Bearer exact-attempt" },
+            {
+              carrier: "header",
+              name: "Authorization",
+              value: "Bearer exact-attempt",
+            },
             { carrier: "query", name: "api_key", value: "query-secret" },
             { carrier: "cookie", name: "session_key", value: "cookie-secret" },
           ],
@@ -155,6 +331,8 @@ describe("installed API Integration worker adapters", () => {
           destinationUrl: "https://127.0.0.1/v1/items",
           credentialTarget: "http_api",
           forceRefresh: false,
+          credentialResolutionMode: "execution",
+          expectedAuthorityGeneration: item.connectionAuthorityGeneration,
         },
       ]);
       expect(requests).toEqual([
@@ -296,7 +474,10 @@ describe("installed API Integration worker adapters", () => {
         connectionRef: item.connectionRef!,
       })),
     });
-    const resolutions: Array<{ serverId: string; connectionId: string | undefined }> = [];
+    const resolutions: Array<{
+      serverId: string;
+      connectionId: string | undefined;
+    }> = [];
     const localMcpServers = buildApiIntegrationServersForTurn({
       settings,
       integrations: [finance, sales],
@@ -309,7 +490,9 @@ describe("installed API Integration worker adapters", () => {
         return {
           status: "ok",
           connectionId: request.connectionRef.connectionId!,
-          headers: { Authorization: `Bearer ${request.connectionRef.connectionId}` },
+          headers: {
+            Authorization: `Bearer ${request.connectionRef.connectionId}`,
+          },
         };
       },
       fetchImpl: async () =>
@@ -341,7 +524,10 @@ describe("installed API Integration worker adapters", () => {
           serverId: finance.serverId,
           connectionId: finance.connectionRef!.connectionId,
         },
-        { serverId: sales.serverId, connectionId: sales.connectionRef!.connectionId },
+        {
+          serverId: sales.serverId,
+          connectionId: sales.connectionRef!.connectionId,
+        },
       ]);
     } finally {
       await prepared.close();

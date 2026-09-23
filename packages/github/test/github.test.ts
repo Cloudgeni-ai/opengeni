@@ -14,12 +14,14 @@ import {
   githubAppBotIdentityWarnings,
   GITHUB_APP_BOT_IDENTITY_UNAVAILABLE_WARNING,
   githubOAuthAuthorizeUrl,
+  listGitHubAppRepositoryBranches,
   normalizeGitHubAppPrivateKey,
   openPersonalGitHubGitBrokerClaims,
   personalGitHubGitBrokerRouteId,
   prReviewGitHubAppMissingSettings,
   sealPersonalGitHubGitBrokerClaims,
   settingsForPrReviewGitHubApp,
+  verifyPublicGitHubRepositoryRef,
   verifySignedState,
 } from "../src";
 
@@ -759,6 +761,215 @@ describe("GitHub App installation repository lookup", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  test("lists a bounded branch page with one exact repository-scoped token", async () => {
+    const requests: Array<{
+      method: string;
+      url: string;
+      authorization: string | null;
+      body: string | null;
+      redirect: RequestRedirect | undefined;
+    }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : {}));
+      requests.push({
+        method: init?.method ?? "GET",
+        url,
+        authorization: headers.get("authorization"),
+        body: typeof init?.body === "string" ? init.body : null,
+        redirect: init?.redirect,
+      });
+      if (url.endsWith("/app/installations/123/access_tokens")) {
+        return Response.json(
+          { token: "ghs_branches", expires_at: "2026-09-01T13:00:00Z" },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/repositories/456")) {
+        return Response.json({
+          id: 456,
+          full_name: "acme/app",
+          default_branch: "main",
+        });
+      }
+      if (url.startsWith("https://api.github.com/repos/acme/app/branches?")) {
+        return Response.json([{ name: "feature/picker" }, { name: "main" }]);
+      }
+      return Response.json({ message: "unexpected request" }, { status: 500 });
+    }) as typeof fetch;
+    try {
+      await expect(
+        listGitHubAppRepositoryBranches(signingSettings(), {
+          installationId: 123,
+          repositoryId: 456,
+          page: 2,
+          limit: 2,
+        }),
+      ).resolves.toEqual({
+        installationId: 123,
+        repositoryId: 456,
+        defaultBranch: "main",
+        branches: ["feature/picker", "main"],
+        nextPage: 3,
+      });
+      expect(JSON.parse(requests[0]!.body ?? "{}")).toEqual({
+        repository_ids: [456],
+        permissions: { contents: "read", metadata: "read" },
+      });
+      expect(requests.slice(1).map((request) => request.authorization)).toEqual([
+        "Bearer ghs_branches",
+        "Bearer ghs_branches",
+      ]);
+      expect(requests.every((request) => request.redirect === "manual")).toBe(true);
+      const branchUrl = new URL(requests[2]!.url);
+      expect(branchUrl.searchParams.get("page")).toBe("2");
+      expect(branchUrl.searchParams.get("per_page")).toBe("2");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("bounds branch-provider error bodies before surfacing a stable failure", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith("/app/installations/123/access_tokens")) {
+        return Response.json(
+          { token: "ghs_branches", expires_at: "2026-09-01T13:00:00Z" },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/repositories/456")) {
+        return new Response("provider detail ".repeat(8_000), { status: 502 });
+      }
+      return Response.json({ message: "unexpected request" }, { status: 500 });
+    }) as typeof fetch;
+    try {
+      await expect(
+        listGitHubAppRepositoryBranches(signingSettings(), {
+          installationId: 123,
+          repositoryId: 456,
+          page: 1,
+          limit: 100,
+        }),
+      ).rejects.toMatchObject({ message: "GitHub API 502", status: 502 });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("bounds the branch flow's installation-token success body", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith("/app/installations/123/access_tokens")) {
+        return Response.json({
+          token: "ghs_branches",
+          padding: "x".repeat(70 * 1024),
+        });
+      }
+      return Response.json({ message: "unexpected request" }, { status: 500 });
+    }) as typeof fetch;
+    try {
+      await expect(
+        listGitHubAppRepositoryBranches(signingSettings(), {
+          installationId: 123,
+          repositoryId: 456,
+          page: 1,
+          limit: 100,
+        }),
+      ).rejects.toThrow("GitHub returned an invalid installation token payload");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("verifies an exact public repository and arbitrary GitHub ref anonymously", async () => {
+    const requests: Array<{
+      url: string;
+      authorization: string | null;
+      redirect?: RequestRedirect;
+    }> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      requests.push({
+        url,
+        authorization: new Headers(init?.headers).get("authorization"),
+        redirect: init?.redirect,
+      });
+      if (url.endsWith("/repos/Cloudgeni-ai/opengeni")) {
+        return Response.json({
+          id: 123,
+          full_name: "Cloudgeni-ai/opengeni",
+          private: false,
+          default_branch: "main",
+        });
+      }
+      if (url.endsWith("/commits/refs%2Ftags%2Fv1.0.0%5E%7Bcommit%7D")) {
+        return Response.json({ sha: "a".repeat(40) });
+      }
+      return Response.json({ message: "not found" }, { status: 404 });
+    }) as typeof fetch;
+    await expect(
+      verifyPublicGitHubRepositoryRef(
+        {
+          repository: {
+            owner: "Cloudgeni-ai",
+            name: "opengeni",
+            fullName: "Cloudgeni-ai/opengeni",
+            canonicalUrl: "https://github.com/Cloudgeni-ai/opengeni",
+            cloneUrl: "https://github.com/Cloudgeni-ai/opengeni.git",
+          },
+          ref: "refs/tags/v1.0.0^{commit}",
+        },
+        fetchImpl,
+      ),
+    ).resolves.toEqual({
+      owner: "Cloudgeni-ai",
+      name: "opengeni",
+      fullName: "Cloudgeni-ai/opengeni",
+      canonicalUrl: "https://github.com/Cloudgeni-ai/opengeni",
+      cloneUrl: "https://github.com/Cloudgeni-ai/opengeni.git",
+      defaultBranch: "main",
+      ref: "refs/tags/v1.0.0^{commit}",
+      commitSha: "a".repeat(40),
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests.every((request) => request.authorization === null)).toBe(true);
+    expect(requests.every((request) => request.redirect === "manual")).toBe(true);
+  });
+
+  test("fails closed for private, missing-ref, redirected, or oversized public GitHub responses", async () => {
+    const repository = {
+      owner: "acme",
+      name: "app",
+      fullName: "acme/app",
+      canonicalUrl: "https://github.com/acme/app",
+      cloneUrl: "https://github.com/acme/app.git",
+    };
+    await expect(
+      verifyPublicGitHubRepositoryRef({ repository, ref: "main" }, (async () =>
+        Response.json({ message: "not found" }, { status: 404 })) as typeof fetch),
+    ).rejects.toMatchObject({ code: "unavailable" });
+    await expect(
+      verifyPublicGitHubRepositoryRef(
+        { repository, ref: "main" },
+        (async () =>
+          new Response(null, {
+            status: 302,
+            headers: { location: "https://evil.test" },
+          })) as typeof fetch,
+      ),
+    ).rejects.toMatchObject({ code: "provider_unavailable" });
+    await expect(
+      verifyPublicGitHubRepositoryRef(
+        { repository, ref: "main" },
+        (async () => new Response("x".repeat(140 * 1024))) as typeof fetch,
+      ),
+    ).rejects.toMatchObject({ code: "provider_unavailable" });
   });
 
   test("refuses to build a lookup without GitHub App credentials", () => {

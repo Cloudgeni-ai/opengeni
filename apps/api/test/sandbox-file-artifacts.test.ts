@@ -39,7 +39,13 @@ describe("sandbox file artifact paths", () => {
 
   test("uses stable MIME types with an opaque fallback", () => {
     expect(sandboxFileContentType("report.PDF")).toBe("application/pdf");
+    expect(sandboxFileContentType("demo.MP4")).toBe("video/mp4");
+    expect(sandboxFileContentType("voice.mp3")).toBe("audio/mpeg");
     expect(sandboxFileContentType("archive.zip")).toBe("application/zip");
     expect(sandboxFileContentType("unknown.custom")).toBe("application/octet-stream");
+    // Writer MIME must remain replay-compatible with the rolling base binary.
+    expect(sandboxFileContentType("diagram.SVG")).toBe("application/octet-stream");
+    expect(sandboxFileContentType("animation.gif")).toBe("application/octet-stream");
+    expect(sandboxFileContentType("screenshot.avif")).toBe("application/octet-stream");
   });
 });

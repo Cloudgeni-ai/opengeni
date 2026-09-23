@@ -161,45 +161,46 @@ async function fixture(): Promise<Fixture> {
       provider_api, model, billing_path, scheduled_task_id,
       input_tokens, output_tokens, cached_tokens, cache_write_tokens,
       reasoning_tokens, total_tokens, priced_cost_micros,
-      estimated_provider_cost_micros, pricing_source, context_contributions,
+      estimated_provider_cost_micros, equivalent_credit_cost_micros,
+      pricing_source, context_contributions,
       occurred_at, recorded_at
     ) values
       (
         ${grant.accountId}, ${workspaceId}, ${sharedSession.id}, ${crypto.randomUUID()},
         ${`shared-openai-${suffix}`}, 'openai', 'responses', 'gpt-bundle', 'external',
-        ${sharedTaskId}, 100, 50, 20, null, 5, 150, 0, 25, 'gateway_reported',
+        ${sharedTaskId}, 100, 50, 20, null, 5, 150, 0, 25, 27, 'gateway_reported',
         ${shared.admin.json([{ source: "company_profile", items: 1, utf8Bytes: 80, estimatedTokens: 20 }])},
         '2026-08-11T09:15:00.000Z', '2026-08-11T09:15:01.000Z'
       ),
       (
         ${grant.accountId}, ${workspaceId}, ${sharedSession.id}, ${crypto.randomUUID()},
         ${`shared-azure-${suffix}`}, 'azure', 'responses', 'azure-bundle', 'opengeni_credits',
-        ${sharedTaskId}, null, 10, null, null, null, 10, 200, null, null, null,
+        ${sharedTaskId}, null, 10, null, null, null, 10, 200, null, null, null, null,
         '2026-08-12T10:30:00.000Z', '2026-08-12T10:30:01.000Z'
       ),
       (
         ${grant.accountId}, ${workspaceId}, ${privateSession.id}, ${crypto.randomUUID()},
         ${`private-openai-a-${suffix}`}, 'openai', 'responses', 'gpt-bundle', 'opengeni_credits',
-        ${privateTaskId}, 40, 20, 10, 3, 2, 60, 300, 50, 'configured_list_price',
+        ${privateTaskId}, 40, 20, 10, 3, 2, 60, 300, 50, 53, 'configured_list_price',
         ${shared.admin.json([{ source: "workspace_instruction_policy", items: 2, utf8Bytes: 120, estimatedTokens: 30 }])},
         '2026-08-13T11:45:00.000Z', '2026-08-13T11:45:01.000Z'
       ),
       (
         ${grant.accountId}, ${workspaceId}, ${privateSession.id}, ${crypto.randomUUID()},
         ${`private-openai-b-${suffix}`}, 'openai', 'responses', 'gpt-bundle', 'opengeni_credits',
-        ${privateTaskId}, 10, 5, null, null, null, 15, 75, null, null, '[]'::jsonb,
+        ${privateTaskId}, 10, 5, null, null, null, 15, 75, null, null, null, '[]'::jsonb,
         '2026-08-14T12:00:00.000Z', '2026-08-14T12:00:01.000Z'
       ),
       (
         ${grant.accountId}, ${workspaceId}, ${sharedSession.id}, ${crypto.randomUUID()},
         ${`prior-shared-${suffix}`}, 'openai', 'responses', 'gpt-bundle', 'opengeni_credits',
-        ${sharedTaskId}, 70, 30, 10, null, null, 100, 100, 20, 'configured_list_price', null,
+        ${sharedTaskId}, 70, 30, 10, null, null, 100, 100, 20, 21, 'configured_list_price', null,
         '2026-08-02T08:00:00.000Z', '2026-08-02T08:00:01.000Z'
       ),
       (
         ${grant.accountId}, ${workspaceId}, ${privateSession.id}, ${crypto.randomUUID()},
         ${`prior-private-${suffix}`}, 'openai', 'responses', 'gpt-bundle', 'opengeni_credits',
-        ${privateTaskId}, 10, 10, 5, null, null, 20, 50, 10, 'configured_list_price', null,
+        ${privateTaskId}, 10, 10, 5, null, null, 20, 50, 10, 11, 'configured_list_price', null,
         '2026-08-03T08:00:00.000Z', '2026-08-03T08:00:01.000Z'
       )`;
 
@@ -358,6 +359,63 @@ describe("Workspace Insights model bundle", () => {
     expect(source.match(/left join sessions root/g)).toHaveLength(1);
     expect(source).not.toContain("left join sessions session");
     expect(source).toContain("selected_sessions as materialized");
+    expect(source).not.toContain("count(distinct id)");
+    expect(source).toContain("count(*) filter (where first_source)");
+  });
+
+  test("counts each fact once per source while preserving sums, including DB-accepted null sources", async () => {
+    if (!shared) return;
+    const entries = [
+      { source: "company_profile", items: 1, utf8Bytes: 80, estimatedTokens: 20 },
+      { source: null, items: 2, utf8Bytes: 40, estimatedTokens: 10 },
+      { source: null, items: 3, utf8Bytes: 60, estimatedTokens: 15 },
+    ];
+    const [valid] = await shared.admin`
+      select opengeni_private.model_context_contributions_valid(${shared.admin.json(entries)}) as accepted,
+        opengeni_private.model_context_contributions_valid(${shared.admin.json([entries[0]!, entries[0]!])}) as duplicate_named`;
+    expect(valid?.accepted).toBe(true);
+    expect(valid?.duplicate_named).toBe(false);
+    const [constraint] = await shared.admin`
+      select convalidated from pg_constraint
+      where conrelid = 'model_call_facts'::regclass
+        and conname = 'model_call_facts_context_contributions_check'`;
+    expect(constraint?.convalidated).toBe(true);
+
+    // Include repeated sources across facts, empty coverage, and unknown coverage.
+    const rows = await shared.admin`
+      with facts(id, context_contributions) as (values
+        (1, ${shared.admin.json(entries)}::jsonb),
+        (2, ${shared.admin.json(entries)}::jsonb),
+        (3, '[]'::jsonb), (4, null::jsonb)
+      ), legacy as (
+        select entry->>'source' as source,
+          sum((entry->>'items')::bigint)::bigint as items,
+          sum((entry->>'utf8Bytes')::bigint)::bigint as utf8_bytes,
+          sum((entry->>'estimatedTokens')::bigint)::bigint as estimated_tokens,
+          count(distinct id)::bigint as calls
+        from facts cross join lateral jsonb_array_elements(context_contributions) entry
+        group by entry->>'source'
+      ), candidate as (
+        select contribution.entry->>'source' as source,
+          sum((contribution.entry->>'items')::bigint)::bigint as items,
+          sum((contribution.entry->>'utf8Bytes')::bigint)::bigint as utf8_bytes,
+          sum((contribution.entry->>'estimatedTokens')::bigint)::bigint as estimated_tokens,
+          count(*) filter (where case
+            when contribution.entry->>'source' is not null then true
+            else not exists (
+              select 1 from jsonb_array_elements(context_contributions)
+                with ordinality earlier(entry, ordinal)
+              where earlier.ordinal < contribution.ordinal
+                and earlier.entry->>'source' is null
+            ) end)::bigint as calls
+        from facts cross join lateral jsonb_array_elements(context_contributions)
+          with ordinality contribution(entry, ordinal)
+        group by contribution.entry->>'source'
+      )
+      (select * from legacy except all select * from candidate)
+      union all
+      (select * from candidate except all select * from legacy)`;
+    expect(rows).toHaveLength(0);
   });
 
   test("matches the legacy helpers for shared/private visibility, filters, and UTC buckets", async () => {

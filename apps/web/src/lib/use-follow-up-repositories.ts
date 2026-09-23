@@ -1,15 +1,116 @@
-import { mergeResourceRefs } from "@opengeni/contracts";
+import {
+  mergeResourceRefs,
+  normalizeRepositoryTransportUri,
+  stableJson,
+} from "@opengeni/contracts";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { RepositoryContextPickerProps } from "@/components/repository-picker";
 import { useAppContext } from "@/context";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import {
   buildAdditionalRepositoryResources,
   repositorySelectionFromResources,
   type RepoDraft,
 } from "@/lib/session-tools";
 import type { GitHubRepository, ResourceRef, Session } from "@/types";
+
+type RepositoryResource = Extract<ResourceRef, { kind: "repository" }>;
+
+type RepositoryRefreshContext = Pick<
+  ReturnType<typeof useAppContext>,
+  | "accessContext"
+  | "captureWorkspaceInvocation"
+  | "refreshGitHub"
+  | "refreshPersonalGitHub"
+  | "repoBusy"
+  | "personalGitHubBusy"
+>;
+
+/** Keep this above the lazily mounted menu so rapid reopenings share one cooldown. */
+export function useRepositoryCatalogRefresh(
+  workspaceId: string,
+  context: RepositoryRefreshContext,
+) {
+  const gate = useRef<{ key: string; attemptedAt: number; inFlight: Promise<void> | null } | null>(
+    null,
+  );
+  const canUseGitHub = hasWorkspacePermission(context.accessContext, workspaceId, "github:use");
+  const canManageGitHub = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "github:manage",
+  );
+  const canReadPersonal = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "connections:read",
+  );
+  const refresh = useCallback(
+    async (explicit: boolean) => {
+      const transition = context.captureWorkspaceInvocation(workspaceId);
+      if (!transition || (!canUseGitHub && !canReadPersonal)) return;
+      // A principal/workspace/permission transition must not inherit another scope's cooldown.
+      const key = JSON.stringify([
+        context.accessContext.subjectId,
+        workspaceId,
+        transition.revision,
+        canUseGitHub,
+        canManageGitHub,
+        canReadPersonal,
+      ]);
+      const previous = gate.current;
+      if (previous?.key === key) {
+        if (previous.inFlight) return previous.inFlight;
+        if (!explicit && Date.now() - previous.attemptedAt < 30_000) return;
+      }
+      if ((canUseGitHub && context.repoBusy) || (canReadPersonal && context.personalGitHubBusy))
+        return;
+      const accepted = { key, attemptedAt: Date.now(), inFlight: null as Promise<void> | null };
+      gate.current = accepted;
+      // Opening is read-only. Explicit refresh may sync for an App manager;
+      // ordinary users keep catalog reads. Context retains its async ownership fences.
+      const request = Promise.all([
+        ...(canUseGitHub
+          ? [
+              context.refreshGitHub(workspaceId, undefined, {
+                sync: explicit && canManageGitHub,
+              }),
+            ]
+          : []),
+        ...(canReadPersonal ? [context.refreshPersonalGitHub(workspaceId)] : []),
+      ]).then(() => undefined);
+      accepted.inFlight = request;
+      try {
+        await request;
+      } finally {
+        accepted.inFlight = null;
+      }
+    },
+    [context, workspaceId, canUseGitHub, canManageGitHub, canReadPersonal],
+  );
+  return {
+    refreshAllowed: canUseGitHub || canReadPersonal,
+    onOpenRefresh: useCallback(() => refresh(false), [refresh]),
+    onRefresh: useCallback(() => refresh(true), [refresh]),
+  };
+}
+
+function manualDraftSignature(draft: RepoDraft): string | null {
+  try {
+    const uri = normalizeRepositoryTransportUri(
+      draft.url.includes("://") ? draft.url : `https://${draft.url}`,
+    );
+    return `${uri}\u0000${draft.ref.trim()}\u0000${draft.expectedCommitSha ?? ""}`;
+  } catch {
+    return null;
+  }
+}
+
+function manualResourceSignature(resource: RepositoryResource): string {
+  return `${resource.uri}\u0000${resource.ref}\u0000${resource.expectedCommitSha ?? ""}`;
+}
 
 /**
  * Session-scoped repository additions for the follow-up composer. Session
@@ -24,6 +125,7 @@ export function useFollowUpRepositories(session: Session): {
   commitSent: (resources: ResourceRef[]) => void;
 } {
   const context = useAppContext();
+  const catalogRefresh = useRepositoryCatalogRefresh(session.workspaceId, context);
   const [pendingRepoIds, setPendingRepoIds] = useState<Set<number>>(() => new Set());
   const [pendingRepoRefs, setPendingRepoRefs] = useState<Record<number, string>>({});
   const [pendingPersonalRepoIds, setPendingPersonalRepoIds] = useState<Set<string>>(
@@ -36,6 +138,8 @@ export function useFollowUpRepositories(session: Session): {
   const [manualReposOpen, setManualReposOpen] = useState(false);
   const [optimisticMountedRepos, setOptimisticMountedRepos] = useState<ResourceRef[]>([]);
   const nextManualRepoId = useRef(1);
+  const currentSessionId = useRef(session.id);
+  currentSessionId.current = session.id;
 
   const mountedResources = useMemo(
     () => mergeResourceRefs(session.resources, optimisticMountedRepos),
@@ -133,11 +237,14 @@ export function useFollowUpRepositories(session: Session): {
     pendingRepoIds,
     pendingRepoRefs,
   ]);
+  const pendingResourcesRef = useRef(pendingBuild.resources);
+  pendingResourcesRef.current = pendingBuild.resources;
   const selectionCount =
     selectedRepoIds.size +
     selectedPersonalRepoIds.size +
-    [...mountedManualRepos, ...pendingManualRepos].filter((repo) => repo.url.trim().length > 0)
-      .length;
+    [...mountedManualRepos, ...pendingManualRepos].filter(
+      (repository) => repository.attached !== false && repository.url.trim().length > 0,
+    ).length;
 
   const togglePendingRepository = useCallback(
     (repo: GitHubRepository) => {
@@ -284,13 +391,16 @@ export function useFollowUpRepositories(session: Session): {
       lockedRepoIds: mountedRepositorySelection.selectedRepoIds,
       lockedPersonalGitHubRepoIds: mountedPersonalRepoIds,
       lockedManualRepoIds,
+      unavailableMountedRepositories: mountedRepositoryResources.filter(
+        (resource) =>
+          resource.connectionType === "github_personal" &&
+          (context.personalGitHubStatus?.connection?.status !== "active" ||
+            !context.personalGitHubRepositories.some(
+              (repo) => repo.repositoryId === resource.repositoryId && repo.selectedAccess !== null,
+            )),
+      ),
       validationError: pendingBuild.error,
-      onRefresh: async () => {
-        await Promise.all([
-          context.refreshGitHub(session.workspaceId, undefined, { sync: true }),
-          context.refreshPersonalGitHub(session.workspaceId),
-        ]);
-      },
+      ...catalogRefresh,
       onConnectPersonalGitHub: () => void context.connectPersonalGitHub(session.workspaceId),
       onTogglePersonalGitHubRepo: (repo) => void togglePendingPersonalRepository(repo),
       onPersonalGitHubRefChange: (repositoryId, ref) =>
@@ -298,10 +408,56 @@ export function useFollowUpRepositories(session: Session): {
       onToggleRepo: togglePendingRepository,
       onRefChange: (repoId, ref) =>
         setPendingRepoRefs((current) => ({ ...current, [repoId]: ref })),
+      onLoadGitHubBranches: async (repository) => {
+        const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
+        const acceptedSessionId = session.id;
+        if (!acceptedTransition) throw new Error("The session changed; refresh and try again.");
+        const { listGitHubRepositoryBranches } = await import("@opengeni/sdk/github-repositories");
+        const response = await listGitHubRepositoryBranches(
+          context.client,
+          session.workspaceId,
+          repository.installationId,
+          repository.id,
+          { limit: 100 },
+        );
+        if (
+          currentSessionId.current !== acceptedSessionId ||
+          !context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)
+        ) {
+          throw new Error("The session changed; refresh and try again.");
+        }
+        return response.branches;
+      },
+      onLoadPersonalGitHubBranches: async (repository) => {
+        const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
+        const acceptedSessionId = session.id;
+        if (!acceptedTransition) throw new Error("The session changed; refresh and try again.");
+        const connectionId = context.personalGitHubStatus?.connection?.id;
+        if (!connectionId) throw new Error("Connect your GitHub identity to load branches.");
+        const { listPersonalGitHubRepositoryBranches } =
+          await import("@opengeni/sdk/github-repositories");
+        const response = await listPersonalGitHubRepositoryBranches(
+          context.client,
+          session.workspaceId,
+          connectionId,
+          repository.repositoryId,
+          { limit: 100 },
+        );
+        if (
+          currentSessionId.current !== acceptedSessionId ||
+          !context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)
+        ) {
+          throw new Error("The session changed; refresh and try again.");
+        }
+        return response.branches;
+      },
       onManualOpenChange: setManualReposOpen,
       onManualAdd: () => {
         const id = nextManualRepoId.current++;
-        setPendingManualRepos((current) => [...current, { id, url: "", ref: "main" }]);
+        setPendingManualRepos((current) => [
+          ...current,
+          { id, url: "", ref: "main", attached: false },
+        ]);
         setManualReposOpen(true);
       },
       onManualUpdate: (id, patch) =>
@@ -310,17 +466,134 @@ export function useFollowUpRepositories(session: Session): {
         ),
       onManualRemove: (id) =>
         setPendingManualRepos((current) => current.filter((repo) => repo.id !== id)),
+      onManualAttach: async (repository) => {
+        const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
+        const acceptedSessionId = session.id;
+        if (!acceptedTransition) throw new Error("The session changed; try again.");
+        const assertCurrent = () => {
+          if (
+            currentSessionId.current !== acceptedSessionId ||
+            !context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)
+          ) {
+            throw new Error("The session changed; try again.");
+          }
+        };
+        assertCurrent();
+        const { attachManualRepository } = await import("@/lib/manual-repositories");
+        assertCurrent();
+        return await attachManualRepository({
+          repository,
+          workspaceRepositories: context.githubRepos,
+          personalRepositories: context.personalGitHubRepositories,
+          selectWorkspaceRepository: (matched, ref) => {
+            assertCurrent();
+            const mountedPersonalConflict = context.personalGitHubRepositories.some(
+              (candidate) =>
+                mountedPersonalRepoIds.has(candidate.repositoryId) &&
+                candidate.fullName.toLowerCase() === matched.fullName.toLowerCase(),
+            );
+            if (mountedPersonalConflict) {
+              throw new Error("This repository is already mounted as your GitHub identity.");
+            }
+            const mountedInstallationId = context.githubRepos.find((candidate) =>
+              mountedRepositorySelection.selectedRepoIds.has(candidate.id),
+            )?.installationId;
+            if (
+              mountedInstallationId !== undefined &&
+              mountedInstallationId !== matched.installationId
+            ) {
+              throw new Error(
+                "This session already has repositories mounted from another App account.",
+              );
+            }
+            setPendingRepoIds((current) => {
+              const next =
+                selectedInstallationId !== null && selectedInstallationId !== matched.installationId
+                  ? new Set<number>()
+                  : new Set(current);
+              next.add(matched.id);
+              return next;
+            });
+            setPendingRepoRefs((current) => ({ ...current, [matched.id]: ref }));
+            setPendingPersonalRepoIds(
+              (current) =>
+                new Set(
+                  [...current].filter(
+                    (id) =>
+                      context.personalGitHubRepositories
+                        .find((candidate) => candidate.repositoryId === id)
+                        ?.fullName.toLowerCase() !== matched.fullName.toLowerCase(),
+                  ),
+                ),
+            );
+          },
+          selectPersonalRepository: async (matched, ref) => {
+            const mountedWorkspaceConflict = context.githubRepos.some(
+              (candidate) =>
+                mountedRepositorySelection.selectedRepoIds.has(candidate.id) &&
+                candidate.fullName.toLowerCase() === matched.fullName.toLowerCase(),
+            );
+            if (mountedWorkspaceConflict) {
+              throw new Error("This repository is already mounted with the workspace App.");
+            }
+            if (!(await context.ensurePersonalGitHubAuthority(session.workspaceId))) {
+              throw new Error("Your GitHub identity could not be authorized for this workspace.");
+            }
+            assertCurrent();
+            setPendingRepoIds(
+              (current) =>
+                new Set(
+                  [...current].filter(
+                    (id) =>
+                      context.githubRepos
+                        .find((candidate) => candidate.id === id)
+                        ?.fullName.toLowerCase() !== matched.fullName.toLowerCase(),
+                  ),
+                ),
+            );
+            setPendingPersonalRepoIds((current) => new Set(current).add(matched.repositoryId));
+            setPendingPersonalRepoRefs((current) => ({
+              ...current,
+              [matched.repositoryId]: ref,
+            }));
+          },
+          verifyPublicGitHubRepository: async (request) => {
+            const { verifyPublicGitHubRepositoryRef } =
+              await import("@opengeni/sdk/github-repositories");
+            const verified = await verifyPublicGitHubRepositoryRef(
+              context.client,
+              session.workspaceId,
+              request,
+            );
+            assertCurrent();
+            return verified;
+          },
+          attach: (attached) => {
+            assertCurrent();
+            setPendingManualRepos((current) =>
+              current.map((candidate) => (candidate.id === attached.id ? attached : candidate)),
+            );
+          },
+          remove: (id) => {
+            assertCurrent();
+            setPendingManualRepos((current) => current.filter((candidate) => candidate.id !== id));
+          },
+        });
+      },
+      newChatUrl: `/workspaces/${session.workspaceId}`,
       onGitHubAppOpenChange: context.setGithubAppOpen,
       onOrgChange: context.setGithubOrg,
       onStartGitHubApp: () => void context.startGitHubAppManifestFlow(session.workspaceId),
       onDisconnectInstallation: disconnectRepositoryInstallation,
     }),
     [
+      catalogRefresh,
       context,
       disconnectRepositoryInstallation,
       lockedManualRepoIds,
       manualReposOpen,
       mountedManualRepos,
+      mountedRepositoryResources,
       mountedPersonalRepoIds,
       mountedRepositorySelection.selectedRepoIds,
       pendingBuild.error,
@@ -330,6 +603,7 @@ export function useFollowUpRepositories(session: Session): {
       selectedPersonalRepoRefs,
       selectedRepoIds,
       selectedRepoRefs,
+      session.id,
       session.workspaceId,
       togglePendingRepository,
       togglePendingPersonalRepository,
@@ -343,13 +617,71 @@ export function useFollowUpRepositories(session: Session): {
     );
     if (repositories.length === 0) return;
     setOptimisticMountedRepos((current) => mergeResourceRefs(current, repositories));
-    // The picker is disabled during delivery, so every pending selection belongs
-    // to the immutable wire input accepted by this callback.
-    setPendingRepoIds(new Set());
-    setPendingRepoRefs({});
-    setPendingPersonalRepoIds(new Set());
-    setPendingPersonalRepoRefs({});
-    setPendingManualRepos([]);
+
+    // An optimistic Send can be accepted after the picker becomes editable
+    // again. Remove only pending selections represented by this immutable wire
+    // snapshot; later additions must remain queued for the next message.
+    const acceptedKeys = new Set(repositories.map(stableJson));
+    const pendingResources = pendingResourcesRef.current;
+    const acceptedRepoIds = new Set(
+      pendingResources.flatMap((resource) =>
+        resource.kind === "repository" &&
+        resource.githubRepositoryId !== undefined &&
+        acceptedKeys.has(stableJson(resource))
+          ? [resource.githubRepositoryId]
+          : [],
+      ),
+    );
+    const acceptedPersonalRepoIds = new Set(
+      pendingResources.flatMap((resource) =>
+        resource.kind === "repository" &&
+        resource.connectionType === "github_personal" &&
+        typeof resource.repositoryId === "string" &&
+        acceptedKeys.has(stableJson(resource))
+          ? [resource.repositoryId]
+          : [],
+      ),
+    );
+    const acceptedManualDraftKeys = new Set(
+      pendingResources.flatMap((resource) => {
+        if (
+          resource.kind !== "repository" ||
+          resource.connectionType === "github_personal" ||
+          resource.githubRepositoryId !== undefined ||
+          resource.githubInstallationId !== undefined ||
+          !acceptedKeys.has(stableJson(resource))
+        ) {
+          return [];
+        }
+        return [manualResourceSignature(resource)];
+      }),
+    );
+
+    setPendingRepoIds((current) => {
+      const next = new Set([...current].filter((id) => !acceptedRepoIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+    setPendingRepoRefs((current) => {
+      const next = { ...current };
+      for (const id of acceptedRepoIds) delete next[id];
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+    setPendingPersonalRepoIds((current) => {
+      const next = new Set([...current].filter((id) => !acceptedPersonalRepoIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+    setPendingPersonalRepoRefs((current) => {
+      const next = { ...current };
+      for (const id of acceptedPersonalRepoIds) delete next[id];
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+    setPendingManualRepos((current) => {
+      const next = current.filter((draft) => {
+        const signature = manualDraftSignature(draft);
+        return signature === null || !acceptedManualDraftKeys.has(signature);
+      });
+      return next.length === current.length ? current : next;
+    });
   }, []);
 
   return {

@@ -104,7 +104,6 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       settings,
       workspaceModelPolicy,
       inheritedModel: inheritedContinuationModel,
-      sessionModel: session.model,
     });
     continuationModel = modelDecision.model;
     let modelPolicyBlocked = modelDecision.blocked;
@@ -174,7 +173,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
         tools: withFirstPartyTools(settings, session.tools),
         sandboxBackend: session.sandboxBackend,
       },
-      // The hold guidance is only given when `goal_wait` is actually in this
+      // Long-wait guidance is only given when `wait_for_input` is actually in this
       // session's effective first-party selection (the same source the worker
       // signs into the delegated token and the API uses to register tools), so
       // a pre-existing narrowed selection is never told to call a missing tool.
@@ -184,7 +183,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
           session.firstPartyMcpTools,
         );
         return goalContinuationPrompt(goal, autoContinuation, cap, {
-          goalWaitAvailable: effectiveFirstPartyTools.includes("goal_wait"),
+          inputWaitAvailable: effectiveFirstPartyTools.includes("wait_for_input"),
           humanInputRespondAvailable: effectiveFirstPartyTools.includes(
             "session_human_input_respond",
           ),
@@ -207,7 +206,6 @@ export function goalContinuationModelDecision(input: {
   settings: Settings;
   workspaceModelPolicy: Awaited<ReturnType<typeof getWorkspaceModelPolicy>>;
   inheritedModel: string;
-  sessionModel: string;
 }): { model: string; blocked: string | null } {
   const catalogSettings = input.settings.supergrokSubscriptionEnabled
     ? withXaiSubscriptionCatalogProvider(
@@ -224,11 +222,11 @@ export function goalContinuationModelDecision(input: {
       providerId: policyProviderIdForModel(catalogSettings, modelId),
       modelId,
     }).allowed;
-  const candidates = [...new Set([input.inheritedModel, input.sessionModel])];
-  for (const model of candidates) {
-    if (resolveModelProvider(catalogSettings, model) && !policyBlocks(model)) {
-      return { model, blocked: null };
-    }
+  if (
+    resolveModelProvider(catalogSettings, input.inheritedModel) &&
+    !policyBlocks(input.inheritedModel)
+  ) {
+    return { model: input.inheritedModel, blocked: null };
   }
   if (!resolveModelProvider(catalogSettings, input.inheritedModel)) {
     return {
@@ -254,14 +252,15 @@ export function goalContinuationPrompt(
   _goal: SessionGoal,
   _autoContinuation: number,
   _cap: number | null,
-  options: { goalWaitAvailable?: boolean; humanInputRespondAvailable?: boolean } = {},
+  options: { inputWaitAvailable?: boolean; humanInputRespondAvailable?: boolean } = {},
 ): string {
-  const waitingGuidance = options.goalWaitAvailable
+  const waitingGuidance = options.inputWaitAvailable
     ? [
-        "Waiting on child sessions or external events:",
-        "- When the next progress depends on child sessions you spawned or on an external event, do not sleep, loop, or poll sessions_list/session_get/session_events to wait for it.",
-        "- Re-check sessions_list or session_get once; if the work is still in flight, call opengeni__goal_wait with a concrete reason and a deadline (untilSeconds), then end your turn immediately. You will be woken by a child result, a message, a human prompt, or at the deadline, and this goal stays active.",
-        "- A hold is for child/external progress only. If you are blocked on a human decision, use opengeni__goal_pause under the blocked audit below instead.",
+        "Waiting on child sessions, background commands, or external events:",
+        "- When further progress depends on work already in flight, do not sleep, loop, or poll session or command state repeatedly.",
+        "- Re-check once; if the work is still in flight and the wait is long or uncertain, call opengeni__wait_for_input with a concrete reason and timeoutSeconds, then end your turn immediately. Relevant session input or the safety deadline will start a new turn, and this goal stays active.",
+        "- If the immediately preceding user-facing update already reported this same unchanged wait, do not restate it or produce another equivalent final answer. Call opengeni__wait_for_input and end the turn. Report only material new state or a newly discovered blocker.",
+        "- If you are blocked on a human decision, use opengeni__goal_pause under the blocked audit below instead.",
         "",
       ]
     : [];
@@ -287,6 +286,8 @@ export function goalContinuationPrompt(
     "Continuation behavior:",
     "- This goal persists across turns. A runtime boundary can end one turn without shrinking the objective; the next continuation resumes the same full objective.",
     "- Keep working until the requested end state is true and verified. Do not end the turn merely because one useful action completed, and do not redefine success around a smaller or easier task.",
+    "- An incomplete-status report is not a substitute for continuing the work. If the remaining problem can be investigated or addressed within your current authority, continue that work in this turn rather than returning another equivalent status-only final.",
+    "- Distinguish unfinished work from a blocker that actually requires human input or external change; use the existing waiting and blocked audits only when their conditions hold.",
     "- Temporary rough edges are acceptable while the work is moving in the right direction. Completion still requires the requested end state to be true and verified.",
     "",
     "Work from evidence:",
@@ -307,6 +308,7 @@ export function goalContinuationPrompt(
     "- For every explicit requirement, named artifact, command, test, gate, invariant, and deliverable, identify and inspect the authoritative evidence that would prove it.",
     "- Match verification scope to requirement scope. Treat uncertain, indirect, incomplete, or missing evidence as not achieved and continue working.",
     "- The audit must prove completion, not merely fail to find obvious remaining work.",
+    "- For user-facing report deliverables, including reports produced during another task, follow the Documents Skill: create the durable native document first, inspect its relevant final head after the last edit, and provide the returned artifact reference. Declare report requirements through the available goal tools before authoring and satisfy every persisted report requirement with verified artifact delivery evidence before completion. Sandbox paths and raw file IDs do not prove report delivery. If artifact tooling or access is unavailable, keep that deliverable incomplete and state the blocker; never invent proof or silently substitute a local report. Ordinary chat answers, short progress updates, source-code links, and explicitly requested local-file work remain outside this report contract.",
     "",
     "Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Call opengeni__goal_complete with concrete evidence only when the full objective is actually achieved and no required work remains.",
     "",

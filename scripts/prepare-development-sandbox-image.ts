@@ -316,6 +316,8 @@ function commonBuildArguments(options: Arguments): string[] {
     // exported image identity differ from the cached build result below.
     "--provenance=false",
     "--sbom=false",
+    "--build-arg",
+    "OPENGENI_LOCAL_SITE_PACKAGES=true",
     "--label",
     "io.opengeni.development-sandbox=true",
     "-f",

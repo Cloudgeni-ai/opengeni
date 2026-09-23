@@ -5,12 +5,13 @@ import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
   createDb,
   createImportBatch,
-  encryptEnvironmentValue,
+  decryptEnvironmentValue,
   getGlobalCatalogOAuthProfile,
+  loadIntegrationOAuthPendingState,
   upsertRegistryCapabilityCatalogItem,
   type DbClient,
 } from "@opengeni/db";
-import { createSignedState, readSignedState } from "@opengeni/github";
+import { readSignedState } from "@opengeni/github";
 import {
   acquireSharedTestDatabase,
   startTestMcpServer,
@@ -26,7 +27,6 @@ import {
   OFFICIAL_SLACK_MCP_URL,
   assertAuthorizationServerNotReserved,
   assertAuthorizationServerPins,
-  assertOwnershipAllowed,
   builtInOAuthProfileFor,
   catalogMcpUrlKey,
   defaultOwnershipFor,
@@ -43,6 +43,27 @@ let settings: Settings;
 
 const rawKey = randomBytes(32);
 
+async function readMcpOAuthState(referenceState: string): Promise<Record<string, unknown>> {
+  const reference = readSignedState(referenceState, STATE_SECRET) as Record<string, unknown> | null;
+  if (
+    reference?.kind !== "mcp_oauth_reference" ||
+    typeof reference.id !== "string" ||
+    typeof reference.accountId !== "string" ||
+    typeof reference.workspaceId !== "string"
+  ) {
+    throw new Error("expected a short MCP OAuth state reference");
+  }
+  const encrypted = await loadIntegrationOAuthPendingState(client.db, {
+    id: reference.id,
+    accountId: reference.accountId,
+    workspaceId: reference.workspaceId,
+  });
+  if (!encrypted) throw new Error("pending MCP OAuth state missing");
+  const payload = readSignedState(decryptEnvironmentValue(rawKey, encrypted), STATE_SECRET);
+  if (!payload) throw new Error("pending MCP OAuth state invalid");
+  return payload as Record<string, unknown>;
+}
+
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("api_oauth_profiles");
   if (!shared) {
@@ -57,6 +78,7 @@ beforeAll(async () => {
     delegationSecret: DELEGATION_SECRET,
     environmentsEncryptionKey: rawKey.toString("base64"),
     integrationsEnabled: true,
+    integrationsOauthShortStateEnabled: true,
     integrationsStateSecret: STATE_SECRET,
     publicBaseUrl: "https://api.opengeni.test",
   }) as Settings;
@@ -92,21 +114,12 @@ describe("built-in OAuth profiles", () => {
     expect(builtInOAuthProfileFor({ mcpUrl: "https://mcp.linear.app/mcp" })).toBeNull();
   });
 
-  test("personal-only profiles default an omitted ownership to personal and reject workspace", () => {
+  test("ownership defaults do not prohibit explicit personal or workspace connections", () => {
     const slack = builtInOAuthProfileFor({ mcpUrl: OFFICIAL_SLACK_MCP_URL })!;
     const gmail = builtInOAuthProfileFor({ mcpUrl: OFFICIAL_GMAIL_MCP_URL })!;
-    expect(defaultOwnershipFor(slack)).toBe("personal");
+    expect(defaultOwnershipFor(slack)).toBe("workspace");
     expect(defaultOwnershipFor(gmail)).toBe("personal");
     expect(defaultOwnershipFor(DEFAULT_OAUTH_PROFILE)).toBe("workspace");
-    expect(() => assertOwnershipAllowed(slack, "personal")).not.toThrow();
-    expect(() => assertOwnershipAllowed(slack, "workspace")).toThrow(
-      "Slack's hosted MCP connection is personal only",
-    );
-    expect(() => assertOwnershipAllowed(gmail, "workspace")).toThrow(
-      "Gmail connections are personal only",
-    );
-    expect(() => assertOwnershipAllowed(DEFAULT_OAUTH_PROFILE, "workspace")).not.toThrow();
-    expect(() => assertOwnershipAllowed(DEFAULT_OAUTH_PROFILE, "personal")).not.toThrow();
   });
 
   test("a Google-identity authorization server is reserved for the Gmail profile", () => {
@@ -165,14 +178,14 @@ describe("built-in OAuth profiles", () => {
 });
 
 describe("catalog OAuth profiles", () => {
-  test("a valid catalog profile narrows ownership, binding, pins, scopes, and authorize params", () => {
+  test("a valid catalog profile supplies defaults, binding, pins, scopes, and authorize params", () => {
     const profile = oauthProfileFromCatalog("https://mcp.pinned.example/mcp", {
       clientSource: "dcr",
       exactMcpUrl: "https://mcp.pinned.example/mcp",
       pinnedIssuerOrigins: ["https://auth.pinned.example"],
       pinnedEndpointOrigins: ["https://auth.pinned.example"],
       sendResourceParameter: false,
-      allowedOwnership: ["personal"],
+      defaultOwnership: "personal",
       requestedScopes: ["files:read"],
       extraAuthorizeParams: { audience: "pinned" },
     });
@@ -185,9 +198,6 @@ describe("catalog OAuth profiles", () => {
     expect(profile!.requestedScopes).toEqual(["files:read"]);
     expect(profile!.extraAuthorizeParams).toEqual({ audience: "pinned" });
     expect(defaultOwnershipFor(profile!)).toBe("personal");
-    expect(() => assertOwnershipAllowed(profile!, "workspace")).toThrow(
-      "allows only personal connections",
-    );
     expect(() =>
       assertAuthorizationServerPins(
         {
@@ -203,7 +213,7 @@ describe("catalog OAuth profiles", () => {
 
   test("an empty profile keeps the default behavior and malformed profiles fail closed", () => {
     const empty = oauthProfileFromCatalog("https://mcp.example/mcp", {});
-    expect(empty.allowedOwnership).toEqual(DEFAULT_OAUTH_PROFILE.allowedOwnership);
+    expect(defaultOwnershipFor(empty)).toBe("workspace");
     expect(empty.exactMcpBinding).toBe(false);
     expect(empty.sendResourceParameter).toBe(true);
     expect(empty.authorizationServer).toBeUndefined();
@@ -214,8 +224,8 @@ describe("catalog OAuth profiles", () => {
       null,
       "profile",
       { unknownKey: true },
-      { allowedOwnership: [] },
-      { allowedOwnership: ["group"] },
+      { defaultOwnership: [] },
+      { defaultOwnership: "group" },
       { pinnedIssuerOrigins: ["nonsense"] },
       { requestedScopes: [] },
       { extraAuthorizeParams: { scope: "everything" } },
@@ -269,7 +279,7 @@ describe("catalog OAuth profiles", () => {
     expect(builtInOAuthProfileFor({ mcpUrl: OFFICIAL_SLACK_MCP_URL })).not.toBeNull();
     expect(builtInOAuthProfileFor({ mcpUrl: OFFICIAL_GMAIL_MCP_URL })).not.toBeNull();
     const wouldLoosen = oauthProfileFromCatalog(OFFICIAL_SLACK_MCP_URL, {
-      allowedOwnership: ["workspace", "personal"],
+      defaultOwnership: "workspace",
     });
     expect(wouldLoosen).not.toBeNull();
     // The schema has no field for deployment clients or reserved servers, so a
@@ -311,19 +321,6 @@ describe("catalog OAuth profiles", () => {
     expect(url.searchParams.get("redirect_uri")).toBe(
       "https://api.opengeni.test/v1/integrations/oauth/callback",
     );
-  });
-
-  test("ownership asserts raise typed HTTP 422s", () => {
-    try {
-      assertOwnershipAllowed(
-        builtInOAuthProfileFor({ mcpUrl: OFFICIAL_SLACK_MCP_URL })!,
-        "workspace",
-      );
-      expect.unreachable();
-    } catch (error) {
-      expect(error).toBeInstanceOf(HTTPException);
-      expect((error as HTTPException).status).toBe(422);
-    }
   });
 });
 
@@ -437,7 +434,7 @@ describe("catalog-profile-driven OAuth start", () => {
     });
     try {
       await insertCatalogProfileRow(mcp.url, {
-        allowedOwnership: ["personal"],
+        defaultOwnership: "personal",
         pinnedIssuerOrigins: [as.url],
         requestedScopes: ["files:read"],
         extraAuthorizeParams: { audience: "pinned" },
@@ -454,10 +451,13 @@ describe("catalog-profile-driven OAuth start", () => {
           body: JSON.stringify({ mcpUrl: mcp.url, returnPath: "/integrations", ...body }),
         });
 
-      // Explicit workspace ownership is rejected by the catalog profile.
-      const rejected = await start({ ownership: "workspace" });
-      expect(rejected.status).toBe(422);
-      expect(await rejected.text()).toContain("allows only personal connections");
+      // An explicit choice overrides the suggested personal default.
+      const workspaceStart = await start({ ownership: "workspace" });
+      expect(workspaceStart.status).toBe(200);
+      const workspaceState = await readMcpOAuthState(
+        ((await workspaceStart.json()) as { state: string }).state,
+      );
+      expect(workspaceState?.ownership).toBe("workspace");
 
       // Omitted ownership defaults to personal; scopes and authorize params
       // come from the profile, not the caller.
@@ -467,7 +467,7 @@ describe("catalog-profile-driven OAuth start", () => {
       const authUrl = new URL(body.authorizationUrl);
       expect(authUrl.searchParams.get("scope")).toBe("files:read");
       expect(authUrl.searchParams.get("audience")).toBe("pinned");
-      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
+      const state = await readMcpOAuthState(body.state);
       expect(state?.ownership).toBe("personal");
       expect(state?.requestedScopes).toEqual(["files:read"]);
       expect(state?.authorizeScopes).toEqual(["files:read"]);
@@ -514,9 +514,9 @@ describe("catalog-profile-driven OAuth start", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const mcpUrl = "https://profile-lookup.example/mcp";
-    await insertCatalogProfileRow(mcpUrl, { allowedOwnership: ["personal"] });
+    await insertCatalogProfileRow(mcpUrl, { defaultOwnership: "personal" });
     expect(await getGlobalCatalogOAuthProfile(client.db, workspace.workspaceId, mcpUrl)).toEqual({
-      allowedOwnership: ["personal"],
+      defaultOwnership: "personal",
     });
     expect(
       await getGlobalCatalogOAuthProfile(
@@ -537,7 +537,7 @@ describe("catalog-profile-driven OAuth start", () => {
       ) values (
         'mcp:custom:workspace-row', ${workspace.accountId}, ${workspace.workspaceId}, 'mcp',
         'manual', 'Workspace Row', 'custom', ${mcpUrl},
-        ${shared!.admin.json({ oauthProfile: { allowedOwnership: ["personal"] } })}
+        ${shared!.admin.json({ oauthProfile: { defaultOwnership: "personal" } })}
       )`;
     expect(await getGlobalCatalogOAuthProfile(client.db, workspace.workspaceId, mcpUrl)).toBeNull();
   });
@@ -551,9 +551,8 @@ describe("catalog-profile-driven OAuth start", () => {
       unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="files:read"`,
     });
     try {
-      // The row is keyed by the importer's canonical URL (no trailing slash);
-      // the start targets a trailing-slash variant of the same server.
-      await insertCatalogProfileRow(mcp.url, { allowedOwnership: ["personal"] });
+      // URL fragments do not change the resource or its catalog profile.
+      await insertCatalogProfileRow(mcp.url, { defaultOwnership: "personal" });
       const response = await app().request(
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
@@ -563,14 +562,14 @@ describe("catalog-profile-driven OAuth start", () => {
             "content-type": "application/json",
           },
           body: JSON.stringify({
-            mcpUrl: `${mcp.url}/`,
-            ownership: "workspace",
+            mcpUrl: `${mcp.url}#setup`,
             returnPath: "/integrations",
           }),
         },
       );
-      expect(response.status).toBe(422);
-      expect(await response.text()).toContain("allows only personal connections");
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { state: string };
+      expect((await readMcpOAuthState(body.state)).ownership).toBe("personal");
     } finally {
       as.close();
       mcp.close();
@@ -586,7 +585,7 @@ describe("catalog-profile-driven OAuth start", () => {
       unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="files:read"`,
     });
     try {
-      await insertCatalogProfileRow(mcp.url, { allowedOwnership: ["everyone"] });
+      await insertCatalogProfileRow(mcp.url, { defaultOwnership: "everyone" });
       const response = await app().request(
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
@@ -610,7 +609,7 @@ describe("catalog-profile-driven OAuth start", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     await insertCatalogProfileRow(OFFICIAL_SLACK_MCP_URL, {
-      allowedOwnership: ["workspace", "personal"],
+      defaultOwnership: "workspace",
     });
     // Deployment Slack credentials are configured so the flow reaches the
     // ownership fence rather than the earlier 503; the hostile catalog row
@@ -627,47 +626,13 @@ describe("catalog-profile-driven OAuth start", () => {
       body: JSON.stringify({
         mcpUrl: OFFICIAL_SLACK_MCP_URL,
         ownership: "workspace",
+        oauthClient: { clientId: "caller-client" },
         returnPath: "/integrations",
       }),
     });
     expect(response.status).toBe(422);
-    expect(await response.text()).toContain("Slack's hosted MCP connection is personal only");
-  });
-
-  test("the callback fences a catalog personal-only row against a stale workspace-owned state", async () => {
-    if (!available) return;
-    const workspace = await freshWorkspace();
-    const mcpUrl = "https://callback-fence.example/mcp";
-    await insertCatalogProfileRow(mcpUrl, { allowedOwnership: ["personal"] });
-    // A state minted by an older deployment (before the row declared
-    // personal-only) with workspace ownership must not persist shared
-    // authority at the callback.
-    const state = createSignedState(STATE_SECRET, {
-      accountId: workspace.accountId,
-      workspaceId: workspace.workspaceId,
-      subjectId: "subject-a",
-      ownership: "workspace",
-      providerDomain: "callback-fence.example",
-      mcpUrl,
-      resource: mcpUrl,
-      requestedScopes: [],
-      authorizeScopes: [],
-      encryptedPkceVerifier: encryptEnvironmentValue(rawKey, "test-pkce-verifier-value-123456789"),
-      clientId: "client",
-      tokenEndpoint: "https://callback-fence.example/token",
-      authorizationServer: "https://callback-fence.example",
-      issuer: "https://callback-fence.example",
-      clientRegistrationMethod: "cimd",
-      tokenEndpointAuthMethod: "none",
-      resourceParameterSupported: true,
-      returnPath: "/integrations",
-    });
-    const callback = await app().request(
-      `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`,
+    expect(await response.text()).toContain(
+      "Slack OAuth client credentials are deployment-managed",
     );
-    expect(callback.status).toBe(302);
-    const location = callback.headers.get("location")!;
-    expect(location).toContain("integration_oauth=error");
-    expect(location).toContain("stage=state_verify");
   });
 });

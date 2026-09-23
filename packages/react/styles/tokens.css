@@ -45,7 +45,7 @@
      embedded composer and its portalled menu can be tuned as one surface. */
   --og-model-picker-trigger-height: 2rem;
   --og-model-picker-trigger-height-mobile: 1.75rem;
-  --og-model-picker-menu-width: 18rem;
+  --og-model-picker-menu-width: 22rem;
   --og-model-picker-menu-padding: 0.375rem;
   --og-model-picker-row-padding-x: 0.625rem;
   --og-model-picker-row-padding-y: 0.5rem;
@@ -190,7 +190,7 @@
   --og-line-height-composer-wide: 20px;
   --og-model-picker-trigger-height: 1.75rem;
   --og-model-picker-trigger-height-mobile: 1.75rem;
-  --og-model-picker-menu-width: 15rem;
+  --og-model-picker-menu-width: 20rem;
   --og-model-picker-menu-padding: 0.25rem;
   --og-model-picker-row-padding-x: 0.5rem;
   --og-model-picker-row-padding-y: 0.375rem;

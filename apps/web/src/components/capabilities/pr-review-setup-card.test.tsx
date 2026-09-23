@@ -5,7 +5,7 @@ import type {
   PrReviewManagedGitHubSetup,
   PrReviewRepositoryBinding,
 } from "@opengeni/sdk";
-import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -129,6 +129,13 @@ const managedSetup: PrReviewManagedGitHubSetup = {
 };
 
 async function render(client: OpenGeniBrowserClient) {
+  client.connectTransport ??= () =>
+    new OpenGeniBrowserClient({
+      baseUrl: "http://localhost:3000",
+      fetch: async () => {
+        throw new Error("Unexpected Connect request in review model test");
+      },
+    }).connectTransport();
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);

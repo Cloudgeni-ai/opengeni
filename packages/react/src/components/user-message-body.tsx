@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { cn } from "../lib/cn";
+import { useTimelineSearchReveal } from "./timeline-search";
 
 const FALLBACK_LINE_THRESHOLD = 12;
 const FALLBACK_TEXT_THRESHOLD = 900;
@@ -190,7 +191,15 @@ function observeSharedResize(element: Element, callback: () => void): (() => voi
   };
 }
 
+export type UserMessageDisclosureLabels = {
+  /** Collapsed disclosure action. Defaults to "Show more". */
+  showMore?: string | undefined;
+  /** Expanded disclosure action. Defaults to "Show less". */
+  showLess?: string | undefined;
+};
+
 export type UserMessageDisclosureContextValue = {
+  labels?: UserMessageDisclosureLabels | undefined;
   expandedByMessageId: Map<string, boolean>;
   beginChange: (
     messageBody: HTMLElement,
@@ -235,6 +244,8 @@ export type UserMessageBodyProps = {
   text: string;
   children: ReactNode;
   className?: string | undefined;
+  /** Per-field overrides for timeline labels, then the English defaults. */
+  disclosureLabels?: UserMessageDisclosureLabels | undefined;
 };
 
 /**
@@ -247,11 +258,23 @@ export type UserMessageBodyProps = {
  * remembers expansion per durable message id and preserves the reader's scroll
  * anchor when height changes.
  */
-export function UserMessageBody({ messageId, text, children, className }: UserMessageBodyProps) {
+export function UserMessageBody({
+  messageId,
+  text,
+  children,
+  className,
+  disclosureLabels,
+}: UserMessageBodyProps) {
   const disclosure = useContext(UserMessageDisclosureContext);
   const [expanded, setExpanded] = useState(
     () => disclosure?.expandedByMessageId.get(messageId) ?? false,
   );
+  const searchReveal = useTimelineSearchReveal();
+  useLayoutEffect(() => {
+    if (!searchReveal) return;
+    setExpanded(true);
+    disclosure?.expandedByMessageId.set(messageId, true);
+  }, [searchReveal, messageId, disclosure]);
   const collapsibleRef = useRef(userMessageLikelyNeedsDisclosure(text));
   const expandedRef = useRef(expanded);
   expandedRef.current = expanded;
@@ -454,7 +477,9 @@ export function UserMessageBody({ messageId, text, children, className }: UserMe
         className="mt-1.5 inline-flex min-h-7 items-center rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted outline-hidden transition-colors hover:bg-og-surface-3/60 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:min-h-11"
         onClick={(event) => toggle(event.currentTarget)}
       >
-        {expanded ? "Show less" : "Show more"}
+        {expanded
+          ? (disclosureLabels?.showLess ?? disclosure?.labels?.showLess ?? "Show less")
+          : (disclosureLabels?.showMore ?? disclosure?.labels?.showMore ?? "Show more")}
       </button>
     </div>
   );

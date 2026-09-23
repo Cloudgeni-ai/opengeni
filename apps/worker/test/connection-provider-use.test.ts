@@ -27,21 +27,9 @@ const snapshot: ConnectionUseAuthoritySnapshot = {
   ownerSubjectId: "user:alice",
   ownerOrganizationMembershipId: id("9"),
   ownerMembershipAuthorizationRevision: 11,
-  authoritySource: "user_delegation",
+  authoritySource: "sender",
   selectionSources: ["mcp:example"],
-  userDelegation: {
-    authorityId: id("10"),
-    grantId: id("11"),
-    organizationId: id("1"),
-    workspaceId: id("3"),
-    sessionId: id("4"),
-    action: "connection.use",
-    mode: "session",
-    context: "workspace_shared",
-    authorityEpoch: 5,
-    authorityGeneration: 1,
-    grantGeneration: 1,
-  },
+  userDelegation: null,
 };
 
 const attribution: ConnectionUseAttribution = {
@@ -53,7 +41,7 @@ const attribution: ConnectionUseAttribution = {
   scope: "user",
   ownerSubjectId: "user:alice",
   authorityId: id("10"),
-  grantId: id("11"),
+  grantId: null,
 };
 
 describe("connection provider pre-use guard", () => {

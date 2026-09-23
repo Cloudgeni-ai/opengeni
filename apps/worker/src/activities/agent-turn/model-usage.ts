@@ -129,8 +129,17 @@ export const createSessionTitleModelUsageEventState = createCompactionModelUsage
 
 export function modelResponseContextSignal(
   state: ModelResponseEventState,
+  responseCountBeforeStream = 0,
 ): { revision: number; totalTokens: number } | null {
-  return state.contextSignal;
+  const signal = state.contextSignal;
+  // A compaction retry creates a new SDK request counter, but usage identities
+  // remain activity-wide. Never bind a pre-stream report to a reused request
+  // ordinal; translate only this stream's reports without mutating usage state.
+  if (!signal || signal.revision <= responseCountBeforeStream) return null;
+  return {
+    revision: signal.revision - responseCountBeforeStream,
+    totalTokens: signal.totalTokens,
+  };
 }
 
 export function assertModelResponseLatencyMode(input: {
@@ -593,6 +602,8 @@ export type ModelUsageBillingRecord = {
   pricedCostMicros: number;
   /** Hypothetical provider-rate USD micros; never an OpenGeni charge. */
   estimatedProviderCostMicros: number | null;
+  /** Hypothetical OpenGeni credit price at the captured rate; never a debit. */
+  equivalentCreditCostMicros: number | null;
   pricingSource: "configured_list_price" | "gateway_reported" | null;
   normalizedUsage: ModelCallUsageNormalization;
   upstreamProvider?: string;
@@ -674,7 +685,7 @@ export async function recordModelUsageAndDebitCredits(
         }
       : calculateGatewayReportedCostBreakdown(
           settings,
-          input.model,
+          configuredPricingModel ?? input.model,
           gatewayBilling.inferenceCostUsd,
           { inputTokens },
         )
@@ -690,6 +701,12 @@ export async function recordModelUsageAndDebitCredits(
     ? (pricingBreakdown?.providerCostMicros ?? null)
     : hasCompleteCoreTokenTelemetry
       ? (pricingBreakdown?.providerCostMicros ?? null)
+      : null;
+  const equivalentCreditCostMicros =
+    pricingBreakdown && !unpinnedWorkspaceGatewayModel
+      ? gatewayBilling || hasCompleteCoreTokenTelemetry
+        ? pricingBreakdown.creditCostMicros
+        : null
       : null;
   const pricingSource = gatewayBilling
     ? ("gateway_reported" as const)
@@ -734,6 +751,7 @@ export async function recordModelUsageAndDebitCredits(
       billingPath: "external",
       pricedCostMicros: 0,
       estimatedProviderCostMicros,
+      equivalentCreditCostMicros,
       pricingSource,
       normalizedUsage,
       ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
@@ -745,6 +763,7 @@ export async function recordModelUsageAndDebitCredits(
       billingPath: "opengeni_credits",
       pricedCostMicros: 0,
       estimatedProviderCostMicros,
+      equivalentCreditCostMicros,
       pricingSource,
       normalizedUsage,
       ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
@@ -798,6 +817,7 @@ export async function recordModelUsageAndDebitCredits(
     billingPath: "opengeni_credits",
     pricedCostMicros: costMicros,
     estimatedProviderCostMicros,
+    equivalentCreditCostMicros,
     pricingSource,
     normalizedUsage,
     ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
@@ -835,6 +855,7 @@ export async function recordAuthoritativeModelCallFact(input: {
       billingPath: input.billing.billingPath,
       pricedCostMicros: input.billing.pricedCostMicros,
       estimatedProviderCostMicros: input.billing.estimatedProviderCostMicros,
+      equivalentCreditCostMicros: input.billing.equivalentCreditCostMicros,
       pricingSource: input.billing.pricingSource,
       inputTokens: telemetry.inputTokens,
       outputTokens: telemetry.outputTokens,
@@ -862,10 +883,15 @@ export function sanitizedModelUsageInput(normalized: ModelCallUsageNormalization
       ? { outputTokens: normalized.telemetry.outputTokens }
       : {}),
     ...(normalized.totalTokens !== null ? { totalTokens: normalized.totalTokens } : {}),
-    ...(normalized.telemetry.cachedTokens !== null
+    ...(normalized.telemetry.cachedTokens !== null || normalized.telemetry.cacheWriteTokens !== null
       ? {
           inputTokensDetails: {
-            cached_tokens: normalized.telemetry.cachedTokens,
+            ...(normalized.telemetry.cachedTokens === null
+              ? {}
+              : { cached_tokens: normalized.telemetry.cachedTokens }),
+            ...(normalized.telemetry.cacheWriteTokens === null
+              ? {}
+              : { cache_write_tokens: normalized.telemetry.cacheWriteTokens }),
           },
         }
       : {}),

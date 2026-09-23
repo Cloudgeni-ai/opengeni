@@ -97,7 +97,7 @@ describe("deployment model catalog source", () => {
         OPENGENI_OPENROUTER_API_KEY: "openrouter-test-key",
         OPENGENI_MODEL_COST_POLICY_JSON: JSON.stringify({
           [DEFAULT_OPENROUTER_MODEL_ID]: "credits",
-          "gpt-5.6-luna": "free",
+          "gpt-6-luna": "free",
         }),
       },
       () => getSettings(),
@@ -108,7 +108,7 @@ describe("deployment model catalog source", () => {
       cost: "credits",
       billing: { upstreamPayer: "deployment", metering: "external" },
     });
-    expect(configuredModels(settings).find((model) => model.id === "gpt-5.6-luna")?.cost).toBe(
+    expect(configuredModels(settings).find((model) => model.id === "gpt-6-luna")?.cost).toBe(
       "free",
     );
   });
@@ -440,13 +440,13 @@ describe("deployment model catalog source", () => {
       ),
       {
         schemaVersion: 1,
-        defaultModel: "codex/gpt-5.6-sol",
-        builtInModels: ["gpt-5.6-luna"],
+        defaultModel: "codex/gpt-6-sol",
+        builtInModels: ["gpt-6-luna"],
       },
     );
 
-    expect(validateModelCatalogSettings(settings)[0]?.id).toBe("gpt-5.6-luna");
-    expect(settings.openaiModel).toBe("codex/gpt-5.6-sol");
+    expect(validateModelCatalogSettings(settings)[0]?.id).toBe("gpt-6-luna");
+    expect(settings.openaiModel).toBe("codex/gpt-6-sol");
     expect(
       resolveTurnExecutionPolicyV1(settings, {
         modelId: settings.openaiModel,
@@ -458,7 +458,7 @@ describe("deployment model catalog source", () => {
         latencyModeSource: "deployment",
       }),
     ).toMatchObject({
-      productModelId: "codex/gpt-5.6-sol",
+      productModelId: "codex/gpt-6-sol",
       providerId: "codex-subscription",
     });
   });
@@ -486,8 +486,8 @@ describe("deployment model catalog source", () => {
       getSettings({
         OPENGENI_OPENAI_API_KEY: "openai-test-key",
         OPENGENI_CODEX_SUBSCRIPTION_ENABLED: "true",
-        OPENGENI_OPENAI_MODEL: "codex/gpt-5.6-sol",
-        OPENGENI_OPENAI_ALLOWED_MODELS: "codex/gpt-5.6-sol",
+        OPENGENI_OPENAI_MODEL: "codex/gpt-6-sol",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "codex/gpt-6-sol",
       }),
     ).not.toThrow();
   });

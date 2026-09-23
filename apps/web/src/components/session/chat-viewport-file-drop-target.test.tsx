@@ -68,6 +68,7 @@ describe("ChatViewportFileDropTarget", () => {
     );
 
     expect(viewport?.getAttribute("data-workspace-scroll-owner")).toBe("self-managed");
+    expect(viewport?.hasAttribute("data-og-conversation")).toBe(true);
   });
 
   test("shows one full-viewport overlay without flicker across nested enter/leave events", async () => {

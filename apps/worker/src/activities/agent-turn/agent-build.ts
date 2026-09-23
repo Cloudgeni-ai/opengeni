@@ -6,11 +6,14 @@ import {
   setXaiSessionAccountPin,
   getWorkspaceVideoGenerationPolicy,
   loadWorkspaceVercelAiGatewayCredentialLease,
-  beginConnectorActionExecution,
-  completeConnectorActionExecution,
-  prepareConnectorActionApproval,
+  getExternalLinkTurnAuthorization,
+  getSessionTurnForAttempt,
+  ensureSessionReasoningConfiguration,
+  ensureSessionSkillCatalog,
 } from "@opengeni/db";
+import { recoveryAwareSessionInstructions } from "./recovery-warning";
 import {
+  formatSkillCatalog,
   type AttemptConnectorActionBinding,
   type BuildAgentOptions,
   type ConnectorActionPolicyHooks,
@@ -24,7 +27,7 @@ import {
   resolveModelProvider,
   type Settings,
 } from "@opengeni/config";
-import { type CodexRequestContext } from "@opengeni/codex";
+import { type CodexRequestContext, supportsReasoningConfiguration } from "@opengeni/codex";
 import { executeXaiSubscriptionImageGeneration } from "../xai-image-generation";
 import { rigProviderImageContentHash, videoGenerationCapabilitiesForPolicy } from "@opengeni/core";
 import {
@@ -34,13 +37,10 @@ import {
   type VideoGenerationCredentialLease,
 } from "../video-generation-admission";
 import { VideoReferenceInputError } from "../video-reference-staging";
-import { rigProviderImageSourceImage } from "../packs";
+import { rigProviderImageSourceImage } from "../sandbox-images";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import { recordTurnStartupPhase } from "../../observability-metrics";
-import {
-  modelVisibleCompanyBrainSkillActivations,
-  summarizeCompanyBrainContributions,
-} from "../../model-context-contributions";
+import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { executeGatewayImageGeneration } from "../gateway-image-generation";
@@ -78,6 +78,8 @@ import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 
 export type BuildTurnAgentDeps = {
+  skillCatalog: NonNullable<BuildAgentOptions["skillCatalog"]>;
+  mcpServers: Settings["mcpServers"];
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
   runtime: ActivityServices["runtime"];
@@ -112,8 +114,6 @@ export type BuildTurnAgentDeps = {
   workspaceMemory: GovernanceModelOk["workspaceMemory"];
   rigVersion: GovernanceModelOk["rigVersion"];
   rigName: GovernanceModelOk["rigName"];
-  packRuntime: GovernanceModelOk["packRuntime"];
-  installedSkillRuntime: GovernanceModelOk["installedSkillRuntime"];
   buildCompanyBrainContributionReceiptFor: GovernanceModelOk["buildCompanyBrainContributionReceiptFor"];
   promptCacheKey: CompactionPrepOk["promptCacheKey"];
   workspaceVariableSet: Awaited<ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>>;
@@ -128,15 +128,8 @@ export type BuildTurnAgentDeps = {
   sandboxCodemodeToken: string | undefined;
   fileResourceDownloads: SandboxFileDownload[];
   attemptConnectorActionBindings: readonly AttemptConnectorActionBinding[];
-  connectorActionIdentity: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    attemptId: string;
-    executionGeneration: number;
-    initiator: Pick<ClaimTurnOk["turn"]["initiator"], "kind" | "subjectId">;
-  };
+  connectorActionPolicy: ConnectorActionPolicyHooks;
+  trigger: ClaimTurnOk["trigger"];
   preparationIndependentToolNames: readonly string[];
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
@@ -147,6 +140,7 @@ export type BuildTurnAgentDeps = {
 
 export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   const {
+    mcpServers,
     input,
     db,
     runtime,
@@ -180,8 +174,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     workspaceMemory,
     rigVersion,
     rigName,
-    packRuntime,
-    installedSkillRuntime,
     buildCompanyBrainContributionReceiptFor,
     promptCacheKey,
     workspaceVariableSet,
@@ -194,7 +186,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     sandboxCodemodeToken,
     fileResourceDownloads,
     attemptConnectorActionBindings,
-    connectorActionIdentity,
+    connectorActionPolicy,
+    trigger,
     preparationIndependentToolNames,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
@@ -203,6 +196,13 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     codexContext,
   } = deps;
   const preparedTools = eventing.preparedTools!;
+  // Durable recovery truth is read for every attempt, including reconstruction
+  // after compaction. It is never inferred from transcript tool successes.
+  const sessionInstructions = await recoveryAwareSessionInstructions(
+    db,
+    input.workspaceId,
+    session,
+  );
 
   const missingSessionTitleHint = preparationIndependentToolNames.includes(
     SESSION_TITLE_MODEL_TOOL_NAME,
@@ -567,43 +567,19 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     turnExecutionPolicy.providerId,
     turnExecutionPolicy.latencyMode,
   );
-  const connectorActionPolicy: ConnectorActionPolicyHooks = {
-    prepare: async (call) =>
-      await prepareConnectorActionApproval(db, connectorActionIdentity, call),
-    begin: async (call) => await beginConnectorActionExecution(db, connectorActionIdentity, call),
-    complete: async ({ requestId, outcome }) =>
-      await completeConnectorActionExecution(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        requestId,
-        attemptId: input.attemptId,
-        outcome,
-      }),
-  };
-  const runtimeSkillActivations = [
-    ...installedSkillRuntime.activations,
-    ...packRuntime.skillActivations,
-    ...session.skills.map((skill) => ({
-      source: "session" as const,
-      id: `session:${session.id}:${skill.name}`,
-      artifact: {
-        name: skill.name,
-        description: skill.description ?? null,
-        files: skill.files.map((file) => ({
-          path: file.path,
-          content: file.content,
-        })),
-      },
-      reason: "attached to session",
-    })),
-  ];
-  const modelVisibleRuntimeSkillActivations = modelVisibleCompanyBrainSkillActivations(
-    eventing.modelRunSettings.sandboxBackend,
-    runtimeSkillActivations,
-  );
+  const approvedToolCallId = approvedConnectorActionCallId(trigger);
+  const modelVisibleSkillCatalogText = await ensureSessionSkillCatalog(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    expectedExecutionGeneration: turn.executionGeneration,
+    expectedAttemptId: input.attemptId,
+    catalog: formatSkillCatalog(deps.skillCatalog),
+  });
   try {
     eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
-      buildCompanyBrainContributionReceiptFor(modelVisibleRuntimeSkillActivations),
+      buildCompanyBrainContributionReceiptFor(modelVisibleSkillCatalogText),
     );
   } catch {
     // Contribution telemetry must never change model execution semantics.
@@ -615,12 +591,61 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     outcome: "completed",
     durationSeconds: (performance.now() - postToolPreparationStartedAt) / 1_000,
   });
+  const linkedToolAuthority = await getExternalLinkTurnAuthorization(
+    db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    },
+    turn.id,
+  );
+  if (linkedToolAuthority && !linkedToolAuthority.authorized)
+    throw new Error("Native identity link was revoked");
+  const useReasoningUpdates =
+    eventing.modelRunSettings.reasoningConfigurationUpdatesEnabled &&
+    resolvedModel?.provider.api === "responses" &&
+    (resolvedModel.provider.id === "codex" || resolvedModel.provider.id === "openai") &&
+    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort);
+  const requestReasoningEffort =
+    useReasoningUpdates &&
+    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort)
+      ? await ensureSessionReasoningConfiguration(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          expectedExecutionGeneration: turn.executionGeneration,
+          expectedAttemptId: input.attemptId,
+          effort: turn.reasoningEffort,
+        })
+      : turn.reasoningEffort;
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
     try {
-      return runtime.buildAgent(eventing.modelRunSettings, runtimeResources, {
-        reasoningEffort: turn.reasoningEffort,
+      // Approval policy must use the same accepted account identities as tool
+      // preparation. Keep the separately resolved model/sandbox settings intact.
+      return runtime.buildAgent({ ...eventing.modelRunSettings, mcpServers }, runtimeResources, {
+        ...(linkedToolAuthority
+          ? {
+              authorizeAttemptExecution: async () => {
+                const current = await getSessionTurnForAttempt(
+                  db,
+                  input.workspaceId,
+                  input.sessionId,
+                  input.attemptId,
+                );
+                if (
+                  !current ||
+                  current.id !== turn.id ||
+                  current.executionGeneration !== turn.executionGeneration
+                )
+                  throw new Error("The linked agent attempt is no longer authorized");
+              },
+            }
+          : {}),
+        ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
+        reasoningEffort: requestReasoningEffort,
         latencyMode: turnExecutionPolicy.latencyMode,
         ...(serviceTier ? { serviceTier } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
@@ -669,6 +694,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         resolvedMcpConnectionIds: preparedTools.resolvedMcpConnectionIds,
         connectorActionPolicy,
         attemptConnectorActionBindings,
+        ...(approvedToolCallId ? { approvedToolCallId } : {}),
         // LIVE by-reference connector namespaces (fills during this turn's
         // codex_apps tools/list): the codex tool_search description reads it per
         // model call so the model sees the account's real connected sources.
@@ -720,9 +746,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               promptCacheKey: input.sessionId,
             }),
         onRetainableSessionImageOutput: media.retainSessionImageAtToolBoundary,
-        ...(runtimeSkillActivations.length > 0
-          ? { skillActivations: runtimeSkillActivations }
-          : {}),
+        skillCatalog: deps.skillCatalog,
+        skillCatalogInHistory: true,
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
           ? { instructionsTemplate: workspaceAgentInstructions }
           : {}),
@@ -731,7 +756,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // Per-session persona tier (session > workspace > deployment default).
         // Composed system-level AFTER the workspace persona so it refines it for
         // this one session; absent ⇒ byte-identical to today's composition.
-        ...(session.instructions ? { sessionInstructions: session.instructions } : {}),
+        ...(sessionInstructions ? { sessionInstructions } : {}),
         ...workspaceEnvironmentOption,
         // RIG RUNTIME (M3): the doctrine block, the setup-script hook (only when
         // the frozen version carries a non-empty script), and the rig credential
@@ -791,9 +816,23 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   }
   return {
     agent,
-    modelVisibleRuntimeSkillActivations,
+    modelVisibleSkillCatalogText,
     postAgentPreparationStartedAt,
   };
+}
+
+function approvedConnectorActionCallId(trigger: ClaimTurnOk["trigger"]): string | null {
+  if (trigger.type !== "user.approvalDecision") {
+    return null;
+  }
+
+  const payload = trigger.payload as {
+    approvalId?: unknown;
+    decision?: unknown;
+  };
+  return payload.decision === "approve" && typeof payload.approvalId === "string"
+    ? payload.approvalId
+    : null;
 }
 
 export type BuildTurnAgentOk = Awaited<ReturnType<typeof buildTurnAgent>>;

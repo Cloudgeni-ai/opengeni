@@ -1,10 +1,11 @@
 # Agent session authority
 
 A live agent attempt may read, message, and control other sessions in the same
-workspace. Parent/child lineage is not an access deny. First-party session
-tools (`sessions_list`, `session_get`, `session_events`, `session_wait`,
-`session_steer`, pause/resume/cancel) are the capability surface; unprompted
-hijack is an instruction problem, not a second lock. `session_wait` authorizes
+workspace when the caller's outbound `agentAccess` scope allows it. Parent/child
+lineage is never an access deny. First-party session tools (`sessions_list`,
+`session_get`, `session_events`, `session_wait`, `session_steer`,
+pause/resume/cancel) are the capability surface; the access scope below is the
+lock, and unprompted hijack inside an allowed scope is an instruction problem. `session_wait` authorizes
 every watched target exactly as `session_events` does (`session.events.read`)
 before it subscribes to live fanout; the caller's own session is always an
 allowed self target. Slack-private sessions stay same-root for agents, and
@@ -15,18 +16,61 @@ This policy applies only to authenticated `agent_attempt` callers. Human and
 service callers continue through their existing workspace, private-session, and
 optional embedding-host authorization rules.
 
+`session_get({})` resolves only the session in the authenticated exact agent
+attempt claims, then performs the same live-attempt and target authorization as
+an explicit ID. A child reads itself, never its parent or root. Sessionless,
+human, and operator callers must provide `sessionId`; session-like metadata on
+a non-agent grant is not a current-agent context. Explicit IDs retain ordinary
+private-session and host restrictions. Both compact and full projections remain
+bounded; self reads inspect state, not conversation history. REST/SDK session
+reads still require explicit IDs. Attempt catalogs and their generated Codemode
+declarations derive the optional field from the first-party MCP schema; an
+already-frozen catalog does not change in place.
+
+## Agent access scope
+
+Every session carries frozen `agentAccess` (`session`, `user`, or
+`workspace`; default `workspace`) and a server-derived canonical
+`scopeSubjectId`. Native or `asUser` authority establishes that identity;
+request bodies cannot supply it or the retired `endUser` label. Children inherit
+identity and omitted scope, and may narrow access (`workspace` > `user` >
+`session`) but never widen it.
+
+For authenticated `agent_attempt` callers:
+
+- Own-tree access remains subject to ordinary permissions, private-session,
+  Slack-private, and optional host checks.
+- Outside that tree, a `session` caller cannot reach another task.
+- A `user` caller requires the same non-null canonical scope subject.
+- A `workspace` caller may reach any otherwise authorized workspace task.
+- The target's `agentAccess` never restricts inbound access.
+
+The same predicate filters REST/MCP lists, topology, and Slack discovery through
+`SessionAuthorizationListScope.agentAccessViewer`. Human visibility is separate:
+private-session ownership and ordinary authorization still apply.
+
+Memory selection is `workspace`, `user`, or `off`. User Memory uses the verified
+active-turn user. Children may only narrow the selection. New `session` Memory
+requests are rejected; stored historical selectors hydrate as `off`, without
+deleting records or making private data workspace-visible. Existing task notes
+serve tree-local coordination. The MCP `session_create` tool accepts Memory
+selection; access and canonical identity are inherited from trusted authority.
+
 ## Relationship policy
 
 The server reconstructs the exact live caller attempt. Caller-supplied lineage
-is never accepted. After that, Slack-private and `user_private` owner checks
-still run. An optional embedding-host `SessionAuthorizationPort` may narrow the
+is never accepted. After that, the agent access scope, Slack-private, and
+`user_private` owner checks still run. An optional embedding-host `SessionAuthorizationPort` may narrow the
 result; it cannot grant a private session OpenGeni already denied, and it cannot
 widen a cross-session projection from exact-target to whole-root.
 
 | Target relative to caller | Read | Message (`session.append`) | Mutate/control |
 | --- | --- | --- | --- |
 | Self | Yes | Yes | Session-local operations; an agent cannot Steer itself; tool approvals are never agent-decidable |
-| Immediate child, parent, sibling, skipped generation, or unrelated root | Yes, subject to private/host checks | Yes, subject to private/host checks | Yes, subject to ordinary permissions and private/host checks |
+| Immediate child, parent, sibling, or skipped generation in the caller's own root tree | Yes, subject to private/host checks | Yes, subject to private/host checks | Yes, subject to ordinary permissions and private/host checks |
+| Unrelated root, caller `agentAccess: "workspace"` | Yes, subject to private/host checks | Yes, subject to private/host checks | Yes, subject to ordinary permissions and private/host checks |
+| Unrelated root, caller `agentAccess: "user"` with the same canonical scope subject | Yes | Yes | Yes, subject to ordinary permissions |
+| Unrelated root where caller is `agentAccess: "session"`, or `"user"` with a different or missing scope subject | No | No | No |
 | Slack-private session outside the caller's root | No | No | No |
 | `user_private` session whose owner is not the initiating human | No | No | No |
 
@@ -69,6 +113,44 @@ the canonical session and attempt locks. Both validate the exact current attempt
 before addressing the target. An optional embedding-host `SessionAuthorizationPort`
 runs only after the preflight check and may narrow the result; it cannot widen
 private-session access.
+
+Agent-facing Pause guidance names its recursive workstream scope: pausing an
+ancestor interrupts the caller too, so it must not be used merely to coordinate
+concurrent edits. This is guidance for the existing control semantics, not a new
+exception for agent descendants. Message acceptance and queued/updated session
+projections do not prove execution. Agents supervising authorized work must
+retain the accepted update/turn identity and consumed event cursors. For an
+agent message, `session_events` with `view=debug`,
+`includeTypes=["system.update.delivered"]`, and `payloadMode=full` exposes the
+receipt: match `resource.id` in `payload.updateIds`, then follow its `turnId`
+to the relevant result. An unrelated in-flight turn completing is not proof
+that the new input was consumed. Inspect blockers instead of duplicating
+unconsumed messages. Explicit human pauses and approvals remain authoritative.
+
+Authority never widens down a tree or through a side door:
+
+- `resolveFirstPartyMcpToolsForCreate` rejects a child `firstPartyMcpTools`
+  request outside the parent's effective selection, exactly as
+  `firstPartyMcpPermissions` were already fenced.
+- `PUT /sessions/:id/tool-policy` from an agent attempt may only narrow a
+  parentless session's current tools and selection; humans and API keys keep
+  the ability to widen a top-level session.
+- A scheduled task created by an agent freezes the creating session's effective
+  tools, permissions, and `{ agentAccess, endUser, memoryScope }` as its creator
+  policy (`packages/core/src/domain/scheduled-tasks.ts`, migration 0428), and
+  every session it generates uses that policy instead of deployment defaults.
+- The Codemode SDK proxy (`/v1/workspaces/:workspaceId/codemode/sdk/*`) mints
+  its agent token from the session's permissions intersected with the
+  permissions the session's selected first-party tools require, and
+  `siteSessionPath` is an explicit method-plus-path allowlist: session list,
+  create, read, events, stream, send, queue, and composer drafts. Tool policy,
+  visibility, forks, steer, and control are not reachable from a sandbox.
+- A session-scoped grant without a signed `firstPartyMcpTools` claim registers
+  no first-party tools.
+
+`test/session-agent-access-contract-surface.test.ts` pins every
+`/sessions/:sessionId` route and every target-session MCP tool to the seam;
+adding a session-read entry point requires updating that allowlist deliberately.
 
 The non-bypassable operational prompt tells the agent to use session tools for
 user-requested session management, and to spawn a child worker for a subtask

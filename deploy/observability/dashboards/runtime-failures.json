@@ -3,7 +3,7 @@
   "title": "OpenGeni · Runtime Failures",
   "description": "One exact deployment's turn, MCP, sandbox, API, provider, and durable-write failures. Identity and error content stay in authenticated logs and durable events, never metric labels.",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 5,
   "editable": true,
   "graphTooltip": 1,
   "timezone": "browser",
@@ -710,6 +710,278 @@
         }
       ],
       "gridPos": { "x": 12, "y": 53, "w": 12, "h": 8 }
+    },
+    {
+      "id": 24,
+      "type": "bargauge",
+      "title": "Sandbox visibility-check failures",
+      "description": "Repository or file setup returned, but its destination could not be verified. Destination not visible: the provider shell test exited 1; check the recorded workspace root, path, and permissions. Check exited with an error: inspect the recorded exit code and output. Check still running: the provider yielded a command handle, so absence is not proven. No valid confirmation: missing or malformed result. Provider check failed: the provider call threw before returning a result. Exact path, command, response, and provider handle remain in the authenticated turn.failed or turn.recovery.requested event under materializationDiagnostic; Grafana receives only these fixed reason categories. Counts describe checks across providers, not distinct sessions. Use Explore to group the metric by backend. Zero means no observed failures in the selected window. No data means missing samples or unavailable instrumentation; check Scrape health and the deployed version. Continue succeeding does not establish the original cause.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"],
+          "fields": ""
+        },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(opengeni_sandbox_materialization_verification_failures_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",reason=\"path_not_visible\"}[$__range]))",
+          "legendFormat": "Destination not visible",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(opengeni_sandbox_materialization_verification_failures_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",reason=\"command_failed\"}[$__range]))",
+          "legendFormat": "Check exited with an error",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "expr": "sum(increase(opengeni_sandbox_materialization_verification_failures_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",reason=\"command_pending\"}[$__range]))",
+          "legendFormat": "Check still running",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "D",
+          "expr": "sum(increase(opengeni_sandbox_materialization_verification_failures_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",reason=\"invalid_response\"}[$__range]))",
+          "legendFormat": "No valid confirmation",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "E",
+          "expr": "sum(increase(opengeni_sandbox_materialization_verification_failures_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",reason=\"command_error\"}[$__range]))",
+          "legendFormat": "Provider check failed",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "F",
+          "expr": "sum(increase(opengeni_sandbox_materialization_verification_failures_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",reason=\"unknown\"}[$__range]))",
+          "legendFormat": "Unclassified check failure",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 61,
+        "w": 24,
+        "h": 8
+      }
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Workflow wake dispatch observations",
+      "description": "Signal accepted means transport only. Acknowledged means the durable admission guard accepted the revision; it is not proof of a running model call. Pending admission still needs work claimed or a control boundary settled. Unconfirmed means the signaler returned no receipt. These are repeated dispatch observations, not unique sessions; signal_accepted overlaps with the other outcomes and must not be added to them.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (increase(opengeni_session_workflow_wake_observations_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range]))",
+          "legendFormat": "{{outcome}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 69,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "Workflow wake admission blockers",
+      "description": "Repeated dispatch attempts awaiting durable admission. pending_prompt_turn: a queued message has not been claimed. pending_agent_steer: a Steer is pending. pending_machine_input: internal input has not been claimed. pending_quiescence: prior attempt settlement is incomplete. pending_input_wait: the explicit wait has not settled. Counts are observations, not unique stalled sessions.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (increase(opengeni_session_workflow_wake_admission_blockers_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range]))",
+          "legendFormat": "{{reason}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": {
+        "x": 12,
+        "y": 69,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "Turn cleanup in progress",
+      "description": "Physical cleanup after agent execution has ended. A completed logical turn can still hold its activity here and delay queued follow-ups. Inspect Temporal heartbeat finalizationStage for the exact session and attempt.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage) (opengeni_turn_finalization_inflight{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "legendFormat": "{{stage}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 77,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Slow turn cleanup stages",
+      "description": "Cleanup stages that took more than thirty seconds, recorded while the worker remains scrapeable. A slow stage may still finish successfully. A stage stalled for five minutes triggers worker containment; correlate the bounded containment log with worker restarts. These deadlines begin only after execution ends and do not limit agent run length.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage) (increase(opengeni_turn_finalization_slow_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range]))",
+          "legendFormat": "{{stage}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": {
+        "x": 12,
+        "y": 77,
+        "w": 12,
+        "h": 8
+      }
     }
   ]
 }

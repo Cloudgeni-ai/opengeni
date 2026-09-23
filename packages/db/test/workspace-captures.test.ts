@@ -266,6 +266,45 @@ describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
       ),
     ).toEqual([...captureCommit!.events, ...availableCommit!.events]);
 
+    // A queued successor can have a LOWER position (priority queue). It must
+    // fence both successful and degraded late commits from the previous turn.
+    const [nextTrigger] = await admin<{ id: string }[]>`
+      insert into session_events
+        (account_id, workspace_id, session_id, sequence, type, payload)
+      select ${workspace.accountId}, ${workspace.workspaceId}, ${session.id},
+        coalesce(max(sequence), 0) + 1, 'user.message', '{"text":"next message"}'::jsonb
+      from session_events where session_id = ${session.id}
+      returning id`;
+    const [successor] = await admin<{ id: string }[]>`
+      insert into session_turns
+        (account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+         status, source, position, prompt, resources, tools, model, reasoning_effort,
+         sandbox_backend, metadata, lineage)
+      values
+        (${workspace.accountId}, ${workspace.workspaceId}, ${session.id},
+         ${nextTrigger!.id}, ${`session-${session.id}`}, 'queued', 'user', -1, 'next message',
+         '[]'::jsonb, '[]'::jsonb, 'test-model', 'medium', 'none', '{}'::jsonb, '{}'::jsonb)
+      returning id`;
+    expect(
+      await insertFailedWorkspaceCapture(db, {
+        ...input,
+        revision: 2,
+        expectedEpoch: liveEpoch,
+      }),
+    ).toBeNull();
+    expect(
+      await insertWorkspaceCapture(db, {
+        ...input,
+        revision: 2,
+        expectedEpoch: liveEpoch,
+        manifestKey: "late/manifest",
+        treeIndexKey: "late/tree",
+        blobKeys: [],
+        sizeBytes: 1,
+      }),
+    ).toBeNull();
+    await admin`delete from session_turns where id = ${successor!.id}`;
+
     await admin`
       update session_turn_attempts
       set outcome = 'lease_lost_recoverable'

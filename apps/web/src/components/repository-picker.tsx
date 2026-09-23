@@ -9,11 +9,17 @@ import {
   PlusIcon,
   RefreshCwIcon,
   Trash2Icon,
-  XIcon,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
+import { REPOSITORY_PANEL_CLASS } from "@/components/repository-picker-layout";
+import { ComposerMenuHeader, ComposerMenuSwitch } from "@/components/ui/composer-menu";
 
+import {
+  ManualRepositoryEditor,
+  type ManualRepositoryAttachResult,
+} from "@/components/manual-repository-editor";
+import { RepositoryRefInput } from "@/components/repository-ref-input";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
@@ -26,6 +32,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { repoCountLabel } from "@/lib/format";
+import { attachedManualRepositoryCount } from "@/lib/manual-repositories";
 import {
   gitHubRepositoryResource,
   isRepositoryResourceForGitHubRepo,
@@ -65,10 +72,7 @@ export function repositoryBindingPresentation(
       emptyDescription:
         "This workspace has an active GitHub App binding, but none of its explicitly allowed repositories are currently shared by GitHub. Reconfigure the installation or refresh after policy approval.",
       connectUrl: installUrl,
-      connectLabel:
-        setupMode === "platform"
-          ? "Connect another GitHub account"
-          : "Configure another installation",
+      connectLabel: "Connect another account",
       healthy: true,
       canRefresh: true,
     };
@@ -84,7 +88,7 @@ export function repositoryBindingPresentation(
           ? "Connect as the personal account owner or an organization owner. GitHub repository administrators and collaborators cannot connect an installation."
           : "GitHub App server credentials exist, but this workspace has no active installation binding. Connect as the personal owner or an organization owner; repository administrators and collaborators cannot bind.",
       connectUrl: installUrl,
-      connectLabel: setupMode === "platform" ? "Install or connect GitHub" : "Connect GitHub",
+      connectLabel: "Connect workspace App",
       healthy: false,
       canRefresh: false,
     };
@@ -133,12 +137,23 @@ export type RepositoryContextPickerProps = {
   repoBusy: boolean;
   githubAppBusy: boolean;
   onRefresh: () => Promise<void>;
+  /** Passive open refresh. Caller owns provider-sync permissions and throttling. */
+  onOpenRefresh?: () => Promise<void>;
+  /** False when the current principal cannot read either repository catalog. */
+  refreshAllowed?: boolean;
   onToggleRepo: (repo: GitHubRepository) => void;
   onRefChange: (repoId: number, ref: string) => void;
   onManualOpenChange: (open: boolean) => void;
   onManualAdd: () => void;
   onManualUpdate: (id: number, patch: Partial<RepoDraft>) => void;
   onManualRemove: (id: number) => void;
+  onManualAttach?: (repository: RepoDraft) => Promise<ManualRepositoryAttachResult>;
+  onLoadGitHubBranches?: (
+    repository: GitHubRepository,
+  ) => Promise<import("@/types").GitHubRepositoryBranch[]>;
+  onLoadPersonalGitHubBranches?: (
+    repository: PersonalGitHubRepositoryCatalogItem,
+  ) => Promise<import("@/types").GitHubRepositoryBranch[]>;
   onGitHubAppOpenChange: (open: boolean) => void;
   onOrgChange: (value: string) => void;
   onStartGitHubApp: () => void;
@@ -149,8 +164,12 @@ export type RepositoryContextPickerProps = {
   lockedPersonalGitHubRepoIds?: ReadonlySet<string>;
   /** Manual rows already mounted on an additive surface are rendered read-only. */
   lockedManualRepoIds?: ReadonlySet<number>;
+  /** Mounted personal sources may outlive their currently authorized catalog entry. */
+  unavailableMountedRepositories?: ReadonlyArray<{ uri: string; ref: string }>;
   /** Inline validation for pending manual repository additions. */
   validationError?: string | null;
+  /** New-chat route used to explain immutable mounted follow-up resources. */
+  newChatUrl?: string;
   /** Optional back control when embedded in the mobile “+” drill-in. */
   leading?: ReactNode;
   /** Extra classes on the bar trigger (e.g. `max-sm:hidden` when opened from +). */
@@ -159,23 +178,53 @@ export type RepositoryContextPickerProps = {
 
 /** Shared picker body — desktop dropdown and mobile “+” drill-in. */
 export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
-  const selectedInstalledCount = props.selectedRepoIds.size;
+  const [search, setSearch] = useState("");
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [refreshBusy, setRefreshBusy] = useState(false);
+  const refreshedOnOpen = useRef(false);
+  const openRefresh = useRef(props.onOpenRefresh);
+  openRefresh.current = props.onOpenRefresh;
+  useEffect(() => {
+    let active = true;
+    void Promise.resolve()
+      .then(() => {
+        if (!active || refreshedOnOpen.current || !openRefresh.current) return;
+        refreshedOnOpen.current = true;
+        return openRefresh.current();
+      })
+      .catch((error: unknown) => {
+        if (active) setRefreshError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+  const matchesSearch = (name: string) => name.toLowerCase().includes(search.trim().toLowerCase());
   const personalRepositories = (props.personalGitHubRepositories ?? []).filter(
-    (repository) => repository.selectedAccess !== null,
+    (repository) => repository.selectedAccess !== null && matchesSearch(repository.fullName),
   );
-  const selectedPersonalCount = props.selectedPersonalGitHubRepoIds?.size ?? 0;
-  const manualCount = props.manualRepos.filter((repo) => repo.url.trim().length > 0).length;
-  const selectedCount = selectedInstalledCount + selectedPersonalCount + manualCount;
+  const manualCount = attachedManualRepositoryCount(props.manualRepos);
   const hasRepos = props.repositories.length > 0;
   const bindingPresentation = repositoryBindingPresentation(
     props.status,
     props.installUrl,
     props.setupMode,
   );
-  const canRefresh = bindingPresentation.canRefresh || props.personalGitHubStatus?.enabled === true;
-  // Two-step inline confirm for removing a manual repo, so a stray click in a
-  // dense picker doesn't drop a repo the user typed out.
-  const [confirmRemoveId, setConfirmRemoveId] = useState<number | null>(null);
+  const canRefresh =
+    props.refreshAllowed !== false &&
+    (bindingPresentation.canRefresh || props.personalGitHubStatus?.enabled === true);
+  async function refreshList() {
+    if (!canRefresh || props.repoBusy || refreshBusy) return;
+    setRefreshBusy(true);
+    setRefreshError(null);
+    try {
+      await props.onRefresh();
+    } catch (error) {
+      setRefreshError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRefreshBusy(false);
+    }
+  }
   const [confirmDisconnectInstallationId, setConfirmDisconnectInstallationId] = useState<
     number | null
   >(null);
@@ -229,7 +278,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
         </div>
       </div>
       {props.installations.length > 0 ? (
-        <div className="overflow-hidden rounded-lg border border-border bg-bg/25">
+        <div>
           {props.installations.map((installation) => {
             const confirming = confirmDisconnectInstallationId === installation.installationId;
             return (
@@ -333,39 +382,30 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
 
   return (
     <div onKeyDown={(event) => event.stopPropagation()} className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-3 py-2.5">
-        <div className="flex min-w-0 items-start gap-1">
-          {props.leading}
-          <div className="min-w-0">
-            <div className="truncate text-sm font-medium text-fg">Repository context</div>
-            <div className="mt-0.5 truncate text-2xs text-fg-subtle">
-              {selectedCount > 0
-                ? `${repoCountLabel(selectedCount)} selected for this session`
-                : "Optional repositories for the sandbox"}
-            </div>
-          </div>
-        </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          onClick={() => void props.onRefresh()}
-          disabled={!canRefresh || props.repoBusy}
-          aria-label="Refresh repositories"
-          className="size-7"
-        >
-          <RefreshCwIcon className={cn("size-3.5", props.repoBusy && "animate-spin")} />
-        </Button>
-      </div>
+      <ComposerMenuHeader title="Repositories" leading={props.leading} />
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain max-h-[min(calc(var(--radix-dropdown-menu-content-available-height,70vh)-3.5rem),620px)]">
-        <div className="space-y-2.5 p-2.5">
+        <div className="space-y-2 p-2">
+          {props.repositories.length + (props.personalGitHubRepositories?.length ?? 0) > 5 ? (
+            <Input
+              aria-label="Search repositories"
+              placeholder="Search repositories…"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              className="h-8 text-xs"
+            />
+          ) : null}
+          {search.trim() &&
+          !props.repositories.some((repo) => matchesSearch(repo.fullName)) &&
+          personalRepositories.length === 0 ? (
+            <p className="px-3 text-xs text-fg-muted">No repositories match your search.</p>
+          ) : null}
           {props.personalGitHubStatus?.enabled ? (
             props.personalGitHubStatus.connection?.status === "active" ? (
-              <section className="overflow-hidden rounded-lg border border-border bg-bg/25">
-                <div className="border-b border-border px-3 py-2">
+              <section>
+                <div className="px-0 py-2">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0 truncate text-xs font-medium text-fg">
+                    <div className="min-w-0 truncate text-sm font-medium text-fg">
                       Your GitHub identity
                     </div>
                     <MetaChip dot="running" rounded="full">
@@ -375,10 +415,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                       )}
                     </MetaChip>
                   </div>
-                  <p className="mt-1 text-2xs leading-4 text-fg-subtle">
-                    Reviews, merges, and other writes appear as you. Selecting a repository lets
-                    this workspace remember that identity.
-                  </p>
+                  <p className="mt-1 text-xs leading-4 text-fg-subtle">Writes appear as you.</p>
                 </div>
                 {props.personalGitHubBusy ? (
                   <div className="flex items-center gap-2 p-3 text-xs text-fg-muted">
@@ -387,49 +424,40 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                   </div>
                 ) : personalRepositories.length === 0 ? (
                   <div className="p-3 text-xs leading-5 text-fg-muted">
-                    No personal repositories are allowed yet. Choose them from Integrations.
+                    {search.trim()
+                      ? "No personal repositories match your search."
+                      : "No personal repositories are allowed yet. Choose them from Integrations."}
                   </div>
                 ) : (
                   <div className="divide-y divide-border/70">
                     {personalRepositories.map((repo) => {
-                      const checked = props.selectedPersonalGitHubRepoIds?.has(repo.repositoryId);
                       const locked =
                         props.lockedPersonalGitHubRepoIds?.has(repo.repositoryId) === true;
+                      const checked =
+                        locked ||
+                        props.selectedPersonalGitHubRepoIds?.has(repo.repositoryId) === true;
                       return (
-                        <div key={repo.repositoryId} className="px-2 py-2 hover:bg-surface-2/45">
-                          <button
-                            type="button"
-                            onClick={() => props.onTogglePersonalGitHubRepo?.(repo)}
-                            disabled={props.pending || props.personalGitHubBusy || locked}
-                            aria-pressed={checked}
-                            aria-label={`Use ${repo.fullName} as your GitHub identity`}
-                            className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md text-left outline-none"
-                          >
-                            <span
-                              className={cn(
-                                "flex size-4 items-center justify-center rounded border",
-                                checked
-                                  ? "border-brand bg-brand-strong text-brand-fg"
-                                  : "border-border-strong bg-surface",
-                              )}
-                            >
-                              {checked ? <CheckIcon className="size-3" /> : null}
-                            </span>
-                            <span className="min-w-0">
+                        <div key={repo.repositoryId} className="px-0 py-3 hover:bg-surface-2/45">
+                          <div className="flex w-full items-center gap-3 text-left">
+                            <span className="min-w-0 flex-1">
                               <span className="flex min-w-0 items-center gap-1.5">
-                                <span className="truncate text-xs font-medium text-fg">
+                                <span className="truncate text-sm font-medium text-fg">
                                   {repo.fullName}
                                 </span>
                                 {repo.private ? (
                                   <LockIcon className="size-3 shrink-0 text-fg-subtle" />
                                 ) : null}
                               </span>
-                              <span className="mt-0.5 block truncate text-2xs text-fg-subtle">
+                              <span className="mt-0.5 block truncate text-xs text-fg-subtle">
+                                {props.selectedPersonalGitHubRepoRefs?.[repo.repositoryId] ??
+                                  repo.defaultBranch}
+                                {" · "}
                                 {repo.selectedAccess === "write" ? "Read and write" : "Read only"}
                               </span>
                             </span>
                             {locked ? (
                               <MetaChip dot="idle" rounded="full">
+                                <LockIcon className="size-3" aria-hidden="true" />
                                 Mounted
                               </MetaChip>
                             ) : checked ? (
@@ -437,24 +465,37 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                                 As you
                               </MetaChip>
                             ) : null}
-                          </button>
-                          {checked ? (
-                            <div className="mt-2 flex items-center gap-2 pl-6">
-                              <GitBranchIcon className="size-3.5 shrink-0 text-fg-subtle" />
-                              <Input
+                            <ComposerMenuSwitch
+                              checked={checked}
+                              locked={locked}
+                              disabled={
+                                props.pending ||
+                                props.personalGitHubBusy ||
+                                !props.onTogglePersonalGitHubRepo
+                              }
+                              onCheckedChange={() => props.onTogglePersonalGitHubRepo?.(repo)}
+                              label={
+                                locked
+                                  ? `${repo.fullName} mounted as you`
+                                  : `Use ${repo.fullName} as your GitHub identity`
+                              }
+                            />
+                          </div>
+                          {checked && !locked ? (
+                            <div className="mt-1 flex items-center gap-2">
+                              <RepositoryRefInput
                                 value={
                                   props.selectedPersonalGitHubRepoRefs?.[repo.repositoryId] ??
                                   repo.defaultBranch
                                 }
-                                onChange={(event) =>
-                                  props.onPersonalGitHubRefChange?.(
-                                    repo.repositoryId,
-                                    event.target.value,
-                                  )
+                                defaultRef={repo.defaultBranch}
+                                label={`${repo.fullName} ref`}
+                                compact
+                                onChange={(value) =>
+                                  props.onPersonalGitHubRefChange?.(repo.repositoryId, value)
                                 }
                                 disabled={props.pending || locked}
-                                aria-label={`${repo.fullName} ref`}
-                                className="h-7 text-xs"
+                                loadBranches={props.onLoadPersonalGitHubBranches?.bind(null, repo)}
                               />
                             </div>
                           ) : null}
@@ -465,10 +506,10 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                 )}
               </section>
             ) : (
-              <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-bg/25 p-3">
+              <div className="flex items-center justify-between gap-3 p-3">
                 <div className="min-w-0">
-                  <div className="text-xs font-medium text-fg">Use your GitHub identity</div>
-                  <div className="mt-0.5 text-2xs text-fg-subtle">
+                  <div className="text-sm font-medium text-fg">Use your GitHub identity</div>
+                  <div className="mt-0.5 text-xs text-fg-subtle">
                     Approve, review, and merge as yourself.
                   </div>
                 </div>
@@ -494,7 +535,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
               <div className="px-1 pt-1">{setupForm}</div>
             </div>
           ) : props.repoBusy ? (
-            <div className="flex items-center gap-2 rounded-lg border border-border bg-bg/25 p-3 text-xs text-fg-muted">
+            <div className="flex items-center gap-2 p-3 text-xs text-fg-muted">
               <Loader2Icon className="size-3.5 animate-spin" />
               Loading repositories…
             </div>
@@ -513,125 +554,94 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             </div>
           ) : (
             <>
-              <div className="flex items-center justify-between gap-2 px-1 py-0.5">
-                <div className="flex min-w-0 items-center gap-2">
-                  <MetaChip dot="idle" rounded="full">
-                    GitHub app
-                  </MetaChip>
-                  {props.org ? (
-                    <span className="min-w-0 truncate text-2xs text-fg-subtle" title={props.org}>
-                      {props.org}
-                    </span>
-                  ) : null}
-                </div>
-              </div>
-
-              <section className="overflow-hidden rounded-lg border border-border bg-bg/25">
-                <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
-                  <div className="min-w-0 truncate text-xs font-medium text-fg">Repositories</div>
-                  <div className="shrink-0 text-2xs text-fg-subtle">
-                    {props.repositories.length} available
-                  </div>
-                </div>
+              <section>
                 <div>
-                  {props.groups.map((group) => (
-                    <div
-                      key={group.installationId}
-                      className="border-b border-border last:border-b-0"
-                    >
-                      <div className="flex items-center justify-between gap-3 bg-surface/45 px-3 py-1.5">
-                        <div className="min-w-0 truncate text-2xs font-medium text-fg-muted">
-                          {group.label}
+                  {props.groups
+                    .filter((group) =>
+                      group.repositories.some((repo) => matchesSearch(repo.fullName)),
+                    )
+                    .map((group) => (
+                      <div key={group.installationId} className="py-1">
+                        <div className="flex items-center justify-between gap-3 px-0 py-2">
+                          <div className="min-w-0 truncate text-sm font-medium text-fg-muted">
+                            {group.label}
+                          </div>
                         </div>
-                        <div className="shrink-0 text-2xs uppercase tracking-wide text-fg-subtle">
-                          {group.repositories.length} repos
-                        </div>
-                      </div>
-                      <div className="divide-y divide-border/70">
-                        {group.repositories.map((repo) => {
-                          const checked = props.selectedRepoIds.has(repo.id);
-                          const locked = props.lockedRepoIds?.has(repo.id) === true;
-                          const blocked =
-                            props.selectedInstallationId !== null &&
-                            props.selectedInstallationId !== repo.installationId &&
-                            !checked;
-                          return (
-                            <div
-                              key={`${repo.installationId}:${repo.id}`}
-                              className={cn(
-                                "px-2 py-2 transition-colors hover:bg-surface-2/45",
-                                blocked && "opacity-55",
-                              )}
-                            >
-                              <button
-                                type="button"
-                                onClick={() => props.onToggleRepo(repo)}
-                                disabled={props.pending || locked}
-                                aria-pressed={checked}
-                                aria-label={
-                                  locked ? `${repo.fullName} mounted` : `Select ${repo.fullName}`
-                                }
-                                className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md text-left outline-none"
-                              >
-                                <span
+                        <div className="divide-y divide-border/70">
+                          {group.repositories
+                            .filter((repo) => matchesSearch(repo.fullName))
+                            .map((repo) => {
+                              const locked = props.lockedRepoIds?.has(repo.id) === true;
+                              const checked = locked || props.selectedRepoIds.has(repo.id);
+                              const blocked =
+                                props.selectedInstallationId !== null &&
+                                props.selectedInstallationId !== repo.installationId &&
+                                !checked;
+                              return (
+                                <div
+                                  key={`${repo.installationId}:${repo.id}`}
                                   className={cn(
-                                    "flex size-4 items-center justify-center rounded border",
-                                    checked
-                                      ? "border-brand bg-brand-strong text-brand-fg"
-                                      : "border-border-strong bg-surface",
+                                    "px-0 py-3 transition-colors hover:bg-surface-2/45",
+                                    blocked && "opacity-55",
                                   )}
                                 >
-                                  {checked ? <CheckIcon className="size-3" /> : null}
-                                </span>
-                                <span className="min-w-0">
-                                  <span className="flex min-w-0 items-center gap-1.5">
-                                    <span className="truncate text-xs font-medium text-fg">
-                                      {repo.fullName}
+                                  <div className="flex w-full items-center gap-3 text-left">
+                                    <span className="min-w-0 flex-1">
+                                      <span className="flex min-w-0 items-center gap-1.5">
+                                        <span className="truncate text-sm font-medium text-fg">
+                                          {repo.name}
+                                        </span>
+                                        {repo.private ? (
+                                          <LockIcon className="size-3 shrink-0 text-fg-subtle" />
+                                        ) : null}
+                                      </span>
+                                      <span className="mt-0.5 block truncate text-xs text-fg-subtle">
+                                        {props.selectedRepoRefs[repo.id] ?? repo.defaultBranch}
+                                      </span>
                                     </span>
-                                    {repo.private ? (
-                                      <LockIcon className="size-3 shrink-0 text-fg-subtle" />
+                                    {locked ? (
+                                      <MetaChip dot="idle" rounded="full">
+                                        <LockIcon className="size-3" aria-hidden="true" />
+                                        Mounted
+                                      </MetaChip>
+                                    ) : blocked ? (
+                                      <MetaChip dot="waiting" rounded="full">
+                                        Other app
+                                      </MetaChip>
                                     ) : null}
-                                  </span>
-                                  <span className="mt-0.5 block truncate text-2xs text-fg-subtle">
-                                    default {repo.defaultBranch}
-                                  </span>
-                                </span>
-                                {locked ? (
-                                  <MetaChip dot="idle" rounded="full">
-                                    Mounted
-                                  </MetaChip>
-                                ) : blocked ? (
-                                  <MetaChip dot="waiting" rounded="full">
-                                    Other app
-                                  </MetaChip>
-                                ) : checked ? (
-                                  <MetaChip dot="idle" rounded="full">
-                                    Selected
-                                  </MetaChip>
-                                ) : null}
-                              </button>
-                              {checked ? (
-                                <div className="mt-2 flex items-center gap-2 pl-6">
-                                  <GitBranchIcon className="size-3.5 shrink-0 text-fg-subtle" />
-                                  <Input
-                                    value={props.selectedRepoRefs[repo.id] ?? repo.defaultBranch}
-                                    onChange={(event) =>
-                                      props.onRefChange(repo.id, event.target.value)
-                                    }
-                                    onClick={(event) => event.stopPropagation()}
-                                    disabled={props.pending || locked}
-                                    placeholder={repo.defaultBranch}
-                                    aria-label={`${repo.fullName} ref`}
-                                    className="h-7 text-xs"
-                                  />
+                                    <ComposerMenuSwitch
+                                      checked={checked}
+                                      locked={locked}
+                                      disabled={props.pending}
+                                      onCheckedChange={() => props.onToggleRepo(repo)}
+                                      label={
+                                        locked
+                                          ? `${repo.fullName} mounted`
+                                          : `Select ${repo.fullName}`
+                                      }
+                                    />
+                                  </div>
+                                  {checked && !locked ? (
+                                    <div className="mt-1 flex items-center gap-2">
+                                      <RepositoryRefInput
+                                        value={
+                                          props.selectedRepoRefs[repo.id] ?? repo.defaultBranch
+                                        }
+                                        defaultRef={repo.defaultBranch}
+                                        label={`${repo.fullName} ref`}
+                                        compact
+                                        onChange={(value) => props.onRefChange(repo.id, value)}
+                                        disabled={props.pending || locked}
+                                        loadBranches={props.onLoadGitHubBranches?.bind(null, repo)}
+                                      />
+                                    </div>
+                                  ) : null}
                                 </div>
-                              ) : null}
-                            </div>
-                          );
-                        })}
+                              );
+                            })}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
                 </div>
               </section>
 
@@ -639,132 +649,168 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             </>
           )}
 
-          <Collapsible open={props.manualOpen} onOpenChange={props.onManualOpenChange}>
-            <div className="border-t border-border/60 pt-1">
-              <div className="flex items-center justify-between gap-2 px-3 py-2">
-                <CollapsibleTrigger asChild>
-                  <button
-                    type="button"
-                    className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left text-xs font-medium text-fg"
-                  >
-                    <ChevronDownIcon
-                      className={cn(
-                        "size-3.5 shrink-0 text-fg-subtle transition-transform",
-                        props.manualOpen && "rotate-180",
-                      )}
-                    />
-                    <span className="truncate">Add by URL</span>
-                    {manualCount > 0 ? <MetaChip rounded="full">{manualCount}</MetaChip> : null}
-                  </button>
-                </CollapsibleTrigger>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="xs"
-                  onClick={props.onManualAdd}
-                  disabled={props.pending}
-                  className="h-7 text-xs"
-                >
-                  <PlusIcon className="size-3" />
-                  Add
-                </Button>
-              </div>
-
-              <CollapsibleContent>
-                <div className="space-y-2 border-t border-border p-3">
-                  {props.manualRepos.length === 0 ? (
-                    <p className="text-xs leading-5 text-fg-muted">
-                      Add HTTPS Git repositories that don't use the GitHub app token.
-                    </p>
-                  ) : (
-                    props.manualRepos.map((repo) => {
-                      const locked = props.lockedManualRepoIds?.has(repo.id) === true;
-                      return (
-                        <div
-                          key={repo.id}
-                          className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_7rem_auto]"
-                        >
-                          <Input
-                            value={repo.url}
-                            onChange={(event) =>
-                              props.onManualUpdate(repo.id, { url: event.target.value })
-                            }
-                            disabled={props.pending || locked}
-                            placeholder="https://github.com/org/repo"
-                            className="h-8 text-xs"
-                          />
-                          <div className="relative">
-                            <GitBranchIcon className="pointer-events-none absolute left-2.5 top-2 size-3.5 text-fg-subtle" />
-                            <Input
-                              value={repo.ref}
-                              onChange={(event) =>
-                                props.onManualUpdate(repo.id, { ref: event.target.value })
-                              }
-                              disabled={props.pending || locked}
-                              placeholder="main"
-                              className="h-8 pl-7 text-xs"
-                            />
-                          </div>
-                          {locked ? (
-                            <MetaChip dot="idle" rounded="full" className="self-center">
-                              Mounted
-                            </MetaChip>
-                          ) : confirmRemoveId === repo.id ? (
-                            <div className="flex items-center gap-1">
-                              <Button
-                                type="button"
-                                variant="destructive"
-                                size="icon-sm"
-                                onClick={() => {
-                                  props.onManualRemove(repo.id);
-                                  setConfirmRemoveId(null);
-                                }}
-                                disabled={props.pending}
-                                aria-label="Confirm remove repository"
-                                title="Remove"
-                                className="size-8"
-                              >
-                                <CheckIcon className="size-3.5" />
-                              </Button>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon-sm"
-                                onClick={() => setConfirmRemoveId(null)}
-                                aria-label="Keep repository"
-                                title="Cancel"
-                                className="size-8"
-                              >
-                                <XIcon className="size-3.5" />
-                              </Button>
-                            </div>
-                          ) : (
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon-sm"
-                              onClick={() => setConfirmRemoveId(repo.id)}
-                              disabled={props.pending}
-                              aria-label="Remove repository"
-                              title="Remove"
-                              className="size-8"
-                            >
-                              <Trash2Icon className="size-3.5" />
-                            </Button>
-                          )}
-                        </div>
-                      );
-                    })
-                  )}
-                  {props.validationError ? (
-                    <p className="text-xs leading-5 text-status-failed" role="alert">
-                      {props.validationError}
-                    </p>
-                  ) : null}
+          {props.unavailableMountedRepositories?.map((repo) => (
+            <div key={`${repo.uri}:${repo.ref}`} className="flex items-center gap-3 px-0 py-3">
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-medium text-fg" title={repo.uri}>
+                  {repo.uri}
                 </div>
-              </CollapsibleContent>
+                <div className="truncate text-xs text-fg-subtle">
+                  {repo.ref} · Unavailable in catalog
+                </div>
+              </div>
+              <MetaChip dot="idle" rounded="full">
+                <LockIcon className="size-3" aria-hidden="true" />
+                Mounted
+              </MetaChip>
+              <ComposerMenuSwitch
+                checked
+                locked
+                label={`${repo.uri} mounted`}
+                onCheckedChange={() => {}}
+              />
             </div>
-          </Collapsible>
+          ))}
+          {props.manualRepos
+            .filter((repo) => props.lockedManualRepoIds?.has(repo.id))
+            .map((repo) => (
+              <div key={repo.id} className="flex items-center gap-3 px-0 py-3">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium text-fg" title={repo.url}>
+                    {repo.url}
+                  </div>
+                  <div className="truncate text-xs text-fg-subtle">{repo.ref}</div>
+                </div>
+                <MetaChip dot="idle" rounded="full">
+                  <LockIcon className="size-3" aria-hidden="true" />
+                  Mounted
+                </MetaChip>
+                <ComposerMenuSwitch
+                  checked
+                  locked
+                  label={`${repo.url} mounted`}
+                  onCheckedChange={() => {}}
+                />
+              </div>
+            ))}
+
+          {props.manualRepos.length === 0 ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={props.onManualAdd}
+              disabled={props.pending}
+              className="w-full justify-start text-sm text-fg-muted"
+            >
+              <PlusIcon className="size-3.5" />
+              Add repository URL
+            </Button>
+          ) : (
+            <Collapsible open={props.manualOpen} onOpenChange={props.onManualOpenChange}>
+              <div className="border-t border-border/60 pt-1">
+                <div className="flex items-center justify-between gap-2 px-3 py-2">
+                  <CollapsibleTrigger asChild>
+                    <button
+                      type="button"
+                      className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left text-xs font-medium text-fg"
+                    >
+                      <ChevronDownIcon
+                        className={cn(
+                          "size-3.5 shrink-0 text-fg-subtle transition-transform",
+                          props.manualOpen && "rotate-180",
+                        )}
+                      />
+                      <span className="truncate">Add repository URL</span>
+                      {manualCount > 0 ? <MetaChip rounded="full">{manualCount}</MetaChip> : null}
+                    </button>
+                  </CollapsibleTrigger>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    onClick={props.onManualAdd}
+                    disabled={props.pending}
+                    className="h-7 text-xs"
+                  >
+                    <PlusIcon className="size-3" />
+                    Add
+                  </Button>
+                </div>
+
+                <CollapsibleContent>
+                  <div className="space-y-2 border-t border-border p-3">
+                    {props.manualRepos.every((repo) => props.lockedManualRepoIds?.has(repo.id)) ? (
+                      <p className="text-xs leading-5 text-fg-muted">
+                        Public HTTPS repositories only. Private GitHub repositories require the
+                        workspace App or your personal identity.
+                      </p>
+                    ) : (
+                      props.manualRepos
+                        .filter((repo) => !props.lockedManualRepoIds?.has(repo.id))
+                        .map((repo) => (
+                          <ManualRepositoryEditor
+                            key={repo.id}
+                            repository={repo}
+                            mounted={props.lockedManualRepoIds?.has(repo.id) === true}
+                            pending={props.pending}
+                            onUpdate={(patch) => props.onManualUpdate(repo.id, patch)}
+                            onRemove={() => props.onManualRemove(repo.id)}
+                            onAttach={
+                              props.onManualAttach ??
+                              (async () => {
+                                throw new Error("Repository attachment is unavailable.");
+                              })
+                            }
+                          />
+                        ))
+                    )}
+                    {props.validationError ? (
+                      <p className="text-xs leading-5 text-status-failed" role="alert">
+                        {props.validationError}
+                      </p>
+                    ) : null}
+                  </div>
+                </CollapsibleContent>
+              </div>
+            </Collapsible>
+          )}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="w-full justify-start text-sm text-fg-muted"
+            onClick={() => void refreshList()}
+            disabled={!canRefresh || props.repoBusy || refreshBusy}
+          >
+            <RefreshCwIcon
+              className={cn("size-3.5", (props.repoBusy || refreshBusy) && "animate-spin")}
+            />
+            Refresh list
+          </Button>
+          {refreshError ? (
+            <p className="px-3 text-xs text-status-failed" role="alert">
+              {refreshError}
+            </p>
+          ) : null}
+          {props.newChatUrl &&
+          (props.lockedRepoIds?.size ?? 0) +
+            (props.lockedPersonalGitHubRepoIds?.size ?? 0) +
+            (props.lockedManualRepoIds?.size ?? 0) >
+            0 ? (
+            <p className="px-3 text-2xs text-fg-muted">
+              Mounted repositories cannot be removed or retargeted.{" "}
+              <a href={props.newChatUrl} className="text-brand hover:underline">
+                Start a new chat
+              </a>{" "}
+              to change them.
+            </p>
+          ) : null}
+          {props.validationError && (!props.manualOpen || props.manualRepos.length === 0) ? (
+            <p className="px-3 text-xs text-status-failed" role="alert">
+              {props.validationError}
+            </p>
+          ) : null}
         </div>
       </div>
     </div>
@@ -774,7 +820,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
 export function RepositoryContextPicker(props: RepositoryContextPickerProps) {
   const selectedInstalledCount = props.selectedRepoIds.size;
   const selectedPersonalCount = props.selectedPersonalGitHubRepoIds?.size ?? 0;
-  const manualCount = props.manualRepos.filter((repo) => repo.url.trim().length > 0).length;
+  const manualCount = attachedManualRepositoryCount(props.manualRepos);
   const selectedCount = selectedInstalledCount + selectedPersonalCount + manualCount;
   const bindingPresentation = repositoryBindingPresentation(
     props.status,
@@ -783,7 +829,9 @@ export function RepositoryContextPicker(props: RepositoryContextPickerProps) {
   );
   const personalGitHubActive = props.personalGitHubStatus?.connection?.status === "active";
   const selectedInstalled = props.repositories.filter((repo) => props.selectedRepoIds.has(repo.id));
-  const selectedManual = props.manualRepos.filter((repo) => repo.url.trim().length > 0);
+  const selectedManual = props.manualRepos.filter(
+    (repo) => repo.attached !== false && repo.url.trim().length > 0,
+  );
   const selectedNames = [
     ...selectedInstalled.map((repo) => repo.fullName),
     ...selectedManual.map((repo) => repo.url.trim()),
@@ -834,7 +882,7 @@ export function RepositoryContextPicker(props: RepositoryContextPickerProps) {
         align="start"
         side="top"
         sideOffset={8}
-        className="flex w-[min(560px,calc(100vw-2rem))] max-h-[min(70vh,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-0 shadow-2xl"
+        className={REPOSITORY_PANEL_CLASS}
       >
         <RepositoryContextMenuBody {...props} />
       </DropdownMenuContent>

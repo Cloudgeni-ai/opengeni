@@ -51,7 +51,7 @@ export function rigChangeStatusView(change: RigChange): RigStatusView {
         tone: "idle",
         label: "Merged",
         pulse: false,
-        description: "Verified and folded into a new rig version.",
+        description: "Verified and folded into a new sandbox environment version.",
       };
     case "rejected":
       return {

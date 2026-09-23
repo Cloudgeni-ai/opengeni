@@ -3,6 +3,7 @@ import {
   environmentsEncryptionKeyBytes,
   resolveFirstPartyDelegationSecret,
   resolveStreamTokenSecret,
+  sandboxWarmRateMicrosPerSecond,
 } from "@opengeni/config";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
@@ -75,6 +76,7 @@ import {
   BrowserSessionNotFoundError,
   BrowserSessionOperationConflictError,
   BrowserSessionStateError,
+  SandboxPaidComputeAdmissionError,
   completeBrowserSessionEnd,
   completeExternalAuth,
   completeBrowserDownloadSave,
@@ -191,6 +193,7 @@ import {
   shouldPersistControllerDataPlaneUrl,
   withCachedController,
 } from "../controller-data-plane";
+import { filterInteractionSessionsForGrant } from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import {
   browserStateArtifactAad,
@@ -284,13 +287,15 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.get("/v1/workspaces/:workspaceId/browser-sessions", async (context) => {
     const workspaceId = context.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:read");
+    const listed = await listBrowserSessions(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
     return context.json(
-      BrowserSessionListResponse.parse(
-        await listBrowserSessions(deps.db, {
-          accountId: grant.accountId,
-          workspaceId,
-        }),
-      ),
+      BrowserSessionListResponse.parse({
+        ...listed,
+        sessions: await filterInteractionSessionsForGrant(deps, grant, listed.sessions),
+      }),
     );
   });
 
@@ -946,6 +951,34 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         async ({ sessionClient }) => await sessionClient.observe(targetId),
       );
       return context.json(result);
+    },
+  );
+
+  app.get(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/screenshot",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:read",
+      );
+      const targetId = requireOpaqueParam(context, "targetId");
+      const frame = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.read",
+        "browser.read",
+        async ({ sessionClient }) => await sessionClient.capture(targetId),
+      );
+      return new Response(frame.data.slice().buffer, {
+        status: 200,
+        headers: {
+          "cache-control": "no-store",
+          "content-type": frame.mediaType,
+          "x-opengeni-browser-frame": frame.metadataHeader,
+        },
+      });
     },
   );
 
@@ -2700,6 +2733,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         operationResourcePolicySupported:
           enrollment.agentCapabilities.operationResourcePolicy === true,
         operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+        transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
         ...(deps.settings.agentOpStreamEnabled === true &&
         enrollment.opStream === true &&
         deps.bus.getOpStreamConnection
@@ -2788,6 +2822,12 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             resolved.kind !== "selfhosted" ||
             resolved.sandboxId !== expectedPlacement.sandboxId
           ) {
+            if (operation === "browser.create") {
+              throw new HTTPException(422, {
+                message:
+                  "The requested Connected Machine is not this session's current placement. Move the session to that machine before creating an interaction resource.",
+              });
+            }
             return await throwBrowserSourcePlacementChanged(
               grant,
               sourceSession.id,
@@ -3744,6 +3784,10 @@ async function ensureInteractionHolder(
     holderId: interactionHolderId(browserSessionId),
     subjectId: sourceSession.id,
     backend: placement.lease.backend,
+    warmBilling: {
+      mode: deps.settings.sandboxWarmBillingMode,
+      rateMicrosPerSecond: sandboxWarmRateMicrosPerSecond(deps.settings, placement.lease.backend),
+    },
     os: placement.lease.os,
     image: sandboxRuntime.image,
     rigVersionId: sourceSession.rigVersionId,
@@ -4712,6 +4756,8 @@ function browserRouteError(error: unknown): HTTPException {
   const connectedMachineError = interactionControlApiError(error, "browser");
   if (connectedMachineError) return connectedMachineError;
   if (error instanceof HTTPException) return error;
+  if (error instanceof SandboxPaidComputeAdmissionError)
+    return new HTTPException(402, { message: error.message, cause: error });
   if (error instanceof BrowserSessionNotFoundError) {
     return new HTTPException(404, { message: error.message, cause: error });
   }

@@ -20,7 +20,7 @@ describe("portable local compaction capability boundary", () => {
       expect(types).not.toContain("compaction");
       expect(types).toContain("filesystem");
       expect(types).toContain("shell");
-      expect(types).toContain("skills");
+      expect(types).not.toContain("skills");
     }
   });
 });
@@ -43,11 +43,9 @@ describe("turn sandbox-tool cancellation boundary", () => {
       .capabilities;
 
     expect(fence).not.toBeNull();
-    expect(capabilities.map((capability) => capability.type)).toEqual([
-      "filesystem",
-      "shell",
-      "skills",
-    ]);
+    expect(capabilities.map((capability) => capability.type)).toEqual(["filesystem", "shell"]);
+    expect(agent.tools.map((tool) => tool.name)).toContain("skill_read");
+    expect(agent.tools.map((tool) => tool.name)).not.toContain("load_skill");
     expect(capabilities.every((capability) => Object.hasOwn(capability, "tools"))).toBe(true);
 
     abort.abort(new Error("steered"));
@@ -122,7 +120,7 @@ describe("native web search hosted tool", () => {
     expect(webSearchHostedTools(sandboxAgent)).toHaveLength(0);
     expect(
       ((noneAgent as { tools?: Array<{ name?: unknown }> }).tools ?? []).map((tool) => tool.name),
-    ).toEqual([HUMAN_INPUT_TOOL_NAME]);
+    ).toContain(HUMAN_INPUT_TOOL_NAME);
   });
 });
 

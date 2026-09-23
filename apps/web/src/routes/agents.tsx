@@ -10,7 +10,6 @@ import {
   ListTreeIcon,
   NetworkIcon,
   PauseIcon,
-  RefreshCwIcon,
   SearchIcon,
   WorkflowIcon,
   XCircleIcon,
@@ -360,17 +359,6 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
         icon={<NetworkIcon className="size-4" />}
         title="Agents"
         description="Every visible agent workstream, connected to the agents it spawned. Open a node to inspect its session, goal, turns, and output."
-        actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => void refresh()}
-            disabled={data.loading || data.refreshing}
-          >
-            <RefreshCwIcon className={cn("size-3.5", data.refreshing && "animate-spin")} />
-            Refresh
-          </Button>
-        }
       />
 
       <section

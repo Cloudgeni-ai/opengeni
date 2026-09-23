@@ -217,6 +217,49 @@ test("HTTP/1 browser fallback reads a finite durable snapshot without opening su
   expect(liveResponse.headers.get("connection")).toBeNull();
 });
 
+test("HTTP/1 session batches deliver an oversized message alone and resume after it", async () => {
+  const text = `HEAD-${"界🙂 exact content ".repeat(50_000)}-TAIL`;
+  const large = { ...event(1), type: "agent.message.completed" as const, payload: { text } };
+  durableEvents = [
+    large,
+    { ...event(2), type: "agent.message.completed", payload: { text: "next" } },
+  ];
+  const bus = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("finite polling must not use the live bus");
+      },
+    },
+  ) as EventBus;
+  const options = browserSseDeliveryOptions("http1-bounded");
+  const first = await sseSessionStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    SESSION_ID,
+    0,
+    new AbortController().signal,
+    options,
+  );
+  const body = await first.text();
+  const frames = body.split("\n").filter((line) => line.startsWith("data: "));
+  expect(frames).toHaveLength(1);
+  expect(JSON.parse(frames[0]!.slice(6)).payload.text).toBe(text);
+  const next = await sseSessionStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    SESSION_ID,
+    1,
+    new AbortController().signal,
+    options,
+  );
+  const nextFrames = (await next.text()).split("\n").filter((line) => line.startsWith("data: "));
+  expect(nextFrames).toHaveLength(1);
+  expect(JSON.parse(nextFrames[0]!.slice(6)).payload.text).toBe("next");
+});
+
 test("finite durable snapshots stop on whole frames and resume without gaps", async () => {
   durableEvents = Array.from({ length: 100 }, (_, index) =>
     titleEvent(index + 1, `${index + 1}:${"x".repeat(8_000)}`),
@@ -619,7 +662,10 @@ test("an open session stream catches up after an accepted embedding publish whil
   // heartbeat both remain read-free.
   reconnect?.(1);
   expect(new TextDecoder().decode((await reader.read()).value)).toBe(": heartbeat\n\n");
-  expect(durableReads).toHaveLength(2);
+  // The short page requires one EOF probe: byte-selected pages can be short
+  // even when more exact events remain. Neither heartbeat nor duplicate
+  // recovery notification starts another read after that probe.
+  expect(durableReads).toHaveLength(3);
 
   await reader.cancel();
   expect(reconnectReleased).toBe(1);

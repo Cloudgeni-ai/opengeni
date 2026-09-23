@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   encodeSpreadsheetMetadataKernelProjection,
+  encodeDocumentArtifactQueryResponse,
   spreadsheetSheetId,
 } from "@opengeni/contracts/editable-artifacts";
 
@@ -41,6 +42,98 @@ const agentActor: EditableArtifactActor = Object.freeze({
 });
 
 describe("editable artifact agent application", () => {
+  test("mints document inspection proof only after successful native query and decode", async () => {
+    const fixture = await artifactFixture({ seed: false });
+    let malformed = false;
+    let recorderFails = false;
+    const proofs: Array<{ queryKind: string; headSequence: number; stateHash: string }> = [];
+    const receiptId = "11111111-1111-4111-8111-111111111111";
+    const application = new EditableArtifactAgentApplication({
+      domain: fixture.service,
+      associations: { listArtifactIds: async () => [], touch: async () => {} },
+      exports: {} as EditableArtifactDurableExportService,
+      officeImports: {
+        prepare: async () => {
+          throw new Error("unused");
+        },
+      },
+      workspaceFiles: {
+        ensureMaterializationFile: async () => {
+          throw new Error("unused");
+        },
+      },
+      inspector: {
+        query: async () =>
+          malformed
+            ? new Uint8Array([0])
+            : encodeDocumentArtifactQueryResponse({
+                revision: 0n,
+                items: [],
+                nextCursor: null,
+                truncated: false,
+                projectedTextUtf16: 0,
+                projectedTableCells: 0,
+              }),
+      },
+      recordInspection: async ({ artifact, queryKind, queryHash }) => {
+        expect(queryHash).toHaveLength(64);
+        if (recorderFails) throw new Error("document changed during receipt recording");
+        proofs.push({
+          queryKind,
+          headSequence: artifact.headSequence,
+          stateHash: artifact.stateHash,
+        });
+        return receiptId;
+      },
+    });
+    const document = await application.create({
+      scope,
+      actor: agentActor,
+      sessionId,
+      idempotencyKey: editableArtifactClientTransactionId("report-inspection"),
+      modality: "document",
+      title: "Report",
+    });
+    expect(document.artifactReference).toBe(
+      `[Open report](/workspaces/${scope.workspaceId}/artifacts/editable/${document.id})`,
+    );
+    expect(
+      await application.get({
+        scope,
+        actor: agentActor,
+        sessionId,
+        artifactId: document.id as never,
+      }),
+    ).toEqual(document);
+    const input = {
+      scope,
+      actor: agentActor,
+      sessionId,
+      artifactId: document.id as never,
+      request: {
+        modality: "document" as const,
+        query: {
+          kind: "body" as const,
+          startBlock: 0,
+          limits: { maxItems: 10, maxTextUtf16: 1000, maxTableCells: 100 },
+        },
+      },
+    };
+    expect(await application.inspect(input)).toMatchObject({
+      artifact: document,
+      inspectionReceiptId: receiptId,
+    });
+    expect(proofs).toEqual([
+      { queryKind: "body", headSequence: document.headSequence, stateHash: document.stateHash },
+    ]);
+    malformed = true;
+    await expect(application.inspect(input)).rejects.toThrow();
+    expect(proofs).toHaveLength(1);
+    malformed = false;
+    recorderFails = true;
+    await expect(application.inspect(input)).rejects.toThrow("changed during receipt");
+    expect(proofs).toHaveLength(1);
+  });
   test("routes direct commands through the authoritative domain and recovers a lost response", async () => {
     const fixture = await artifactFixture();
     const touched: string[] = [];

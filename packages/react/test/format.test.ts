@@ -6,12 +6,49 @@ import {
   formatClockTime,
   formatRelativeTime,
   humanizeFailureReason,
+  presentFailure,
   isCreditExhaustion,
   stringifyPayload,
   truncate,
   tryParseJson,
 } from "../src/lib/format";
 import { OpenGeniApiError } from "@opengeni/sdk";
+
+describe("failure presentation", () => {
+  const refusal =
+    "This request was blocked by our safety systems. Reason: Potentially unintended activity.";
+  test("exposes the actual reason in legacy exhausted-retry failures", () => {
+    expect(
+      presentFailure({
+        error: "Upstream unavailable. Send a message to retry.",
+        lastRetryableError: refusal,
+      }),
+    ).toEqual({
+      reason: `The model provider blocked this request. ${refusal}`,
+      safetyRefusal: true,
+    });
+  });
+  test("retains the exact diagnostic on new safety failures", () => {
+    expect(
+      presentFailure({
+        code: "provider_safety_refusal",
+        error: "Automatic retries stopped.",
+        detail: refusal,
+      }),
+    ).toEqual({
+      reason: `The model provider blocked this request. ${refusal}`,
+      safetyRefusal: true,
+    });
+  });
+  test("keeps other underlying failures and ignores nontext details", () => {
+    expect(
+      presentFailure({ error: "Retries exhausted.", lastRetryableError: "Connection reset." })
+        .reason,
+    ).toBe("Retries exhausted. Connection reset.");
+    expect(presentFailure({ error: "Failed.", detail: { nested: true } }).reason).toBe("Failed.");
+    expect(presentFailure({})).toEqual({ reason: null, safetyRefusal: false });
+  });
+});
 
 describe("formatClockTime", () => {
   test("formats date + time and rejects invalid input", () => {

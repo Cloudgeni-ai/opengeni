@@ -45,7 +45,6 @@ import type {
   BrowserTargetListResponse,
   BrowserRevision,
   BrowserRevisionListResponse,
-  CapabilityPack,
   ClientConfig,
   ComposerDraft,
   ComputerActionReceipt,
@@ -87,8 +86,6 @@ import type {
   RigVersion,
   RigChange,
   CreateWorkspaceRequest,
-  EnablePackRequest,
-  InstallPackRequest,
   FileAsset,
   FileDownloadUrlResponse,
   FsListResponse,
@@ -108,19 +105,13 @@ import type {
   InteractionInterventionListOptions,
   InteractionInterventionListResponse,
   InteractionInterventionMutationResponse,
-  ListPacksResponse,
   NetworkRoute,
   NetworkRouteListOptions,
   NetworkRouteListResponse,
   NetworkRouteMutationResponse,
-  PackInstallation,
-  PackInstallationPreview,
-  PackUninstallPreview,
-  PreviewPackInstallationRequest,
   ProtectedAuthFillRequest,
   ProtectedAuthFillResponse,
   PtyOpenResponse,
-  RegisterCapabilityPackRequest,
   SessionCapabilities,
   TerminalExecResponse,
   ViewerHeartbeatResponse,
@@ -158,8 +149,6 @@ import type {
   UpdateWorkspaceEnvironmentRequest,
   UpdateVariableSetRequest,
   UpdateWorkspaceRequest,
-  UninstallPackRequest,
-  UninstallPackResult,
   Workspace,
   WorkspaceControlEvent,
   WorkspaceInteractionRevisionEvent,
@@ -169,7 +158,6 @@ import type {
   VariableSetSecret,
   VariableSetVariableMetadata,
   VerifyAuthRunRequest,
-  WorkspaceRegisteredPack,
   WorkspaceRealtimeModelCatalogResponse,
 } from "@opengeni/sdk";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
@@ -1052,8 +1040,6 @@ export class MockOpenGeniClient implements SessionClientLike {
     return this.bus(sessionId).append("user.humanInputResponse", { requestId, response });
   }
 
-  // --- Environments, packs, workspaces, billing (static-ish fixtures) ----------
-
   private environments: WorkspaceEnvironment[] = [
     fabricateEnvironment("staging"),
     fabricateEnvironment("production"),
@@ -1456,174 +1442,6 @@ export class MockOpenGeniClient implements SessionClientLike {
   ): Promise<{ ok: boolean; versionId: string }> {
     const rig = await this.getRig(_workspaceId, rigId);
     return { ok: true, versionId: rig.activeVersion?.id ?? "" };
-  }
-
-  private registeredPacks: WorkspaceRegisteredPack[] = [];
-  private packInstallations: PackInstallation[] = [];
-
-  async listPacks(): Promise<ListPacksResponse> {
-    return {
-      packs: [DEVOPS_PACK, ...this.registeredPacks.map((registration) => registration.pack)],
-      installations: [...this.packInstallations],
-    };
-  }
-
-  async registerPack(
-    _workspaceId: string,
-    manifest: RegisterCapabilityPackRequest,
-  ): Promise<WorkspaceRegisteredPack> {
-    const now = new Date().toISOString();
-    const registration: WorkspaceRegisteredPack = {
-      accountId: ACCOUNT_ID,
-      workspaceId: WORKSPACE_ID,
-      pack: fabricatePack(manifest),
-      createdAt: now,
-      updatedAt: now,
-    };
-    this.registeredPacks = [
-      ...this.registeredPacks.filter((existing) => existing.pack.id !== manifest.id),
-      registration,
-    ];
-    return registration;
-  }
-
-  async enablePack(
-    _workspaceId: string,
-    packId: string,
-    request: EnablePackRequest = {},
-  ): Promise<PackInstallation> {
-    const now = new Date().toISOString();
-    const installation: PackInstallation = {
-      id: demoUuid(),
-      accountId: ACCOUNT_ID,
-      workspaceId: WORKSPACE_ID,
-      packId,
-      status: "active",
-      version: 1,
-      manifestSnapshot: null,
-      manifestDigest: null,
-      selectedRigId: null,
-      installedBySubjectId: null,
-      metadata: {
-        ...request.metadata,
-        ...(request.environmentId ? { environmentId: request.environmentId } : {}),
-      },
-      enabledAt: now,
-      updatedAt: now,
-    };
-    this.packInstallations = [
-      ...this.packInstallations.filter((existing) => existing.packId !== packId),
-      installation,
-    ];
-    return installation;
-  }
-
-  async previewPackInstallation(
-    _workspaceId: string,
-    packId: string,
-    request: PreviewPackInstallationRequest = {},
-  ): Promise<PackInstallationPreview> {
-    const pack = (await this.listPacks()).packs.find((candidate) => candidate.id === packId);
-    if (!pack) throw new Error("pack not found");
-    const installation = this.packInstallations.find((candidate) => candidate.packId === packId);
-    return {
-      packId,
-      packVersion: pack.version,
-      manifestDigest: "0".repeat(64),
-      installationVersion: installation?.version ?? null,
-      action: !installation || installation.status === "disabled" ? "install" : "update",
-      ready: true,
-      blockers: [],
-      components: [],
-      rig: {
-        required: false,
-        status: "not_required",
-        requestedRigId: request.rigId ?? null,
-        rigId: null,
-        rigVersionId: null,
-        name: null,
-        image: null,
-      },
-      variableSetId: request.variableSetId ?? null,
-      legacyInlineSkillCount: pack.skills.length,
-      legacySandboxImage: pack.sandboxImage ?? null,
-    };
-  }
-
-  async installPack(
-    _workspaceId: string,
-    packId: string,
-    request: InstallPackRequest,
-  ): Promise<PackInstallation> {
-    const pack = (await this.listPacks()).packs.find((candidate) => candidate.id === packId);
-    if (!pack) throw new Error("pack not found");
-    const existing = this.packInstallations.find((candidate) => candidate.packId === packId);
-    const now = new Date().toISOString();
-    const installation: PackInstallation = {
-      id: existing?.id ?? demoUuid(),
-      accountId: ACCOUNT_ID,
-      workspaceId: WORKSPACE_ID,
-      packId,
-      status: "active",
-      version: (existing?.version ?? 0) + 1,
-      manifestSnapshot: pack,
-      manifestDigest: request.expectedManifestDigest,
-      selectedRigId: request.rigId ?? null,
-      installedBySubjectId: "demo:user",
-      metadata: {
-        ...request.metadata,
-        ...(request.variableSetId ? { variableSetId: request.variableSetId } : {}),
-      },
-      enabledAt: now,
-      updatedAt: now,
-    };
-    this.packInstallations = [
-      ...this.packInstallations.filter((candidate) => candidate.packId !== packId),
-      installation,
-    ];
-    return installation;
-  }
-
-  async previewPackUninstall(_workspaceId: string, packId: string): Promise<PackUninstallPreview> {
-    const installation = this.packInstallations.find((candidate) => candidate.packId === packId);
-    return {
-      packId,
-      installed: Boolean(installation && installation.status !== "disabled"),
-      installationVersion: installation?.version ?? null,
-      components: [],
-    };
-  }
-
-  async uninstallPack(
-    _workspaceId: string,
-    packId: string,
-    _request: UninstallPackRequest,
-  ): Promise<UninstallPackResult> {
-    const installation = this.packInstallations.find((candidate) => candidate.packId === packId);
-    if (installation) {
-      this.packInstallations = [
-        ...this.packInstallations.filter((candidate) => candidate.packId !== packId),
-        {
-          ...installation,
-          status: "disabled",
-          version: installation.version + 1,
-        },
-      ];
-    }
-    return {
-      packId,
-      status: installation ? "uninstalled" : "not_installed",
-      retainedComponents: [],
-    };
-  }
-
-  async deletePack(_workspaceId: string, packId: string): Promise<void> {
-    this.registeredPacks = this.registeredPacks.filter(
-      (registration) => registration.pack.id !== packId,
-    );
-    this.packInstallations = this.packInstallations.filter(
-      (installation) => installation.packId !== packId,
-    );
   }
 
   private workspaces: Workspace[] = [fabricateWorkspace("Acme Platform")];
@@ -4250,64 +4068,6 @@ function fabricateEnvironment(
   };
 }
 
-function fabricatePack(manifest: RegisterCapabilityPackRequest): CapabilityPack {
-  return {
-    id: manifest.id,
-    name: manifest.name,
-    description: manifest.description,
-    role: manifest.role,
-    category: manifest.category,
-    version: manifest.version,
-    skills: (manifest.skills ?? []).map((skill) => ({
-      name: skill.name,
-      files: skill.files,
-    })),
-    components: (manifest.components ?? []).map((component) => ({
-      ...component,
-      required: component.required ?? true,
-    })),
-    ...(manifest.rig
-      ? {
-          rig: {
-            ...manifest.rig,
-            required: manifest.rig.required ?? true,
-            requireVerified: manifest.rig.requireVerified ?? false,
-          },
-        }
-      : {}),
-    ...(manifest.sandboxImage ? { sandboxImage: manifest.sandboxImage } : {}),
-    connectors: [],
-    knowledge: [],
-    scheduledTaskTemplates: [],
-    tools: manifest.tools ?? [],
-    ...(manifest.variableSet
-      ? {
-          variableSet: {
-            ...manifest.variableSet,
-            requiredVariables: manifest.variableSet.requiredVariables ?? [],
-            required: manifest.variableSet.required ?? false,
-          },
-        }
-      : {}),
-    metadata: manifest.metadata ?? {},
-  };
-}
-
-const DEVOPS_PACK: CapabilityPack = fabricatePack({
-  id: "autonomous-devops",
-  name: "Autonomous DevOps",
-  description: "Long-running infrastructure agents: drift checks, deploys, incident response.",
-  role: "devops",
-  category: "infrastructure",
-  version: "1.2.0",
-  skills: [
-    {
-      name: "drift-checks",
-      files: [{ path: "SKILL.md", content: "# Drift checks" }],
-    },
-  ],
-});
-
 function fabricateWorkspace(name: string): Workspace {
   const now = new Date().toISOString();
   return {
@@ -4416,6 +4176,7 @@ function scheduledTask(
     status: "active",
     schedule,
     temporalScheduleId: `sched-${name.toLowerCase().replace(/[^a-z]+/g, "-")}`,
+    ownerSubjectId: null,
     runMode: "new_session_per_run",
     overlapPolicy: "skip",
     action: { kind: "agent_turn" },

@@ -9,6 +9,28 @@ import {
 const identity = (s: string): string => s;
 
 describe("normalizeCodexRequestBody", () => {
+  test("retains required hosted-call status without mutating retained wire items", () => {
+    for (const type of [
+      "web_search_call",
+      "file_search_call",
+      "code_interpreter_call",
+      "image_generation_call",
+    ]) {
+      for (const status of ["completed", "in_progress", "failed"]) {
+        const item = Object.freeze({ type, id: "provider-item", status });
+        const body = normalizedCodexRequestBody({ input: [item] }, identity);
+        expect(body.input).toEqual([{ type, status }]);
+        expect(item).toEqual({ type, id: "provider-item", status });
+        expect(normalizedCodexRequestBody(body, identity)).toEqual(body);
+      }
+    }
+  });
+
+  test("does not invent a status for a hosted item missing provider evidence", () => {
+    const body = normalizeCodexRequestBody({ input: [{ type: "web_search_call" }] }, identity);
+    expect(body.input).toEqual([{ type: "web_search_call" }]);
+  });
+
   test("copy-on-write form preserves a retained source graph", () => {
     const changedItem = Object.freeze({
       type: "tool_search_call",
@@ -164,7 +186,7 @@ describe("normalizeCodexRequestBody", () => {
     );
     const input = body.input as Array<Record<string, unknown>>;
     expect(input).toHaveLength(5);
-    for (const item of input) {
+    for (const item of input.slice(0, 4)) {
       expect("status" in item).toBe(false);
       expect("id" in item).toBe(false);
     }
@@ -172,6 +194,8 @@ describe("normalizeCodexRequestBody", () => {
     expect(input[3]?.call_id).toBe("call_abc");
     expect(input[3]?.name).toBe("exec_command");
     expect(input[4]?.action).toEqual({ type: "search", query: "x" });
+    expect(input[4]?.status).toBe("completed");
+    expect(input[4]).not.toHaveProperty("id");
   });
 
   test("does NOT remove item_reference items or convert orphans (verdict §0 a/c)", () => {
@@ -345,7 +369,7 @@ describe("buildModelResolver", () => {
     expect(resolve("o3-pro")).toBe("gpt-5.6-sol");
   });
 
-  test("all exposed Codex GPT-5.6 ids reach the exact upstream slug unchanged", () => {
+  test("all exposed Codex GPT-6 ids reach the exact upstream slug unchanged", () => {
     const resolveExact = buildModelResolver(
       CODEX_FALLBACK_MODEL_SLUGS,
       CODEX_FALLBACK_MODEL_SLUGS[0],

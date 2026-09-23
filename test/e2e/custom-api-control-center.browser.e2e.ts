@@ -19,6 +19,7 @@ const salesConnectionId = "00000000-0000-4000-8000-000000000620";
 const outlookConnectionId = "00000000-0000-4000-8000-000000000621";
 const apiContractRevision = OPENGENI_API_CONTRACT_REVISION;
 let webBaseUrl = "";
+const consentUrl = "https://provider.fixture.invalid/consent";
 
 type UiState = {
   canManage: boolean;
@@ -29,6 +30,17 @@ type UiState = {
   unhealthyAccount?: boolean;
   mailInboxBinding: ReturnType<typeof mailInboxBinding> | null;
   oauthFailuresRemaining: number;
+  connectStarts?: Array<{
+    providerId: string;
+    ownership: string;
+    returnUrl: string;
+    installationTarget: {
+      instanceKey: string;
+      displayName: string;
+      expectedInstanceVersion?: number;
+    };
+    reconnectAccountId?: string;
+  }>;
   oauthStarts: Array<{
     definitionId: string;
     ownership: "personal" | "workspace";
@@ -40,6 +52,14 @@ describe("custom API control center diagnostics", () => {
   const sessionsUrl = `http://127.0.0.1:9/v1/workspaces/${workspaceId}/sessions`;
 
   test("allows only the route-owned paged session requests cancelled during replacement", () => {
+    for (const query of [
+      "view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active",
+      "archiveStatus=active&sortBy=updatedAt&parentSessionId=null&limit=50&view=page",
+    ]) {
+      expect(
+        isExpectedSessionPageCancellation("GET", `${sessionsUrl}?${query}`, "net::ERR_ABORTED"),
+      ).toBe(true);
+    }
     expect(
       isExpectedSessionPageCancellation(
         "GET",
@@ -64,6 +84,25 @@ describe("custom API control center diagnostics", () => {
   });
 
   test("retains other request failures as diagnostics", () => {
+    const query = "view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active";
+    for (const [method, url, error] of [
+      ["POST", `${sessionsUrl}?${query}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query}`, "net::ERR_CONNECTION_RESET"],
+      ["GET", `${sessionsUrl}?${query}&unexpected=true`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query}&sortBy=updatedAt`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query}&archivedOnly=true`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query.replace("updatedAt", "name")}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query.replace("active", "all")}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query.replace("50", "51")}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query.replace("null", "other-session")}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query.replace("&archiveStatus=active", "")}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl.replace(workspaceId, accountId)}?${query}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl.replace(":9/", ":10/")}?${query}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}/other?${query}`, "net::ERR_ABORTED"],
+      ["GET", "not a URL", "net::ERR_ABORTED"],
+    ]) {
+      expect(isExpectedSessionPageCancellation(method!, url!, error!)).toBe(false);
+    }
     expect(
       isExpectedSessionPageCancellation(
         "GET",
@@ -195,7 +234,7 @@ describe("custom API control center browser acceptance", () => {
       const dialog = page.getByRole("dialog");
       await expectVisible(dialog);
       await dialog.getByLabel("API URL or domain").fill("linear.example.test/graphql");
-      await dialog.getByRole("button", { name: "Detect and preview" }).click();
+      await dialog.getByRole("button", { name: "Find tools", exact: true }).click();
 
       await expectText(dialog, "GraphQL introspection requires authentication");
       await expectText(dialog, "Create a new Connection");
@@ -222,7 +261,7 @@ describe("custom API control center browser acceptance", () => {
       const finance = page.locator('[data-custom-api-instance="finance"]');
       await finance.getByRole("button", { name: "Check for updates" }).click();
       const dialog = page.getByRole("dialog");
-      await dialog.getByRole("button", { name: "Detect and preview" }).click();
+      await dialog.getByRole("button", { name: "Find tools", exact: true }).click();
 
       await expectText(dialog, "Immutable preview ready");
       await expectText(dialog, "1 added, 0 removed, 2 unchanged tools");
@@ -281,9 +320,8 @@ describe("custom API control center browser acceptance", () => {
       await loading.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "domcontentloaded",
       });
-      const refresh = loading.getByRole("button", { name: "Refresh", exact: true });
-      await expectVisible(refresh);
-      expect(await refresh.isDisabled()).toBe(true);
+      await expectVisible(loading.getByRole("status").filter({ hasText: "Loading connections" }));
+      expect(await loading.getByRole("button", { name: "Refresh", exact: true }).count()).toBe(0);
       await loading.screenshot({ path: `${evidenceDir}pass-5c-loading.png`, fullPage: true });
     } finally {
       await context.close();
@@ -327,7 +365,7 @@ describe("custom API control center browser acceptance", () => {
     }
   }, 60_000);
 
-  test("pass 7: adding an account redirects straight to consent and retries one exact account", async () => {
+  test("pass 7: shared Connect opens provider consent and retries one exact account", async () => {
     const context = await browser.newContext({ viewport: { width: 1180, height: 960 } });
     const page = await context.newPage();
     const state = readyState();
@@ -336,20 +374,28 @@ describe("custom API control center browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "light");
 
-      // Every curated definition is oauth2-reviewed, so adding an account is a
-      // zero-dialog straight redirect - no local account-naming form.
+      // Shared Connect keeps the exact account target and opens consent only
+      // from the explicit user gesture, without a local account-naming form.
       let sheet = await openOutlookMailSheet(page);
       const addAccount = sheet.getByRole("button", { name: "+ Add account" });
       await expectVisible(addAccount);
-      await Promise.all([page.waitForURL(`${webBaseUrl}/provider-consent`), addAccount.click()]);
-      expect(state.oauthStarts).toHaveLength(1);
-      const added = new URL(state.oauthStarts[0]!.returnPath, webBaseUrl);
-      expect(added.searchParams.get("api_integration_instance")).toMatch(/^account-/);
-      expect(added.searchParams.get("api_integration_instance")).not.toBe("account-finance");
-      expect(added.searchParams.get("api_integration_name")).toBe("Outlook Mail - Account 2");
-      expect(added.searchParams.get("api_integration_expected")).toBeNull();
-      expect(state.oauthStarts[0]).toMatchObject({
-        definitionId: "microsoft-outlook-mail",
+      await addAccount.click();
+      await page.getByRole("radio", { name: "This workspace", exact: false }).check();
+      await page.getByRole("button", { name: "Continue", exact: true }).click();
+      const [consent] = await Promise.all([
+        context.waitForEvent("page"),
+        page.getByRole("button", { name: "Authorize connection" }).click(),
+      ]);
+      await consent.waitForURL(consentUrl);
+      await consent.close();
+      expect(state.connectStarts).toHaveLength(1);
+      const added = state.connectStarts![0]!.installationTarget;
+      expect(added.instanceKey).toMatch(/^account-/);
+      expect(added.instanceKey).not.toBe("account-finance");
+      expect(added.displayName).toBe("Outlook Mail - Account 2");
+      expect(added.expectedInstanceVersion).toBeUndefined();
+      expect(state.connectStarts![0]).toMatchObject({
+        providerId: "microsoft-outlook-mail",
         ownership: "workspace",
       });
 
@@ -364,26 +410,33 @@ describe("custom API control center browser acceptance", () => {
       await expectText(account, "Needs attention");
       const reconnect = account.getByRole("button", { name: "Reconnect" });
       await reconnect.click();
-      await expectVisible(repair.getByText("Couldn't start account connection"));
-      expect(repairState.oauthStarts).toHaveLength(1);
+      await expectVisible(repair.getByText("Could not start setup.", { exact: false }));
+      expect(repairState.connectStarts).toHaveLength(1);
       expect(repair.url()).toBe(`${webBaseUrl}/workspaces/${workspaceId}/plugins`);
-      await assertAccessibleAndBounded(repair, '[data-integration-sheet="outlook-mail"]');
+      await assertAccessibleAndBounded(repair, '[data-slot="dialog-content"]');
       await repair.screenshot({
         path: `${evidenceDir}pass-7-add-and-reconnect.png`,
         fullPage: true,
       });
 
-      await Promise.all([repair.waitForURL(`${webBaseUrl}/provider-consent`), reconnect.click()]);
-      expect(repairState.oauthStarts).toHaveLength(2);
-      const firstReturn = new URL(repairState.oauthStarts[0]!.returnPath, webBaseUrl);
-      const retriedReturn = new URL(repairState.oauthStarts[1]!.returnPath, webBaseUrl);
-      expect(firstReturn.searchParams.get("api_integration_instance")).toBe("account-finance");
-      expect(retriedReturn.searchParams.get("api_integration_instance")).toBe("account-finance");
-      expect(retriedReturn.searchParams.get("api_integration_name")).toBe("Outlook Mail — Finance");
-      expect(retriedReturn.searchParams.get("api_integration_expected")).toBe("2");
-      expect(repairState.oauthStarts[1]).toMatchObject({
-        definitionId: "microsoft-outlook-mail",
+      await repair.getByRole("button", { name: "Retry setup" }).click();
+      const [retryConsent] = await Promise.all([
+        context.waitForEvent("page"),
+        repair.getByRole("button", { name: "Authorize connection" }).click(),
+      ]);
+      await retryConsent.waitForURL(consentUrl);
+      await retryConsent.close();
+      expect(repairState.connectStarts).toHaveLength(2);
+      expect(repairState.connectStarts![0]!.installationTarget.instanceKey).toBe("account-finance");
+      expect(repairState.connectStarts![1]!.installationTarget).toEqual({
+        instanceKey: "account-finance",
+        displayName: "Outlook Mail — Finance",
+        expectedInstanceVersion: 2,
+      });
+      expect(repairState.connectStarts![1]).toMatchObject({
+        providerId: "microsoft-outlook-mail",
         ownership: "workspace",
+        reconnectAccountId: outlookConnectionId,
       });
     } finally {
       await context.close();
@@ -405,8 +458,11 @@ describe("custom API control center browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "dark");
 
-      const row = page.getByRole("button", { name: "Outlook Mail. Connected", exact: true });
+      const row = page
+        .getByRole("button", { name: /^Outlook Mail\s/ })
+        .filter({ hasText: "Connected" });
       await expectVisible(row);
+      expect(await row.locator(".og-capability-catalog-sr-only").textContent()).toBe("Connected");
       // Keyboard journey: opening from the focused row must return focus to it.
       await row.focus();
       await row.press("Enter");
@@ -489,6 +545,8 @@ function isExpectedSessionPageCancellation(
     .sort()
     .join("&");
   return new Set([
+    // Default root page on this fixture's capabilities route; keep exact keys and values.
+    "archiveStatus=active&limit=50&parentSessionId=null&sortBy=updatedAt&view=page",
     "limit=50&parentSessionId=null&view=page",
     "archivedOnly=true&limit=50&parentSessionId=null&view=page",
     "limit=1&pinsOnly=true&view=page",
@@ -499,12 +557,15 @@ async function openCapabilities(page: Page): Promise<void> {
   await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
     waitUntil: "networkidle",
   });
+  await page.getByRole("tab", { name: "Connections", exact: true }).click();
   await expectVisible(page.getByRole("heading", { name: "Custom APIs" }));
 }
 
 /** Opens the one Outlook Mail provider row's detail sheet (its accounts live there). */
 async function openOutlookMailSheet(page: Page) {
-  const row = page.getByRole("button", { name: /^Outlook Mail\. / });
+  const row = page
+    .locator(".og-capability-catalog-row")
+    .and(page.getByRole("button", { name: /^Outlook Mail\s/ }));
   await expectVisible(row);
   await row.click();
   const sheet = page.locator('[data-integration-sheet="outlook-mail"]');
@@ -519,6 +580,14 @@ async function expectCustomInstances(page: Page): Promise<void> {
 }
 
 async function installApi(page: Page, state: UiState): Promise<void> {
+  let connectAttempt: unknown;
+  await page.context().route(consentUrl, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: "<!doctype html><title>Provider consent</title><h1>Provider consent</h1>",
+    }),
+  );
   await page.route(`${webBaseUrl}/provider-consent`, (route) =>
     route.fulfill({
       status: 200,
@@ -555,21 +624,54 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       });
     }
     if (url.pathname === "/v1/access/me") return json(access(state.canManage));
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connect/attempts`) {
+      if (request.method() === "GET") return json([]);
+      const input = request.postDataJSON();
+      (state.connectStarts ??= []).push(input);
+      if (state.oauthFailuresRemaining > 0) {
+        state.oauthFailuresRemaining -= 1;
+        return json({ message: "Synthetic setup start failed" }, 503);
+      }
+      connectAttempt = {
+        id: "fixture-connect",
+        workspaceId,
+        providerId: input.providerId,
+        ownership: input.ownership,
+        installationTarget: input.installationTarget,
+        revision: 1,
+        state: "requires_user_action",
+        credentialsCommitted: false,
+        integrationInstalled: false,
+        completionRequirement: "integration",
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        nextAction: { type: "authorize", url: consentUrl },
+      };
+      return json(connectAttempt);
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connect/attempts/fixture-connect`)
+      return json(connectAttempt);
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json({ items: [], installations: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`) {
+      return json({ bindings: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       if (state.connectionsUnavailable)
         return json({ message: "Connection data unavailable" }, 503);
       return json({ connections: connections(state.dense) });
     }
-    if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
-      return json({ packs: [], installations: [] });
-    }
+
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`)
+      return json({ items: [], nextCursor: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) return json({ skills: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/content`)
+      return json({ skills: [], nextCursor: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) return json({ plugins: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`)
+      return json({ items: [], total: 0, nextOffset: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {

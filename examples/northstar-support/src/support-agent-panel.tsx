@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
+  OpenGeniProvider,
   Markdown,
   MessageTimeline,
   ModelPolicyPicker,
@@ -23,12 +24,18 @@ import {
 } from "@opengeni/react";
 import * as Composer from "@opengeni/react/composer";
 import { SessionRealtimeControl } from "@opengeni/react/realtime";
-import type { EffectiveSessionControl, LatencyMode, ReasoningEffort } from "@opengeni/sdk";
+import {
+  OpenGeniClient,
+  type EffectiveSessionControl,
+  type LatencyMode,
+  type ReasoningEffort,
+} from "@opengeni/sdk";
 import type { DemoHealth, SupportCase } from "./types";
 import { createDemoSession } from "./use-support-demo";
 import { supportToolRegistry } from "./support-tool-renderers";
 
 const DEFAULT_CODEX_MODEL = "codex/gpt-5.6-luna";
+const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 
 function demoPrompt(supportCase: SupportCase): string {
   const { ticket, customer } = supportCase;
@@ -39,15 +46,7 @@ function renderNorthstarMessage(text: string) {
   return <Markdown className="northstar-agent-copy">{text}</Markdown>;
 }
 
-export function SupportAgentPanel({
-  health,
-  supportCase,
-  sessionId,
-  expanded,
-  onExpandedChange,
-  onSessionCreated,
-  onClearSession,
-}: {
+type SupportAgentPanelProps = {
   health: DemoHealth | null;
   supportCase: SupportCase;
   sessionId: string | null;
@@ -55,7 +54,25 @@ export function SupportAgentPanel({
   onExpandedChange: (expanded: boolean) => void;
   onSessionCreated: (sessionId: string) => void;
   onClearSession: () => void;
-}) {
+};
+
+export function SupportAgentPanel(props: SupportAgentPanelProps) {
+  return (
+    <OpenGeniProvider client={client} workspaceId={props.health?.workspaceId ?? "unconfigured"}>
+      <SupportAgentPanelView {...props} />
+    </OpenGeniProvider>
+  );
+}
+
+function SupportAgentPanelView({
+  health,
+  supportCase,
+  sessionId,
+  expanded,
+  onExpandedChange,
+  onSessionCreated,
+  onClearSession,
+}: SupportAgentPanelProps) {
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<Error | null>(null);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);

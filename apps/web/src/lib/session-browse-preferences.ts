@@ -1,15 +1,30 @@
-import type { SessionBrowseGroupBy } from "./sessions-group";
+import type { SessionBrowseGroupBy, SessionBrowseSortBy } from "./sessions-group";
+
+export type SessionBrowseStatus = "active" | "archived" | "all";
+export type SessionBrowsePreferences = {
+  groupBy: SessionBrowseGroupBy;
+  sortBy: SessionBrowseSortBy;
+  status: SessionBrowseStatus;
+  showEmptyGroups: boolean;
+};
+export const DEFAULT_SESSION_BROWSE_PREFERENCES: SessionBrowsePreferences = {
+  groupBy: "project",
+  sortBy: "updatedAt",
+  status: "active",
+  showEmptyGroups: false,
+};
 
 const SESSION_BROWSE_PREFERENCE_VERSION = 1;
-const DEFAULT_SESSION_BROWSE_GROUP_BY: SessionBrowseGroupBy = "activity";
+const DEFAULT_SESSION_BROWSE_GROUP_BY = DEFAULT_SESSION_BROWSE_PREFERENCES.groupBy;
 
 type BrowsePreferenceStorage = Pick<Storage, "getItem" | "setItem">;
 
-export function sessionBrowsePreferenceStorageId(subjectId: string): string {
+export function sessionBrowsePreferenceStorageId(subjectId: string, workspaceId?: string): string {
   return [
     "og.session.browse",
     `v${SESSION_BROWSE_PREFERENCE_VERSION}`,
     encodeURIComponent(subjectId),
+    ...(workspaceId ? [encodeURIComponent(workspaceId)] : []),
   ].join(":");
 }
 
@@ -40,7 +55,51 @@ export function writeSessionBrowseGroupBy(
 }
 
 function isSessionBrowseGroupBy(value: string | null): value is SessionBrowseGroupBy {
-  return value === "activity" || value === "created" || value === "creator";
+  return (
+    value === "activity" ||
+    value === "created" ||
+    value === "creator" ||
+    value === "project" ||
+    value === "none"
+  );
+}
+
+export function readSessionBrowsePreferences(
+  id: string,
+  storage: BrowsePreferenceStorage | null = browserStorage(),
+): SessionBrowsePreferences {
+  try {
+    const parsed = JSON.parse(storage?.getItem(`${id}:view`) ?? "null");
+    if (!parsed || typeof parsed !== "object")
+      return {
+        ...DEFAULT_SESSION_BROWSE_PREFERENCES,
+        groupBy: readSessionBrowseGroupBy(id, storage),
+      };
+    return {
+      groupBy: isSessionBrowseGroupBy(parsed.groupBy)
+        ? parsed.groupBy
+        : DEFAULT_SESSION_BROWSE_GROUP_BY,
+      sortBy: ["updatedAt", "createdAt", "name"].includes(parsed.sortBy)
+        ? parsed.sortBy
+        : "updatedAt",
+      status: ["active", "archived", "all"].includes(parsed.status) ? parsed.status : "active",
+      showEmptyGroups: parsed.showEmptyGroups === true,
+    };
+  } catch {
+    return { ...DEFAULT_SESSION_BROWSE_PREFERENCES };
+  }
+}
+
+export function writeSessionBrowsePreferences(
+  id: string,
+  value: SessionBrowsePreferences,
+  storage: BrowsePreferenceStorage | null = browserStorage(),
+): void {
+  try {
+    storage?.setItem(`${id}:view`, JSON.stringify(value));
+  } catch {
+    /* Storage may be unavailable. */
+  }
 }
 
 function groupByStorageKey(preferenceStorageId: string): string {

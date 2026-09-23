@@ -74,7 +74,7 @@ export function createTranscriptionService(input: {
       );
     },
     async selectProvider(context) {
-      return (await firstAvailable(providers, context))?.id ?? null;
+      return (await firstAvailable(orderedProviders(providers, context), context))?.id ?? null;
     },
     async transcribe(request) {
       const mimeType = normalizeMimeType(request.mimeType);
@@ -106,12 +106,10 @@ export function createTranscriptionService(input: {
             workspaceId: request.workspaceId,
             subjectId: request.subjectId,
           })
-        : await firstAvailable(providers, {
-            workspaceId: request.workspaceId,
-            subjectId: request.subjectId,
-          });
+        : await firstAvailable(orderedProviders(providers, request), request);
       if (!provider) {
         throw new TranscriptionServiceError({
+          fallbackSafe: true,
           code: "unavailable",
           message: "Transcription is unavailable.",
         });
@@ -163,6 +161,23 @@ export function createTranscriptionService(input: {
             message: "Transcription provider timed out.",
             retryable: true,
           });
+        }
+        if (
+          error instanceof TranscriptionServiceError &&
+          error.fallbackSafe &&
+          !request.providerId &&
+          request.fallbackEnabled !== false &&
+          !request.signal?.aborted
+        ) {
+          const excludedProviders = [...(request.excludedProviders ?? []), provider.id];
+          if (
+            await firstAvailable(
+              orderedProviders(providers, { ...request, excludedProviders }),
+              request,
+            )
+          ) {
+            return await this.transcribe({ ...request, excludedProviders });
+          }
         }
         throw error;
       } finally {
@@ -217,12 +232,34 @@ function createProviderRequestDeadline(
   };
 }
 
+export function orderedProviders(
+  providers: readonly TranscriptionProvider[],
+  context: TranscriptionAvailabilityContext,
+): TranscriptionProvider[] {
+  const preferred = providers.filter((provider) => provider.id === context.preferredProvider);
+  const ordered = context.preferredProvider
+    ? context.fallbackEnabled === false
+      ? preferred
+      : [...preferred, ...providers.filter((provider) => provider.id !== context.preferredProvider)]
+    : context.fallbackEnabled === false
+      ? providers.slice(0, 1)
+      : [...providers];
+  const remaining = context.afterProvider
+    ? ordered.slice(ordered.findIndex((provider) => provider.id === context.afterProvider) + 1)
+    : ordered;
+  return remaining.filter((provider) => !context.excludedProviders?.includes(provider.id));
+}
+
 async function firstAvailable(
   providers: readonly TranscriptionProvider[],
   context: TranscriptionAvailabilityContext,
 ) {
   for (const provider of providers) {
-    if (await provider.available(context)) return provider;
+    try {
+      if (await provider.available(context)) return provider;
+    } catch {
+      /* No audio sent; another configured provider may be ready. */
+    }
   }
   return null;
 }

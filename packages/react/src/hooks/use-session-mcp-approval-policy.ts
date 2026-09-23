@@ -1,7 +1,7 @@
 import type {
   SessionEvent,
   SessionMcpApprovalPolicy,
-  SessionMcpServerMetadata,
+  SessionMcpApprovalPolicyTarget,
   UpdateSessionMcpApprovalPolicyResponse,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -38,7 +38,7 @@ export type UseSessionMcpApprovalPolicyOptions = EmbeddedSessionMcpApprovalPolic
   };
 
 export type UseSessionMcpApprovalPolicyResult = {
-  server: SessionMcpServerMetadata | null;
+  server: SessionMcpApprovalPolicyTarget | null;
   policy: SessionMcpApprovalPolicy | null;
   loading: boolean;
   error: Error | null;
@@ -61,7 +61,7 @@ export function useSessionMcpApprovalPolicy(
 ): UseSessionMcpApprovalPolicyResult {
   const { client, workspaceId } = useEmbeddedSessionMcpApprovalPolicy(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId && serverId);
-  const [override, setOverride] = useState<SessionMcpServerMetadata | null>(null);
+  const [override, setOverride] = useState<SessionMcpApprovalPolicyTarget | null>(null);
   const targetKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${serverId ?? ""}`;
   const authoritativeGeneration = useRef(0);
   const mutationIdentity = useMemo(() => ({ client, targetKey }), [client, targetKey]);
@@ -75,7 +75,7 @@ export function useSessionMcpApprovalPolicy(
   type PolicyRead = {
     targetKey: string;
     generation: number;
-    server: SessionMcpServerMetadata | null;
+    server: SessionMcpApprovalPolicyTarget | null;
   };
   const load = useCallback(async (): Promise<PolicyRead> => {
     const generation = authoritativeGeneration.current;
@@ -86,7 +86,15 @@ export function useSessionMcpApprovalPolicy(
     return {
       targetKey,
       generation,
-      server: session.mcpServers.find((server) => server.id === serverId) ?? null,
+      server:
+        session.mcpServers.find((server) => server.id === serverId) ??
+        (session.mcpApprovalPolicies && Object.hasOwn(session.mcpApprovalPolicies, serverId)
+          ? {
+              id: serverId,
+              source: "workspace",
+              requireApproval: session.mcpApprovalPolicies[serverId]!,
+            }
+          : null),
     };
   }, [client, serverId, sessionId, targetKey, workspaceId]);
   const {

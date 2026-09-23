@@ -31,6 +31,7 @@ const BRIDGE_PROTOCOL_VERSION: u32 = 1;
 const AUTHORITY_FILE: &str = "browser-bridge-authority.json";
 const NATIVE_HOST_NAME: &str = "ai.opengeni.browser";
 const EXTENSION_ID: &str = "imdmcebcclhibdfolbokjbiibpcnpbel";
+const STORE_EXTENSION_ID: &str = "phpmmcbeelfkcinjfbbggegjdcdmnnch";
 // Chrome Native Messaging is intentionally asymmetric: browser -> host may be
 // 64 MiB, while host -> browser is limited to 1 MiB. CDP screenshots travel in
 // browser -> host responses, so flattening both directions to 1 MiB breaks
@@ -74,7 +75,20 @@ pub enum BrowserBridgeError {
 /// pinned origin before ordinary CLI parsing.
 #[must_use]
 pub fn is_native_host_invocation() -> bool {
-    std::env::args().nth(1).as_deref() == Some(extension_origin().as_str())
+    std::env::args()
+        .nth(1)
+        .is_some_and(|origin| is_extension_origin(&origin))
+}
+
+fn is_extension_origin(origin: &str) -> bool {
+    extension_origins().iter().any(|allowed| allowed == origin)
+}
+
+fn extension_origins() -> [String; 2] {
+    [
+        extension_origin(),
+        format!("chrome-extension://{STORE_EXTENSION_ID}/"),
+    ]
 }
 
 fn extension_origin() -> String {
@@ -153,7 +167,7 @@ pub fn install_native_host_manifests(
         description: "OpenGeni attached-browser bridge",
         path: binary,
         kind: "stdio",
-        allowed_origins: [extension_origin()],
+        allowed_origins: extension_origins(),
     })?;
     let mut installed = Vec::new();
     for (browser_root, primary) in native_host_browser_roots(home) {
@@ -235,7 +249,7 @@ struct NativeHostManifest<'a> {
     path: &'a str,
     #[serde(rename = "type")]
     kind: &'static str,
-    allowed_origins: [String; 1],
+    allowed_origins: [String; 2],
 }
 
 #[derive(Debug, Deserialize)]
@@ -1348,6 +1362,21 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
+    fn native_host_accepts_only_exact_development_and_store_origins() {
+        for origin in extension_origins() {
+            assert!(is_extension_origin(&origin));
+            assert!(!is_extension_origin(origin.trim_end_matches('/')));
+            assert!(!is_extension_origin(&format!("{origin}extra")));
+        }
+        assert!(!is_extension_origin(
+            "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"
+        ));
+        assert!(!is_extension_origin(
+            "https://phpmmcbeelfkcinjfbbggegjdcdmnnch/"
+        ));
+    }
+
+    #[test]
     fn native_host_origin_matches_the_extension_manifest_key() {
         let manifest: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1665,6 +1694,7 @@ mod tests {
             assert_eq!(manifest["name"], NATIVE_HOST_NAME);
             assert_eq!(manifest["path"], binary.to_str().expect("path"));
             assert_eq!(manifest["allowed_origins"][0], extension_origin());
+            assert_eq!(manifest["allowed_origins"], json!(extension_origins()));
         }
         remove_native_host_manifests(directory.path()).expect("remove");
         assert!(manifests.iter().all(|path| !path.exists()));

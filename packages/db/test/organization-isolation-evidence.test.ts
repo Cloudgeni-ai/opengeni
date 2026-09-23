@@ -4,6 +4,9 @@ import postgres from "postgres";
 import {
   bootstrapWorkspace,
   createDb,
+  saveKnowledgeEntry,
+  getKnowledgeEntry,
+  type KnowledgeContext,
   createSession,
   getOrganizationPrivateSessionSettings,
   nestedPostgresSqlState,
@@ -66,7 +69,10 @@ const ORGANIZATION_AUTHORITY_TABLES = [
  * exact global ingress keys used to discover tenant context before loading the
  * protected automation source or PR-review binding. Their organization
  * boundary is enforced above the database, by authenticated ingress and
- * `@opengeni/core` access resolution.
+ * `@opengeni/core` access resolution. The four account-carrying MCP OAuth
+ * protocol tables are likewise exact hash-keyed state used before the bearer,
+ * authorization code, or consent request can establish tenant context; token
+ * use then revalidates live workspace authority inside the resolved RLS scope.
  *
  * This list is a review gate, not a target. Adding an organization-scoped
  * resource table without RLS must fail this file; removing an entry here
@@ -76,6 +82,10 @@ const ORGANIZATION_AUTHORITY_TABLES = [
 const REVIEWED_UNPROTECTED_ACCOUNT_TABLES = [
   "auth_identities",
   "automation_webhook_endpoints",
+  "mcp_oauth_access_tokens",
+  "mcp_oauth_authorization_codes",
+  "mcp_oauth_authorization_requests",
+  "mcp_oauth_refresh_tokens",
   "pr_review_managed_github_routes",
   "workspace_memberships",
   "workspaces",
@@ -408,13 +418,6 @@ async function seedResources(
   `;
   resources.push({ family: "document", table: "documents", id: document!.id });
 
-  const [memory] = await db.admin<{ id: string }[]>`
-    insert into knowledge_memories (account_id, workspace_id, text)
-    values (${accountId}, ${workspaceId}, 'evidence workspace knowledge')
-    returning id
-  `;
-  resources.push({ family: "knowledge memory", table: "knowledge_memories", id: memory!.id });
-
   const [task] = await db.admin<{ id: string }[]>`
     insert into scheduled_tasks (
       name, schedule, temporal_schedule_id, agent_config, account_id, workspace_id,
@@ -594,7 +597,6 @@ describe("organization tenancy isolation evidence", () => {
       file: "visible",
       "document base": "visible",
       document: "visible",
-      "knowledge memory": "visible",
       "scheduled task": "visible",
       "api key": "visible",
     });
@@ -1078,4 +1080,30 @@ describe("organization tenancy isolation evidence", () => {
       "42501",
     );
   });
+});
+
+test("canonical Knowledge is visible only through its own organization's capability", async () => {
+  if (!fixture || !client) return;
+  const context = (organization: Fixture["orgB"]): KnowledgeContext => ({
+    accountId: organization.accountId,
+    workspaceId: organization.workspaceId,
+    actor: {
+      kind: "human",
+      principalKind: "human_session",
+      subjectId: fixture!.humanSubjectId,
+      writeScopes: ["workspace"],
+      settingsScopes: [],
+      review: true,
+    },
+  });
+  const entryId = crypto.randomUUID();
+  await saveKnowledgeEntry(client.db, context(fixture.orgA), {
+    operationId: crypto.randomUUID(),
+    entryId,
+    expectedVersion: 0,
+    scope: "workspace",
+    entry: { kind: "fact", title: "Organization isolation", content: "This fact belongs to A." },
+  });
+  expect((await getKnowledgeEntry(client.db, context(fixture.orgA), entryId))?.id).toBe(entryId);
+  expect(await getKnowledgeEntry(client.db, context(fixture.orgB), entryId)).toBeNull();
 });

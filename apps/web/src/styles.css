@@ -3,8 +3,8 @@
 @import "@fontsource-variable/inter/wght-italic.css";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
 @import "@opengeni/react/styles.css";
+@import "@opengeni/react/responsive.css";
 
-@source "../node_modules/streamdown/dist/*.js";
 @source "../../../packages/react/src";
 
 @custom-variant dark (&:where(.dark, .dark *));
@@ -168,6 +168,7 @@ body {
    - the composer textarea (`.og-root textarea`) already shows a whole-composer
      focus affordance (focus-within border + soft glow), so a second outline
      bounded to the textarea box would double it;
+   - model search inputs use a whole-field focus outline including the icon;
    - shadcn buttons (`[data-slot="button"]`) carry their own offset ring in
      button.tsx — excluding them here avoids stacking two rings on one control;
    - `[tabindex="-1"]` is for programmatic focus only (timeline scroller, etc.).
@@ -180,10 +181,16 @@ body {
   textarea,
   [role="button"],
   [tabindex]:not([tabindex="-1"])
-):focus-visible:not(.og-root textarea):not([data-slot="button"]) {
+):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control) {
   outline: 2px solid color-mix(in oklch, var(--color-ring) 55%, transparent);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
+}
+
+/* Connector controls own a bounded inset ring, so adjacent actions never overlap. */
+.connector-control:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--color-ring) 55%, transparent);
+  outline-offset: -3px;
 }
 
 :where(button, a[href], [role="button"], [role="menuitem"], [role="option"], summary):not(:disabled, [aria-disabled="true"]) {
@@ -290,4 +297,61 @@ body {
 /* Workspace Insights — tabular figures for meter columns */
 [data-insights] {
   font-feature-settings: "cv11", "ss01", "ss03", "tnum";
+}
+
+/* Keep the tools entry point compact in narrow composers. */
+@media (max-width: 639px) {
+  .session-tools-trigger { width: 2rem; padding-inline: 0; gap: 0; }
+  .session-tools-label, .session-tools-chevron { display: none; }
+}
+@container og-composer (max-width: 39.999rem) {
+  /* A split desktop pane needs the same overflow menu as a phone. These
+     hooks also cover the compact variable-set picker, without duplicating
+     controls or changing their keyboard/menu behavior. */
+  .console-composer-wide-control { display: none; }
+  .console-composer-compact-control { display: inline-flex; }
+  .session-tools-trigger { width: 2rem; padding-inline: 0; gap: 0; }
+  .session-tools-label, .session-tools-chevron { display: none; }
+}
+.capabilities-tab-bar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px 16px; border-bottom:1px solid var(--color-border); }
+.capabilities-tab-action { display:flex; align-items:center; margin-left:auto; padding-block:4px; }
+.capabilities-tab-action:empty { display:none; }
+.capabilities-tabs { margin-top: 16px; gap: 20px; }
+.capabilities-tab-bar > [data-slot="tabs-list"] {
+  width: auto; height: auto; min-height: 44px; justify-content: flex-start;
+  gap: 24px; padding: 0; border-bottom: 0;
+  border-radius: 0; background: transparent;
+}
+.capabilities-tab-bar > [data-slot="tabs-list"] > [data-slot="tabs-trigger"] {
+  flex: none; height: 44px; padding: 0 2px; border: 0; border-radius: 0;
+  background: transparent; box-shadow: none;
+}
+.capabilities-tab-bar > [data-slot="tabs-list"] > [data-slot="tabs-trigger"]::after {
+  bottom: -1px; height: 2px; border-radius: 2px;
+}
+
+/* Skill editing controls keep a visible surface in either theme. */
+.skills-panel .skill-editor { background:var(--color-surface); }
+.skills-panel [data-variant="outline"], .skills-panel select { background:var(--color-surface); border:1px solid var(--color-border-strong); color:var(--color-fg); box-shadow:none; }
+.skills-panel [data-variant="outline"]:hover:not(:disabled), .skills-panel select:hover:not(:disabled) { background:var(--color-surface-2, var(--color-bg)); }
+.skills-panel [aria-expanded="true"] { background:var(--color-surface); color:var(--color-fg); box-shadow:inset 0 -2px var(--color-brand); border:1px solid var(--color-border-strong); }
+.skills-panel textarea, .skills-panel input { background:var(--color-bg); border-color:var(--color-border-strong); color:var(--color-fg); }
+.skills-panel button:disabled { opacity:.55; }
+
+.skills-panel [hidden] { display:none !important; }
+.skills-panel .skill-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px 24px; }
+.skills-panel .skill-list-row { display:flex; align-items:center; justify-content:space-between; gap:16px; min-width:0; min-height:52px; padding:12px; border:0; border-radius:8px; background:transparent; color:var(--color-fg); text-align:left; cursor:pointer; box-shadow:none; }
+.skills-panel .skill-list-row:hover, .skills-panel .skill-list-row[aria-expanded="true"] { background:var(--color-surface-2,var(--color-surface)); border:0; box-shadow:none; }
+.skills-panel .skill-list-row:focus-visible { outline:2px solid var(--color-brand); outline-offset:2px; }
+@media (max-width:640px) { .skills-panel .skill-list { grid-template-columns:minmax(0,1fr); } }
+
+/* All-results boundaries; tab-specific layouts keep their own spacing. */
+.capability-search-section {
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid var(--color-border);
+}
+.capability-search-section > .og-plugin-discovery,
+.capability-search-section > section {
+  margin-top: 0;
 }

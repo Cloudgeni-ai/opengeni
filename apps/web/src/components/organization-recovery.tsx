@@ -1,4 +1,4 @@
-import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
   CheckIcon,
   ClockIcon,
@@ -258,6 +258,27 @@ export function OrganizationRecoverySection(props: {
   }
 
   if (visible.error && !overview) {
+    // The API deliberately conceals whether recovery exists for this account.
+    // Do not infer policy state or replace authority checks with an owner-role gate.
+    if (
+      visible.error instanceof OpenGeniApiError &&
+      visible.error.status === 404 &&
+      visible.error.code === "not_found"
+    ) {
+      return (
+        <Notice
+          title="Recovery is unavailable"
+          tone="muted"
+          action={
+            <Button type="button" variant="ghost" size="sm" onClick={() => void load()}>
+              Check again
+            </Button>
+          }
+        >
+          Recovery is unavailable for this account.
+        </Notice>
+      );
+    }
     return (
       <LoadErrorState
         title="Couldn't load organization recovery"

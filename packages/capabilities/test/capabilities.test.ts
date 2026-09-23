@@ -3,6 +3,9 @@ import { buildSchema, introspectionFromSchema } from "graphql";
 
 import {
   MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+  MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+  MAX_INTEGRATION_SPEC_BYTES,
+  MAX_CURATED_INTEGRATION_SPEC_BYTES,
   applyCredentialPlacements,
   compileGraphqlRevision,
   compileOpenApiRevision,
@@ -13,6 +16,7 @@ import {
   IntegrationInvocationError,
   invokeGraphqlOperation,
   invokeOpenApiOperation,
+  parseOpenApiDocument,
   validateGraphqlSelection,
 } from "../src";
 
@@ -27,6 +31,52 @@ const authority = {
 };
 
 describe("OpenAPI compiler and local MCP invocation", () => {
+  test("keeps ordinary documents bounded while explicitly allowing larger curated sources", () => {
+    const source = JSON.stringify({
+      openapi: "3.1.0",
+      info: {
+        title: "Large provider",
+        version: "1",
+        description: "x".repeat(MAX_INTEGRATION_SPEC_BYTES),
+      },
+      paths: {},
+    });
+    expect(() => parseOpenApiDocument(source)).toThrow("8388608 bytes");
+    expect(
+      parseOpenApiDocument(source, {
+        maxBytes: MAX_CURATED_INTEGRATION_SPEC_BYTES,
+      }).openapi,
+    ).toBe("3.1.0");
+    for (const maxBytes of [0, -1, 1.5, Infinity, MAX_CURATED_INTEGRATION_SPEC_BYTES + 1]) {
+      expect(() => parseOpenApiDocument("{}", { maxBytes })).toThrow(RangeError);
+    }
+  });
+
+  test("OneDrive excludes the nested Excel API without dropping file or sharing operations", () => {
+    const file = "/drives/{drive-id}/items/{driveItem-id}";
+    const paths = Object.fromEntries(
+      [
+        file,
+        `${file}/children`,
+        `${file}/workbook`,
+        `${file}/workbook/worksheets`,
+        `${file}/workbookOther`,
+        "/shares/{sharedDriveItem-id}/driveItem",
+        "/users",
+      ].map((path) => [path, { get: { responses: { "200": { description: "OK" } } } }]),
+    );
+    const filtered = filterOpenApiDocumentForDefinition(
+      { openapi: "3.1.0", info: { title: "Graph", version: "1" }, paths },
+      MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+    );
+    expect(Object.keys(filtered.paths as object)).toEqual([
+      file,
+      `${file}/children`,
+      `${file}/workbookOther`,
+      "/shares/{sharedDriveItem-id}/driveItem",
+    ]);
+  });
+
   const document = {
     openapi: "3.1.0",
     info: { title: "Widgets", version: "1.0.0" },

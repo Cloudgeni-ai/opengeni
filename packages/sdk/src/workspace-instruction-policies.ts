@@ -5,11 +5,12 @@ export type WorkspaceInstructionPolicyScope = "global" | "role";
 export type WorkspaceInstructionPolicyProvenanceSource =
   | "human"
   | "onboarding"
+  | "agent_learning"
   | "knowledge_proposal"
   | "legacy_import";
 export type WorkspaceInstructionPolicyDraftProvenanceSource = Exclude<
   WorkspaceInstructionPolicyProvenanceSource,
-  "legacy_import"
+  "legacy_import" | "agent_learning"
 >;
 export type WorkspaceInstructionPolicyActivationType = "activate" | "rollback";
 

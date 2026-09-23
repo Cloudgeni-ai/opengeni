@@ -8,6 +8,15 @@ type AllowedComparison = Readonly<{
 
 const allowed = new Map<string, readonly AllowedComparison[]>([
   [
+    "scripts/publish-artifact-runtime.ts",
+    [
+      {
+        expression: "receipt.buildIdentity !== buildIdentity",
+        category: "distribution",
+      },
+    ],
+  ],
+  [
     "apps/api/src/editable-artifact-native-kernel.ts",
     [
       {

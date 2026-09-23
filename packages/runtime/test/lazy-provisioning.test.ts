@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { ScriptedModel, testSettings } from "@opengeni/testing";
 import { buildManifest, buildOpenGeniAgent, runOwnedSandboxSetup } from "../src/index";
 import { RoutingSandboxSession, type RoutableBackendSession } from "../src/sandbox";
+import { dir, Manifest } from "@openai/agents/sandbox";
 
 const agentsCoreEntry = import.meta.resolve("@openai/agents-core");
 const { applyManifestToProvidedSession } = (await import(
@@ -23,6 +24,35 @@ async function manifestEnv(manifest: {
 }
 
 describe("lazy provisioning synthetic manifest", () => {
+  test("lazy owned setup reconciles verified repository placeholders only when opted in", async () => {
+    const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
+    const environment = { HOME: "/workspace" };
+    const agent = buildOpenGeniAgent(settings, [], {
+      model: new ScriptedModel([]),
+      sandboxEnvironment: environment,
+    });
+    const target = new Manifest({ environment, entries: { "repos/repo": dir() } });
+    (agent as { defaultManifest: Manifest }).defaultManifest = target;
+    const backend = {
+      state: { manifest: new Manifest({ environment }) },
+      listDir: async ({ path }: { path: string }) =>
+        path === "/workspace"
+          ? [{ name: "repos", type: "dir", path: "/workspace/repos" }]
+          : [{ name: "repo", type: "dir", path: "/workspace/repos/repo" }],
+    };
+    await runOwnedSandboxSetup(agent, backend as never, backend as never, {
+      settings,
+      environment,
+    });
+    expect(backend.state.manifest.entries).toEqual({});
+    await runOwnedSandboxSetup(agent, backend as never, backend as never, {
+      settings,
+      environment,
+      recordLazyManifest: true,
+    });
+    expect(backend.state.manifest).toEqual(target);
+  });
+
   test("SDK provided-session apply sees synthetic current === target and performs no write", async () => {
     const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
     const environment = { HOME: "/workspace", DEPLOY_TARGET: "lazy-test" };

@@ -1,8 +1,12 @@
+import { skillCatalogContextItem, readSkillCatalogContext } from "@opengeni/contracts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
+import type postgres from "postgres";
 import {
   addSessionSystemUpdate,
+  appendSessionHistoryItems,
+  applyContextCompaction,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
@@ -17,7 +21,11 @@ import {
   nestedPostgresSqlState,
   openPrivateChildSessionCreateCapability,
   openPrivateSessionCreateCapability,
+  peekSessionWork,
+  enqueueSessionWorkflowWake,
+  markSessionWorkflowWakeDelivered,
   removeWorkspaceMember,
+  registerPendingSessionToolCall,
   resolveCompanyBrainContextSelection,
   setSubjectRlsContext,
   submitHumanPromptInTransaction,
@@ -168,6 +176,94 @@ async function waitUntilBlockedBy(backendPid: number): Promise<void> {
  * inference is accepted.
  */
 describe("session tenancy SQL seams inside a managed human's own personal workspace", () => {
+  test("an unavailable private-session observer preserves state and sees restored owner scope", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const workspaceId = human.legacyWorkspaceId;
+    const { session } = await createSessionWithIdempotencyKey(client.db, {
+      accountId: human.accountId,
+      workspaceId,
+      visibility: "user_private",
+      initialMessage: "private accepted work",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: human.subjectId },
+      subjectId: human.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createIdempotencyKey: crypto.randomUUID(),
+    });
+    const before =
+      await shared.admin`select status, active_turn_id, last_sequence, direct_control_state
+      from sessions where id = ${session.id}`;
+    const hidden = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      workspaceId,
+      `user:${crypto.randomUUID()}`,
+      (db) => peekSessionWork(db, workspaceId, session.id, false, human.accountId),
+    );
+    expect(hidden).toEqual({ kind: "unavailable" });
+    await withWorkspaceSubjectSessionActivityRls(client.db, workspaceId, human.subjectId, (db) =>
+      enqueueSessionWorkflowWake(db, {
+        accountId: human.accountId,
+        workspaceId,
+        sessionId: session.id,
+        temporalWorkflowId: `session-${session.id}`,
+        reason: "test_restore_observer",
+      }),
+    );
+    const [wakeBefore] =
+      await shared.admin`select * from session_workflow_wake_outbox where session_id = ${session.id}`;
+    expect(wakeBefore).toBeDefined();
+    const receipt = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      workspaceId,
+      `user:${crypto.randomUUID()}`,
+      (db) =>
+        markSessionWorkflowWakeDelivered(db, {
+          accountId: human.accountId,
+          workspaceId,
+          sessionId: session.id,
+          temporalWorkflowId: `session-${session.id}`,
+          wakeRevision: Number(wakeBefore!.wake_revision),
+        }),
+    );
+    expect(receipt).toEqual({ action: "pending_admission", blocker: "session_unavailable" });
+    const [wakeHidden] =
+      await shared.admin`select * from session_workflow_wake_outbox where session_id = ${session.id}`;
+    expect(wakeHidden).toEqual(wakeBefore);
+    const visible = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      workspaceId,
+      human.subjectId,
+      (db) => peekSessionWork(db, workspaceId, session.id, false, human.accountId),
+    );
+    expect(visible.kind).not.toBe("unavailable");
+    const restoredReceipt = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      workspaceId,
+      human.subjectId,
+      (db) =>
+        markSessionWorkflowWakeDelivered(db, {
+          accountId: human.accountId,
+          workspaceId,
+          sessionId: session.id,
+          temporalWorkflowId: `session-${session.id}`,
+          wakeRevision: Number(wakeBefore!.wake_revision),
+        }),
+    );
+    expect(restoredReceipt).toEqual({ action: "acknowledged" });
+    const [wakeRestored] =
+      await shared.admin`select delivered_revision from session_workflow_wake_outbox where session_id = ${session.id}`;
+    expect(Number(wakeRestored!.delivered_revision)).toBe(Number(wakeBefore!.wake_revision));
+    const after =
+      await shared.admin`select status, active_turn_id, last_sequence, direct_control_state
+      from sessions where id = ${session.id}`;
+    expect(Array.from(after)).toEqual(Array.from(before));
+  });
+
   test("creates an owner-bound private session atomically in shared and Personal workspaces", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
@@ -790,6 +886,538 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
       ownedByCurrentUser: true,
     });
     expect(event).toMatchObject({ id: result.eventId, sequence: result.eventSequence });
+  }, 180_000);
+
+  test("message forks accept valid fractional reasoning controls but reject malformed and compacted history", async () => {
+    if (!shared || !client) throw new Error("test postgres unavailable");
+    const human = await provisionManagedHuman();
+    const workspaceId = human.personalWorkspaceId;
+    const sourceSessionId = await ownedSession(human, workspaceId);
+    const events: string[] = [];
+    const controls: Record<string, postgres.JSONValue>[] = [];
+    for (const [index, effort] of ["low", "high"].entries()) {
+      const turnId = crypto.randomUUID();
+      const eventId = crypto.randomUUID();
+      events.push(eventId);
+      await shared.admin`insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+        status, position, prompt, model, reasoning_effort, sandbox_backend
+      ) values (${turnId}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${eventId}, 'reasoning-fork-test', 'completed', ${index + 1}, 'Question',
+        'gpt-6-astra', ${effort}, 'none')`;
+      await shared.admin`insert into session_events (
+        id, account_id, workspace_id, session_id, turn_id, sequence, type, payload
+      ) values (${eventId}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${turnId}, ${index + 1}, 'user.message', '{"text":"Question"}')`;
+      const control = {
+        type: "unknown",
+        providerData: { type: "configuration_update", reasoning: { effort } },
+        opengeniReasoningConfiguration: { version: 1, baselineEffort: "low", effort, turnId },
+      };
+      controls.push(control);
+      for (const [position, item] of [
+        [index + 0.75, control],
+        [index + 1, { type: "message", role: "user", content: "Question" }],
+      ] as const) {
+        await shared.admin`insert into session_history_items (
+          account_id, workspace_id, session_id, turn_id, position, item
+        ) values (${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${turnId},
+          ${position}, ${shared.admin.json(item)})`;
+      }
+    }
+    const fork = (sourceEventId = events[1]!) =>
+      forkSessionContent(client!.db, {
+        sourceWorkspaceId: workspaceId,
+        sourceSessionId,
+        actorSubjectId: human.subjectId,
+        destinationWorkspaceId: workspaceId,
+        destinationVisibility: "user_private",
+        workspaceSharedAcknowledged: false,
+        operationKey: crypto.randomUUID(),
+        sourceEventId,
+      });
+    expect((await fork(events[0]!)).copiedHistoryItemCount).toBe(2);
+    const switched = await fork();
+    expect(switched.copiedHistoryItemCount).toBe(4);
+    const rows = await shared.admin`select item from session_history_items
+      where session_id = ${switched.sessionId} order by position`;
+    expect(rows.filter((row) => row.item.type === "unknown").map((row) => row.item)).toEqual(
+      controls,
+    );
+    for (const invalid of [
+      { type: "unknown" },
+      {
+        ...controls[0],
+        providerData: { type: "configuration_update", reasoning: { effort: "high" } },
+      },
+      { ...controls[0], opengeniReasoningConfiguration: { version: 1, effort: "low" } },
+      { type: "compaction", encrypted_content: "test" },
+    ]) {
+      await shared.admin`update session_history_items set item = ${shared.admin.json(invalid)}
+        where session_id = ${sourceSessionId} and position = 0.75`;
+      await expect(fork()).rejects.toThrow("Session tenancy request is invalid");
+    }
+    await shared.admin`update session_history_items set item = ${shared.admin.json(controls[0]!)}, active = false
+      where session_id = ${sourceSessionId} and position = 0.75`;
+    await expect(fork()).rejects.toThrow("Session tenancy request is invalid");
+  }, 180_000);
+
+  test("message forks preserve catalog snapshots and reject malformed fractional catalog rows", async () => {
+    if (!shared || !client) throw new Error("test postgres unavailable");
+    const human = await provisionManagedHuman();
+    const workspaceId = human.personalWorkspaceId;
+    const sourceSessionId = await ownedSession(human, workspaceId);
+    const events: string[] = [];
+    const controls: Record<string, postgres.JSONValue>[] = [];
+    for (const [index, effort] of ["low", "high"].entries()) {
+      const turnId = crypto.randomUUID();
+      const eventId = crypto.randomUUID();
+      events.push(eventId);
+      await shared.admin`insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+        status, position, prompt, model, reasoning_effort, sandbox_backend
+      ) values (${turnId}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${eventId}, 'reasoning-fork-test', 'completed', ${index + 1}, 'Question',
+        'gpt-6-astra', ${effort}, 'none')`;
+      await shared.admin`insert into session_events (
+        id, account_id, workspace_id, session_id, turn_id, sequence, type, payload
+      ) values (${eventId}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${turnId}, ${index + 1}, 'user.message', '{"text":"Question"}')`;
+      const control = skillCatalogContextItem(effort) as Record<string, postgres.JSONValue>;
+      controls.push(control);
+      for (const [position, item] of [
+        [index + 0.75, control],
+        [index + 1, { type: "message", role: "user", content: "Question" }],
+      ] as const) {
+        await shared.admin`insert into session_history_items (
+          account_id, workspace_id, session_id, turn_id, position, item
+        ) values (${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${turnId},
+          ${position}, ${shared.admin.json(item)})`;
+      }
+    }
+    const fork = (sourceEventId = events[1]!) =>
+      forkSessionContent(client!.db, {
+        sourceWorkspaceId: workspaceId,
+        sourceSessionId,
+        actorSubjectId: human.subjectId,
+        destinationWorkspaceId: workspaceId,
+        destinationVisibility: "user_private",
+        workspaceSharedAcknowledged: false,
+        operationKey: crypto.randomUUID(),
+        sourceEventId,
+      });
+    expect((await fork(events[0]!)).copiedHistoryItemCount).toBe(2);
+    const switched = await fork();
+    expect(switched.copiedHistoryItemCount).toBe(4);
+    const rows = await shared.admin`select item from session_history_items
+      where session_id = ${switched.sessionId} order by position`;
+    expect(
+      rows.filter((row) => readSkillCatalogContext(row.item) !== null).map((row) => row.item),
+    ).toEqual(controls);
+    for (const invalid of [
+      { ...controls[0], role: "user" },
+      { ...controls[0], content: "unmarked developer instructions" },
+      { ...controls[0], content: "<opengeni_skill_catalog>\nmissing close" },
+      { type: "compaction", encrypted_content: "test" },
+    ]) {
+      await shared.admin`update session_history_items set item = ${shared.admin.json(invalid)}
+        where session_id = ${sourceSessionId} and position = 0.75`;
+      await expect(fork()).rejects.toThrow("Session tenancy request is invalid");
+    }
+    await shared.admin`update session_history_items set item = ${shared.admin.json(controls[0]!)}, active = false
+      where session_id = ${sourceSessionId} and position = 0.75`;
+    await expect(fork()).rejects.toThrow("Session tenancy request is invalid");
+  }, 180_000);
+
+  test("active message forks preserve source execution, ordered prefix, authority and replay", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const workspaceId = human.personalWorkspaceId;
+    const sourceSessionId = await ownedSession(human, workspaceId);
+    const submitted = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      workspaceId,
+      human.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: human.accountId,
+            workspaceId,
+            sessionId: sourceSessionId,
+            subjectId: human.subjectId,
+            actor: { type: "human", subjectId: human.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "Active question",
+            resources: [],
+            model: "test-model",
+            reasoningEffort: "medium",
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+    );
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId: sourceSessionId,
+      workflowId: `session-${sourceSessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed" || claim.turn.id !== submitted.turnId) {
+      throw new Error("active fork fixture was not claimed");
+    }
+    const authority = {
+      accountId: human.accountId,
+      workspaceId,
+      sessionId: sourceSessionId,
+      turnId: claim.turn.id,
+      expectedExecutionGeneration: claim.turn.executionGeneration,
+      expectedAttemptId: attemptId,
+    };
+    // Use the real writer seams, including their attempt and shared tenancy fences.
+    const [last] = await shared.admin`select coalesce(max(position), 0)::integer as position
+      from session_history_items where session_id = ${sourceSessionId}`;
+    const boundary = Number(last!.position) + 1;
+    const orderedItem = {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Retained answer" }],
+      providerData: { z: 1, a: 2 },
+    };
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        ...authority,
+        items: [{ position: boundary, item: orderedItem }],
+      }),
+    ).toBe(true);
+    const replyEventId = crypto.randomUUID();
+    await shared.admin`insert into session_events
+      (id, account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+      select ${replyEventId}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${claim.turn.id}, coalesce(max(sequence), 0) + 1, 'agent.message.completed',
+        '{"text":"Retained answer"}' from session_events where session_id = ${sourceSessionId}`;
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: human.accountId,
+        workspaceId,
+        sessionId: sourceSessionId,
+        turnId: claim.turn.id,
+        executionGeneration: claim.turn.executionGeneration,
+        attemptId,
+        callId: "pending-after-boundary",
+        callType: "function_call",
+        callItem: {
+          type: "function_call",
+          call_id: "pending-after-boundary",
+          name: "test",
+          arguments: "{}",
+        },
+      }),
+    ).toMatchObject({ accepted: true, registered: true });
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        ...authority,
+        items: [
+          {
+            position: boundary + 1,
+            item: {
+              type: "function_call",
+              call_id: "unfinished-suffix",
+              name: "test",
+              arguments: "{}",
+            },
+          },
+        ],
+      }),
+    ).toBe(true);
+    const input = {
+      sourceWorkspaceId: workspaceId,
+      sourceSessionId,
+      actorSubjectId: human.subjectId,
+      destinationWorkspaceId: workspaceId,
+      destinationVisibility: "user_private" as const,
+      workspaceSharedAcknowledged: false,
+      operationKey: crypto.randomUUID(),
+      sourceEventId: replyEventId,
+    };
+    const sourceBefore =
+      await shared.admin`select to_jsonb(s) as value from sessions s where id = ${sourceSessionId}`;
+    const attemptBefore =
+      await shared.admin`select to_jsonb(a) as value from session_turn_attempts a where id = ${attemptId}`;
+    const pendingBefore =
+      await shared.admin`select to_jsonb(p) as value from session_pending_tool_calls p where session_id = ${sourceSessionId}`;
+    const fork = await forkSessionContent(client.db, input);
+    const prefix = await shared.admin`select item_ordered::text as item, active, position
+      from session_history_items where session_id = ${sourceSessionId} and position <= ${boundary} order by position`;
+    const copied = await shared.admin`select item_ordered::text as item, active, position
+      from session_history_items where session_id = ${fork.sessionId} order by position`;
+    expect(copied).toEqual(prefix);
+    expect(fork.copiedHistoryItemCount).toBe(prefix.length);
+    expect(copied.at(-1)!.item).toContain('"z":1,"a":2');
+    expect([
+      ...(await shared.admin`select to_jsonb(s) as value from sessions s where id = ${sourceSessionId}`),
+    ]).toEqual([...sourceBefore]);
+    expect([
+      ...(await shared.admin`select to_jsonb(a) as value from session_turn_attempts a where id = ${attemptId}`),
+    ]).toEqual([...attemptBefore]);
+    expect([
+      ...(await shared.admin`select to_jsonb(p) as value from session_pending_tool_calls p where session_id = ${sourceSessionId}`),
+    ]).toEqual([...pendingBefore]);
+    expect(
+      await shared.admin`select id from session_turn_attempts where session_id = ${fork.sessionId}`,
+    ).toHaveLength(0);
+    expect(
+      await shared.admin`select id from session_pending_tool_calls where session_id = ${fork.sessionId}`,
+    ).toHaveLength(0);
+    await shared.admin`update session_history_items set position = -10
+      where session_id = ${sourceSessionId} and position = ${boundary + 1}`;
+    await expect(
+      forkSessionContent(client.db, {
+        ...input,
+        operationKey: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow("Session tenancy request is invalid");
+    await shared.admin`update session_history_items set position = ${boundary + 1}
+      where session_id = ${sourceSessionId} and position = -10`;
+    const userFork = await forkSessionContent(client.db, {
+      ...input,
+      sourceEventId: claim.turn.triggerEventId!,
+      operationKey: crypto.randomUUID(),
+    });
+    expect(userFork.copiedHistoryItemCount).toBe(prefix.length - 1);
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        ...authority,
+        items: [
+          {
+            position: boundary + 2,
+            item: {
+              type: "function_call_output",
+              call_id: "unfinished-suffix",
+              output: "continued",
+            },
+          },
+        ],
+      }),
+    ).toBe(true);
+    // Whole-session copying retains its stronger quiescence requirement.
+    const { sourceEventId: _boundaryEvent, ...wholeSessionInput } = input;
+    await expect(
+      forkSessionContent(client.db, {
+        ...wholeSessionInput,
+        operationKey: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow();
+    await expect(
+      forkSessionContent(client.db, {
+        ...input,
+        sourceEventId: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow();
+    const stranger = await provisionManagedHuman();
+    await expect(
+      forkSessionContent(client.db, {
+        ...input,
+        actorSubjectId: stranger.subjectId,
+      }),
+    ).rejects.toThrow();
+    // A racing compaction uses the real writer and must wait behind the fork's
+    // already-held exclusive tenancy fence. No timing-only assertion is used.
+    const entered = deferred();
+    const release = deferred();
+    let pid = 0;
+    const heldFork = withRlsContext(
+      client.db,
+      {
+        accountId: human.accountId,
+        workspaceId,
+      },
+      async (db) => {
+        await setSubjectRlsContext(db, human.subjectId);
+        await db.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
+        );
+        const backend = await db.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+        pid = backend[0]!.pid;
+        const result = await forkSessionContent(db, {
+          ...input,
+          operationKey: crypto.randomUUID(),
+        });
+        entered.resolve();
+        await release.promise;
+        return result;
+      },
+    );
+    // Surface setup failure without leaving the test waiting on a deferred.
+    await Promise.race([
+      entered.promise,
+      heldFork.then(() => {
+        throw new Error("fork did not hold transaction");
+      }),
+    ]);
+    const compaction = applyContextCompaction(client.db, {
+      ...authority,
+      replacementItems: [],
+      summaryItem: { type: "message", role: "assistant", content: "Compacted later content" },
+    });
+    try {
+      await waitUntilBlockedBy(pid);
+    } finally {
+      release.resolve();
+    }
+    const stableFork = await heldFork;
+    expect((await compaction).applied).toBe(true);
+    expect([
+      ...(await shared.admin`select item_ordered::text as item, active, position
+      from session_history_items where session_id = ${stableFork.sessionId} order by position`),
+    ]).toEqual([...prefix]);
+    await expect(
+      forkSessionContent(client.db, {
+        ...input,
+        operationKey: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow("Session tenancy request is invalid");
+    expect(await forkSessionContent(client.db, input)).toEqual({ ...fork, replay: true });
+  }, 180_000);
+
+  test("message fork copies the exact prefix and replays the same boundary", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const workspaceId = human.personalWorkspaceId;
+    const sourceSessionId = await ownedSession(human, workspaceId);
+    const turnId = crypto.randomUUID();
+    const userEventId = crypto.randomUUID();
+    const replyEventId = crypto.randomUUID();
+    await shared.admin`insert into session_turns (
+      id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+      status, position, prompt, model, reasoning_effort, sandbox_backend
+    ) values (${turnId}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+      ${userEventId}, 'message-fork-test', 'completed', 1, 'First question', 'test-model', 'medium', 'none')`;
+    for (const [index, event] of [
+      { id: userEventId, type: "user.message", text: "First question" },
+      { id: replyEventId, type: "agent.message.completed", text: "First answer" },
+    ].entries()) {
+      await shared.admin`insert into session_events (id, account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+        values (${event.id}, ${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${turnId}, ${index + 1}, ${event.type}, ${shared.admin.json({ text: event.text })})`;
+    }
+    for (const [index, item] of [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "First question" }] },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "First answer" }],
+      },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Later answer must not be copied" }],
+      },
+    ].entries()) {
+      await shared.admin`insert into session_history_items (account_id, workspace_id, session_id, turn_id, position, item)
+        values (${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${turnId}, ${index + 1}, ${shared.admin.json(item)})`;
+    }
+    const input = {
+      sourceWorkspaceId: workspaceId,
+      sourceSessionId,
+      actorSubjectId: human.subjectId,
+      destinationWorkspaceId: workspaceId,
+      destinationVisibility: "user_private" as const,
+      workspaceSharedAcknowledged: false,
+      operationKey: crypto.randomUUID(),
+      sourceEventId: replyEventId,
+    };
+    const fork = await forkSessionContent(client.db, input);
+    expect(fork.copiedHistoryItemCount).toBe(2);
+    const rows =
+      await shared.admin`select item from session_history_items where session_id = ${fork.sessionId} order by position`;
+    expect(rows).toHaveLength(2);
+    expect(JSON.stringify(rows)).not.toContain("Later answer");
+    expect((await forkSessionContent(client.db, input)).sessionId).toBe(fork.sessionId);
+    await expect(
+      forkSessionContent(client.db, { ...input, sourceEventId: userEventId }),
+    ).rejects.toThrow();
+    const userFork = await forkSessionContent(client.db, {
+      ...input,
+      sourceEventId: userEventId,
+      operationKey: crypto.randomUUID(),
+    });
+    expect(userFork.copiedHistoryItemCount).toBe(1);
+    await expect(
+      forkSessionContent(client.db, {
+        ...input,
+        sourceEventId: crypto.randomUUID(),
+        operationKey: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow();
+    // Exercise persisted SDK identities, provider identities, and all supported tool pairs.
+    const completedPairs: [postgres.JSONValue, postgres.JSONValue][] = [
+      [
+        { type: "function_call", callId: "fn", name: "test", arguments: "{}" },
+        { type: "function_call_result", callId: "fn", name: "test", output: "done" },
+      ],
+      [
+        { type: "computer_call", callId: "pc", action: { type: "screenshot" } },
+        { type: "computer_call_result", callId: "pc", output: "done" },
+      ],
+      [
+        { type: "shell_call", call_id: "sh" },
+        { type: "shell_call_output", call_id: "sh", output: [] },
+      ],
+      [
+        { type: "apply_patch_call", id: "patch" },
+        { type: "apply_patch_call_output", callId: "patch", output: "done" },
+      ],
+      [
+        { type: "tool_search_call", id: "item-search", providerData: { call_id: "search" } },
+        { type: "tool_search_output", providerData: { callId: "search" }, tools: [] },
+      ],
+    ];
+    for (const [call, result] of completedPairs) {
+      await shared.admin`insert into session_history_items (account_id, workspace_id, session_id, turn_id, position, item)
+        values (${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${turnId}, -2, ${shared.admin.json(call)})`;
+      await expect(
+        forkSessionContent(client.db, { ...input, operationKey: crypto.randomUUID() }),
+      ).rejects.toThrow();
+      // A matching result before its call cannot settle this prefix.
+      await shared.admin`insert into session_history_items (account_id, workspace_id, session_id, turn_id, position, item)
+        values (${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${turnId}, -3, ${shared.admin.json(result)})`;
+      await expect(
+        forkSessionContent(client.db, { ...input, operationKey: crypto.randomUUID() }),
+      ).rejects.toThrow();
+      await shared.admin`update session_history_items set position = -1 where session_id = ${sourceSessionId} and position = -3`;
+      const pairedFork = await forkSessionContent(client.db, {
+        ...input,
+        operationKey: crypto.randomUUID(),
+      });
+      expect(pairedFork.copiedHistoryItemCount).toBe(4);
+      await shared.admin`delete from session_history_items where session_id = ${sourceSessionId} and position < 0`;
+    }
+    await shared.admin`insert into session_history_items (account_id, workspace_id, session_id, turn_id, position, item)
+      values (${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${turnId}, 0,
+        ${shared.admin.json({ type: "function_call", call_id: "unfinished", name: "test", arguments: "{}" })})`;
+    await expect(
+      forkSessionContent(client.db, { ...input, operationKey: crypto.randomUUID() }),
+    ).rejects.toThrow();
+    await shared.admin`delete from session_history_items where session_id = ${sourceSessionId} and position = 0`;
+    await shared.admin`insert into session_history_items (account_id, workspace_id, session_id, turn_id, position, item)
+      values (${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${turnId}, 4,
+        ${shared.admin.json({ type: "message", role: "assistant", content: [{ type: "output_text", text: "First answer" }] })})`;
+    await expect(
+      forkSessionContent(client.db, { ...input, operationKey: crypto.randomUUID() }),
+    ).rejects.toThrow();
+    await shared.admin`delete from session_history_items where session_id = ${sourceSessionId} and position = 4`;
+    const [count] =
+      await shared.admin`select count(*)::integer as total from sessions where forked_from_session_id = ${sourceSessionId}`;
+    expect(count?.total).toBe(2 + completedPairs.length);
+    await shared.admin`update session_history_items set active = false where session_id = ${sourceSessionId} and position = 1`;
+    await expect(
+      forkSessionContent(client.db, { ...input, operationKey: crypto.randomUUID() }),
+    ).rejects.toThrow();
+    // An already committed receipt remains recoverable after source compaction.
+    expect((await forkSessionContent(client.db, input)).sessionId).toBe(fork.sessionId);
   }, 180_000);
 
   test("fork_session_content accepts the owner's own personal workspace as source", async () => {

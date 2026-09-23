@@ -11,6 +11,7 @@ const PositiveSafeInteger = z.number().int().positive().max(Number.MAX_SAFE_INTE
  * separately stored causal subject and xAI subscription authority row.
  */
 export const XaiProviderAccountAuthoritySnapshotV1 = z.discriminatedUnion("scope", [
+  z.object({ version: z.literal(1), scope: z.literal("organization") }).strict(),
   z
     .object({
       version: z.literal(1),

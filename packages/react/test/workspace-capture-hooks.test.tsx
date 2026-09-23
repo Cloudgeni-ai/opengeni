@@ -2143,20 +2143,25 @@ describe("useSandboxGit — capture source", () => {
 
 describe("useWorkspaceEdit", () => {
   test("happy path: cold edit → warm → guarded flush (hash matches)", async () => {
-    const writes: { path: string; content: string }[] = [];
+    const route = { epoch: 7, root: "C:\\workspace" };
+    const reads: unknown[] = [];
+    const writes: { path: string; content: string; route: unknown }[] = [];
     let warmRequests = 0;
     const client = fakeClient({
-      fsRead: async (_ws, _s, req) => ({
-        path: req.path,
-        encoding: "utf8" as const,
-        content: "hello\n",
-        sizeBytes: 6,
-        truncated: false,
-        isBinary: false,
-        revision: 0,
-      }),
+      fsRead: async (_ws, _s, req) => {
+        reads.push(req.route);
+        return {
+          path: req.path,
+          encoding: "utf8" as const,
+          content: "hello\n",
+          sizeBytes: 6,
+          truncated: false,
+          isBinary: false,
+          revision: 0,
+        };
+      },
       fsWrite: async (_ws, _s, req) => {
-        writes.push({ path: req.path, content: req.content });
+        writes.push({ path: req.path, content: req.content, route: req.route });
         return { path: req.path, sizeBytes: req.content.length, revision: 9 };
       },
     });
@@ -2167,6 +2172,7 @@ describe("useWorkspaceEdit", () => {
           client,
           path: "a.txt",
           baseContent: "hello\n",
+          route,
           liveness: props.liveness,
           onWarmRequested: () => {
             warmRequests += 1;
@@ -2191,7 +2197,8 @@ describe("useWorkspaceEdit", () => {
     await flush();
     expect(hook.result.current.state).toBe("flushed");
     expect(hook.result.current.wantsWarm).toBe(false);
-    expect(writes).toEqual([{ path: "a.txt", content: "hello world\n" }]);
+    expect(reads).toEqual([route]);
+    expect(writes).toEqual([{ path: "a.txt", content: "hello world\n", route }]);
     await hook.unmount();
   });
 
@@ -2246,6 +2253,7 @@ describe("useWorkspaceEdit", () => {
   });
 
   test("conflict path: live diverged from base → conflict, NO write (C2)", async () => {
+    const route = { epoch: 11, root: "//server/share/workspace" };
     const writes: unknown[] = [];
     const client = fakeClient({
       // The live file changed on the box since capture.
@@ -2258,8 +2266,8 @@ describe("useWorkspaceEdit", () => {
         isBinary: false,
         revision: 0,
       }),
-      fsWrite: async () => {
-        writes.push(true);
+      fsWrite: async (_workspaceId, _sessionId, request) => {
+        writes.push(request.route);
         return { path: "a.txt", sizeBytes: 0, revision: 0 };
       },
     });
@@ -2270,6 +2278,7 @@ describe("useWorkspaceEdit", () => {
           client,
           path: "a.txt",
           baseContent: "hello\n",
+          route,
           liveness: props.liveness,
         }),
       { liveness: "cold" },
@@ -2288,7 +2297,55 @@ describe("useWorkspaceEdit", () => {
     await actRun(() => hook.result.current.overwrite());
     await flush();
     expect(hook.result.current.state).toBe("flushed");
-    expect(writes.length).toBe(1);
+    expect(writes).toEqual([route]);
+    await hook.unmount();
+  });
+
+  test("a filesystem route change discards a buffered edit before the successor warms", async () => {
+    const reads: unknown[] = [];
+    const writes: unknown[] = [];
+    const client = fakeClient({
+      fsRead: async (_workspaceId, _sessionId, request) => {
+        reads.push(request);
+        return {
+          path: request.path,
+          encoding: "utf8" as const,
+          content: "base\n",
+          sizeBytes: 5,
+          truncated: false,
+          isBinary: false,
+          revision: 0,
+        };
+      },
+      fsWrite: async (_workspaceId, _sessionId, request) => {
+        writes.push(request);
+        return { path: request.path, sizeBytes: request.content.length, revision: 1 };
+      },
+    });
+    const hook = await renderHook(
+      (props: { liveness: string; route: { epoch: number; root: string } }) =>
+        useWorkspaceEdit(SESSION_ID, {
+          ...ctx,
+          client,
+          path: "a.txt",
+          baseContent: "base\n",
+          liveness: props.liveness,
+          route: props.route,
+        }),
+      { liveness: "cold", route: { epoch: 21, root: "/first" } },
+    );
+    await flush();
+    await actRun(() => hook.result.current.edit("edited\n"));
+    await flush();
+    expect(hook.result.current.buffer).toBe("edited\n");
+
+    await hook.rerender({ liveness: "warm", route: { epoch: 22, root: "/second" } });
+    await flush();
+
+    expect(hook.result.current.state).toBe("viewing-cold");
+    expect(hook.result.current.buffer).toBeNull();
+    expect(reads).toEqual([]);
+    expect(writes).toEqual([]);
     await hook.unmount();
   });
 

@@ -1105,16 +1105,14 @@ export function RealtimeVoiceModelPanel(props: {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="realtime-voice-model-panel">
-      <div className="flex shrink-0 items-start gap-1 px-2 pt-1 pb-1.5">
+      <div className="flex min-h-10 shrink-0 items-center gap-2 border-b border-og-border px-2 pb-2">
         {props.leading}
-        <div className="min-w-0">
-          <div className="text-og-menu font-medium text-og-fg">Voice model</div>
-          <p className="mt-0.5 text-og-control text-og-fg-subtle">
-            Used when you start a voice conversation.
-          </p>
-        </div>
+        <div className="min-w-0 flex-1 text-og-menu font-medium text-og-fg">Voice model</div>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 pb-1.5">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2">
+        <p className="mb-3 text-og-control text-og-fg-muted">
+          Used when you start a voice conversation.
+        </p>
         <RealtimeModelPickerMenu
           models={props.models}
           selectedModel={props.selectedModel}

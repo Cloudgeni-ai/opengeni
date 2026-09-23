@@ -12,6 +12,7 @@ import {
   deleteWorkspace,
   grantWorkspaceAccess,
   getApiIntegrationUninstallPreview,
+  getApiIntegrationReconciliationSnapshot,
   getConnectionMetadata,
   installApiIntegration,
   IntegrationFacetBindingOwnershipConflictError,
@@ -166,7 +167,190 @@ function integrationInput(connectionId?: string, suffix = "inventory"): InstallA
   };
 }
 
+async function removePolicyFixtureInstallation(installed: {
+  capabilityId: string;
+  instanceKey: string;
+}) {
+  if (!client) throw new Error("API integration fixture unavailable");
+  const preview = await getApiIntegrationUninstallPreview(
+    client.db,
+    first.workspaceId,
+    first.subjectId,
+    installed.capabilityId,
+    installed.instanceKey,
+  );
+  if (preview.installed)
+    await uninstallApiIntegration(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      subjectId: first.subjectId,
+      capabilityId: installed.capabilityId,
+      instanceKey: installed.instanceKey,
+      expectedInstallationVersion: preview.installationVersion!,
+      expectedInstanceVersion: preview.instanceVersion!,
+    });
+}
+
 describe("API Integration persistence", () => {
+  test("a stored reconciliation snapshot cannot restore subsequently removed authority", async () => {
+    if (!client || !shared) throw new Error("Snapshot regression requires PostgreSQL");
+    for (const change of ["owner", "disabled", "tools"] as const) {
+      const input = integrationInput(undefined, `snapshot-${change}-${crypto.randomUUID()}`);
+      const installed = await installApiIntegration(client.db, input);
+      try {
+        const snapshot = await getApiIntegrationReconciliationSnapshot(client.db, {
+          accountId: first.accountId,
+          workspaceId: first.workspaceId,
+          subjectId: first.subjectId,
+          source: { kind: "openapi", url: input.sourceUrl! },
+          expectedRevisionId: input.revision.id,
+          expectedContentSha256: input.revision.contentSha256,
+        });
+        expect(snapshot?.runtime.instanceId).toBe(installed.instanceId);
+        await shared.admin`insert into organization_integration_policies (account_id, mode, allowed_integration_keys, revision)
+          values (${first.accountId}, 'restricted', '[]'::jsonb, 1)`;
+        // Simulate another committed lifecycle writer after the read-only snapshot.
+        if (change === "owner")
+          await shared.admin`delete from integration_facet_binding_owners where binding_id = ${installed.instanceId} and owner_kind = 'direct'`;
+        else if (change === "disabled")
+          await shared.admin`update integration_facet_bindings set status = 'disabled', version = version + 1 where id = ${installed.instanceId}`;
+        else
+          await shared.admin`update integration_facet_bindings set config = jsonb_set(config, '{allowedTools}', '["list_items"]'::jsonb), version = version + 1 where id = ${installed.instanceId}`;
+        await expect(installApiIntegration(client.db, input)).rejects.toThrow(
+          "organization policy",
+        );
+        const [binding] =
+          await shared.admin`select status, config from integration_facet_bindings where id = ${installed.instanceId}`;
+        if (change === "owner") {
+          const owners =
+            await shared.admin`select id from integration_facet_binding_owners where binding_id = ${installed.instanceId} and owner_kind = 'direct'`;
+          expect(owners).toHaveLength(0);
+        } else if (change === "disabled") expect(binding!.status).toBe("disabled");
+        else expect(binding!.config.allowedTools).toEqual(["list_items"]);
+      } finally {
+        await shared.admin`delete from organization_integration_policies where account_id = ${first.accountId}`;
+        // Restore only fixture state so the normal exact-target uninstaller can clean up.
+        if (change === "owner")
+          await shared.admin`insert into integration_facet_binding_owners (account_id, workspace_id, binding_id, owner_kind, owner_id, removable) values (${first.accountId}, ${first.workspaceId}, ${installed.instanceId}, 'direct', ${input.capabilityId}, true) on conflict do nothing`;
+        if (change === "disabled")
+          await shared.admin`update integration_facet_bindings set status = 'active' where id = ${installed.instanceId}`;
+        await removePolicyFixtureInstallation(installed);
+      }
+    }
+  });
+  test("restricted policy permits exact API reconciliation and tool reductions but no acquired authority", async () => {
+    if (!client || !shared) throw new Error("API reconciliation regression requires PostgreSQL");
+    const input = integrationInput(undefined, `reconcile-${crypto.randomUUID()}`);
+    const installed = await installApiIntegration(client.db, input);
+    const connection = await createConnection(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      subjectId: null,
+      providerDomain: input.providerDomain,
+      kind: "api_key",
+      credentialEncrypted: "fixture-only",
+      grantedScopes: [],
+      metadata: {},
+      createdBySubjectId: first.subjectId,
+    });
+    try {
+      await shared.admin`insert into organization_integration_policies (account_id, mode, allowed_integration_keys, revision)
+        values (${first.accountId}, 'restricted', '[]'::jsonb, 1)`;
+      expect((await installApiIntegration(client.db, input)).instanceVersion).toBe(
+        installed.instanceVersion,
+      );
+      const reduced = await installApiIntegration(client.db, {
+        ...input,
+        allowedTools: ["list_items"],
+        expectedInstanceVersion: installed.instanceVersion,
+      });
+      expect(reduced.instanceVersion).toBe(installed.instanceVersion + 1);
+      const renamed = await installApiIntegration(client.db, {
+        ...input,
+        allowedTools: ["list_items"],
+        displayName: "Renamed fixture",
+        expectedInstanceVersion: reduced.instanceVersion,
+      });
+      expect(renamed.displayName).toBe("Renamed fixture");
+      for (const next of [
+        { ...input, expectedInstanceVersion: renamed.instanceVersion },
+        {
+          ...input,
+          allowedTools: ["list_items"],
+          connectionId: connection.id,
+          instanceKey: installed.instanceKey,
+          expectedInstanceVersion: renamed.instanceVersion,
+        },
+        {
+          ...input,
+          allowedTools: ["list_items"],
+          owner: { kind: "direct" as const, id: "new-owner", removable: true },
+        },
+        {
+          ...input,
+          revision: {
+            ...input.revision,
+            id: `openapi:${"2".repeat(24)}`,
+            contentSha256: "2".repeat(64),
+          },
+          allowedTools: ["list_items"],
+        },
+      ]) {
+        await expect(installApiIntegration(client.db, next)).rejects.toThrow("organization policy");
+      }
+      await shared.admin`update integration_facet_bindings
+        set config = jsonb_set(config, '{requireApproval}', '["list_items"]'::jsonb)
+        where id = ${renamed.instanceId}`;
+      await expect(
+        installApiIntegration(client.db, {
+          ...input,
+          allowedTools: ["list_items"],
+          displayName: "Renamed fixture",
+          expectedInstanceVersion: renamed.instanceVersion,
+        }),
+      ).rejects.toThrow("organization policy");
+      const current = (await listInstalledApiIntegrations(client.db, first.workspaceId)).find(
+        (row) => row.capabilityId === input.capabilityId,
+      )!;
+      expect(current.allowedTools).toEqual(["list_items"]);
+      expect(current.connectionRef).toBeNull();
+      expect(current.instanceVersion).toBe(renamed.instanceVersion);
+    } finally {
+      await shared.admin`delete from organization_integration_policies where account_id = ${first.accountId}`;
+      await removePolicyFixtureInstallation(installed);
+    }
+  });
+  test("organization acquisition policy denies custom installation but preserves installed visibility", async () => {
+    if (!client || !shared) throw new Error("Integration policy regression requires PostgreSQL");
+    const input = integrationInput(undefined, `policy-${crypto.randomUUID()}`);
+    const installed = await installApiIntegration(client.db, input);
+    let allowed: Awaited<ReturnType<typeof installApiIntegration>> | null = null;
+    try {
+      await shared.admin`insert into organization_integration_policies (account_id, mode, allowed_integration_keys, revision)
+        values (${first.accountId}, 'restricted', '[]'::jsonb, 1)`;
+      await expect(
+        installApiIntegration(
+          client.db,
+          integrationInput(undefined, `denied-${crypto.randomUUID()}`),
+        ),
+      ).rejects.toThrow("organization policy");
+      expect(
+        (await listInstalledApiIntegrations(client.db, first.workspaceId)).some(
+          (item) => item.capabilityId === installed.capabilityId,
+        ),
+      ).toBe(true);
+      await shared.admin`update organization_integration_policies set allowed_integration_keys = '["custom:openapi"]'::jsonb where account_id = ${first.accountId}`;
+      allowed = await installApiIntegration(
+        client.db,
+        integrationInput(undefined, `allowed-${crypto.randomUUID()}`),
+      );
+      expect(allowed.capabilityId).toStartWith("api:allowed-");
+    } finally {
+      await shared.admin`delete from organization_integration_policies where account_id = ${first.accountId}`;
+      await removePolicyFixtureInstallation(installed);
+      if (allowed) await removePolicyFixtureInstallation(allowed);
+    }
+  });
   test("accepts provider-equivalent Google OIDC scope names", async () => {
     if (!available || !client) return;
     const ownerSubjectId = "user:api-integration-google-owner";
@@ -531,7 +715,7 @@ describe("API Integration persistence", () => {
     });
   }, 60_000);
 
-  test("binds an exact workspace Connection and preserves Pack-owned runtime components", async () => {
+  test("binds an exact workspace Connection and preserves independently owned runtime components", async () => {
     if (!available || !client || !shared) return;
     const wrongKindConnection = await createConnection(client.db, {
       accountId: first.accountId,
@@ -577,16 +761,16 @@ describe("API Integration persistence", () => {
         (account_id, workspace_id, facet_installation_id, owner_kind, owner_id, removable)
       values
         (${first.accountId}, ${first.workspaceId}, ${installed.integrationFacetInstallationId},
-         'pack', 'pack:inventory-operations', false),
+         'migration', 'inventory-operations', false),
         (${first.accountId}, ${first.workspaceId}, ${installed.apiFacetInstallationId},
-         'pack', 'pack:inventory-operations', false)
+         'migration', 'inventory-operations', false)
     `;
     await shared.admin`
       insert into integration_facet_binding_owners
         (account_id, workspace_id, binding_id, owner_kind, owner_id, removable)
       values
         (${first.accountId}, ${first.workspaceId}, ${installed.instanceId},
-         'pack', 'pack:inventory-operations', false)
+         'migration', 'inventory-operations', false)
     `;
     const preview = await getApiIntegrationUninstallPreview(
       client.db,
@@ -598,7 +782,7 @@ describe("API Integration persistence", () => {
     expect(preview).toMatchObject({
       removesRuntimeIntegration: false,
       removesDefinition: false,
-      remainingOwners: [{ kind: "pack", id: "pack:inventory-operations", removable: false }],
+      remainingOwners: [{ kind: "migration", id: "inventory-operations", removable: false }],
     });
     expect(
       await uninstallApiIntegration(client.db, {
@@ -614,7 +798,7 @@ describe("API Integration persistence", () => {
       capabilityId: input.capabilityId,
       instanceKey: installed.instanceKey,
       status: "retained_by_other_owners",
-      remainingOwners: [{ kind: "pack", id: "pack:inventory-operations", removable: false }],
+      remainingOwners: [{ kind: "migration", id: "inventory-operations", removable: false }],
       definitionStatus: "retained",
     });
     expect(await listInstalledApiIntegrations(client.db, first.workspaceId)).toHaveLength(1);

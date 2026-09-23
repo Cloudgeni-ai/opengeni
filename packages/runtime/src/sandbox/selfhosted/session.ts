@@ -31,6 +31,11 @@ import {
   type StreamChannel,
 } from "@opengeni/agent-proto";
 import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
+import {
+  SELFHOSTED_FILE_CHUNK_BYTES,
+  fileContentDigest,
+  transferEditorFile,
+} from "./file-transfer";
 // `Manifest` from the ALLOWED sandbox-leaf entrypoint (`@openai/agents/sandbox`
 // re-exports `@openai/agents-core/sandbox`, which exports the Manifest class) —
 // NOT the agent-loop `@openai/agents` root the sandbox leaf forbids. The live
@@ -60,7 +65,12 @@ import {
   notifyDurableOpOwnershipTransferStarted,
   notifyDurableOpOwnershipTransferred,
 } from "../op-correlation";
-import { OpStreamExecClient, type OpStreamJournal } from "./op-stream";
+import {
+  OpStreamExecClient,
+  runnerFailureToControlError,
+  type OpStreamJournal,
+  type OpStreamOutputFrame,
+} from "./op-stream";
 import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport";
 import { connectedMachineWorkspaceRootsEqual, resolveConnectedMachinePath } from "./workspace-path";
 
@@ -257,6 +267,7 @@ export interface SelfhostedBackgroundCommandAdoption {
 /** Exact command-admission snapshot. A worker resolves this immediately before
  * every exec/Git admission; retries and already-started operations retain it. */
 export interface SelfhostedOperationAdmission {
+  transactionalFsWriteSupported?: boolean;
   /** Workspace segment of the physical agent/relay route. Personal machines may
    * originate in a different same-organization workspace than the session. */
   workspaceId?: string;
@@ -279,6 +290,8 @@ export interface SelfhostedOperationAdmission {
 }
 
 export interface SelfhostedSessionDeps {
+  /** Exact live daemon capability; absent preserves legacy small-file writes. */
+  transactionalFsWriteSupported?: boolean;
   /** Authorization/session workspace. */
   workspaceId: string;
   /** Physical control-plane workspace. Defaults to workspaceId for legacy and
@@ -333,6 +346,10 @@ export interface SelfhostedSessionDeps {
   adoptBackgroundCommand?: (
     input: SelfhostedBackgroundCommandAdoption,
   ) => Promise<{ commandId: string }>;
+  captureBackgroundCommandOutput?: (
+    commandId: string,
+    frames: OpStreamOutputFrame[],
+  ) => Promise<void>;
   /** Best-effort fast settlement for the race where an adopted op exits while
    * the adoption transaction is committing. The reconciler remains authority. */
   settleBackgroundCommand?: (input: {
@@ -344,6 +361,7 @@ export interface SelfhostedSessionDeps {
     outcome: "exited" | "lost";
     exitCode: number | null;
     reason: string;
+    failure?: import("@opengeni/contracts").SessionCommandFailure;
   }) => void | Promise<void>;
   /** The clock the bounded control-op retry loop drives (sleep + jitter). Injected
    *  so tests are deterministic; defaults to a real timer + `Math.random()`. */
@@ -451,6 +469,26 @@ export class SelfhostedSession {
    * durability hook; never retarget an already-admitted operation on reconnect. */
   private readonly opStreamClients = new Map<string, OpStreamExecClient>();
   private readonly inFlightOpStreamClients = new Map<string, OpStreamExecClient>();
+  private readonly ownedCommandReaders = new Map<string, () => Promise<void>>();
+  private readonly commandRefreshes = new Map<string, Promise<void>>();
+
+  /** Attach only to operations adopted by this exact live session. Output and
+   * terminal settlement are durable control work, never model observation. */
+  async refreshOwnedCommand(commandId: string): Promise<boolean> {
+    const read = this.ownedCommandReaders.get(commandId);
+    if (!read) return false;
+    let pending = this.commandRefreshes.get(commandId);
+    if (!pending) {
+      pending = read();
+      this.commandRefreshes.set(commandId, pending);
+    }
+    try {
+      await pending;
+    } finally {
+      if (this.commandRefreshes.get(commandId) === pending) this.commandRefreshes.delete(commandId);
+    }
+    return true;
+  }
   private readonly defaultOpStreamClient: OpStreamExecClient | undefined;
   /** Exact host-native root bound for this session/attempt. */
   readonly workspaceRoot: string;
@@ -458,6 +496,7 @@ export class SelfhostedSession {
   private readonly resourcePolicy: OperationResourcePolicy | undefined;
   private readonly resourcePolicySupported: boolean;
   private readonly operationCpuQuotaSupported: boolean;
+  private readonly transactionalFsWriteSupported: boolean;
   private readonly defaultOpStream: SelfhostedOpStreamDeps | undefined;
   private readonly connectionInstanceId: string;
   private readonly resolveOperationAdmission:
@@ -469,6 +508,7 @@ export class SelfhostedSession {
   private readonly settleBackgroundCommand:
     | SelfhostedSessionDeps["settleBackgroundCommand"]
     | undefined;
+  private readonly captureBackgroundCommandOutput: SelfhostedSessionDeps["captureBackgroundCommandOutput"];
 
   /**
    * The structural `state` slice consumers read. `agentId`/`instanceId` serve the
@@ -529,11 +569,13 @@ export class SelfhostedSession {
     this.resourcePolicy = normalizeOperationResourcePolicy(deps.operationResourcePolicy);
     this.resourcePolicySupported = deps.operationResourcePolicySupported === true;
     this.operationCpuQuotaSupported = deps.operationCpuQuotaSupported === true;
+    this.transactionalFsWriteSupported = deps.transactionalFsWriteSupported === true;
     this.defaultOpStream = deps.opStream;
     this.connectionInstanceId = deps.connectionInstanceId;
     this.resolveOperationAdmission = deps.resolveOperationAdmission;
     this.adoptBackgroundCommand = deps.adoptBackgroundCommand;
     this.settleBackgroundCommand = deps.settleBackgroundCommand;
+    this.captureBackgroundCommandOutput = deps.captureBackgroundCommandOutput;
     // A pre-admission tombstone is safe only for a static connection. Dynamic
     // sessions must never route an unknown op id through their constructor's
     // potentially stale connection after a reconnect.
@@ -545,6 +587,7 @@ export class SelfhostedSession {
             subject: this.subject,
             resourcePolicy: this.resourcePolicy,
             opStream: deps.opStream,
+            transactionalFsWriteSupported: this.transactionalFsWriteSupported,
           })
         : undefined;
     // A valid Manifest whose root is the machine's actual effective root. There
@@ -612,6 +655,7 @@ export class SelfhostedSession {
   }
 
   private async admitOperation(commandPolicy: boolean): Promise<{
+    transactionalFsWriteSupported: boolean;
     controlWorkspaceId: string;
     connectionInstanceId: string;
     subject: string;
@@ -632,6 +676,7 @@ export class SelfhostedSession {
         subject: this.subject,
         resourcePolicy: commandPolicy ? this.resourcePolicy : undefined,
         opStream: this.defaultOpStream,
+        transactionalFsWriteSupported: this.transactionalFsWriteSupported,
       };
     }
 
@@ -666,6 +711,7 @@ export class SelfhostedSession {
       ),
       resourcePolicy: commandPolicy ? resourcePolicy : undefined,
       opStream: resolved.opStream,
+      transactionalFsWriteSupported: resolved.transactionalFsWriteSupported === true,
     };
   }
 
@@ -847,7 +893,9 @@ export class SelfhostedSession {
           machineId: this.agentId,
           faultClass: selfhostedFaultClass(error),
           // Known only on a PAYLOAD_TOO_LARGE fault (the agent's encoded_bytes detail).
-          ...(Number.isFinite(encoded) ? { replyBytes: encoded } : {}),
+          ...(Number.isFinite(encoded) && error.detail.direction !== "request"
+            ? { replyBytes: encoded }
+            : {}),
         });
         // Fold the retry count into the DRAINING copy when we actually retried, so
         // the surfaced message reads "…retried N times first…".
@@ -935,7 +983,7 @@ export class SelfhostedSession {
         allowBackground
           ? Math.min(
               SELFHOSTED_BACKGROUND_MAX_YIELD_MS,
-              Math.max(0, Math.trunc(args.yieldTimeMs ?? SELFHOSTED_BACKGROUND_DEFAULT_YIELD_MS)),
+              Math.max(1, Math.trunc(args.yieldTimeMs ?? SELFHOSTED_BACKGROUND_DEFAULT_YIELD_MS)),
             )
           : 0,
         args.cmd,
@@ -976,6 +1024,10 @@ export class SelfhostedSession {
         backgroundYieldMs > 0 && this.adoptBackgroundCommand
           ? await client.execWithYield(opId, execReq, executionTimeoutMs, wallMs, {
               yieldMs: backgroundYieldMs,
+              captureOutput: async (frames) => {
+                if (adoptedCommandId)
+                  await this.captureBackgroundCommandOutput?.(adoptedCommandId, frames);
+              },
               onYield: async () => {
                 notifyDurableOpOwnershipTransferStarted(opId);
                 const adopted = await this.adoptBackgroundCommand!({
@@ -986,6 +1038,40 @@ export class SelfhostedSession {
                   command,
                 });
                 adoptedCommandId = adopted.commandId;
+                this.ownedCommandReaders.set(adopted.commandId, async () => {
+                  const replay = await client.readExisting(opId, 250, async (frames) => {
+                    await this.captureBackgroundCommandOutput?.(adopted.commandId, frames);
+                  });
+                  const terminal = replay.status === "completed" ? replay : replay.terminal;
+                  if (terminal) {
+                    await this.settleBackgroundCommand?.({
+                      commandId: adopted.commandId,
+                      controlWorkspaceId: admission.controlWorkspaceId,
+                      enrollmentId: this.agentId,
+                      connectionInstanceId: admission.connectionInstanceId,
+                      opId,
+                      outcome: "exited",
+                      exitCode: terminal.outcome.response.exitCode,
+                      reason: terminal.outcome.failure
+                        ? `op_failure_${terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
+                        : "op_exit",
+                      ...(terminal.outcome.failure
+                        ? {
+                            failure: {
+                              code: terminal.outcome.failure.failureCode
+                                .replace(/[^A-Za-z0-9_-]/g, "_")
+                                .slice(0, 128),
+                              detail: terminal.outcome.failure.failureDetail,
+                              retryable: false as const,
+                            },
+                          }
+                        : {}),
+                    });
+                    this.ownedCommandReaders.delete(adopted.commandId);
+                    if (terminal.outcome.failure)
+                      throw runnerFailureToControlError(terminal.outcome.failure);
+                  }
+                });
                 notifyDurableOpOwnershipTransferred(opId);
               },
             })
@@ -994,6 +1080,33 @@ export class SelfhostedSession {
               outcome: await client.exec(opId, execReq, executionTimeoutMs, wallMs),
             };
       if (result.status === "running") {
+        if (result.terminal && adoptedCommandId) {
+          await Promise.resolve(
+            this.settleBackgroundCommand?.({
+              commandId: adoptedCommandId,
+              controlWorkspaceId: admission.controlWorkspaceId,
+              enrollmentId: this.agentId,
+              connectionInstanceId: admission.connectionInstanceId,
+              opId,
+              outcome: "exited",
+              exitCode: result.terminal.outcome.response.exitCode,
+              reason: result.terminal.outcome.failure
+                ? `op_failure_${result.terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
+                : "op_exit",
+              ...(result.terminal.outcome.failure
+                ? {
+                    failure: {
+                      code: result.terminal.outcome.failure.failureCode
+                        .replace(/[^A-Za-z0-9_-]/g, "_")
+                        .slice(0, 128),
+                      detail: result.terminal.outcome.failure.failureDetail,
+                      retryable: false as const,
+                    },
+                  }
+                : {}),
+            }),
+          ).catch(() => undefined);
+        }
         const retries = result.heals + result.startRetries;
         this.emitOp({
           op: "exec",
@@ -1028,7 +1141,18 @@ export class SelfhostedSession {
             opId,
             outcome: "exited",
             exitCode: outcome.response.exitCode,
-            reason: "op_exit",
+            reason: outcome.failure
+              ? `op_failure_${outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
+              : "op_exit",
+            ...(outcome.failure
+              ? {
+                  failure: {
+                    code: outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128),
+                    detail: outcome.failure.failureDetail,
+                    retryable: false as const,
+                  },
+                }
+              : {}),
           }),
         ).catch(() => undefined);
       }
@@ -1216,8 +1340,169 @@ export class SelfhostedSession {
     const pathExists = (path: string): Promise<boolean> => this.pathExists(path, runAs);
     const readText = async (path: string): Promise<string> =>
       decoder.decode(await this.readFile({ path, ...(runAs ? { runAs } : {}) }));
-    const writeText = async (path: string, content: string): Promise<void> => {
-      await this.writeFile({ path, content, createParents: true });
+    const writeText = async (
+      path: string,
+      content: string,
+      base?: string | (() => Promise<string | undefined>),
+    ): Promise<((source: string, sourceBase: string) => Promise<void>) | undefined> => {
+      const bytes = encoder.encode(content);
+      if (bytes.byteLength <= SELFHOSTED_FILE_CHUNK_BYTES) {
+        await this.writeFile({ path, content, createParents: true });
+        return;
+      }
+      const initial = await this.admitOperation(false);
+      if (!initial.transactionalFsWriteSupported) {
+        // Older agents may have a larger negotiated message budget. Preserve
+        // their existing writes; a real size rejection remains a typed fault.
+        await this.writeFile({ path, content, createParents: true });
+        return;
+      }
+      if (runAs) {
+        throw new SelfhostedControlError({
+          code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+          message:
+            "Transactional file editing does not support runAs impersonation; no file was written.",
+          reason: null,
+          retryable: false,
+        });
+      }
+      const requestTransfer = async (
+        requestId: string,
+        op: NonNullable<ControlRequest["op"]>,
+      ): Promise<ControlResponse> => {
+        const startedAt = Date.now();
+        try {
+          const current = await this.admitOperation(false);
+          if (
+            !current.transactionalFsWriteSupported ||
+            current.subject !== initial.subject ||
+            current.connectionInstanceId !== initial.connectionInstanceId
+          ) {
+            throw new Error(
+              "The authorized machine connection changed during the file transfer; the operation was not replayed.",
+            );
+          }
+          const response = await this.controlRpc.request(
+            current.subject,
+            {
+              requestId,
+              epoch: this.epoch,
+              op,
+              resourcePolicy: undefined,
+            },
+            { timeoutMs: this.timeoutMs },
+          );
+          if (response.requestId !== requestId)
+            throw new Error("The machine returned a mismatched file-transfer response identity.");
+          const error = response.error
+            ? agentErrorToControlError(response.error, requestId)
+            : undefined;
+          this.emitOp({
+            op: op.$case,
+            outcome: error || !response.result ? "failed" : "ok",
+            healed: false,
+            retries: 0,
+            durationMs: Date.now() - startedAt,
+            machineId: this.agentId,
+            ...(error
+              ? { code: error.code, reason: error.reason, faultClass: selfhostedFaultClass(error) }
+              : {}),
+          });
+          return response;
+        } catch (error) {
+          this.emitOp({
+            op: op.$case,
+            outcome: "failed",
+            healed: false,
+            retries: 0,
+            durationMs: Date.now() - startedAt,
+            machineId: this.agentId,
+            ...(error instanceof SelfhostedControlError
+              ? { code: error.code, reason: error.reason, faultClass: selfhostedFaultClass(error) }
+              : {}),
+          });
+          throw error;
+        }
+      };
+      const resolvedBase = typeof base === "function" ? await base() : base;
+      const transferStartedAt = Date.now();
+      try {
+        const result = await transferEditorFile({
+          path: resolveConnectedMachinePath(this.workspaceRoot, path),
+          content: bytes,
+          ...(resolvedBase === undefined ? {} : { baseContent: encoder.encode(resolvedBase) }),
+          request: requestTransfer,
+        });
+        // Unlike physical request observations, this is a verified file outcome.
+        this.emitOp({
+          op: "fsWrite",
+          outcome: "ok",
+          healed: result.recovered,
+          retries: 0,
+          durationMs: Date.now() - transferStartedAt,
+          machineId: this.agentId,
+        });
+      } catch (error) {
+        this.emitOp({
+          op: "fsWrite",
+          outcome: "failed",
+          healed: false,
+          retries: 0,
+          durationMs: Date.now() - transferStartedAt,
+          machineId: this.agentId,
+        });
+        throw error;
+      }
+      return async (source, sourceBase) => {
+        // A move is verified destination replacement followed by source cleanup,
+        // not an atomic rename. Never retarget cleanup after a runner change.
+        // The source check and deletion are not CAS against unrelated writers.
+        try {
+          const sourcePath = resolveConnectedMachinePath(this.workspaceRoot, source);
+          const sourceBytes: Uint8Array[] = [];
+          let offset = 0;
+          let total = Infinity;
+          while (offset < total) {
+            const reply = await requestTransfer(crypto.randomUUID(), {
+              $case: "fsRead",
+              fsRead: {
+                path: sourcePath,
+                offset: String(offset),
+                length: String(SELFHOSTED_FILE_CHUNK_BYTES),
+              },
+            });
+            if (reply.error) throw agentErrorToControlError(reply.error);
+            if (reply.result?.$case !== "fsRead")
+              throw new Error("Source verification response missing");
+            const part = reply.result.fsRead;
+            total = safeWireSize(part.totalSize, "source file size");
+            if (!part.content.length && offset < total)
+              throw new Error("Source verification was incomplete");
+            sourceBytes.push(part.content);
+            offset += part.content.length;
+          }
+          const actual = new Uint8Array(offset);
+          let cursor = 0;
+          for (const chunk of sourceBytes) {
+            actual.set(chunk, cursor);
+            cursor += chunk.length;
+          }
+          if (fileContentDigest(actual) !== fileContentDigest(encoder.encode(sourceBase)))
+            throw new Error("Source changed before move cleanup");
+          const reply = await requestTransfer(crypto.randomUUID(), {
+            $case: "fsRemove",
+            fsRemove: { path: sourcePath, recursive: false },
+          });
+          if (reply.error) throw agentErrorToControlError(reply.error);
+          if (reply.result?.$case !== "fsRemove")
+            throw new Error("Source cleanup response missing");
+        } catch (cause) {
+          throw new Error(
+            "The destination edit was verified, but source cleanup was not verified. The move was not replayed; inspect both paths.",
+            { cause },
+          );
+        }
+      };
     };
     const deletePath = async (path: string): Promise<void> => {
       const result = await this.call({
@@ -1243,9 +1528,15 @@ export class SelfhostedSession {
         const current = await readText(operation.path);
         const next = applyDiff(current, operation.diff);
         const destination = operation.moveTo ?? operation.path;
-        await writeText(destination, next);
+        const destinationBase =
+          destination === operation.path
+            ? current
+            : async () =>
+                (await pathExists(destination)) ? await readText(destination) : undefined;
+        const cleanup = await writeText(destination, next, destinationBase);
         if (operation.moveTo && destination !== operation.path) {
-          await deletePath(operation.path);
+          if (cleanup) await cleanup(operation.path, current);
+          else await deletePath(operation.path);
         }
         return {};
       },
@@ -1600,6 +1891,7 @@ export class SelfhostedSandboxClient {
   private readonly operationResourcePolicy: SelfhostedOperationResourcePolicy | undefined;
   private readonly operationResourcePolicySupported: boolean | undefined;
   private readonly operationCpuQuotaSupported: boolean | undefined;
+  private readonly transactionalFsWriteSupported: boolean | undefined;
   private readonly resolveOperationAdmission:
     | (() => Promise<SelfhostedOperationAdmission | null>)
     | undefined;
@@ -1609,6 +1901,7 @@ export class SelfhostedSandboxClient {
   private readonly settleBackgroundCommand:
     | SelfhostedSessionDeps["settleBackgroundCommand"]
     | undefined;
+  private readonly captureBackgroundCommandOutput: SelfhostedSessionDeps["captureBackgroundCommandOutput"];
   private readonly onOp: SelfhostedOpObserver | undefined;
   private readonly opStream: SelfhostedOpStreamDeps | undefined;
   private controlRpcMemo: ControlRpc | undefined;
@@ -1639,9 +1932,11 @@ export class SelfhostedSandboxClient {
     operationResourcePolicy?: SelfhostedOperationResourcePolicy;
     operationResourcePolicySupported?: boolean;
     operationCpuQuotaSupported?: boolean;
+    transactionalFsWriteSupported?: boolean;
     resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
     adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
     settleBackgroundCommand?: SelfhostedSessionDeps["settleBackgroundCommand"];
+    captureBackgroundCommandOutput?: SelfhostedSessionDeps["captureBackgroundCommandOutput"];
     /** The run's declared sandbox environment, threaded into every bound session's
      *  `state.manifest.environment` so the SDK's per-turn manifest-env delta is
      *  empty (validateNoEnvironmentDelta). See SelfhostedSessionDeps.environment.
@@ -1669,9 +1964,11 @@ export class SelfhostedSandboxClient {
     this.operationResourcePolicy = opts.operationResourcePolicy;
     this.operationResourcePolicySupported = opts.operationResourcePolicySupported;
     this.operationCpuQuotaSupported = opts.operationCpuQuotaSupported;
+    this.transactionalFsWriteSupported = opts.transactionalFsWriteSupported;
     this.resolveOperationAdmission = opts.resolveOperationAdmission;
     this.adoptBackgroundCommand = opts.adoptBackgroundCommand;
     this.settleBackgroundCommand = opts.settleBackgroundCommand;
+    this.captureBackgroundCommandOutput = opts.captureBackgroundCommandOutput;
     this.environment = opts.environment;
     this.transientExecEnvironment = opts.transientExecEnvironment;
     this.onOp = opts.onOp;
@@ -1711,6 +2008,7 @@ export class SelfhostedSandboxClient {
       ...(this.operationCpuQuotaSupported !== undefined
         ? { operationCpuQuotaSupported: this.operationCpuQuotaSupported }
         : {}),
+      transactionalFsWriteSupported: this.transactionalFsWriteSupported === true,
       ...(this.resolveOperationAdmission !== undefined
         ? { resolveOperationAdmission: this.resolveOperationAdmission }
         : {}),
@@ -1719,6 +2017,9 @@ export class SelfhostedSandboxClient {
         : {}),
       ...(this.settleBackgroundCommand !== undefined
         ? { settleBackgroundCommand: this.settleBackgroundCommand }
+        : {}),
+      ...(this.captureBackgroundCommandOutput
+        ? { captureBackgroundCommandOutput: this.captureBackgroundCommandOutput }
         : {}),
       ...(this.environment !== undefined ? { environment: this.environment } : {}),
       ...(this.transientExecEnvironment !== undefined
@@ -1827,10 +2128,12 @@ export interface SelfhostedSessionBuild {
   operationResourcePolicySupported?: boolean;
   /** Exact live CPU enforcement capability paired with the initial snapshot. */
   operationCpuQuotaSupported?: boolean;
+  transactionalFsWriteSupported?: boolean;
   /** Live last-boundary operation admission resolver; see SelfhostedSessionDeps. */
   resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
   adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
   settleBackgroundCommand?: SelfhostedSessionDeps["settleBackgroundCommand"];
+  captureBackgroundCommandOutput?: SelfhostedSessionDeps["captureBackgroundCommandOutput"];
   /** The per-op observer (out-of-band telemetry). Absent ⇒ no-op. */
   onOp?: SelfhostedOpObserver;
   /** The op-stream exec transport (present when the runner advertises it and the
@@ -1881,6 +2184,7 @@ export async function buildSelfhostedBackendSession(
     ...(deps.operationCpuQuotaSupported !== undefined
       ? { operationCpuQuotaSupported: deps.operationCpuQuotaSupported }
       : {}),
+    transactionalFsWriteSupported: deps.transactionalFsWriteSupported === true,
     ...(deps.resolveOperationAdmission !== undefined
       ? { resolveOperationAdmission: deps.resolveOperationAdmission }
       : {}),
@@ -1889,6 +2193,9 @@ export async function buildSelfhostedBackendSession(
       : {}),
     ...(deps.settleBackgroundCommand !== undefined
       ? { settleBackgroundCommand: deps.settleBackgroundCommand }
+      : {}),
+    ...(deps.captureBackgroundCommandOutput
+      ? { captureBackgroundCommandOutput: deps.captureBackgroundCommandOutput }
       : {}),
     ...(deps.onOp !== undefined ? { onOp: deps.onOp } : {}),
     ...(deps.environment !== undefined ? { environment: deps.environment } : {}),

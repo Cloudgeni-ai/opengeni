@@ -2,23 +2,11 @@ import type {
   CompanyBrainContextReceiptPage as ContractCompanyBrainContextReceiptPage,
   CompanyBrainKnowledgeProposalPage as ContractCompanyBrainKnowledgeProposalPage,
   CompanyBrainOkfPackage as ContractCompanyBrainOkfPackage,
-  KnowledgeBrowseRequest as ContractKnowledgeBrowseRequest,
-  KnowledgeBrowseResponse as ContractKnowledgeBrowseResponse,
-  KnowledgeGetResponse as ContractKnowledgeGetResponse,
-  KnowledgeRecord as ContractKnowledgeRecord,
-  KnowledgeSearchRequest as ContractKnowledgeSearchRequest,
-  KnowledgeSearchResponse as ContractKnowledgeSearchResponse,
 } from "@opengeni/contracts";
 
 export type CompanyBrainOkfPackage = ContractCompanyBrainOkfPackage;
 export type CompanyBrainContextReceiptPage = ContractCompanyBrainContextReceiptPage;
 export type CompanyBrainKnowledgeProposalPage = ContractCompanyBrainKnowledgeProposalPage;
-export type CompanyBrainKnowledgeSearchRequest = ContractKnowledgeSearchRequest;
-export type CompanyBrainKnowledgeSearchResponse = ContractKnowledgeSearchResponse;
-export type CompanyBrainKnowledgeBrowseRequest = ContractKnowledgeBrowseRequest;
-export type CompanyBrainKnowledgeBrowseResponse = ContractKnowledgeBrowseResponse;
-export type CompanyBrainKnowledgeGetResponse = ContractKnowledgeGetResponse;
-export type CompanyBrainKnowledgeRecord = ContractKnowledgeRecord;
 
 export type CompanyBrainContextReceiptListOptions = {
   attemptId?: string;
@@ -36,34 +24,6 @@ export type CompanyBrainInspectorTransport = {
 
 function inspectorPath(workspaceId: string, suffix: string): string {
   return `/v1/workspaces/${workspaceId}/company-brain/${suffix}`;
-}
-
-/** Human-authorized, permission-first Knowledge search for Company Brain inspectors. */
-export function searchCompanyBrainKnowledge(
-  client: CompanyBrainInspectorTransport,
-  workspaceId: string,
-  request: CompanyBrainKnowledgeSearchRequest,
-): Promise<CompanyBrainKnowledgeSearchResponse> {
-  return client.requestJson("POST", inspectorPath(workspaceId, "knowledge/search"), request);
-}
-
-export function getCompanyBrainKnowledge(
-  client: CompanyBrainInspectorTransport,
-  workspaceId: string,
-  recordId: string,
-): Promise<CompanyBrainKnowledgeGetResponse> {
-  return client.requestJson(
-    "GET",
-    `${inspectorPath(workspaceId, "knowledge/record")}?id=${encodeURIComponent(recordId)}`,
-  );
-}
-
-export function browseCompanyBrainKnowledge(
-  client: CompanyBrainInspectorTransport,
-  workspaceId: string,
-  request: CompanyBrainKnowledgeBrowseRequest = {},
-): Promise<CompanyBrainKnowledgeBrowseResponse> {
-  return client.requestJson("POST", inspectorPath(workspaceId, "knowledge/browse"), request);
 }
 
 export function listCompanyBrainContextReceipts(

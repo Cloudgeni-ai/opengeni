@@ -7,6 +7,8 @@ import {
   resolveWorkspaceCodexCompactionDefault,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
   ScheduledTaskRunAcceptedExecution,
+  SessionAgentAccess,
+  SessionMemoryScope,
   normalizeAutomaticSessionTitle,
   scheduledOccurrencePayloadUtf8Bytes,
   stableJson,
@@ -15,7 +17,6 @@ import {
   type ScheduledTaskRun,
 } from "@opengeni/contracts";
 import {
-  defaultSessionMcpServerIds,
   openGeniSlackBotMetadata,
   requireOpenGeniSlackBotConnection,
   resolveWorkspaceCatalogSettings,
@@ -23,6 +24,12 @@ import {
   workspaceCustomModelReference,
   lockActiveCustomModelForAdmission,
   scheduledSlackBotConnectionId,
+  freezeConnectionAccounts,
+  ConnectionAccountSelectionError,
+  scheduledConnectionSurfaceEligibility,
+  scheduledConnectionTools,
+  settingsWithEnabledCapabilityMcpServers,
+  settingsWithSessionMcpServerMetadata,
   swapActiveSandbox,
 } from "@opengeni/core";
 import {
@@ -35,11 +42,10 @@ import {
   enqueueSessionWorkflowWakeIfRunnable,
   failScheduledGeneratedSessionRoute,
   getScheduledTask,
+  getScheduledTaskCreatorPolicy,
   getScheduledTaskRunAcceptedExecution,
   getScheduledTaskRunByProducerKey,
   getScheduledTargetSessionExecution,
-  ensureKnowledgeSourceSyncState,
-  getScheduledTaskPersonalConnectionDelegations,
   getScheduledTaskRunPersonalResourceAuthority,
   getScheduledTaskPersonalResourceAuthoritySubject,
   getScheduledTaskRevisionAuthority,
@@ -50,28 +56,30 @@ import {
   getScheduledScopedRigVersionMetadata,
   getNestedAgentDepthDeploymentPolicy,
   getSessionByCreateIdempotencyKey,
+  getSessionCreationExecutionPolicy,
   getVariableSet,
   isCodexBilledModel,
   initializeSessionStartAtomically,
   materializeScheduledTaskReusableSessionFromRun,
-  listEnabledMcpCapabilityServerIds,
   listInstalledApiIntegrationServerIdsForDelegations,
   markScheduledTaskRunFailedIfQueued,
   markScheduledTaskRunSkippedIfQueued,
-  recordKnowledgeSourceSyncWake,
   recordUsageEvent,
   requireScheduledTaskIncidentAuthorityInTransaction,
   requireSession,
   requireWorkspace,
   settleScheduledTaskRunInTransaction,
   SessionSpawnDeniedDbError,
-  updateScheduledTaskRun,
   updateSessionTitleWithEvent,
   upsertScheduledSessionGoalForRun,
   withSessionActivityRlsContext,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import { resolveFirstPartyMcpToolPolicy, resolveTurnExecutionPolicyV1 } from "@opengeni/config";
+import {
+  allowedFirstPartyMcpToolsForSession,
+  resolveFirstPartyMcpToolPolicy,
+  resolveTurnExecutionPolicyV1,
+} from "@opengeni/config";
 import { Context } from "@temporalio/activity";
 import { createHash } from "node:crypto";
 import {
@@ -356,68 +364,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (!task) {
         return { action: "deleted" };
       }
-      if (task.action.kind === "knowledge_source_sync") {
-        if (knowledgeSourceSyncEffectivelyPaused(task)) {
-          return { action: "blocked", reason: "knowledge_source_paused" };
-        }
-        const run = await createScheduledTaskRun(db, {
-          workspaceId: task.workspaceId,
-          taskId: task.id,
-          taskAuthorityRevision: task.authorityRevision,
-          taskExecutionDigest: task.executionDigest,
-          triggerType: input.triggerType,
-          producerKey: stableProducerKey,
-          scheduledAt: null,
-        });
-        await ensureKnowledgeSourceSyncState(db, task);
-        await recordKnowledgeSourceSyncWake(db, {
-          accountId: task.accountId,
-          workspaceId: task.workspaceId,
-          sourceId: task.action.sourceId,
-          scheduledTaskId: task.id,
-          scheduledTaskRunId: run.id,
-          cause: input.triggerType,
-          producerKey: stableProducerKey,
-          sourceConfigGeneration: task.action.sourceConfigGeneration,
-          sourceLifecycleGeneration: task.action.sourceLifecycleGeneration,
-        });
-        await recordUsageEvent(db, {
-          accountId: task.accountId,
-          workspaceId: task.workspaceId,
-          eventType: "knowledge_source_sync.fired",
-          quantity: 1,
-          unit: "run",
-          sourceResourceType: "scheduled_task_run",
-          sourceResourceId: run.id,
-          initiator: input.initiator ?? {
-            kind: "service",
-            subjectId: "scheduler",
-          },
-          initiatorContext: {
-            scheduledTaskId: task.id,
-            scheduledTaskRunId: run.id,
-          },
-          origin: "scheduled_task",
-          idempotencyKey: `usage:knowledge_source_sync.fired:${run.id}`,
-        });
-        if (run.status === "queued") {
-          await updateScheduledTaskRun(db, task.workspaceId, run.id, {
-            status: "dispatched",
-            actionKind: "knowledge_source_sync",
-          });
-        }
-        return {
-          action: "knowledge_source_sync",
-          accountId: task.accountId,
-          workspaceId: task.workspaceId,
-          taskId: task.id,
-          scheduledTaskRunId: run.id,
-          sourceId: task.action.sourceId,
-          overlapPolicy: task.overlapPolicy as "skip" | "buffer_one",
-        };
+      if (task.action.kind !== "agent_turn") {
+        return { action: "blocked", reason: "legacy_source_schedule_requires_migration" };
       }
       if (task.status !== "active") {
         return { action: "blocked", reason: "scheduled_task_paused" };
+      }
+      if (task.agentConfig.knowledgeSource && knowledgeSourceSyncEffectivelyPaused(task)) {
+        return { action: "blocked", reason: "knowledge_source_paused" };
       }
       const structuredAlertOccurrence = scheduledAlertOccurrenceIdentity({
         workspaceId: task.workspaceId,
@@ -440,20 +394,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (incidentDeclaration.action === "blocked") {
         return incidentDeclaration;
       }
-      const taskPersonalConnectionDelegations = await getScheduledTaskPersonalConnectionDelegations(
-        db,
-        task.workspaceId,
-        task.id,
-      );
-      const taskConnectionAuthoritySubjects = [
-        ...new Set(
-          taskPersonalConnectionDelegations.map((delegation) => delegation.ownerSubjectId),
-        ),
-      ];
-      if (taskConnectionAuthoritySubjects.length > 1) {
-        throw new Error("scheduled connection authority has multiple causal humans");
-      }
-      const taskConnectionAuthoritySubjectId = taskConnectionAuthoritySubjects[0] ?? null;
       const taskPersonalResourceAuthoritySubjectId =
         await getScheduledTaskPersonalResourceAuthoritySubject(db, {
           accountId: task.accountId,
@@ -467,17 +407,16 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         taskId: task.id,
         taskAuthorityRevision: task.authorityRevision,
       });
+      const taskAuthoritySubjectId = task.ownerSubjectId;
       if (
-        taskConnectionAuthoritySubjectId &&
-        taskPersonalResourceAuthoritySubjectId &&
-        taskConnectionAuthoritySubjectId !== taskPersonalResourceAuthoritySubjectId
+        task.action.kind === "agent_turn" &&
+        ((taskRevisionAuthority?.subjectId ?? null) !== taskAuthoritySubjectId ||
+          [taskPersonalResourceAuthoritySubjectId].some(
+            (subject) => subject !== null && subject !== taskAuthoritySubjectId,
+          ))
       ) {
-        throw new Error("scheduled authority classes have different causal humans");
+        throw new Error("scheduled authority differs from its immutable execution owner");
       }
-      const taskAuthoritySubjectId =
-        taskRevisionAuthority?.subjectId ??
-        taskPersonalResourceAuthoritySubjectId ??
-        taskConnectionAuthoritySubjectId;
       const acceptedTargetSessionId =
         task.runMode === "existing_session"
           ? task.targetSessionId
@@ -504,7 +443,75 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       let sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
       let sandboxOs: "linux" | "macos" | "windows" = "linux";
       const taskTools = withFirstPartyTools(settings, task.agentConfig.tools);
-      const firstPartyMcpTools = resolveFirstPartyMcpToolPolicy(settings).default;
+      // A task created by a live agent attempt froze its creator's effective
+      // first-party selection, permission set, and session access policy;
+      // its generated sessions inherit that boundary under today's
+      // deployment ceiling. A human/API-created task (null policy) keeps the
+      // deployment default exactly as before.
+      const creatorPolicy = await getScheduledTaskCreatorPolicy(db, task.workspaceId, task.id);
+      const firstPartyMcpTools = creatorPolicy?.firstPartyMcpTools
+        ? allowedFirstPartyMcpToolsForSession(settings, creatorPolicy.firstPartyMcpTools)
+        : resolveFirstPartyMcpToolPolicy(settings).default;
+      const firstPartyMcpPermissions = creatorPolicy?.firstPartyMcpPermissions
+        ? [...creatorPolicy.firstPartyMcpPermissions]
+        : [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS];
+      // A fresh occurrence resolves the immutable owner's current accounts.
+      // Retry/recovery above uses the already accepted occurrence snapshot.
+      const connectionSettings = await settingsWithEnabledCapabilityMcpServers(
+        db,
+        task.workspaceId,
+        settings,
+        taskAuthoritySubjectId ? { subjectId: taskAuthoritySubjectId } : {},
+      );
+      const connectionTarget =
+        acceptedTargetSessionId && targetSessionExecutionBase
+          ? await requireSession(db, task.workspaceId, acceptedTargetSessionId)
+          : null;
+      const connectionTools = await scheduledConnectionTools(
+        db,
+        task.workspaceId,
+        connectionSettings,
+        connectionTarget,
+        taskTools,
+        taskAuthoritySubjectId ?? undefined,
+      );
+      const taskConnections = await freezeConnectionAccounts({
+        db,
+        accountId: task.accountId,
+        workspaceId: task.workspaceId,
+        settings: connectionTarget
+          ? settingsWithSessionMcpServerMetadata(connectionSettings, connectionTarget.mcpServers)
+          : connectionSettings,
+        tools: connectionTools,
+        resources: connectionTarget?.resources ?? task.agentConfig.resources,
+        source: taskAuthoritySubjectId
+          ? { kind: "subject", subjectId: taskAuthoritySubjectId, accountId: task.accountId }
+          : { kind: "none" },
+        authoritySelections: task.agentConfig.connectionAccounts ?? [],
+        authoritySelectionsFrozen: task.agentConfig.connectionAccountsFrozen === true,
+        ...scheduledConnectionSurfaceEligibility(
+          settings,
+          connectionTarget ?? {
+            firstPartyMcpTools,
+            firstPartyMcpPermissions,
+          },
+        ),
+      }).catch((error: unknown) => {
+        if (error instanceof ConnectionAccountSelectionError) return null;
+        throw error;
+      });
+      if (taskConnections === null) {
+        return { action: "blocked", reason: "connection_account_unavailable" };
+      }
+      const {
+        personalConnectionDelegations: taskPersonalConnectionDelegations,
+        mcpAccountBindings: taskMcpAccountBindings,
+      } = taskConnections;
+      const taskConnectionAuthoritySubjectId =
+        taskPersonalConnectionDelegations.length > 0 ? taskAuthoritySubjectId : null;
+      const creatorSessionPolicy = scheduledCreatorSessionPolicyInput(
+        creatorPolicy?.sessionPolicy ?? null,
+      );
       const generatedTarget =
         task.runMode === "new_session_per_run" ||
         (task.runMode === "reusable_session" && task.reusableSessionId === null);
@@ -572,20 +579,16 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         : null;
       const targetSessionExecution = targetSessionExecutionBase
         ? await (async () => {
-            const [capabilityServerIds, apiIntegrationServerIds] = await Promise.all([
-              listEnabledMcpCapabilityServerIds(db, task.workspaceId),
-              listInstalledApiIntegrationServerIdsForDelegations(
+            const apiIntegrationServerIds =
+              await listInstalledApiIntegrationServerIdsForDelegations(
                 db,
                 task.workspaceId,
                 taskPersonalConnectionDelegations,
-              ),
+              );
+            const availableMcpServerIds = new Set([
+              ...connectionSettings.mcpServers.map((server) => server.id),
+              ...apiIntegrationServerIds,
             ]);
-            const workspaceDefaultMcpServerIds = new Set(
-              settings.mcpServers.map((server) => server.id),
-            );
-            for (const id of capabilityServerIds) workspaceDefaultMcpServerIds.add(id);
-            for (const id of apiIntegrationServerIds) workspaceDefaultMcpServerIds.add(id);
-            const availableMcpServerIds = new Set(workspaceDefaultMcpServerIds);
             for (const id of targetSessionExecutionBase.mcpServerIds) {
               availableMcpServerIds.add(id);
             }
@@ -593,9 +596,10 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               toolPolicy: targetSessionExecutionBase.toolPolicy,
               sessionTools: targetSessionExecutionBase.tools,
               availableMcpServerIds,
-              defaultMcpServerIds: defaultSessionMcpServerIds(
-                [...workspaceDefaultMcpServerIds].map((id) => ({ id })),
-              ),
+              defaultMcpServerIds: [
+                ...connectionTools.map((tool) => tool.id),
+                ...apiIntegrationServerIds,
+              ],
             });
             return {
               ...targetSessionExecutionBase,
@@ -639,7 +643,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             )
           : null;
       if (generatedTarget && task.rigId && (!acceptedRig || !acceptedRig.activeVersion)) {
-        throw new Error(`rig has no active version to bind: ${task.rigId}`);
+        throw new Error(`sandbox environment has no active version to bind: ${task.rigId}`);
       }
       const acceptedRigDefaultVariableSets = acceptedRig?.activeVersion
         ? await Promise.all(
@@ -654,7 +658,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 variableSetId,
               );
               if (!variableSet) {
-                throw new Error(`rig default Variable Set not found: ${variableSetId}`);
+                throw new Error(
+                  `sandbox environment default Variable Set not found: ${variableSetId}`,
+                );
               }
               return { id: variableSet.id, generation: variableSet.generation };
             }),
@@ -700,7 +706,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             : {
                 tools: taskTools,
                 firstPartyMcpTools,
-                firstPartyMcpPermissions: [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+                firstPartyMcpPermissions,
                 variableSetId: acceptedVariableSet?.id ?? null,
                 rigId: acceptedRig?.id ?? null,
                 rigVersionId: acceptedRig?.activeVersion?.id ?? null,
@@ -756,6 +762,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         throw new Error("scheduled authority classes have different causal humans");
       }
       const causalHumanSubjectId = taskAuthoritySubjectId ?? xaiAuthoritySubjectId;
+      if (
+        task.agentConfig.knowledgeSource &&
+        causalHumanSubjectId !== task.agentConfig.knowledgeSource.initiatingSubjectId
+      ) {
+        throw new Error(
+          "Source schedule requires its connection owner's current human authorization; update the source schedule to authorize it",
+        );
+      }
       // Workspace/organization Variable Sets and Rigs run through ordinary
       // workspace authority; only a user-owned resource needs the exact frozen
       // human, and the database admission fence re-proves the same rule for
@@ -847,7 +861,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           resolvedSandboxOs: sandboxOs,
           resolvedTools: taskTools,
           resolvedFirstPartyMcpTools: firstPartyMcpTools,
-          resolvedFirstPartyMcpPermissions: [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+          resolvedFirstPartyMcpPermissions: firstPartyMcpPermissions,
           resolvedVariableSet: acceptedVariableSet
             ? { id: acceptedVariableSet.id, generation: acceptedVariableSet.generation }
             : null,
@@ -870,6 +884,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           targetSessionExecution,
           generatedSessionBinding,
           personalConnectionDelegations: taskPersonalConnectionDelegations,
+          mcpAccountBindings: taskMcpAccountBindings,
           personalResourceAuthoritySubjectId: taskPersonalResourceAuthoritySubjectId,
           causalHumanSubjectId,
           causalHumanAuthority: taskRevisionAuthority,
@@ -993,16 +1008,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 taskId: task.id,
               },
             );
-            if (
-              stableJson({
-                task: exactAuthority.task,
-                personalConnectionDelegations: exactAuthority.personalConnectionDelegations,
-              }) !==
-              stableJson({
-                task,
-                personalConnectionDelegations: taskPersonalConnectionDelegations,
-              })
-            ) {
+            if (stableJson(exactAuthority) !== stableJson(task)) {
               throw new IncidentTelemetryPreflightBlockedError(
                 "incident_preflight_metadata_missing",
               );
@@ -1036,7 +1042,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             if (task.rigId) {
               const rig = acceptedRig;
               if (!rig || !rig.activeVersion) {
-                throw new Error(`rig has no active version to bind: ${task.rigId}`);
+                throw new Error(`sandbox environment has no active version to bind: ${task.rigId}`);
               }
               frozenRigId = rig.id;
               frozenRigVersionId =
@@ -1044,7 +1050,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   (resource) => resource.resourceKind === "rig" && resource.resourceId === rig.id,
                 )?.resourceVersionId ?? rig.activeVersion.id;
               if (frozenRigVersionId !== rig.activeVersion.id) {
-                throw new Error("scheduled run rig version changed during admission");
+                throw new Error(
+                  "scheduled run sandbox environment version changed during admission",
+                );
               }
             }
             let session: Awaited<ReturnType<typeof createSession>>;
@@ -1057,9 +1065,17 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 workspaceId: task.workspaceId,
                 initialMessage: task.agentConfig.prompt,
                 resources: task.agentConfig.resources,
+                bundledSkillIds: task.agentConfig.bundledSkillIds,
                 tools: taskTools,
                 firstPartyMcpTools,
-                firstPartyMcpPermissions: [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+                firstPartyMcpPermissions,
+                ...creatorSessionPolicy,
+                ...(task.agentConfig.knowledgeSource?.destination.kind === "personal"
+                  ? {
+                      visibility: "user_private" as const,
+                      scheduledSourceRunId: run.id,
+                    }
+                  : {}),
                 metadata: {
                   ...taskMetadata,
                   model,
@@ -1387,18 +1403,20 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                     : {}),
                 },
                 personalConnectionDelegations: taskPersonalConnectionDelegations,
+                mcpAccountBindings: taskMcpAccountBindings,
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
                 scheduledTaskRunId: run.id,
               },
-              async (tx, wakeEventId) => {
+              async (tx, wakeEventId, _updateId, rejectionReason) => {
                 if (!wakeEventId) {
+                  const error = scheduledSessionRejectionError(rejectionReason);
                   await settleScheduledTaskRunInTransaction(tx, {
                     workspaceId: task.workspaceId,
                     runId: scheduledRun.id,
                     sessionId: session.id,
                     triggerEventId: null,
                     status: "skipped",
-                    error: "session_cancelled",
+                    error,
                   });
                   return;
                 }
@@ -1410,26 +1428,33 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   status: "dispatched",
                 });
               },
-              incidentPreflightRequired
-                ? {
-                    prepareSource: async (tx, sessionId) =>
-                      await prepareIncidentTelemetrySource({
-                        tx,
-                        settings,
-                        taskId: task.id,
-                        workspaceId: task.workspaceId,
-                        sessionId,
-                        alertOccurrenceLabels: structuredAlertOccurrence?.labels ?? null,
-                        acceptedExecution,
-                      }),
-                  }
-                : undefined,
+              {
+                requireIdleSession: task.overlapPolicy === "skip" && !sessionCreated,
+                ...(incidentPreflightRequired
+                  ? {
+                      prepareSource: async (tx, sessionId) =>
+                        await prepareIncidentTelemetrySource({
+                          tx,
+                          settings,
+                          taskId: task.id,
+                          workspaceId: task.workspaceId,
+                          sessionId,
+                          alertOccurrenceLabels: structuredAlertOccurrence?.labels ?? null,
+                          acceptedExecution,
+                        }),
+                    }
+                  : {}),
+              },
             );
-            if (scheduledUpdate.reason === "session_cancelled") {
+            if (
+              scheduledUpdate.reason === "session_cancelled" ||
+              scheduledUpdate.reason === "session_not_idle"
+            ) {
+              const error = scheduledSessionRejectionError(scheduledUpdate.reason);
               return {
                 kind: "blocked" as const,
                 result: { action: "blocked" as const, reason: "scheduled_run_terminal" as const },
-                run: { ...run, status: "skipped" as const, error: "session_cancelled" },
+                run: { ...run, status: "skipped" as const, error },
               };
             }
             if (scheduledUpdate.added && scheduledUpdate.events.length > 0) {
@@ -1467,39 +1492,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               sessionId: session.id,
             });
             // A user-cancelled (terminal) reusable session must not be revived and
-            // re-billed on the next fire. Early check avoids the pre-lock goal
-            // upsert side-effect; the locked-callback check below is the
-            // authoritative atomic guard. Mirrors apps/api/src/domain/sessions.ts.
+            // re-billed on the next fire. This cheap check gives an early answer;
+            // the locked admission check below remains authoritative. Mirrors
+            // apps/api/src/domain/sessions.ts.
             assertReusableSessionRevivable(session.status);
             // Defensive backstop for the API-level 409: a reusable session keeps
             // its creation-time attachment, so a diverged task attachment must
             // fail the run instead of silently running with the wrong secrets.
             assertReusableSessionBindingMatches(session, task);
-            // A recurring "maintain X" task re-establishes its objective on every
-            // fire: replace the goal text, reactivate it, and reset the counters.
-            const goalEvents =
-              task.runMode === "reusable_session" && goalSpec && run.status === "queued"
-                ? await upsertScheduledSessionGoalForRun(dispatchDb, {
-                    accountId: task.accountId,
-                    workspaceId: task.workspaceId,
-                    sessionId: session.id,
-                    runId: run.id,
-                    text: goalSpec.text,
-                    successCriteria: goalSpec.successCriteria ?? null,
-                    maxAutoContinuations: goalSpec.maxAutoContinuations ?? null,
-                    ...(goalSpec.mutationPolicy ? { mutationPolicy: goalSpec.mutationPolicy } : {}),
-                  })
-                : [];
-            if (goalEvents.length > 0) {
-              if (deferPublications) {
-                deferredEvents.push({
-                  sessionId: session.id,
-                  events: goalEvents,
-                });
-              } else {
-                await publishDurableSessionEvents(bus, task.workspaceId, session.id, goalEvents);
-              }
-            }
             const bundled = await addSessionSystemUpdateWithSourceMutation(
               dispatchDb,
               {
@@ -1531,18 +1531,20 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                     : {}),
                 },
                 personalConnectionDelegations: taskPersonalConnectionDelegations,
+                mcpAccountBindings: taskMcpAccountBindings,
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
                 scheduledTaskRunId: run.id,
               },
-              async (tx, wakeEventId) => {
+              async (tx, wakeEventId, _updateId, rejectionReason) => {
                 if (!wakeEventId) {
+                  const error = scheduledSessionRejectionError(rejectionReason);
                   await settleScheduledTaskRunInTransaction(tx, {
                     workspaceId: task.workspaceId,
                     runId: scheduledRun.id,
                     sessionId: session.id,
                     triggerEventId: null,
                     status: "skipped",
-                    error: "session_cancelled",
+                    error,
                   });
                   return;
                 }
@@ -1554,10 +1556,26 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   status: "dispatched",
                 });
               },
-              incidentPreflightRequired
-                ? {
-                    prepareSource: async (tx, sessionId) =>
-                      await prepareIncidentTelemetrySource({
+              {
+                requireIdleSession: task.overlapPolicy === "skip",
+                prepareSource: async (tx, sessionId) => {
+                  const goalEvents =
+                    task.runMode === "reusable_session" && goalSpec && run.status === "queued"
+                      ? await upsertScheduledSessionGoalForRun(tx, {
+                          accountId: task.accountId,
+                          workspaceId: task.workspaceId,
+                          sessionId,
+                          runId: run.id,
+                          text: goalSpec.text,
+                          successCriteria: goalSpec.successCriteria ?? null,
+                          maxAutoContinuations: goalSpec.maxAutoContinuations ?? null,
+                          ...(goalSpec.mutationPolicy
+                            ? { mutationPolicy: goalSpec.mutationPolicy }
+                            : {}),
+                        })
+                      : [];
+                  const incidentSource = incidentPreflightRequired
+                    ? await prepareIncidentTelemetrySource({
                         tx,
                         settings,
                         taskId: task.id,
@@ -1565,15 +1583,21 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                         sessionId,
                         alertOccurrenceLabels: structuredAlertOccurrence?.labels ?? null,
                         acceptedExecution,
-                      }),
-                  }
-                : undefined,
+                      })
+                    : undefined;
+                  return {
+                    ...(incidentSource ?? {}),
+                    ...(goalEvents.length > 0 ? { events: goalEvents } : {}),
+                  };
+                },
+              },
             );
-            if (bundled.reason === "session_cancelled") {
+            if (bundled.reason === "session_cancelled" || bundled.reason === "session_not_idle") {
+              const error = scheduledSessionRejectionError(bundled.reason);
               return {
                 kind: "blocked" as const,
                 result: { action: "blocked" as const, reason: "scheduled_run_terminal" as const },
-                run: { ...run, status: "skipped" as const, error: "session_cancelled" },
+                run: { ...run, status: "skipped" as const, error },
               };
             }
             if (bundled.added && bundled.events.length > 0) {
@@ -1797,6 +1821,14 @@ function scheduledRunTerminalResult(
   return { action: "blocked", reason: "scheduled_run_terminal" };
 }
 
+function scheduledSessionRejectionError(
+  rejectionReason: "session_cancelled" | "session_not_idle" | null,
+): "session_cancelled" | "scheduled_session_not_idle" {
+  return rejectionReason === "session_not_idle"
+    ? "scheduled_session_not_idle"
+    : "session_cancelled";
+}
+
 async function prepareIncidentTelemetrySource(input: {
   tx: Database;
   settings: ControlActivityServices["settings"];
@@ -1804,18 +1836,10 @@ async function prepareIncidentTelemetrySource(input: {
   workspaceId: string;
   sessionId: string;
   alertOccurrenceLabels: Readonly<Record<string, string>> | null;
-  acceptedExecution?: ScheduledTaskRunAcceptedExecution;
+  acceptedExecution: ScheduledTaskRunAcceptedExecution;
 }) {
   const session = await requireSession(input.tx, input.workspaceId, input.sessionId);
-  const { task, personalConnectionDelegations } = input.acceptedExecution
-    ? {
-        task: input.acceptedExecution.task,
-        personalConnectionDelegations: input.acceptedExecution.personalConnectionDelegations,
-      }
-    : await requireScheduledTaskIncidentAuthorityInTransaction(input.tx, {
-        workspaceId: input.workspaceId,
-        taskId: input.taskId,
-      });
+  const { task, personalConnectionDelegations } = input.acceptedExecution;
   const responder = await resolveIncidentTelemetryResponderMetadata({
     db: input.tx,
     settings: input.settings,
@@ -1823,39 +1847,34 @@ async function prepareIncidentTelemetrySource(input: {
     session,
     personalConnectionDelegations,
     personalResourceAuthoritySubjectId:
-      input.acceptedExecution?.personalResourceAuthoritySubjectId ?? null,
-    ...(input.acceptedExecution
+      input.acceptedExecution.personalResourceAuthoritySubjectId ?? null,
+    executionPolicy: input.acceptedExecution.targetSessionExecution
       ? {
-          executionPolicy: input.acceptedExecution.targetSessionExecution
-            ? {
-                tools: input.acceptedExecution.targetSessionExecution.tools,
-                firstPartyMcpTools:
-                  input.acceptedExecution.targetSessionExecution.firstPartyMcpTools,
-                firstPartyMcpPermissions:
-                  input.acceptedExecution.targetSessionExecution.firstPartyMcpPermissions,
-                variableSetIds: input.acceptedExecution.targetSessionExecution.variableSets.map(
-                  (variableSet) => variableSet.id,
-                ),
-                variableSetId: input.acceptedExecution.targetSessionExecution.variableSetId,
-                rigId: input.acceptedExecution.targetSessionExecution.rigId,
-                rigVersionId: input.acceptedExecution.targetSessionExecution.rigVersionId,
-                toolPolicy: input.acceptedExecution.targetSessionExecution.toolPolicy,
-                mcpServerIds: input.acceptedExecution.targetSessionExecution.mcpServerIds,
-                toolPolicyVersion: input.acceptedExecution.targetSessionExecution.toolPolicyVersion,
-              }
-            : {
-                tools: input.acceptedExecution.resolvedTools,
-                firstPartyMcpTools: input.acceptedExecution.resolvedFirstPartyMcpTools,
-                firstPartyMcpPermissions: input.acceptedExecution.resolvedFirstPartyMcpPermissions,
-                variableSetId: input.acceptedExecution.resolvedVariableSet?.id ?? null,
-                rigId: input.acceptedExecution.resolvedRig?.id ?? null,
-                rigVersionId: input.acceptedExecution.resolvedRig?.versionId ?? null,
-                toolPolicy: session.toolPolicy,
-                mcpServerIds: [],
-                toolPolicyVersion: session.toolPolicyVersion,
-              },
+          tools: input.acceptedExecution.targetSessionExecution.tools,
+          firstPartyMcpTools: input.acceptedExecution.targetSessionExecution.firstPartyMcpTools,
+          firstPartyMcpPermissions:
+            input.acceptedExecution.targetSessionExecution.firstPartyMcpPermissions,
+          variableSetIds: input.acceptedExecution.targetSessionExecution.variableSets.map(
+            (variableSet) => variableSet.id,
+          ),
+          variableSetId: input.acceptedExecution.targetSessionExecution.variableSetId,
+          rigId: input.acceptedExecution.targetSessionExecution.rigId,
+          rigVersionId: input.acceptedExecution.targetSessionExecution.rigVersionId,
+          toolPolicy: input.acceptedExecution.targetSessionExecution.toolPolicy,
+          mcpServerIds: input.acceptedExecution.targetSessionExecution.mcpServerIds,
+          toolPolicyVersion: input.acceptedExecution.targetSessionExecution.toolPolicyVersion,
         }
-      : {}),
+      : {
+          tools: input.acceptedExecution.resolvedTools,
+          firstPartyMcpTools: input.acceptedExecution.resolvedFirstPartyMcpTools,
+          firstPartyMcpPermissions: input.acceptedExecution.resolvedFirstPartyMcpPermissions,
+          variableSetId: input.acceptedExecution.resolvedVariableSet?.id ?? null,
+          rigId: input.acceptedExecution.resolvedRig?.id ?? null,
+          rigVersionId: input.acceptedExecution.resolvedRig?.versionId ?? null,
+          toolPolicy: session.toolPolicy,
+          mcpServerIds: [],
+          toolPolicyVersion: session.toolPolicyVersion,
+        },
   });
   const preflight = evaluateIncidentTelemetryPreflight({
     agentConfig: task.agentConfig,
@@ -2054,14 +2073,30 @@ async function recoverBoundScheduledTaskDispatch(input: {
     }
     const taskMetadata = { ...task.agentConfig.metadata };
     delete taskMetadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY];
+    // Tools and permissions were frozen into the accepted execution. The
+    // creator session policy is immutable on the task row (a tombstoned task
+    // still answers), so re-reading it here is deterministic for the same run.
+    const recoveredCreatorPolicy = await getScheduledTaskCreatorPolicy(
+      input.db,
+      task.workspaceId,
+      task.id,
+    );
     const created = await createSessionWithIdempotencyKeyResult(input.db, {
       accountId: task.accountId,
       workspaceId: task.workspaceId,
       initialMessage: task.agentConfig.prompt,
       resources: task.agentConfig.resources,
+      bundledSkillIds: task.agentConfig.bundledSkillIds,
       tools: input.acceptedExecution.resolvedTools,
       firstPartyMcpTools: input.acceptedExecution.resolvedFirstPartyMcpTools,
       firstPartyMcpPermissions: input.acceptedExecution.resolvedFirstPartyMcpPermissions,
+      ...scheduledCreatorSessionPolicyInput(recoveredCreatorPolicy?.sessionPolicy ?? null),
+      ...(task.agentConfig.knowledgeSource?.destination.kind === "personal"
+        ? {
+            visibility: "user_private" as const,
+            scheduledSourceRunId: input.run.id,
+          }
+        : {}),
       metadata: {
         ...taskMetadata,
         model: input.acceptedExecution.resolvedModel,
@@ -2183,6 +2218,13 @@ async function recoverBoundScheduledTaskDispatch(input: {
       task.runMode === "reusable_session" && typeof session.metadata.scheduledTaskRunId === "string"
         ? session.metadata.scheduledTaskRunId
         : input.run.id;
+    // The public Session policy follows the latest started turn. Recovery must
+    // instead validate the immutable creation binding accepted by this run.
+    const creationPolicy = await getSessionCreationExecutionPolicy(
+      input.db,
+      task.workspaceId,
+      session.id,
+    );
     const expectedTaskMetadata = { ...task.agentConfig.metadata };
     delete expectedTaskMetadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY];
     const expectedMetadata = {
@@ -2228,9 +2270,9 @@ async function recoverBoundScheduledTaskDispatch(input: {
         input.acceptedExecution.alertOccurrenceLabels === null &&
         (session.metadata.scheduledTaskRunId !== input.run.id ||
           session.createdByContext.scheduledTaskRunId !== input.run.id)) ||
-      session.model !== input.acceptedExecution.resolvedModel ||
-      session.reasoningEffort !== input.acceptedExecution.resolvedReasoningEffort ||
-      session.latencyMode !== input.acceptedExecution.resolvedLatencyMode ||
+      creationPolicy?.model !== input.acceptedExecution.resolvedModel ||
+      creationPolicy.reasoningEffort !== input.acceptedExecution.resolvedReasoningEffort ||
+      creationPolicy.latencyMode !== input.acceptedExecution.resolvedLatencyMode ||
       session.sandboxBackend !== input.acceptedExecution.resolvedSandboxBackend ||
       session.sandboxOs !== input.acceptedExecution.resolvedSandboxOs ||
       session.activeSandboxId !== (task.agentConfig.machineTarget?.targetSandboxId ?? null) ||
@@ -2304,23 +2346,6 @@ async function recoverBoundScheduledTaskDispatch(input: {
       await publishDurableSessionEvents(input.bus, task.workspaceId, session.id, titleEvents);
     }
   }
-  if (!generatedSession && task.runMode === "reusable_session" && task.agentConfig.goal) {
-    const goalEvents = await upsertScheduledSessionGoalForRun(input.db, {
-      accountId: task.accountId,
-      workspaceId: task.workspaceId,
-      sessionId: session.id,
-      runId: input.run.id,
-      text: task.agentConfig.goal.text,
-      successCriteria: task.agentConfig.goal.successCriteria ?? null,
-      maxAutoContinuations: task.agentConfig.goal.maxAutoContinuations ?? null,
-      ...(task.agentConfig.goal.mutationPolicy
-        ? { mutationPolicy: task.agentConfig.goal.mutationPolicy }
-        : {}),
-    });
-    if (goalEvents.length > 0) {
-      await publishDurableSessionEvents(input.bus, task.workspaceId, session.id, goalEvents);
-    }
-  }
   const scheduledUpdate = await addSessionSystemUpdateWithSourceMutation(
     input.db,
     {
@@ -2355,19 +2380,21 @@ async function recoverBoundScheduledTaskDispatch(input: {
           : {}),
       },
       personalConnectionDelegations: input.acceptedExecution.personalConnectionDelegations,
+      mcpAccountBindings: input.acceptedExecution.mcpAccountBindings ?? null,
       xaiProviderAccountAuthoritySnapshot:
         input.acceptedExecution.xaiProviderAccountAuthoritySnapshot,
       scheduledTaskRunId: input.run.id,
     },
-    async (tx, wakeEventId) => {
+    async (tx, wakeEventId, _updateId, rejectionReason) => {
       if (!wakeEventId) {
+        const error = scheduledSessionRejectionError(rejectionReason);
         await settleScheduledTaskRunInTransaction(tx, {
           workspaceId: task.workspaceId,
           runId: input.run.id,
           sessionId: session.id,
           triggerEventId: null,
           status: "skipped",
-          error: "session_cancelled",
+          error,
         });
         return;
       }
@@ -2379,10 +2406,25 @@ async function recoverBoundScheduledTaskDispatch(input: {
         status: "dispatched",
       });
     },
-    input.acceptedExecution.incidentPreflightRequired
-      ? {
-          prepareSource: async (tx, sessionId) =>
-            await prepareIncidentTelemetrySource({
+    {
+      requireIdleSession: task.overlapPolicy === "skip" && !generatedSession,
+      prepareSource: async (tx, sessionId) => {
+        const goal = task.agentConfig.goal;
+        const goalEvents =
+          !generatedSession && task.runMode === "reusable_session" && goal
+            ? await upsertScheduledSessionGoalForRun(tx, {
+                accountId: task.accountId,
+                workspaceId: task.workspaceId,
+                sessionId,
+                runId: input.run.id,
+                text: goal.text,
+                successCriteria: goal.successCriteria ?? null,
+                maxAutoContinuations: goal.maxAutoContinuations ?? null,
+                ...(goal.mutationPolicy ? { mutationPolicy: goal.mutationPolicy } : {}),
+              })
+            : [];
+        const incidentSource = input.acceptedExecution.incidentPreflightRequired
+          ? await prepareIncidentTelemetrySource({
               tx,
               settings: input.settings,
               taskId: task.id,
@@ -2390,11 +2432,19 @@ async function recoverBoundScheduledTaskDispatch(input: {
               sessionId,
               alertOccurrenceLabels: input.acceptedExecution.alertOccurrenceLabels,
               acceptedExecution: input.acceptedExecution,
-            }),
-        }
-      : undefined,
+            })
+          : undefined;
+        return {
+          ...(incidentSource ?? {}),
+          ...(goalEvents.length > 0 ? { events: goalEvents } : {}),
+        };
+      },
+    },
   );
-  if (scheduledUpdate.reason === "session_cancelled") {
+  if (
+    scheduledUpdate.reason === "session_cancelled" ||
+    scheduledUpdate.reason === "session_not_idle"
+  ) {
     return { action: "blocked", reason: "scheduled_run_terminal" };
   }
   if (scheduledUpdate.added && scheduledUpdate.events.length > 0) {
@@ -2508,6 +2558,38 @@ async function replayScheduledTaskDispatch(input: {
     });
   }
   return result;
+}
+
+/**
+ * Session-create fields carried by a frozen creator session policy. Only the
+ * facts the creating session projection exposed at task creation are set;
+ * a null (or no longer valid) key leaves the generated session on its own
+ * default. The field names are the session access-scope contract
+ * (`agentAccess`, `scopeSubjectId`, `memoryScope`) consumed by session create.
+ */
+function scheduledCreatorSessionPolicyInput(
+  policy: {
+    agentAccess: string | null;
+    scopeSubjectId: string | null;
+    memoryScope: string | null;
+  } | null,
+): {
+  agentAccess?: SessionAgentAccess;
+  scopeSubjectId?: string;
+  memoryScope?: SessionMemoryScope;
+} {
+  if (!policy) return {};
+  const agentAccess = SessionAgentAccess.safeParse(policy.agentAccess);
+  const memoryScope = SessionMemoryScope.safeParse(policy.memoryScope);
+  return {
+    ...(agentAccess.success ? { agentAccess: agentAccess.data } : {}),
+    // This is a trusted DB admission input, not the public create payload.
+    // Preserve the immutable creator policy through scheduled materialization.
+    ...(policy.scopeSubjectId && /^(?:user:|external_user:).+/u.test(policy.scopeSubjectId)
+      ? { scopeSubjectId: policy.scopeSubjectId }
+      : {}),
+    ...(memoryScope.success ? { memoryScope: memoryScope.data } : {}),
+  };
 }
 
 function knowledgeSourceSyncEffectivelyPaused(task: {

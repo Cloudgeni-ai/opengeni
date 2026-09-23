@@ -56,11 +56,52 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await applyBelow(ownerUrl, REPAIR);
     // Current session adapters select the complete current sessions row while
     // this fixture intentionally holds the database below 0343. Supply only
-    // the later column they need, then remove it before the real deferred
-    // migration chain runs so 0348 still owns creation and backfill.
+    // the later columns they need, then remove them before the real deferred
+    // migration chain runs so their owning migrations still create/backfill
+    // the production shapes.
     await admin`
       alter table sessions
-      add column variable_set_ids jsonb not null default '[]'::jsonb`;
+      add column mcp_approval_policies jsonb not null default '{}'::jsonb,
+      add column admission_block jsonb,
+      add column variable_set_ids jsonb not null default '[]'::jsonb,
+      add column input_wait_turn_id uuid,
+      add column input_wait_until timestamptz,
+      add column input_wait_reason text,
+      add column input_wait_set_at timestamptz,
+      add column agent_access text not null default 'workspace',
+      add column scope_subject_id text,
+      add column end_user_source text,
+      add column end_user_id text,
+      add column memory_scope text not null default 'workspace',
+      add column execution_authority_epoch integer not null default 1,
+      add column initial_mcp_account_bindings jsonb`;
+    // Current session/claim adapters project 0494 receipts. Keep historical
+    // NULL semantics and install no account-binding runtime guards here: this
+    // fixture must still exercise the actual pre-0343 authority boundary.
+    await admin`alter table session_turns add column mcp_account_bindings jsonb`;
+    await admin`alter table session_system_updates add column mcp_account_bindings jsonb`;
+    await admin`alter table session_system_update_outbox add column mcp_account_bindings jsonb`;
+    // The current claim adapter also reads timer fields under the workspace
+    // fence. These temporary nullable fields are removed before 0420 runs.
+    await admin`
+      alter table workspace_inference_controls
+      add column timer_id uuid,
+      add column timer_action text,
+      add column timer_due_at timestamptz,
+      add column timer_pause_for_seconds integer,
+      add column timer_pause_revision bigint`;
+    // The current claim writer uses ordered JSON. Bridge it to this historical
+    // schema, then remove the bridge so 0434 performs its actual backfill.
+    await admin`alter table session_history_items add column item_ordered json`;
+    await admin.unsafe(`
+      create function fixture_0343_history_write() returns trigger language plpgsql as $$
+      begin
+        new.item := new.item_ordered::jsonb;
+        return new;
+      end $$;
+      create trigger fixture_0343_history_write before insert on session_history_items
+      for each row execute function fixture_0343_history_write();
+    `);
     await provisionRoles(adminUrl, { appPassword, rlsStrategy: "force" });
 
     const [posture] = await admin<Array<{ superuser: boolean; bypassRls: boolean }>>`
@@ -222,8 +263,44 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await app.end({ timeout: 5 });
     expect(await applicationSessionCount()).toBe(0);
     await admin`drop table session_event_cursors`;
-    await admin`alter table sessions drop column variable_set_ids`;
+    await admin`drop trigger fixture_0343_history_write on session_history_items`;
+    await admin`drop function fixture_0343_history_write()`;
+    await admin`alter table session_history_items drop column item_ordered`;
+    await admin`
+      alter table workspace_inference_controls
+      drop column timer_id,
+      drop column timer_action,
+      drop column timer_due_at,
+      drop column timer_pause_for_seconds,
+      drop column timer_pause_revision`;
+    await admin`
+      alter table sessions
+      drop column admission_block,
+      drop column variable_set_ids,
+      drop column mcp_approval_policies,
+      drop column input_wait_turn_id,
+      drop column input_wait_until,
+      drop column input_wait_reason,
+      drop column input_wait_set_at,
+      drop column agent_access,
+      drop column scope_subject_id,
+      drop column end_user_source,
+      drop column end_user_id,
+      drop column memory_scope,
+      drop column execution_authority_epoch,
+      drop column initial_mcp_account_bindings`;
+    await admin`alter table session_turns drop column mcp_account_bindings`;
+    await admin`alter table session_system_updates drop column mcp_account_bindings`;
+    await admin`alter table session_system_update_outbox drop column mcp_account_bindings`;
     await migrate(ownerUrl);
+    // 0494 must recreate the real receipt columns after the temporary bridge
+    // is gone, retaining historical NULL rather than accepting an empty list.
+    const [historicalBindings] = await admin`
+      select s.initial_mcp_account_bindings as session_bindings,
+        t.mcp_account_bindings as turn_bindings
+      from sessions s join session_turns t on t.session_id = s.id
+      where s.id = ${session.id} and t.id = ${turn!.id}`;
+    expect(historicalBindings).toEqual({ session_bindings: null, turn_bindings: null });
     app = openApp();
 
     const afterDocument = crypto.randomUUID();

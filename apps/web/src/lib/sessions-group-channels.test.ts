@@ -207,11 +207,11 @@ describe("summarizeRailNodes", () => {
     });
   });
 
-  test("treats capacity waits as working, not as needing user input", () => {
+  test("treats capacity waits as waiting to run, not as active execution", () => {
     const forest = buildRailForest([session({ id: "waiting", status: "waiting_capacity" })]);
     expect(summarizeRailNodes(forest.running)).toMatchObject({
-      kind: "active",
-      label: "1 working",
+      kind: "queued",
+      label: "1 waiting to run",
     });
   });
 
@@ -306,6 +306,20 @@ describe("summarizeRailNodes", () => {
       kind: "unread",
       count: 1,
       total: 2,
+      label: "1 unread",
+    });
+  });
+
+  test("queued output stays unread but exposes the unread label only after settling", () => {
+    const queued = session({ id: "answered", status: "queued", unread: true });
+    expect(summarizeRailNodes(buildRailForest([queued]).running)).toMatchObject({
+      kind: "queued",
+      label: "1 waiting to run",
+    });
+    expect(queued.unread).toBe(true);
+    const settled = buildRailForest([{ ...queued, status: "idle" }]);
+    expect(summarizeRailNodes(settled.grouped.flatMap((group) => group.sessions))).toMatchObject({
+      kind: "unread",
       label: "1 unread",
     });
   });

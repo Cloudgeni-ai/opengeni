@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
+import { OpenGeniDocumentAuthorityClient } from "../src/document-authority-client";
 import {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
@@ -66,6 +67,130 @@ function makeClient(responder: (request: RecordedRequest) => Response): {
 }
 
 describe("OpenGeniClient", () => {
+  test("checkpoint recovery preview is read-only and explicit consent sends one exact request, never a Retry", async () => {
+    const projection = {
+      version: 1 as const,
+      status: "eligible" as const,
+      reason: null,
+      checkpoint: null,
+      operationId: null,
+    };
+    const request = {
+      operationId: crypto.randomUUID(),
+      acceptHistoricalCheckpoint: true as const,
+      selection: {
+        version: 1 as const,
+        sessionId: SESSION_ID,
+        sandboxGroupId: crypto.randomUUID(),
+        leaseId: crypto.randomUUID(),
+        routeEpoch: 1,
+        authorityEpoch: 2,
+        leaseEpoch: 3,
+        workspaceGeneration: 44,
+        archiveGeneration: 10,
+        artifactId: crypto.randomUUID(),
+        revision: "wa2:exact",
+        capturedAt: "2026-09-16T06:24:07.000Z",
+      },
+    };
+    const { client, requests } = makeClient((r) =>
+      jsonResponse(
+        r.method === "GET"
+          ? projection
+          : {
+              outcome: "accepted",
+              operationId: request.operationId,
+              recovery: { ...projection, status: "consent_accepted" },
+            },
+      ),
+    );
+    expect(await client.getSandboxRecovery(WORKSPACE_ID, SESSION_ID)).toEqual(projection);
+    expect((await client.recoverSandbox(WORKSPACE_ID, SESSION_ID, request)).recovery.status).toBe(
+      "consent_accepted",
+    );
+    expect(requests.map((r) => r.method)).toEqual(["GET", "POST"]);
+    expect(requests.every((r) => r.url.endsWith(`/sessions/${SESSION_ID}/sandbox-recovery`))).toBe(
+      true,
+    );
+    expect(JSON.parse(requests[1]!.body!)).toEqual(request);
+  });
+
+  test("listSessionCodexAccounts uses the session-authorized projection without a caller-selected source", async () => {
+    const response = {
+      accounts: [],
+      currentAccount: null,
+      currentSelection: null,
+      pinnedAccountId: null,
+      lastAccountId: null,
+      activeAccountId: null,
+      settings: {
+        rotationEnabled: false,
+        rotationStrategy: "sharded" as const,
+        activeCredentialId: null,
+      },
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    expect(await client.listSessionCodexAccounts(WORKSPACE_ID, SESSION_ID)).toEqual(response);
+    expect(requests[0]!.method).toBe("GET");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/codex-accounts`,
+    );
+  });
+  test("retrySession preserves the exact failure and selected policy without a message", async () => {
+    const request = {
+      clientEventId: crypto.randomUUID(),
+      failureEventId: crypto.randomUUID(),
+      model: "selected-model",
+      reasoningEffort: "high" as const,
+      latencyMode: "fast" as const,
+    };
+    const response = {
+      outcome: "accepted" as const,
+      turnId: crypto.randomUUID(),
+      failureEventId: request.failureEventId,
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    expect(await client.retrySession(WORKSPACE_ID, SESSION_ID, request)).toEqual(response);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("POST");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/retry`,
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual(request);
+    expect(requests[0]!.body).not.toContain('"text"');
+  });
+  test("session pages require affirmative sort and archive acknowledgments", async () => {
+    for (const response of [
+      [],
+      { pinned: [], sessions: [], nextCursor: null },
+      { pinned: [], sessions: [], nextCursor: null, sortBy: "updatedAt", archiveStatus: "active" },
+    ]) {
+      const { client } = makeClient(() => jsonResponse(response));
+      await expect(client.listSessionPage(WORKSPACE_ID, { sortBy: "name" })).rejects.toThrow(
+        "does not support",
+      );
+      await expect(client.listSessionPage(WORKSPACE_ID, { archiveStatus: "all" })).rejects.toThrow(
+        "does not support",
+      );
+    }
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        sortBy: "name",
+        archiveStatus: "all",
+      }),
+    );
+    expect(
+      await client.listSessionPage(WORKSPACE_ID, { sortBy: "name", archiveStatus: "all" }),
+    ).toMatchObject({
+      sortBy: "name",
+      archiveStatus: "all",
+    });
+    expect(requests[0]!.url).toContain("sortBy=name&archiveStatus=all");
+  });
+
   test("uses organization-scoped shared-workspace control-plane routes", async () => {
     const organizationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const membershipId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -83,6 +208,7 @@ describe("OpenGeniClient", () => {
     await client.updateOrganizationWorkspaceSettings(organizationId, WORKSPACE_ID, {
       memoryEnabled: true,
     });
+    await client.deleteOrganizationWorkspace(organizationId, WORKSPACE_ID);
     await client.putOrganizationWorkspaceMember(organizationId, WORKSPACE_ID, membershipId, {
       role: "member",
       expectedUpdatedAt: null,
@@ -104,6 +230,7 @@ describe("OpenGeniClient", () => {
         `POST /v1/organizations/${organizationId}/workspaces`,
         `PATCH /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}`,
         `PATCH /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/settings`,
+        `DELETE /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}`,
         `PUT /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/members/${membershipId}`,
         `PUT /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/members/${membershipId}`,
         `POST /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/members/${membershipId}/revoke`,
@@ -113,7 +240,7 @@ describe("OpenGeniClient", () => {
       name: "Product systems",
       operationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
     });
-    expect(JSON.parse(requests[3]!.body!)).toEqual({
+    expect(JSON.parse(requests[4]!.body!)).toEqual({
       role: "member",
       expectedUpdatedAt: null,
       operationId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
@@ -123,15 +250,20 @@ describe("OpenGeniClient", () => {
   test("manages bounded session/always personal grants without exposing once", async () => {
     const authorityId = "66666666-6666-4666-8666-666666666666";
     const grantId = "77777777-7777-4777-8777-777777777777";
-    const { client, requests } = makeClient(() => jsonResponse({}));
+    const { fetch, requests } = recordingFetch(() => jsonResponse({}));
+    const client = new OpenGeniDocumentAuthorityClient({
+      baseUrl: "https://api.example.test/",
+      apiKey: "og_test_key",
+      fetch,
+    });
     await client.listUserResourceAuthorities(WORKSPACE_ID, {
-      resourceKind: "connection",
+      resourceKind: "document",
       cursor: authorityId,
       limit: 25,
     });
     await client.issueUserResourceGrant(WORKSPACE_ID, authorityId, {
       scope: "user",
-      resourceKind: "connection",
+      resourceKind: "document",
       mode: "session",
       context: "workspace_shared",
       sessionId: SESSION_ID,
@@ -149,13 +281,13 @@ describe("OpenGeniClient", () => {
     const listUrl = new URL(requests[0]!.url);
     expect(Object.fromEntries(listUrl.searchParams)).toEqual({
       scope: "user",
-      resourceKind: "connection",
+      resourceKind: "document",
       cursor: authorityId,
       limit: "25",
     });
     expect(JSON.parse(requests[1]!.body!)).toEqual({
       scope: "user",
-      resourceKind: "connection",
+      resourceKind: "document",
       mode: "session",
       context: "workspace_shared",
       sessionId: SESSION_ID,
@@ -397,6 +529,7 @@ describe("OpenGeniClient", () => {
       model: "gpt-5.4",
       reasoningEffort: "medium",
       latencyMode: "standard",
+      selectedProjectChannelId: null,
       options: { sandboxBackend: "none" },
       updatedAt: "2026-07-20T01:02:03.000Z",
     };
@@ -413,6 +546,7 @@ describe("OpenGeniClient", () => {
         model: draft.model,
         reasoningEffort: "medium",
         latencyMode: "standard",
+        selectedProjectChannelId: null,
         options: { sandboxBackend: "none" },
       }),
     ).toEqual(draft as never);
@@ -430,6 +564,7 @@ describe("OpenGeniClient", () => {
       model: "gpt-5.4",
       reasoningEffort: "medium",
       latencyMode: "standard",
+      selectedProjectChannelId: null,
       options: { sandboxBackend: "none" },
     });
   });
@@ -554,7 +689,7 @@ describe("OpenGeniClient", () => {
         model: "gpt-5.6-sol",
         reasoningEffort: "high",
         latencyMode: "priority",
-        connectionAuthorities: [],
+        connectionAccounts: [],
       }),
     ).toEqual(response as never);
 
@@ -573,7 +708,7 @@ describe("OpenGeniClient", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
       latencyMode: "priority",
-      connectionAuthorities: [],
+      connectionAccounts: [],
     });
   });
 
@@ -1385,7 +1520,7 @@ describe("OpenGeniClient", () => {
       clientEventId: "ce-1",
       controlEtag: "control-1",
       expectedDraftRevision: 3,
-      connectionAuthorities: [],
+      connectionAccounts: [],
     });
     expect(result.sequence).toBe(4);
     const request = requests[0]!;
@@ -1400,7 +1535,7 @@ describe("OpenGeniClient", () => {
         modelContext: "Host context for this turn.",
         controlEtag: "control-1",
         expectedDraftRevision: 3,
-        connectionAuthorities: [],
+        connectionAccounts: [],
       },
     });
   });
@@ -1948,7 +2083,12 @@ describe("OpenGeniClient", () => {
   test("listSessions stays array-shaped while listSessionPage adds pin cursors", async () => {
     const { client, requests } = makeClient((request) =>
       request.url.includes("view=page")
-        ? jsonResponse({ pinned: [], sessions: [], nextCursor: null })
+        ? jsonResponse({
+            pinned: [],
+            sessions: [],
+            nextCursor: null,
+            ...(request.url.includes("channelId=") ? { filtersApplied: true } : {}),
+          })
         : jsonResponse([]),
     );
     await client.listSessions(WORKSPACE_ID, { limit: 5, parentSessionId: null });
@@ -1959,6 +2099,12 @@ describe("OpenGeniClient", () => {
       search: "  pinned work  ",
     });
     await client.listSessionPage(WORKSPACE_ID, { pinsOnly: true });
+    await client.listSessionPage(WORKSPACE_ID, {
+      channelId: null,
+      createdBy: { kind: "subject", subjectId: "user:ada" },
+      updatedFrom: "2026-09-04T00:00:00.000Z",
+      updatedBefore: "2026-09-05T00:00:00.000Z",
+    });
     await client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
     expect(requests[0]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?limit=5&parentSessionId=null`,
@@ -1973,6 +2119,9 @@ describe("OpenGeniClient", () => {
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&pinsOnly=true`,
     );
     expect(requests[4]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&channelId=null&createdByKind=subject&createdBySubjectId=user%3Aada&updatedFrom=2026-09-04T00%3A00%3A00.000Z&updatedBefore=2026-09-05T00%3A00%3A00.000Z`,
+    );
+    expect(requests[5]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/lineage`,
     );
   });
@@ -2047,6 +2196,49 @@ describe("OpenGeniClient", () => {
     await expect(client.listSessionPage(WORKSPACE_ID, { pinsOnly: true })).rejects.toThrow(
       "does not support pins-only session lists",
     );
+    await expect(client.listSessionPage(WORKSPACE_ID, { channelId: null })).rejects.toThrow(
+      "does not support filtered session lists",
+    );
+  });
+
+  test("filtered session pages fail closed when an older page response lacks filter support", async () => {
+    const { client } = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null }),
+    );
+    await expect(
+      client.listSessionPage(WORKSPACE_ID, {
+        createdBy: { kind: "subject", subjectId: "user:ada" },
+      }),
+    ).rejects.toThrow("does not support filtered session lists");
+  });
+
+  test("Site-filtered lists require explicit server support, including with other filters", async () => {
+    const old = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null, filtersApplied: true }),
+    );
+    await expect(
+      old.client.listSessions(WORKSPACE_ID, { originSiteId: SESSION_ID }),
+    ).rejects.toThrow("does not support Site-filtered session lists");
+    await expect(
+      old.client.listSessionPage(WORKSPACE_ID, { originSiteId: SESSION_ID, channelId: null }),
+    ).rejects.toThrow("does not support Site-filtered session lists");
+    const modern = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        filtersApplied: true,
+        originSiteId: SESSION_ID,
+      }),
+    );
+    await expect(
+      modern.client.listSessions(WORKSPACE_ID, { originSiteId: SESSION_ID }),
+    ).resolves.toEqual([]);
+    expect(modern.requests[0]!.url).toContain(`originSiteId=${SESSION_ID}`);
+    expect(modern.requests[0]!.url).toContain("view=page");
+    await expect(
+      modern.client.listSessionPage(WORKSPACE_ID, { originSiteId: "current" }),
+    ).resolves.toMatchObject({ originSiteId: SESSION_ID });
   });
 
   test("listSessionPage types only an expired snapshot cursor as recoverable", async () => {
@@ -2283,4 +2475,29 @@ describe("OpenGeniClient", () => {
       OpenGeniApiContractMismatchError,
     );
   });
+});
+
+test("filters schedules by session on the server", async () => {
+  const { fetch, requests } = recordingFetch(() => Response.json([]));
+  const client = new OpenGeniClient({ baseUrl: "https://example.com", fetch });
+  await client.listScheduledTasks(WORKSPACE_ID, { sessionId: SESSION_ID, limit: 10, offset: 20 });
+  const url = new URL(requests[0]!.url);
+  expect(url.searchParams.get("sessionId")).toBe(SESSION_ID);
+  expect(url.searchParams.get("limit")).toBe("10");
+  expect(url.searchParams.get("offset")).toBe("20");
+});
+
+test("sets a workspace duration timer through the public endpoint", async () => {
+  const { client, requests } = makeClient(() => jsonResponse({ ok: true }));
+  const request = {
+    action: "set" as const,
+    pauseInSeconds: 1800,
+    pauseForSeconds: 7200,
+    clientEventId: "timer-save",
+    expectedRevision: 7,
+  };
+  expect(await client.setWorkspacePauseTimer(WORKSPACE_ID, request)).toEqual({ ok: true });
+  expect(requests[0]!.url).toEndWith(`/v1/workspaces/${WORKSPACE_ID}/pause-timer`);
+  expect(requests[0]!.method).toBe("POST");
+  expect(JSON.parse(requests[0]!.body!)).toEqual(request);
 });

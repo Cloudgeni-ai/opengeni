@@ -1,7 +1,7 @@
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
+import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
 import {
   AUTOMATION_WEBHOOK_MAX_BYTES,
-  OPENGENI_PR_REVIEW_PACK_ID,
   PrReviewManagedGitHubSetup,
   type AccessGrant,
   type GitHubInstallationBindingCandidate,
@@ -9,21 +9,19 @@ import {
 } from "@opengeni/contracts";
 import {
   automationRequestDigest,
-  getCapabilityPack,
   hasPermission,
-  PR_REVIEW_AUTOMATION_TEMPLATE_ID,
-  prReviewPackConnectorId,
   requireAutomationAdapter,
-  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  externalActorContinuationForAuthorization,
   requirePermission,
   verifyPrReviewWebhook,
   type ApiRouteDeps,
+  PR_REVIEW_AUTOMATION_SETUP,
 } from "@opengeni/core";
 import {
   AutomationDeliveryConflictError,
   encryptVariableSetValue,
   getAutomationSourceSecret,
-  getPackInstallation,
   listPrReviewAppRegistrations,
   listPrReviewRepositoryBindings,
   nestedPostgresSqlState,
@@ -47,10 +45,19 @@ import {
   type GitHubSignedStatePayload,
 } from "@opengeni/github";
 import type { Context, Hono } from "hono";
+import { requireLegacyOAuthActor } from "../connection-ownership";
+import {
+  integrationCommitGrant,
+  type IntegrationCommitGrant,
+} from "../integrations/integration-commit-authority";
 import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { githubBrowserBaseUrl } from "../github-browser-flow";
 import { acceptAutomationEvent, readAutomationWebhookBody } from "./automations";
+import {
+  completeGitHubAppConnect,
+  isGitHubAppConnectState,
+} from "../integrations/github-app-connect";
 
 const stateCookie = "opengeni_pr_review_github_state";
 const bindingStateMaxAgeSeconds = 10 * 60;
@@ -123,8 +130,9 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
 
   app.get("/v1/workspaces/:workspaceId/pr-review/github", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    await requireActivePack(deps, workspaceId);
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
+    const grant = access.grant;
+
     const missing = prReviewGitHubAppMissingSettings(deps.settings);
     const configured = missing.length === 0;
     const registrations = (
@@ -136,6 +144,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       workspaceId,
     );
     const canManage =
+      !externalActorContinuationForAuthorization(access) &&
       hasPermission(grant.permissions, "workspace:admin") &&
       hasPermission(grant.permissions, "secrets:write");
     const connectState =
@@ -195,7 +204,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     const state = requireStateQuery(c, "missing OpenGeni Lens installation state");
     const payload = requireFreshState(state, deps, "pr_review_github_authority", workspaceId);
     await requirePrReviewManageGrant(c, deps, workspaceId, payload);
-    await requireActivePack(deps, workspaceId);
+
     assertManagedCompute(deps);
     requireConfiguredApp(deps);
     const discoveryState = createSignedState(deps.githubStateSecret, {
@@ -225,7 +234,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
         throw new HTTPException(400, { message: "invalid OpenGeni Lens installation" });
       }
       await requirePrReviewManageGrant(c, deps, workspaceId, payload);
-      await requireActivePack(deps, workspaceId);
+
       assertManagedCompute(deps);
       const registrations = await listPrReviewAppRegistrations(
         deps.db,
@@ -252,6 +261,15 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
   );
 
   const handleInstallCallback = async (c: Context) => {
+    if (isGitHubAppConnectState(deps, c.req.query("state")))
+      return completeGitHubAppConnect(deps, {
+        expectedProvider: "github-lens",
+        state: c.req.query("state"),
+        installationId: c.req.query("installation_id"),
+        setupAction: c.req.query("setup_action"),
+        error: c.req.query("error"),
+        requestUrl: c.req.url,
+      });
     const state =
       c.req.query("state") ??
       allCookieValues(c, stateCookie).find((candidate) => {
@@ -262,7 +280,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     const payload = requireFreshState(state, deps, "pr_review_github_install");
     requireStateCookie(c, state);
     await requirePrReviewManageGrant(c, deps, payload.workspaceId!, payload);
-    await requireActivePack(deps, payload.workspaceId!);
+
     assertManagedCompute(deps);
     const setupAction = c.req.query("setup_action");
     if (setupAction === "request") return c.html(setupPendingHtml());
@@ -303,6 +321,14 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.get("/v1/pr-review/github/install/callback", handleInstallCallback);
 
   app.get("/v1/pr-review/github/oauth/callback", async (c) => {
+    if (isGitHubAppConnectState(deps, c.req.query("state")))
+      return completeGitHubAppConnect(deps, {
+        expectedProvider: "github-lens",
+        state: c.req.query("state"),
+        code: c.req.query("code"),
+        error: c.req.query("error"),
+        requestUrl: c.req.url,
+      });
     const code = c.req.query("code");
     const state = c.req.query("state");
     if (!code || !state) {
@@ -311,10 +337,11 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     const payload = requireFreshState(state, deps);
     requireStateCookie(c, state);
     const grant = await requirePrReviewManageGrant(c, deps, payload.workspaceId!, payload);
-    const packInstallation = await requireActivePack(deps, grant.workspaceId);
+
     assertManagedCompute(deps);
     requireConfiguredApp(deps);
 
+    await withOrganizationIntegrationAcquisition(deps.db, grant, ["github-lens"], async () => {});
     if (payload.intent === "pr_review_github_discovery") {
       let candidates: GitHubInstallationBindingCandidate[] | null;
       try {
@@ -385,12 +412,8 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     if (repositoryIds.size !== proof.repositories.length) {
       throw new HTTPException(409, { message: "GitHub returned duplicate repository identities" });
     }
-    const template = getCapabilityPack(OPENGENI_PR_REVIEW_PACK_ID)?.automationTemplates?.find(
-      (candidate) => candidate.id === PR_REVIEW_AUTOMATION_TEMPLATE_ID,
-    );
-    if (!template) {
-      throw new HTTPException(503, { message: "PR Review automation template is unavailable" });
-    }
+    const template = PR_REVIEW_AUTOMATION_SETUP;
+
     const encryptionKey = environmentsEncryptionKeyBytes(deps.settings);
     if (!encryptionKey) {
       throw new HTTPException(503, {
@@ -399,32 +422,38 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     }
     let synchronized;
     try {
-      synchronized = await syncManagedGitHubPrReviewInstallation(deps.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        installationId,
-        providerAccountLogin: proof.installation.accountLogin,
-        providerAccountType: proof.installation.accountType as "User" | "Organization",
-        githubActorId: proof.actorId,
-        authorityKind: proof.authorityKind,
-        authorityCheckedAt: new Date(),
-        authorityExpiresAt: new Date((payload.iat + bindingStateMaxAgeSeconds) * 1_000),
-        authorityNonce: payload.nonce,
-        appId: deps.settings.prReviewGithubAppId!,
-        webhookSecretEncrypted: encryptVariableSetValue(
-          encryptionKey,
-          deps.settings.prReviewGithubWebhookSecret!,
-        ),
-        repositories: proof.repositories,
-        createdBySubjectId: grant.subjectId,
-        packInstallationId: packInstallation.id,
-        packConnectorId: prReviewPackConnectorId("github"),
-        packTemplateId: template.id,
-        adapterId: template.adapterId,
-        eventTypes: template.eventTypes,
-        configuration: template.configuration,
-        sessionTemplate: template.sessionTemplate,
-      });
+      synchronized = await withOrganizationIntegrationAcquisition(
+        deps.db,
+        grant,
+        ["github-lens"],
+        async (tx) => {
+          await grant.authorizeCommit(tx);
+          return syncManagedGitHubPrReviewInstallation(tx, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            installationId,
+            providerAccountLogin: proof.installation.accountLogin,
+            providerAccountType: proof.installation.accountType as "User" | "Organization",
+            githubActorId: proof.actorId,
+            authorityKind: proof.authorityKind,
+            authorityCheckedAt: new Date(),
+            authorityExpiresAt: new Date((payload.iat + bindingStateMaxAgeSeconds) * 1_000),
+            authorityNonce: payload.nonce,
+            appId: deps.settings.prReviewGithubAppId!,
+            webhookSecretEncrypted: encryptVariableSetValue(
+              encryptionKey,
+              deps.settings.prReviewGithubWebhookSecret!,
+            ),
+            repositories: proof.repositories,
+            createdBySubjectId: grant.subjectId,
+
+            adapterId: template.adapterId,
+            eventTypes: template.eventTypes,
+            configuration: template.configuration,
+            sessionTemplate: template.sessionTemplate,
+          });
+        },
+      );
     } catch (error) {
       if (error instanceof PrReviewDispatchAuthorityError) {
         throw new HTTPException(409, { message: error.message });
@@ -467,7 +496,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     const payload = requireFreshState(state, deps, "pr_review_github_selection", workspaceId);
     requireStateCookie(c, state);
     await requirePrReviewManageGrant(c, deps, workspaceId, payload);
-    await requireActivePack(deps, workspaceId);
+
     const selected = c.req.query("installation_id");
     if (selected === "new") return redirectToInstallation(c, deps, state);
     const installationId = positiveInteger(selected);
@@ -493,16 +522,6 @@ function requireConfiguredApp(deps: ApiRouteDeps): void {
   }
 }
 
-async function requireActivePack(deps: ApiRouteDeps, workspaceId: string) {
-  const installation = await getPackInstallation(deps.db, workspaceId, OPENGENI_PR_REVIEW_PACK_ID);
-  if (installation?.status !== "active") {
-    throw new HTTPException(409, {
-      message: "Install and enable the OpenGeni Review Bot Pack first",
-    });
-  }
-  return installation;
-}
-
 function assertManagedCompute(deps: ApiRouteDeps): void {
   if (deps.settings.sandboxBackend === "selfhosted") {
     throw new HTTPException(409, { message: "OpenGeni Lens requires managed compute" });
@@ -514,15 +533,33 @@ async function requirePrReviewManageGrant(
   deps: ApiRouteDeps,
   workspaceId: string,
   state: GitHubSignedStatePayload,
-): Promise<AccessGrant> {
-  let grant: AccessGrant;
+): Promise<IntegrationCommitGrant> {
+  let grant: IntegrationCommitGrant;
   try {
-    grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:admin");
+    requireLegacyOAuthActor(access);
+    grant = await integrationCommitGrant(access, ["workspace:admin", "secrets:write"], {
+      settings: deps.settings,
+      authorizationHeader: c.req.header("authorization"),
+    });
   } catch (error) {
     if (!(error instanceof HTTPException) || error.status !== 401) throw error;
     const handedOff = prReviewBrowserGrantFromState(deps, state, workspaceId);
     if (!handedOff) throw error;
-    grant = handedOff;
+    grant = {
+      ...handedOff,
+      authorizeCommit: async () => {
+        const current = prReviewBrowserGrantFromState(deps, state, workspaceId);
+        if (
+          !current ||
+          current.accountId !== handedOff.accountId ||
+          current.subjectId !== handedOff.subjectId
+        )
+          throw new HTTPException(403, {
+            message: "OpenGeni Lens browser handoff expired or changed",
+          });
+      },
+    };
   }
   requirePermission(grant, "secrets:write");
   if (grant.accountId !== state.accountId) {

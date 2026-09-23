@@ -462,8 +462,21 @@ export async function buildSandboxImage(
     },
   );
   if (result.exitCode !== 0) {
-    throw new Error(`sandbox image build failed\n${result.stdout}\n${result.stderr}`);
+    throw new Error(sandboxBuildFailureMessage(result));
   }
+}
+
+export function sandboxBuildFailureMessage(result: {
+  exitCode: number;
+  timedOut: boolean;
+  stdout: string;
+  stderr: string;
+}): string {
+  // Test reporters truncate long Error messages. Keep the terminal BuildKit
+  // diagnostic visible instead of filling the message with image-pull progress.
+  const tail = (output: string) =>
+    output.length > 6_000 ? `[earlier output omitted]\n${output.slice(-6_000)}` : output;
+  return `sandbox image build failed: exit=${result.exitCode} timedOut=${String(result.timedOut)}\nstderr (tail):\n${tail(result.stderr)}\nstdout (tail):\n${tail(result.stdout)}`;
 }
 
 /**

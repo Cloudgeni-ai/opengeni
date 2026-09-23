@@ -55,3 +55,16 @@ export function parseCheckoutOutcome(search: Record<string, unknown>): CheckoutO
     ? search.checkout
     : undefined;
 }
+
+/** Full-page artifact return context belongs to route assembly, not the session graph. */
+export function artifactReturnSearch(search: Record<string, unknown>): { fromSession?: string } {
+  // Router match search merges validation over raw input. An omitted key would
+  // leave an invalid raw fromSession available to useSearch() consumers.
+  return {
+    fromSession:
+      typeof search.fromSession === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(search.fromSession)
+        ? search.fromSession
+        : undefined,
+  };
+}

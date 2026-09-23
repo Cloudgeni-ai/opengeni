@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 const contextSource = await Bun.file(`${import.meta.dir}/context.tsx`).text();
 const switcherSource = await Bun.file(
-  `${import.meta.dir}/components/rail/switcher-block.tsx`,
+  `${import.meta.dir}/components/rail/workspace-switcher.tsx`,
 ).text();
 const settingsSource = await Bun.file(`${import.meta.dir}/routes/workspace-settings.tsx`).text();
 const organizationSource = await Bun.file(`${import.meta.dir}/routes/org-settings.tsx`).text();

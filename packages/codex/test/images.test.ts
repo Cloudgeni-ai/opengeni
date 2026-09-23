@@ -44,7 +44,7 @@ describe("generateCodexSubscriptionImage", () => {
     expect(JSON.parse(String(captured?.init?.body))).toEqual({
       prompt: "a blue sphere",
       background: "auto",
-      model: "gpt-image-2",
+      model: "gpt-image-2.5-sunburst",
       quality: "auto",
       size: "auto",
     });
@@ -78,7 +78,7 @@ describe("generateCodexSubscriptionImage", () => {
       ],
       prompt: "Use the first image's subject and the second image's style",
       background: "auto",
-      model: "gpt-image-2",
+      model: "gpt-image-2.5-sunburst",
       quality: "auto",
       size: "auto",
     });
@@ -87,6 +87,7 @@ describe("generateCodexSubscriptionImage", () => {
   test("refreshes only after a definitive 401", async () => {
     const authorizations: string[] = [];
     let refreshes = 0;
+    let fences = 0;
     const result = await generateCodexSubscriptionImage({
       prompt: "a blue sphere",
       turnId: "turn-1",
@@ -96,6 +97,9 @@ describe("generateCodexSubscriptionImage", () => {
         refresh: async () => {
           refreshes += 1;
           return token("fresh");
+        },
+        beforeProviderDispatch: () => {
+          fences += 1;
         },
       },
       fetch: async (_input, init) => {
@@ -107,6 +111,7 @@ describe("generateCodexSubscriptionImage", () => {
     });
     expect(result.bytes).toEqual(new TextEncoder().encode("image"));
     expect(refreshes).toBe(1);
+    expect(fences).toBe(2);
     expect(authorizations).toEqual(["Bearer stale", "Bearer fresh"]);
   });
 

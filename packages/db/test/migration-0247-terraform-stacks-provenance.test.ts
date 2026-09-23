@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
-import { CapabilityPack, stableJson } from "@opengeni/contracts";
+import { stableJson } from "@opengeni/contracts";
 import { listSkillLibraryEntries, loadSkillLibrarySkill } from "@opengeni/runtime/skill-library";
-import { acquireSharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 
 import { bootstrapWorkspace, createDb, installPortableSkill } from "../src";
-import { migrate } from "../src/migrate";
+import { acquirePreRemovalDatabase, migrateBefore } from "./helpers/historical-schema";
+const migrate = (url: string) => migrateBefore(url, "0482_remove_packs.sql");
 
 const migrationName = "0247_terraform_stacks_provenance_repair.sql";
 const resolutionFenceMigrationName = "0248_terraform_stacks_component_resolution_fence.sql";
@@ -16,6 +16,11 @@ const newUrl =
   "https://github.com/hashicorp/agent-skills/tree/de4323afdfbc30d1387f287b55062fa8d82b62e8/terraform/module-generation/skills/terraform-stacks";
 const oldDigest = "d484ccc1279954e5dbcdd9b8b57bc21e6a0fa47d38dc11854ffcf8e61289e883";
 const newDigest = "3a58c98b725573b8fd524555b7ed9dbff04df4df9f8fad44e2e850bac3824809";
+// 0247 repairs one exact historical projection, not today's SKILL.md-derived
+// catalog description. Keep the historical precondition independently pinned
+// so the digest and component-resolution failure cases reach their own guards.
+const historicalDescription =
+  "Create, modify, validate, and troubleshoot Terraform Stack component and deployment configurations.";
 const oldManifest = {
   schemaVersion: 1,
   kind: "skill",
@@ -51,6 +56,7 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
     expect(migration).toContain("ENABLE TRIGGER capability_plugin_versions_restrict_update");
     expect(migration).toContain("ENABLE TRIGGER capability_skill_facets_immutable");
     expect(migration).toContain("skill.name <> 'terraform-stacks'");
+    expect(migration).toContain(historicalDescription);
     expect(migration).toContain(oldUrl);
     expect(migration).toContain(newUrl);
     expect(migration).toContain(oldDigest);
@@ -90,7 +96,7 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
     const shared =
       adminUrl && appUrl
         ? await (async () => {
-            await migrate(adminUrl);
+            await migrateBefore(adminUrl, "0482_remove_packs.sql");
             const admin = postgres(adminUrl, { max: 4 });
             return {
               admin,
@@ -99,7 +105,7 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
               release: async () => await admin.end().catch(() => undefined),
             };
           })()
-        : await acquireSharedTestDatabase("migration-0247-terraform-stacks-provenance");
+        : await acquirePreRemovalDatabase("migration-0247-terraform-stacks-provenance");
     if (!shared) {
       if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
         throw new Error(
@@ -142,13 +148,19 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
       expect(totalBytes).toBe(oldManifest.totalBytes);
 
       const packId = `terraform-stacks-provenance-${suffix}`;
-      const oldPackManifest = CapabilityPack.parse({
+      const oldPackManifest = {
         id: packId,
         name: "Terraform Stacks provenance fixture",
         description: "Exercises exact Skill Plugin digest references in Pack state.",
         role: "test",
         category: "test",
         version: "1.0.0",
+        skills: [],
+        tools: [],
+        connectors: [],
+        knowledge: [],
+        scheduledTaskTemplates: [],
+        automationTemplates: [],
         components: [
           {
             key: "skills/terraform-stacks",
@@ -160,14 +172,14 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
           },
         ],
         metadata: { A: 1, a: 2 },
-      });
-      const newPackManifest = CapabilityPack.parse({
+      };
+      const newPackManifest = {
         ...oldPackManifest,
         components: oldPackManifest.components.map((component) => ({
           ...component,
           manifestDigest: newDigest,
         })),
-      });
+      };
       const oldPackJson = JSON.parse(stableJson(oldPackManifest)) as postgres.JSONValue;
       const newPackJson = JSON.parse(stableJson(newPackManifest)) as postgres.JSONValue;
       const oldPackDigest = sha256(stableJson(oldPackManifest));
@@ -214,7 +226,7 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
           ${facet!.id},
           'skill:terraform-stacks',
           ${entry.name},
-          ${entry.description},
+          ${historicalDescription},
           ${oldUrl},
           ${entry.sourceCommit},
           ${entry.relativePath},
@@ -525,6 +537,7 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           subjectId: grant.subjectId,
+          skillActor: { kind: "human", subjectId: grant.subjectId, principalKind: "human_session" },
           capabilityId: "skill:terraform-stacks",
           pluginKey: "skill/library/terraform-stacks",
           source: "library",
@@ -545,6 +558,13 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
           files,
         }),
       ).toEqual({
+        skillReceipt: {
+          operationId: expect.any(String),
+          skillId: expect.any(String),
+          revisionId: expect.any(String),
+          outcome: "applied",
+          replayed: false,
+        },
         created: false,
         capabilityId: "skill:terraform-stacks",
         pluginId: plugin!.id,

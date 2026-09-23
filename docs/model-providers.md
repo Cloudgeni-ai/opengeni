@@ -21,8 +21,8 @@ OpenGeni does not scrape `GET /models`. Membership is the reviewed catalog
 
 Exactly one built-in provider. `OPENGENI_OPENAI_PROVIDER` is `openai` (default)
 or `azure`. In code mode its catalog is `OPENGENI_OPENAI_MODEL` (default
-`gpt-5.6-sol`) and `OPENGENI_OPENAI_ALLOWED_MODELS` (default
-`gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna`). A custom base URL still speaks
+`gpt-6-astra`) and `OPENGENI_OPENAI_ALLOWED_MODELS` (default
+`gpt-6-astra,gpt-6-sol,gpt-6-luna`). A custom base URL still speaks
 Responses; it does not become Chat Completions.
 
 | | OpenAI | Azure |
@@ -163,16 +163,39 @@ workspace-facing cost are deliberately independent:
 Database documents use schema version 1 and contain only reviewed membership
 and optional line-safe notes:
 
+The optional `codexModels` array replaces connected Codex membership without
+changing its credential broker. Omission preserves built-in defaults; `[]`
+removes all Codex models. Each entry requires `id: "codex/<slug>"`, matching
+`upstreamModelId: "<slug>"`, and a complete V1 `capabilities` object. Labels,
+aliases and context/compaction/tool-output token settings use the registry-model
+schema. Credentials, transport URLs, pricing and billing overrides are rejected.
+An explicit Codex default must belong to this list when supplied. Update through
+the existing version-checked catalog upsert below; subsequent catalog reads and
+new-turn admission use that membership, while accepted turn policy remains
+frozen. Subscription enablement, credential readiness and workspace policy still
+apply. Catalog inclusion does not prove the provider supports a slug.
+Removal also makes previously accepted queued/resumed attempts fail their
+current-catalog check; this is not a hidden-but-executable retirement list.
+To retire only from new selection, keep the exact model definition and set
+`retired: true` instead of deleting it. Retired entries are absent from pickers,
+`list_models`, and new-turn/child-session admission. A worker may restore only
+the exact retired definition referenced by an already persisted accepted-turn
+policy, after verifying its executable digest. Retirement itself does not change
+that digest. Missing-policy legacy turns are not granted this exception. Live
+workspace deny policy, session restrictions, subscription enablement, and broker
+credential checks still apply; retirement is not permission to bypass revocation.
+Choose an active deployment default before retiring its old entry.
+
 ```json
 {
   "schemaVersion": 1,
-  "defaultModel": "gpt-5.6-sol",
-  "builtInModels": ["gpt-5.6-sol", "gpt-5.6-luna"],
+  "defaultModel": "gpt-6-astra",
+  "builtInModels": ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
   "registryProviders": [],
   "gatewayModels": [],
   "openrouterModels": [],
   "modelNotes": {
-    "gpt-5.6-sol": "Use when the task is genuinely difficult."
+    "gpt-6-sol": "Use for difficult implementation work."
   }
 }
 ```
@@ -180,6 +203,11 @@ and optional line-safe notes:
 `defaultModel` may name deployment membership or an enabled Codex/SuperGrok
 connected-subscription product. Omission retains schema-v1 compatibility by
 using the first `builtInModels` entry, but operators should set it explicitly.
+Provider-only deployments may set `builtInModels: []`; they must supply an
+explicit `defaultModel`. The default must belong to the catalog (or the preserved
+connected-subscription fallback), be active, and resolve through an enabled
+provider. No dummy built-in model is required. Runtime catalog preflight still
+rejects defaults that cannot execute.
 The strict document rejects keys, billing, pricing policy, enabled flags,
 bands, unknown note IDs, duplicate product IDs, and reserved provider IDs.
 Notes are at most 500 characters and cannot contain a newline or `|`.
@@ -352,17 +380,21 @@ The table describes credential and upstream-settlement identity, not the
 workspace-facing price. Deployment models—including anonymous and managed
 OpenRouter routes—default to `credits` unless
 `OPENGENI_MODEL_COST_POLICY_JSON` marks the exact product ID `free`. The picker
-may still group such a route under External while the payment sentence and
-`list_models` output show its deployment-defined cost.
+groups all deployment-provided models under OpenGeni, regardless of upstream
+provider or settlement. Only explicitly free models receive a Free badge; paid
+rows omit repetitive credit labels. Subscription descriptions appear once per
+provider group; the Free badge stays explicit, and `list_models` retains the cost.
+Workspace/organization connections and connected subscriptions stay separate.
 
-### OpenCode Zen temporary free preview
+### OpenCode Zen temporary free contributor model
 
 OpenCode Zen currently exposes an OpenAI-compatible endpoint at
-`https://opencode.ai/zen/v1`. On August 21, 2026, its public model registry
-included `x-preview-f-free`, and that model accepted keyless Chat Completions,
-Responses, SSE streaming, and function calls. OpenCode documents the Ox Alpha
-free window as temporary, so configure it as an operator-owned registry entry
-rather than treating it as a permanent built-in or availability promise:
+`https://opencode.ai/zen/v1`. On September 3, 2026, its public model registry
+included `muse-spark-1.3-contributor-free`, and the model accepted keyless
+Responses API calls, SSE streaming, and function calls. OpenCode documents the
+free contributor window as temporary, so configure it as an operator-owned
+registry entry rather than treating it as a permanent built-in or availability
+promise:
 
 ```json
 [
@@ -370,16 +402,47 @@ rather than treating it as a permanent built-in or availability promise:
     "kind": "anonymous",
     "id": "opencode-zen",
     "label": "OpenCode Zen",
-    "api": "chat",
+    "api": "responses",
     "baseUrl": "https://opencode.ai/zen/v1",
     "models": [
       {
-        "id": "opencode/x-preview-f-free",
-        "upstreamModelId": "x-preview-f-free",
-        "label": "OpenCode Ox Alpha (temporary free preview)",
-        "contextWindowTokens": 1000000,
+        "id": "opencode/muse-spark-1.3-contributor-free",
+        "upstreamModelId": "muse-spark-1.3-contributor-free",
+        "label": "Muse Spark 1.3 Contributor Free",
+        "contextWindowTokens": 1048576,
         "reasoningEffort": true,
-        "hostedWebSearch": false
+        "hostedWebSearch": false,
+        "capabilities": {
+          "reasoning": {
+            "upstream": "supported",
+            "runnable": true,
+            "efforts": ["minimal", "low", "medium", "high", "xhigh"],
+            "defaultEffort": "low",
+            "required": true
+          },
+          "functionCalling": { "upstream": "supported", "runnable": true },
+          "structuredOutput": { "upstream": "supported", "runnable": true },
+          "hostedTools": {
+            "webSearch": { "upstream": "unknown", "runnable": false },
+            "xSearch": { "upstream": "unknown", "runnable": false },
+            "codeExecution": { "upstream": "unknown", "runnable": false }
+          },
+          "inputModalities": ["text"],
+          "inputFileMediaTypes": [
+            "application/json",
+            "application/pdf",
+            "application/x-yaml",
+            "application/yaml",
+            "text/*"
+          ],
+          "outputModalities": ["text"],
+          "transports": {
+            "sse": { "upstream": "supported", "runnable": true },
+            "responsesWebSocket": { "upstream": "unknown", "runnable": false },
+            "realtimeAudio": { "upstream": "unsupported", "runnable": false }
+          },
+          "latencyModes": [{ "id": "standard", "upstream": "supported", "runnable": true }]
+        }
       }
     ]
   }
@@ -387,21 +450,20 @@ rather than treating it as a permanent built-in or availability promise:
 ```
 
 Requests go from OpenGeni to OpenCode's `opencode.ai` service; this is not local
-inference. Anonymous routes are shown on the External rail. To make this
+inference. Anonymous deployment routes are shown under OpenGeni. To make this
 temporary preview free to the workspace, set
-`OPENGENI_MODEL_COST_POLICY_JSON='{"opencode/x-preview-f-free":"free"}'`;
+`OPENGENI_MODEL_COST_POLICY_JSON='{"opencode/muse-spark-1.3-contributor-free":"free"}'`;
 external settlement alone does not bypass credits. A free route still emits
 ordinary model-call/token telemetry plus a zero-cost audit marker. It remains
 subject to the upstream provider's changing
-model catalogue, rate limits, retention policy, preview duration, and terms.
+model catalogue, rate limits, retention policy, contributor duration, and terms.
 Verify `GET /zen/v1/models` before enabling the route and remove or update the
-registry entry when keyless access or the model slug changes. OpenCode's
-client-side model metadata advertises image input, but raw image probes on
-August 21, 2026 returned upstream `503`/image-parse failures, so this example
-deliberately keeps OpenGeni's runnable input capability at its text-only default.
+registry entry when keyless access or the model slug changes. The example keeps
+OpenGeni's runnable input capability at its conservative text-only default until
+the image path is independently verified end to end.
 
 OpenCode Zen uses the same provider-neutral progressive disclosure as other
-ordinary Chat Completions providers. The first request receives the stable
+ordinary Responses API providers. The first request receives the stable
 `tool_search` and `tool_invoke` functions plus OpenGeni's always-visible base
 tools and any explicitly eager MCP tools. Deferred MCP and other non-base tool
 schemas stay out of the initial prompt; matching definitions are disclosed on
@@ -446,14 +508,16 @@ models. They are siblings of the built-in GPT-5.6 family in the OpenGeni picker
 rail; the client never receives the Gateway hostname, upstream model slug, or
 endpoint provider.
 
-| Product                | Approved provider order      | Supplier input / cache read / output                                                                   | Conservative retail fallback (+25%)                     |
-| ---------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
-| DeepSeek V4 Flash 0731 | Baseten → Novita → DeepInfra | Baseten $0.13 / $0.028 / $0.26; Novita $0.14 / $0.028 / $0.28; DeepInfra $0.09 / $0.018 / $0.18 per 1M | $0.175 / $0.035 / $0.35 per 1M (highest approved route) |
-| Kimi K3                | Baseten → Fireworks          | $3 / $0.30 / $15 per 1M on both routes                                                                 | $3.75 / $0.375 / $18.75 per 1M                          |
+| Product                | Approved provider order      | Supplier input / cache read / cache write / output                                                                                  | Conservative retail fallback (+5%)                                 |
+| ---------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| DeepSeek V4 Flash 0731 | Baseten → Novita → DeepInfra | Baseten $0.13 / $0.028 / $0.13 / $0.26; Novita $0.14 / $0.028 / $0.14 / $0.28; DeepInfra $0.09 / $0.018 / $0.09 / $0.18 per 1M | $0.147 / $0.0294 / $0.147 / $0.294 per 1M (highest approved route) |
+| Kimi K3                | Baseten → Fireworks          | $3 / $0.30 / $3 / $15 per 1M on both routes                                                                                        | $3.15 / $0.315 / $3.15 / $15.75 per 1M                            |
 
-Prices are a reviewed 2026-08-03 snapshot from public Gateway endpoint metadata.
+Prices are a reviewed 2026-09-02 snapshot from public Gateway endpoint metadata.
+Gateway does not publish a separate cache-write rate for these routes, so the
+static fallback prices cache writes at the route's uncached-input rate.
 Managed turns normally debit the exact Gateway-reported inference cost for the
-provider that actually served the response, plus 25%. The static token rates
+provider that actually served the response, plus 5%. The static token rates
 above are only a conservative fallback if that response metadata is absent.
 Adding or changing a model requires reviewing the provider order, Responses
 tool/vision transport, cache reporting, pricing, definition, and tests together.
@@ -482,7 +546,7 @@ DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
 dispatcher on the Responses wire. Their initial tool block contains the stable
 ordinary `tool_search` and `tool_invoke` schemas, the always-visible base
 runtime tools (`exec_command`, `write_stdin`, `apply_patch`, `view_image`,
-`load_skill`, `request_human_input`, `list_models`), and exact session MCP refs marked
+`skill_read`, `request_human_input`, `list_models`), and exact session MCP refs marked
 `eager: true`, never the deferred MCP catalogue or Browser/Computer/`generate_image`/
 `generate_video`/`get_video_generation_capabilities` schemas. A search result carries only bounded
 matching definitions. A valid `tool_invoke` call is renamed to the exact real authorized tool and
@@ -531,14 +595,16 @@ On August 27, 2026, OpenRouter advertised that slug with a 262,144-token context
 window, a 235,929-token completion ceiling, text input/output, function tools,
 tool choice, structured outputs, and reasoning controls. A live forced-function
 probe completed with `finish_reason=tool_calls`. OpenGeni therefore marks
-function calling and structured output runnable, while reasoning effort remains
-non-runnable until a reviewed effort vocabulary is mapped.
+function calling and structured output runnable. On September 8, 2026, OpenRouter
+`GET /api/v1/models` explicitly advertised reasoning efforts `low` and `medium`,
+with `medium` as default. Both are runnable; the Chat Completions adapter sends
+the selected value as `reasoning_effort`. Higher levels are not exposed.
 
 OpenRouter membership is curated and production never mirrors `GET /models`.
 The v1 database schema accepts reviewed `:free` slugs only; a key does not make
 every upstream model visible, and workspace policy may hide the starter. The
-provider settles through the deployment's OpenRouter account and appears on the
-External picker rail, while `OPENGENI_MODEL_COST_POLICY_JSON` independently
+provider settles through the deployment's OpenRouter account and appears in the
+OpenGeni picker group, while `OPENGENI_MODEL_COST_POLICY_JSON` independently
 decides whether the workspace sees `free` or `credits`. The shipped default is
 `free`. If an operator changes it to `credits`, managed billing also requires a
 separate `OPENGENI_MODEL_PRICING_JSON` entry.
@@ -577,9 +643,9 @@ the same membership, connection-readiness, workspace-policy, and provider-health
 decision as the human picker. Its result is one text string in catalog order:
 
 ```text
-Current: gpt-5.6-sol
+Current: gpt-6-astra
 - openrouter/nvidia/nemotron-3-super-120b-a12b:free | Nemotron 3 Super 120B | free | Good for bounded tool-driven work.
-- gpt-5.6-sol | GPT-5.6 Sol | credits
+- gpt-6-sol | GPT-6 Sol | credits
 ```
 
 Each selectable line is `id | label | cost` with an optional final note. It
@@ -609,12 +675,19 @@ facts. A session frozen to `remote_v2` compaction admits only Codex models;
 portable sessions may use any supported route whose request adapter can express
 their canonical history. Responses output items may carry `status`
 (`completed` / `in_progress` / `incomplete`); that field is not conversation
-meaning — pairing is `call_id` — and Codex's input schema rejects it
+meaning for function/message annotations — pairing is `call_id` — and Codex's input schema rejects it
 (`400 Unknown parameter: 'input[N].status'`). New `session_history_items` rows
 omit it at persist (`canonicalizePersistedHistoryItem`). The Codex request
 normalizer still strips leftover item `id` and `status` on the wire for
 already-stored SuperGrok rows and mid-turn SDK items — ordinary inference and
 portable compaction share that seam — and never rewrites stored rows.
+Hosted web/file search, code interpreter and image-generation calls are an
+exception: their Responses replay schema requires `status`. Both persistence
+and wire normalization preserve the original value, including failed or
+in-progress outcomes; neither synthesizes completion. SDK `hosted_tool_call`
+records retain their status and provider data as well. This preservation does
+not reconstruct status already lost from historical rows or alter the SDK's
+legacy missing-status conversion behavior.
 
 SuperGrok models use the `supergrok/` product namespace and the curated
 `supergrok-subscription` provider. The catalog advertises image input, which is
@@ -671,13 +744,12 @@ The catalog describes:
 - SSE, Responses WebSocket, and realtime-audio transports; and
 - standard, priority, and fast latency modes.
 
-GPT-5.6 Sol, Terra, and Luna (including their Codex subscription variants)
+GPT-6 Astra, Sol, and Luna (including their Codex subscription variants)
 advertise runnable **Fast** mode. Fast requests set the provider service tier,
 use a 2× billing multiplier, and fail the turn if the provider response omits
 or downgrades that tier; OpenGeni never silently falls back to Standard. The
-same billed GPT-5.6 family pins Codex's 272,000 / 258,400 / 244,800
-raw / effective / auto-compact catalog rather than the 1.05M deployment
-fallback.
+GPT-6 family uses the 1.05M context window. A configured GPT-5.6 id still pins
+Codex's 272,000 / 258,400 / 244,800 raw / effective / auto-compact catalog.
 
 Upstream documentation alone never makes a capability runnable. For example,
 provider support for X search or Responses WebSocket remains `runnable: false`
@@ -721,7 +793,7 @@ Progressive disclosure is selected explicitly per resolved provider:
 
 Classification is origin, not transport. The same first-request set is eager on
 every path: the closed non-MCP allowlist (`exec_command`, `write_stdin`,
-`apply_patch`, `view_image`, `load_skill`, `request_human_input`, `list_models`) plus MCP
+`apply_patch`, `view_image`, `skill_read`, `request_human_input`, `list_models`) plus MCP
 tools whose session `ToolRef.eager` is true. Every other function tool —
 deferred MCP, Browser/Computer, `generate_image`, `generate_video`,
 `get_video_generation_capabilities`, and later first-party additions — is
@@ -952,7 +1024,33 @@ Pricing is keyed by product model ID. A tiered schedule selects the greatest
 `minimumInputTokens` threshold not exceeding the current input count. Billing
 classification comes from the accepted policy: `external` usage must not spend
 OpenGeni model credits; `opengeni_credits` usage follows configured pricing and
-margin rules.
+margin rules. Each price entry can distinguish uncached input, cache reads,
+cache writes, and output through `inputMicrosPerMillionTokens`,
+`cachedInputMicrosPerMillionTokens`, `cacheWriteMicrosPerMillionTokens`, and
+`outputMicrosPerMillionTokens`. Cache writes fall back to the ordinary input
+rate only when an older override omits the dedicated field.
+
+The built-in schedules use a 5% OpenGeni markup (`marginBps: 500`). Insights
+keeps three amounts separate for every authoritative model call:
+
+- estimated provider USD is the upstream list price or Gateway-reported cost,
+  before OpenGeni markup;
+- equivalent OpenGeni credit price is the same captured rate with markup,
+  including a comparison for externally billed Codex-subscription calls;
+- OpenGeni credit price is the actual credits-path price and remains zero for
+  externally billed calls.
+
+GPT-5.6 Sol uses OpenAI's current promotional list price ($4 input, $0.40
+cached input, $5 cache write, and $20 output per million tokens), guaranteed
+through at least 2026-11-21. Its >272K-input tier applies OpenAI's 2x input and
+1.5x output multipliers to the whole request. Re-run the price audit and review
+the official rate before that date.
+
+`OPENGENI_MODEL_PRICING_JSON` accepts either a flat price or a complete
+`{ default, inputTokenTiers }` schedule. Use the complete schedule when an Azure
+deployment uses Data Zone or another SKU whose rates differ from the built-in
+Global Standard defaults. Historical facts retain the price known at call time;
+they are not recomputed after an operator changes the override.
 
 ### Price audit (llm-prices canary)
 
@@ -972,8 +1070,9 @@ compares Standard short- and long-context rates for the allow-listed GPT-5.6
 product ids. Treat mismatches as a prompt to re-check OpenAI (or the provider)
 and update `defaultModelPricing` — not as automatic truth to import.
 
-Not covered by the llm-prices canary: Fast/priority multipliers, Fireworks GLM
-defaults, the provider-pinned Gateway snapshots, and the `marginBps` markup.
+Not covered by the llm-prices canary: cache-write rates, Azure SKU-specific
+overrides, Fast/priority multipliers, Fireworks GLM defaults, the provider-pinned
+Gateway snapshots, and the `marginBps` markup.
 Gateway catalogue tests pin the exact Baseten/Wafer rates and caching claims;
 offline llm-prices coverage uses
 `scripts/fixtures/llm-prices-current-v1.sample.json`.

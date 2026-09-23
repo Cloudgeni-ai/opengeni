@@ -736,7 +736,7 @@ describe("codex-parity rebuild", () => {
     expect(prepared.input.at(-1)).toMatchObject({ role: "user", content: COMPACTION_PROMPT });
   });
 
-  test("drops images from retained user messages", () => {
+  test("preserves images in retained user messages", () => {
     const rebuilt = buildCompactionReplacementHistory(
       [
         userParts([
@@ -748,6 +748,7 @@ describe("codex-parity rebuild", () => {
     );
     expect((rebuilt[0] as { content?: unknown }).content).toEqual([
       { type: "input_text", text: "look at this" },
+      { type: "input_image", image_url: "data:image/png;base64,abc" },
     ]);
   });
 
@@ -1203,6 +1204,7 @@ describe("provider-proof compaction transcript", () => {
         responseId: null,
         code: "server_error",
         type: "server_error",
+        param: null,
         requestId: "req_compaction_failed",
       });
       expect(JSON.stringify(error)).not.toContain("deploy it");
@@ -1496,7 +1498,7 @@ describe("Codex remote compaction v2 helpers", () => {
     expect(history.some((item) => item.role === "developer")).toBe(true);
   });
 
-  test("remote_v2 retain keeps input_image parts (portable strips them)", () => {
+  test("both compaction modes preserve retained image parts", () => {
     const withImage = userParts([
       { type: "input_text", text: "look" },
       { type: "input_image", image_url: "data:image/png;base64,abc" },
@@ -1513,9 +1515,7 @@ describe("Codex remote compaction v2 helpers", () => {
       ],
     });
     const portable = buildCompactionReplacementHistory([withImage], "summary");
-    expect((portable[0] as { content?: unknown }).content).toEqual([
-      { type: "input_text", text: "look" },
-    ]);
+    expect(portable[0]).toEqual(withImage);
   });
 
   test("remote_v2 retain keeps images when truncating oversized text", () => {
@@ -1611,7 +1611,14 @@ describe("Codex remote compaction v2 helpers", () => {
       requestRemoteCompactionV2(testSettings(), [user("hi")], {
         client,
         model: "gpt-5.6-sol",
-        systemInstructions: "   ",
+        preparedRequest: {
+          systemInstructions: "   ",
+          modelSettings: {},
+          tools: [],
+          outputType: "text",
+          handoffs: [],
+          tracing: false,
+        },
       }),
     ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
   });
@@ -1634,10 +1641,86 @@ describe("Codex remote compaction v2 helpers", () => {
     await requestRemoteCompactionV2(testSettings(), [user("hi")], {
       client,
       model: "gpt-5.6-sol",
-      systemInstructions: padded,
+      preparedRequest: {
+        systemInstructions: padded,
+        modelSettings: {},
+        tools: [],
+        outputType: "text",
+        handoffs: [],
+        tracing: false,
+      },
     });
     // Ordinary turns keep leading/trailing whitespace via normalizeInstructions;
     // compact must not `.trim()` the payload or the cache prefix diverges.
     expect(seenInstructions).toBe(padded);
   });
+});
+
+test("compaction charges projected attachment images before selecting retained messages", () => {
+  const image = {
+    ...user("image"),
+    [MODEL_ATTACHMENT_REFS_FIELD]: [
+      { kind: "file", fileId: "00000000-0000-4000-8000-000000000084" },
+    ],
+  };
+  const portable = buildCompactionReplacementHistory([image, user("continue")], "summary", (item) =>
+    item === image ? 100000 : 20,
+  );
+  expect(portable).not.toContainEqual(image);
+  expect(portable.some((item) => item[MODEL_ATTACHMENT_REFS_FIELD])).toBe(true);
+  const remote = buildRemoteV2ReplacementHistory(
+    [image, user("continue")],
+    { type: "compaction", encrypted_content: "blob" },
+    (item) => (item === image ? 100000 : 20),
+  );
+  expect(remote).not.toContainEqual(image);
+});
+
+test("remote compaction reserves image tokens while truncating retained text", () => {
+  const text = "long context ".repeat(50000);
+  const image = { type: "input_image", image_url: "data:image/png;base64,cGl4ZWxz" };
+  const item = {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text }, image],
+  };
+  const retained = buildRemoteV2ReplacementHistory(
+    [item],
+    { type: "compaction", encrypted_content: "blob" },
+    () => estimateTextTokens(text) + 10000,
+  );
+  const content = retained[0]!.content as Array<Record<string, unknown>>;
+  expect(content).toContainEqual(image);
+  expect(estimateTextTokens(content[0]!.text as string) + 10000).toBeLessThanOrEqual(64000);
+});
+
+test("remote compaction preserves explicitly selected reasoning instructions on the wire", async () => {
+  let body: any;
+  const client = {
+    responses: {
+      create: async (request: any) => {
+        body = request;
+        return {
+          id: "compact_test",
+          status: "completed",
+          output: [{ type: "compaction", encrypted_content: "blob" }],
+        };
+      },
+    },
+  } as unknown as OpenAI;
+  for (const effort of ["low", "medium", "high"] as const) {
+    await requestRemoteCompactionV2(testSettings(), [user("hi")], {
+      client,
+      model: "gpt-5.6-sol",
+      preparedRequest: {
+        systemInstructions: "stable",
+        modelSettings: { reasoning: { effort, summary: "detailed" } },
+        tools: [],
+        outputType: "text",
+        handoffs: [],
+        tracing: false,
+      },
+    });
+    expect(body.reasoning).toEqual({ effort, summary: "detailed" });
+  }
 });

@@ -7,14 +7,18 @@
 // is added to isAuthExempt. Secrets never leave the server: status/usage read the
 // decrypted token only to call the codex backend; the token is never returned.
 
-import { environmentsEncryptionKeyBytes } from "@opengeni/config";
+import {
+  environmentsEncryptionKeyBytes,
+  configuredModels,
+  getSettings,
+  withCodexCatalogProvider,
+  type Settings,
+} from "@opengeni/config";
 import {
   accessTokenExpiry,
   buildCodexUsageWindowFromCache,
   CODEX_CLIENT_VERSION,
-  CODEX_FALLBACK_MODEL_SLUGS,
   CODEX_FIVE_HOUR_WINDOW_SECONDS,
-  CODEX_MODEL_ID_PREFIX,
   CODEX_PROVIDER_ID,
   CODEX_WEEKLY_WINDOW_SECONDS,
   CodexDeviceError,
@@ -84,7 +88,7 @@ const CODEX_PROVIDER_LABEL = "Codex subscription · no credits";
 // The wire shape for one Codex account (metadata only; never the secret column).
 // P2: fiveHour/weekly ride along, built from the CACHED usage columns (zero
 // provider calls, zero decrypts) so the bars render instantly off this read.
-function codexAccountJson(
+export function codexAccountJson(
   row: CodexAccountStatus,
   options: {
     appsCredentialId?: string | null;
@@ -134,6 +138,55 @@ function codexAccountJson(
   };
 }
 
+/**
+ * Derive the two distinct cached worker-readiness meanings exposed by the
+ * status route. `poolReady` means at least one effective-pool account passes
+ * the worker's cached admission predicate. `workerRoutable` additionally
+ * honors rotation-off's active-pointer-only rule; it says nothing about a
+ * session-specific manual pin.
+ */
+export function codexWorkerReadiness(input: {
+  effectiveSource: "workspace" | "organization" | "disabled";
+  rotationEnabled: boolean;
+  activeCredentialId: string | null;
+  accounts: ReadonlyArray<
+    Pick<
+      CodexAccountStatus,
+      | "id"
+      | "status"
+      | "allocatorEnabled"
+      | "primaryUsedPercent"
+      | "primaryResetAt"
+      | "secondaryUsedPercent"
+      | "secondaryResetAt"
+      | "exhaustedUntil"
+    >
+  >;
+  now: Date;
+}): { poolReady: boolean; workerRoutable: boolean } {
+  if (input.effectiveSource === "disabled") {
+    return { poolReady: false, workerRoutable: false };
+  }
+  const windowUsed = (used: number | null, resetAt: Date | null): number =>
+    resetAt !== null && resetAt.getTime() <= input.now.getTime() ? 0 : (used ?? 0);
+  const eligible = (account: (typeof input.accounts)[number]): boolean =>
+    account.status === "active" &&
+    account.allocatorEnabled &&
+    (account.exhaustedUntil === null || account.exhaustedUntil.getTime() <= input.now.getTime()) &&
+    Math.max(
+      windowUsed(account.primaryUsedPercent, account.primaryResetAt),
+      windowUsed(account.secondaryUsedPercent, account.secondaryResetAt),
+    ) < 100;
+  const poolReady = input.accounts.some(eligible);
+  const activePointerReady = input.accounts.some(
+    (account) => account.id === input.activeCredentialId && eligible(account),
+  );
+  return {
+    poolReady,
+    workerRoutable: input.rotationEnabled ? poolReady : activePointerReady,
+  };
+}
+
 // The /codex/usage{,/refresh,/:id} wire wrapper: the rich normalized payload
 // carries its own `status`, surfaced at the top level for back-compat with the
 // existing CodexUsage = { status; usage } shape.
@@ -144,25 +197,22 @@ function codexUsageJson(payload: CodexUsagePayload): {
   return { status: payload.status, usage: payload };
 }
 
-export function codexModelsForPicker(liveSlugs: readonly string[]): Array<{
+export function codexModelsForPicker(settings: Settings = getSettings()): Array<{
   id: string;
   label: string;
   provider: string;
   providerLabel: string;
   api: "responses";
 }> {
-  const available = new Set(liveSlugs);
-  const missing = CODEX_FALLBACK_MODEL_SLUGS.filter((slug) => !available.has(slug));
-  if (missing.length > 0) {
-    throw new Error(`Codex catalog is missing required models: ${missing.join(", ")}`);
-  }
-  return CODEX_FALLBACK_MODEL_SLUGS.map((slug) => ({
-    id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
-    label: slug.replace(/^gpt-/, "GPT-"),
-    provider: CODEX_PROVIDER_ID,
-    providerLabel: CODEX_PROVIDER_LABEL,
-    api: "responses" as const,
-  }));
+  return configuredModels(withCodexCatalogProvider(settings))
+    .filter((model) => model.providerId === CODEX_PROVIDER_ID)
+    .map((model) => ({
+      id: model.id,
+      label: model.label,
+      provider: CODEX_PROVIDER_ID,
+      providerLabel: CODEX_PROVIDER_LABEL,
+      api: "responses" as const,
+    }));
 }
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
@@ -170,6 +220,7 @@ import {
   hasPermission,
   requireAccessGrant,
   requireCanonicalLocalAccountAdministrator,
+  resolveCatalogSettings,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
@@ -903,26 +954,39 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       organizationId,
       actorSubjectId: human.subjectId,
     });
-    const upserted = await upsertOrganizationCodexSubscriptionCredential(db, {
-      organizationId,
-      actorSubjectId: human.subjectId,
-      credentialEncrypted: encryptEnvironmentValue(
-        key,
-        JSON.stringify({
-          access_token: tokens.accessToken,
-          refresh_token: tokens.refreshToken,
-          id_token: tokens.idToken,
-        }),
-      ),
-      chatgptAccountId: id.chatgptAccountId,
-      scopes: null,
-      planType: id.planType,
-      isFedramp: id.isFedramp,
-      expiresAt: accessTokenExpiry(tokens.accessToken),
-      lastRefreshAt: new Date(),
-      accountEmail: id.email ?? null,
-      label: id.email ?? id.chatgptAccountId ?? null,
-    });
+    let upserted: Awaited<ReturnType<typeof upsertOrganizationCodexSubscriptionCredential>>;
+    try {
+      upserted = await upsertOrganizationCodexSubscriptionCredential(db, {
+        organizationId,
+        actorSubjectId: human.subjectId,
+        credentialEncrypted: encryptEnvironmentValue(
+          key,
+          JSON.stringify({
+            access_token: tokens.accessToken,
+            refresh_token: tokens.refreshToken,
+            id_token: tokens.idToken,
+          }),
+        ),
+        chatgptAccountId: id.chatgptAccountId,
+        scopes: null,
+        planType: id.planType,
+        isFedramp: id.isFedramp,
+        expiresAt: accessTokenExpiry(tokens.accessToken),
+        lastRefreshAt: new Date(),
+        accountEmail: id.email ?? null,
+        label: id.email ?? id.chatgptAccountId ?? null,
+      });
+    } catch (error) {
+      const cause = (error as { cause?: unknown } | null)?.cause;
+      const message =
+        cause instanceof Error ? cause.message : error instanceof Error ? error.message : "";
+      if (message.includes("active turns are using it")) {
+        throw new HTTPException(409, {
+          message: "Codex subscription source cannot change while active turns are using it",
+        });
+      }
+      throw error;
+    }
     await signalCodexCapacityTargets(deps, upserted.wakeTargets);
     const rotation = await getOrganizationCodexRotationSettings(db, {
       organizationId,
@@ -1124,6 +1188,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       upserted: Awaited<ReturnType<typeof upsertCodexSubscriptionCredential>>;
       isActive: boolean;
     }>(db, { workspaceId, reason: "codex_credential_connected" }, async (tx) => {
+      // The capacity mutation holds the source lock before entering this callback.
+      const sourceBeforeConnect = await getWorkspaceCodexSubscriptionSource(tx, workspaceId);
       const upserted = await upsertCodexSubscriptionCredential(tx, {
         accountId: grant.accountId,
         workspaceId,
@@ -1151,12 +1217,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       await ensureCodexRotationSettings(tx, grant.accountId, workspaceId);
       await setInitialActiveCodexCredential(tx, workspaceId, upserted.id);
-      const source = await getWorkspaceCodexSubscriptionSource(tx, workspaceId);
       await setWorkspaceCodexSubscriptionModeInTransaction(tx, {
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
-        mode: source.workspaceKind === "personal" ? "automatic" : "workspace",
+        // Connecting local capacity does not override an explicit source choice.
+        // Automatic naturally prefers the newly connected workspace pool.
+        mode: sourceBeforeConnect.mode,
+        effectiveSourceBeforeMutation: sourceBeforeConnect.effectiveSource,
       });
       const rotation = await getCodexRotationSettings(tx, workspaceId);
       return {
@@ -1166,6 +1234,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         },
         changed: true,
       };
+    }).catch((error: unknown) => {
+      const cause = (error as { cause?: unknown } | null)?.cause;
+      const message =
+        cause instanceof Error ? cause.message : error instanceof Error ? error.message : "";
+      if (message.includes("active turns are using it")) {
+        throw new HTTPException(409, { message });
+      }
+      throw error;
     });
     const { upserted, isActive } = mutation.result;
     if (upserted.kind === "unresolved_redemption") {
@@ -1188,15 +1264,13 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/codex/status", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const status = await getCodexCredentialStatus(db, workspaceId);
-    if (!status) {
-      return c.json({ connected: false });
-    }
-    const [accounts, source] = await Promise.all([
+    const [status, accounts, source, rotation] = await Promise.all([
+      getCodexCredentialStatus(db, workspaceId),
       listCodexAccountStatuses(db, workspaceId),
       getWorkspaceCodexSubscriptionSource(db, workspaceId),
+      getCodexRotationSettings(db, workspaceId),
     ]);
-    const activeRow = accounts.find((account) => account.id === status.credentialId) ?? null;
+    const activeRow = accounts.find((account) => account.id === status?.credentialId) ?? null;
     const activeAccount = activeRow
       ? {
           id: activeRow.id,
@@ -1208,11 +1282,19 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           chatgptAccountId: activeRow.chatgptAccountId,
         }
       : null;
+    const activeCredentialId = status?.credentialId ?? rotation?.activeCredentialId ?? null;
+    const readiness = codexWorkerReadiness({
+      effectiveSource: source.effectiveSource,
+      rotationEnabled: rotation?.rotationEnabled ?? false,
+      activeCredentialId,
+      accounts,
+      now: new Date(),
+    });
     let valid = false;
-    let models: ReturnType<typeof codexModelsForPicker> = [];
+    const models = codexModelsForPicker((await resolveCatalogSettings(db, settings)).settings);
     let catalogError: string | null = null;
     try {
-      const cred = status.credentialId
+      const cred = status?.credentialId
         ? await loadCodexCredentialForRun(db, settings, workspaceId, status.credentialId)
         : null;
       if (cred) {
@@ -1223,7 +1305,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           clientVersion: CODEX_CLIENT_VERSION,
         });
         if (live.ok) {
-          models = codexModelsForPicker(live.slugs);
           valid = true;
         } else {
           catalogError = `Codex models request failed with status ${live.status}`;
@@ -1234,11 +1315,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       catalogError = error instanceof Error ? error.message : String(error);
     }
     return c.json({
-      connected: status.connected,
-      plan: status.planType,
+      connected: status?.connected ?? false,
+      plan: status?.planType ?? null,
       valid,
-      expiresAt: status.expiresAt,
-      lastError: catalogError ?? status.lastError,
+      activeAccountValid: valid,
+      poolReady: readiness.poolReady,
+      workerRoutable: readiness.workerRoutable,
+      expiresAt: status?.expiresAt ?? null,
+      lastError: catalogError ?? status?.lastError ?? null,
       models, // ClientModel[] the picker surfaces under the "no credits" group
       activeAccount, // the account a session runs on when unpinned (label for the indicator)
       accountCount: accounts.length,

@@ -7,6 +7,8 @@
  * from argument JSON.
  */
 
+import type { ToolDisplayMetadata } from "@opengeni/sdk";
+
 /** Leaf tool name after the first `__` server boundary (or the whole name). */
 export function mcpToolLeaf(name: string): string {
   const boundary = name.indexOf("__");
@@ -26,10 +28,10 @@ export function toolMatchesLeaf(wireName: string, leaf: string): boolean {
  * Readable label for a tool call ("session_create" / "opengeni__session_create"
  * → "Session create"). Title-cases the first character of the leaf phrase.
  */
-export function toolDisplayName(name: string): string {
-  const phrase = mcpToolLeaf(name).replace(/[_-]+/g, " ").trim();
-  if (!phrase) {
-    return name;
-  }
-  return phrase.charAt(0).toUpperCase() + phrase.slice(1);
+export function toolDisplayName(name: string, display?: ToolDisplayMetadata): string {
+  if (!display && /^[a-f0-9]{64}$/.test(name)) return "Tool call";
+  const phrase = (display?.toolName ?? mcpToolLeaf(name)).replace(/[_-]+/g, " ").trim();
+  const title =
+    display?.title ?? (phrase ? phrase.charAt(0).toUpperCase() + phrase.slice(1) : name);
+  return display?.accountLabel ? `${title} — ${display.accountLabel}` : title;
 }

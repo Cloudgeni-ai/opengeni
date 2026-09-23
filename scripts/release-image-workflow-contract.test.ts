@@ -9,9 +9,12 @@ const exactCiSource =
   "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}";
 
 type WorkflowStep = {
+  id?: string;
   name?: string;
   uses?: string;
   if?: string;
+  env?: Record<string, string>;
+  run?: string;
   with?: Record<string, unknown>;
 };
 
@@ -52,10 +55,15 @@ function keepsStableSandboxToolchainBeforeArtifactRuntime(dockerfile: string): b
   const stableToolchain = [
     "releases.hashicorp.com/terraform/${TERRAFORM_VERSION}",
     'pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"',
-    "https://aka.ms/InstallAzureCLIDeb",
     "https://cli.github.com/packages/githubcli-archive-keyring.gpg",
     "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}",
   ];
+
+  // Only the headless image installs Azure CLI. Preserve its cache-ordering
+  // check without requiring Azure tooling in the stock desktop image.
+  if (dockerfile.includes("https://aka.ms/InstallAzureCLIDeb")) {
+    stableToolchain.push("https://aka.ms/InstallAzureCLIDeb");
+  }
 
   return (
     runtimeCopy >= 0 &&
@@ -410,6 +418,14 @@ describe("release image workflow contract", () => {
     },
   );
 
+  test.each(["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"])(
+    "%s copies and doctors the native artifact runtime after the stable toolchain",
+    async (path) => {
+      const dockerfile = await readFile(resolve(root, path), "utf8");
+      expect(keepsStableSandboxToolchainBeforeArtifactRuntime(dockerfile)).toBe(true);
+    },
+  );
+
   test("keeps stable sandbox tools cacheable across exact runtime revisions", async () => {
     const dockerfile = await readFile(resolve(root, "docker/sandbox.Dockerfile"), "utf8");
 
@@ -434,18 +450,35 @@ describe("release image workflow contract", () => {
     expect(keepsStableSandboxToolchainBeforeArtifactRuntime(previousOrdering)).toBe(false);
   });
 
-  test("retries the Azure CLI bootstrap in both sandbox images", async () => {
-    for (const path of ["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"]) {
-      const dockerfile = await readFile(resolve(root, path), "utf8");
-      expect(dockerfile).toContain(
-        "curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://aka.ms/InstallAzureCLIDeb",
-      );
-      expect(dockerfile).toContain("ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6");
-      expect(dockerfile).toContain(
-        'az extension add --name azure-devops --version "$AZURE_DEVOPS_EXTENSION_VERSION"',
-      );
-      expect(dockerfile).not.toContain("az extension add --name azure-devops; \\");
+  test("retries the Azure CLI bootstrap in the headless sandbox image", async () => {
+    const dockerfile = await readFile(resolve(root, "docker/sandbox.Dockerfile"), "utf8");
+    expect(dockerfile).toContain(
+      "curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://aka.ms/InstallAzureCLIDeb",
+    );
+    expect(dockerfile).toContain("ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6");
+    expect(dockerfile).toContain(
+      'az extension add --name azure-devops --version "$AZURE_DEVOPS_EXTENSION_VERSION"',
+    );
+    expect(dockerfile).not.toContain("az extension add --name azure-devops; \\");
+  });
+
+  test("desktop excludes Azure tooling while retaining browser and document tools", async () => {
+    const dockerfile = await readFile(resolve(root, "docker/desktop.Dockerfile"), "utf8");
+    for (const marker of [
+      "InstallAzureCLIDeb",
+      "azure-cli",
+      "azure-devops",
+      "AZURE_DEVOPS_EXTENSION_VERSION",
+      "AZURE_EXTENSION_DIR",
+      "/opt/az",
+    ]) {
+      expect(dockerfile).not.toContain(marker);
     }
+    expect(dockerfile).toContain("xdotool scrot ffmpeg");
+    expect(dockerfile).toContain("COPY --from=anydoc-runtime-builder /out /opt/opengeni/anydoc");
+    expect(dockerfile).toContain('test "$(anydoc --version)" = 0.1.8');
+    expect(dockerfile).toContain("COPY --from=browserd-build /out/agent-browser");
+    expect(dockerfile).toContain("ARG OPENGENI_BROWSER_BIN_AMD64=/opt/google/chrome/google-chrome");
   });
 
   test("builds Checkov outside the serial sandbox toolchain", async () => {
@@ -701,6 +734,51 @@ describe("release image workflow contract", () => {
     expect(candidate).not.toContain('existing_tag_sha="$(gh api');
   });
 
+  test("candidate web deployment identity uses the validated source SHA, not its release version or controller", async () => {
+    const parsed = Bun.YAML.parse(await workflow("release-candidate.yml")) as ParsedWorkflow;
+    const steps = parsed.jobs.candidate?.steps ?? [];
+    const sourceRevision = "${{ inputs.source_sha }}";
+    const validation =
+      steps[stepIndex(parsed, "candidate", "Validate exact retained versioned main source")];
+    const checkout = steps[stepIndex(parsed, "candidate", "Check out candidate source")];
+    const webBuilds = steps.filter(
+      (step) => step.uses?.startsWith("docker/build-push-action@") && step.with?.target === "web",
+    );
+
+    expect(webBuilds).toHaveLength(1);
+    const web = webBuilds[0]!;
+    expect(web.id).toBe("build-web");
+    expect(web.with?.context).toBe(".");
+    expect(web.with?.file).toBe("docker/opengeni.Dockerfile");
+    expect(checkout.with?.ref).toBe(sourceRevision);
+    expect(validation.env?.SOURCE_SHA).toBe(sourceRevision);
+    expect(validation.if).toBeUndefined();
+    expect(validation.run).toContain('[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]');
+    expect(validation.run).toContain('[ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]');
+    expect(steps.indexOf(checkout)).toBeLessThan(steps.indexOf(validation));
+    expect(steps.indexOf(validation)).toBeLessThan(steps.indexOf(web));
+
+    // Build identity matches the API's source revision. The product version and
+    // immutable attempt tag remain separate release/publication identities.
+    expect(String(web.with?.["build-args"]).trim().split(/\r?\n/)).toEqual([
+      `OPENGENI_DEPLOYMENT_REVISION=${sourceRevision}`,
+      "OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}",
+    ]);
+    expect(web.with?.tags).toBe(
+      "${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-web:${{ steps.meta.outputs.candidate_tag }}",
+    );
+    expect(String(web.with?.labels).trim().split(/\r?\n/)).toEqual([
+      `org.opencontainers.image.revision=${sourceRevision}`,
+      "org.opencontainers.image.source=https://github.com/${{ github.repository }}",
+    ]);
+    const identity = steps[stepIndex(parsed, "candidate", "Resolve candidate identity")];
+    expect(identity.env?.SOURCE_SHA).toBe(sourceRevision);
+    expect(identity.run).toContain('echo "version=$version" >> "$GITHUB_OUTPUT"');
+    expect(identity.run).toContain(
+      'echo "candidate_tag=candidate-${SOURCE_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"',
+    );
+  });
+
   test("main CI publishes exact-SHA canary images without granting PR publication", async () => {
     const ci = await workflow("ci.yml");
     const images = ci.slice(ci.indexOf("\n  api-image:\n"), ci.indexOf("\n  automation-report:\n"));
@@ -769,7 +847,9 @@ describe("release image workflow contract", () => {
     ]) {
       expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["worker-image"]?.if);
     }
-    expect(parsed.jobs.images?.if).toBe(parsed.jobs["worker-image"]?.if);
+    expect(parsed.jobs.images?.if).toBe(
+      "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
+    );
     expect(images.match(/packages: write/g)).toHaveLength(7);
     for (const jobName of leafNames) {
       const login = parsed.jobs[jobName]?.steps?.find((step) => step.name === "Log in to GHCR");

@@ -30,6 +30,8 @@ export type ShardWeightResolution = {
 };
 
 export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
+  "apps/api/test/native-report-delivery.test.ts":
+    "requires a verified native runtime and real PostgreSQL and is owned by the required package-contracts gate",
   "test/integration/workspace-capture.integration.ts":
     "requires an already-running real dev stack and is owned by the live workspace-capture gate",
   "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts":
@@ -57,6 +59,8 @@ export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
     "requires a real FORCE-RLS PostgreSQL boundary and browser evidence and is owned by the curated onboarding gate",
   "test/e2e/browser-accounts-acceptance.e2e.ts":
     "requires actual Better Auth users, a real FORCE-RLS PostgreSQL boundary, and Chromium/Firefox/WebKit popup and cookie evidence in the account-acceptance lane",
+  "test/e2e/browser-account-request-observation.browser.e2e.ts":
+    "requires native Chromium request-header evidence and is owned by the Chromium account-acceptance lane",
   "test/e2e/queue-surface.browser.e2e.ts":
     "requires dedicated queue-surface evidence and is owned by the curated browser-acceptance gate",
   "test/e2e/react-demo-mobile.browser.e2e.ts":
@@ -73,6 +77,8 @@ export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
     "is retained for dedicated session-header acceptance outside default CI",
   "test/e2e/session-pins.browser.e2e.ts":
     "requires dedicated FORCE-RLS visual evidence and is owned by the curated browser-acceptance gate",
+  "test/e2e/session-search.browser.e2e.ts":
+    "requires real history-search API and responsive browser evidence and is owned by the curated interaction gate",
   "test/e2e/slack-oauth.browser.e2e.ts":
     "requires dedicated Slack OAuth acceptance outside default CI",
   "test/e2e/timeline-scroll.browser.e2e.ts":
@@ -204,7 +210,7 @@ export function discoverTestFiles(root = process.cwd()): {
     walkFiles(root, join(root, directory), files);
   }
   return {
-    unit: files.filter((path) => UNIT_TEST_PATTERN.test(path)).sort(),
+    unit: files.filter((path) => UNIT_TEST_PATTERN.test(path) && !OPT_IN_TESTS[path]).sort(),
     integration: files
       .filter((path) => INTEGRATION_TEST_PATTERN.test(path) && !OPT_IN_TESTS[path])
       .sort(),
@@ -221,12 +227,15 @@ export function assertTestTierMapComplete(root = process.cwd()): void {
     if (!files.includes(path)) throw new Error(`stale opt-in test mapping: ${path}`);
   }
   const discovered = discoverTestFiles(root);
-  const selected = new Set([...discovered.integration, ...discovered.e2e]);
+  const selected = new Set([...discovered.unit, ...discovered.integration, ...discovered.e2e]);
   for (const path of files.filter(
-    (candidate) => INTEGRATION_TEST_PATTERN.test(candidate) || E2E_TEST_PATTERN.test(candidate),
+    (candidate) =>
+      UNIT_TEST_PATTERN.test(candidate) ||
+      INTEGRATION_TEST_PATTERN.test(candidate) ||
+      E2E_TEST_PATTERN.test(candidate),
   )) {
     if (!selected.has(path) && !OPT_IN_TESTS[path]) {
-      throw new Error(`unmapped integration/e2e test: ${path}`);
+      throw new Error(`unmapped unit/integration/e2e test: ${path}`);
     }
   }
 }

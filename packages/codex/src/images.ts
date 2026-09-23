@@ -3,7 +3,7 @@ import type { CodexRequestContext, CodexTokenSnapshot } from "./request-context"
 import type { FetchLike } from "./fetch";
 import { pinnedFetch, readJsonBase64Field, readResponseTextBounded } from "@opengeni/network";
 
-const CODEX_IMAGE_MODEL = "gpt-image-2";
+export const CODEX_IMAGE_MODEL = "gpt-image-2.5-sunburst";
 const CODEX_IMAGE_RESPONSE_MAX_BYTES = 90 * 1024 * 1024;
 const CODEX_IMAGE_ERROR_MAX_BYTES = 64 * 1024;
 const CODEX_IMAGE_MAX_BYTES = 64 * 1024 * 1024;
@@ -61,7 +61,10 @@ export async function generateCodexSubscriptionImage(input: {
   prompt: string;
   references?: readonly CodexImageReferenceInput[];
   turnId: string;
-  context: Pick<CodexRequestContext, "clientVersion" | "getToken" | "refresh">;
+  context: Pick<
+    CodexRequestContext,
+    "clientVersion" | "getToken" | "refresh" | "beforeProviderDispatch"
+  >;
   abortSignal?: AbortSignal;
   fetch?: FetchLike;
   /** Internal test/host override; one absolute budget covers auth retry and body streaming. */
@@ -91,6 +94,7 @@ export async function generateCodexSubscriptionImage(input: {
     : deadline.signal;
   const request = async (auth: CodexTokenSnapshot): Promise<Response> => {
     const headers = codexImageHeaders(auth, input.context.clientVersion, input.turnId);
+    await input.context.beforeProviderDispatch?.();
     return await fetchImpl(
       `${CODEX_RESPONSES_BASE}/${references.length > 0 ? "images/edits" : "images/generations"}`,
       {

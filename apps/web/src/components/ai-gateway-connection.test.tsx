@@ -369,7 +369,7 @@ describe("AiGatewayConnectionCard custom models", () => {
     const { container, root } = await renderCard(true, onConnectionChange);
 
     try {
-      expect(container.textContent).toContain("Off");
+      expect(container.textContent).toContain("Not connected");
       expect(container.textContent).toContain("No custom model slugs yet");
       const input = container.querySelector<HTMLInputElement>(
         'input[aria-label="Vercel AI Gateway model slug"]',
@@ -457,7 +457,7 @@ describe("AiGatewayConnectionCard custom models", () => {
     try {
       const summary = container.querySelector("summary")!;
       expect(summary.textContent).toContain("…");
-      expect(summary.textContent).not.toContain("Off");
+      expect(summary.textContent).not.toContain("Not connected");
 
       await act(async () => {
         pendingModels.reject(new Error("custom models unavailable"));
@@ -465,7 +465,7 @@ describe("AiGatewayConnectionCard custom models", () => {
       });
 
       expect(summary.textContent).toContain("Unavailable");
-      expect(summary.textContent).not.toContain("Off");
+      expect(summary.textContent).not.toContain("Not connected");
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -747,7 +747,7 @@ describe("AiGatewayConnectionCard custom models", () => {
       });
 
       expect(deleteConnection).toHaveBeenCalledWith("workspace-a", selected.id);
-      expect(container.textContent).toContain("Off");
+      expect(container.textContent).toContain("Not connected");
       expect(container.textContent).not.toContain("Disconnect");
       expect(onConnectionChange).toHaveBeenCalledTimes(1);
       expect(toastSuccess).toHaveBeenCalledWith("Vercel AI Gateway disconnected");
@@ -829,7 +829,7 @@ describe("AiGatewayConnectionCard custom models", () => {
         await flush();
       });
 
-      expect(container.textContent).toContain("Off");
+      expect(container.textContent).toContain("Not connected");
       expect(container.textContent).not.toContain("Disconnect");
       expect(deleteConnection).toHaveBeenCalledTimes(1);
       expect(onConnectionChange).toHaveBeenCalledTimes(1);
@@ -1015,7 +1015,7 @@ describe("AiGatewayConnectionCard custom models", () => {
     const { container, root } = await renderCard(false);
 
     try {
-      expect(container.textContent).toContain("Bring your own Vercel AI Gateway");
+      expect(container.textContent).toContain("Vercel AI Gateway");
       expect(container.textContent).toContain("Unavailable");
       expect(container.textContent).toContain("readiness unavailable");
     } finally {
@@ -1669,7 +1669,7 @@ describe("AiGatewayConnectionCard custom models", () => {
     const { container, root } = await renderOpenRouterCard(true, onConnectionChange);
 
     try {
-      expect(container.textContent).toContain("Bring your own OpenRouter");
+      expect(container.textContent).toContain("OpenRouter");
       expect(container.textContent).toContain(
         "The workspace's OpenRouter account is billed directly.",
       );

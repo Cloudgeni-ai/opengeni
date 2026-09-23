@@ -1,6 +1,7 @@
 import {
   commitSessionAttemptQuiescence,
-  recordCodexAccountUsageWithWakeTargets,
+  listPendingSessionTurns,
+  recordCodexAccountUsageForFinalization,
   releaseCodexCredentialLease,
   releaseXaiCredentialLease,
   updateXaiQuotaMetadata,
@@ -12,7 +13,8 @@ import { clearRunCredentialsForAttempt } from "@opengeni/runtime";
 import { fetchXaiSubscriptionQuota } from "@opengeni/xai-subscription";
 import type { Settings } from "@opengeni/config";
 import { signalCodexCapacityWakeTargets } from "../codex-capacity";
-import type { currentActivityContext } from "../streaming";
+import { startActivityHeartbeat, type currentActivityContext } from "../streaming";
+import { startTurnFinalizationMonitor } from "./finalization-monitor";
 import type { CodemodeTokenRenewalController } from "../codemode-token-renewal";
 import type { RunCredentialRenewalController } from "../run-credential-renewal";
 import type {
@@ -20,13 +22,18 @@ import type {
   SessionAttemptQuiescenceProof,
   TurnActivityServices as ActivityServices,
 } from "../types";
-import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "../workspace-capture";
+import {
+  captureWhileIdle,
+  captureWorkspaceRevision,
+  openFreshWorkspaceCaptureSession,
+} from "../workspace-capture";
 import { type ChannelASession } from "@opengeni/runtime/sandbox";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 import {
   makeMachineOpObserver,
   recordSessionEventAppendPhase,
   turnLifecycleMetricsFor,
+  runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
 import {
   maybePersistWarmWorkspaceSnapshot,
@@ -38,7 +45,6 @@ import { safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
 import {
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
-  armTurnQuiescenceWatchdog,
   clearAttemptCredentialsWithSettledFence,
   drainAttemptOwnedSandboxWriters,
   persistOrSignalSessionAttemptQuiescence,
@@ -94,6 +100,42 @@ export type TurnFinalizationDeps = {
 };
 
 export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<void> {
+  const details = deps.eventing.heartbeatDetails ?? {
+    sessionId: deps.input.sessionId,
+    turnId: deps.attempt.turnId,
+    opAcks: {},
+  };
+  deps.eventing.heartbeatDetails = details;
+  // Keep one heartbeat owner through all physical cleanup, with the same op
+  // acknowledgements used during execution. It must no longer say "running".
+  if (deps.eventing.heartbeatTimer) clearInterval(deps.eventing.heartbeatTimer);
+  deps.eventing.heartbeatTimer = startActivityHeartbeat(deps.activityContext, details);
+  const monitor = startTurnFinalizationMonitor({
+    observability: deps.observability,
+    details,
+    heartbeat: (value) => {
+      try {
+        deps.activityContext?.heartbeat({ ...value, at: new Date().toISOString() });
+      } catch {
+        // A closed Temporal transport is not proof of physical quiescence.
+      }
+    },
+    terminateWorker: () => process.exit(1),
+  });
+  try {
+    monitor.enter("tool_writers");
+    await finalizeTurnAttemptSteps(deps, monitor);
+  } finally {
+    monitor.stop();
+    if (deps.eventing.heartbeatTimer) clearInterval(deps.eventing.heartbeatTimer);
+    deps.eventing.heartbeatTimer = undefined;
+  }
+}
+
+async function finalizeTurnAttemptSteps(
+  deps: TurnFinalizationDeps,
+  monitor: ReturnType<typeof startTurnFinalizationMonitor>,
+): Promise<void> {
   const {
     input,
     settings,
@@ -137,21 +179,27 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
   let finalizationError: unknown;
   let physicalToolQuiescenceConfirmed = !control.acknowledgeQuiescence;
   let quiescenceReceiptOrProofDurable = !control.acknowledgeQuiescence;
-  const disarmQuiescenceWatchdog = armTurnQuiescenceWatchdog({
-    enabled: control.acknowledgeQuiescence,
-    onTimeout: () => {
-      observability.error("turn quiescence drain exceeded hard containment deadline", {
-        "opengeni.session_id": input.sessionId,
-        "opengeni.turn_id": attempt.turnId ?? "",
-        "opengeni.attempt_id": input.attemptId,
-      });
-    },
-    terminateWorker: () => process.exit(1),
-  });
   const finalizerSignal = turnFinalizerCancellationSignal(
     cancellationSignal,
     control.activityStatus,
   );
+  const drainInFlightWarmSnapshot = async (): Promise<void> => {
+    const snapshot = sandboxState.snapshotInFlight;
+    if (!snapshot) return;
+    // This is physical quiescence, not optional turn-end persistence. The
+    // provider capture SDK is not cancellable, so an aborted finalizer signal
+    // must not detach this wait and release the holder while the continuation
+    // is still reading or publishing the exact workspace generation.
+    await snapshot.catch((error) => {
+      console.error(
+        "in-flight workspace snapshot settlement failed (turn outcome unaffected)",
+        safeErrorDiagnostic(error),
+      );
+    });
+    if (sandboxState.snapshotInFlight === snapshot) {
+      sandboxState.snapshotInFlight = null;
+    }
+  };
   try {
     const toolCancellationFence = eventing.toolCancellationFenceRef.current;
     // Every renewal controller is an attempt-owned sandbox writer. Capture
@@ -178,6 +226,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
       // and durably settled before workspace capture. Only receipt
       // publication remains conditional on acknowledgeQuiescence.
       toolCancellationFence,
+      onStage: monitor.enter,
       cancellationReason: cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),
       gitCredentialRenewals: gitRenewalsToStop,
       codemodeTokenRenewal: codemodeRenewalToStop,
@@ -189,6 +238,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
     // attempt's generation before publishing physical quiescence. A failure
     // deliberately keeps the receipt closed.
     if (credentialSessionToClear) {
+      monitor.enter("credential_cleanup");
       const clearAttemptCredentials = async (): Promise<void> =>
         await clearRunCredentialsForAttempt(credentialSessionToClear, {
           sessionId: input.sessionId,
@@ -236,6 +286,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
       // and before lease, cache, recording, or provider cleanup. Its
       // transaction also enqueues the exact workflow wake that will admit
       // the replacement; Temporal activity terminalization does neither.
+      monitor.enter("quiescence_receipt");
       const proof: SessionAttemptQuiescenceProof = {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -282,6 +333,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
         signalProof: signalSessionAttemptQuiesced,
         heartbeat: (deliveryAttempt, retryMs) => {
           activityContext?.heartbeat({
+            ...eventing.heartbeatDetails,
             phase: "quiescence-proof-delivery",
             sessionId: input.sessionId,
             attemptId: input.attemptId,
@@ -314,7 +366,6 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
         },
       });
       quiescenceReceiptOrProofDurable = true;
-      disarmQuiescenceWatchdog();
       if (recoveryMode === "signal") {
         observability.info("agent turn quiescence proof handed to workflow recovery", {
           "opengeni.session_id": input.sessionId,
@@ -329,6 +380,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
     // the turn. Sync observer → buffer → single awaited append here (no unawaited
     // DB write inside the activity). Scoped to this turn; skipped if no turnId
     // (the op ran under a turn, so on the normal path turnId is set).
+    monitor.enter("event_flush");
     const machineOpEvents = machineOpObserver.drainEvents();
     if (machineOpEvents.length > 0 && attempt.turnId && attempt.executionGeneration > 0) {
       await waitForTurnFinalizerStep(
@@ -355,17 +407,34 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
     // Multi-account P4: flush the serving account's free per-turn caches ONCE,
     // best-effort (same discipline as today's usage write). Both writers skip
     // version/updatedAt, so neither can race the token-refresh CAS.
+    monitor.enter("provider_leases");
     if (providerTurn.effectiveCodexCredentialId) {
       // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
       // full both-windows snapshot (parseCodexUsageHeaders gates on both), so this
       // is byte-identical to the /wham/usage write — no partial-window clobber.
-      if (providerTurn.latestCodexUsage) {
+      if (
+        providerTurn.latestCodexUsage &&
+        attempt.turnId &&
+        leases.codex.held &&
+        leases.codex.holderId &&
+        leases.codex.generation !== null &&
+        providerTurn.effectiveCodexCredentialVersion !== null
+      ) {
         const usageMutation = await waitForTurnFinalizerStep(
-          recordCodexAccountUsageWithWakeTargets(
+          recordCodexAccountUsageForFinalization(
             db,
             input.workspaceId,
             providerTurn.effectiveCodexCredentialId,
             providerTurn.latestCodexUsage,
+            {
+              turnId: attempt.turnId,
+              sessionId: input.sessionId,
+              attemptId: input.attemptId,
+              executionGeneration: attempt.executionGeneration,
+              holderId: leases.codex.holderId,
+              generation: leases.codex.generation,
+              credentialVersion: providerTurn.effectiveCodexCredentialVersion,
+            },
           ).catch(() => null),
           finalizerSignal,
         );
@@ -468,53 +537,67 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
     const runTurnEndPersistence = shouldRunTurnEndWorkspacePersistence({
       activityStatus: control.activityStatus,
       cancellationRequested: finalizerSignal?.aborted === true,
+      deadlineRotationRequested: sandboxState.deadlineRotationRequested,
     });
     if (
+      settings.workspaceCaptureEnabled &&
       runTurnEndPersistence &&
       attempt.turnId &&
       sandboxState.resolvedSandbox &&
       sandboxState.setupBoxSession &&
       sandboxState.sandboxGroupId
     ) {
-      // Block new periodic snapshots, then drain any one already in flight.
-      // Keep the lease heartbeat itself running: capture may legitimately
-      // exceed the 90s holder TTL, and the reaper must remain unable to drain
-      // the exact box while this holder still reads it.
+      // Review reads yield to queued work. Recovery snapshots have their own
+      // physical-settlement requirement and are drained later in finalization.
+      monitor.enter("workspace_capture");
       sandboxState.turnEndCaptureInProgress = true;
-      if (sandboxState.snapshotInFlight) {
-        await waitForWarmSnapshot(
-          sandboxState.snapshotInFlight,
-          settings.sandboxSnapshotTimeoutMs,
-          finalizerSignal,
-        );
-      }
-      const captureEstablished = sandboxState.resolvedSandbox.established;
-      await captureWorkspaceRevision({
-        db,
-        objectStorage,
-        settings,
-        publish: async (events) => {
-          await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
-        },
-        session: sandboxState.setupBoxSession as ChannelASession,
-        openReadSession: async () =>
-          await openFreshWorkspaceCaptureSession({
-            backendId: captureEstablished.backendId,
-            client: captureEstablished.client,
-            session: sandboxState.setupBoxSession as ChannelASession,
-            expectedInstanceId: captureEstablished.instanceId,
-          }),
-        leaseEpoch: sandboxState.resolvedSandbox.leaseEpoch,
-        sandboxGroupId: sandboxState.sandboxGroupId,
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: attempt.turnId,
-        attemptId: input.attemptId,
-        observability,
+      const captureSandbox = sandboxState.resolvedSandbox;
+      const captureSession = sandboxState.setupBoxSession as ChannelASession;
+      const captureGroupId = sandboxState.sandboxGroupId;
+      const captureTurnId = attempt.turnId;
+      await captureWhileIdle({
         ...(finalizerSignal ? { signal: finalizerSignal } : {}),
+        hasPendingWork: async () =>
+          (await listPendingSessionTurns(db, input.workspaceId, input.sessionId)).some(
+            (turn) => turn.id !== captureTurnId,
+          ),
+        capture: async (signal) => {
+          if (sandboxState.snapshotInFlight) {
+            await waitForWarmSnapshot(
+              sandboxState.snapshotInFlight,
+              settings.sandboxSnapshotTimeoutMs,
+              signal,
+            );
+          }
+          if (signal.aborted) return;
+          await captureWorkspaceRevision({
+            db,
+            objectStorage,
+            settings,
+            publish: async (events) =>
+              publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events),
+            session: captureSession,
+            openReadSession: async () =>
+              openFreshWorkspaceCaptureSession({
+                backendId: captureSandbox.established.backendId,
+                client: captureSandbox.established.client,
+                session: captureSession,
+                expectedInstanceId: captureSandbox.established.instanceId,
+              }),
+            leaseEpoch: captureSandbox.leaseEpoch,
+            sandboxGroupId: captureGroupId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: captureTurnId,
+            attemptId: input.attemptId,
+            observability,
+            signal,
+          });
+        },
       });
     }
+    monitor.enter("tool_close");
     eventing.toolPreparationClosing = true;
     if (eventing.toolPreparationReady) {
       await waitForTurnFinalizerStep(
@@ -535,9 +618,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
         finalizerSignal,
       );
     }
-    if (eventing.heartbeatTimer) {
-      clearInterval(eventing.heartbeatTimer);
-    }
+    monitor.enter("sandbox_provisioning");
     if (sandboxState.turnSandboxProvisioner?.hasStarted()) {
       await waitForTurnFinalizerStep(
         sandboxState.turnSandboxProvisioner.waitForSettled(30_000),
@@ -565,11 +646,15 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
     if (sandboxState.leaseHeartbeatTimer) {
       stopLeaseHeartbeat();
     }
-    if (sandboxState.rotationInFlight) {
-      await waitForTurnFinalizerStep(sandboxState.rotationInFlight, finalizerSignal).catch(
-        () => undefined,
-      );
+    monitor.enter("sandbox_rotation");
+    if (sandboxState.rotationPreemptionInFlight) {
+      await sandboxState.rotationPreemptionInFlight.catch(() => undefined);
     }
+    // No heartbeat can register another capture after this point. Join the
+    // actual provider continuation before either starting a turn-end capture
+    // or entering the proof-bearing holder release.
+    monitor.enter("workspace_snapshot");
+    await drainInFlightWarmSnapshot();
     if (sandboxState.resolvedSandbox) {
       // TURN-END mid-session snapshot (sandbox-file-persistence): fold the
       // turn's finished /workspace onto the lease before releasing the holder,
@@ -585,20 +670,14 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
         sandboxState.sandboxGroupId &&
         settledTurnId
       ) {
-        // Single-flight vs the heartbeat capture: the timer is already cleared
-        // above, but a capture it launched may still be in flight — and that
-        // capture predates the turn's final writes. Wait for it, but only up
-        // to the snapshot timeout: release must never depend on an unbounded
-        // provider capture.
-        if (sandboxState.snapshotInFlight) {
-          await waitForWarmSnapshot(
-            sandboxState.snapshotInFlight,
-            settings.sandboxSnapshotTimeoutMs,
-            finalizerSignal,
-          );
-        }
-        const persisted = await maybePersistWarmWorkspaceSnapshot(
-          { db, settings, objectStorage },
+        const snapshot = maybePersistWarmWorkspaceSnapshot(
+          {
+            db,
+            settings,
+            objectStorage,
+            sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+            observability,
+          },
           {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -611,6 +690,8 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
           sandboxState.resolvedSandbox.leaseEpoch,
           finalizerSignal,
         );
+        sandboxState.snapshotInFlight = snapshot.settled;
+        const persisted = await snapshot;
         if (persisted && eventing.publish) {
           await eventing
             .publish([
@@ -641,6 +722,13 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
     // Temporal cancellation: the eager listener may already have dropped
     // the holder, and this idempotent proof-bearing pass still must run.
     stopLeaseHeartbeat();
+    monitor.enter("sandbox_rotation");
+    if (sandboxState.rotationPreemptionInFlight) {
+      await sandboxState.rotationPreemptionInFlight.catch(() => undefined);
+    }
+    monitor.enter("workspace_snapshot");
+    await drainInFlightWarmSnapshot();
+    monitor.enter("sandbox_release");
     const sandboxReleaseTargets = new Set(sandboxState.lateSandboxesAwaitingWriterDrain);
     sandboxState.lateSandboxesAwaitingWriterDrain.clear();
     if (sandboxState.resolvedSandbox) {
@@ -715,12 +803,17 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
       status: finalizationError ? "cleanup_failed" : control.activityStatus,
       durationSeconds,
     });
-    if (attempt.turnId && control.activityStatus !== "unknown") {
-      turnLifecycleMetricsFor(observability).finish(
-        attempt.turnId,
-        control.turnMetricOutcome,
+    if (attempt.turnId) {
+      // This registry describes physical activity ownership, not durable turn
+      // settlement. Always clear the exact attempt when its activity unwinds,
+      // even when failure settlement could not classify an outcome. Otherwise
+      // a recovered successor can make progress while the predecessor leaves a
+      // process-local false stuck-turn alert behind.
+      turnLifecycleMetricsFor(observability).finish({
+        attemptId: input.attemptId,
+        outcome: control.turnMetricOutcome,
         durationSeconds,
-      );
+      });
     }
     activitySpan.end({
       attributes: {

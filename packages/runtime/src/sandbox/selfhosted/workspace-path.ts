@@ -86,11 +86,48 @@ export function isWindowsConnectedMachinePath(value: string): boolean {
   return WINDOWS_DRIVE_ABSOLUTE.test(portable) || WINDOWS_UNC_ABSOLUTE.test(portable);
 }
 
+export function isConnectedMachineAbsolutePath(value: string): boolean {
+  const portable = value.replaceAll("\\", "/");
+  return (
+    portable.startsWith("/") ||
+    WINDOWS_DRIVE_ABSOLUTE.test(portable) ||
+    WINDOWS_UNC_ABSOLUTE.test(portable)
+  );
+}
+
 export function connectedMachineWorkspaceRootsEqual(left: string, right: string): boolean {
   if (isWindowsConnectedMachinePath(left) || isWindowsConnectedMachinePath(right)) {
     return left.replaceAll("\\", "/").toLowerCase() === right.replaceAll("\\", "/").toLowerCase();
   }
   return left === right;
+}
+
+/** True only when an absolute host-native path stays beneath an already-
+ * normalized absolute workspace root. Windows drive and UNC comparisons are
+ * case-insensitive; POSIX comparisons remain byte-sensitive. */
+export function connectedMachinePathWithinRoot(workspaceRoot: string, value: string): boolean {
+  if (!isConnectedMachineAbsolutePath(value)) return false;
+  let path: string;
+  try {
+    path = resolveConnectedMachinePath(workspaceRoot, value);
+  } catch {
+    return false;
+  }
+  const windows = isWindowsConnectedMachinePath(workspaceRoot);
+  if (windows !== isWindowsConnectedMachinePath(path)) return false;
+  const comparisonRoot = windows ? workspaceRoot.toLowerCase() : workspaceRoot;
+  const comparisonPath = windows ? path.toLowerCase() : path;
+  const rootPrefix = comparisonRoot.endsWith("/") ? comparisonRoot : `${comparisonRoot}/`;
+  return comparisonPath === comparisonRoot || comparisonPath.startsWith(rootPrefix);
+}
+
+/** Return the portable slash-separated path relative to workspaceRoot, or null
+ * when the absolute candidate is outside that authority. */
+export function relativeConnectedMachinePath(workspaceRoot: string, value: string): string | null {
+  if (!connectedMachinePathWithinRoot(workspaceRoot, value)) return null;
+  const path = resolveConnectedMachinePath(workspaceRoot, value);
+  if (connectedMachineWorkspaceRootsEqual(path, workspaceRoot)) return "";
+  return path.slice(workspaceRoot.endsWith("/") ? workspaceRoot.length : workspaceRoot.length + 1);
 }
 
 function normalizeAbsoluteOperationPath(value: string, windows: boolean): string {

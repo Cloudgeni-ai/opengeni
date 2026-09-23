@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { AccessContext, Workspace } from "@opengeni/contracts";
+import { signDelegatedAccessToken, type AccessContext, type Workspace } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
 import {
@@ -20,6 +20,9 @@ import {
 import { Hono } from "hono";
 import postgres from "postgres";
 import { registerApiKeyRoutes, organizationApiKeyPermissions } from "../src/routes/api-keys";
+import { registerVideoGenerationRoutes } from "../src/routes/video-generation";
+import { registerKnowledgeRoutes } from "../src/routes/knowledge";
+import { registerWorkspaceLearningRoutes } from "../src/routes/workspace-learning";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 
 let shared: SharedTestDatabase | null = null;
@@ -30,6 +33,7 @@ let userId = "";
 let accountId = "";
 let personalWorkspaceId = "";
 let accountAdminToken = "";
+const SETTINGS_SECRET = "personal-settings-delegation-secret-at-least-32-bytes";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const externalAdminUrl = process.env.OPENGENI_ORG_TENANCY_POSTGRES_ADMIN_URL;
 const externalAppUrl = process.env.OPENGENI_ORG_TENANCY_POSTGRES_APP_URL;
@@ -122,11 +126,20 @@ function createTestApp(overrides: Partial<Settings> = {}): Hono {
   const registered = new Hono();
   const deps = {
     db: client.db,
-    settings: testSettings({ productAccessMode: "managed", ...overrides }),
+    settings: testSettings({
+      productAccessMode: "managed",
+      delegationSecret: SETTINGS_SECRET,
+      ...overrides,
+    }),
     managedAuth,
+    // This fixture checks durable authorization; post-commit delivery has its own suite.
+    schedulePromptPostCommit: () => undefined,
   } as ApiRouteDeps;
   registerApiKeyRoutes(registered, deps);
   registerWorkspaceRoutes(registered, deps);
+  registerWorkspaceLearningRoutes(registered, deps);
+  registerKnowledgeRoutes(registered, deps);
+  registerVideoGenerationRoutes(registered, deps);
   return registered;
 }
 
@@ -199,6 +212,199 @@ describe("managed personal workspace access", () => {
       headers: { authorization: `Bearer ${accountAdminToken}` },
     });
     expect(denied.status).toBe(401);
+  });
+
+  test("Personal owners save settings and learning policy without gaining access-management powers", async () => {
+    if (!shared || !client || !app) return;
+    const headers = { cookie: "session=present", "content-type": "application/json" };
+    const base = `http://x/v1/workspaces/${personalWorkspaceId}`;
+    const saved = await app.request(`${base}/settings`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ voiceInput: { enabled: false } }),
+    });
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({
+      settings: { voiceInput: { enabled: false } },
+    });
+    const video = await app.request(`${base}/video-generation/policy`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        expectedRevision: 0,
+        fundingSource: "workspace_gateway",
+        enabledModelIds: [],
+        defaultModelId: null,
+      }),
+    });
+    expect(video.status).toBe(200);
+    expect(await video.json()).toMatchObject({ revision: 1, enabledModelIds: [] });
+    const current = await app.request(base, { headers });
+    const workspace = (await current.json()) as Workspace;
+    const timer = await app.request(`${base}/pause-timer`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        action: "set",
+        pauseInSeconds: 3600,
+        pauseForSeconds: 600,
+        expectedRevision: workspace.inferenceControl.revision,
+        clientEventId: crypto.randomUUID(),
+      }),
+    });
+    expect(timer.status).toBe(200);
+    const timed = await app.request(base, { headers });
+    expect(((await timed.json()) as Workspace).inferenceControl.pauseAt).not.toBeNull();
+    const currentLearning = await app.request(`${base}/agent-learning/read`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ scope: "personal" }),
+    });
+    expect(currentLearning.status).toBe(200);
+    const baseline = (await currentLearning.json()) as {
+      version: number;
+      settings: Record<string, string>;
+    };
+    const changedLearning = await app.request(`${base}/agent-learning`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        scope: "personal",
+        operationId: crypto.randomUUID(),
+        expectedVersion: baseline.version,
+        settings: { ...baseline.settings, knowledge: "off" },
+      }),
+    });
+    expect(changedLearning.status).toBe(200);
+    expect(await changedLearning.json()).toMatchObject({ settings: { knowledge: "off" } });
+    const instructionReviews = await app.request(`${base}/agent-learning/instructions/reviews`, {
+      headers,
+    });
+    expect(instructionReviews.status).toBe(200);
+    expect(await instructionReviews.json()).toMatchObject({ entries: [] });
+    const retired = await app.request(`${base}/learning/revisions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ workspaceMode: "off", sourceOverrides: [] }),
+    });
+    expect(retired.status).toBe(410);
+    for (const [method, path, body] of [
+      ["POST", "/members", { subjectId: "user:outsider", permissions: ["workspace:read"] }],
+      ["POST", "/api-keys", { name: "No delegation", permissions: ["workspace:read"] }],
+      ["DELETE", "", undefined],
+    ] as const) {
+      const denied = await app.request(`${base}${path}`, {
+        method,
+        headers,
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      });
+      expect(denied.status).toBe(403);
+    }
+    const [count] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from workspace_memberships where workspace_id = ${personalWorkspaceId}`;
+    expect(count?.count).toBe(0);
+  });
+
+  test("Personal Knowledge uses the canonical API and validates pagination before retrieval", async () => {
+    if (!app) return;
+    const headers = { cookie: "session=present", "content-type": "application/json" };
+    const base = `http://x/v1/workspaces/${personalWorkspaceId}/knowledge/entries`;
+    const entryId = crypto.randomUUID();
+    const saved = await app.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        operationId: crypto.randomUUID(),
+        entryId,
+        expectedVersion: 0,
+        scope: "personal",
+        entry: {
+          kind: "note",
+          title: "Personal research",
+          content: "A retained customer observation.",
+          source: { kind: "manual" },
+        },
+      }),
+    });
+    expect(saved.status).toBe(201);
+    expect(await saved.json()).toMatchObject({ entryId, outcome: "published" });
+    const tooMany = await app.request(`${base}/search`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ limit: 51, scope: "personal" }),
+    });
+    expect(tooMany.status).toBe(422);
+    const listing = await app.request(`${base}/search`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ limit: 50, scope: "personal" }),
+    });
+    expect(listing.status).toBe(200);
+    expect(await listing.json()).toMatchObject({
+      entries: [
+        { id: entryId, scope: "personal", revision: { title: "Personal research", kind: "note" } },
+      ],
+    });
+  });
+
+  test("Personal settings deny delegated owner lookalikes and read-only shared-workspace cookies", async () => {
+    if (!shared || !client || !app) return;
+    const base = `http://x/v1/workspaces/${personalWorkspaceId}`;
+    for (const principalKind of ["human_session", "service"] as const) {
+      const token = await signDelegatedAccessToken(SETTINGS_SECRET, {
+        accountId,
+        workspaceId: personalWorkspaceId,
+        subjectId: `user:${userId}`,
+        principalKind,
+        permissions: managedPersonalWorkspacePermissions,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      for (const [method, path, body] of [
+        ["PATCH", "/settings", { memoryEnabled: true }],
+        ["POST", "/learning/revisions", { workspaceMode: "automatic", sourceOverrides: [] }],
+        ["PUT", "/model-policy", {}],
+        ["PUT", "/video-generation/policy", {}],
+        ["POST", "/gateway-custom-models", {}],
+        ["POST", "/openrouter-custom-models", {}],
+        ["POST", "/inference-control", {}],
+        ["POST", "/pause-timer", {}],
+      ] as const) {
+        const response = await app.request(`${base}${path}`, {
+          method,
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        expect(response.status).toBe(403);
+      }
+    }
+    // Even an accessible shared workspace in the same organization is not the
+    // Personal pointer, and a read-only cookie must not acquire settings powers.
+    const access = await app.request("http://x/v1/access/me", {
+      headers: { cookie: "session=present" },
+    });
+    const sharedWorkspaceId = ((await access.json()) as AccessContext).defaultWorkspaceId!;
+    const [before] = await shared.admin<Array<{ permissions: string[] }>>`
+      select permissions from workspace_memberships where workspace_id = ${sharedWorkspaceId} and subject_id = ${`user:${userId}`}`;
+    try {
+      await shared.admin`update workspace_memberships set permissions = '["workspace:read"]'::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${`user:${userId}`}`;
+      const response = await app.request(`http://x/v1/workspaces/${sharedWorkspaceId}/settings`, {
+        method: "PATCH",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({ memoryEnabled: false }),
+      });
+      expect(response.status).toBe(403);
+      const video = await app.request(
+        `http://x/v1/workspaces/${sharedWorkspaceId}/video-generation/policy`,
+        {
+          method: "PUT",
+          headers: { cookie: "session=present", "content-type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      );
+      expect(video.status).toBe(403);
+    } finally {
+      await shared.admin`update workspace_memberships set permissions = ${JSON.stringify(before!.permissions)}::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${`user:${userId}`}`;
+    }
   });
 
   test("organization API keys manage shared workspaces while personal workspaces stay excluded", async () => {

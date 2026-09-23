@@ -10,6 +10,9 @@ import {
   UpdateAutomationSourceRequest,
   UpdateAutomationTriggerRequest,
   stableJson,
+  resolveBundledSkillSelection,
+  type AccessGrant,
+  type BundledSkillId,
 } from "@opengeni/contracts";
 import {
   AutomationDeliveryConflictError,
@@ -21,6 +24,7 @@ import {
   encryptVariableSetValue,
   getAutomationSourceSecret,
   getAutomationTriggerRevisions,
+  getSession,
   listActiveAutomationTriggersForSource,
   listAutomationRuns,
   listAutomationSources,
@@ -38,6 +42,7 @@ import {
   assertWorkspaceModelPolicyAllows,
   buildAutomationAcceptedExecution,
   canonicalConfiguredModel,
+  creationInitiatorForGrant,
   workspaceCustomModelReference,
   lockActiveCustomModelForAdmission,
   requireAccessGrant,
@@ -48,6 +53,26 @@ import {
 } from "@opengeni/core";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+
+async function callerBundleSelection(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  requested: BundledSkillId[] | undefined,
+) {
+  const actor = creationInitiatorForGrant(grant).actor;
+  const parent = actor ? await getSession(deps.db, grant.workspaceId, actor.sessionId) : null;
+  if (actor && (!parent || parent.accountId !== grant.accountId))
+    throw new HTTPException(403, {
+      message: "Automation Skill selection requires the creating agent's session",
+    });
+  try {
+    return resolveBundledSkillSelection(requested, parent?.bundledSkillIds);
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: error instanceof Error ? error.message : "Invalid bundled Skill selection",
+    });
+  }
+}
 
 export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/automations/sources", async (c) => {
@@ -63,6 +88,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     requirePermission(grant, "secrets:write");
     const request = CreateAutomationSourceRequest.parse(await c.req.json());
+    assertGenericTriggerMutable(request);
     requireAutomationAdapter(request.adapterId).validateSourceConfiguration(request.configuration);
     const key = requireEncryptionKey(deps);
     const source = await createAutomationSource(deps.db, {
@@ -146,11 +172,11 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const request = CreateAutomationTriggerRequest.parse(await c.req.json());
-    if (request.packInstallationId || request.packTemplateId) {
-      throw new HTTPException(409, {
-        message: "Pack-owned automation triggers must be created through their Pack setup API",
-      });
-    }
+    request.sessionTemplate.bundledSkillIds = await callerBundleSelection(
+      deps,
+      grant,
+      request.sessionTemplate.bundledSkillIds,
+    );
     const source = await requireSource(deps, grant.accountId, workspaceId, request.sourceId);
     assertGenericSourceMutable(source);
     if (source.status !== "active") {
@@ -220,6 +246,11 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
       requireAutomationAdapter(existing.adapterId).validateTriggerParameters(request.parameters);
     }
     if (request.sessionTemplate) {
+      request.sessionTemplate.bundledSkillIds = await callerBundleSelection(
+        deps,
+        grant,
+        request.sessionTemplate.bundledSkillIds,
+      );
       for (const permission of request.sessionTemplate.firstPartyMcpPermissions) {
         requirePermission(grant, permission);
       }
@@ -632,17 +663,13 @@ async function requireSource(
 }
 
 function assertGenericSourceMutable(source: AutomationSourceSecret): void {
-  if (source.packInstallationId) {
-    throw new HTTPException(409, {
-      message: "Pack-owned automation sources must be managed through their Pack setup API",
-    });
-  }
+  assertGenericTriggerMutable(source);
 }
 
-function assertGenericTriggerMutable(trigger: { packInstallationId: string | null }): void {
-  if (trigger.packInstallationId) {
+function assertGenericTriggerMutable(trigger: { adapterId: string }): void {
+  if (trigger.adapterId === "source-control.pull-request.v1") {
     throw new HTTPException(409, {
-      message: "Pack-owned automation triggers must be managed through their Pack setup API",
+      message: "PR Review automations must be managed through the PR Review setup API",
     });
   }
 }

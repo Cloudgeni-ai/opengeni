@@ -2356,7 +2356,6 @@ function densityProfileSettings(productionSettings: Settings, densityMcpUrl: str
       },
     ],
     codexSubscriptionEnabled: false,
-    codexCredentialLeasingEnabled: false,
     webSearchEnabled: false,
     sandboxBackend: "none",
     sandboxOwnershipEnabled: false,

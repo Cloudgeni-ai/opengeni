@@ -1,12 +1,71 @@
 import { createHash } from "node:crypto";
+import { tool, type Tool } from "@openai/agents";
+import { parseSkillFrontmatter } from "@opengeni/contracts";
+import { z } from "zod";
+import {
+  assertSkillRelativePath,
+  listSkillPaths,
+  readSkillFiles,
+  SkillFileError,
+  SKILL_READ_MAX_PATHS,
+  SKILL_READ_MAX_OUTPUT_BYTES,
+  type SkillTextFile,
+} from "./skill-files";
 
-import { Capability, type SandboxSessionLike } from "@openai/agents/sandbox";
+import {
+  Capability,
+  SandboxWorkspaceReadNotFoundError,
+  type SandboxSessionLike,
+} from "@openai/agents/sandbox";
+import { SandboxFilesystemNotFoundError } from "modal";
+import { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
+import { isDefinitePathNotFoundError } from "./sandbox/channel-a";
 
 const SKILL_FILE = "SKILL.md";
 const MAX_DISCOVERED_SKILLS = 256;
 const MAX_SKILL_ENTRIES = 1_024;
 const MAX_SKILL_BYTES = 32 * 1024 * 1024;
 const SAFE_SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const DISCOVERY_CONCURRENCY = 8;
+
+// Keep ordered results, bound remote work, and drain already-started operations
+// before propagating a failure. Never leave detached filesystem work behind.
+async function mapDiscovery<T, R>(
+  items: readonly T[],
+  read: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  let failed = false;
+  let failure: unknown;
+  let failureIndex = Infinity;
+  await Promise.all(
+    Array.from({ length: Math.min(DISCOVERY_CONCURRENCY, items.length) }, async () => {
+      while (!failed && next < items.length) {
+        const index = next++;
+        try {
+          results[index] = await read(items[index]!);
+        } catch (error) {
+          if (index < failureIndex) {
+            failure = error;
+            failureIndex = index;
+          }
+          failed = true;
+        }
+      }
+    }),
+  );
+  if (failed) throw failure;
+  return results;
+}
+
+function isMissingSkillPath(error: unknown): boolean {
+  return (
+    isDefinitePathNotFoundError(error) ||
+    error instanceof SandboxWorkspaceReadNotFoundError ||
+    error instanceof SandboxFilesystemNotFoundError
+  );
+}
 
 export type WorkspaceSkillSearchPath = Readonly<{
   path: string;
@@ -49,24 +108,94 @@ export class WorkspaceSkillsCapability extends Capability {
     super();
   }
 
-  override async instructions(): Promise<string | null> {
+  override bind(session: SandboxSessionLike): this {
+    if (this._session !== session) delete this.discovery;
+    return super.bind(session);
+  }
+
+  private discover(): Promise<readonly WorkspaceSkill[]> {
     const session = requireWorkspaceSkillSession(this._session);
-    this.discovery ??= discoverWorkspaceSkills(
+    return (this.discovery ??= discoverWorkspaceSkills(
       session,
       this.searchPaths,
       this.reservedNames,
       this._runAs,
       this.shadowedNames,
-    );
-    const skills = await this.discovery;
+    ));
+  }
+
+  override tools(): Tool<unknown>[] {
+    return [
+      tool({
+        name: "repository_skill_read",
+        description:
+          "Read current repository Skill files from the bound workspace. Use the exact repository: identifier from the Repository skills index. Omit paths for SKILL.md; explicit relative paths read only those files. Set listFiles:true without paths for a bounded file inventory. This reads live files through the sandbox, including Connected Machines.",
+        parameters: z.object({
+          skill: z.string().min(1),
+          paths: z.array(z.string().min(1).max(1024)).min(1).max(SKILL_READ_MAX_PATHS).optional(),
+          listFiles: z.boolean().optional(),
+        }),
+        execute: async (request) => {
+          if (request.listFiles && request.paths !== undefined)
+            throw new SkillFileError(
+              "invalid_request",
+              "listFiles:true cannot be combined with paths.",
+            );
+          const skill = (await this.discover()).find(
+            (entry) => repositorySkillId(entry) === request.skill,
+          );
+          if (!skill)
+            throw new SkillFileError(
+              "missing_file",
+              "Repository Skill is not in this index. Use its exact repository: identifier.",
+            );
+          const session = requireWorkspaceSkillSession(this._session);
+          const root = skill.path.slice(0, -SKILL_FILE.length - 1);
+          const result = request.listFiles
+            ? listSkillPaths(
+                await repositorySkillInventory(session, root, this._runAs),
+                MAX_SKILL_ENTRIES,
+              )
+            : readSkillFiles(
+                await repositorySkillFiles(
+                  session,
+                  root,
+                  request.paths ?? [SKILL_FILE],
+                  this._runAs,
+                ),
+                request.paths,
+              );
+          const output = JSON.stringify({
+            skillId: request.skill,
+            source: "repository",
+            root,
+            ...result,
+          });
+          if (new TextEncoder().encode(output).byteLength > SKILL_READ_MAX_OUTPUT_BYTES) {
+            throw new SkillFileError(
+              "output_too_large",
+              "Repository Skill response exceeds the read output limit. Request fewer paths.",
+            );
+          }
+          return output;
+        },
+      }),
+    ];
+  }
+
+  override async instructions(): Promise<string | null> {
+    const skills = await this.discover();
     if (skills.length === 0) return null;
 
     const available = skills
-      .map((skill) => `- ${skill.name}: ${skill.description} (file: ${skill.path})`)
+      .map(
+        (skill) =>
+          `- ${JSON.stringify({ id: repositorySkillId(skill), name: skill.name, description: skill.description, reader: "repository_skill_read", path: skill.path })}`,
+      )
       .join("\n");
     return `## Repository skills
 
-Repository skills are instructions already present in the live workspace. They do not need to be loaded or copied.
+Repository skills are instructions already present in the live workspace. Read them with repository_skill_read using the exact repository: id below. The reader returns current live files; ordinary filesystem tools execute referenced scripts and read binary assets. Configured Skills use their separate skill_read index.
 
 ### Available repository skills
 ${available}
@@ -98,78 +227,130 @@ export async function discoverWorkspaceSkills(
   runAs?: string,
   shadowedNames: ReadonlySet<string> = new Set(),
 ): Promise<readonly WorkspaceSkill[]> {
+  const startedAt = performance.now();
+  let outcome: "completed" | "failed" = "completed";
+  try {
+    return await discoverWorkspaceSkillsUnmeasured(
+      session,
+      searchPaths,
+      reservedNames,
+      runAs,
+      shadowedNames,
+    );
+  } catch (error) {
+    outcome = "failed";
+    throw error;
+  } finally {
+    recordModelPreparationMeasurement({
+      phase: "repository_skill_discovery",
+      outcome,
+      durationSeconds: (performance.now() - startedAt) / 1_000,
+      count: searchPaths.length,
+    });
+  }
+}
+
+async function discoverWorkspaceSkillsUnmeasured(
+  session: SandboxSessionLike,
+  searchPaths: readonly WorkspaceSkillSearchPath[],
+  reservedNames: ReadonlySet<string>,
+  runAs: string | undefined,
+  shadowedNames: ReadonlySet<string>,
+): Promise<readonly WorkspaceSkill[]> {
   if (!session.listDir || !session.readFile) {
     throw new Error("Workspace skill discovery requires sandbox listDir() and readFile() support");
   }
   const discovered = new Map<string, DiscoveredWorkspaceSkill>();
-  let candidates = 0;
-  for (const searchPath of searchPaths) {
-    let entries;
+  const roots = await mapDiscovery(searchPaths, async (searchPath) => {
     try {
-      entries = await session.listDir({ path: searchPath.path, ...(runAs ? { runAs } : {}) });
-    } catch {
+      return await session.listDir!({ path: searchPath.path, ...(runAs ? { runAs } : {}) });
+    } catch (error) {
+      if (!isMissingSkillPath(error)) throw error;
+      return [];
+    }
+  });
+  const candidates = roots.flatMap((entries, index) =>
+    [...entries]
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .filter((entry) => entry.type === "dir")
+      .map((entry) => ({ entry, searchPath: searchPaths[index]! })),
+  );
+  if (candidates.length > MAX_DISCOVERED_SKILLS) {
+    throw new Error(`Repository skill discovery exceeds ${MAX_DISCOVERED_SKILLS} directories`);
+  }
+  const loaded = await mapDiscovery(candidates, async ({ entry, searchPath }) => {
+    const skillMarkdownPath = joinWorkspacePath(entry.path, SKILL_FILE);
+    let markdown: string;
+    try {
+      // Match reader/inventory eligibility: symlink entrypoints are not
+      // advertised because the portable filesystem API cannot prove containment.
+      const skillEntries = await session.listDir!({
+        path: entry.path,
+        ...(runAs ? { runAs } : {}),
+      });
+      if (
+        !skillEntries.some(
+          (candidate) => candidate.name === SKILL_FILE && candidate.type === "file",
+        )
+      )
+        return null;
+      const content = await session.readFile!({
+        path: skillMarkdownPath,
+        ...(runAs ? { runAs } : {}),
+      });
+      markdown = typeof content === "string" ? content : new TextDecoder().decode(content);
+    } catch (error) {
+      if (!isMissingSkillPath(error)) throw error;
+      return null;
+    }
+    const frontmatter = parseSkillFrontmatter(markdown);
+    const name = frontmatter.name?.trim() || entry.name;
+    if (name.length > 64 || !SAFE_SKILL_NAME.test(name)) {
+      throw new Error(`Repository skill has an invalid name: ${name.slice(0, 64)}`);
+    }
+    const key = name.toLowerCase();
+    if (shadowedNames.has(key)) return null;
+    const description = frontmatter.description?.trim() || "No description provided.";
+    if (description.length > 2_048) {
+      throw new Error(`Repository skill "${name}" has an invalid description`);
+    }
+    if (reservedNames.has(key)) {
+      throw new Error(`Workspace skill "${name}" conflicts with a configured OpenGeni skill`);
+    }
+    const candidate: DiscoveredWorkspaceSkill = {
+      name,
+      description,
+      path: skillMarkdownPath,
+      source: searchPath.source,
+      directory: entry.path,
+    };
+    return candidate;
+  });
+  for (const candidate of loaded) {
+    if (!candidate) continue;
+    const { name } = candidate;
+    const key = name.toLowerCase();
+    const existing = discovered.get(key);
+    if (!existing) {
+      discovered.set(key, candidate);
       continue;
     }
-    for (const entry of [...entries].sort((left, right) => left.name.localeCompare(right.name))) {
-      if (entry.type !== "dir") continue;
-      candidates += 1;
-      if (candidates > MAX_DISCOVERED_SKILLS) {
-        throw new Error(`Repository skill discovery exceeds ${MAX_DISCOVERED_SKILLS} directories`);
-      }
-      const skillMarkdownPath = joinWorkspacePath(entry.path, SKILL_FILE);
-      let markdown: string;
-      try {
-        const content = await session.readFile({
-          path: skillMarkdownPath,
-          ...(runAs ? { runAs } : {}),
-        });
-        markdown = typeof content === "string" ? content : new TextDecoder().decode(content);
-      } catch {
-        continue;
-      }
-      const frontmatter = parseSkillFrontmatter(markdown);
-      const name = frontmatter.name?.trim() || entry.name;
-      if (name.length > 64 || !SAFE_SKILL_NAME.test(name)) {
-        throw new Error(`Repository skill has an invalid name: ${name.slice(0, 64)}`);
-      }
-      const key = name.toLowerCase();
-      if (shadowedNames.has(key)) continue;
-      const description = frontmatter.description?.trim() || "No description provided.";
-      if (description.length > 2_048 || /[\r\n]/.test(description)) {
-        throw new Error(`Repository skill "${name}" has an invalid description`);
-      }
-      if (reservedNames.has(key)) {
-        throw new Error(`Workspace skill "${name}" conflicts with a configured OpenGeni skill`);
-      }
-      const candidate: DiscoveredWorkspaceSkill = {
-        name,
-        description,
-        path: skillMarkdownPath,
-        source: searchPath.source,
-        directory: entry.path,
-      };
-      const existing = discovered.get(key);
-      if (!existing) {
-        discovered.set(key, candidate);
-        continue;
-      }
-      // Unique names only need SKILL.md frontmatter for the prompt-cache prefix.
-      // Hash both trees only when the same name appears in two search paths.
-      const existingFingerprint =
-        existing.fingerprint ??
-        (await fingerprintWorkspaceDirectory(session, existing.directory, runAs));
-      const candidateFingerprint = await fingerprintWorkspaceDirectory(
-        session,
-        candidate.directory,
-        runAs,
+    // Unique names only need SKILL.md frontmatter for the prompt-cache prefix.
+    // Hash both trees only when the same name appears in two search paths.
+    const existingFingerprint =
+      existing.fingerprint ??
+      (await fingerprintWorkspaceDirectory(session, existing.directory, runAs));
+    const candidateFingerprint = await fingerprintWorkspaceDirectory(
+      session,
+      candidate.directory,
+      runAs,
+    );
+    if (existingFingerprint !== candidateFingerprint) {
+      throw new Error(
+        `Workspace skill "${name}" has conflicting definitions in ${existing.source} and ${candidate.source}`,
       );
-      if (existingFingerprint !== candidateFingerprint) {
-        throw new Error(
-          `Workspace skill "${name}" has conflicting definitions in ${existing.source} and ${candidate.source}`,
-        );
-      }
-      existing.fingerprint = existingFingerprint;
     }
+    existing.fingerprint = existingFingerprint;
   }
   return [...discovered.values()]
     .map(({ name, description, path, source }) => ({ name, description, path, source }))
@@ -220,34 +401,80 @@ async function fingerprintWorkspaceDirectory(
   return hash.digest("hex");
 }
 
-function parseSkillFrontmatter(markdown: string): {
-  name?: string;
-  description?: string;
-} {
-  const lines = markdown.split(/\r?\n/);
-  if (lines[0]?.trim() !== "---") return {};
-  const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
-  if (end === -1) return {};
-  const values: Record<string, string> = {};
-  for (const line of lines.slice(1, end)) {
-    const separator = line.indexOf(":");
-    if (separator === -1) continue;
-    const key = line.slice(0, separator).trim();
-    if (key !== "name" && key !== "description") continue;
-    values[key] = unquote(line.slice(separator + 1).trim());
-  }
-  return values;
+function repositorySkillId(skill: WorkspaceSkill): string {
+  return `repository:${skill.path}`;
 }
 
-function unquote(value: string): string {
-  if (
-    value.length >= 2 &&
-    value[0] === value[value.length - 1] &&
-    (value[0] === '"' || value[0] === "'")
-  ) {
-    return value.slice(1, -1);
+/** Resolve only ordinary directory entries under the discovered Skill root.
+ * Never treat a caller identifier as a path or follow a listed symlink. The
+ * bound sandbox remains the filesystem authority, including concurrent edits.
+ */
+async function repositorySkillFiles(
+  session: SandboxSessionLike,
+  root: string,
+  paths: readonly string[],
+  runAs?: string,
+): Promise<SkillTextFile[]> {
+  // Validate the entire request before touching the filesystem.
+  readSkillFiles(
+    paths.map((path) => ({ path, content: "" })),
+    paths,
+  );
+  const files: SkillTextFile[] = [];
+  for (const path of paths) {
+    let directory = root;
+    const segments = path.split("/");
+    for (const [index, name] of segments.entries()) {
+      const entries = await session.listDir!({ path: directory, ...(runAs ? { runAs } : {}) });
+      const entry = entries.find((candidate) => candidate.name === name);
+      const expected = index === segments.length - 1 ? "file" : "dir";
+      if (entry?.type !== expected)
+        throw new SkillFileError("missing_file", `Repository Skill file is unavailable: ${path}`);
+      directory = joinWorkspacePath(directory, name);
+    }
+    const content = await session.readFile!({ path: directory, ...(runAs ? { runAs } : {}) });
+    files.push({
+      path,
+      content:
+        typeof content === "string"
+          ? content
+          : new TextDecoder("utf-8", { fatal: true }).decode(content),
+    });
+    // Bound aggregate output as each file arrives; do not truncate accepted text.
+    readSkillFiles(
+      files,
+      files.map((file) => file.path),
+    );
   }
-  return value;
+  return files;
+}
+
+async function repositorySkillInventory(
+  session: SandboxSessionLike,
+  root: string,
+  runAs?: string,
+): Promise<SkillTextFile[]> {
+  const files: SkillTextFile[] = [];
+  let count = 0;
+  async function visit(relative: string): Promise<void> {
+    const entries = await session.listDir!({
+      path: relative ? joinWorkspacePath(root, relative) : root,
+      ...(runAs ? { runAs } : {}),
+    });
+    for (const entry of entries) {
+      if (++count > MAX_SKILL_ENTRIES)
+        throw new SkillFileError("output_too_large", "Repository Skill inventory is too large.");
+      // Paths derive from validated names, never provider-returned absolute paths.
+      assertSkillRelativePath(entry.name);
+      if (entry.name.includes("/"))
+        throw new SkillFileError("invalid_path", "Invalid repository directory entry.");
+      const path = relative ? `${relative}/${entry.name}` : entry.name;
+      if (entry.type === "dir") await visit(path);
+      else if (entry.type === "file") files.push({ path, content: "" });
+    }
+  }
+  await visit("");
+  return files;
 }
 
 function joinWorkspacePath(parent: string, child: string): string {

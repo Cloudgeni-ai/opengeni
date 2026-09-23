@@ -993,6 +993,11 @@ export async function writeCompanyBrainGovernedProposal(
 ): Promise<CompanyBrainGovernedWriteResult> {
   const attempt = CompanyBrainGovernedWriteAttempt.parse(rawInput.attempt);
   const request = CompanyBrainGovernedWriteRequest.parse(rawInput.request);
+  if (isPreferenceProposal(request)) {
+    throw new CompanyBrainGovernedWriteInvalidOperationError(
+      "Knowledge-backed Skill proposals are retired; use the unified Skill lifecycle (skill_save)",
+    );
+  }
   const inputHash = scopedKnowledgeInputHash({
     attempt,
     request: identityRequest(request),

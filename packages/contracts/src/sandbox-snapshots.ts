@@ -64,8 +64,35 @@ export type WorkspaceArchiveObjectRef = {
   backend: string;
 };
 
+// Keep legacy scope/key spelling readable. New physical upload identities must
+// be a complete RFC UUID (including version and variant), never arbitrary text.
+const UPLOAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const OBJECT_KEY =
-  /^sandbox-archives\/v1\/[0-9a-f-]{36}\/[0-9a-f-]{36}\/[0-9a-f-]{36}\/wa1:[0-9]{13}:[0-9a-f]{64}\.tar$/i;
+  /^sandbox-archives\/v1\/([0-9a-f-]{36})\/([0-9a-f-]{36})\/([0-9a-f-]{36})\/(wa1:[0-9]{13}:[0-9a-f]{64})(?:\.([0-9a-f-]+))?\.tar$/i;
+
+export type WorkspaceArchiveObjectKey = {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  revision: string;
+  uploadId: string | null;
+};
+
+export function parseWorkspaceArchiveObjectKey(value: unknown): WorkspaceArchiveObjectKey | null {
+  if (typeof value !== "string") return null;
+  const match = OBJECT_KEY.exec(value);
+  // JS $ may match before a final newline; a locator must match in full.
+  if (!match || match[0] !== value || (match[5] !== undefined && !UPLOAD_ID.test(match[5]))) {
+    return null;
+  }
+  return {
+    accountId: match[1]!,
+    workspaceId: match[2]!,
+    sandboxGroupId: match[3]!,
+    revision: match[4]!,
+    uploadId: match[5] ?? null,
+  };
+}
 
 export function parseWorkspaceArchiveObjectRef(value: unknown): WorkspaceArchiveObjectRef | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -73,7 +100,7 @@ export function parseWorkspaceArchiveObjectRef(value: unknown): WorkspaceArchive
   if (
     candidate.schema !== WORKSPACE_ARCHIVE_OBJECT_REF_SCHEMA ||
     typeof candidate.key !== "string" ||
-    !OBJECT_KEY.test(candidate.key) ||
+    !parseWorkspaceArchiveObjectKey(candidate.key) ||
     typeof candidate.sha256 !== "string" ||
     !SHA256.test(candidate.sha256) ||
     !nonnegativeInteger(candidate.bytes) ||
@@ -98,8 +125,45 @@ export function workspaceArchiveObjectKey(input: {
   workspaceId: string;
   sandboxGroupId: string;
   revision: string;
+  /** New upload invocations supply a fresh randomUUID; omission is legacy-only. */
+  uploadId?: string;
 }): string {
-  return `sandbox-archives/v1/${input.accountId}/${input.workspaceId}/${input.sandboxGroupId}/${input.revision}.tar`;
+  if (
+    input.uploadId !== undefined &&
+    (!UPLOAD_ID.test(input.uploadId) || input.uploadId.length !== 36)
+  ) {
+    throw new Error("Invalid workspace archive upload UUID");
+  }
+  return `sandbox-archives/v1/${input.accountId}/${input.workspaceId}/${input.sandboxGroupId}/${input.revision}${input.uploadId === undefined ? "" : `.${input.uploadId}`}.tar`;
+}
+
+/** Bind a stored locator to its publication/restore scope and verified tar
+ * descriptor. A logical revision never substitutes for the exact physical key. */
+export function validateWorkspaceArchiveObjectRef(
+  value: unknown,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    descriptor: WorkspaceArchiveDescriptor;
+  },
+): WorkspaceArchiveObjectRef | null {
+  const ref = parseWorkspaceArchiveObjectRef(value);
+  const key = ref && parseWorkspaceArchiveObjectKey(ref.key);
+  const descriptor = parseWorkspaceArchiveDescriptor(input.descriptor);
+  if (
+    !ref ||
+    !key ||
+    descriptor?.version !== 1 ||
+    key.accountId.toLowerCase() !== input.accountId.toLowerCase() ||
+    key.workspaceId.toLowerCase() !== input.workspaceId.toLowerCase() ||
+    key.sandboxGroupId.toLowerCase() !== input.sandboxGroupId.toLowerCase() ||
+    key.revision !== descriptor.revision ||
+    ref.sha256 !== descriptor.archiveSha256 ||
+    ref.bytes !== descriptor.archiveBytes
+  )
+    return null;
+  return ref;
 }
 
 export function workspaceArchivePayloadPresent(

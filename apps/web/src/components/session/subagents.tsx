@@ -81,7 +81,7 @@ export function sessionStatusTone(status: SessionStatus): StatusTone {
 }
 
 function isLiveStatus(status: SessionStatus): boolean {
-  return status === "running" || status === "queued" || status === "requires_action";
+  return status === "running";
 }
 
 /* --- the shared compact tree ------------------------------------------------ */

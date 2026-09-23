@@ -1,3 +1,5 @@
+export { inlineHtmlDocument } from "./components/artifacts/inline-html-document";
+export { isRetainedImageContentType, useRetainedImageObjectUrl } from "./timeline/retained-image";
 /** Public artifact surfaces. Import from `@opengeni/react/artifacts`. */
 export {
   ArtifactSurface,
@@ -18,6 +20,8 @@ export {
   PresentationProjectionEditor,
   PublishedHtmlArtifactFrame,
   PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX,
+  openGeniSiteBridgePortFromBootstrap,
+  publishedHtmlArtifactDocument,
   SpreadsheetArtifactSurface,
   SpreadsheetGrid,
   SpreadsheetProjectionGrid,
@@ -62,6 +66,7 @@ export {
   type PresentationProjectionConnector,
   type PresentationProjectionEditorProps,
   type PublishedHtmlArtifactFrameProps,
+  type PublishedHtmlArtifactToolBridge,
   type PresentationProjectionElementMetadata,
   type PresentationProjectionElement,
   type PresentationProjectionFill,

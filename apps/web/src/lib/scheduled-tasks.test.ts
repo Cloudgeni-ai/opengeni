@@ -14,6 +14,7 @@ import {
   scheduleFromFormState,
   scheduleLabel,
   scheduledTaskCadence,
+  loadSessionSchedules,
   scheduledTaskDescription,
   scheduledTaskRunLabel,
   scheduledTaskRunSessionAccess,
@@ -33,6 +34,7 @@ function scheduledTask(): ScheduledTask {
     accountId: "33333333-3333-4333-8333-333333333333",
     workspaceId: "44444444-4444-4444-8444-444444444444",
     name: "Explicit Slack routing",
+    ownerSubjectId: null,
     status: "active",
     schedule: { type: "interval", everySeconds: 3_600 },
     temporalScheduleId: "scheduled-task-test",
@@ -719,5 +721,48 @@ describe("malformed scheduled tasks degrade instead of throwing", () => {
     expect(groupScheduledTasksForList([partial], {}).active.map((task) => task.id)).toEqual([
       partial.id,
     ]);
+  });
+});
+
+test("session schedule navigation includes matches beyond the first page", async () => {
+  const fixture = scheduledTask();
+  const tasks = Array.from({ length: 205 }, (_, i) => ({
+    ...fixture,
+    id: `task-${i}`,
+    status: i === 204 ? ("paused" as const) : ("active" as const),
+  }));
+  const offsets: number[] = [];
+  const result = await loadSessionSchedules(
+    {
+      listScheduledTasks: async (workspaceId, options = {}) => {
+        expect(workspaceId).toBe(fixture.workspaceId);
+        expect(options.sessionId).toBe("target-session");
+        offsets.push(options.offset ?? 0);
+        return tasks.slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 100));
+      },
+    },
+    fixture.workspaceId,
+    "target-session",
+  );
+  expect(offsets).toEqual([0, 100, 200]);
+  expect(result).toEqual(tasks);
+});
+
+test("editing an ordinary source task preserves its source binding and private learning scope", () => {
+  const task = scheduledTask();
+  const source = knowledgeSyncAction({
+    destination: { kind: "personal", workspaceId: task.workspaceId, subjectId: "user:owner" },
+  });
+  task.agentConfig.knowledgeSource = source;
+  task.metadata.knowledgeSourceSync = { sourceEnabled: true, connectionPaused: true };
+  const form = formStateFromScheduledTask(task);
+  expect(form.knowledgeSource).toEqual(source);
+  expect(
+    agentConfigFromFormState({ ...form, prompt: "Read changes and retain useful decisions" }, task)
+      .knowledgeSource,
+  ).toEqual(source);
+  expect(scheduledTaskStateLabel(task)).toMatchObject({
+    active: false,
+    reason: "connection_paused",
   });
 });

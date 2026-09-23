@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { createElement } from "react";
+import { createElement, StrictMode } from "react";
 
-import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
+import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-menu-body";
 import {
   RepositoryContextPicker,
+  RepositoryContextMenuBody,
   repositoryBindingPresentation,
 } from "@/components/repository-picker";
-import { registerDom, renderComponent } from "../../../packages/react/test/render-hook";
+import { actRun, registerDom, renderComponent } from "../../../packages/react/test/render-hook";
 import type {
   GitHubRepository,
   PersonalGitHubConnectionStatusResponse,
@@ -21,7 +22,7 @@ describe("repository picker GitHub binding status", () => {
     const presentation = repositoryBindingPresentation("unbound", url);
     expect(presentation).toMatchObject({
       connectUrl: url,
-      connectLabel: "Connect GitHub",
+      connectLabel: "Connect workspace App",
       healthy: false,
       canRefresh: false,
     });
@@ -35,7 +36,7 @@ describe("repository picker GitHub binding status", () => {
     const presentation = repositoryBindingPresentation("unbound", url, "platform");
     expect(presentation).toMatchObject({
       connectUrl: url,
-      connectLabel: "Install or connect GitHub",
+      connectLabel: "Connect workspace App",
       healthy: false,
       canRefresh: false,
     });
@@ -57,7 +58,7 @@ describe("repository picker GitHub binding status", () => {
       "https://api.opengeni.test/github/connect",
     );
     expect(presentation).toMatchObject({
-      connectLabel: "Configure another installation",
+      connectLabel: "Connect another account",
       healthy: true,
       canRefresh: true,
     });
@@ -214,12 +215,11 @@ describe("additive repository picker", () => {
     const mounted = rendered.container.querySelector<HTMLButtonElement>(
       'button[aria-label="example/app mounted"]',
     );
-    expect(mounted?.disabled).toBe(true);
+    expect(mounted?.getAttribute("aria-disabled")).toBe("true");
+    expect(mounted?.getAttribute("aria-checked")).toBe("true");
     expect(rendered.container.textContent).toContain("Mounted");
-    expect(
-      rendered.container.querySelector<HTMLInputElement>('input[aria-label="example/app ref"]')
-        ?.disabled,
-    ).toBe(true);
+    expect(rendered.container.querySelector('input[aria-label="example/app ref"]')).toBeNull();
+    expect(rendered.container.textContent).toContain("main");
     await rendered.unmount();
   });
 
@@ -279,9 +279,118 @@ describe("additive repository picker", () => {
     const row = mounted.container.querySelector<HTMLButtonElement>(
       'button[aria-label="octocat/private-repository mounted as you"]',
     );
-    expect(row?.disabled).toBe(true);
+    expect(row?.getAttribute("aria-disabled")).toBe("true");
     expect(mounted.container.textContent).toContain("@octocat");
     expect(mounted.container.textContent).toContain("Mounted");
     await mounted.unmount();
+
+    let openRefreshes = 0;
+    let explicitRefreshes = 0;
+    let toggles = 0;
+    let manualAdds = 0;
+    const bodyProps = {
+      ...props,
+      lockedPersonalGitHubRepoIds: new Set([personalRepository.repositoryId]),
+      onManualAdd: () => {
+        manualAdds += 1;
+      },
+      onTogglePersonalGitHubRepo: () => {
+        toggles += 1;
+      },
+      onOpenRefresh: async () => {
+        openRefreshes += 1;
+      },
+      onRefresh: async () => {
+        explicitRefreshes += 1;
+        throw new Error("Catalog unavailable");
+      },
+    };
+    const body = await renderComponent(
+      createElement(StrictMode, null, createElement(RepositoryContextMenuBody, bodyProps)),
+    );
+    expect(openRefreshes).toBe(1);
+    expect(explicitRefreshes).toBe(0);
+    expect(body.container.textContent).toContain("Repositories");
+    const mountedSwitch = body.container.querySelector<HTMLButtonElement>('button[role="switch"]');
+    expect(mountedSwitch?.getAttribute("aria-checked")).toBe("true");
+    expect(mountedSwitch?.getAttribute("aria-disabled")).toBe("true");
+    await actRun(() => mountedSwitch?.click());
+    expect(toggles).toBe(0);
+    expect(
+      body.container.querySelector('input[aria-label="octocat/private-repository ref"]'),
+    ).toBeNull();
+    expect(body.container.textContent).toContain("main");
+    const addActions = [...body.container.querySelectorAll<HTMLButtonElement>("button")].filter(
+      (button) => button.textContent?.includes("Add repository URL"),
+    );
+    expect(addActions).toHaveLength(1);
+    expect(
+      [...body.container.querySelectorAll("button")].some(
+        (button) => button.textContent?.trim() === "Add",
+      ),
+    ).toBe(false);
+    await actRun(() => addActions[0]?.click());
+    expect(manualAdds).toBe(1);
+    expect(body.container.textContent).toContain("Mounted");
+    expect(body.container.querySelector('button[aria-label="Refresh repositories"]')).toBeNull();
+    await body.rerender(
+      createElement(
+        StrictMode,
+        null,
+        createElement(RepositoryContextMenuBody, {
+          ...bodyProps,
+          onOpenRefresh: async () => {
+            openRefreshes += 1;
+          },
+        }),
+      ),
+    );
+    expect(openRefreshes).toBe(1);
+    const refresh = [...body.container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent?.includes("Refresh list"),
+    );
+    await actRun(() => refresh?.click());
+    expect(explicitRefreshes).toBe(1);
+    expect(body.container.querySelector('[role="alert"]')?.textContent).toBe("Catalog unavailable");
+    await body.rerender(
+      createElement(RepositoryContextMenuBody, {
+        ...bodyProps,
+        lockedPersonalGitHubRepoIds: new Set<string>(),
+      }),
+    );
+    expect(
+      body.container.querySelector<HTMLInputElement>(
+        'input[aria-label="octocat/private-repository ref"]',
+      )?.disabled,
+    ).toBe(false);
+    await body.unmount();
+
+    const manual = await renderComponent(
+      createElement(FollowUpRepositoryMenuBody, {
+        ...props,
+        manualRepos: [
+          { id: -1, url: "https://example.test/repo.git", ref: "release", attached: true },
+        ],
+        lockedManualRepoIds: new Set([-1]),
+        manualOpen: false,
+        unavailableMountedRepositories: [
+          { uri: "https://github.com/removed/personal.git", ref: "pinned" },
+        ],
+      }),
+    );
+    const manualSwitch = manual.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="https://example.test/repo.git mounted"]',
+    );
+    expect(manualSwitch?.getAttribute("aria-checked")).toBe("true");
+    expect(manualSwitch?.getAttribute("aria-disabled")).toBe("true");
+    expect(manual.container.textContent).toContain("release");
+    expect(manual.container.textContent).toContain("Unavailable in catalog");
+    expect(
+      manual.container
+        .querySelector('button[aria-label="https://github.com/removed/personal.git mounted"]')
+        ?.getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(manual.container.querySelector('input[aria-label="Repository URL"]')).toBeNull();
+    await manual.unmount();
   });
 });

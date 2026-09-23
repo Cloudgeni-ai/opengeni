@@ -134,7 +134,12 @@ describe("canonical human recovery through managed Better Auth", () => {
       `/v1/identity/login-bindings/${onlyBinding.id}/recovery/complete`,
       {
         method: "POST",
-        headers: { "content-type": "application/json", cookie: recoveryCookie },
+        headers: {
+          "content-type": "application/json",
+          cookie: recoveryCookie,
+          origin: "http://opengeni.test",
+          "sec-fetch-site": "same-origin",
+        },
         body: JSON.stringify({
           operationId: crypto.randomUUID(),
           expectedIdentityRevision: lostFactor.identity.activeIdentity.identityRevision,

@@ -32,7 +32,7 @@ export function RigOverview({
   const active = rig.activeVersion;
   if (!active) {
     return (
-      <Notice tone="waiting" title="This rig has no active version">
+      <Notice tone="waiting" title="This sandbox environment has no active version">
         Create a version by proposing and promoting a change, then it will materialize into
         sandboxes.
       </Notice>

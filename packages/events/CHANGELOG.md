@@ -1,5 +1,287 @@
 # @opengeni/events
 
+## 0.4.30
+
+### Patch Changes
+
+- Updated dependencies [d92af11]
+- Updated dependencies [f60ca2b]
+- Updated dependencies [56ddcfb]
+- Updated dependencies [86c710a]
+- Updated dependencies [38b9857]
+- Updated dependencies [2f8bc58]
+- Updated dependencies [90e089a]
+- Updated dependencies [b1ad0c6]
+- Updated dependencies [a463199]
+  - @opengeni/db@6.0.1
+  - @opengeni/contracts@5.1.0
+
+## 0.4.29
+
+### Patch Changes
+
+- 9d9b94b: Keep the published dependency closure aligned with the updated plugin removal
+  contracts. The SDK exposes named removal outcomes and optional preview-token
+  confirmation alongside the existing installation-version check.
+- Updated dependencies [4ddab4a]
+- Updated dependencies [6d0a4de]
+- Updated dependencies [59bad3f]
+- Updated dependencies [c64a94f]
+- Updated dependencies [1c924ed]
+- Updated dependencies [c31a951]
+- Updated dependencies [f90d628]
+- Updated dependencies [348e54d]
+- Updated dependencies [aa09567]
+- Updated dependencies [d1ab270]
+- Updated dependencies [f90d628]
+- Updated dependencies [0bf014d]
+- Updated dependencies [c702159]
+- Updated dependencies [3977932]
+- Updated dependencies [f90d628]
+- Updated dependencies [c8bb974]
+- Updated dependencies [3fa175e]
+- Updated dependencies [332a02d]
+- Updated dependencies [132b945]
+- Updated dependencies [779b16b]
+- Updated dependencies [9d5bb1c]
+- Updated dependencies [1cb688d]
+- Updated dependencies [621201d]
+- Updated dependencies [e261b39]
+- Updated dependencies [f90d628]
+- Updated dependencies [1bfb6a4]
+- Updated dependencies [f90d628]
+- Updated dependencies [7e2436a]
+- Updated dependencies [0bf014d]
+- Updated dependencies [6ed7dfb]
+- Updated dependencies [b0a5a54]
+- Updated dependencies [1d6e49a]
+- Updated dependencies [23d4542]
+- Updated dependencies [f90d628]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [c66ba31]
+- Updated dependencies [f7c9169]
+- Updated dependencies [0ea365c]
+  - @opengeni/db@6.0.0
+  - @opengeni/contracts@5.0.0
+
+## 0.4.28
+
+### Patch Changes
+
+- Updated dependencies [de5569f]
+- Updated dependencies [7746251]
+- Updated dependencies [85cafd0]
+  - @opengeni/db@5.0.1
+  - @opengeni/contracts@4.1.0
+
+## 0.4.27
+
+### Patch Changes
+
+- Updated dependencies [50ac837]
+- Updated dependencies [ad9dc2f]
+- Updated dependencies [750060c]
+- Updated dependencies [71fd840]
+- Updated dependencies [da4a85f]
+- Updated dependencies [123cf57]
+- Updated dependencies [efeaa9c]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/db@5.0.0
+
+## 0.4.26
+
+### Patch Changes
+
+- Updated dependencies [4e2b59d]
+- Updated dependencies [a1bb8db]
+- Updated dependencies [4e2b59d]
+- Updated dependencies [e41027c]
+- Updated dependencies [488a69b]
+- Updated dependencies [935af4e]
+- Updated dependencies [22a9e4d]
+- Updated dependencies [d08dbb6]
+  - @opengeni/db@4.4.0
+  - @opengeni/contracts@3.1.0
+
+## 0.4.25
+
+### Patch Changes
+
+- Updated dependencies [e1a50ba]
+  - @opengeni/contracts@3.0.2
+  - @opengeni/db@4.3.3
+
+## 0.4.24
+
+### Patch Changes
+
+- Updated dependencies [a9cc903]
+  - @opengeni/db@4.3.2
+
+## 0.4.23
+
+### Patch Changes
+
+- Updated dependencies [6a60a58]
+  - @opengeni/db@4.3.1
+  - @opengeni/contracts@3.0.1
+
+## 0.4.22
+
+### Patch Changes
+
+- Updated dependencies [cffd21b]
+- Updated dependencies [f8be7df]
+- Updated dependencies [cffd21b]
+  - @opengeni/contracts@3.0.0
+  - @opengeni/db@4.3.0
+
+## 0.4.21
+
+### Patch Changes
+
+- 87fbd92: Preserve full session messages and tool output through database paging, compact
+  event delivery, SSE, browser rendering, and copying. Remove browser per-event
+  preview truncation while retaining history pagination and backpressure. Events
+  larger than a page or loaded-window byte target are delivered intact on their own.
+- Updated dependencies [1b0f4f2]
+- Updated dependencies [87fbd92]
+- Updated dependencies [5835c27]
+- Updated dependencies [eb21b93]
+  - @opengeni/contracts@2.15.2
+  - @opengeni/db@4.2.2
+
+## 0.4.20
+
+### Patch Changes
+
+- d1cb266: Keep automatic history filling from evicting the latest reply or cycling between older and newer pages. Preserve explicit history navigation and stable jumps back to latest. Retain provider message identity so assistant chunks interleaved with tool activity remain one message without merging distinct replies.
+- Updated dependencies [068be26]
+- Updated dependencies [69924e8]
+- Updated dependencies [9233c88]
+- Updated dependencies [2fa33e4]
+  - @opengeni/contracts@2.15.1
+  - @opengeni/db@4.2.1
+
+## 0.4.19
+
+### Patch Changes
+
+- Updated dependencies [231b103]
+- Updated dependencies [392c575]
+- Updated dependencies [9827c25]
+- Updated dependencies [7e73418]
+- Updated dependencies [5904fd1]
+- Updated dependencies [14dd6fe]
+  - @opengeni/db@4.2.0
+  - @opengeni/contracts@2.15.0
+
+## 0.4.18
+
+### Patch Changes
+
+- Updated dependencies [22a6704]
+- Updated dependencies [4536385]
+- Updated dependencies [7dac7e3]
+- Updated dependencies [8db607e]
+- Updated dependencies [d8b0012]
+- Updated dependencies [fa2b99a]
+- Updated dependencies [5cc0aac]
+- Updated dependencies [341a7f6]
+- Updated dependencies [fa12951]
+- Updated dependencies [c1dc59b]
+- Updated dependencies [ac7e07c]
+- Updated dependencies [cc1bfe0]
+- Updated dependencies [1fc0889]
+- Updated dependencies [ba9e5a4]
+- Updated dependencies [d06450c]
+- Updated dependencies [d9dbd5d]
+- Updated dependencies [c69ad5f]
+- Updated dependencies [123a72a]
+- Updated dependencies [1c4b707]
+- Updated dependencies [cc1bfe0]
+- Updated dependencies [c90f3fc]
+- Updated dependencies [414946c]
+- Updated dependencies [0c39126]
+- Updated dependencies [0c39126]
+- Updated dependencies [b1d479b]
+- Updated dependencies [64c7c5c]
+- Updated dependencies [6e167eb]
+- Updated dependencies [575af5b]
+- Updated dependencies [b43a821]
+- Updated dependencies [6de9fe3]
+- Updated dependencies [732bece]
+- Updated dependencies [19c51e2]
+- Updated dependencies [baa1c36]
+- Updated dependencies [380bba5]
+- Updated dependencies [cda46e8]
+- Updated dependencies [c1dc59b]
+- Updated dependencies [b1d3673]
+- Updated dependencies [2fb17fd]
+- Updated dependencies [3a29372]
+- Updated dependencies [107aa14]
+- Updated dependencies [d8a70ec]
+- Updated dependencies [0a81cc8]
+  - @opengeni/contracts@2.14.0
+  - @opengeni/db@4.1.0
+
+## 0.4.17
+
+### Patch Changes
+
+- Updated dependencies [6b65383]
+- Updated dependencies [6f84c02]
+  - @opengeni/contracts@2.13.0
+  - @opengeni/db@4.0.0
+
+## 0.4.16
+
+### Patch Changes
+
+- Updated dependencies [d63ee0f]
+- Updated dependencies [b420912]
+- Updated dependencies [fab39d2]
+  - @opengeni/contracts@2.12.0
+  - @opengeni/db@3.9.0
+
+## 0.4.15
+
+### Patch Changes
+
+- Updated dependencies [38de50d]
+- Updated dependencies [8b42f58]
+- Updated dependencies [0214875]
+- Updated dependencies [7c5897f]
+- Updated dependencies [e2a668b]
+- Updated dependencies [9c45eae]
+- Updated dependencies [ae19409]
+  - @opengeni/contracts@2.11.1
+  - @opengeni/db@3.8.2
+
+## 0.4.14
+
+### Patch Changes
+
+- Updated dependencies [a5ca001]
+- Updated dependencies [8f81b57]
+  - @opengeni/db@3.8.1
+  - @opengeni/contracts@2.11.0
+
+## 0.4.13
+
+### Patch Changes
+
+- 9af1666: Keep backward session-history pagination advancing across oversized legacy events by applying the canonical bounded read projection instead of failing the page, and report when a forensic response is no longer byte-for-byte exact.
+- Updated dependencies [f5e2dfc]
+- Updated dependencies [2d0fad4]
+- Updated dependencies [9fe5c5b]
+- Updated dependencies [bcacd54]
+- Updated dependencies [c356468]
+- Updated dependencies [5ef0757]
+- Updated dependencies [9af1666]
+  - @opengeni/db@3.8.0
+  - @opengeni/contracts@2.10.0
+
 ## 0.4.12
 
 ### Patch Changes

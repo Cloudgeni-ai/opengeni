@@ -128,7 +128,6 @@ function scheduledTask(agentConfig = incidentConfig()): ScheduledTask {
     agentConfig,
     createdBy: { kind: "service", subjectId: "scheduler" },
     createdByContext: {},
-    personalConnections: [],
     reusableSessionId: null,
     targetSessionId: "44444444-4444-4444-8444-444444444444",
     variableSetId: null,
@@ -391,7 +390,7 @@ describe("incident telemetry dispatch preflight", () => {
     const preflight = dispatchSource.indexOf("incidentTelemetryPreflightDeclaration(");
     expect(preflight).toBeGreaterThan(0);
     for (const downstream of [
-      "getScheduledTaskPersonalConnectionDelegations(",
+      "freezeConnectionAccounts(",
       "getScheduledTaskXaiProviderAccountAuthoritySnapshot(",
       "agentRunAdmissionDenial(",
       "createScheduledTaskRun(",

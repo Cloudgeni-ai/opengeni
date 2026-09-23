@@ -17,6 +17,7 @@ import {
   claimAutomationRun,
   settleAutomationRun,
 } from "@opengeni/db";
+import { SessionSkills } from "@opengeni/contracts";
 import { agentRunAdmissionDenial } from "./agent-run-admission";
 import type {
   ControlActivityServices,
@@ -189,7 +190,8 @@ export function createAutomationActivities(
           workspaceId: input.workspaceId,
           initialMessage: accepted.initialMessage,
           resources: template.resources,
-          skills: template.skills,
+          skills: SessionSkills.parse(template.skills),
+          bundledSkillIds: template.bundledSkillIds,
           tools: template.tools,
           toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
           model,

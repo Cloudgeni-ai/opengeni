@@ -1,8 +1,9 @@
+import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 // Rigs: organization-, workspace-, or user-scoped sandbox machine definitions. A rig is the
 // team's machine — a setup/check layer over the platform sandbox image plus
 // default variable sets, versioned and self-healing. This page lists them and
 // creates new ones; the per-rig detail owns versions, changes, and promotion.
-import { useRigs, useVariableSets } from "@opengeni/react";
+import { useVariableSets } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
 import {
   CheckIcon,
@@ -10,7 +11,6 @@ import {
   ChevronRightIcon,
   Loader2Icon,
   PlusIcon,
-  RefreshCwIcon,
   ServerCogIcon,
   StarIcon,
 } from "lucide-react";
@@ -62,7 +62,7 @@ export function RigsRoute({ workspaceId }: { workspaceId: string }) {
         membership.status === "active" && membership.organizationId === workspace.accountId,
     ),
   );
-  const rigs = useRigs({ enabled: canView });
+  const rigs = useWorkspaceRigs({ enabled: canView });
   const defaultRigId =
     context.workspaces.find((candidate) => candidate.id === workspaceId)?.defaultRigId ?? null;
   const [createOpen, setCreateOpen] = useState(false);
@@ -77,8 +77,8 @@ export function RigsRoute({ workspaceId }: { workspaceId: string }) {
       <PageShell>
         <PageHeader
           icon={<ServerCogIcon className="size-4" />}
-          title="Rigs"
-          description="Versioned machine definitions for your sandboxes."
+          title="Sandbox Environments"
+          description="Custom setup and health checks for your sandboxes."
         />
         <div className="mt-6">
           <PermissionDenied />
@@ -91,33 +91,20 @@ export function RigsRoute({ workspaceId }: { workspaceId: string }) {
     <PageShell>
       <PageHeader
         icon={<ServerCogIcon className="size-4" />}
-        title="Rigs"
-        description="The team's machine, versioned and self-healing: setup and health checks layered on the deployment-managed platform sandbox."
+        title="Sandbox Environments"
+        description="Customize sandbox setup and health checks. Save versions and verify changes before using them."
         actions={
-          <>
+          canManage ? (
             <Button
               type="button"
-              variant="ghost"
               size="sm"
-              onClick={() => void rigs.refresh()}
-              disabled={rigs.loading}
+              onClick={() => setCreateOpen((open) => !open)}
               className="h-9"
             >
-              <RefreshCwIcon className={rigs.loading ? "size-3.5 animate-spin" : "size-3.5"} />
-              Refresh
+              <PlusIcon className="size-3.5" />
+              New sandbox environment
             </Button>
-            {canManage ? (
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => setCreateOpen((open) => !open)}
-                className="h-9"
-              >
-                <PlusIcon className="size-3.5" />
-                New rig
-              </Button>
-            ) : null}
-          </>
+          ) : null
         }
       />
 
@@ -131,9 +118,11 @@ export function RigsRoute({ workspaceId }: { workspaceId: string }) {
             const created = await rigs.create(request);
             if (created) {
               setCreateOpen(false);
-              toast.success(`Rig “${created.name}” created`);
+              toast.success(`Sandbox Environment “${created.name}” created`);
             } else if (rigs.mutationError) {
-              toast.error("Couldn't create rig", { description: rigs.mutationError.message });
+              toast.error("Couldn't create sandbox environment", {
+                description: rigs.mutationError.message,
+              });
             }
             return created;
           }}
@@ -157,20 +146,20 @@ export function RigsRoute({ workspaceId }: { workspaceId: string }) {
           </>
         ) : rigsView === "error" ? (
           <LoadErrorState
-            title="Couldn't load rigs"
+            title="Couldn't load sandbox environments"
             error={rigs.error}
             onRetry={() => void rigs.refresh()}
           />
         ) : rigsView === "empty" ? (
           <EmptyState
             icon={<ServerCogIcon className="size-4" />}
-            title="No rigs yet"
-            description="A rig defines what a sandbox is — its image, setup, and health checks — versioned so the team's machine can evolve safely. Create one to get started."
+            title="No sandbox environments yet"
+            description="Create a custom sandbox environment to install tools, run setup commands, and check that everything is ready."
             action={
               canManage ? (
                 <Button type="button" size="sm" onClick={() => setCreateOpen(true)}>
                   <PlusIcon className="size-3.5" />
-                  New rig
+                  New sandbox environment
                 </Button>
               ) : undefined
             }
@@ -208,8 +197,9 @@ function PageShell({ children }: { children: React.ReactNode }) {
 
 export function PermissionDenied() {
   return (
-    <Notice tone="muted" title="You don't have access to rigs">
-      Ask a workspace admin for the “Rigs” permission to view and propose machine definitions.
+    <Notice tone="muted" title="You don't have access to sandbox environments">
+      Ask a workspace admin for the “Sandbox Environments” permission to view environments and
+      propose changes.
     </Notice>
   );
 }
@@ -245,7 +235,7 @@ function RigCard({
             <RigScopeChip scope={rig.scope} />
             {isDefault ? (
               <MetaChip
-                title="Workspace default — new sessions use this rig unless another is picked"
+                title="Workspace default — new sessions use this sandbox environment unless another is picked"
                 className="border-brand/30 text-brand"
               >
                 <span className="inline-flex items-center gap-1">
@@ -317,7 +307,7 @@ function CreateRigForm({
   async function submit() {
     const trimmed = name.trim();
     if (!trimmed) {
-      toast.error("Rig name is required");
+      toast.error("Sandbox Environment name is required");
       return;
     }
     await onCreate({
@@ -362,6 +352,7 @@ function CreateRigForm({
           <Label htmlFor="rig-name">Name</Label>
           <Input
             id="rig-name"
+            suppressAutofill
             value={name}
             onChange={(event) => setName(event.target.value)}
             placeholder="dev-machine"
@@ -375,7 +366,7 @@ function CreateRigForm({
             id="rig-description"
             value={description}
             onChange={(event) => setDescription(event.target.value)}
-            placeholder="What this machine is for"
+            placeholder="What this environment is for"
             className="h-9"
           />
         </div>
@@ -421,7 +412,7 @@ function CreateRigForm({
           ) : (
             <CheckIcon className="size-3.5" />
           )}
-          Create rig
+          Create sandbox environment
         </Button>
       </div>
     </div>

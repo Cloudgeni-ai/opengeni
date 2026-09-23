@@ -22,7 +22,7 @@ approval policy, and MCP discovery, `packages/runtime` freezes one
 The model-facing MCP adapter and Codemode dispatcher both invoke that same
 environment. A display name or generated JavaScript path is never parsed back
 into authority. All first-party OpenGeni, Files, Docs, Codex Apps, capability,
-pack, interaction, and per-session MCP tools admitted to the attempt can enter
+interaction and per-session MCP tools admitted to the attempt can enter
 the catalog. Codemode never rediscovers or reconnects an MCP server.
 
 The catalog is persisted in `session_attempt_tool_catalogs` before Codemode is
@@ -48,6 +48,9 @@ generation tuple, the canonical session-authorization seam, the currently
 running attempt, and the catalog digest. Ordinary workspace or session bearers
 cannot use this surface, and the Codemode bearer cannot use the ordinary MCP
 mount as a back door.
+
+Codemode is outside the browser API-contract fence because its attempt catalog
+digest is the compatibility token for this live protocol.
 
 The caller supplies a UUID operation id. The first valid submission atomically
 binds it to the exact request digest and creates a durable `queued` row. An
@@ -106,7 +109,7 @@ into each newly launched exact child exec. It is absent from machine storage,
 argv, stable environment, session/RunState serialization, and logs. A process
 already running retains its launch value; the next exec sees renewal. The Rust
 agent adds its own absolute executable path only to an authorized child, making
-`opengeni-agent codemode list|call` a dependency-free client. This is transport
+`opengeni-agent codemode list|show|call` a dependency-free client. This is transport
 only: it terminates at the same API journal and `AttemptToolEnvironment`.
 
 ## Clients
@@ -114,13 +117,34 @@ only: it terminates at the same API journal and `AttemptToolEnvironment`.
 `@opengeni/codemode` exposes a persistent typed client and generates a nested,
 collision-safe namespace from `codemodePath`. `@opengeni/ogtool` is the small
 JavaScript command-line client; the installed Connected Machine agent contains
-the equivalent no-runtime list/call client:
+the equivalent no-runtime list/show/call client:
 
 ```bash
 ogtool list
+ogtool list --json
+ogtool list --query search --limit 25 --offset 0
+ogtool show docs.search
 ogtool call docs.search '{"query":"durable catalogs"}'
 "$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call docs.search '{"query":"durable catalogs"}'
 ```
+
+Discovery is compact by default: `list` prints callable paths plus descriptions
+bounded to 160 Unicode code points. `--query` matches literal case-sensitive substrings
+in paths or full whitespace-normalized descriptions. Default text and `--json` return
+all authorized entries, with no aggregate output byte cap or default pagination.
+`--limit` is a strictly opt-in compatibility slice bounded to 1..100; `--offset` is a
+nonnegative safe integer in the filtered catalog and alone returns all remaining tools.
+No trailing entries or partial paths are dropped to fit a byte budget.
+`list --json` returns `{catalogDigest, total, offset, nextOffset, tools:
+[{path, description}]}`. `total` is the filtered count; follow `nextOffset` until null,
+keeping the query and frozen digest unchanged. Empty and past-end pages have no tools
+and a null next offset. `list --full` preserves the previous full catalog JSON for
+explicit inspection and existing scripts and rejects every compact option.
+`show <path>` resolves exactly one tool using the same aliases as `call` and emits
+its details and schemas as JSON, capped at 64 KiB including the final newline.
+Unknown/ambiguous tools and oversized details fail without partial schema output;
+use `list --full` redirected to a file for oversized entries. These are local CLI
+projections only: the frozen catalog, authority, and API responses are unchanged.
 
 All clients retain one caller-owned operation id, submit once, poll the journal,
 and recover by `GET` if a POST response is lost after commit. None silently

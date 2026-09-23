@@ -4,7 +4,7 @@ Thanks for considering a contribution.
 
 ## Development Setup
 
-1. Install Bun and Docker.
+1. Install the exact Bun version in [`.bun-version`](.bun-version), Git, curl, rustup, a C build toolchain, and Docker. See the [local prerequisites](README.md#quick-start).
 2. Copy `.env.example` to `.env`.
 3. Fill in the required `OPENGENI_*` values for the workflow you want to test.
 4. Start the full local stack:
@@ -12,6 +12,9 @@ Thanks for considering a contribution.
 ```bash
 bun run dev
 ```
+
+[`docs/local-development.md`](docs/local-development.md) covers manual startup,
+configuration, the native (no Docker) path, and the web-app walkthrough.
 
 ## Toolchain
 
@@ -55,10 +58,20 @@ bun run test:e2e
 - Treat candidate/version labels as substantive source revisions. Base-only
   evidence refreshes stay on the same head. Change the head only for a source
   defect, actual conflict, or material semantic incompatibility.
+- PR CI in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) checks out
+  the exact PR head, not GitHub's synthetic merge commit. Closing and reopening
+  an unchanged PR starts another run of the same source; it does not incorporate
+  fixes from a newer base. Keep current-main integration evidence separate from
+  exact-head CI evidence.
+- Before retrying a failed check, inspect its failing leaf and checkout SHA.
+  If the candidate contains a real defect already fixed on `main`, apply the
+  necessary scoped correction to the candidate and run review and CI on that new
+  head. An unchanged-head retry needs evidence of a transient failure, not an
+  expectation that moving `main` changed the tested source.
 
 ## Keeping Docs True
 
-Use [`docs/README.md`](docs/README.md) as the docs map. If you move or rename files or packages, run `bun run check:docs-refs` and fix the current-tier references it reports. New packages need a package README plus an update to the [`docs/architecture.md`](docs/architecture.md) package table. New embed surfaces or ports belong in [`docs/embedding.md`](docs/embedding.md). New processes or commands belong in their canonical home from the docs map; link there instead of copying volatile details into multiple docs.
+Use [`docs/README.md`](docs/README.md) as the docs map. If you move or rename files or packages, run `bun run check:docs-refs` and fix the current-tier references it reports. New packages need a package README plus an update to the [`docs/architecture.md`](docs/architecture.md) package table. New embed surfaces or ports belong in [`docs/embedding.md`](docs/embedding.md). New processes or commands belong in their canonical home from the docs map; link there instead of copying volatile details into multiple docs. The public product docs at docs.opengeni.ai live in [`docs-site/`](docs-site/README.md) and are deployed by Mintlify from `main`; update them in the same change when user-facing behavior they describe moves.
 
 ## Release / Publishing
 
@@ -75,6 +88,13 @@ Release and publishing guidance starts here; executable truth lives in [`package
 **Staging:** dispatch `staging-canary-dispatch.yml` with any `main` SHA whose `canary-sha-*` tags already exist. Pending changesets are allowed. Missing tags fail closed; do not rebuild unsigned `:ci` images.
 
 **Canary npm:** dispatch `publish-canary.yml` to publish `{version}-canary.N` with dist-tag `canary`. This does not consume changeset files or move `latest`.
+
+In GitHub Actions, `N` has a floor derived from the workflow run ID and attempt
+(`run ID * 1000 + attempt`), so retries do not reuse versions hidden by stale
+registry tags or staged publication. A visible version at or above that floor
+rejects a superseded attempt: dispatch a new workflow instead of retrying the
+older one. Fixed package groups remain aligned. An admitted retry publishes a fresh set rather than
+overwriting or removing any partially published versions.
 
 Two publish-coherence rules learned the hard way (all versions are 0.x):
 

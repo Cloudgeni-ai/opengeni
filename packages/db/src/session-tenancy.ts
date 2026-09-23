@@ -95,6 +95,7 @@ export type TransitionSessionVisibilityInput = {
   targetVisibility: SessionTenancyVisibility;
   expectedAuthorityEpoch: number;
   operationKey: string;
+  beforeCommit?: (tx: Database) => Promise<void>;
 };
 
 export type TransitionSessionVisibilityResult = {
@@ -114,6 +115,7 @@ export type TransitionSessionVisibilityResult = {
 };
 
 export type ForkSessionContentInput = {
+  sourceEventId?: string;
   sourceWorkspaceId: string;
   sourceSessionId: string;
   actorSubjectId: string;
@@ -123,6 +125,7 @@ export type ForkSessionContentInput = {
   operationKey: string;
   runtimeRequest?: ForkSessionRuntimeRequest;
   runtimeConfiguration?: ForkSessionRuntimeConfiguration;
+  beforeCommit?: (tx: Database) => Promise<void>;
 };
 
 export type ForkSessionRuntimeRequest = {
@@ -346,8 +349,23 @@ export function canonicalSessionForkHash(
     | "destinationVisibility"
     | "workspaceSharedAcknowledged"
     | "runtimeRequest"
+    | "sourceEventId"
   >,
 ): string {
+  if (input.sourceEventId) {
+    return createHash("sha256")
+      .update(
+        JSON.stringify({
+          version: 4,
+          sourceSessionId: input.sourceSessionId,
+          destinationWorkspaceId: input.destinationWorkspaceId,
+          destinationVisibility: input.destinationVisibility,
+          workspaceSharedAcknowledged: input.workspaceSharedAcknowledged,
+          sourceEventId: input.sourceEventId,
+        }),
+      )
+      .digest("hex");
+  }
   if (input.runtimeRequest) {
     return createHash("sha256")
       .update(
@@ -453,6 +471,7 @@ export async function transitionSessionVisibility(
         );
         const result = rows[0];
         if (!result) throw new Error("Session visibility transition returned no result");
+        await input.beforeCommit?.(scopedDb);
         return result;
       },
       undefined,
@@ -470,6 +489,9 @@ export async function forkSessionContent(
   if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
   if (input.destinationWorkspaceId !== input.sourceWorkspaceId) {
     throw new Error("The first session fork contract is same-workspace only");
+  }
+  if (input.sourceEventId && input.runtimeRequest) {
+    throw new Error("Message forks cannot replace runtime setup");
   }
   if (Boolean(input.runtimeRequest) !== Boolean(input.runtimeConfiguration)) {
     throw new Error("A fresh session fork runtime request requires its resolved configuration");
@@ -526,6 +548,7 @@ export async function forkSessionContent(
           );
           const result = rows[0];
           if (!result) throw new Error("Session fork returned no result");
+          await input.beforeCommit?.(scopedDb);
           return result;
         }
         const rows = await rawRows<ForkSessionContentResult>(
@@ -553,10 +576,12 @@ export async function forkSessionContent(
           ${input.operationKey},
           ${requestHash},
           ${SESSION_TENANCY_ACTIVATION_VERSION}
+          ${input.sourceEventId ? sql`, ${input.sourceEventId}::uuid` : sql``}
         )`,
         );
         const result = rows[0];
         if (!result) throw new Error("Session fork returned no result");
+        await input.beforeCommit?.(scopedDb);
         return result;
       },
       undefined,
@@ -629,6 +654,7 @@ export async function replayAppliedSessionFork(
             ${runtimeDigest}
           )`,
           );
+          await input.beforeCommit?.(scopedDb);
           return rows[0] ?? null;
         }
         const rows = await rawRows<ForkSessionContentResult>(
@@ -658,6 +684,7 @@ export async function replayAppliedSessionFork(
           ${SESSION_TENANCY_ACTIVATION_VERSION}
         )`,
         );
+        await input.beforeCommit?.(scopedDb);
         return rows[0] ?? null;
       },
     );

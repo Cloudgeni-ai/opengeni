@@ -51,28 +51,16 @@ Decisions baked in:
 - `credential_encrypted` is the only column that may hold secret material; `metadata` is UI-renderable verbatim. API list/get helpers never select `credential_encrypted`.
 - Revoking sets `status='revoked'` (row kept for audit) and best-effort calls the provider's revocation endpoint when known.
 
-**Ownership doctrine.** Default new providers to workspace-shared (`subject_id` null) bot-style identity — survives user churn, matches agent workloads. Personal connections are for act-as-a-person tools; the token's native provider-side permissions are the authorization boundary. OpenGeni's standalone table resolver remains workspace-shared. Embedded hosts can resolve subject-scoped connections through `ConnectionCredentialsPort.mcpCredentials`, which receives the immutable current turn initiator rather than relying on the worker's synthetic technical subject.
+**Ownership defaults.** New providers default to workspace ownership. Mail, calendar, contacts and drive setup suggest personal ownership. Users can explicitly choose either. OAuth profiles describe protocol requirements and optional `defaultOwnership`; they cannot prohibit a supported ownership choice. Reconnecting preserves the saved ownership.
 
-**An omitted ownership is never guessed.** The MCP OAuth start keeps its
-documented behaviour: it resolves through the resolved provider profile's
-declared default (`defaultOwnershipFor`, §5.2.2) — workspace, unless the
-profile's `allowedOwnership` is personal-only. The Integration Definition OAuth
-start (`provider-oauth.ts`) instead **refuses** an ambiguous omission with a
-422, because both possible fallbacks are defects there: `personal` (what it used
-to do) inverts the doctrine for every caller that did not spell ownership out,
-and `workspace` silently flips a newly connected Outlook mailbox, Drive, or
-OneDrive from subject-scoped to workspace-shared. A profile that allows exactly
-one ownership is unambiguous and still resolves, so Gmail and hosted Slack MCP
-are unaffected, as is a reconnect (which takes the existing row's ownership).
-No flow may fall back to `personal` on its own.
+Generic MCP OAuth applies its profile default when ownership is omitted. The Integration Definition OAuth API requires an explicit ownership for a new account, while native setup supplies the user's choice. Workspace sharing uses the authorized provider account; it does not create a separate provider identity.
 
 **Only a managed human may own a personal connection**
 (`apps/api/src/connection-ownership.ts`). An API key, the shared `configured:`
 key, a service principal, an agent attempt, a grant that fails
 `contextIntegrity`, and any principal whose grant subject is not its
 authenticated subject are refused with an explicit **422** before a connection
-is created — never silently downgraded to workspace ownership, which a
-personal-only profile (Gmail, hosted Slack MCP) forbids outright. Two
+is created — never silently downgraded to workspace ownership. Two
 independent facts require it: personal execution resolves only through the
 immutable delegation snapshot frozen on a *human's* causal turn or scheduled
 task, and `bind_connection_authority` (migration 0256) can mint the `user`
@@ -198,7 +186,7 @@ Broker rules:
 
 The broker passes resolved connection credentials directly to the outbound request rather than deliberately copying them into session configuration, events, run state, or Temporal inputs. OpenGeni does not heuristically scan or rewrite arbitrary provider, user, agent, or tool content if that content contains credential-shaped text; internal persisted and model-visible data remains exact.
 
-## 5. MCP OAuth client (spec rev 2025-11-25)
+## 5. MCP OAuth client (current profile with 2025-03-26 compatibility)
 
 ### 5.1 Flow
 
@@ -206,7 +194,11 @@ The broker passes resolved connection credentials directly to the outbound reque
 DISCOVER   probe server URL unauthenticated
            → 401 + WWW-Authenticate: parse resource_metadata URL + scope hint
            → RFC 9728 Protected Resource Metadata (well-known fallback probing)
-           → pick AS; RFC 8414 / OIDC-discovery metadata (both well-known path orders)
+           → only when the challenge has no resource_metadata and every PRM
+             candidate is explicitly absent (404/410), probe the MCP origin's
+             RFC 8414 metadata as the legacy 2025-03-26 profile
+           → pick AS; RFC 8414 path insertion, then OIDC path insertion/appending
+             (no guessed OAuth suffix, tenant-root, or bare-issuer probes)
            → REQUIRE code_challenge_methods_supported ∋ S256, else abort with clear error
 REGISTER   priority: (1) operator pre-registered creds for this AS
            (2) DCR (RFC 7591) if registration_endpoint — minted client_id stored per AS
@@ -216,7 +208,8 @@ REGISTER   priority: (1) operator pre-registered creds for this AS
            (4) manual client-credential entry in UI
            A reviewed provider profile may explicitly force DCR or CIMD.
 AUTHORIZE  authorize URL: PKCE S256, state = signed payload (§5.2),
-           resource = canonical MCP server URI (RFC 8707, ALWAYS sent),
+           resource = canonical MCP server URI (RFC 8707 in modern PRM mode;
+           omitted in legacy 2025-03-26 mode),
            scope = requestedScopes when supplied (step-up), else 401-challenge
            scope if present, else PRM scopes_supported
            → browser → provider consent → redirect to callback
@@ -229,11 +222,15 @@ STEP-UP    runtime 403 error="insufficient_scope" → tool.auth_needed → re-AU
            widened scope on user click; new grant supersedes via CAS update
 ```
 
-### 5.2 Stateless grant state (decision)
+### 5.2 Short provider-facing grant state
 
-No pending-grant table. The `state` parameter is a **signed, time-limited payload** using the established `createSignedState`/`verifySignedState` pattern from `@opengeni/github`, with a dedicated `integrationsStateSecret`: `{ workspaceId, accountId, subjectId, providerDomain, resource, requestedScopes, authorizeScopes, encryptedPkceVerifier, clientId, tokenEndpoint, authorizationServer, issuer, returnPath, nonce, iat }`. The PKCE verifier is **encrypted** (variable-sets key) inside the signed state — state transits browser URLs and provider logs, and a plaintext verifier there would defeat PKCE's interception protection. Single-use is enforced by inserting the consumed nonce into `integration_oauth_state_nonces` with a short TTL; the primary key makes replay fail across API instances. This survives multi-instance API deployments (the callback may land on any instance) — which is also why a random per-process fallback secret is forbidden: `integrationsStateSecret` is required whenever integrations are enabled outside local dev.
+When enabled, MCP OAuth sends a short signed reference in the provider-facing `state` parameter. The full signed callback context is encrypted under the variable-sets key and stored in `integration_oauth_pending_states` for ten minutes. It includes the actor and ownership decision, PKCE verifier, client registration, resource, exact discovery provenance, scopes, and return destination. The reference carries only its random row id and account/workspace scope, so provider state-length limits do not reject the grant. The callback verifies the reference, loads the pending context under workspace RLS, checks that the two scopes match, and then validates the full signed state. Existing full signed states remain readable for their normal ten-minute lifetime during rolling deployment. Expired pending rows are removed in bounded batches on later starts in the same workspace.
 
-The callback route must NOT call `requireAccessGrant` — a browser redirect carries only `code`+`state`. It trusts exclusively the verified, unexpired signed state minted by the authenticated start route.
+Issuance is gated by `OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED`, default `false`. Deploy the new callback reader to every API instance with the flag off. After the old instances are drained, set the flag to `true` in a separate configuration rollout. Readers accept both formats regardless of this flag, so mixed flag values in the second rollout are safe. Resend and other providers with short state limits require the flag enabled.
+
+The PKCE verifier remains encrypted inside the full signed context, which is encrypted again at rest in the pending row. Single-use is still enforced by inserting the context nonce into `integration_oauth_state_nonces`; its primary key makes replay fail across API instances. `integrationsStateSecret` and the variable-sets encryption key must be shared across API instances.
+
+The callback route must NOT call `requireAccessGrant` — a browser redirect carries only `code`+`state`. It trusts exclusively the verified, unexpired state minted by the authenticated start route and the matching scoped pending record.
 
 ### 5.2.1 Authorization-server clients
 
@@ -243,14 +240,14 @@ Some authorization servers advertise both CIMD and DCR but reject a metadata-doc
 
 ### 5.2.2 Provider OAuth quirks as data (profiles)
 
-Providers that need a pre-registered client with pinned metadata, personal-only
-ownership, an exact resource URL, a fixed scope set, or non-standard authorize
+Providers that need a pre-registered client with pinned metadata, an exact
+resource URL, a fixed scope set, or non-standard authorize
 parameters are expressed as an `OAuthProviderProfile`
 (`apps/api/src/integrations/oauth-profiles.ts`), never as a provider branch in
 the flow. `oauth-client.ts` resolves exactly one profile per start and reads
 every quirk from it: start-time payload fences (caller-client rejection,
-provider identity, exact MCP URL, required deployment client), allowed
-ownership plus its default, exact-URL reconnect binding and connection
+provider identity, exact MCP URL, required deployment client), ownership
+defaults, exact-URL reconnect binding and connection
 selection, post-discovery authorization-server origin pins, `resource`
 parameter suppression, extra authorize parameters, and an exact scope override.
 
@@ -292,7 +289,22 @@ Served publicly at `GET /v1/integrations/oauth/client-metadata.json`:
 
 - PKCE S256 always; refuse ASes not advertising it.
 - `state` signed, single-use, TTL-bound, workspace+subject-bound; callback validates all of it.
-- `resource` (RFC 8707) on both authorize and token requests regardless of AS support.
+- RFC 9728 discovery probes the well-known prefix before the resource path,
+  then the origin-root location, after any explicitly advertised metadata URL.
+  It does not guess metadata beneath the resource API path: a protected API
+  catch-all there may return 401 even when metadata is absent. Explicitly
+  advertised URLs remain authoritative regardless of their path shape.
+- RFC 9728 PRM is authoritative whenever present. Malformed, contradictory,
+  unreachable, redirected-to-unsafe, or otherwise invalid PRM is a hard failure;
+  it never causes a legacy downgrade.
+- Automatic legacy discovery requires a real Bearer/OAuth challenge without
+  `resource_metadata`, explicit absence of every PRM candidate, valid RFC 8414
+  metadata at the MCP URL's own origin, an issuer matching that metadata
+  authority, and a same-origin MCP-resource-to-issuer binding. Cross-origin
+  legacy servers require a reviewed profile/manual decision.
+- `resource` (RFC 8707) is sent on both authorize and token requests in modern
+  PRM mode, subject to reviewed provider-profile suppression. It is always
+  omitted in legacy 2025-03-26 mode.
 - Exact-match redirect URI only; never follow AS-supplied alternative redirects.
 - SSRF guard on PRM/AS-metadata/token-endpoint fetches: no private-range targets unless running in local/test or `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS=true`.
 - No token passthrough: tokens minted for an MCP server go only to that server; our own first-party MCP servers keep validating audience on inbound tokens.
@@ -303,7 +315,7 @@ Served publicly at `GET /v1/integrations/oauth/client-metadata.json`:
 MCP server settings entries carry the optional `connectionRef` (§4). Behavior when the broker returns `auth_needed`:
 
 - **Tool call time:** the call short-circuits before any network I/O; a `tool.auth_needed` session event is published, and the model receives an MCP error result (`isError: true`, "Authentication required — a connection link was posted to the session") so it can adapt. The turn continues; **this is not a `session.requiresAction` pause** (approval gates persist run state and block; a missing connection is a tool-level condition). If product later wants blocking OAuth, that's an explicit extension.
-- **Connect/tools-list time:** connection-missing servers are treated as best-effort (event + skip), not a strict-connect turn failure — today required servers fail the turn via strict `connectMcpServers`, which is wrong for auth-recoverable conditions.
+- **Connect/tools-list time:** credential-backed servers are best-effort: publish the authorization-needed event and skip the unavailable server while the turn continues. The Gmail REST bridge preserves the broker's reason at startup as well as tool-call time. Ambient startup notices remain in diagnostics to avoid repeated consent prompts during unrelated work. When a needed personal integration lacks tools, the agent can post an authorization request. Connect uses the initiating user's own account; sharing a conversation never grants another participant access to it. Concrete tool-call authority failures resolve by exact server identity.
 
 Event: `"tool.auth_needed"` added to `SessionEventType` in `packages/contracts/src/index.ts` AND the hand-written mirror in `packages/sdk/src/types.ts` (parity test pins them), plus the structural flush set in `apps/worker/src/activities/streaming.ts` so the chip appears promptly. Payload: `{ serverId, toolName?, providerDomain, connectionId?, reason, scopes?, resource?, authorizationUrl?, subjectId? }` — no verifiers, secrets, or raw provider responses; `authorizationUrl` only when free of secret material. Timeline projection (`packages/react/src/timeline/projection.ts`) renders a waiting-tone notice with a Connect action; copy is plain language (provider name + "needs a connection"/"needs additional access") — no kind enums, no "CIMD"/"DCR", no status slugs.
 
@@ -313,7 +325,7 @@ New permissions `connections:read` (metadata/status only — never secrets) and 
 
 Subject-ownership is enforced in helper predicates + domain logic (DB RLS is account/workspace-scoped and cannot see the caller subject): readers see shared rows plus their own subject rows; admins may revoke subject-owned rows but not use them or read beyond provider + status; the broker re-checks at resolve time.
 
-**Resolved embedding boundary:** the worker still calls `prepareTools` with the synthetic technical subject `worker:first-party-mcp`, so OpenGeni's standalone connection-table resolver intentionally accepts **workspace-shared connections only**. The host MCP credential port separately receives the durable turn's immutable initiator and must use that field—not the technical caller—for subject authorization. Codemode follows the same rule.
+**Execution boundary:** native credential resolution uses the durable turn's immutable initiating user and captured account selection, not the technical worker identity. Children retain that authority; scheduled runs use their named owner. Codemode follows the same rule. No host credential-resolution lane is required.
 
 `subjectScope: "subject"` remains representable for forward compatibility, but
 the standalone table resolver currently fails it closed because it does not load
@@ -338,11 +350,19 @@ Config additions in `packages/config/src/index.ts`: `integrationsEnabled` (`EnvB
 
 ## 10. Discovery & catalog (I4)
 
+Runtime OAuth discovery and catalog OAuth diagnostics share
+`packages/network/src/mcp-oauth-discovery.ts`. Catalog results are diagnostic
+cache only; a connection attempt always performs fresh runtime discovery under
+the current DNS/IP/SSRF and redirect policy. Auth-gated rows carry one of:
+`oauth_rfc9728`, `oauth_legacy_same_origin_metadata`,
+`oauth_legacy_default_endpoints_unverified`, `oauth_requires_profile`, or
+`oauth_discovery_broken`.
+
 - Source-of-truth order: (1) the service's own well-known signals probed at add-by-domain time, (2) a **vendored, reviewed snapshot** of the integrations.sh registry (MIT) — import pipeline re-verifies `detected` entries (probe endpoint, confirm PRM) and demotes the rest to `community`, (3) the committed **curated overlay** `data/catalog/curated.json`, keyed by exact MCP URL, which wins over the snapshot field-by-field and carries reviewed first-party contracts, branding, category, and the checkable `featured` / `official` flags. Never live-consume the registry at request time; snapshots are versioned with import provenance. See `docs/capabilities.md` § Curated overlay.
 - Catalog rows extend `capability_catalog_items` with surface type, MCP URL, transports, credential facts, tier, provenance.
 - **Consent copy is data, not frontend code.** A curated row may carry a `presentation` object (provider name, icon, introduction, capabilities, permission summary, scope labels) that flows overlay -> importer -> `metadata.presentation` and renders in the connector sheet's connect step through `capabilityPresentation()` / `presentationPermissions()` (`apps/web/src/components/capabilities/integration-experience.ts`); API integration definitions serve the same shape from `INTEGRATION_DEFINITION_PRESENTATIONS` (`@opengeni/capabilities`) on the definitions endpoint, and it is available to any future definition surface - the one-row-per-provider integration sheet does not render it today, so that definition-side copy currently has no web consumer. Presentation is cosmetic only — it never grants a scope or replaces server-side authorization, a malformed object degrades to the generic copy, and an uncurated connector renders exactly the pre-existing fallback. The provider-neutral `COMMON_SCOPE_LABELS` stay in the web bundle.
 - Phase I4 imports use `scripts/import-integrations-catalog.ts` against a reviewed snapshot or precomputed `importRows` file. Imported rows are global `source: "registry"` capability rows keyed by `(provider_domain, mcp_url)`, linked to `import_batches`, and stale-marked on removal rather than deleted. Logo URLs are fetched at import time and stored as self-hosted object-storage assets (`logo_asset_path`); third-party logo URLs are not served from the catalog.
-- **Agent registry tools (implemented):** `capability_catalog_search` lets a session query the trusted merged catalog for capabilities it lacks, and `capability_authorization_request` emits a concrete, attempt-fenced `tool.auth_needed` recommendation with mandatory human domain confirmation. The agent can never silently add a server. The web resolves live catalog state again before acting: supported OAuth MCPs return to and enable from the originating session, while API-key/variable/admin-review cases use the protected Capabilities setup sheet. GitHub remains on its existing owner-authority spine until I6; its adapter mints fresh browser-only `github:manage` state at click time and never widens the worker grant.
+- **Agent registry tools (implemented):** `capability_catalog_search` lets a session query the trusted merged catalog for capabilities it lacks, and `capability_authorization_request` emits a concrete, attempt-fenced `tool.auth_needed` recommendation with mandatory human domain confirmation. The agent can never silently add a server. The web resolves live catalog state again before acting: supported OAuth MCPs return to and enable from the originating session, while API-key/variable/admin-review cases use the protected Capabilities setup sheet. GitHub remains on its existing owner-authority spine until I6; its adapter mints fresh browser-only `github:manage` state at click time and never widens the worker grant. Enabled personal MCPs are reported ready to the agent only when the exact caller's attempt catalog contains that server's tools. Otherwise discovery reports authorization required and allows a human review card; workspace installation alone does not prove session access.
 
 ## 11. Legacy credential sites — convergence
 

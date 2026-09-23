@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { CapabilityPack, stableJson, type AutomationSessionTemplate } from "@opengeni/contracts";
+import { type AutomationSessionTemplate } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
@@ -15,7 +14,6 @@ import {
   createWorkspaceGatewayCustomModel,
   deletePrReviewAppRegistration,
   deleteWorkspace,
-  enablePackInstallation,
   ensureManagedAccessForUser,
   initializeSessionStartAtomically,
   listAutomationSources,
@@ -29,7 +27,6 @@ import {
   resolveManagedGitHubPrReviewRoute,
   syncManagedGitHubPrReviewInstallation,
   updateAutomationTrigger,
-  updatePackInstallationStatus,
   updatePrReviewRepositoryBinding,
   type Database,
   type DbClient,
@@ -47,6 +44,7 @@ const sessionTemplate: AutomationSessionTemplate = {
   skills: [
     {
       name: "pr-review",
+      description: "Review pull requests.",
       files: [
         {
           path: "SKILL.md",
@@ -120,7 +118,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("PR Review Pack persistence", () => {
+describe("PR Review persistence", () => {
   test("serializes binding create and material update with custom-model retirement", async () => {
     if (!client || !shared) return;
     const access = await ensureManagedAccessForUser(client.db, {
@@ -132,42 +130,7 @@ describe("PR Review Pack persistence", () => {
     const grant = access.workspaceGrants.find(
       (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
     )!;
-    const pack = CapabilityPack.parse({
-      id: "pr-review",
-      name: "PR Review",
-      description: "Review pull requests.",
-      role: "software-engineering",
-      category: "code-review",
-      version: "1.0.0",
-      skills: [],
-      components: [],
-      tools: [],
-      connectors: [],
-      knowledge: [],
-      scheduledTaskTemplates: [],
-      automationTemplates: [
-        {
-          id: "review-pull-request",
-          name: "Review pull requests",
-          description: "Review exact pull-request heads.",
-          adapterId: "source-control.pull-request.v1",
-          eventTypes: ["pull_request.review_requested"],
-          sessionTemplate,
-          configuration: {},
-          connectionRequirement: "source-control-provider",
-        },
-      ],
-      metadata: {},
-    });
-    const installation = await enablePackInstallation(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      packId: pack.id,
-      manifestSnapshot: pack,
-      manifestDigest: createHash("sha256").update(stableJson(pack)).digest("hex"),
-      installedBySubjectId: grant.subjectId,
-      metadata: {},
-    });
+
     const registration = await createPrReviewAppRegistration(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -182,8 +145,6 @@ describe("PR Review Pack persistence", () => {
       webhookSecretEncrypted: "encrypted-webhook-secret",
       webhookUsername: null,
       createdBySubjectId: grant.subjectId,
-      packInstallationId: installation.id,
-      packConnectorId: "github",
     });
     const customModelGuard = (productModelId: string) => async (tx: Database) => {
       const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
@@ -207,8 +168,7 @@ describe("PR Review Pack persistence", () => {
       additionalInstructions: null,
       status: "active" as const,
       createdBySubjectId: grant.subjectId,
-      packInstallationId: installation.id,
-      packTemplateId: "review-pull-request",
+
       adapterId: "source-control.pull-request.v1",
       eventTypes: ["pull_request.review_requested"],
       configuration: {},
@@ -304,7 +264,7 @@ describe("PR Review Pack persistence", () => {
     ).toMatchObject({ additionalInstructions: null, model: updateProductModelId });
   }, 60_000);
 
-  test("creates generic source and trigger authority atomically with Pack setup", async () => {
+  test("creates generic source and trigger authority atomically with PR Review setup", async () => {
     if (!client) return;
     const access = await ensureManagedAccessForUser(client.db, {
       userId: `pr-review-${crypto.randomUUID()}`,
@@ -315,42 +275,7 @@ describe("PR Review Pack persistence", () => {
     const grant = access.workspaceGrants.find(
       (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
     )!;
-    const pack = CapabilityPack.parse({
-      id: "pr-review",
-      name: "PR Review",
-      description: "Review pull requests.",
-      role: "software-engineering",
-      category: "code-review",
-      version: "1.0.0",
-      skills: [],
-      components: [],
-      tools: [],
-      connectors: [],
-      knowledge: [],
-      scheduledTaskTemplates: [],
-      automationTemplates: [
-        {
-          id: "review-pull-request",
-          name: "Review pull requests",
-          description: "Review exact pull-request heads.",
-          adapterId: "source-control.pull-request.v1",
-          eventTypes: ["pull_request.review_requested"],
-          sessionTemplate,
-          configuration: {},
-          connectionRequirement: "source-control-provider",
-        },
-      ],
-      metadata: {},
-    });
-    const installation = await enablePackInstallation(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      packId: pack.id,
-      manifestSnapshot: pack,
-      manifestDigest: createHash("sha256").update(stableJson(pack)).digest("hex"),
-      installedBySubjectId: grant.subjectId,
-      metadata: {},
-    });
+
     const registration = await createPrReviewAppRegistration(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -365,8 +290,6 @@ describe("PR Review Pack persistence", () => {
       webhookSecretEncrypted: "encrypted-webhook-secret",
       webhookUsername: null,
       createdBySubjectId: grant.subjectId,
-      packInstallationId: installation.id,
-      packConnectorId: "github",
     });
     expect(registration.webhookPath).toMatch(/^\/v1\/webhooks\/automations\/[0-9a-f-]+$/u);
     const binding = await createPrReviewRepositoryBinding(client.db, {
@@ -383,8 +306,7 @@ describe("PR Review Pack persistence", () => {
       additionalInstructions: null,
       status: "active",
       createdBySubjectId: grant.subjectId,
-      packInstallationId: installation.id,
-      packTemplateId: "review-pull-request",
+
       adapterId: "source-control.pull-request.v1",
       eventTypes: ["pull_request.review_requested"],
       configuration: {},
@@ -393,16 +315,15 @@ describe("PR Review Pack persistence", () => {
     expect(binding.triggerId).not.toBe(registration.sourceId);
     expect(await listAutomationSources(client.db, grant.workspaceId)).toEqual([
       expect.objectContaining({
-        packInstallationId: installation.id,
-        packConnectorId: "github",
+        id: registration.sourceId,
+        adapterId: "source-control.pull-request.v1",
       }),
     ]);
     const [trigger] = await listAutomationTriggers(client.db, grant.workspaceId);
     expect(trigger).toMatchObject({
       id: binding.triggerId,
       sourceId: registration.sourceId,
-      packInstallationId: installation.id,
-      packTemplateId: "review-pull-request",
+
       parameters: {
         registrationId: registration.id,
         repositoryBindingId: binding.id,
@@ -416,7 +337,7 @@ describe("PR Review Pack persistence", () => {
         subjectId: grant.subjectId,
         request: { expectedRevision: trigger!.revision, status: "disabled" },
       }),
-    ).rejects.toThrow("Pack-owned automation triggers must be managed");
+    ).rejects.toThrow("PR Review automations require the PR Review setup API");
 
     const headSha = "e".repeat(40);
     const source = (await listAutomationSources(client.db, grant.workspaceId))[0]!;
@@ -633,9 +554,7 @@ describe("PR Review Pack persistence", () => {
       webhookSecretEncrypted: "encrypted-lens-webhook",
       repositories: [githubRepository(505, 303, "example/repository")],
       createdBySubjectId: grant.subjectId,
-      packInstallationId: installation.id,
-      packConnectorId: "github",
-      packTemplateId: "review-pull-request",
+
       adapterId: "source-control.pull-request.v1",
       eventTypes: ["pull_request.review_requested"],
       configuration: {},
@@ -675,9 +594,7 @@ describe("PR Review Pack persistence", () => {
         webhookSecretEncrypted: "encrypted-lens-webhook",
         repositories: [githubRepository(505, 303, "example/repository")],
         createdBySubjectId: grant.subjectId,
-        packInstallationId: installation.id,
-        packConnectorId: "github",
-        packTemplateId: "review-pull-request",
+
         adapterId: "source-control.pull-request.v1",
         eventTypes: ["pull_request.review_requested"],
         configuration: {},
@@ -700,9 +617,7 @@ describe("PR Review Pack persistence", () => {
       webhookSecretEncrypted: "encrypted-lens-webhook",
       repositories: [githubRepository(606, 303, "example/next")],
       createdBySubjectId: grant.subjectId,
-      packInstallationId: installation.id,
-      packConnectorId: "github",
-      packTemplateId: "review-pull-request",
+
       adapterId: "source-control.pull-request.v1",
       eventTypes: ["pull_request.review_requested"],
       configuration: {},
@@ -739,42 +654,13 @@ describe("PR Review Pack persistence", () => {
         webhookSecretEncrypted: "encrypted-lens-webhook",
         repositories: [githubRepository(505, 303, "example/repository")],
         createdBySubjectId: grant.subjectId,
-        packInstallationId: installation.id,
-        packConnectorId: "github",
-        packTemplateId: "review-pull-request",
+
         adapterId: "source-control.pull-request.v1",
         eventTypes: ["pull_request.review_requested"],
         configuration: {},
         sessionTemplate,
       }),
     ).rejects.toThrow("authorization was already used");
-
-    await updatePackInstallationStatus(client.db, grant.workspaceId, pack.id, "disabled");
-    await expect(
-      syncManagedGitHubPrReviewInstallation(client.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        installationId: 303,
-        providerAccountLogin: "example",
-        providerAccountType: "Organization",
-        githubActorId: 404,
-        authorityKind: "organization_owner",
-        authorityCheckedAt: new Date(),
-        authorityExpiresAt: new Date(Date.now() + 10 * 60_000),
-        authorityNonce: `lens-${crypto.randomUUID()}`,
-        appId: "lens-app-1",
-        webhookSecretEncrypted: "encrypted-lens-webhook",
-        repositories: [githubRepository(606, 303, "example/next")],
-        createdBySubjectId: grant.subjectId,
-        packInstallationId: installation.id,
-        packConnectorId: "github",
-        packTemplateId: "review-pull-request",
-        adapterId: "source-control.pull-request.v1",
-        eventTypes: ["pull_request.review_requested"],
-        configuration: {},
-        sessionTemplate,
-      }),
-    ).rejects.toThrow("Pack is not active");
   }, 60_000);
 });
 

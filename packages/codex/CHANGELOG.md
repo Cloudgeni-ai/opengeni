@@ -1,5 +1,40 @@
 # @opengeni/codex
 
+## 0.2.25
+
+### Patch Changes
+
+- a642885: Update the reviewed Codex client version to stable 0.156.0, keeping discovery query and transport identity aligned.
+
+## 0.2.24
+
+### Patch Changes
+
+- c387603: Classify streaming response completion after parsing the final SSE block, so successful responses without a trailing blank separator do not produce false failed-request telemetry. Preserve genuine missing-terminal and provider failures and exactly one terminal audit event per attempt.
+- ac006ef: Add opt-in durable GPT-6 Astra reasoning effort updates with a stable request-level baseline, retry fencing, SDK replay, and explicit compaction restoration. Disabled by default pending live backend verification.
+
+## 0.2.23
+
+### Patch Changes
+
+- 750060c: Support inline HTML visualizations, retained images, and embedded Sites in chat. Add a plain HTML Site client, preserve application request headers through the shared bridge, document visualization workflows, and use Image 2.5 Sunburst for Codex image generation.
+
+## 0.2.22
+
+### Patch Changes
+
+- 694c1ff: Add GPT-6 Astra to the static Codex subscription catalog using the current Codex client version and the existing 272k context policy.
+- Updated dependencies [52cf486]
+- Updated dependencies [92cdc31]
+  - @opengeni/network@0.3.1
+
+## 0.2.21
+
+### Patch Changes
+
+- Updated dependencies [876396d]
+  - @opengeni/network@0.3.0
+
 ## 0.2.20
 
 ### Patch Changes

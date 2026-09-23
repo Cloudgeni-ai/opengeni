@@ -83,9 +83,18 @@ describe("TurnSummary facets", () => {
     expect(cancelled.container.querySelector("svg.lucide-circle-slash")).not.toBeNull();
     await cancelled.unmount();
 
-    const active = await renderComponent(<TurnSummary items={[]}>details</TurnSummary>);
+    const active = await renderComponent(
+      <TurnSummary items={[toolCall("1", "exec_command", "running")]}>details</TurnSummary>,
+    );
     expect(active.container.querySelector(".animate-og-pulse")).not.toBeNull();
     await active.unmount();
+
+    const settled = await renderComponent(
+      <TurnSummary items={[toolCall("1", "exec_command")]}>details</TurnSummary>,
+    );
+    expect(settled.container.querySelector(".animate-og-pulse")).toBeNull();
+    expect(summaryText(settled.container)).toContain("1 step");
+    await settled.unmount();
   });
 
   test("omitted configuration preserves the exact built-in summary", async () => {

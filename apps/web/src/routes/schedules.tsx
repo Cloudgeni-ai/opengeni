@@ -1,7 +1,14 @@
-// Shared schedules for agent turns and deterministic knowledge-source syncs,
+import { ConnectionAccountPicker } from "@/components/capabilities/connection-account-picker";
+import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
+import { connectionAccountChoices } from "@/components/capabilities/session-connection-accounts";
+import { AgentLearningDraftEditor } from "@/components/knowledge/agent-learning-settings";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
+import { loadSessionSchedules, scheduledLearningDestinationKey } from "@/lib/scheduled-tasks";
+// Shared schedules for agent turns, including connected-source Knowledge tasks,
 // with honest per-run outcomes and no implied agent session for connector work.
 import { useNavigate } from "@tanstack/react-router";
-import { MACHINES_COMPOSER_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
+import { MACHINES_COMPOSER_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import {
   BotIcon,
   CalendarClockIcon,
@@ -104,6 +111,7 @@ type TaskRunHistory =
  * connections at once on a page the user has only just landed on.
  */
 const RUN_PROBE_CONCURRENCY = 8;
+const SCHEDULES_POLL_MS = 30_000;
 
 /**
  * The rendered list and the ordering keys it is sorted by, committed as one
@@ -147,17 +155,19 @@ export function SchedulesRoute({
   workspaceId,
   sourceSessionId,
   focusTaskId,
+  targetSessionId,
 }: {
   workspaceId: string;
   sourceSessionId?: string;
   /** Arrived from a session this task started: reveal that one task on load. */
   focusTaskId?: string;
+  targetSessionId?: string;
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
   const client = context.client;
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  const fleet = useMachines({ pollIntervalMs: MACHINES_COMPOSER_POLL_MS });
+  const fleet = useWorkspaceMachines({ pollIntervalMs: MACHINES_COMPOSER_POLL_MS });
   const [list, setList] = useState<ScheduleListSnapshot>(EMPTY_LIST);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
@@ -173,7 +183,10 @@ export function SchedulesRoute({
   const [expandedTaskIds, setExpandedTaskIds] = useState<ReadonlySet<string>>(
     () => new Set<string>(focusTaskId ? [focusTaskId] : []),
   );
-  const [pausedOpen, setPausedOpen] = useState(false);
+  const [pausedOpen, setPausedOpen] = useState(Boolean(targetSessionId));
+  useEffect(() => {
+    if (targetSessionId) setPausedOpen(true);
+  }, [targetSessionId]);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<ScheduledTask | null>(null);
   const [clock, setClock] = useState(() => new Date());
@@ -268,77 +281,102 @@ export function SchedulesRoute({
   // error can never masquerade as a failed mutation in the callers' catch
   // blocks. The toast still fires because a failed refresh with tasks already
   // on screen keeps rendering the stale list.
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [next, targetSessions, exactSourceSession] = await Promise.all([
-        client.listScheduledTasks(workspaceId),
-        canTargetSessions
-          ? client.listSessions(workspaceId, { limit: 100 }).catch(() => [])
-          : Promise.resolve([]),
-        canTargetSessions && sourceSessionId
-          ? client.getSession(workspaceId, sourceSessionId, { fresh: true }).catch(() => null)
-          : Promise.resolve(null),
-      ]);
-      setSessions(
-        [
-          ...(exactSourceSession ? [exactSourceSession] : []),
-          ...targetSessions.filter((session) => session.id !== exactSourceSession?.id),
-        ].filter((session) => session.status !== "cancelled"),
-      );
-      setLoadError(null);
+  const refresh = useCallback(
+    async (background = false) => {
+      if (!background) setLoading(true);
+      try {
+        const [next, targetSessions, exactSourceSession] = await Promise.all([
+          targetSessionId
+            ? loadSessionSchedules(client, workspaceId, targetSessionId)
+            : client.listScheduledTasks(workspaceId),
+          canTargetSessions
+            ? client.listSessions(workspaceId, { limit: 100 }).catch(() => [])
+            : Promise.resolve([]),
+          canTargetSessions && sourceSessionId
+            ? client.getSession(workspaceId, sourceSessionId, { fresh: true }).catch(() => null)
+            : Promise.resolve(null),
+        ]);
+        setSessions(
+          [
+            ...(exactSourceSession ? [exactSourceSession] : []),
+            ...targetSessions.filter((session) => session.id !== exactSourceSession?.id),
+          ].filter((session) => session.status !== "cancelled"),
+        );
+        setLoadError(null);
 
-      // Deleted schedules must not keep an expanded panel or a cached history
-      // alive, and a collapsed card must never reopen onto a history from before
-      // this reload, so cached history is dropped wholesale and only the panels
-      // that are actually open are read again below.
-      const liveTaskIds = new Set(next.map((task) => task.id));
-      const openTaskIds = [...expandedTaskIdsRef.current].filter((id) => liveTaskIds.has(id));
-      setExpandedTaskIds(new Set(openTaskIds));
-      setRunHistory({});
+        // Deleted schedules must not keep an expanded panel or a cached history
+        // alive, and a collapsed card must never reopen onto a history from before
+        // this reload, so cached history is dropped wholesale and only the panels
+        // that are actually open are read again below.
+        const liveTaskIds = new Set(next.map((task) => task.id));
+        const openTaskIds = [...expandedTaskIdsRef.current].filter((id) => liveTaskIds.has(id));
+        setExpandedTaskIds(new Set(openTaskIds));
+        setRunHistory({});
 
-      // Both the ordering and the collapsed last-run line need one last-run fact
-      // per task, and the wire `ScheduledTask` carries none. A single-row probe
-      // (the runs list is newest-first) is the smallest read that answers both;
-      // the full history behind a card stays strictly on demand.
-      type LastRunProbe = readonly [string, ScheduledTaskRun | null];
-      const probes = await mapWithConcurrency<ScheduledTask, LastRunProbe | null>(
-        next,
-        RUN_PROBE_CONCURRENCY,
-        async (task) => {
-          try {
-            const [newest] = await client.listScheduledTaskRuns(workspaceId, task.id, { limit: 1 });
-            return [task.id, newest ?? null];
-          } catch {
-            // A failed probe leaves the key absent ("unknown") rather than
-            // null, which would claim the task has never run.
-            return null;
-          }
-        },
-      );
-      // The list and its ordering keys land in the same commit, so the order the
-      // user sees is the final one from the first paint onward. Awaiting the
-      // probes first is what pays for that; see ScheduleListSnapshot.
-      setList({
-        tasks: next,
-        lastRuns: Object.fromEntries(
-          probes.filter((entry): entry is LastRunProbe => entry !== null),
-        ),
-      });
+        // Both the ordering and the collapsed last-run line need one last-run fact
+        // per task, and the wire `ScheduledTask` carries none. A single-row probe
+        // (the runs list is newest-first) is the smallest read that answers both;
+        // the full history behind a card stays strictly on demand.
+        type LastRunProbe = readonly [string, ScheduledTaskRun | null];
+        const probes = await mapWithConcurrency<ScheduledTask, LastRunProbe | null>(
+          next,
+          RUN_PROBE_CONCURRENCY,
+          async (task) => {
+            try {
+              const [newest] = await client.listScheduledTaskRuns(workspaceId, task.id, {
+                limit: 1,
+              });
+              return [task.id, newest ?? null];
+            } catch {
+              // A failed probe leaves the key absent ("unknown") rather than
+              // null, which would claim the task has never run.
+              return null;
+            }
+          },
+        );
+        // The list and its ordering keys land in the same commit, so the order the
+        // user sees is the final one from the first paint onward. Awaiting the
+        // probes first is what pays for that; see ScheduleListSnapshot.
+        setList({
+          tasks: next,
+          lastRuns: Object.fromEntries(
+            probes.filter((entry): entry is LastRunProbe => entry !== null),
+          ),
+        });
 
-      await Promise.all(openTaskIds.map((id) => loadRunHistory(id, { notify: false })));
-    } catch (error) {
-      setLoadError(error instanceof Error ? error : new Error(String(error)));
-      toast.error("Failed to load scheduled tasks", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [canTargetSessions, client, loadRunHistory, sourceSessionId, workspaceId]);
+        await Promise.all(openTaskIds.map((id) => loadRunHistory(id, { notify: false })));
+      } catch (error) {
+        if (!background) {
+          setLoadError(error instanceof Error ? error : new Error(String(error)));
+          toast.error("Failed to load scheduled tasks", {
+            description: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } finally {
+        if (!background) setLoading(false);
+      }
+    },
+    [canTargetSessions, client, loadRunHistory, sourceSessionId, targetSessionId, workspaceId],
+  );
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    const reconcileForeground = () => {
+      if (document.visibilityState === "visible") {
+        void refresh(true);
+      }
+    };
+    const interval = window.setInterval(reconcileForeground, SCHEDULES_POLL_MS);
+    window.addEventListener("focus", reconcileForeground);
+    document.addEventListener("visibilitychange", reconcileForeground);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", reconcileForeground);
+      document.removeEventListener("visibilitychange", reconcileForeground);
+    };
   }, [refresh]);
 
   // Ordering keys come only from the probe, which is refilled by `refresh`.
@@ -425,13 +463,25 @@ export function SchedulesRoute({
     }
     setBusyTaskId("new");
     try {
+      const scope = scheduledLearningScope(
+        form,
+        sessions,
+        isPersonalWorkspace(
+          context.workspaces.find((item) => item.id === workspaceId) ?? null,
+          context.managedSelfContext,
+        ),
+      );
       await client.createScheduledTask(workspaceId, {
+        ...(form.agentLearning && Object.keys(form.agentLearning).length
+          ? { agentLearning: { scope, settings: form.agentLearning } }
+          : {}),
         name: form.name.trim() || form.prompt.trim().slice(0, 64),
         schedule: scheduleFromFormState(form),
         runMode: form.runMode,
         ...(form.runMode === "existing_session" ? { targetSessionId: form.targetSessionId } : {}),
         overlapPolicy: form.overlapPolicy,
         metadata: taskMetadataFromFormState(form),
+        connectionAccounts: form.connectionAccounts ?? [],
         agentConfig: agentConfigFromFormState(form),
       });
       setOpen(false);
@@ -475,12 +525,33 @@ export function SchedulesRoute({
     setBusyTaskId(task.id);
     try {
       await client.updateScheduledTask(workspaceId, task.id, {
+        ...(form.agentLearningVersion !== undefined &&
+        (form.agentLearningDirty ||
+          form.agentLearningDestinationKey !== scheduledLearningDestinationKey(form))
+          ? {
+              agentLearning: {
+                scope: scheduledLearningScope(
+                  form,
+                  sessions,
+                  isPersonalWorkspace(
+                    context.workspaces.find((item) => item.id === workspaceId) ?? null,
+                    context.managedSelfContext,
+                  ),
+                ),
+                baselineScope: form.agentLearningBaselineScope,
+                operationId: crypto.randomUUID(),
+                expectedVersion: form.agentLearningVersion,
+                settings: form.agentLearning ?? {},
+              },
+            }
+          : {}),
         name: form.name.trim() || form.prompt.trim().slice(0, 64),
         schedule: scheduleFromFormState(form),
         runMode: form.runMode,
         targetSessionId: form.runMode === "existing_session" ? form.targetSessionId : null,
         overlapPolicy: form.overlapPolicy,
         metadata: taskMetadataFromFormState(form, task),
+        connectionAccounts: form.connectionAccounts ?? [],
         agentConfig: agentConfigFromFormState(form, task),
       });
       setEditingTaskId(null);
@@ -567,6 +638,7 @@ export function SchedulesRoute({
           tone={tone}
           expanded={expandedTaskIds.has(task.id)}
           editing={editingTaskId === task.id}
+          viewerSubjectId={context.accessContext.subjectId}
           busy={busyTaskId === task.id}
           history={runHistory[task.id]}
           probedLastRun={list.lastRuns[task.id]}
@@ -601,6 +673,8 @@ export function SchedulesRoute({
               />
             ) : (
               <ScheduledTaskForm
+                workspaceId={workspaceId}
+                taskId={task.id}
                 key={task.id}
                 initialState={formStateFromScheduledTask(task, {
                   model: context.model,
@@ -637,32 +711,19 @@ export function SchedulesRoute({
         title="Schedules"
         description="Create and manage recurring work."
         actions={
-          <>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => void refresh()}
-              disabled={loading}
-              className="h-9 pointer-coarse:min-h-10"
-            >
-              <RefreshCwIcon className={cn("size-3.5", loading && "animate-spin")} />
-              Refresh
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              className="h-9 pointer-coarse:min-h-10"
-              onClick={() => {
-                clearRecurringLaunch();
-                setOpen((value) => !value);
-                setEditingTaskId(null);
-              }}
-            >
-              <PlusIcon className="size-3.5" />
-              New schedule
-            </Button>
-          </>
+          <Button
+            type="button"
+            size="sm"
+            className="h-9 pointer-coarse:min-h-10"
+            onClick={() => {
+              clearRecurringLaunch();
+              setOpen((value) => !value);
+              setEditingTaskId(null);
+            }}
+          >
+            <PlusIcon className="size-3.5" />
+            New schedule
+          </Button>
         }
       />
 
@@ -675,6 +736,7 @@ export function SchedulesRoute({
             </Notice>
           ) : null}
           <ScheduledTaskForm
+            workspaceId={workspaceId}
             key={recurringSourceSessionId ?? "new"}
             initialState={
               recurringSourceSessionId
@@ -724,7 +786,7 @@ export function SchedulesRoute({
           <EmptyState
             icon={<CalendarClockIcon className="size-4" />}
             title="No schedules yet"
-            description="Schedule an agent run or connector sync."
+            description="Schedule recurring agent work."
             action={
               <Button
                 type="button"
@@ -783,6 +845,7 @@ export function SchedulesRoute({
         onOpenChange={(next) => (next ? undefined : setConfirmDelete(null))}
         title={confirmDelete ? `Delete “${confirmDelete.name}”?` : "Delete scheduled task?"}
         description={
+          confirmDelete?.agentConfig.knowledgeSource ||
           confirmDelete?.action.kind === "knowledge_source_sync"
             ? "Deletes this schedule and disables its source. Re-enable it from the connector."
             : "Deletes future runs; existing sessions are kept."
@@ -825,6 +888,7 @@ class ScheduledTaskCardBoundary extends Component<
 
 function ScheduledTaskCard(props: {
   task: ScheduledTask;
+  viewerSubjectId: string;
   /** Paused cards sit one step down the foreground ladder, not behind opacity. */
   tone: "active" | "paused";
   expanded: boolean;
@@ -844,6 +908,7 @@ function ScheduledTaskCard(props: {
   renderEditor: () => ReactNode;
 }) {
   const { task } = props;
+  const ownsTask = task.ownerSubjectId === null || task.ownerSubjectId === props.viewerSubjectId;
   const panelId = useId();
   const state = scheduledTaskStateLabel(task);
   const muted = props.tone === "paused";
@@ -927,12 +992,21 @@ function ScheduledTaskCard(props: {
                 </span>
               </button>
             </CollapsibleTrigger>
-            {task.action.kind === "knowledge_source_sync" ? (
+            {task.agentConfig.knowledgeSource || task.action.kind === "knowledge_source_sync" ? (
               <div className="mt-1 text-2xs text-fg-subtle">
-                {knowledgeSyncSourceLabel(task.action)}
+                {knowledgeSyncSourceLabel(
+                  task.agentConfig.knowledgeSource ??
+                    (task.action as Extract<
+                      ScheduledTask["action"],
+                      { kind: "knowledge_source_sync" }
+                    >),
+                )}
               </div>
             ) : (
-              <SchedulePersonalConnectionDisclosure connections={task.personalConnections} />
+              <SchedulePersonalConnectionDisclosure
+                ownerSubjectId={task.ownerSubjectId}
+                viewerSubjectId={props.viewerSubjectId}
+              />
             )}
           </div>
           {/* Run now remains the frequent action. Editing, state changes, and
@@ -944,12 +1018,12 @@ function ScheduledTaskCard(props: {
               variant="secondary"
               size="sm"
               className="h-8"
-              disabled={props.busy || !state.active}
+              disabled={props.busy || !state.active || !ownsTask}
               onClick={(event) => {
                 event.stopPropagation();
                 props.onRunNow();
               }}
-              title="Fire a manual run now"
+              title={ownsTask ? "Fire a manual run now" : "Only the owner can run this schedule"}
             >
               <ZapIcon className="size-3.5" />
               Run now
@@ -960,7 +1034,7 @@ function ScheduledTaskCard(props: {
                   type="button"
                   variant={props.editing ? "secondary" : "ghost"}
                   size="icon-sm"
-                  disabled={props.busy}
+                  disabled={props.busy || !ownsTask}
                   aria-label={`More actions for ${task.name}`}
                   title="More actions"
                   onClick={(event) => event.stopPropagation()}
@@ -1222,7 +1296,31 @@ function ScheduleTimeField(props: {
   );
 }
 
+function scheduledLearningScope(
+  form: ScheduledTaskFormState,
+  sessions: Session[],
+  personal: boolean,
+): "personal" | "workspace" {
+  if (
+    form.agentLearningBaselineScope &&
+    form.agentLearningDestinationKey === scheduledLearningDestinationKey(form)
+  )
+    return form.agentLearningBaselineScope;
+  const target =
+    form.runMode === "existing_session"
+      ? sessions.find((session) => session.id === form.targetSessionId)
+      : null;
+  return form.knowledgeSource?.destination.kind === "personal" ||
+    personal ||
+    target?.tenancy?.visibility === "private" ||
+    target?.memoryScope === "user"
+    ? "personal"
+    : "workspace";
+}
+
 function ScheduledTaskForm(props: {
+  workspaceId: string;
+  taskId?: string;
   initialState: ScheduledTaskFormState;
   submitLabel: string;
   busy: boolean;
@@ -1239,7 +1337,78 @@ function ScheduledTaskForm(props: {
   onSubmit: (form: ScheduledTaskFormState) => void;
   onCancel?: () => void;
 }) {
-  const [form, setForm] = useState(props.initialState);
+  const context = useAppContext();
+  const [form, setForm] = useState<ScheduledTaskFormState>(() => ({
+    ...props.initialState,
+    mcpServerIds:
+      props.initialState.mcpServerIds ??
+      [...context.selectedCapabilityToolIds].filter((id) => id !== "opengeni"),
+  }));
+  const selectedIds =
+    form.runMode === "existing_session"
+      ? (props.sessions.find((session) => session.id === form.targetSessionId)?.effectiveToolPolicy
+          ?.configuredIds ??
+        props.sessions
+          .find((session) => session.id === form.targetSessionId)
+          ?.tools.map((tool) => tool.id) ??
+        [])
+      : (form.mcpServerIds ?? []);
+  const connectionAccounts = useConnectionAccounts(
+    context.client,
+    {
+      workspaceId: props.workspaceId,
+      id: props.taskId ?? "new-schedule",
+      selectedIds,
+    },
+    context.workspaceCapabilityCatalog,
+    connectionAccountChoices(props.initialState.connectionAccounts ?? []),
+  );
+  const [learningOpen, setLearningOpen] = useState(false);
+  const learningScope = scheduledLearningScope(
+    form,
+    props.sessions,
+    isPersonalWorkspace(
+      context.workspaces.find((item) => item.id === props.workspaceId) ?? null,
+      context.managedSelfContext,
+    ),
+  );
+  const baselineDestinationKey = scheduledLearningDestinationKey(props.initialState);
+  const [learningLoading, setLearningLoading] = useState(Boolean(props.taskId));
+  const [learningError, setLearningError] = useState<string | null>(null);
+  const [learningRetry, setLearningRetry] = useState(0);
+  useEffect(() => {
+    if (!props.taskId) return;
+    let current = true;
+    setLearningLoading(true);
+    setLearningError(null);
+    void context.client
+      .getAgentLearningSettings(props.workspaceId, "context", {
+        kind: "scheduled_task",
+        id: props.taskId,
+      })
+      .then((record) => {
+        if (current)
+          setForm((previous) => ({
+            ...previous,
+            agentLearning: record.settings,
+            agentLearningVersion: record.version,
+            agentLearningBaselineScope: record.ownerKey.startsWith("personal:")
+              ? "personal"
+              : "workspace",
+            agentLearningDestinationKey: baselineDestinationKey,
+            agentLearningDirty: false,
+          }));
+      })
+      .catch((reason) => {
+        if (current) setLearningError(reason instanceof Error ? reason.message : String(reason));
+      })
+      .finally(() => {
+        if (current) setLearningLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [context.client, props.workspaceId, props.taskId, baselineDestinationKey, learningRetry]);
   const [cadence, setCadenceState] = useState<ScheduledTaskCadence>(() =>
     scheduledTaskCadence(props.initialState),
   );
@@ -1507,6 +1676,126 @@ function ScheduledTaskForm(props: {
         </div>
       </FormDisclosure>
 
+      <div className="grid gap-2">
+        {form.runMode === "existing_session" ? (
+          <p className="text-xs text-fg-subtle">Uses the conversation’s tool selection.</p>
+        ) : (
+          <fieldset className="grid gap-2" disabled={props.busy}>
+            <legend className="mb-2 text-sm font-medium">Tools for this schedule</legend>
+            {context.toolMcpServers
+              .filter((server) => server.id !== "opengeni")
+              .map((server) => (
+                <label key={server.id} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.includes(server.id)}
+                    onChange={(event) =>
+                      update(
+                        "mcpServerIds",
+                        event.target.checked
+                          ? [...selectedIds, server.id]
+                          : selectedIds.filter((id) => id !== server.id),
+                      )
+                    }
+                  />
+                  {server.name}
+                </label>
+              ))}
+            {selectedIds
+              .filter(
+                (id) =>
+                  id !== "opengeni" && !context.toolMcpServers.some((server) => server.id === id),
+              )
+              .map((id) => (
+                <div key={id} className="flex items-center justify-between gap-2 text-sm">
+                  <span>Unavailable tool: {id}</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() =>
+                      update(
+                        "mcpServerIds",
+                        selectedIds.filter((selected) => selected !== id),
+                      )
+                    }
+                  >
+                    Remove
+                  </Button>
+                </div>
+              ))}
+          </fieldset>
+        )}
+        <p className="text-xs text-fg-subtle">
+          Runs as you, using your connected accounts. Only you can edit or run this schedule.
+        </p>
+        <ConnectionAccountPicker
+          groups={connectionAccounts.accountGroups}
+          choices={connectionAccounts.accountChoices}
+          onChoose={connectionAccounts.selectAccount}
+          disabled={props.busy}
+        />
+        {connectionAccounts.error ? (
+          <Notice
+            tone="failed"
+            action={
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => void connectionAccounts.refresh()}
+              >
+                Retry
+              </Button>
+            }
+          >
+            {connectionAccounts.error}
+          </Notice>
+        ) : null}
+      </div>
+
+      <FormDisclosure
+        title="Agent learning"
+        summary="Optional defaults for this task"
+        open={learningOpen}
+        onOpenChange={setLearningOpen}
+      >
+        {learningLoading ? (
+          <p role="status" className="text-sm text-fg-muted">
+            Loading task settings…
+          </p>
+        ) : learningError ? (
+          <p role="alert" className="text-sm text-status-error">
+            Learning settings are unavailable. You can still save other task changes.
+            <span className="block text-xs">{learningError}</span>
+            <Button
+              variant="ghost"
+              type="button"
+              onClick={() => setLearningRetry((value) => value + 1)}
+            >
+              Retry
+            </Button>
+          </p>
+        ) : (
+          <AgentLearningDraftEditor
+            workspaceId={props.workspaceId}
+            scope={learningScope}
+            value={form.agentLearning ?? {}}
+            disabled={props.busy}
+            onChange={(value) =>
+              setForm((previous) => ({
+                ...previous,
+                agentLearning: value,
+                agentLearningDirty: true,
+              }))
+            }
+          />
+        )}
+        {props.taskId ? (
+          <p className="text-xs text-fg-muted">
+            Applied when you save changes. Cancel discards these edits.
+          </p>
+        ) : null}
+      </FormDisclosure>
+
       <section className="grid gap-3" aria-labelledby="schedule-editor-heading">
         <Label id="schedule-editor-heading">Schedule</Label>
         <div
@@ -1590,7 +1879,22 @@ function ScheduledTaskForm(props: {
             Cancel
           </Button>
         ) : null}
-        <Button type="button" onClick={() => props.onSubmit(form)} disabled={props.busy}>
+        <Button
+          type="button"
+          onClick={() =>
+            props.onSubmit({
+              ...form,
+              connectionAccounts: connectionAccounts.selections,
+            })
+          }
+          disabled={
+            props.busy ||
+            learningLoading ||
+            connectionAccounts.loading ||
+            Boolean(connectionAccounts.error) ||
+            connectionAccounts.requiresAccountChoice
+          }
+        >
           {props.busy ? (
             <Loader2Icon className="size-3.5 animate-spin" />
           ) : (

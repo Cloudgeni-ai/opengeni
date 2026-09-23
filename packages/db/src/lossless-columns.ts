@@ -33,3 +33,16 @@ export const losslessText = customType<{ data: string; driverData: string }>({
     return value;
   },
 });
+
+/** Ordered model history: JSON decoding preserves insertion order without repair. */
+export const losslessOrderedJson = customType<{ data: unknown; driverData: string }>({
+  dataType() {
+    return "json";
+  },
+  toDriver(value) {
+    return JSON.stringify(toPostgresLosslessJson(value));
+  },
+  fromDriver(value) {
+    return typeof value === "string" ? JSON.parse(value) : value;
+  },
+});

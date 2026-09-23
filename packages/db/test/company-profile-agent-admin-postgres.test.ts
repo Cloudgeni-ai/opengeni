@@ -8,14 +8,13 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   acceptSessionHumanInputResponse,
-  activateWorkspaceLearningPolicyRevision,
   appendSessionEventsForTurnAttempt,
   applySessionTurnSettlement,
   claimSessionWorkForAttempt,
   confirmCompanyProfileForAgent,
+  saveAgentLearningSettings,
   createDb,
   createSession,
-  createWorkspaceLearningPolicyRevision,
   ensureManagedAccessForUser,
   getCompanyProfileAgentPolicy,
   initializeSessionStartAtomically,
@@ -88,23 +87,27 @@ async function fixture(options: { initiatingSubjectId?: string } = {}) {
       account_id, activation_version, inventory_digest, parity_digest, activated_by
     ) values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'profile-agent-test')
     on conflict (account_id) do nothing`;
-  const offRevision = await createWorkspaceLearningPolicyRevision(client.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    workspaceMode: "off",
-    actorSubjectId: ownerSubjectId,
-    principalKind: "human_session",
-  });
-  await activateWorkspaceLearningPolicyRevision(client.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    revisionId: offRevision.id,
-    expectedCurrentRevisionId: null,
-    expectedActivationVersion: 0,
-    actorSubjectId: ownerSubjectId,
-    principalKind: "human_session",
-    reason: "Keep workspace learning disabled while testing explicit organization administration.",
-  });
+  await saveAgentLearningSettings(
+    client.db,
+    {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      actor: {
+        kind: "human",
+        principalKind: "human_session",
+        subjectId: ownerSubjectId,
+        writeScopes: ["workspace"],
+        settingsScopes: ["workspace"],
+        review: true,
+      },
+    },
+    {
+      scope: "workspace",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 0,
+      settings: { knowledge: "off", instructions: "off", skills: "off" },
+    },
+  );
   const session = await withSessionRlsActorContext({ subjectId: ownerSubjectId }, async () =>
     createSession(client!.db, {
       accountId: grant.accountId,

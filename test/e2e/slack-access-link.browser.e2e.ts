@@ -528,15 +528,22 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
       // never hands an envelope to the rail's array-only grouping helper.
       return json([]);
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`) {
+      return json({ items: [], nextCursor: null });
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) {
       return json({ skills: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/content`) {
+      return json({ skills: [], nextCursor: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
       return json({ plugins: [] });
     }
-    if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
-      return json({ packs: [], installations: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`) {
+      return json({ items: [], total: 0, nextOffset: null });
     }
+
     if (
       url.pathname === `/v1/workspaces/${workspaceId}/rigs` ||
       url.pathname === `/v1/workspaces/${workspaceId}/variable-sets` ||
@@ -546,6 +553,9 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json({ items: [], installations: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`) {
+      return json({ items: [], total: 0, nextOffset: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       return json({ connections: [] });
@@ -677,6 +687,8 @@ async function expectVisible(locator: import("playwright").Locator): Promise<voi
     await locator.waitFor({ state: "visible", timeout: 15_000 });
   } catch (error) {
     const page = locator.page();
+    const errorDetails = page.getByRole("button", { name: "Show Error", exact: true });
+    if (await errorDetails.isVisible()) await errorDetails.click();
     throw new Error(
       `${String(error)}\nURL: ${page.url()}\nBODY: ${((await page.locator("body").textContent()) ?? "").slice(0, 4_000)}`,
       { cause: error },

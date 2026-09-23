@@ -9,10 +9,16 @@ import { encodePresentationArtifactCommandBatch } from "@opengeni/contracts/pres
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 
-import { createDb, withRlsContext, type DbClient } from "../src/database";
+import {
+  createDb,
+  withRlsContext,
+  withSessionRlsActorContext,
+  type DbClient,
+} from "../src/database";
 import {
   bootstrapWorkspace,
   completeFileUpload,
+  getFile,
   createSession,
   nestedPostgresSqlState,
   prepareGeneratedWorkspaceFile,
@@ -191,6 +197,43 @@ describe("Postgres editable artifact authority", () => {
     await expect(
       prepareGeneratedWorkspaceFile(client.db, { ...input, sha256: "b".repeat(64) }),
     ).rejects.toThrow("identity conflict");
+  });
+
+  test("generated originals inherit private session ownership and stay out of shared reads", async () => {
+    if (!available || !client) throw new Error("Private original verification requires PostgreSQL");
+    const db = client.db,
+      owner = "user:private-generated-owner";
+    const input = {
+      accountId,
+      workspaceId,
+      fileId: crypto.randomUUID(),
+      uploadId: crypto.randomUUID(),
+      filename: "analysis.json",
+      safeFilename: "analysis.json",
+      contentType: "application/json",
+      sizeBytes: 20,
+      sha256: "a".repeat(64),
+      bucket: "test",
+      objectKey: crypto.randomUUID(),
+      expiresAt: new Date(Date.now() + 60000),
+    };
+    await withSessionRlsActorContext(
+      { subjectId: owner, privateFileOwnerSubjectId: owner },
+      async () => {
+        expect((await prepareGeneratedWorkspaceFile(db, input)).file.scope).toBe("personal");
+        await completeFileUpload(db, workspaceId, input.uploadId);
+        expect((await prepareGeneratedWorkspaceFile(db, input)).created).toBe(false);
+        expect((await getFile(db, workspaceId, input.fileId))?.scope).toBe("personal");
+      },
+    );
+    expect(await getFile(db, workspaceId, input.fileId)).toBeNull();
+    await withSessionRlsActorContext(
+      { subjectId: "user:other", privateFileOwnerSubjectId: "user:other" },
+      async () => {
+        expect(await getFile(db, workspaceId, input.fileId)).toBeNull();
+        await expect(prepareGeneratedWorkspaceFile(db, input)).rejects.toBeDefined();
+      },
+    );
   });
 
   test("tags built-in bootstrap grants with exact principal provenance", async () => {

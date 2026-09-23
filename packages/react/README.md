@@ -24,6 +24,141 @@ ancestor. Components are styled with Tailwind v4 utilities mapped onto the
 tokens, Radix primitives for behavior, and Motion for state-communicating
 animation. Override the tokens to rebrand everything.
 
+## Embedded connections and Sites
+
+Optional `@opengeni/react/connect` exports `useConnect`, `ConnectChooser`,
+`ConnectSetup`, `ConnectAccounts`, and the composed `ConnectPanel`. Inject one
+`@opengeni/connect` controller per authenticated actor/workspace and dispose it
+when that scope changes. The controller uses your authenticated backend proxy;
+never place an organization key in browser props. Import
+`@opengeni/react/connect.css` for opt-in, scoped styles without Tailwind.
+`DeviceAuthorization` also accepts an optional `render` callback for host presentation;
+it receives shared copy state, the copy action, and the validated verification URL.
+Omitting it preserves the default embedded presentation.
+
+`CapabilityCatalogRow` gives connections, skills, and plugins one consistent
+icon/name/description button with a decorative plus/check and visible exception
+states. Supply `onOpen` and an explicit `status`; the host owns setup and
+installation. `ConnectionCatalog` accepts the same states through each option's
+`state`. Older callers that omit `state` keep their visible status labels, so
+provider warnings are not hidden during migration.
+
+`PluginDiscovery` accepts `defaultProvider="openai"` or `"anthropic"` to choose
+the initial registry. Omitting it starts with All. Users can still switch among
+All, OpenAI, and Anthropic; changing the search preserves their selection. The
+OpenGeni Plugins page starts with OpenAI.
+
+```tsx
+import { ConnectPanel } from "@opengeni/react/connect";
+import "@opengeni/react/connect.css";
+
+<ConnectPanel
+  controller={controller}
+  returnUrl={hostSelectedReturnUrl}
+  onAuthorize={hostAuthorizeFromClick}
+/>;
+```
+
+The host owns synchronous popup/full-redirect navigation and pending-attempt
+recovery. Backend state, not a popup message or URL query, proves completion.
+Operation installation uses explicit selection; OAuth success alone is not
+installation. Account disconnect requires an observed version and confirmation,
+revokes local OpenGeni access only, and never silently retries an unknown outcome.
+Provider readiness is deployment-dependent; use the server catalog rather than
+assuming every OAuth application or operator-managed provider is configured.
+
+Optional `@opengeni/react/sites` exports `SiteList`, `SiteDetail`, and `SiteClient`.
+Pass the public SDK client through your host proxy. `onOpen` owns list
+navigation. Authoring buttons and prompts belong to the host and use the ordinary
+session SDK; they are not part of the Site component API. `SiteDetail` reuses `PublishedHtmlArtifactFrame`, accepts
+an optional authenticated/filtered tool bridge, and removes the frame after
+read-authority refresh failure. Loaded Sites revalidate every 15 seconds;
+downloaded HTML cannot be recalled and every tool call still needs live authority.
+
+`canPublish` is only a presentation hint. Version-checked rollback/archive/restore
+remain subject to backend `artifacts:publish` permission. Sites stay workspace
+shared, even if a source session is private. See
+[`examples/embedded-product`](../../examples/embedded-product/README.md) for the
+runnable loopback host reference. Native route reuse and full visual acceptance
+are not implied by these optional package surfaces.
+## Conversation UI
+
+Use `SessionConversation` for an existing session, or compose `MessageTimeline`
+and `ChatComposer` with the session hooks. These use the normal SDK through
+your authenticated host routes. For custom or compatible frontends, the backend
+`@opengeni/sdk/chat` adapters provide the `createChatHandler` protocol.
+
+### Exact conversation search navigation
+
+`useSessionEvents(sessionId).jumpToSequence(sequence)` replaces the current
+window with at most two bounded cursor reads around an exact durable event.
+It resolves `true` only when that event is retained, `false` for a missing or
+superseded target, and rejects current request errors. `loadingTarget` exposes
+the pending state. New targets supersede older targets/pages; session/client
+changes fence stale results. Search enters history mode; use the existing
+`loadOlder`, `loadNewer`, and `jumpToLatest` controls to navigate onward. It does
+not download the intervening session history.
+Pass `jumpToSequence(sequence, { signal })` to cancel one navigation: an
+aborted signal fences the pending jump before its fetched window is applied
+(the underlying reads may still complete), resolves `false`, and settles
+`loadingTarget` without disturbing any newer navigation that superseded it.
+
+Pass the selected hit to `MessageTimeline` independently of loading:
+
+```tsx
+const history = useSessionEvents(sessionId);
+const [target, setTarget] = useState<TimelineSearchTarget | null>(null);
+
+function selectHit(hit: { sequence: number; eventId: string }, query: string, occurrence = 0) {
+  setTarget({ ...hit, query, occurrence });
+  void history.jumpToSequence(hit.sequence);
+}
+
+<MessageTimeline events={history.events} items={history.timeline} searchTarget={target} />;
+```
+
+The host owns search results, error handling, next/previous controls and query
+state. `TimelineSearchTarget` is exported from the root and `session-ui` entry:
+`{ sequence: number; eventId?: string; query: string; occurrence?: number; offset?: number }`.
+Matching is literal, case-insensitive, non-overlapping; `occurrence` is zero-based
+within the message, defaulting to zero. When the backend all-occurrence search
+returns `messageMatchOffset`, pass it as `offset`: the zero-based UTF-16 position
+of the match in the original message text. An explicit `offset` takes precedence
+over `occurrence` and is validated against the query, so a stale offset simply
+produces no highlight. `buildTimeline` supplies `sourceEvents`
+identities so completed assistant events remain addressable when the renderer
+keeps a first-delta ID. Hosts supplying their own items should preserve those
+identities (or the canonical `annotationSource`).
+
+The active message's group and long-user disclosure open persistently. Setting
+`searchTarget={null}` removes the active highlight without collapsing content or
+restoring a former scroll position. The package mounts its complete bounded
+window. The default Markdown renderer shows a labeled, bounded **message source**
+excerpt for the active match, including Markdown syntax and link destinations;
+closing find removes the highlight but retains that excerpt and its layout.
+An explicit **Show formatted message** action restores the full body; this can
+expand a huge message, so it is never done automatically on closing Find.
+Raw UTF-16 offsets are never applied
+to rendered Markdown text. Custom hosts can use
+`<Markdown searchTarget={searchTarget}>{text}</Markdown>` for the same behavior.
+A custom virtualized renderer receives
+`renderMessageText(text, item, { searchTarget })` and must materialize the exact
+occurrence when that context is non-null. Existing two-argument renderers remain
+compatible. If previous occurrences are omitted from the virtualized DOM, wrap
+the materialized match in an element with `data-og-search-occurrence` (zero-based
+index), `data-og-search-sequence` and `data-og-search-query`, each set from the
+target; when the target carries an `offset`, set `data-og-search-offset` to it
+alongside `data-og-search-occurrence` (which can be zero). This lets navigation
+identify that exact occurrence without recounting an incomplete DOM. Keep the
+materialized window when the context clears to
+preserve position. Navigation waits for the mounted text and highlights the active
+DOM range using the CSS Custom Highlight API, without rewriting React-owned
+text. Explicit source-offset targets require this marker: matching characters
+at the same rendered offset are not proof of source identity. A custom renderer
+that omits source text or puts it in an opaque iframe must reveal that text
+itself. Existing renderers without this mapping remain render-compatible but
+cannot provide exact source-offset navigation.
+
 ## Editable Office artifacts
 
 The optional artifact workbench is isolated from the ordinary session and
@@ -443,6 +578,18 @@ same-origin `/demo-api` proxy and the exact published SDK/React entrypoints.
 
 ## Composer customization (`@opengeni/react/composer`)
 
+`SessionChrome` accepts `onComposerFocus` for queue editing. Connect it to
+`controller.focusInput` from `useChatComposerController`, or focus a custom
+input through its ref. Chrome calls it after a successful checkout and
+`composer.applyDraft`, including confirmed draft replacement; failed checkout
+and pending/cancelled replacement do not request focus. The host retains
+ownership of the input and no DOM selector or global focus event is needed.
+
+When sharing `useSessionEvents().events` with `useGoal`, the hook still fetches
+the authoritative goal on mount and target changes, even when the supplied log
+already contains goal events. The shared log drives subsequent invalidations
+without opening another event stream. A 404 remains a normal goal-less state.
+
 Use `ChatComposer` for the standard layout and its `controlsStart`, `header`,
 and `messages` props for small additions. For a different layout, import the
 headless controller and compound primitives as a namespace. The controller is
@@ -534,13 +681,30 @@ state remains application-owned; durable draft and session state remain in
   callback return type. Custom loaders can use `createOlderHistoryLoadReceipt`
   and call `markCommitted` immediately before publishing their accepted older
   window.
+- Browser retention limits are exported as `SESSION_EVENT_BROWSER_MAX_BYTES`
+  and `SESSION_EVENT_BROWSER_MAX_COUNT`; they do not change fetch page sizes.
+  Live appends reuse the retained window's byte total, measuring only incoming
+  and evicted events. History still pages when either retention limit is reached.
+- Newer history uses `hasNewer`, `loadingNewer`, and `loadNewer`. A failed
+  `loadNewer()` preserves the retained events and cursors, exposes the original
+  failure through `error`, and still rejects for the caller to handle. Pass
+  `onLoadNewer={loadNewer}` (or return its promise from your wrapper) to
+  `MessageTimeline`: it catches the request failure, shows the error and an
+  explicit **Retry later activity** action, and does not automatically retry
+  the failed boundary. A successful retry, jump to the start/latest window,
+  or session change clears that failure. Loading older rows alone does not
+  resolve a failed newer read. Late failures from a previous session are ignored.
+  A host that discards the promise must handle its own rejected request.
 - `useComposer(sessionId, { sendExtras, effectiveControl })` — revisioned private
   draft, Send, Steer, and workstream Pause/Resume state. `send()` appends in
   visible queue order (including while paused); `steer()` puts the new direction
   directly in chat and supersedes the current direction. Resume is always an
   explicit control action and never an implicit side effect of Send. Drafts
   autosave with optimistic concurrency, survive failed sends, and reuse one
-  `clientEventId` across retries so the server dedupes. `composer.policy` and
+  `clientEventId` across retries so the server dedupes. Draft reads retry transient
+  failures, including request timeouts, with backoff. Successful refreshes clear
+  draft-read errors without dismissing Send, Steer, or control errors; a draft
+  sync timeout does not mean the agent turn has stopped. `composer.policy` and
   `setModel` / `setReasoningEffort` / `setLatencyMode` expose the exact policy
   owned by that actor/session draft; policy is `null` until hydration completes.
   `sendExtras` (object or function evaluated at send time) is only for
@@ -580,8 +744,6 @@ state remains application-owned; durable draft and session state remain in
   reads and create/update/remove/set/delete operations. Dedicated permissioned
   exact-value reveal is part of the held React/UI train rather than an
   implicit field on ordinary reads.
-- `usePacks()` — capability packs + installations with
-  register/enable/remove and `installationFor(packId)`.
 - `useWorkspaces()` — the caller's workspaces with create/update (client-only;
   not bound to the provider's workspace).
 - `useBillingUsage({ accountId?, workspaceId? })` — credit balance + recent
@@ -636,6 +798,15 @@ intentional changes should regenerate those snapshots and review the diff.
 - `UserMessageBody` — the shared lossless rendered-height disclosure for
   already-sent user text. Use it inside a custom `renderMessageText` user branch
   so attachments and voice identity remain outside the clipped Markdown region.
+  Pass `disclosureLabels={{ showMore: "Afficher davantage", showLess: "Réduire" }}`
+  to localize a direct instance. For the default timeline, pass the same object
+  as `MessageTimeline.userMessageDisclosureLabels` or
+  `SessionConversation.userMessageDisclosureLabels`; custom `UserMessageBody`
+  renderers inside that timeline inherit these labels too. Each direct label
+  overrides its timeline label independently, then falls back to `Show more`
+  or `Show less`. Changing labels does not reset a message's expanded state.
+  `UserMessageDisclosureLabels` is exported from both `@opengeni/react` and
+  `@opengeni/react/session-ui`.
 - `SessionStatus` / `StatusDot` — status badges; live states breathe.
 - `FleetTile` — one session in a fleet grid: title, status, model, recency.
 - `ModelPicker` — a compact model dropdown for a composer slot, grouping the
@@ -645,6 +816,11 @@ intentional changes should regenerate those snapshots and review the diff.
   runnable latency modes such as Fast. It accepts either `ClientModel[]` or
   catalog-backed `PickerModelRow[]`, and supports host-supplied labels.
 - `Markdown` — the timeline's markdown renderer (GFM), also usable standalone.
+  Top-level assistant tables in `MessageTimeline` can expand beyond the prose
+  column into the actual conversation panel's available space. Small tables,
+  paragraphs, user bubbles, and nested or standalone Markdown keep their normal
+  width; oversized tables retain table-only horizontal scrolling. No host prop
+  or viewport-wide layout override is required.
   With `onSandboxFile`, a valid `sandbox:<path>[:line]` application link becomes
   an in-session Open action. The callback receives the decoded path unchanged;
   the optional line is positive and 1-based. Invalid sandbox references render
@@ -722,6 +898,16 @@ capability document so every surface degrades to a reason instead of crashing.
 These surfaces pull in [optional peer dependencies](#optional-peer-dependencies)
 — install only the ones for surfaces you actually mount.
 
+`SandboxWorkspace` keeps capture-backed file browsing passive, but an explicit
+live-file open acquires a viewer. Failed opens show the connection error and a
+retry that renegotiates the viewer instead of leaving a waking spinner running.
+When composing `SandboxFiles` directly, pass `workspaceError` alongside
+`liveWorkspaceReady` and supply an `onWakeWorkspace` callback that can retry a
+failed negotiation. Complete PNG, JPEG, GIF, and WebP reads render as read-only
+image previews; truncated reads and other binary formats remain non-editable
+notices. Image previews use the existing bounded file-read path and do not
+publish or retain additional files.
+
 ## Connected Machines (`@opengeni/react/machines`)
 
 Bring-your-own-compute UI: the Machines dashboard, per-machine metrics, the
@@ -789,3 +975,58 @@ with streaming, tool calls, and a worker spawn, plus fleet and scheduled-task
 views and a dark/light toggle. `realtime.html` is the public-package reference
 consumer described above, with deterministic mock and same-origin live modes.
 `bun run demo:build` is part of the repo gate.
+
+### Model selection
+
+`ModelPolicyPicker` opens a flat, searchable list grouped by payment source, with
+the selected model checked in its provider group. Choosing a model applies it and closes the popover.
+Thinking and supported speed controls remain in a fixed footer instead of a
+nested page. Model changes preserve supported reasoning effort and latency;
+unsupported effort falls back to the new model's default, and unsupported speed
+returns to Standard. Thinking uses inline radio choices and is hidden when the
+model has no adjustable reasoning levels. Availability and Codex-only session restrictions still disable choices.
+
+The trigger renders immediately; the searchable popover loads when opened. Hosts
+can translate its search, current-selection, empty-result, attachment-warning, and
+thinking labels through `messages`, and override payment descriptions through
+`messages.billingHints`.
+
+Hosts can rebrand the full picker without replacing its interaction logic:
+
+```tsx
+<ModelPolicyPicker
+  {...pickerProps}
+  groupPresentation={{
+    opengeni_credits: {
+      label: "Acme Assist",
+      icon: <AcmeMark aria-hidden="true" />,
+      description: "Provided by your workspace",
+    },
+    codex_subscription: { description: null },
+  }}
+/>
+```
+
+`groupPresentation` is a partial map keyed by `PickerBillingClass`. Labels apply
+to group headings, search, and trigger-icon accessibility. Icons apply to both
+the menu and trigger; supply decorative, non-interactive content (SVG or image)
+that fits the existing 14px slot. Explicit `null` hides an icon or description;
+omitted fields retain defaults. Descriptions override `messages.billingHints`,
+can also be shown for the deployment-provided group, and are searchable. Existing
+`rows[].billingClassLabel` remains the fallback when no label override is supplied.
+This is presentation only: model IDs, billing, ordering, availability and callbacks
+are unchanged. The type `ModelPolicyPickerGroupPresentation` is exported from
+both `@opengeni/react` and `@opengeni/react/composer`. The native `ModelPicker`
+is a separate control; this API targets the full `ModelPolicyPicker` shown above.
+
+For a rendered example, open the composer-responsive demo with `?branding=host`.
+
+Subscription descriptions appear once per provider group. Free models carry a
+Free badge. Pass `hasImageAttachments` for the current draft to show an image
+compatibility warning only when the selected model cannot view those images.
+
+`MessageTimeline.renderMessageActions(item)` places host-owned controls beside
+Copy and the timestamp for user messages and completed assistant messages.
+The host owns feedback, fork authorization, and mutations; streaming assistant
+messages omit this slot. Use the `group/copy` hover/focus state and preserve
+visible touch targets when styling actions.

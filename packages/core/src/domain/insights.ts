@@ -20,6 +20,9 @@ import {
   type Database,
 } from "@opengeni/db";
 
+import { measureInsightsPhase, type InsightsPhaseObserver } from "./insights-timing";
+export { measureInsightsPhase, workspaceInsightsPhaseMetricObserver } from "./insights-timing";
+export type { InsightsPhaseObservation, InsightsPhaseObserver } from "./insights-timing";
 const MACHINE_HEARTBEAT_FRESH_MS = 120_000;
 export const WORKSPACE_INSIGHTS_PROVIDER_FILTER_MAX_UTF8_BYTES = 256;
 export const WORKSPACE_INSIGHTS_MODEL_FILTER_MAX_UTF8_BYTES = 512;
@@ -210,10 +213,13 @@ export async function getWorkspaceInsights(
   db: Database,
   settings: Settings,
   input: GetWorkspaceInsightsInput,
+  observePhase?: InsightsPhaseObserver,
 ): Promise<WorkspaceInsightsResponse> {
   const provider = normalizeWorkspaceInsightsFilter(input.provider, "provider");
   const model = normalizeWorkspaceInsightsFilter(input.model, "model");
-  await requireWorkspace(db, input.workspaceId);
+  await measureInsightsPhase(observePhase, "require_workspace", () =>
+    requireWorkspace(db, input.workspaceId),
+  );
   const now = input.now ?? new Date();
   const window = resolveRangeWindow(input.range, now);
   const modelFilterActive = Boolean(provider || model);
@@ -221,31 +227,45 @@ export async function getWorkspaceInsights(
 
   const [modelBundle, usageBundle, liveWarm, tasks, depth, floorRows, machinesOnline] =
     await Promise.all([
-      readWorkspaceInsightsModelBundle(db, {
-        workspaceId: input.workspaceId,
-        since: window.since,
-        until: window.until,
-        priorSince: window.priorSince,
-        priorUntil: window.priorUntil,
-        granularity: input.range === "today" ? "hour" : "day",
-        ...filter,
-      }),
-      readWorkspaceInsightsUsageBundle(db, {
-        workspaceId: input.workspaceId,
-        since: window.since,
-        until: window.until,
-        priorSince: window.priorSince,
-        priorUntil: window.priorUntil,
-        monthSince: startOfUtcMonth(now),
-        granularity: input.range === "today" ? "hour" : "day",
-        warmGroupLimit: 24,
-      }),
-      listLiveWarmLeases(db, input.workspaceId),
-      listScheduledTasks(db, input.workspaceId, 100),
-      aggregateSessionDepth(db, input.workspaceId),
-      listFloorSessions(db, input.workspaceId, 24),
+      measureInsightsPhase(observePhase, "model_bundle", () =>
+        readWorkspaceInsightsModelBundle(db, {
+          workspaceId: input.workspaceId,
+          since: window.since,
+          until: window.until,
+          priorSince: window.priorSince,
+          priorUntil: window.priorUntil,
+          granularity: input.range === "today" ? "hour" : "day",
+          ...filter,
+        }),
+      ),
+      measureInsightsPhase(observePhase, "usage_bundle", () =>
+        readWorkspaceInsightsUsageBundle(db, {
+          workspaceId: input.workspaceId,
+          since: window.since,
+          until: window.until,
+          priorSince: window.priorSince,
+          priorUntil: window.priorUntil,
+          monthSince: startOfUtcMonth(now),
+          granularity: input.range === "today" ? "hour" : "day",
+          warmGroupLimit: 24,
+        }),
+      ),
+      measureInsightsPhase(observePhase, "live_warm", () =>
+        listLiveWarmLeases(db, input.workspaceId),
+      ),
+      measureInsightsPhase(observePhase, "scheduled_tasks", () =>
+        listScheduledTasks(db, input.workspaceId, 100),
+      ),
+      measureInsightsPhase(observePhase, "session_depth", () =>
+        aggregateSessionDepth(db, input.workspaceId),
+      ),
+      measureInsightsPhase(observePhase, "floor_sessions", () =>
+        listFloorSessions(db, input.workspaceId, 24),
+      ),
       settings.sandboxSelfhostedEnabled
-        ? countOnlineMachines(db, input.workspaceId, MACHINE_HEARTBEAT_FRESH_MS, now)
+        ? measureInsightsPhase(observePhase, "online_machines", () =>
+            countOnlineMachines(db, input.workspaceId, MACHINE_HEARTBEAT_FRESH_MS, now),
+          )
         : Promise.resolve(0),
     ]);
 
@@ -271,17 +291,21 @@ export async function getWorkspaceInsights(
     agentRunsUsed,
   } = usageBundle;
   const [attached, fireCounts] = await Promise.all([
-    countSessionsAttachedToGroups(
-      db,
-      input.workspaceId,
-      warmGroups.map((group) => group.groupId),
+    measureInsightsPhase(observePhase, "attached_sessions", () =>
+      countSessionsAttachedToGroups(
+        db,
+        input.workspaceId,
+        warmGroups.map((group) => group.groupId),
+      ),
     ),
-    countScheduledTaskFires(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-      taskIds: tasks.map((task) => task.id),
-    }),
+    measureInsightsPhase(observePhase, "scheduled_fires", () =>
+      countScheduledTaskFires(db, {
+        workspaceId: input.workspaceId,
+        since: window.since,
+        until: window.until,
+        taskIds: tasks.map((task) => task.id),
+      }),
+    ),
   ]);
   const backendByGroup = new Map(liveWarm.map((lease) => [lease.groupId, lease.backend]));
   const warmSecondsByGroup = new Map(warmGroups.map((group) => [group.groupId, group.warmSeconds]));
@@ -305,6 +329,8 @@ export async function getWorkspaceInsights(
       creditUsd: microsToUsd(row.pricedCostMicros),
       estimatedProviderUsd: microsToUsd(row.estimatedProviderCostMicros),
       estimatedProviderCostKnownCalls: row.estimatedProviderCostKnownCalls,
+      equivalentCreditUsd: microsToUsd(row.equivalentCreditCostMicros),
+      equivalentCreditCostKnownCalls: row.equivalentCreditCostKnownCalls,
     }))
     .sort((a, b) => b.totalTokens - a.totalTokens);
 
@@ -326,6 +352,22 @@ export async function getWorkspaceInsights(
     (sum, row) => sum + row.estimatedProviderCostKnownCalls,
     0,
   );
+  const equivalentCreditCostMicros = modelRows.reduce(
+    (sum, row) => sum + row.equivalentCreditCostMicros,
+    0,
+  );
+  const priorEquivalentCreditCostMicros = priorModelRows.reduce(
+    (sum, row) => sum + row.equivalentCreditCostMicros,
+    0,
+  );
+  const equivalentCreditCostKnownCalls = modelRows.reduce(
+    (sum, row) => sum + row.equivalentCreditCostKnownCalls,
+    0,
+  );
+  const priorEquivalentCreditCostKnownCalls = priorModelRows.reduce(
+    (sum, row) => sum + row.equivalentCreditCostKnownCalls,
+    0,
+  );
   const modelCalls = modelRows.reduce((sum, row) => sum + row.calls, 0);
   const priorInputTokens = priorModelRows.reduce((sum, row) => sum + row.inputTokens, 0);
   const priorTotalTokens = priorModelRows.reduce((sum, row) => sum + row.totalTokens, 0);
@@ -342,6 +384,8 @@ export async function getWorkspaceInsights(
       costMicros: 0,
       estimatedProviderCostMicros: 0,
       estimatedProviderCostKnownCalls: 0,
+      equivalentCreditCostMicros: 0,
+      equivalentCreditCostKnownCalls: 0,
       inputTokens: 0,
       outputTokens: 0,
       cachedTokens: 0,
@@ -361,6 +405,8 @@ export async function getWorkspaceInsights(
       modelCostUsd: microsToUsd(modelCostMicros),
       estimatedProviderUsd: microsToUsd(facts.estimatedProviderCostMicros),
       estimatedProviderCostKnownCalls: facts.estimatedProviderCostKnownCalls,
+      equivalentCreditUsd: microsToUsd(facts.equivalentCreditCostMicros),
+      equivalentCreditCostKnownCalls: facts.equivalentCreditCostKnownCalls,
       warmSeconds: usageBuckets.get(bucket)?.warmSeconds ?? 0,
       inputTokens: facts.inputTokens,
       outputTokens: facts.outputTokens,
@@ -393,6 +439,8 @@ export async function getWorkspaceInsights(
       creditUsd,
       estimatedProviderUsd: microsToUsd(row.estimatedProviderCostMicros),
       estimatedProviderCostKnownCalls: row.estimatedProviderCostKnownCalls,
+      equivalentCreditUsd: microsToUsd(row.equivalentCreditCostMicros),
+      equivalentCreditCostKnownCalls: row.equivalentCreditCostKnownCalls,
       tokens: row.totalTokens,
       cacheHitPct: cacheHitPct(row.cachedTokens, row.cacheInputTokens),
       pctOfCreditUsd:
@@ -414,6 +462,8 @@ export async function getWorkspaceInsights(
       creditUsd: fact ? microsToUsd(fact.pricedCostMicros) : null,
       estimatedProviderUsd: fact ? microsToUsd(fact.estimatedProviderCostMicros) : null,
       estimatedProviderCostKnownCalls: fact ? fact.estimatedProviderCostKnownCalls : null,
+      equivalentCreditUsd: fact ? microsToUsd(fact.equivalentCreditCostMicros) : null,
+      equivalentCreditCostKnownCalls: fact ? fact.equivalentCreditCostKnownCalls : null,
       tokens: fact ? fact.totalTokens : null,
       cacheHitPct: fact ? cacheHitPct(fact.cachedTokens, fact.cacheInputTokens) : null,
       billing: fact ? billingPathOf(fact.billingPath) : null,
@@ -489,6 +539,8 @@ export async function getWorkspaceInsights(
         row.estimatedProviderCostMicros == null
           ? null
           : microsToUsd(row.estimatedProviderCostMicros),
+      equivalentCreditUsd:
+        row.equivalentCreditCostMicros == null ? null : microsToUsd(row.equivalentCreditCostMicros),
       pricingSource: pricingSourceOf(row.pricingSource),
     })),
     promptContributions,
@@ -522,6 +574,10 @@ export async function getWorkspaceInsights(
     priorEstimatedProviderUsd: microsToUsd(priorEstimatedProviderCostMicros),
     estimatedProviderCostKnownCalls,
     priorEstimatedProviderCostKnownCalls,
+    equivalentCreditUsd: microsToUsd(equivalentCreditCostMicros),
+    priorEquivalentCreditUsd: microsToUsd(priorEquivalentCreditCostMicros),
+    equivalentCreditCostKnownCalls,
+    priorEquivalentCreditCostKnownCalls,
     modelCalls,
     priorInputTokens,
     priorTotalTokens,

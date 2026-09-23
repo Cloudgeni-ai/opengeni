@@ -1,5 +1,197 @@
 # @opengeni/interaction
 
+## 0.4.38
+
+### Patch Changes
+
+- Updated dependencies [d92af11]
+- Updated dependencies [f60ca2b]
+- Updated dependencies [86c710a]
+- Updated dependencies [2f8bc58]
+  - @opengeni/contracts@5.1.0
+
+## 0.4.37
+
+### Patch Changes
+
+- 9d9b94b: Keep the published dependency closure aligned with the updated plugin removal
+  contracts. The SDK exposes named removal outcomes and optional preview-token
+  confirmation alongside the existing installation-version check.
+- Updated dependencies [6d0a4de]
+- Updated dependencies [c64a94f]
+- Updated dependencies [1c924ed]
+- Updated dependencies [c31a951]
+- Updated dependencies [f90d628]
+- Updated dependencies [aa09567]
+- Updated dependencies [d1ab270]
+- Updated dependencies [c8bb974]
+- Updated dependencies [3fa175e]
+- Updated dependencies [332a02d]
+- Updated dependencies [132b945]
+- Updated dependencies [779b16b]
+- Updated dependencies [1cb688d]
+- Updated dependencies [621201d]
+- Updated dependencies [f90d628]
+- Updated dependencies [1bfb6a4]
+- Updated dependencies [7e2436a]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [c66ba31]
+- Updated dependencies [f7c9169]
+- Updated dependencies [0ea365c]
+  - @opengeni/contracts@5.0.0
+
+## 0.4.36
+
+### Patch Changes
+
+- Updated dependencies [7746251]
+- Updated dependencies [85cafd0]
+  - @opengeni/contracts@4.1.0
+
+## 0.4.35
+
+### Patch Changes
+
+- Updated dependencies [50ac837]
+- Updated dependencies [ad9dc2f]
+- Updated dependencies [750060c]
+- Updated dependencies [da4a85f]
+- Updated dependencies [123cf57]
+- Updated dependencies [efeaa9c]
+  - @opengeni/contracts@4.0.0
+
+## 0.4.34
+
+### Patch Changes
+
+- Updated dependencies [4e2b59d]
+- Updated dependencies [488a69b]
+- Updated dependencies [935af4e]
+- Updated dependencies [d08dbb6]
+  - @opengeni/contracts@3.1.0
+
+## 0.4.33
+
+### Patch Changes
+
+- Updated dependencies [e1a50ba]
+  - @opengeni/contracts@3.0.2
+
+## 0.4.32
+
+### Patch Changes
+
+- Updated dependencies [6a60a58]
+  - @opengeni/contracts@3.0.1
+
+## 0.4.31
+
+### Patch Changes
+
+- Updated dependencies [cffd21b]
+- Updated dependencies [f8be7df]
+- Updated dependencies [cffd21b]
+  - @opengeni/contracts@3.0.0
+
+## 0.4.30
+
+### Patch Changes
+
+- Updated dependencies [1b0f4f2]
+  - @opengeni/contracts@2.15.2
+
+## 0.4.29
+
+### Patch Changes
+
+- Updated dependencies [068be26]
+- Updated dependencies [2fa33e4]
+  - @opengeni/contracts@2.15.1
+
+## 0.4.28
+
+### Patch Changes
+
+- Updated dependencies [231b103]
+- Updated dependencies [392c575]
+- Updated dependencies [9827c25]
+- Updated dependencies [5904fd1]
+- Updated dependencies [14dd6fe]
+  - @opengeni/contracts@2.15.0
+
+## 0.4.27
+
+### Patch Changes
+
+- Updated dependencies [22a6704]
+- Updated dependencies [4536385]
+- Updated dependencies [7dac7e3]
+- Updated dependencies [fa2b99a]
+- Updated dependencies [fa12951]
+- Updated dependencies [c1dc59b]
+- Updated dependencies [1fc0889]
+- Updated dependencies [d06450c]
+- Updated dependencies [d9dbd5d]
+- Updated dependencies [c69ad5f]
+- Updated dependencies [1c4b707]
+- Updated dependencies [c90f3fc]
+- Updated dependencies [414946c]
+- Updated dependencies [0c39126]
+- Updated dependencies [0c39126]
+- Updated dependencies [575af5b]
+- Updated dependencies [6de9fe3]
+- Updated dependencies [cda46e8]
+- Updated dependencies [b1d3673]
+- Updated dependencies [2fb17fd]
+- Updated dependencies [3a29372]
+- Updated dependencies [107aa14]
+- Updated dependencies [d8a70ec]
+- Updated dependencies [0a81cc8]
+  - @opengeni/contracts@2.14.0
+
+## 0.4.26
+
+### Patch Changes
+
+- Updated dependencies [6b65383]
+  - @opengeni/contracts@2.13.0
+
+## 0.4.25
+
+### Patch Changes
+
+- Updated dependencies [d63ee0f]
+- Updated dependencies [b420912]
+  - @opengeni/contracts@2.12.0
+
+## 0.4.24
+
+### Patch Changes
+
+- Updated dependencies [38de50d]
+- Updated dependencies [8b42f58]
+- Updated dependencies [0214875]
+- Updated dependencies [e2a668b]
+- Updated dependencies [9c45eae]
+  - @opengeni/contracts@2.11.1
+
+## 0.4.23
+
+### Patch Changes
+
+- Updated dependencies [8f81b57]
+  - @opengeni/contracts@2.11.0
+
+## 0.4.22
+
+### Patch Changes
+
+- Updated dependencies [2d0fad4]
+- Updated dependencies [9fe5c5b]
+- Updated dependencies [c356468]
+- Updated dependencies [9af1666]
+  - @opengeni/contracts@2.10.0
+
 ## 0.4.21
 
 ### Patch Changes

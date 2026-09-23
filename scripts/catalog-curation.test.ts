@@ -86,7 +86,7 @@ describe("curated catalog overlay document", () => {
             exactMcpUrl: "https://mcp.pinned.example/mcp",
             pinnedIssuerOrigins: ["https://auth.pinned.example"],
             sendResourceParameter: false,
-            allowedOwnership: ["personal"],
+            defaultOwnership: "personal",
             requestedScopes: ["files:read"],
             extraAuthorizeParams: { audience: "pinned" },
           },
@@ -98,7 +98,7 @@ describe("curated catalog overlay document", () => {
       exactMcpUrl: "https://mcp.pinned.example/mcp",
       pinnedIssuerOrigins: ["https://auth.pinned.example"],
       sendResourceParameter: false,
-      allowedOwnership: ["personal"],
+      defaultOwnership: "personal",
       requestedScopes: ["files:read"],
       extraAuthorizeParams: { audience: "pinned" },
     });
@@ -112,9 +112,9 @@ describe("curated catalog overlay document", () => {
     expect(() => parseCuratedCatalog(entry({ clientSource: "magic" }))).toThrow(
       /clientSource must be one of/,
     );
-    expect(() => parseCuratedCatalog(entry({ allowedOwnership: [] }))).toThrow(/allowedOwnership/);
-    expect(() => parseCuratedCatalog(entry({ allowedOwnership: ["group"] }))).toThrow(
-      /allowedOwnership/,
+    expect(() => parseCuratedCatalog(entry({ defaultOwnership: [] }))).toThrow(/defaultOwnership/);
+    expect(() => parseCuratedCatalog(entry({ defaultOwnership: "group" }))).toThrow(
+      /defaultOwnership/,
     );
     expect(() => parseCuratedCatalog(entry({ pinnedIssuerOrigins: ["nonsense"] }))).toThrow(
       /entries must be URLs/,
@@ -225,12 +225,12 @@ describe("curated catalog overlay document", () => {
       /tier must be one of/,
     ],
     [
-      "invalid connectionOwnership",
+      "invalid defaultConnectionOwnership",
       {
         version: 1,
-        entries: [{ mcpUrl: "https://a.example/mcp", connectionOwnership: "workspace" }],
+        entries: [{ mcpUrl: "https://a.example/mcp", defaultConnectionOwnership: "invalid" }],
       },
-      /connectionOwnership must be/,
+      /defaultConnectionOwnership must be/,
     ],
     [
       "empty logoSourceUrl",

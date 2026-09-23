@@ -679,10 +679,10 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
                     return Err(error);
                 }
             }
-            activate_launchd_definition(&domain, &target, &plist_path, &spec.binary_path)?;
+            activate_launchd_definition(&domain, &target, &plist_path, &spec.binary_path, true)?;
         }
         LaunchdInstallAction::Bootstrap => {
-            activate_launchd_definition(&domain, &target, &plist_path, &spec.binary_path)?;
+            activate_launchd_definition(&domain, &target, &plist_path, &spec.binary_path, false)?;
         }
     }
     println!(
@@ -693,39 +693,93 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
 }
 
 /// `bootout` may return before launchd has completely retired the old job.
-/// Retrying `bootstrap` blindly is still safe only if every iteration first
-/// inspects the exact label and accepts success solely when launchd reports the
-/// expected program path. This also recovers a lost successful bootstrap reply
-/// without ever admitting two definitions.
+/// A restart must first observe the old label disappear, even when its program
+/// path matches the replacement. Otherwise the retiring job can be mistaken for
+/// the replacement and disappear after a falsely successful restart.
 fn activate_launchd_definition(
     domain: &str,
     target: &str,
     plist_path: &Path,
     expected_binary: &Path,
+    await_retirement: bool,
 ) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    activate_launchd_definition_with_capture(
+        domain,
+        target,
+        plist_path,
+        expected_binary,
+        await_retirement,
+        capture_launchctl_activation,
+    )
+}
+
+fn activate_launchd_definition_with_capture(
+    domain: &str,
+    target: &str,
+    plist_path: &Path,
+    expected_binary: &Path,
+    mut await_retirement: bool,
+    mut launchctl: impl FnMut(&[&str]) -> Result<Option<String>, String>,
+) -> Result<(), String> {
+    // Budget both the old job's termination and the replacement's bootstrap.
+    let deadline = Instant::now() + Duration::from_secs(10);
     let plist = plist_path.to_string_lossy();
     let mut last_error = "launchd did not accept the new service definition".to_string();
     loop {
-        if let Ok(definition) = capture("launchctl", &["print", target]) {
-            if launchd_loaded_program_matches(&definition, expected_binary) {
-                return Ok(());
-            }
-            last_error = "launchd loaded the label with an unexpected program path".to_string();
-        } else {
-            match capture("launchctl", &["bootstrap", domain, &plist]) {
-                Ok(_) => {}
-                Err(error) => last_error = error,
+        match launchctl(&["print", target]) {
+            Err(error) => last_error = error,
+            Ok(definition) => {
+                if definition.is_none() {
+                    await_retirement = false;
+                }
+                if await_retirement {
+                    last_error = "the previous launchd job is still retiring".to_string();
+                } else if let Some(definition) = definition {
+                    if launchd_loaded_program_matches(&definition, expected_binary) {
+                        return Ok(());
+                    }
+                    last_error =
+                        "launchd loaded the label with an unexpected program path".to_string();
+                } else {
+                    match launchctl(&["bootstrap", domain, &plist]) {
+                        Ok(_) => {}
+                        Err(error) => last_error = error,
+                    }
+                }
             }
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "could not converge the LaunchAgent to {} within five seconds: {last_error}",
+                "could not converge the LaunchAgent to {} within ten seconds: {last_error}",
                 expected_binary.display()
             ));
         }
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn capture_launchctl_activation(args: &[&str]) -> Result<Option<String>, String> {
+    let output = Command::new("launchctl")
+        .args(args)
+        .output()
+        .map_err(|error| format!("could not run launchctl: {error}"))?;
+    if output.status.success() {
+        return Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if args.first() == Some(&"print")
+        && args.get(1).is_some_and(|target| {
+            launchctl_service_is_absent(output.status.code(), &stderr, target)
+        })
+    {
+        return Ok(None);
+    }
+    Err(format!("launchctl {args:?} exited with {}", output.status))
+}
+
+fn launchctl_service_is_absent(code: Option<i32>, stderr: &str, target: &str) -> bool {
+    let label = target.rsplit('/').next().unwrap_or(target);
+    code == Some(113) && stderr.contains(&format!("Could not find service \"{label}\""))
 }
 
 /// Windows: register the SCM service + set restart-on-failure recovery. The binary
@@ -1113,12 +1167,86 @@ mod tests {
     }
 
     #[test]
+    fn launchd_restart_waits_for_retirement_even_when_the_program_path_matches() {
+        let binary = Path::new("/Applications/OpenGeni Agent/opengeni-agent");
+        let definition = format!("program = {}\n", binary.display());
+        let mut replies = std::collections::VecDeque::from([
+            ("print", Ok(Some(definition.clone()))),
+            ("print", Err("transient launchd IPC failure".to_string())),
+            ("print", Ok(Some(definition.clone()))),
+            ("print", Ok(None)),
+            ("bootstrap", Ok(Some(String::new()))),
+            ("print", Ok(Some(definition))),
+        ]);
+        activate_launchd_definition_with_capture(
+            "gui/501",
+            "gui/501/ai.opengeni.agent",
+            Path::new("/tmp/agent.plist"),
+            binary,
+            true,
+            |args| {
+                let (command, reply) = replies.pop_front().expect("bounded launchd calls");
+                assert_eq!(args[0], command);
+                reply
+            },
+        )
+        .expect("start replacement after old job disappears");
+        assert!(
+            replies.is_empty(),
+            "must not accept the retiring definition"
+        );
+    }
+
+    #[test]
+    fn launchd_activation_recovers_a_lost_bootstrap_reply_without_repeating_it() {
+        let binary = Path::new("/Applications/OpenGeni Agent/opengeni-agent");
+        let mut replies = std::collections::VecDeque::from([
+            ("print", Ok(None)),
+            ("bootstrap", Err("reply lost".to_string())),
+            (
+                "print",
+                Ok(Some(format!("program = {}\n", binary.display()))),
+            ),
+        ]);
+        activate_launchd_definition_with_capture(
+            "gui/501",
+            "gui/501/ai.opengeni.agent",
+            Path::new("/tmp/agent.plist"),
+            binary,
+            false,
+            |args| {
+                let (command, reply) = replies.pop_front().expect("no duplicate bootstrap");
+                assert_eq!(args[0], command);
+                reply
+            },
+        )
+        .expect("confirm the replacement after an uncertain bootstrap reply");
+        assert!(replies.is_empty());
+    }
+
+    #[test]
     fn launchd_enable_target_uses_the_full_service_domain() {
         let target = format!("gui/501/{}", service::ids::LAUNCHD_LABEL);
         assert_eq!(
             launchd_enable_args(&target),
             ["enable", "gui/501/ai.opengeni.agent"]
         );
+    }
+
+    #[test]
+    fn launchctl_service_absence_excludes_probe_failures_and_missing_domains() {
+        let target = "gui/501/ai.opengeni.agent";
+        let absent = "Bad request.\nCould not find service \"ai.opengeni.agent\" in domain for user gui: 501";
+        assert!(launchctl_service_is_absent(Some(113), absent, target));
+        for (code, message) in [
+            (None, absent),
+            (Some(1), absent),
+            (Some(113), "Could not find domain for user gui: 501"),
+            (Some(113), "Could not find service \"another.agent\""),
+            (Some(5), "Input/output error"),
+        ] {
+            assert!(!launchctl_service_is_absent(code, message, target));
+        }
     }
 
     #[test]

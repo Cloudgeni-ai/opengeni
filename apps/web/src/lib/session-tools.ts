@@ -19,13 +19,30 @@ import {
   type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
 
-export type RepoDraft = { id: number; url: string; ref: string };
+export type RepoDraft = {
+  id: number;
+  url: string;
+  ref: string;
+  expectedCommitSha?: string;
+  attached?: boolean;
+};
 // The composer's effort picker spans the FULL host enum, not a UI-only subset:
 // the old `Extract<…,"low"|…>` silently dropped `none`/`minimal`, so a deployment
 // whose default is one of those was overridden to "low" on every web turn
 // (billing impact — "low" beats the deployer's configured default server-side).
 export type IntelligenceEffort = ReasoningEffort;
-export type McpServerOption = { id: string; name: string };
+export type McpServerOption = {
+  id: string;
+  name: string;
+  logoSrc?: string | null;
+  detail?: string;
+  connectionStatus?: "ready" | "connect" | "reconnect" | "unavailable" | "unknown";
+};
+
+/** Composer connector menus omit builtins managed by workspace tool settings. */
+export function isComposerConnector(server: Pick<McpServerOption, "id">): boolean {
+  return !["opengeni", "files", "docs"].includes(server.id);
+}
 
 const NON_SELECTABLE_SESSION_MCP_SERVER_IDS = new Set(["opengeni"]);
 
@@ -42,6 +59,21 @@ export function isSelectableSessionMcpServerId(id: string): boolean {
 
 export function selectableSessionMcpServerIds(ids: Iterable<string>): Set<string> {
   return new Set([...ids].filter(isSelectableSessionMcpServerId));
+}
+
+/** Compare a retained draft with the current executable catalog, not saved defaults. */
+export function unavailableSessionMcpServerIds(
+  selectedIds: Iterable<string>,
+  servers: readonly McpServerOption[],
+  catalogLoadedSuccessfully: boolean,
+): string[] {
+  if (!catalogLoadedSuccessfully) return [];
+  const available = new Set(
+    servers
+      .filter((server) => server.connectionStatus !== "unavailable")
+      .map((server) => server.id),
+  );
+  return [...selectableSessionMcpServerIds(selectedIds)].filter((id) => !available.has(id));
 }
 
 const FIRST_PARTY_ACTION_LABELS: Partial<Record<FirstPartyMcpToolName, string>> = {
@@ -177,15 +209,24 @@ export function newSessionDraftToolPolicy(input: {
   workspaceDefaultMcpServerIds: Iterable<string>;
   catalogReady: boolean;
   explicit: boolean;
-}): { tools: ToolRef[]; toolsProvided: boolean } {
+  /** Header switch. Distinct from `explicit`, which pins the tool id list. */
+  customizing?: boolean;
+  excludedMcpServerIds?: Iterable<string>;
+}): { tools: ToolRef[]; toolsProvided: boolean; excludedMcpServerIds?: string[] } {
   if (!input.catalogReady) return { tools: [], toolsProvided: false };
-  const selected = buildOpenGeniUiTools(undefined, input.selectedMcpServerIds);
-  const baseline = buildOpenGeniUiTools(undefined, input.workspaceDefaultMcpServerIds);
-  const equal =
-    canonicalToolIds(selected).join("\u0000") === canonicalToolIds(baseline).join("\u0000");
-  return input.explicit || !equal
-    ? { tools: selected, toolsProvided: true }
-    : { tools: [], toolsProvided: false };
+  const customizing = input.customizing ?? input.explicit;
+  if (!customizing) return { tools: [], toolsProvided: false };
+  if (input.explicit) {
+    return {
+      tools: buildOpenGeniUiTools(undefined, input.selectedMcpServerIds),
+      toolsProvided: true,
+    };
+  }
+  return {
+    tools: [],
+    toolsProvided: true,
+    excludedMcpServerIds: [...new Set(input.excludedMcpServerIds ?? [])].sort(),
+  };
 }
 
 /**
@@ -204,7 +245,9 @@ export function sessionPolicyPickerIds(
   const mode = session.effectiveToolPolicy?.mode ?? session.toolPolicy.mode;
   const policyIds =
     mode === "workspace_default"
-      ? [...workspaceDefaultIds]
+      ? [...workspaceDefaultIds, ...session.tools.map((tool) => tool.id)].filter(
+          (id) => !session.toolPolicy.excludedMcpServerIds?.includes(id),
+        )
       : (session.effectiveToolPolicy?.effectiveIds ?? session.tools.map((tool) => tool.id));
   return new Set(policyIds.filter((id) => selectable.has(id)));
 }
@@ -225,6 +268,7 @@ export function buildResources(
       .map((repo) => ({
         url: repo.cloneUrl,
         ref: (selectedRefs[repo.id] ?? repo.defaultBranch).trim(),
+        expectedCommitSha: null,
         repositoryId: repo.id,
         installationId: repo.installationId,
         private: repo.private,
@@ -241,6 +285,7 @@ export function buildResources(
       .map((repo) => ({
         url: repo.canonicalUrl,
         ref: (selectedPersonalRepositoryRefs[repo.repositoryId] ?? repo.defaultBranch).trim(),
+        expectedCommitSha: null,
         repositoryId: repo.repositoryId,
         installationId: null,
         private: repo.private,
@@ -249,17 +294,20 @@ export function buildResources(
         credentialBindingId: personalCredentialBindingId,
         access: repo.selectedAccess!,
       })),
-    ...manualRepos.map((repo) => ({
-      url: repo.url.trim(),
-      ref: repo.ref.trim(),
-      repositoryId: null,
-      installationId: null,
-      private: false,
-      provider: null,
-      connectionType: null,
-      credentialBindingId: null,
-      access: null,
-    })),
+    ...manualRepos
+      .filter((repo) => repo.attached !== false)
+      .map((repo) => ({
+        url: repo.url.trim(),
+        ref: repo.ref.trim(),
+        expectedCommitSha: repo.expectedCommitSha ?? null,
+        repositoryId: null,
+        installationId: null,
+        private: false,
+        provider: null,
+        connectionType: null,
+        credentialBindingId: null,
+        access: null,
+      })),
   ].filter((repo) => repo.url.length > 0);
   const mountPaths = new Set<string>();
   return raw.map((repo) => {
@@ -297,6 +345,7 @@ export function buildResources(
       ref: repo.ref,
       mountPath,
       ...(repo.provider ? { provider: repo.provider } : {}),
+      ...(repo.expectedCommitSha ? { expectedCommitSha: repo.expectedCommitSha } : {}),
       // Every catalog repository is in the workspace's GitHub App allowlist,
       // public or private, so every selection carries the stable ids that
       // mint the scoped installation token. Manual URLs stay bare.
@@ -465,7 +514,13 @@ export function repositorySelectionFromResources(
       selectedRepoIds.add(matched.id);
       selectedRepoRefs[matched.id] = resource.ref;
     } else {
-      manualRepos.push({ id: nextManualId++, url: resource.uri, ref: resource.ref });
+      manualRepos.push({
+        id: nextManualId++,
+        url: resource.uri,
+        ref: resource.ref,
+        ...(resource.expectedCommitSha ? { expectedCommitSha: resource.expectedCommitSha } : {}),
+        attached: true,
+      });
     }
   }
   return {

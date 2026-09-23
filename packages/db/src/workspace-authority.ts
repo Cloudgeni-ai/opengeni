@@ -54,10 +54,10 @@ import { rawRows, type Database } from "./database";
  * adding a caller, that stamp is the part you have to get right; this function
  * will happily answer `true` for any subject you scope a transaction to.
  *
- * Non-`user:` subjects (API keys, delegated service principals, configured and
- * local principals) can never own an organization membership, so they
- * short-circuit to the plain membership answer instead of tripping
- * `list_self_organization_memberships`' `42501`.
+ * Persisted `external_user:` subjects also have an organization membership and
+ * an exact Personal pointer. They use the same consistency check only after the
+ * API's dedicated verified external proof, never a native-cookie stamp. Other
+ * service/configured/local subjects retain the plain membership answer.
  */
 export async function subjectHasLiveWorkspaceAuthorityInScope(
   scopedDb: Database,
@@ -83,7 +83,7 @@ export async function subjectHasLiveWorkspaceAuthorityInScope(
         and workspace_id = ${input.workspaceId}
       limit 1`,
   );
-  if (!input.subjectId.startsWith("user:")) {
+  if (!input.subjectId.startsWith("user:") && !input.subjectId.startsWith("external_user:")) {
     return Boolean(membershipRow);
   }
   const [organizationMembershipResult] = await rawRows<{ result: unknown }>(
