@@ -98,7 +98,10 @@ export function extractBinary(archive: Uint8Array, asset: Asset): Buffer {
   return result;
 }
 
-export async function downloadAsset(url: string): Promise<Uint8Array> {
+export async function downloadAsset(
+  url: string,
+  request: (url: string, options: RequestInit) => Promise<Response> = fetch,
+): Promise<Uint8Array> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 90_000);
   const allowed = new Set(["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "garagehq.deuxfleurs.fr"]);
@@ -106,7 +109,7 @@ export async function downloadAsset(url: string): Promise<Uint8Array> {
     for (let redirects = 0; redirects <= 4; redirects++) {
       const parsed = new URL(url);
       if (parsed.protocol !== "https:" || !allowed.has(parsed.hostname) || parsed.username || parsed.password || (parsed.port && parsed.port !== "443")) throw new Error("Untrusted download URL");
-      const response = await fetch(url, { redirect: "manual", signal: controller.signal });
+      const response = await request(url, { redirect: "manual", signal: controller.signal });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         await response.body?.cancel();
         const location = response.headers.get("location");
