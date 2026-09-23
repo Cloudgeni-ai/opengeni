@@ -229,6 +229,18 @@ export const KnowledgeEntryRevision = z
   .strict();
 export type KnowledgeEntryRevision = z.infer<typeof KnowledgeEntryRevision>;
 
+/** Search/index progress is independent of saved source and keyword access. */
+export const KnowledgeIndexStatus = z.enum([
+  "saved",
+  "queued",
+  "indexing",
+  "awaiting_funding",
+  "indexed",
+  "source_unavailable",
+  "provider_failed",
+]);
+export type KnowledgeIndexStatus = z.infer<typeof KnowledgeIndexStatus>;
+
 /** Private owner IDs are not part of a content-discovery projection. */
 export const KnowledgeEntryRecord = z
   .object({
@@ -241,6 +253,7 @@ export const KnowledgeEntryRecord = z
     archived: z.boolean(),
     createdAt: z.string().datetime({ offset: true }),
     updatedAt: z.string().datetime({ offset: true }),
+    indexStatus: KnowledgeIndexStatus.optional(),
   })
   .strict();
 export type KnowledgeEntryRecord = z.infer<typeof KnowledgeEntryRecord>;
@@ -293,6 +306,9 @@ export const KnowledgeEntryListResponse = z.object({
   entries: z.array(KnowledgeEntrySummary),
   nextCursor: z.string().nullable(),
   searchMode: z.enum(["keyword", "hybrid", "vector"]).optional(),
+  fallbackReason: z
+    .enum(["awaiting_funding", "quota", "provider_unavailable", "query_limit"])
+    .optional(),
 });
 export type KnowledgeEntryListResponse = z.infer<typeof KnowledgeEntryListResponse>;
 

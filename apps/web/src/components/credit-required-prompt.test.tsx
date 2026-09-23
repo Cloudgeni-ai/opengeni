@@ -145,6 +145,29 @@ describe("credit required prompt", () => {
     expect(container.textContent).not.toContain("This model uses OpenGeni credits");
   });
 
+  test("negative balance uses honest funding copy without claiming this is the first chat", async () => {
+    getBilling.mockImplementation(async () => ({
+      mode: "stripe",
+      balance: { balanceMicros: -2_000_000 },
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        <EmptyCreditsNotice
+          workspaceId="workspace-a"
+          accountId="account-a"
+          canBuyCredits
+          canReadBilling
+        />,
+      ),
+    );
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(container.textContent).toContain("No credits are available for this model");
+    expect(container.textContent).not.toContain("first chat");
+  });
+
   test("disabled billing never shows an empty-credits notice", async () => {
     getBilling.mockResolvedValue({ mode: "disabled", balance: { balanceMicros: 0 } });
     const container = document.createElement("div");

@@ -9,6 +9,8 @@ import {
   type KnowledgeContext,
 } from "@opengeni/db";
 import type { DocumentEmbedder } from "@opengeni/documents";
+import type { Settings } from "@opengeni/config";
+import { paidDocumentEmbedding } from "../billing/limits";
 import { searchKnowledgeEntries } from "./knowledge-search";
 
 const defaults = {
@@ -29,6 +31,7 @@ export async function prepareKnowledgeSave(
   input: KnowledgeSavePreparationRequest,
   embedder: () => DocumentEmbedder,
   services = defaults,
+  settings?: Settings,
 ): Promise<KnowledgeSavePreparationResponse> {
   const request = KnowledgeSavePreparationRequest.parse(input);
   if (context.actor.kind !== "agent" && !(context.actor.kind === "human" && context.actor.review)) {
@@ -56,20 +59,38 @@ export async function prepareKnowledgeSave(
   };
   // Search is independent of collection placement and always includes the
   // separate unapproved view. No authoring policy or write is invoked here.
-  const matches = {
-    published: await services.search(
-      db,
-      context,
-      { query: request.query, limit: request.limit, view: "published" },
-      sharedEmbedder,
-    ),
-    needs_review: await services.search(
-      db,
-      context,
-      { query: request.query, limit: request.limit, view: "needs_review" },
-      sharedEmbedder,
-    ),
-  };
+  // Preparation returns BOTH views plus a catalog. A charge on the first
+  // semantic search would precede the second view and catalog; any later
+  // failure would leave no deliverable preparation result. Paid mode uses
+  // keyword discovery until a single-operation settlement seam exists.
+  const paid = settings != null && paidDocumentEmbedding(settings);
+  const published = await services.search(
+    db,
+    context,
+    {
+      query: request.query,
+      limit: request.limit,
+      view: "published",
+      ...(paid ? { mode: "keyword" as const } : {}),
+    },
+    sharedEmbedder,
+    paid ? undefined : settings,
+  );
+  // Reuse the first request's provider result (and charge). If it fell back
+  // to keyword because funding or the provider was unavailable, do not retry
+  // an unfunded embedding request in the second review view.
+  const needsReview = await services.search(
+    db,
+    context,
+    {
+      query: request.query,
+      limit: request.limit,
+      view: "needs_review",
+      ...(published.searchMode === "keyword" ? { mode: "keyword" as const } : {}),
+    },
+    sharedEmbedder,
+  );
+  const matches = { published, needs_review: needsReview };
   for (const view of ["published", "needs_review"] as const) {
     if (request.collectionCursors && request.collectionCursors[view] === null) continue;
     let cursor = request.collectionCursors?.[view] ?? undefined;

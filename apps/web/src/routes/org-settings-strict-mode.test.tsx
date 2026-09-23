@@ -251,6 +251,38 @@ afterAll(() => {
 });
 
 describe("organization billing StrictMode ownership", () => {
+  test("shows a negative balance as prior usage rather than available credits", async () => {
+    getBilling.mockImplementation(async () => ({
+      mode: "stripe",
+      balance: {
+        accountId,
+        balanceMicros: -2_000_000,
+        currency: "usd",
+        updatedAt: timestamp,
+      },
+    }));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(<OrgSettingsRoute workspaceId={workspaceId} section="billing" />),
+      );
+      await flush();
+      expect(container.textContent).toContain("$2.00 in prior usage");
+      expect(container.textContent).toContain("Future credit purchases cover prior usage first");
+      expect(container.textContent).toContain("Your card is not charged automatically");
+      expect(container.textContent).not.toContain("-$2.00 available");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      getBilling.mockImplementation(async () => ({
+        mode: "stripe",
+        balance: { accountId, balanceMicros: 25_000_000, currency: "usd", updatedAt: timestamp },
+      }));
+    }
+  });
+
   test("keeps initial reads and billing mutations owned after setup cleanup setup", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

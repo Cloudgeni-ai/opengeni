@@ -14,12 +14,12 @@ export async function acquirePreKnowledgeTestDatabase(
   const admin = postgres(blank.databaseUrl, { max: 4, onnotice: () => undefined });
   try {
     await admin`CREATE TABLE schema_migrations(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-    // 0468/0469, 0488 and 0499 require the post-0461 Knowledge/file policies.
+    // These later migrations require the post-0461 Knowledge/file policies.
     await admin`INSERT INTO schema_migrations(name) VALUES
-      ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql')`;
+      ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql')`;
     await migrate(blank.databaseUrl);
     await admin`DELETE FROM schema_migrations WHERE name IN
-      ('0461_unified_knowledge.sql','0468_knowledge_relationship_projection.sql','0469_knowledge_source_discovery.sql','0488_permanent_skill_removal.sql','0499_session_attachment_access.sql','0501_session_sharing_execution.sql')`;
+      ('0461_unified_knowledge.sql','0468_knowledge_relationship_projection.sql','0469_knowledge_source_discovery.sql','0488_permanent_skill_removal.sql','0499_session_attachment_access.sql','0501_session_sharing_execution.sql','0510_knowledge_index_funding_wait.sql','0511_knowledge_visible_index_status.sql')`;
     if (!blank.appPassword)
       throw new Error("Historical fixture requires the shared runtime password");
     await provisionRoles(blank.databaseUrl, {

@@ -24,6 +24,7 @@ import {
   effectiveSandboxLifecycle,
   sandboxArchiveCaptureTimeoutMs,
   sandboxLifecycleTransitionWaitMs,
+  sandboxWarmRateMicrosPerSecond,
   type Settings,
 } from "@opengeni/config";
 import { randomUUID } from "node:crypto";
@@ -1153,6 +1154,10 @@ export async function resumeBoxForTurn(
     holderId,
     subjectId: ids.sessionId,
     backend: ids.backend,
+    warmBilling: {
+      mode: settings.sandboxWarmBillingMode,
+      rateMicrosPerSecond: sandboxWarmRateMicrosPerSecond(settings, ids.backend),
+    },
     os,
     // IMAGE IS SHARED STATE (B3): thread the resolved image so the lease stamps it +
     // conflicts on a live box already running a different image. A
@@ -1283,6 +1288,7 @@ export async function resumeBoxForTurn(
         holderId,
         expectedEpoch: heartbeat.expectedEpoch,
         leaseTtlMs: heartbeat.leaseTtlMs,
+        billingMode: services.settings.sandboxWarmBillingMode,
       })
         .then(async (status) => {
           if (heartbeat !== holderLeaseHeartbeat) return;

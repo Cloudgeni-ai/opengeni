@@ -356,6 +356,9 @@ const SettingsSchema = z.object({
   // variable out to disable it).
   organizationTenancyCanonicalActivationEnabled: EnvBoolean.default(false),
   billingMode: BillingMode.default("disabled"),
+  // Explicit launch gate for the one-time $10 verified self-service signup grant.
+  // A migration or deployment alone must not start issuing live credits.
+  verifiedSignupTrialCreditsEnabled: EnvBoolean.default(false),
   entitlementsMode: EntitlementsMode.default("none"),
   usageLimitsMode: UsageLimitsMode.default("none"),
   staticEntitlementsJson: z.string().default("{}"),
@@ -1219,6 +1222,7 @@ const SettingsSchema = z.object({
   // Shape: { "modal": 5, "runloop": 4, ... }. Backends absent here meter
   // warm-seconds but accrue NO warm_cost / debit (rate 0).
   sandboxWarmRateMicrosPerSecondJson: z.string().default("{}"),
+  sandboxWarmBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
   // Per-workspace warm cap (cumulative warm-seconds since the start of the UTC
   // month, summed over sandbox.warm_seconds). 0 = unbounded. A workspace over the
   // cap force-drains its VIEWER-ONLY boxes (guarded AND turn_holders=0 — a paying
@@ -1254,6 +1258,13 @@ const SettingsSchema = z.object({
   documentEmbeddingDimensions: z.coerce.number().int().positive().default(3072),
   documentEmbeddingApiKey: z.string().optional(),
   documentEmbeddingBaseUrl: z.string().url().optional(),
+  documentEmbeddingBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
+  // Explicit commercial cutover. Existing queued revisions remain unpriced;
+  // only jobs created at or after this instant may enter the paid rail.
+  documentEmbeddingCreditsActivatedAt: z.iso.datetime().optional(),
+  // Customer tariff for the exact UTF-8 bytes sent to the embedder. Zero leaves
+  // the paid mode unavailable; no commercial rate is selected by this PR.
+  documentEmbeddingRateMicrosPerMillionBytes: z.coerce.number().int().nonnegative().default(0),
   documentCurationProvider: z.enum(["openai", "heuristic", "none"]).default("openai"),
   documentCurationModel: z.string().min(1).default("gpt-4o-mini"),
   documentCurationApiKey: z.string().optional(),
@@ -3077,6 +3088,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED",
     ),
     billingMode: optional("OPENGENI_BILLING_MODE"),
+    verifiedSignupTrialCreditsEnabled: optional("OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED"),
     entitlementsMode: optional("OPENGENI_ENTITLEMENTS_MODE"),
     usageLimitsMode: optional("OPENGENI_USAGE_LIMITS_MODE"),
     staticEntitlementsJson: optional("OPENGENI_STATIC_ENTITLEMENTS_JSON"),
@@ -3363,6 +3375,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxWarmRateMicrosPerSecondJson: optional(
       "OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON",
     ),
+    sandboxWarmBillingMode: optional("OPENGENI_SANDBOX_WARM_BILLING_MODE"),
     sandboxMaxWarmSecondsPerWorkspace: optional("OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE"),
     sandboxPreparationProfiles: optional("OPENGENI_SANDBOX_PREPARATION_PROFILES"),
     sandboxEnvAllowlist: optional("OPENGENI_SANDBOX_ENV_ALLOWLIST"),
@@ -3392,6 +3405,13 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     documentEmbeddingDimensions: optional("OPENGENI_DOCUMENT_EMBEDDING_DIMENSIONS"),
     documentEmbeddingApiKey: optional("OPENGENI_DOCUMENT_EMBEDDING_API_KEY"),
     documentEmbeddingBaseUrl: optional("OPENGENI_DOCUMENT_EMBEDDING_BASE_URL"),
+    documentEmbeddingBillingMode: optional("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE"),
+    documentEmbeddingCreditsActivatedAt: optional(
+      "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT",
+    ),
+    documentEmbeddingRateMicrosPerMillionBytes: optional(
+      "OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES",
+    ),
     documentCurationProvider: optional("OPENGENI_DOCUMENT_CURATION_PROVIDER"),
     documentCurationModel: optional("OPENGENI_DOCUMENT_CURATION_MODEL"),
     documentCurationApiKey: optional("OPENGENI_DOCUMENT_CURATION_API_KEY"),
@@ -7098,7 +7118,36 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   sandboxEnvironmentVariableNames(settings);
   sandboxLifecycleHookIds(settings);
   // Fail fast on a malformed warm-rate table (P2.1).
-  parseSandboxWarmRateJson(settings.sandboxWarmRateMicrosPerSecondJson);
+  const warmRates = parseSandboxWarmRateJson(settings.sandboxWarmRateMicrosPerSecondJson);
+  // The meter rounds each settled interval to whole USD micros. Fractional
+  // micros/second would make the total depend on heartbeat frequency; only
+  // integer rates have interval-independent settlement at the same elapsed time.
+  if (
+    settings.sandboxWarmBillingMode === "credits" &&
+    Object.values(warmRates).some((rate) => !Number.isSafeInteger(rate))
+  ) {
+    throw new Error(
+      "OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON paid rates must be safe integers",
+    );
+  }
+  if (
+    settings.documentEmbeddingBillingMode === "credits" &&
+    settings.documentEmbeddingProvider === "openai" &&
+    settings.documentEmbeddingRateMicrosPerMillionBytes <= 0
+  ) {
+    throw new Error(
+      "OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES must be positive when paid OpenAI embedding billing is enabled",
+    );
+  }
+  if (
+    settings.documentEmbeddingBillingMode === "credits" &&
+    settings.documentEmbeddingProvider === "openai" &&
+    !settings.documentEmbeddingCreditsActivatedAt
+  ) {
+    throw new Error(
+      "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT is required for paid OpenAI embeddings",
+    );
+  }
   if (settings.sandboxBackend === "opensandbox") {
     if (!/@sha256:[0-9a-f]{64}$/i.test(settings.openSandboxImage ?? "")) {
       throw new Error(

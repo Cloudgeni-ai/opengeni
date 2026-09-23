@@ -60,6 +60,8 @@ const forwardMigrations = [
   // Rewrites the original-file policy introduced by 0461.
   "0499_session_attachment_access.sql",
   "0501_session_sharing_execution.sql",
+  "0510_knowledge_index_funding_wait.sql",
+  "0511_knowledge_visible_index_status.sql",
 ];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;

@@ -25,6 +25,26 @@ import type { ApiRouteDeps } from "../dependencies";
 
 export type LimitDependencies = Pick<ApiRouteDeps, "db" | "settings">;
 
+/** Deterministic/local embeddings never debit credits, even in paid mode. */
+export function paidDocumentEmbedding(settings: Settings): boolean {
+  return (
+    settings.documentEmbeddingBillingMode === "credits" &&
+    settings.documentEmbeddingProvider === "openai"
+  );
+}
+
+/** Round up each provider request so a positive input cannot become a free debit. */
+export function documentEmbeddingCostMicros(settings: Settings, inputBytes: number): number {
+  if (!Number.isSafeInteger(inputBytes) || inputBytes < 0)
+    throw new Error("invalid embedding bytes");
+  const amount =
+    (BigInt(inputBytes) * BigInt(settings.documentEmbeddingRateMicrosPerMillionBytes) + 999_999n) /
+    1_000_000n;
+  if (amount > BigInt(Number.MAX_SAFE_INTEGER))
+    throw new Error("embedding cost exceeds safe integer");
+  return Number(amount);
+}
+
 export type LimitCheckInput = {
   accountId: string;
   workspaceId?: string;
@@ -296,9 +316,10 @@ function usesCreditLimits(deps: LimitDependencies): boolean {
 }
 
 function isCostlyAction(action: LimitAction): boolean {
-  return (
-    action === "agent_run:create" || action === "tokens:consume" || action === "document:index"
-  );
+  // Document admission retains the monthly chunk quota above, but parsing and
+  // source retention do not consume embedding credits. The worker admits paid
+  // embedding separately and settles its actual provider input after use.
+  return action === "agent_run:create" || action === "tokens:consume";
 }
 
 function blocked(code: string, message: string): LimitDecision {

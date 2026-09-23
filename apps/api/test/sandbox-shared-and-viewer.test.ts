@@ -1312,17 +1312,19 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     expect(lease1?.viewerHolders).toBe(1);
   }, 60_000);
 
-  test("an over-limit viewer receives the typed billing response and cannot re-arm until a fresh evaluation clears the gate", async () => {
+  test("a warm-cap viewer receives the typed limit response and cannot re-arm until a fresh evaluation clears the gate", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
     const session = await getSession(db, workspaceId, sessionId);
+    const capEventKey = `viewer-warm-cap:${crypto.randomUUID()}`;
+    await admin`INSERT INTO usage_events(account_id,workspace_id,event_type,quantity,unit,idempotency_key,occurred_at)
+      VALUES(${accountId},${workspaceId},'sandbox.warm_seconds',10,'seconds',${capEventKey},now())`;
 
     await forceDrainOverLimitViewerOnlyBoxes(db, {
       workspaceId,
-      balanceMicros: 0,
-      enforceBalance: true,
-      maxWarmSecondsPerWorkspace: 0,
+      enforceBalance: false,
+      maxWarmSecondsPerWorkspace: 5,
       idleGraceMs: settings.sandboxIdleGraceMs,
     });
 
@@ -1333,19 +1335,19 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
       blocked = error;
     }
     expect(blocked).toBeInstanceOf(HTTPException);
-    expect((blocked as HTTPException).status).toBe(402);
-    expect((blocked as Error).message).toContain("insufficient OpenGeni credits");
+    expect((blocked as HTTPException).status).toBe(429);
+    expect((blocked as Error).message).toContain("warm allowance exhausted");
     expect(await readLease(db, workspaceId, sandboxGroupId)).toMatchObject({
       liveness: "draining",
       refcount: 0,
       viewerHolders: 0,
     });
 
+    await admin`DELETE FROM usage_events WHERE idempotency_key=${capEventKey}`;
     await forceDrainOverLimitViewerOnlyBoxes(db, {
       workspaceId,
-      balanceMicros: 1,
-      enforceBalance: true,
-      maxWarmSecondsPerWorkspace: 0,
+      enforceBalance: false,
+      maxWarmSecondsPerWorkspace: 5,
       idleGraceMs: settings.sandboxIdleGraceMs,
     });
     const attached = await attachViewer(

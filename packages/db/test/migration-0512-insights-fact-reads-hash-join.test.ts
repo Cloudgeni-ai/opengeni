@@ -12,16 +12,16 @@ const FACT_AUTHORITIES = [
 let shared: SharedTestDatabase | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0509");
+  shared = await acquireSharedTestDatabase("migration-0512");
 }, 180_000);
 
 afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-test("0509 is a rolling planner pin that touches nothing but function configuration", async () => {
+test("0512 is a rolling planner pin that touches nothing but function configuration", async () => {
   const candidate = await Bun.file(
-    new URL("../drizzle/0509_insights_fact_reads_hash_join.sql", import.meta.url),
+    new URL("../drizzle/0512_insights_fact_reads_hash_join.sql", import.meta.url),
   ).text();
   expect(candidate).toStartWith("-- deployment-mode: rolling");
   expect(candidate.match(/ALTER FUNCTION opengeni_private\./g)).toHaveLength(

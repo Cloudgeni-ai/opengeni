@@ -3,6 +3,7 @@ import {
   environmentsEncryptionKeyBytes,
   resolveFirstPartyDelegationSecret,
   resolveStreamTokenSecret,
+  sandboxWarmRateMicrosPerSecond,
 } from "@opengeni/config";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
@@ -75,6 +76,7 @@ import {
   BrowserSessionNotFoundError,
   BrowserSessionOperationConflictError,
   BrowserSessionStateError,
+  SandboxPaidComputeAdmissionError,
   completeBrowserSessionEnd,
   completeExternalAuth,
   completeBrowserDownloadSave,
@@ -3782,6 +3784,10 @@ async function ensureInteractionHolder(
     holderId: interactionHolderId(browserSessionId),
     subjectId: sourceSession.id,
     backend: placement.lease.backend,
+    warmBilling: {
+      mode: deps.settings.sandboxWarmBillingMode,
+      rateMicrosPerSecond: sandboxWarmRateMicrosPerSecond(deps.settings, placement.lease.backend),
+    },
     os: placement.lease.os,
     image: sandboxRuntime.image,
     rigVersionId: sourceSession.rigVersionId,
@@ -4750,6 +4756,8 @@ function browserRouteError(error: unknown): HTTPException {
   const connectedMachineError = interactionControlApiError(error, "browser");
   if (connectedMachineError) return connectedMachineError;
   if (error instanceof HTTPException) return error;
+  if (error instanceof SandboxPaidComputeAdmissionError)
+    return new HTTPException(402, { message: error.message, cause: error });
   if (error instanceof BrowserSessionNotFoundError) {
     return new HTTPException(404, { message: error.message, cause: error });
   }

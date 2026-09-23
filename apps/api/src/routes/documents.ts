@@ -818,6 +818,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:search"),
             "documents:search",
           ),
+          settings: deps.settings,
         },
       );
       await server.connect(transport);

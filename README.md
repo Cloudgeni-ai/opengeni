@@ -49,7 +49,7 @@ Prefer to run it yourself? Everything is open source. Jump to [Run it locally](#
 - **Humans in the loop.** Tool approvals gate risky actions. Agents can ask structured questions and resume the exact tool call after the answer, even across restarts.
 - **Run anywhere.** A managed sandbox (Docker, Modal, or a cloud provider) or a **Connected Machine**: your laptop, build server, or GPU box, enrolled once and driven directly. Machines only dial out and receive no Opengeni credentials.
 - **Agent Knowledge.** Files, retained sources, and useful findings in one searchable library, with personal and workspace ownership and optional review before anything is published.
-- **Integrate in one handler.** One organization API key on your server, one chat endpoint, and React components for the timeline, composer, and approvals.
+- **Integrate into your product.** Use a server-side chat handler with a compatible client, or build on the session SDK and React components. Your organization API key stays on your server.
 - **Managed or self-hosted.** Use [app.opengeni.ai](https://app.opengeni.ai) with nothing to run, or deploy the same API, web app, workers, Helm chart, and reference Terraform for Azure, AWS, and GCP yourself. All of it is Apache-2.0.
 
 ## Run it locally
@@ -69,10 +69,13 @@ Open http://127.0.0.1:3000, describe a task, and watch the session run.
 
 ## Use it from your code and product
 
+Verify your installed SDK and target deployment support the chat contract before using this example; source availability does not establish hosted or self-hosted deployment compatibility. Set the API URL explicitly and follow the [product integration guide](https://docs.opengeni.ai/guides/integrate-your-product) for authentication and user membership.
+
 ```ts
-import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+import { OpenGeni } from "@opengeni/sdk/chat";
 
 const og = new OpenGeni({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
   apiKey: process.env.OPENGENI_API_KEY!,
   organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
 });
@@ -81,6 +84,8 @@ const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" }
 const reply = await chat.send("Summarize open incidents from the last week.");
 console.log(reply.text);
 ```
+
+For a chat UI, mount `createChatHandler` on `GET /api/chat`, `POST /api/chat`, and `POST /api/chat/respond`, with a client compatible with the selected chat format. Alternatively, use `SessionConversation`, or compose `MessageTimeline` and `ChatComposer`, through the normal session SDK and an authenticated backend proxy. These React components do not consume the chat-handler protocol.
 
 Start with the [product integration guide](docs/product-integration.md), then the [TypeScript SDK](packages/sdk/README.md) and [React components](packages/react/README.md). The [chat quickstart](examples/chat-quickstart) is a runnable server example, and [Northstar support](examples/northstar-support) shows a full SaaS embed.
 

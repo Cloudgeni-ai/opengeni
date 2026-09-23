@@ -382,7 +382,7 @@ const ComputerActInput = z
     computerSessionId: z.string().uuid(),
     targetId: z.string().min(1).max(512),
     expectedTargetGeneration: z.string().min(1).max(256).optional(),
-    expectedObservationId: z.string().uuid().nullable().optional(),
+    expectedObservationId: ComputerObservation.shape.observationId.nullable().optional(),
     expectedFrameId: z.string().min(1).max(256).nullable().optional(),
     action: ComputerAction,
   })
@@ -1017,7 +1017,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "act"],
     title: "Act in app or window",
     description:
-      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. Omit fences to use a fresh observation automatically. Returns the durable causal receipt.",
+      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. Omit fences to use a fresh observation automatically. Returns the durable causal receipt.",
     input: ComputerActInput,
     output: ComputerActionReceipt,
     readOnly: false,
