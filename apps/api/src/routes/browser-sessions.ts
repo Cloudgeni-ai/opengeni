@@ -2792,6 +2792,12 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             resolved.kind !== "selfhosted" ||
             resolved.sandboxId !== expectedPlacement.sandboxId
           ) {
+            if (operation === "browser.create") {
+              throw new HTTPException(422, {
+                message:
+                  "The requested Connected Machine is not this session's current placement. Move the session to that machine before creating an interaction resource.",
+              });
+            }
             return await throwBrowserSourcePlacementChanged(
               grant,
               sourceSession.id,

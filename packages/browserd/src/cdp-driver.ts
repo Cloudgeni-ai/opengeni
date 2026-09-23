@@ -370,7 +370,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // command can also manufacture a redundant tab. Connect once, reuse the
     // launch-created page, and perform the one intended navigation through our
     // target-scoped CDP authority.
-    const launchUrl = this.targetLifecycle === "runner" ? undefined : url;
     this.started = true;
     let connection: BrowserCdpConnection;
     let launched: { url?: unknown; targetId?: unknown };
@@ -378,12 +377,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection = await this.ensureConnection();
       const created = await connection.send<{ targetId?: unknown }>(
         "Target.createTarget",
-        { url: launchUrl ?? "about:blank", background: true },
+        { url: "about:blank", background: true },
         { timeoutMs: BROWSER_START_TIMEOUT_MS },
       );
       launched = {
         targetId: created.targetId,
-        url: launchUrl ?? "about:blank",
+        url: "about:blank",
       };
     } else {
       connection = await this.ensureConnection();

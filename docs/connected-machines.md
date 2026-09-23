@@ -784,3 +784,31 @@ expecting transactional support. Changing transport limits is not required.
 - **`MachineStatusPill`** / **`ConnectionStatusPill`** — the status chips.
 
 See the [`@opengeni/react` README](../packages/react/README.md) for wiring.
+
+### Interaction runtime reliability
+
+Managed BrowserSessions own browser lifetime across tool calls. A browser daemon
+launched by a shell command remains subject to that command's containment and
+cleanup; repeating its CLI session name does not retain its process. Explicit
+Connected Machine interaction creation must match the source session's current
+placement. Move the session first; a creation mismatch is a 422, while an existing
+resource on a retired placement retains the terminal stale-resource fence.
+
+Attached Chrome is an explicit user-profile choice, never an automatic fallback
+for an unavailable managed browser. A new attached BrowserSession creates a new
+background tab rather than navigating an existing personal tab. Reuse honors
+explicit placement, identity, revision, network route and linked desktop choices.
+Debugger continuation pages are drained without treating a full page as lost
+history; actual sequence gaps still terminate the connection.
+
+Native computer protocol version 3 separates `capture_still` (including JPEG and
+size options) from reading an explicitly started live stream. macOS helpers use
+private, byte-identical executable copies for each process: concurrent
+ScreenCaptureKit clients sharing one executable path can otherwise route capture
+to the first process and leave another waiting. Copies retain their signatures
+and responsible-app permission checks, and are removed after process exit.
+
+Unexpected controller errors are retained in two owner-only, size-bounded
+`controller-errors.jsonl` files in the private controller state directory, as
+well as stderr. The agent forwards bounded controller stderr diagnostics;
+startup mismatch errors report both expected and received runtime build IDs.
