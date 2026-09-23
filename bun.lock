@@ -364,6 +364,7 @@
       "name": "@opengeni/codex",
       "version": "0.2.25",
       "dependencies": {
+        "@opengeni/contracts": "workspace:*",
         "@opengeni/network": "workspace:*",
         "zod": "^4.2.1",
       },
