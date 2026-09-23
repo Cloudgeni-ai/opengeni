@@ -22,6 +22,7 @@
     "dev": "bun scripts/run-development-stack.ts",
     "dev:stack": "bun scripts/run-development-stack.ts",
     "dev:check": "bun scripts/run-development-stack.ts --check",
+    "dev:tools": "bun scripts/install-development-tools.ts",
     "dev:down": "bash scripts/dev-stack-down.sh",
     "dev:clean": "bash scripts/dev-stack-down.sh --clean",
     "dev:api": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; cd apps/api && bun run dev",

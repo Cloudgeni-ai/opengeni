@@ -131,12 +131,17 @@ describe("development infrastructure backend", () => {
     );
   });
 
-  test("the full launcher records native backend, sandbox, and MinIO authority", async () => {
+  test("the full launcher resolves native storage before selecting ports and credentials", async () => {
     const source = await Bun.file(devStackPath).text();
     expect(source).toContain("opengeni_load_dev_environment ./.env");
     expect(source).toContain('OPENGENI_DEV_BACKEND="$(opengeni_resolve_dev_backend)"');
     expect(source).toContain("OPENGENI_SANDBOX_BACKEND=local");
-    expect(source).toContain("OPENGENI_OBJECT_STORAGE_FIXTURE=minio");
+    expect(source).not.toContain("OPENGENI_OBJECT_STORAGE_FIXTURE=minio");
+    expect(source).toContain("bun scripts/dev-native-storage.ts resolve");
+    expect(source.indexOf("bun scripts/dev-native-storage.ts resolve")).toBeLessThan(
+      source.indexOf("choose_port OPENGENI_GARAGE_HOST_PORT"),
+    );
+    expect(source).toContain("choose_port OPENGENI_GARAGE_RPC_HOST_PORT 3901");
     expect(source).toContain("bash scripts/dev-native-infra.sh status --quiet");
     expect(source).toContain("bash scripts/dev-native-infra.sh start");
     expect(source).toContain(

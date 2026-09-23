@@ -14,6 +14,7 @@
 ## 1. Startup
 
 Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-lock.ts`; readiness: `scripts/dev-stack.sh`.
+Fresh native storage uses Garage; Connected Machines is opt-in.
 
 ---
 

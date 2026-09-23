@@ -11,12 +11,13 @@ Use this to develop against OpenGeni or to evaluate it before self-hosting. For 
 - macOS or Linux (use WSL2 on Windows).
 - [Bun](https://bun.com/docs/installation) at the exact version in the checkout's `.bun-version`.
 - Git and curl.
-- [rustup](https://rustup.rs); startup installs and uses the checked-in Rust toolchain without changing your default toolchain.
-- A C build toolchain: Xcode Command Line Tools on macOS (`xcode-select --install`), or `build-essential` on Debian/Ubuntu.
+- For source-build fallback only: [rustup](https://rustup.rs) and a C build toolchain (Xcode Command Line Tools on macOS, or `build-essential` on Debian/Ubuntu). Startup prefers a source-matched verified runtime; if it must compile, it uses the checked-in Rust toolchain without changing your default.
 - Docker with a running daemon, or the native service prerequisites described in [Local development](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/local-development.md). A Docker client without a working daemon is not sufficient. The default agent sandbox is `local` (this machine).
 - Model credentials are needed for agent execution, not application startup. Connect a model in Settings → Models after opening the app, or configure a deployment key.
 
 ## Start the stack
+
+Use Docker infrastructure on macOS. Linux and Windows/WSL2 can use Docker or native services. Run `bun run dev:check` from the checkout for read-only prerequisite diagnostics. `bun run dev:tools` prints a project-local native tool installation plan; add `-- --install` to opt in. OS package installation remains explicit.
 
 ```bash
 git clone https://github.com/Cloudgeni-ai/opengeni.git

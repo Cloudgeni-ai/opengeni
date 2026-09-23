@@ -10,7 +10,7 @@ kernel) see [`deployment.md` § Local Development Stack](deployment.md#local-dev
 - Linux or macOS; on Windows, run the full stack inside WSL2. Keep the checkout and executable tools in the same environment. An agent's isolated sandbox is not automatically your physical computer.
 - Bun at the exact version in `.bun-version`, plus Git, Bash and curl.
 - Docker, for local Postgres, NATS, Temporal, and Garage when the daemon is up. The agent sandbox defaults to `local` (this machine). Set `OPENGENI_SANDBOX_BACKEND=docker` to run the agent in the local sandbox image instead.
-- rustup (the artifact kernel uses its checked-in exact Rust toolchain)
+- rustup and a C compiler only when a matching verified artifact-runtime prebuilt is unavailable or when the optional relay needs a source build. The artifact kernel uses its checked-in exact Rust toolchain.
 - Model credentials for real agent runs. They are not required to start the app; use Settings → Models afterward. The `OPENGENI_OPENAI_API_KEY` example is commented out and empty.
 
 Run `bun run dev:check` to collect missing prerequisites without starting services.
@@ -19,7 +19,13 @@ The native infrastructure path additionally needs PostgreSQL server/client tools
 `vector` extensions, NATS server, Temporal CLI and the selected object-storage
 server. The Docker path needs a responding daemon and Compose; an installed
 Docker CLI alone is not enough. Follow the checker diagnostics for your host,
-rather than copying Linux package commands to macOS or Windows.
+rather than copying Linux package commands to macOS or Windows. Native process
+supervision is supported on Linux/WSL2; use a running Docker daemon on macOS.
+`bun run dev:tools` prints the project-local tool installation plan without
+changing the machine. `bun run dev:tools -- --install` explicitly installs its
+supported pinned binaries; it does not install OS packages or Rust, and does not
+modify your shell profile. The launcher adds the exact tool directory to its
+own `PATH`.
 
 ## Start the full stack
 
@@ -33,7 +39,7 @@ artifact services and web app. Connected Machines is optional and off in a fresh
 checkout; set `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true` to prepare and start its
 relay. Existing explicit values are preserved. With
 `OPENGENI_DEV_BACKEND=auto` (the default), it uses Docker when the daemon is
-reachable and otherwise starts PostgreSQL, NATS, Temporal, and MinIO as native
+reachable and otherwise starts PostgreSQL, NATS, Temporal, and Garage as native
 processes. Set the backend explicitly to `docker` or `native` when required.
 An invocation's `OPENGENI_DEV_BACKEND` takes precedence over `.env`; when unset,
 the file's setting remains effective. An explicit `docker` request fails if the
@@ -44,16 +50,22 @@ The development web server forwards `/v1` requests to `VITE_API_BASE_URL`
 OAuth callbacks can therefore return to the public web origin without landing
 on the application's "Page not found" screen.
 
-The native infrastructure path is intended for Linux sandboxes and other hosts
-without Docker. It changes a copied `OPENGENI_SANDBOX_BACKEND=docker` default to
+The native infrastructure path is intended for Linux/WSL2 hosts without Docker.
+It changes a copied `OPENGENI_SANDBOX_BACKEND=docker` default to
 the in-process `local` sandbox provider, while preserving explicit remote
-providers such as Modal or OpenSandbox. It also selects MinIO instead of the
-Docker-only Garage fixture. `bun run dev:down` stops this worktree's selected
+providers such as Modal or OpenSandbox. Fresh storage uses Garage; existing
+native MinIO state is preserved, and incompatible provider changes fail with a
+diagnostic rather than silently using empty storage. MinIO remains an explicit
+compatibility option (`OPENGENI_OBJECT_STORAGE_FIXTURE=minio`). Switching an
+existing project requires a deliberate backup/migration; selecting Garage is
+not a migration command. `bun run dev:down` stops this worktree's selected
 infrastructure; `bun run dev:clean -- --yes` also removes its data and
 `.env.runtime` without touching another worktree or unrelated Docker state.
 
 The first development start also prepares the current-host editable-artifact
-kernel. Opengeni reads `packages/artifact-tool/kernel/rust-toolchain.toml` and
+kernel. It reuses only a source-matched verified installation or prebuilt;
+unavailable downloads fall back to an explicit source build. For a source build,
+OpenGeni reads `packages/artifact-tool/kernel/rust-toolchain.toml` and
 invokes Cargo and rustc through `rustup run <exact-pin>`; unrelated Homebrew or
 system Rust binaries earlier on `PATH` are ignored. Cargo is also bound to the
 pinned toolchain's absolute compiler path, so ambient compiler/wrapper variables
@@ -87,8 +99,8 @@ Default URLs:
 - Web app: `http://127.0.0.1:3000`
 - API health: `http://127.0.0.1:8000/healthz`
 - NATS monitor: `http://127.0.0.1:8222`
-- Object storage: Garage `http://127.0.0.1:3900` with Docker by default, or
-  MinIO `http://127.0.0.1:9000` with the native backend/explicit MinIO fixture
+- Object storage: Garage `http://127.0.0.1:3900` for fresh Docker/native projects,
+  or MinIO `http://127.0.0.1:9000` for existing/explicit MinIO projects
 - Temporal gRPC: `127.0.0.1:7233`
 - Native Temporal UI: `http://127.0.0.1:8233`
 

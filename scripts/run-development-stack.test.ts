@@ -15,6 +15,10 @@ test("a second launcher cannot mutate runtime state; termination permits restart
       await readFile(new URL("./dev-stack-project.sh", import.meta.url)),
     );
     await writeFile(
+      join(root, "scripts/dev-stack-backend.sh"),
+      await readFile(new URL("./dev-stack-backend.sh", import.meta.url)),
+    );
+    await writeFile(
       join(root, "scripts/dev-stack.sh"),
       `#!/usr/bin/env bash
       set -eu
@@ -28,7 +32,7 @@ test("a second launcher cannot mutate runtime state; termination permits restart
       runner,
       `
       import { runDevelopmentStack } from ${JSON.stringify(new URL("./run-development-stack.ts", import.meta.url).href)};
-      try { process.exitCode = await runDevelopmentStack(${JSON.stringify(root)}); }
+      try { process.exitCode = await runDevelopmentStack(${JSON.stringify(root)}, { checkPrerequisites: async () => {} }); }
       catch (error) { console.error(error.message); process.exitCode = 1; }
     `,
     );
