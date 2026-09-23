@@ -30,6 +30,7 @@ import {
   responseSatisfiesLatencyMode,
   selectModelPricing,
   serviceTierForLatencyMode,
+  settingsForAcceptedSubscriptionTurn,
   withCodexCatalogProvider,
   withXaiSubscriptionCatalogProvider,
   withWorkspaceGatewayCatalogProvider,
@@ -1732,6 +1733,179 @@ describe("turn execution policy V1", () => {
         reasoningEffort: policy.reasoningEffort,
       }),
     ).not.toThrow();
+  });
+
+  test("preserves accepted Codex Astra identity across the implicit caching rollout", () => {
+    const current = withCodexCatalogProvider(
+      getSettings({ OPENGENI_CODEX_SUBSCRIPTION_ENABLED: "true" }),
+    );
+    const providers = JSON.parse(current.modelProvidersJson);
+    delete providers[0].models[0].capabilities.promptCaching;
+    const historical = { ...current, modelProvidersJson: JSON.stringify(providers) };
+    const input = {
+      modelId: "codex/gpt-6-astra",
+      requestedModelId: null,
+      modelSource: "continuation" as const,
+      reasoningEffort: "low" as const,
+      reasoningSource: "continuation" as const,
+    };
+    const accepted = resolveTurnExecutionPolicyV1(historical, input);
+    const newer = resolveTurnExecutionPolicyV1(current, input);
+    expect(accepted.definitionVersion).toBe(
+      "sha256:3b9f79cc6958b71ef6e14c4dc16797e83b9bbceb070ecd44048f0a685e3a1c2a",
+    );
+    expect(newer.definitionVersion).toBe(
+      "sha256:fc4b0bc9ec1a5cc2c302da88c407a633ae5fec0bcc0166668eca3acf1fa49479",
+    );
+    const before = structuredClone(accepted);
+    for (const policy of [accepted, newer]) {
+      expect(settingsForAcceptedSubscriptionTurn(current, policy, input)).toBe(current);
+      expect(assertTurnExecutionPolicyMatchesConfigV1(current, policy, input).policy).toEqual(
+        policy,
+      );
+    }
+    expect(accepted).toEqual(before);
+
+    // Compatibility is one-way: it cannot restore a capability on an old worker.
+    expect(() => assertTurnExecutionPolicyMatchesConfigV1(historical, newer, input)).toThrow(
+      "current provider definition",
+    );
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(current, accepted, {
+        ...input,
+        reasoningEffort: "high",
+      }),
+    ).toThrow("accepted turn model/reasoning/latency");
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(current, accepted, {
+        ...input,
+        latencyMode: "fast",
+      }),
+    ).toThrow("accepted turn model/reasoning/latency");
+
+    const mutations: Array<[string, (provider: any, model: any) => void]> = [
+      [
+        "endpoint",
+        (p) => {
+          p.baseUrl = "https://other.example/v1";
+        },
+      ],
+      [
+        "wire profile",
+        (p) => {
+          p.wireProfile = "azure-openai";
+        },
+      ],
+      [
+        "wire API",
+        (p) => {
+          p.api = "chat";
+        },
+      ],
+      [
+        "upstream model",
+        (_p, m) => {
+          m.upstreamModelId = "gpt-6-sol";
+        },
+      ],
+      [
+        "context",
+        (_p, m) => {
+          m.contextWindowTokens = 300000;
+        },
+      ],
+      [
+        "effective context",
+        (_p, m) => {
+          m.effectiveContextWindowTokens = 250000;
+        },
+      ],
+      [
+        "compaction",
+        (_p, m) => {
+          m.autoCompactTokenLimit = 200000;
+        },
+      ],
+      [
+        "truncation",
+        (_p, m) => {
+          m.toolOutputTruncationTokens = 9000;
+        },
+      ],
+      [
+        "reasoning",
+        (_p, m) => {
+          m.capabilities.reasoning.efforts = ["low"];
+        },
+      ],
+      [
+        "tools",
+        (_p, m) => {
+          m.capabilities.hostedTools.webSearch.runnable = false;
+        },
+      ],
+      [
+        "transport",
+        (_p, m) => {
+          m.capabilities.transports.responsesWebSocket.runnable = true;
+        },
+      ],
+      [
+        "cache runnable",
+        (_p, m) => {
+          m.capabilities.promptCaching.runnable = false;
+        },
+      ],
+      [
+        "cache support",
+        (_p, m) => {
+          m.capabilities.promptCaching.upstream = "unknown";
+        },
+      ],
+      [
+        "cache mode",
+        (_p, m) => {
+          m.capabilities.promptCaching.mode = "automatic";
+        },
+      ],
+    ];
+    for (const [label, mutate] of mutations) {
+      const changed = JSON.parse(current.modelProvidersJson);
+      mutate(changed[0], changed[0].models[0]);
+      expect(
+        () =>
+          assertTurnExecutionPolicyMatchesConfigV1(
+            { ...current, modelProvidersJson: JSON.stringify(changed) },
+            accepted,
+            input,
+          ),
+        label,
+      ).toThrow();
+    }
+    for (const changed of [
+      { providerId: "other" },
+      { upstreamModelId: "gpt-6-sol" },
+      { wireApi: "chat" as const },
+      { credentialSource: { kind: "deployment" as const, mechanism: "api_key" as const } },
+      { billing: { upstreamPayer: "deployment" as const, metering: "opengeni_credits" as const } },
+      { definitionVersion: `sha256:${"0".repeat(64)}` },
+    ]) {
+      expect(() =>
+        assertTurnExecutionPolicyMatchesConfigV1(current, { ...accepted, ...changed }, input),
+      ).toThrow();
+    }
+
+    // A missing caching declaration on another model is not this migration.
+    const otherProviders = JSON.parse(current.modelProvidersJson);
+    delete otherProviders[0].models[1].capabilities.promptCaching;
+    const otherInput = { ...input, modelId: "codex/gpt-6-sol" };
+    const otherPolicy = resolveTurnExecutionPolicyV1(
+      { ...current, modelProvidersJson: JSON.stringify(otherProviders) },
+      otherInput,
+    );
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(current, otherPolicy, otherInput),
+    ).toThrow("current provider definition");
   });
 
   test("attributes connected Codex subscription turns explicitly as externally billed", () => {
