@@ -27,10 +27,15 @@ test("Skill catalog pagination preserves the server cursor and sends bounded que
       return Response.json({ skills: [], nextCursor: "next-page" });
     }) as typeof fetch,
   });
-  expect(await client.listWorkspaceSkills("workspace", { cursor: "opaque+/=", limit: 25 })).toEqual(
-    { skills: [], nextCursor: "next-page" },
-  );
+  expect(
+    await client.listWorkspaceSkills("workspace", {
+      cursor: "opaque+/=",
+      limit: 25,
+      sessionId: "session",
+    }),
+  ).toEqual({ skills: [], nextCursor: "next-page" });
   const query = new URL(url).searchParams;
   expect(query.get("cursor")).toBe("opaque+/=");
   expect(query.get("limit")).toBe("25");
+  expect(query.get("sessionId")).toBe("session");
 });

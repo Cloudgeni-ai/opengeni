@@ -348,6 +348,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/workspace-switcher-trigger.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-rail-row-metadata.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/skill-review.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/session-skill-review.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/site-conversations.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/setup-account-token.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/personal-resource-attachments.browser.e2e.ts": [

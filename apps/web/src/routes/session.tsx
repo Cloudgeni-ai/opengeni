@@ -192,6 +192,11 @@ const ChatInteractiveBlock = lazy(() =>
 );
 
 const HumanInputSurface = lazy(() => import("@/components/session/human-input"));
+const SessionSkillReviews = lazy(() =>
+  import("@/components/session/session-skill-reviews").then((module) => ({
+    default: module.SessionSkillReviews,
+  })),
+);
 const SessionCommands = lazy(() =>
   import("@opengeni/react/session-ui").then((module) => ({ default: module.SessionCommands })),
 );
@@ -2532,6 +2537,15 @@ function SessionChatPane(props: {
                     {/* Recovery follows the failed request, only in the latest history window.
                         Credit exhaustion also surfaces on idle sessions. */}
                     {failureRecovery}
+                    <Suspense fallback={null}>
+                      <SessionSkillReviews
+                        key={`${context.accessContext.subjectId}:${props.session.workspaceId}:${props.session.id}`}
+                        context={context}
+                        workspaceId={props.session.workspaceId}
+                        sessionId={props.session.id}
+                        events={props.events}
+                      />
+                    </Suspense>
                     {props.humanInput.requests.length > 0 &&
                     props.session.status === "requires_action" ? (
                       <div className="pb-1" data-human-input-timeline-surface="">
