@@ -63,6 +63,9 @@ export const DEFAULT_MODEL_COST_POLICY_JSON = JSON.stringify({
 // a configured request timeout may never consume the entire durable claim.
 export const SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS = 60 * 60_000;
 export const SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS = 10_000;
+// Deadline rotation gives retained legacy commands a bounded stop window
+// before capturing the still-running sandbox's current files.
+export const SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS = 120_000;
 export const SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS =
   SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS - SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS;
 export const GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MAX_MS = 60_000;
@@ -3447,7 +3450,21 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         : parsed.sandboxIdleGraceMs,
     sandboxRotationLeadMs:
       raw.sandboxRotationLeadMs === undefined && parsed.sandboxBackend === "modal"
-        ? Math.min(3_600_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
+        ? Math.min(
+            3_600_000,
+            Math.max(
+              Math.floor((parsed.modalTimeoutSeconds * 1000) / 2),
+              SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS +
+                sandboxArchiveCaptureTimeoutMs({
+                  sandboxSnapshotTimeoutMs: Math.max(
+                    parsed.sandboxSnapshotTimeoutMs,
+                    parsed.sandboxDrainSnapshotTimeoutMs ?? parsed.sandboxSnapshotTimeoutMs,
+                  ),
+                }) +
+                2 * parsed.sandboxLeaseReaperPeriodMs +
+                1,
+            ),
+          )
         : parsed.sandboxRotationLeadMs,
     mcpServers: ensureBuiltInMcpServers(parsed),
   };
@@ -7156,11 +7173,13 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       ordinaryCaptureTimeoutMs,
       drainCaptureTimeoutMs,
     );
-    if (!(rotationLeadMs > providerDeadlineCaptureTimeoutMs + reaperPeriod)) {
+    const requiredRotationLeadMs =
+      SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS + providerDeadlineCaptureTimeoutMs + 2 * reaperPeriod;
+    if (!(rotationLeadMs > requiredRotationLeadMs)) {
       throw new Error(
         `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must exceed the ` +
-          `largest durable snapshot or drain capture timeout plus one reaper period ` +
-          `(${providerDeadlineCaptureTimeoutMs + reaperPeriod}), including for persisted Modal ` +
+          `legacy command stop grace, largest durable snapshot or drain capture timeout, and two reaper periods ` +
+          `(${requiredRotationLeadMs}), including for persisted Modal ` +
           `leases after a default-backend rollout.`,
       );
     }

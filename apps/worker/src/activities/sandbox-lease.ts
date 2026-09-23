@@ -1507,6 +1507,25 @@ async function reconcileTerminalRetainedProcesses(
         }
       }
 
+      if (
+        observation?.status === "deferred" &&
+        process.providerBackend === "modal" &&
+        !process.providerBindingKey &&
+        !process.deadlineCancellationRequestedAt
+      ) {
+        // An unbound historical command cannot be signalled safely. Still
+        // record deadline intent when its lease matches: a failed observer
+        // must not block capture until the provider expires.
+        try {
+          await requestRetainedProcessDeadlineCancellation(db, processScope);
+        } catch (error) {
+          observability.warn("sandbox reaper: legacy deadline cancellation intent failed", {
+            processId: process.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
       if (observation === null) {
         const lease = await readLease(db, process.workspaceId, process.sandboxGroupId).catch(
           () => null,
@@ -1583,11 +1602,19 @@ async function reconcileTerminalRetainedProcesses(
               );
               supervisionMetric("cancellation_intent");
             }
-            observation = await probe(
+            const legacyDeadlineStop =
+              lease!.rotationReason === "provider_deadline" &&
+              !supervised &&
+              !process.deadlineCancellationRequestedAt;
+            const probeOutcome = await probe(
               settings,
               lease!,
               process,
-              claim.ownerState === "background_stopping" ? "cancel" : "observe",
+              (claim.ownerState === "background_stopping" &&
+                !process.deadlineCancellationRequestedAt) ||
+                legacyDeadlineStop
+                ? "cancel"
+                : "observe",
               async (result, chunkId, stream, streamFidelity) => {
                 if (
                   typeof result !== "string" ||
@@ -1610,7 +1637,20 @@ async function reconcileTerminalRetainedProcesses(
                     .catch(() => undefined);
               },
               commandPersistence,
+            ).then(
+              (value) => ({ ok: true as const, value }),
+              (error: unknown) => ({ ok: false as const, error }),
             );
+            // Legacy PTY input reserves Ctrl-C before the cancellation fence.
+            // Non-PTY has no command signal in the Modal SDK: probe it without
+            // injecting Ctrl-C as data, then fence and save after the grace.
+            if (
+              legacyDeadlineStop &&
+              !(await requestRetainedProcessDeadlineCancellation(db, processScope))
+            )
+              throw new Error("Deadline cancellation no longer owns its rotating lease");
+            if (!probeOutcome.ok) throw probeOutcome.error;
+            observation = probeOutcome.value;
             if (supervised) {
               supervisionMetric(
                 (await commandPersistence.loadSupervisionReceipt())
@@ -1899,7 +1939,13 @@ export async function probeRetainedProcessAtProvider(
   if (pending) {
     if (!captureOutput) throw new Error("Pending command output requires its persistence callback");
     await captureRetainedProbeOutput(process.id, pending.result, captureOutput);
-    return classifyRetainedProcessPollResult(pending.result, process.providerSessionId);
+    const pendingObservation = classifyRetainedProcessPollResult(
+      pending.result,
+      process.providerSessionId,
+    );
+    // Capture of a previous page must not consume the only deadline stop
+    // attempt. Terminal proof needs no further provider call.
+    if (mode !== "cancel" || pendingObservation.status === "proved") return pendingObservation;
   }
   const envelopeBackend = (lease.resumeState as { backendId?: unknown }).backendId;
   if (
@@ -1996,6 +2042,7 @@ export async function probeRetainedProcessAtProvider(
   if (typeof session.writeStdin !== "function") {
     return { status: "deferred", reason: "backend_unsupported" };
   }
+  let legacyPty = false;
   if (process.providerBackend === "modal") {
     let liveBinding: Awaited<ReturnType<typeof resolveModalCheckpointProviderBindingForSession>>;
     try {
@@ -2027,6 +2074,7 @@ export async function probeRetainedProcessAtProvider(
     if (!command || !providerPersistence || !session.bindProviderCommand)
       return { status: "deferred", reason: "process_observation_unavailable" };
     session.bindProviderCommand(process.providerSessionId, command, providerPersistence);
+    legacyPty = command.pty === true;
   }
   const capturePage = async (value: unknown): Promise<void> => {
     if (!captureOutput) {
@@ -2062,7 +2110,14 @@ export async function probeRetainedProcessAtProvider(
     result = await withRetainedProcessProbeTimeout(
       session.writeStdin({
         sessionId: process.providerSessionId,
-        chars: mode === "cancel" && !supervisedCancelled ? "\u0003" : "",
+        // Ctrl-C is a signal only through a PTY. For a non-PTY command it is
+        // ordinary stdin data and can corrupt the command's input.
+        chars:
+          mode === "cancel" &&
+          !supervisedCancelled &&
+          (process.providerBackend !== "modal" || legacyPty)
+            ? "\u0003"
+            : "",
         yieldTimeMs: 1_000,
         maxOutputTokens: 2_000,
       }),
@@ -2092,6 +2147,9 @@ export async function probeRetainedProcessAtProvider(
     observation.status === "deferred" &&
     observation.reason === "provider_running" &&
     lease.rotationRequestedAt !== null &&
+    mode !== "cancel" &&
+    !process.cancellationRequestedAt &&
+    legacyPty &&
     !(await providerPersistence
       ?.load()
       .then((command) => command?.kind === "modal-router-v1" && command.supervision))

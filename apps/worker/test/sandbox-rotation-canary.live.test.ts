@@ -33,7 +33,7 @@
  * force rotation, fake provider proofs, or rewrite command/process state.
  * The only disabled reaper edge is fleet-wide orphan discovery: the harness
  * must NEVER scan or terminate provider objects outside its own DB attribution.
- * Two 10-minute boxes rotate naturally at 7 minutes; allow 25 minutes total.
+ * Two 10-minute boxes rotate naturally at 6 minutes; allow 25 minutes total.
  * Exact-owned boxes/snapshots are cleaned up AFTER pass/failure, never to pass
  * acceptance. Cleanup failures fail the test and print only opaque resource IDs.
  */
@@ -89,7 +89,7 @@ import {
 } from "./sandbox-rotation-canary-supervision";
 
 const LIFETIME_SECONDS = 600;
-const ROTATION_LEAD_MS = 180_000;
+const ROTATION_LEAD_MS = 240_000;
 const REAPER_MS = 5_000;
 const live = process.env.OPENGENI_SANDBOX_ROTATION_CANARY === "1";
 

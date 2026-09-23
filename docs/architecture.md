@@ -1472,17 +1472,13 @@ Sandbox snapshots/provider-native checkpoints are recovery artifacts, not histor
 Capture requires proof against unaccounted racing writers. Failed/unverifiable
 captures are not empty successes; teardown must preserve the only recoverable workspace state.
 
-Provider-deadline rotation is an explicit preemption boundary. Once the durable
-lead-time request fences new mutations, each live turn aborts immediately rather
-than waiting for a turn-side snapshot that can be blocked by that turn's own
-mutation admission or an earlier provider capture. The attempt finalizer drains
-every tool and credential writer before releasing its holder; only the resulting
-zero-holder reaper may take over an in-flight same-request capture, publish the
-exact workspace generation, and terminate the old provider. When this abort
-reaches an Agents SDK run, the SDK closes the readable stream before its
-completion promise rejects. Iterator EOF is therefore not terminal success
-authority: the worker must await SDK completion and route its rejection through
-`sandbox_deadline_rotation` recovery before settling `turn.completed`.
+Provider-deadline rotation preempts turns when its durable lead-time request
+fences mutations. Finalizers drain tool and credential writers before releasing
+holders. Only the zero-holder reaper may adopt an in-flight same-request capture,
+publish the exact workspace generation, then terminate the provider. The Agents
+SDK closes its readable stream before completion rejects; EOF is not success.
+The worker awaits completion and routes rejection through
+`sandbox_deadline_rotation` before `turn.completed`.
 
 BrowserSession/ComputerSession holders remain durable despite old heartbeats.
 Only finite-provider handoff deadlines override them: the reaper marks exact
@@ -1504,6 +1500,12 @@ Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;
 unobserved outcomes become lost. Command backoff never suppresses rotation's
 provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
+
+Scheduled deadline rotation stops legacy commands where possible, then captures
+after bounded grace under a quiesced owner, exact lease fence, and no other
+holders or mutation admissions. Surviving commands settle lost after capture;
+supervised commands keep separate proof. Details:
+`docs/design/modal-workspace-durability-2026-09-23.md`.
 
 Desktop/browser images and daemons release separately. Desktop/terminal data
 use the relay; the control plane retains authority. Large edits require

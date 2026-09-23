@@ -9960,6 +9960,9 @@ export const sandboxRetainedProcesses = pgTable(
     supervisionOutputCaptured: boolean("supervision_output_captured").notNull().default(false),
     cancellationRequestedAt: timestamp("cancellation_requested_at", { withTimezone: true }),
     cancellationReason: text("cancellation_reason"),
+    deadlineCancellationRequestedAt: timestamp("deadline_cancellation_requested_at", {
+      withTimezone: true,
+    }),
     providerCommandInputIndex: bigint("provider_command_input_index", { mode: "number" })
       .notNull()
       .default(0),
