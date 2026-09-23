@@ -20,6 +20,10 @@ import {
   claimSessionWorkForAttempt,
   createConnection,
   createDb,
+  createVariableSet,
+  bindAuthorizedGitHubInstallationRepositories,
+  saveNewSessionDraftInTransaction,
+  withWorkspaceSubjectRls,
   encryptVariableSetValue,
   getLatestSessionModelForSubject,
   getOrCreateSlackInteraction,
@@ -1005,6 +1009,185 @@ async function interactions(workspaceId: string) {
 }
 
 describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
+  for (const [trigger, retryShell] of [
+    ["app_mention", false],
+    ["reaction", false],
+    ["app_mention", true],
+    ["reaction", true],
+  ] as const) {
+    test(`${trigger} ${retryShell ? "recovers a pending shell with" : "inherits"} the actor's routed website selections without draft content`, async () => {
+      if (!available) return;
+      const value = await fixture({
+        slackWorkspaceRouting: true,
+        routedWorkspaceName: "Engineering",
+        ownerPermissions: [
+          "sessions:create",
+          "sessions:read",
+          "sessions:control",
+          "variable-sets:attach",
+          "variable-sets:use",
+          "github:use",
+        ],
+        grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, "reactions:read"],
+        slackReactionSummon: {
+          enabled: true,
+          emoji: "genie",
+          channelPolicy: { mode: "bot_member" },
+        },
+      });
+      const target = value.routed!;
+      const channelId = `C_DEFAULTS_${trigger.toUpperCase()}`;
+      await upsertSlackChannelRoute(client.db, value.owner, {
+        connectionId: value.connectionId,
+        slackTeamId: value.teamId,
+        slackChannelId: channelId,
+        targetAccountId: target.accountId,
+        targetWorkspaceId: target.workspaceId,
+        decidedBySubjectId: value.owner.subjectId,
+        decidedBySlackUserId: value.ownerSlackUserId,
+        source: "admin",
+      });
+      const variables = await createVariableSet(client.db, {
+        ...target,
+        subjectId: value.owner.subjectId,
+        name: "Build credentials",
+      });
+      const checkedAt = new Date();
+      await bindAuthorizedGitHubInstallationRepositories(client.db, {
+        ...target,
+        installationId: 71,
+        githubAccountId: 7100,
+        accountLogin: "example-owner",
+        accountType: "User",
+        linkedBySubjectId: value.owner.subjectId,
+        githubActorId: 7100,
+        githubActorLogin: "example-owner",
+        authorityKind: "personal_owner",
+        authorityCheckedAt: checkedAt,
+        authorityExpiresAt: new Date(checkedAt.getTime() + 600000),
+        authorityNonce: crypto.randomUUID(),
+        repositoryIds: [42],
+      });
+      const repository = {
+        kind: "repository" as const,
+        uri: "https://github.com/example/project.git",
+        ref: "main",
+        githubInstallationId: 71,
+        githubRepositoryId: 42,
+      };
+      const save = (workspaceId: string, subjectId: string, resources: (typeof repository)[]) =>
+        withWorkspaceSubjectRls(client.db, workspaceId, subjectId, (db) =>
+          saveNewSessionDraftInTransaction(db, {
+            accountId: target.accountId,
+            workspaceId,
+            subjectId,
+            expectedRevision: 0,
+            text: "UNSENT PRIVATE DRAFT",
+            resources,
+            tools: [],
+            toolsProvided: true,
+            model: value.deps.settings.openaiModel,
+            reasoningEffort: "high",
+            latencyMode: "standard",
+            options: {
+              variableSetIds: [variables.id],
+              firstPartyMcpTools: [],
+              firstPartyMcpPermissions: ["sessions:read"],
+              goal: { text: "UNSENT GOAL", successCriteria: "never" },
+            },
+          }),
+        );
+      await save(target.workspaceId, value.owner.subjectId, [repository]);
+      // A different home draft must never win over the routed workspace.
+      await save(value.owner.workspaceId, value.owner.subjectId, []);
+      const timestamp = "1700000999.000001";
+      value.slack.reactionContexts.set(`${channelId}:${timestamp}`, {
+        messages: [{ user: value.ownerSlackUserId, ts: timestamp, text: "Fix the build" }],
+      });
+      const event =
+        trigger === "reaction"
+          ? reactionEvent({
+              teamId: value.teamId,
+              eventId: `E_DEFAULTS_${crypto.randomUUID()}`,
+              userId: value.ownerSlackUserId,
+              channelId,
+              timestamp,
+            })
+          : {
+              teamId: value.teamId,
+              eventId: `E_DEFAULTS_${crypto.randomUUID()}`,
+              event: {
+                type: "app_mention",
+                user: value.ownerSlackUserId,
+                channel: channelId,
+                ts: timestamp,
+                text: "Fix the build",
+              },
+            };
+      expect((await postEvent(value.app, event)).status).toBe(200);
+      if (retryShell) {
+        // Fail initial-event acceptance after the separately committed shell.
+        await shared!.admin.unsafe(
+          `CREATE FUNCTION fail_slack_defaults_initialization() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.workspace_id = '${target.workspaceId}'::uuid AND NEW.type = 'user.message' THEN RAISE EXCEPTION 'injected initialization failure'; END IF; RETURN NEW; END $$`,
+        );
+        await shared!.admin.unsafe(
+          "CREATE TRIGGER fail_slack_defaults_initialization BEFORE INSERT ON session_events FOR EACH ROW EXECUTE FUNCTION fail_slack_defaults_initialization()",
+        );
+        try {
+          await drainAll(value.deps);
+        } finally {
+          await shared!.admin.unsafe(
+            "DROP TRIGGER fail_slack_defaults_initialization ON session_events",
+          );
+          await shared!.admin.unsafe("DROP FUNCTION fail_slack_defaults_initialization()");
+        }
+        const shells = await shared!
+          .admin`select id from sessions where workspace_id = ${target.workspaceId}`;
+        expect(shells).toHaveLength(1);
+        expect((await interactions(target.workspaceId))[0]?.session_id).toBeNull();
+        // A new website selection must not alter the reserved create identity.
+        await withWorkspaceSubjectRls(client.db, target.workspaceId, value.owner.subjectId, (db) =>
+          saveNewSessionDraftInTransaction(db, {
+            accountId: target.accountId,
+            workspaceId: target.workspaceId,
+            subjectId: value.owner.subjectId,
+            expectedRevision: 1,
+            text: "CHANGED DRAFT",
+            resources: [],
+            tools: [],
+            toolsProvided: true,
+            model: value.deps.settings.openaiModel,
+            reasoningEffort: "low",
+            latencyMode: "standard",
+            options: {},
+          }),
+        );
+        await shared!
+          .admin`update slack_interaction_inbox set status = 'pending', retry_at = null, claim_holder_id = null, claim_expires_at = null where provider_event_id = ${event.eventId}`;
+      }
+      await drainAll(value.deps);
+      const [interaction] = await interactions(target.workspaceId);
+      expect(interaction?.session_id).toBeTruthy();
+      const [session] = await shared!
+        .admin`select resources, variable_set_ids, tools, first_party_mcp_tools, first_party_mcp_permissions, initial_message, reasoning_effort from sessions where id = ${interaction!.session_id}`;
+      expect(session!.resources).toEqual([expect.objectContaining(repository)]);
+      expect(session!.variable_set_ids).toEqual([variables.id]);
+      expect(session!.tools).toEqual([]);
+      expect(session!.first_party_mcp_tools).toEqual([]);
+      expect(session!.first_party_mcp_permissions).toEqual(["sessions:read"]);
+      expect(session!.reasoning_effort).toBe("high");
+      expect(session!.initial_message).toContain("Fix the build");
+      expect(session!.initial_message).not.toContain("UNSENT");
+      const [draft] = await shared!
+        .admin`select text, revision from new_session_drafts where workspace_id = ${target.workspaceId} and subject_id = ${value.owner.subjectId}`;
+      expect(draft).toMatchObject(
+        retryShell
+          ? { text: "CHANGED DRAFT", revision: "2" }
+          : { text: "UNSENT PRIVATE DRAFT", revision: "1" },
+      );
+    });
+  }
+
   test("App Home publishes only currently authorized tasks from the linked workspace", async () => {
     if (!available) return;
     const value = await fixture();

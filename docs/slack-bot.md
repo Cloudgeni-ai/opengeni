@@ -216,6 +216,12 @@ Authenticated Slack users can start work through four configured entry points:
 
 Reaction summon is disabled by default. Only `workspace:admin` can enable it, choose the exact emoji name without colons, and select all bot-member conversations or an explicit allowlist. Existing installations without `reactions:read` remain usable for mentions, commands, DMs, shortcuts, and tools, but the admin UI blocks reaction enablement until the bot is reinstalled with the canonical manifest. Slack Connect/shared conversations fail closed unless the separate shared-task policy below authorizes an exact private handoff.
 
+### New-session selections
+
+Mentions, commands, direct messages, shortcuts, and reactions reuse the linked initiating user's saved website selections in the destination workspace: repositories, variable sets, Rig/compute selection, model/effort/latency, and explicit tools and their permission restrictions. Omitted tools still resolve through current workspace defaults; explicit empty selections remain empty. Configure these through the ordinary new-session composer, not a separate Slack settings copy. Every attachment and tool is revalidated by ordinary session admission. Personal resources still require their normal ownership and consent authority.
+
+This read does not consume or change the website draft. Draft text, goals, uploaded files, and visibility are not imported. Existing Slack threads retain their session configuration. Without saved selections, the existing Slack model fallback and workspace defaults apply; mentions retain the built-in read-only Slack context tools only when no first-party selection is configured. Reactions do not add Slack history tools automatically.
+
 ### Shared-conversation task policy
 
 Slack Connect, pending-external conversations, and MPIMs use an immutable workspace policy authority exposed at `GET`/`PUT /v1/workspaces/:workspaceId/slack-task-policy`. No active policy means deny. A workspace admin may activate a CAS-fenced revision containing exact Slack team and conversation allowlists, guest/external-initiator flags, an MPIM flag, `sharedConversationMode`, and `resultPublicationMode`.
@@ -270,7 +276,7 @@ A requested continuation is visible only to workspace member administrators. App
 
 A completed turn without nonblank output is not a finished Slack task. Recorded input waits and pacing yields advance the delivery cursor silently and keep the interaction open for a later result. Earlier commentary is never substituted for a missing result, and Slack does not fabricate a success message. Budget exhaustion instead sends one actionable billing/usage-limit notice to check credits and usage limits and reply to resume, then closes delivery as failed. Internal diagnostics are not echoed to Slack. Ordinary nonblank results keep the existing once-only progress/result coalescing.
 
-Slack message, thread text, and reaction-imported image references are task-local input only. The interaction path does not automatically write them to Documents, Knowledge, Memory, preferences, Workspace Charter, instructions, or policy. A reaction-started session receives only the bounded projected context, exact imported file resources, and the default first-party tools, not general Slack history or mutation tools. Delivery excludes private reasoning, secrets, credentials, raw logs, raw provider responses, and unbounded output, and bot/self/subtype events are suppressed to prevent notification loops.
+Slack message, thread text, and reaction-imported image references are task-local input only. The interaction path does not automatically write them to Documents, Knowledge, Memory, preferences, Workspace Charter, instructions, or policy. A reaction-started session receives bounded projected context and exact imported files alongside the initiating user’s authorized saved selections. It does not automatically add general Slack history or mutation tools. Delivery excludes private reasoning, secrets, credentials, raw logs, raw provider responses, and unbounded output, and bot/self/subtype events are suppressed to prevent notification loops.
 
 ## Which workspace Slack work lands in
 

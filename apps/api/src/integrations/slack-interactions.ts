@@ -3,6 +3,7 @@ import {
   approvalIdentifier,
   ApproveSlackUserLinkAccessRequest,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  resolveWorkspaceSessionToolDefaults,
   hasOpenGeniSlackReactionScope,
   ListSlackUserLinkAccessRequestsResponse,
   PrepareSlackUserLinkAccessRequest,
@@ -52,6 +53,7 @@ import {
   getOrCreateSlackInteraction,
   getLatestSessionModelForSubject,
   getSession,
+  getSessionByCreateIdempotencyKey,
   getSessionEvent,
   getSessionHumanInputRequest,
   childRequiresActionResolutionExists,
@@ -119,6 +121,7 @@ import {
   acceptSessionUserMessage,
   controlHumanSessionWorkstream,
   createSessionForRequest,
+  getActorNewSessionDefaults,
   hasPermission,
   requireAccessContext,
   requireAccessGrant,
@@ -2165,6 +2168,16 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
   );
   let session: Awaited<ReturnType<typeof createSessionForRequest>>;
   try {
+    const defaults = await slackNewSessionDefaults(
+      deps,
+      grant,
+      interaction,
+      `slack:${entry.connectionId}:${entry.providerEventId}`,
+    );
+    const workspace = await getWorkspace(deps.db, interaction.workspaceId);
+    const defaultTools =
+      defaults.firstPartyMcpTools ??
+      resolveWorkspaceSessionToolDefaults(workspace?.settings)?.firstPartyMcpTools;
     const prepared = slackInvocationPreparedMessage(
       preparedEntry,
       preparedAttachments,
@@ -2175,13 +2188,17 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       grant,
       interaction.workspaceId,
       {
+        ...defaults,
         requestedSessionId: interaction.sessionReservationId,
         initialMessage: prepared.entry.text,
         ...(prepared.modelContext ? { modelContext: prepared.modelContext } : {}),
         instructions: SLACK_SESSION_INSTRUCTIONS,
-        firstPartyMcpTools: slackTaskFirstPartyMcpTools(deps.settings),
-        resources: preparedAttachments.resources,
-        ...(preferredModel ? { model: preferredModel } : {}),
+        firstPartyMcpTools:
+          defaultTools !== undefined
+            ? allowedFirstPartyMcpToolsForSession(deps.settings, defaultTools)
+            : slackTaskFirstPartyMcpTools(deps.settings),
+        resources: [...defaults.resources, ...preparedAttachments.resources],
+        ...(!defaults.model && preferredModel ? { model: preferredModel } : {}),
         idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
         clientEventId: `slack:${entry.providerEventId}`,
       },
@@ -2764,19 +2781,25 @@ async function processSlackReactionInboxEntry(
   const preparedEntry = slackReactionPreparedEntry(entry, context, preparedTask);
   let session: Awaited<ReturnType<typeof createSessionForRequest>>;
   try {
+    const defaults = await slackNewSessionDefaults(
+      deps,
+      grant,
+      interaction,
+      `slack-interaction:${interaction.id}`,
+    );
     session = await createSessionForRequest(
       await withCatalogSettings(deps, grant),
       grant,
       interaction.workspaceId,
       {
+        ...defaults,
         requestedSessionId: interaction.sessionReservationId,
         initialMessage: preparedEntry.text,
         instructions: SLACK_SESSION_INSTRUCTIONS,
-        // The exact reacted message and bounded containing thread are already in
-        // the prompt; do not expose general Slack history tools for this trigger.
-        firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings).default,
-        resources: preparedTask.resources,
-        ...(preferredModel ? { model: preferredModel } : {}),
+        // Reaction context stays bounded; ordinary tools follow the same saved
+        // selection/workspace defaults as the website, without adding Slack tools.
+        resources: [...defaults.resources, ...preparedTask.resources],
+        ...(!defaults.model && preferredModel ? { model: preferredModel } : {}),
         // Every reaction entry converging on this route must use the same create
         // key. This closes the same-owner multi-event race while the owner check
         // above prevents a different subject from winning creation authority.
@@ -2851,6 +2874,54 @@ function slackReactionPreparedEntry(
     ...entry,
     slackThreadTs: context.threadTimestamp,
     text: slackReactionTaskText(context, prepared),
+  };
+}
+
+// A create can commit its reserved shell before initial-event acceptance. Keep
+// that shell's selections on retry instead of reading a subsequently edited draft.
+async function slackNewSessionDefaults(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  interaction: { workspaceId: string; sessionReservationId: string; owningSubjectId: string },
+  createKey: string,
+): Promise<Awaited<ReturnType<typeof getActorNewSessionDefaults>>> {
+  const pending = await getSessionByCreateIdempotencyKey(
+    deps.db,
+    interaction.workspaceId,
+    createKey,
+  );
+  if (!pending) return getActorNewSessionDefaults(deps, grant, interaction.workspaceId);
+  if (
+    pending.id !== interaction.sessionReservationId ||
+    interaction.owningSubjectId !== grant.subjectId ||
+    pending.createdBy.kind !== "subject" ||
+    pending.createdBy.subjectId !== grant.subjectId
+  ) {
+    throw new SlackInteractionPermanentError("slack_session_create_identity_mismatch");
+  }
+  return {
+    model: pending.model,
+    reasoningEffort: pending.reasoningEffort,
+    latencyMode: pending.latencyMode,
+    resources: pending.resources.filter((resource) => resource.kind === "repository"),
+    ...(pending.toolPolicy.mode === "explicit"
+      ? { tools: pending.tools }
+      : {
+          excludedMcpServerIds: pending.toolPolicy.excludedMcpServerIds,
+        }),
+    firstPartyMcpTools: pending.firstPartyMcpTools,
+    ...(pending.firstPartyMcpPermissions
+      ? { firstPartyMcpPermissions: pending.firstPartyMcpPermissions }
+      : {}),
+    variableSetIds: pending.variableSetIds,
+    ...(pending.rigId ? { rigId: pending.rigId } : {}),
+    sandboxBackend: pending.sandboxBackend,
+    ...(pending.sandboxBackend === "selfhosted" && pending.activeSandboxId
+      ? {
+          targetSandboxId: pending.activeSandboxId,
+          ...(pending.workingDir ? { workingDir: pending.workingDir } : {}),
+        }
+      : {}),
   };
 }
 
