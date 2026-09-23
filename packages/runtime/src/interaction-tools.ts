@@ -382,7 +382,7 @@ const ComputerActInput = z
     computerSessionId: z.string().uuid(),
     targetId: z.string().min(1).max(512),
     expectedTargetGeneration: z.string().min(1).max(256).optional(),
-    expectedObservationId: z.string().uuid().nullable().optional(),
+    expectedObservationId: ComputerObservation.shape.observationId.nullable().optional(),
     expectedFrameId: z.string().min(1).max(256).nullable().optional(),
     action: ComputerAction,
   })
