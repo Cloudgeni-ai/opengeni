@@ -5448,6 +5448,16 @@ export function resolveTurnExecutionPolicyV1(
   });
 }
 
+/** A valid accepted policy resolved, but its executable definition differs. */
+export class TurnExecutionPolicyDefinitionMismatchError extends Error {
+  readonly code = "turn_execution_policy_definition_mismatch";
+
+  constructor() {
+    super("Turn execution policy does not match the current provider definition");
+    this.name = "TurnExecutionPolicyDefinitionMismatchError";
+  }
+}
+
 /**
  * Parse-time validation lives in @opengeni/contracts; this verifier binds a
  * present snapshot to the current executable definition and exact turn row.
@@ -5512,7 +5522,7 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     canonicalJson(parsed.credentialSource) !== canonicalJson(resolved.model.credentialSource) ||
     canonicalJson(parsed.billing) !== canonicalJson(resolved.model.billing);
   if (mismatched) {
-    throw new Error("Turn execution policy does not match the current provider definition");
+    throw new TurnExecutionPolicyDefinitionMismatchError();
   }
   return { policy: parsed, provider: resolved.provider, model: resolved.model };
 }
