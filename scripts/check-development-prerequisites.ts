@@ -29,7 +29,7 @@ export type PrerequisiteHost = {
 };
 
 const nativeInstall = {
-  postgres: "Install PostgreSQL 17 server/client and matching pgvector (Debian/Ubuntu with PGDG: sudo apt-get install postgresql-17 postgresql-client-17 postgresql-17-pgvector; macOS: brew install postgresql@17, then build/install pgvector v0.8.0 with PG_CONFIG pointing to that PostgreSQL 17 installation). Put its bin directory on PATH and verify pg_config --version. Extension files must belong to that same installation; an unversioned Homebrew pgvector may target a different PostgreSQL major.",
+  postgres: "Install PostgreSQL 17 server/client and matching pgvector (Debian/Ubuntu with PGDG: sudo apt-get install postgresql-17 postgresql-client-17 postgresql-17-pgvector). Put its bin directory on PATH and verify pg_config --version. Extension files must belong to that same installation. On macOS use the Docker backend; the native infrastructure launcher is Linux-only.",
   nats: "Install pinned NATS server 2.11.8 and Temporal CLI 1.4.1 with: bun scripts/install-development-tools.ts --install --tools=nats,temporal. Add the reported binDirectory to PATH. The verified project-local installer provides nats-server, not the nats client; preflight itself installs nothing.",
   temporal: "Install pinned Temporal CLI 1.4.1 with: bun scripts/install-development-tools.ts --install --tools=nats,temporal. Add the reported binDirectory to PATH. The CLI must provide server start-dev; tctl is not a substitute.",
   garage: "Provide an independently verified Garage v2.3.0 host binary on PATH, or use OPENGENI_DEV_BACKEND=docker with the repository's digest-pinned image. Automatic native Garage bootstrap is unavailable: the official Linux release assets lack an upstream checksum source, and no official macOS binary is provided. Preflight does not download or build Garage.",
@@ -115,9 +115,10 @@ export async function collectDevelopmentPrerequisites(
       }
     }
   } else {
-    if (!["x64", "arm64"].includes(host.arch)) errors.push("Native infrastructure host architecture is unsupported; use Linux/macOS x64 or arm64 with verified host binaries, or a supported Docker host.");
+    if (host.platform === "darwin") errors.push("Native development infrastructure is Linux-only; macOS native supervision is unsupported for both Garage and MinIO. Install/start Docker Desktop, verify docker info, and select OPENGENI_DEV_BACKEND=docker. Installing GNU utilities alone does not provide a supported native macOS stack.");
+    if (!["x64", "arm64"].includes(host.arch)) errors.push("Native infrastructure host architecture is unsupported; use Linux x64 or arm64 with verified host binaries, or a supported Docker host.");
     for (const command of ["setsid", "sha256sum", "nohup"]) {
-      requireCommand(command, "Native launcher requires this utility. Debian/Ubuntu: sudo apt-get install util-linux coreutils. macOS: install coreutils and a setsid-compatible utility and expose their commands on PATH, or select Docker; stock macOS alone is insufficient.");
+      requireCommand(command, "Native launcher requires this utility. Debian/Ubuntu: sudo apt-get install util-linux coreutils. On macOS select the Docker backend; native supervision is unsupported.");
     }
     if (host.uid === 0) {
       requireCommand("runuser", "Root native startup requires util-linux runuser and a postgres system user; installing the PostgreSQL server package normally creates that user. Prefer an unprivileged development user.");
@@ -159,7 +160,6 @@ export async function collectDevelopmentPrerequisites(
       if (requireCommand("garage", nativeInstall.garage)) {
         await requireProbe("garage", ["--version"], `Native Garage must match v2.3.0. ${nativeInstall.garage}`, /\b2\.3\.0(?:\s|$)/u);
       }
-      if (host.platform === "darwin") errors.push("Native Garage on macOS has no verified repository bootstrap path. Use the Docker backend, or explicit MinIO compatibility with verified macOS binaries; do not assume a Linux Garage binary will run.");
     }
     if (fixture === "minio") {
       for (const [command, pin] of [["minio", "RELEASE.2025-09-07T16-13-09Z"], ["mc", "RELEASE.2025-08-13T08-35-41Z"]] as const) {
