@@ -292,9 +292,13 @@ test("installs route emulation on about:blank before the first external navigati
   }
 });
 
-test.each(["runner", "cdp"] as const)(
-  "settles a new background target using %s lifecycle without navigating existing tabs",
-  async (targetLifecycle) => {
+test.each([
+  { targetLifecycle: "runner", foregroundManagedTabs: false },
+  { targetLifecycle: "runner", foregroundManagedTabs: true },
+  { targetLifecycle: "cdp", foregroundManagedTabs: false },
+] as const)(
+  "settles a new target using $targetLifecycle lifecycle (foreground=$foregroundManagedTabs)",
+  async ({ targetLifecycle, foregroundManagedTabs }) => {
     const browserSessionId = randomUUID();
     const controllerGeneration = "controller-background";
     let created = false;
@@ -381,10 +385,10 @@ test.each(["runner", "cdp"] as const)(
                 loaderId: second ? "loader-2" : "loader-1",
                 url: second
                   ? regressFrameToEmpty
-                    ? ""
+                    ? ":"
                     : createdFrameReads >= 3
                       ? "https://second.example.test/"
-                      : ""
+                      : ":"
                   : "https://first.example.test/",
               },
             },
@@ -418,6 +422,7 @@ test.each(["runner", "cdp"] as const)(
       controllerGeneration,
       runner,
       targetLifecycle,
+      foregroundManagedTabs,
       connect: async () => connection,
     });
     try {
@@ -441,8 +446,10 @@ test.each(["runner", "cdp"] as const)(
       });
       expect(createdTargetReads).toBeGreaterThanOrEqual(2);
       expect(createdFrameReads).toBeGreaterThanOrEqual(3);
-      expect(calls.some((call) => call.method === "Target.activateTarget")).toBe(false);
-      // Chromium can briefly regress the frame URL during navigation even
+      expect(calls.some((call) => call.method === "Target.activateTarget")).toBe(
+        foregroundManagedTabs,
+      );
+      // Chromium can briefly report a non-URL main-frame placeholder even
       // after the target itself advertises the requested absolute URL.
       regressFrameToEmpty = true;
       expect((await driver.observe(opened.target.id)).target.url).toBe(
