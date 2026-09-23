@@ -1,22 +1,10 @@
 #!/usr/bin/env bun
 // Native development fixtures only. Never point this provisioner at remote storage.
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 export const garageVersion = "2.3.0";
-// Official release bytes, not a moving package-manager formula or latest URL.
-export const garageReleases = {
-  x64: {
-    target: "x86_64-unknown-linux-musl",
-    sha256: "f98d317942bb341151a2775162016bb50cf86b865d0108de03eb5db16e2120cd",
-  },
-  arm64: {
-    target: "aarch64-unknown-linux-musl",
-    sha256: "8ced2ad3040262571de08aa600959aa51f97576d55da7946fcde6f66140705e2",
-  },
-} as const;
-const sourceDigest = "b83a981677676b35400bbbaf20974c396f32da31c7c7630ce55fc3e62c0e2e01";
 export type Fixture = "garage" | "minio";
 export function resolveFixture(state: string, requested?: string): Fixture {
   if (requested && requested !== "garage" && requested !== "minio")
@@ -38,90 +26,39 @@ export function resolveFixture(state: string, requested?: string): Fixture {
   return (existing || requested || "garage") as Fixture;
 }
 
-export function garagePlatform(
-  platform = process.platform,
-  arch = process.arch,
-): "binary" | "source" {
+export function garagePlatform(platform = process.platform, arch = process.arch): "binary" {
   if (platform === "win32")
     throw new Error(
       "Native Windows Garage is unsupported. Run the entire native stack inside WSL2 (Linux), not Git Bash or WSL1.",
     );
-  if (platform !== "linux" && platform !== "darwin")
-    throw new Error(`Unsupported native Garage platform: ${platform}`);
+  if (platform === "darwin")
+    throw new Error(
+      "Native Garage on macOS is not supported by this setup. Use OPENGENI_DEV_BACKEND=docker with a running Docker daemon, or run the native stack on Linux/WSL2.",
+    );
+  if (platform !== "linux") throw new Error(`Unsupported native Garage platform: ${platform}`);
   if (arch !== "x64" && arch !== "arm64")
     throw new Error(`Native Garage supports x64/arm64 only, not ${arch}`);
-  return platform === "darwin" ? "source" : "binary";
+  return "binary";
 }
 const sha256 = (data: string | Uint8Array) => createHash("sha256").update(data).digest("hex");
-async function download(url: string, path: string, digest: string) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
-  if (!response.ok) throw new Error(`Garage download failed: HTTP ${response.status}`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (sha256(bytes) !== digest) throw new Error("Garage release checksum mismatch");
-  writeFileSync(path, bytes, { mode: 0o600 });
-}
-async function run(args: string[]) {
-  // stdout is reserved for the installed binary path (shell command substitution).
-  const child = Bun.spawn(args, { stdout: 2, stderr: "inherit" });
-  if ((await child.exited) !== 0) throw new Error(`${args[0]} failed`);
-}
-export async function installGarage(state: string) {
-  const mode = garagePlatform();
-  const directory = join(
-    state,
-    "runtime",
-    `garage-${garageVersion}-${process.platform}-${process.arch}`,
-  );
-  const binary = join(directory, "garage");
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const release = garageReleases[process.arch as keyof typeof garageReleases];
-  if (existsSync(binary)) {
-    if (mode === "binary" && sha256(readFileSync(binary)) !== release.sha256)
-      throw new Error("Cached Garage binary checksum mismatch");
-    return binary;
-  }
-  if (mode === "binary") {
-    await download(
-      `https://garagehq.deuxfleurs.fr/_releases/v${garageVersion}/${release.target}/garage`,
-      `${binary}.tmp`,
-      release.sha256,
+export function resolveGarageBinary(which = Bun.which): string {
+  garagePlatform();
+  // The bootstrap installer owns distribution verification and puts the
+  // OCI-digest-verified executable on PATH. Never add a weaker download fallback.
+  const binary = which("garage");
+  if (!binary)
+    throw new Error(
+      "Garage 2.3.0 is missing from PATH. Run the development tools bootstrap, or use OPENGENI_DEV_BACKEND=docker.",
     );
-  } else {
-    if (!Bun.which("cargo") || !Bun.which("cc"))
-      throw new Error(
-        "macOS Garage requires cargo and Xcode Command Line Tools for the pinned source build",
-      );
-    const archive = join(directory, "source.tar.gz");
-    await download(
-      `https://git.deuxfleurs.fr/Deuxfleurs/garage/archive/v${garageVersion}.tar.gz`,
-      archive,
-      sourceDigest,
+  const version = Bun.spawnSync([binary, "--version"], {
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: 5000,
+  });
+  if (version.exitCode !== 0 || !/^garage v2\.3\.0(?:\s|$)/.test(version.stdout.toString().trim()))
+    throw new Error(
+      "Native storage requires Garage 2.3.0. Run the development tools bootstrap and use its project-local bin directory on PATH.",
     );
-    const source = join(directory, "source");
-    mkdirSync(source, { recursive: true });
-    await run(["tar", "-xzf", archive, "--strip-components=1", "-C", source]);
-    console.error("Building pinned Garage 2.3.0 for macOS; first build can take several minutes.");
-    await run([
-      "cargo",
-      "build",
-      "--locked",
-      "--release",
-      "--manifest-path",
-      join(source, "Cargo.toml"),
-      "--target-dir",
-      join(directory, "target"),
-      "-p",
-      "garage",
-      "--no-default-features",
-      "--features",
-      "bundled-libs,sqlite",
-    ]);
-    writeFileSync(`${binary}.tmp`, readFileSync(join(directory, "target/release/garage")), {
-      mode: 0o700,
-    });
-  }
-  chmodSync(`${binary}.tmp`, 0o700);
-  renameSync(`${binary}.tmp`, binary);
   return binary;
 }
 
@@ -235,15 +172,15 @@ if (import.meta.main) {
     const [command, stateArg, requested] = process.argv.slice(2);
     if (!stateArg)
       throw new Error(
-        "Usage: dev-native-storage.ts <resolve|install|configure|provision|record> <state-dir> [provider]",
+        "Usage: dev-native-storage.ts <resolve|binary|configure|provision|record> <state-dir> [provider]",
       );
     const state = resolve(stateArg);
     switch (command) {
       case "resolve":
         console.log(resolveFixture(state, requested));
         break;
-      case "install":
-        console.log(await installGarage(state));
+      case "binary":
+        console.log(resolveGarageBinary());
         break;
       case "configure":
         console.log(configureGarage(state));

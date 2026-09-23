@@ -13,10 +13,10 @@ import { join } from "node:path";
 import {
   configureGarage,
   garagePlatform,
-  garageReleases,
   garageVersion,
   provisionGarage,
   resolveFixture,
+  resolveGarageBinary,
   signedRequest,
   storageSettings,
 } from "./dev-native-storage";
@@ -62,16 +62,25 @@ describe("native provider selection", () => {
   });
 });
 
-test("bounded platform matrix and immutable Linux pins", () => {
+test("bounded Linux platform matrix and actionable unsupported-host guidance", () => {
   expect(garageVersion).toBe("2.3.0");
   for (const arch of ["x64", "arm64"] as const) {
     expect(garagePlatform("linux", arch)).toBe("binary");
-    expect(garagePlatform("darwin", arch)).toBe("source");
-    expect(garageReleases[arch].sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(() => garagePlatform("darwin", arch)).toThrow("OPENGENI_DEV_BACKEND=docker");
   }
   expect(() => garagePlatform("win32", "x64")).toThrow("WSL2");
   expect(() => garagePlatform("linux", "ia32")).toThrow("x64/arm64");
 });
+
+test.skipIf(process.platform !== "linux")(
+  "Garage lookup refuses missing or wrong-version executables",
+  () => {
+    expect(() => resolveGarageBinary(() => null)).toThrow("missing from PATH");
+    const binary = join(temporary(), "garage");
+    writeFileSync(binary, '#!/bin/sh\necho "garage v2.4.0"\n', { mode: 0o755 });
+    expect(() => resolveGarageBinary(() => binary)).toThrow("requires Garage 2.3.0");
+  },
+);
 
 test("configuration isolates paths, binds loopback, and preserves the RPC secret", () => {
   const state = temporary();
@@ -192,14 +201,8 @@ for (const provider of ["garage", "minio"] as const) {
         join(root, "deploy/garage/cors.xml"),
       );
       const fixture = join(root, ".opengeni/native/lifecycle-test");
-      const cache = join(
-        fixture,
-        "runtime",
-        `garage-${garageVersion}-${process.platform}-${process.arch}`,
-      );
-      mkdirSync(cache, { recursive: true });
       if (provider === "garage")
-        copyFileSync(process.env.OPENGENI_TEST_GARAGE_BINARY!, join(cache, "garage"));
+        copyFileSync(process.env.OPENGENI_TEST_GARAGE_BINARY!, join(bin, "garage"));
       const command = (name: string, body: string) =>
         writeFileSync(join(bin, name), `#!/usr/bin/env bash\nset -eu\n${body}\n`, { mode: 0o755 });
       command("pg_config", 'printf "%s\\n" "$TEST_BIN"');
