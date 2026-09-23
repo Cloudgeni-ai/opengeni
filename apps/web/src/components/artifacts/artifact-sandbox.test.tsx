@@ -1,4 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX,
@@ -9,6 +12,14 @@ import {
 import { OPENGENI_SITE_BRIDGE_CONNECT, OPENGENI_SITE_BRIDGE_VERSION } from "@opengeni/sdk/site";
 
 import { ArtifactSandbox } from "./artifact-sandbox";
+
+beforeAll(() => {
+  GlobalRegistrator.register();
+  (
+    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
+});
+afterAll(() => GlobalRegistrator.unregister());
 
 describe("published HTML artifacts", () => {
   it("runs exact source without parent-origin or top-navigation authority", () => {
@@ -36,6 +47,41 @@ describe("published HTML artifacts", () => {
     expect(markup).toContain('aria-label="Reload Site"');
     expect(markup).toContain('aria-label="Open Site full screen"');
     expect(markup).toContain("v4");
+  });
+
+  it("promotes the chat preview to the modal top layer without replacing its iframe", async () => {
+    const showModal = spyOn(HTMLDialogElement.prototype, "showModal");
+    const show = spyOn(HTMLDialogElement.prototype, "show");
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<ArtifactSandbox html="<h1>App</h1>" title="Site" />));
+      const dialog = container.querySelector("dialog")!;
+      const iframe = dialog.querySelector("iframe")!;
+      expect(dialog.open).toBe(true);
+      await act(async () =>
+        (
+          container.querySelector('[aria-label="Open Site full screen"]') as HTMLButtonElement
+        ).click(),
+      );
+      expect(showModal).toHaveBeenCalledTimes(1);
+      expect(dialog.querySelector("iframe")).toBe(iframe);
+      expect(dialog.className).toContain("fixed");
+      await act(async () =>
+        [...container.querySelectorAll("button")]
+          .find((button) => button.textContent === "Back")!
+          .click(),
+      );
+      expect(show).toHaveBeenCalledTimes(1);
+      expect(dialog.querySelector("iframe")).toBe(iframe);
+      expect(dialog.open).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      showModal.mockRestore();
+      show.mockRestore();
+    }
   });
 
   it("accepts a tool port only through the parent-issued document bootstrap", () => {
