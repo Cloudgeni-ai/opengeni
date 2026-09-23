@@ -2736,6 +2736,7 @@ describe("connections routes", () => {
 
       const callback = await publicApp(client.db, {
         webBaseUrl: "http://127.0.0.1:3000",
+        integrationsOauthShortStateEnabled: false,
       }).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );
@@ -2814,6 +2815,12 @@ describe("connections routes", () => {
         providerDomain: "mcp.example.com",
         encryptedPkceVerifier: expect.any(String),
       });
+      const legacyCallback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(legacyBody.state)}`,
+      );
+      expect(legacyCallback.status).toBe(302);
+      expect(legacyCallback.headers.get("location")).toContain("integration_oauth=success");
+      expect(as.tokenRequests).toHaveLength(2);
     } finally {
       mcp.close();
       as.close();
