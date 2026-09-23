@@ -209,7 +209,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
       resources: [{ kind: "file" as const, fileId: crashed.fileId }],
       tools: [],
       toolsProvided: false,
-      model: "gpt-6-sol",
+      model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
       latencyMode: "standard",
       options: {},

@@ -1141,9 +1141,9 @@ describe("configuredModels", () => {
     expect(astra).toMatchObject({
       label: "GPT-6 Astra",
       shortLabel: "6 Astra",
-      contextWindowTokens: 1_050_000,
-      effectiveContextWindowTokens: 997_500,
-      autoCompactTokenLimit: 945_000,
+      contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+      effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+      autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
     });
     expect(astra?.capabilities.latencyModes.map(({ id, runnable }) => ({ id, runnable }))).toEqual([
       { id: "standard", runnable: true },
@@ -1713,7 +1713,7 @@ describe("turn execution policy V1", () => {
     });
     const preWireProfilePolicy = {
       ...policy,
-      definitionVersion: "sha256:bf9dd6bdfc7416edc345ab77a8f2b8fbf904fd654cd5d5f0aece43da5689dc7a",
+      definitionVersion: "sha256:f5b77d051ec405ddfcb45815ed1b14a8e07aef33632009eac2689407b1c48194",
     };
 
     expect(() =>
