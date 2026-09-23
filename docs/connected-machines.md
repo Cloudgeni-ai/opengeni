@@ -638,6 +638,22 @@ authority.
 
 ### Zero-click token (fleet / headless)
 
+Agents with the existing `enrollments:manage` permission can call the first-party
+`connected_machine_enroll_token` MCP tool when it is selected for their session.
+It returns the same one-hour token and deployment-specific Unix/PowerShell install
+commands. `allowScreenControl` defaults to false. No additional approval flow is
+introduced. The workspace/account come from the caller's grant, not tool input.
+Run the command on the intended machine through an already-authorized execution
+path, then verify readiness with `sandboxes_list`. A token cannot execute the
+installer on a machine for which no access path exists.
+
+The token is returned to the agent in the tool result; never publish it in source
+code or unrelated logs. Missing `enrollments:manage`, an explicit tool selection
+that excludes it, or disabled Connected Machines means the tool is unavailable.
+This addition does not grant the permission to existing sessions. For interactive
+enrollment without this permission, `sandbox_provision` still returns human
+device-flow instructions.
+
 Mint a short-TTL enroll token and hand it to the machine's installer. The token
 is **secret** — surface it once with a copy-now warning; it cannot be re-read.
 
