@@ -81,19 +81,15 @@ describe("native prerequisite bootstrap", () => {
     for (const url of ["http://github.com/file", "https://example.com/file", "https://github.com:8443/file", "https://user@github.com/file"]) await expect(downloadAsset(url)).rejects.toThrow("Untrusted");
   });
   test("redirects cannot leave official hosts and loops are bounded", async () => {
-    const original = globalThis.fetch;
-    try {
-      let calls = 0;
-      globalThis.fetch = (async () => { calls++; return new Response(null, { status: 302, headers: { location: "https://example.com/payload" } }); }) as typeof fetch;
-      await expect(downloadAsset(asset.url)).rejects.toThrow("Untrusted");
-      expect(calls).toBe(1);
-      calls = 0;
-      globalThis.fetch = (async () => { calls++; return new Response(null, { status: 302, headers: { location: asset.url } }); }) as typeof fetch;
-      await expect(downloadAsset(asset.url)).rejects.toThrow("Too many");
-      expect(calls).toBe(5);
-      globalThis.fetch = (async () => new Response("missing", { status: 404 })) as typeof fetch;
-      await expect(downloadAsset(asset.url)).rejects.toThrow("HTTP 404");
-    } finally { globalThis.fetch = original; }
+    let calls = 0;
+    const externalRedirect = async () => { calls++; return new Response(null, { status: 302, headers: { location: "https://example.com/payload" } }); };
+    await expect(downloadAsset(asset.url, externalRedirect)).rejects.toThrow("Untrusted");
+    expect(calls).toBe(1);
+    calls = 0;
+    const redirectLoop = async () => { calls++; return new Response(null, { status: 302, headers: { location: asset.url } }); };
+    await expect(downloadAsset(asset.url, redirectLoop)).rejects.toThrow("Too many");
+    expect(calls).toBe(5);
+    await expect(downloadAsset(asset.url, async () => new Response("missing", { status: 404 }))).rejects.toThrow("HTTP 404");
   });
   test("corrupt tar headers are rejected even with a matching archive hash", () => {
     const bytes = gzipSync(Buffer.alloc(1024, 42));
