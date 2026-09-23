@@ -23,6 +23,7 @@ const initialWidth = Number(params.get("width") ?? 320);
 const initialDensity = params.get("density") === "compact" ? "compact" : "default";
 const initialTheme = params.get("theme") === "light" ? "light" : "dark";
 const initialVoiceActive = params.get("voice") === "active";
+const hostBranding = params.get("branding") === "host";
 const widths = [280, 320, 360, 420, 640, 768] as const;
 const client = new MockOpenGeniClient();
 
@@ -288,7 +289,41 @@ function ResponsiveComposerHarness() {
               transcription={{}}
               controlsStart={
                 <ModelPolicyPicker
-                  models={models}
+                  models={
+                    hostBranding
+                      ? [
+                          ...models,
+                          {
+                            ...models[0]!,
+                            id: "host/example",
+                            provider: "openai",
+                            source: "opengeni",
+                            label: "Host model",
+                            cost: "credits",
+                          },
+                        ]
+                      : models
+                  }
+                  groupPresentation={
+                    hostBranding
+                      ? {
+                          opengeni_credits: {
+                            label: "Acme Assist",
+                            description: "Provided by your workspace",
+                            icon: (
+                              <svg viewBox="0 0 16 16" aria-hidden="true">
+                                <path fill="currentColor" d="M8 1 15 15H1ZM8 6l-3 7h6Z" />
+                              </svg>
+                            ),
+                          },
+                          codex_subscription: {
+                            label: "Your connected plan",
+                            description: null,
+                            icon: null,
+                          },
+                        }
+                      : undefined
+                  }
                   model={model}
                   effort={effort}
                   latencyMode={latencyMode}

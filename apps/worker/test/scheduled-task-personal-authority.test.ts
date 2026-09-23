@@ -953,7 +953,7 @@ describe("scheduled task personal MCP authority", () => {
         resources: [],
         tools: [],
         metadata: {},
-        model: "supergrok/grok-4.6",
+        model: "supergrok/grok-4.7",
       },
       xaiProviderAccountAuthoritySnapshot: credential.authoritySnapshot,
       metadata: {},

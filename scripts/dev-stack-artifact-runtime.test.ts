@@ -96,15 +96,15 @@ describe("local artifact runtime stack contract", () => {
     );
   });
 
-  test("makes local Connected Machines self-initializing", async () => {
+  test("keeps Connected Machines opt-in with self-initializing configuration", async () => {
     const [source, envExample] = await Promise.all([
       Bun.file(scriptPath).text(),
       Bun.file(envExamplePath).text(),
     ]);
 
-    expect(envExample).toContain("OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true");
+    expect(envExample).toContain("OPENGENI_SANDBOX_SELFHOSTED_ENABLED=false");
     expect(source).toContain('if [ -z "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-}" ]; then');
-    expect(source).toContain("OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true");
+    expect(source).toContain("OPENGENI_SANDBOX_SELFHOSTED_ENABLED=false");
     expect(source).toContain("OPENGENI_ENROLLMENT_SIGNING_SECRET");
     expect(source).toContain("OPENGENI_STREAM_TOKEN_SECRET");
     expect(source).toContain("OPENGENI_SELFHOSTED_NATS_URL");
@@ -133,6 +133,15 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain("OPENGENI_INTEGRATIONS_STATE_SECRET=");
     expect(source).toContain('randomBytes(32).toString("base64url")');
     expect(source).toContain("Generated and persisted a local integration state secret in .env.");
+  });
+
+  test("finishes an opted-in relay build before application startup and readiness", async () => {
+    const source = await Bun.file(scriptPath).text();
+    const build = source.indexOf("cargo build --locked -p opengeni-relay");
+    expect(build).toBeGreaterThan(0);
+    expect(source.slice(0, build)).toMatch(/if \[ "\$start_local_relay" = "1" \]; then[^]*$/);
+    expect(build).toBeLessThan(source.indexOf("(cd apps/api && bun run dev)"));
+    expect(build).toBeLessThan(source.indexOf("if ! wait_for_stack_readiness; then"));
   });
 
   test("persists NATS auth-callout defaults for independently restarted components", async () => {

@@ -183,6 +183,7 @@ const BrowserObserveInput = z
   .object({
     browserSessionId: z.string().uuid(),
     targetId: z.string().min(1).max(512),
+    includeScreenshot: z.boolean().optional(),
   })
   .strict();
 const BrowserActInput = z
@@ -510,7 +511,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
     description:
-      "Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Returns exact session and tab state.",
+      "Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser. BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Returns exact session and tab state.",
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -524,7 +525,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "tabs"],
     title: "Manage browser tabs",
     description:
-      "List, open, select, or close tabs in one exact BrowserSession. Returns the authoritative complete tab list after the operation.",
+      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Returns the authoritative complete tab list after the operation.",
     input: BrowserTabsInput,
     output: BrowserTargetListResponse,
     readOnly: false,
@@ -556,17 +557,47 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "observe"],
     title: "Observe browser tab",
     description:
-      "Read one tab's current URL/title, causal generations, compact semantic accessibility tree, dialog, and diagnostic counts without taking control.",
+      "Read one tab's current URL/title, measured page viewport, causal generations, compact semantic accessibility tree, dialog, and diagnostic counts without taking control. Set includeScreenshot=true to receive a current still image as tool image content; the structured screenshot field is only a retained-artifact reference and can remain null.",
     input: BrowserObserveInput,
     output: BrowserObservation,
     readOnly: true,
     idempotent: true,
-    execute: async (value) =>
-      await input.transport.observeBrowserTarget(
+    execute: async (value) => {
+      let observation = await input.transport.observeBrowserTarget(
         input.workspaceId,
         value.browserSessionId,
         value.targetId,
-      ),
+      );
+      if (!value.includeScreenshot) return observation;
+      const frame = await input.transport.captureBrowserTarget(
+        input.workspaceId,
+        value.browserSessionId,
+        value.targetId,
+      );
+      if (
+        observation.target.targetGeneration !== frame.targetGeneration ||
+        observation.target.documentGeneration !== frame.documentGeneration
+      ) {
+        observation = await input.transport.observeBrowserTarget(
+          input.workspaceId,
+          value.browserSessionId,
+          value.targetId,
+        );
+      }
+      if (
+        observation.target.targetGeneration !== frame.targetGeneration ||
+        observation.target.documentGeneration !== frame.documentGeneration
+      ) {
+        throw new Error("browser target changed while its visual observation was captured");
+      }
+      return new InteractionExecutionResult(observation, [
+        {
+          type: "image",
+          data: Buffer.from(frame.data).toString("base64"),
+          mimeType: frame.mediaType,
+        },
+      ]);
+    },
   });
 
   add({
@@ -574,7 +605,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch, including setting a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to use a fresh observation automatically; provide them to require exact previously observed state. Returns the durable receipt and changed observation.",
+      "Perform one semantic-first browser action or bounded batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to use a fresh observation automatically; provide them to require exact previously observed state. Returns the durable receipt and changed observation.",
     input: BrowserActInput,
     output: BrowserActionReceipt,
     readOnly: false,
@@ -1131,7 +1162,8 @@ async function openBrowser(
   if (value.browserSessionId) {
     session = await transport.getBrowserSession(workspaceId, value.browserSessionId);
   } else {
-    const listed = await transport.listBrowserSessions(workspaceId);
+    const listed =
+      value.mode === "new" ? { sessions: [] } : await transport.listBrowserSessions(workspaceId);
     // The agent-facing browser is human-capable by default. A headless session
     // is a deliberately narrower execution mode and must never be silently
     // reused for an omitted/default headed request: OAuth providers such as
@@ -1141,7 +1173,18 @@ async function openBrowser(
       value.mode === "new"
         ? null
         : newestRelevant(
-            listed.sessions.filter((candidate) => candidate.headless === requestedHeadless),
+            listed.sessions.filter(
+              (candidate) =>
+                candidate.headless === requestedHeadless &&
+                compatibleInteractionPlacement(candidate.placement, value.placement) &&
+                (value.identityId === undefined || candidate.identityId === value.identityId) &&
+                (value.baseRevisionId === undefined ||
+                  candidate.baseRevisionId === value.baseRevisionId) &&
+                (value.networkRouteId === undefined ||
+                  candidate.networkRouteId === value.networkRouteId) &&
+                (value.linkedComputerSessionId === undefined ||
+                  candidate.linkedComputerSessionId === value.linkedComputerSessionId),
+            ),
             sourceSessionId,
           );
     if (reusable) {
@@ -1205,8 +1248,14 @@ async function openComputer(
   if (value.computerSessionId) {
     session = await transport.getComputerSession(workspaceId, value.computerSessionId);
   } else {
-    const listed = await transport.listComputerSessions(workspaceId);
-    const reusable = value.mode === "new" ? null : newestRelevant(listed.sessions, sourceSessionId);
+    const listed =
+      value.mode === "new" ? { sessions: [] } : await transport.listComputerSessions(workspaceId);
+    const reusable = newestRelevant(
+      listed.sessions.filter((candidate) =>
+        compatibleInteractionPlacement(candidate.placement, value.placement),
+      ),
+      sourceSessionId,
+    );
     session = reusable
       ? reusable
       : (
@@ -1225,6 +1274,16 @@ async function openComputer(
         ? (await transport.listComputerTargets(workspaceId, session.id)).targets
         : [],
   };
+}
+
+function compatibleInteractionPlacement(
+  candidate: z.infer<typeof InteractionPlacement>,
+  requested: z.infer<typeof InteractionPlacement> | undefined,
+): boolean {
+  if (!requested) return candidate.kind !== "attached_device";
+  return Object.entries(requested).every(
+    ([key, value]) => (candidate as Record<string, unknown>)[key] === value,
+  );
 }
 
 function newestRelevant<

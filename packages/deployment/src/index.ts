@@ -2704,14 +2704,14 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_OPENAI_PROVIDER", inferredOpenAiProvider(env)),
     valueEnv(
       "OPENGENI_OPENAI_MODEL",
-      env.OPENGENI_OPENAI_MODEL ?? env.OPENGENI_AZURE_OPENAI_DEPLOYMENT ?? "gpt-5.6-sol",
+      env.OPENGENI_OPENAI_MODEL ?? env.OPENGENI_AZURE_OPENAI_DEPLOYMENT ?? "gpt-6-astra",
     ),
     valueEnv(
       "OPENGENI_OPENAI_ALLOWED_MODELS",
       env.OPENGENI_OPENAI_ALLOWED_MODELS ??
         env.OPENGENI_OPENAI_MODEL ??
         env.OPENGENI_AZURE_OPENAI_DEPLOYMENT ??
-        "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna",
+        "gpt-6-astra,gpt-6-sol,gpt-6-luna",
     ),
     valueEnv("OPENGENI_OPENAI_REASONING_EFFORT", env.OPENGENI_OPENAI_REASONING_EFFORT ?? "low"),
     valueEnv(
@@ -3048,12 +3048,12 @@ function addRuntimeConfigHelmValues(
     env.OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED ?? "false";
   values["config.OPENGENI_OPENAI_PROVIDER"] = inferredOpenAiProvider(env);
   values["config.OPENGENI_OPENAI_MODEL"] =
-    env.OPENGENI_OPENAI_MODEL ?? env.OPENGENI_AZURE_OPENAI_DEPLOYMENT ?? "gpt-5.6-sol";
+    env.OPENGENI_OPENAI_MODEL ?? env.OPENGENI_AZURE_OPENAI_DEPLOYMENT ?? "gpt-6-astra";
   values["config.OPENGENI_OPENAI_ALLOWED_MODELS"] =
     env.OPENGENI_OPENAI_ALLOWED_MODELS ??
     env.OPENGENI_OPENAI_MODEL ??
     env.OPENGENI_AZURE_OPENAI_DEPLOYMENT ??
-    "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna";
+    "gpt-6-astra,gpt-6-sol,gpt-6-luna";
   values["config.OPENGENI_OPENAI_REASONING_EFFORT"] = env.OPENGENI_OPENAI_REASONING_EFFORT ?? "low";
   values["config.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"] =
     env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh,max";

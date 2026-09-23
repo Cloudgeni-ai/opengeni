@@ -19,8 +19,10 @@
   ],
   "type": "module",
   "scripts": {
-    "dev": "bash scripts/dev-stack.sh",
-    "dev:stack": "bash scripts/dev-stack.sh",
+    "dev": "bun scripts/run-development-stack.ts",
+    "dev:stack": "bun scripts/run-development-stack.ts",
+    "dev:check": "bun scripts/run-development-stack.ts --check",
+    "dev:tools": "bun scripts/install-development-tools.ts",
     "dev:down": "bash scripts/dev-stack-down.sh",
     "dev:clean": "bash scripts/dev-stack-down.sh --clean",
     "dev:api": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; cd apps/api && bun run dev",
@@ -160,6 +162,7 @@
   "devDependencies": {
     "@axe-core/playwright": "4.10.2",
     "@changesets/cli": "^2.31.0",
+    "@noble/hashes": "1.8.0",
     "@openai/agents": "0.14.3",
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/api-router": "workspace:*",

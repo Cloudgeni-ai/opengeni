@@ -20,6 +20,7 @@ import {
   PRE_CLAIM_FAILURE_MESSAGE,
   PRE_CLAIM_FAILURE_TYPE,
 } from "../src/activities/types";
+import { workflowFailureMessage } from "../src/workflows/activities";
 
 function activityFailure(cause: Error): ActivityFailure {
   return new ActivityFailure(
@@ -31,6 +32,36 @@ function activityFailure(cause: Error): ActivityFailure {
     cause,
   );
 }
+
+test("definition mismatch diagnostics survive Temporal without unwrapping arbitrary causes", () => {
+  for (const message of [
+    "Turn execution policy does not match the current provider definition",
+    "Turn execution policy does not match the current provider definition. Automatic same-turn configuration recovery exhausted after 5 retries.",
+  ]) {
+    expect(
+      workflowFailureMessage(
+        activityFailure(
+          ApplicationFailure.create({
+            message,
+            type: "TurnExecutionPolicyDefinitionMismatchError",
+            nonRetryable: true,
+          }),
+        ),
+      ),
+    ).toBe(message);
+  }
+  expect(
+    workflowFailureMessage(
+      activityFailure(
+        ApplicationFailure.create({
+          message: "private provider detail",
+          type: "OtherError",
+        }),
+      ),
+    ),
+  ).toBe("Activity task failed");
+  expect(workflowFailureMessage(new Error("ordinary failure"))).toBe("ordinary failure");
+});
 
 describe("turn activity fence-cancellation arbitration", () => {
   test("accepts both direct and Temporal ActivityFailure-wrapped cancellation", () => {

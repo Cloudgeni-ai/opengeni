@@ -126,6 +126,15 @@ pub trait ComputerAdapter: Send + Sync {
     /// Captures one exact target and establishes a new pointer frame fence.
     async fn capture(&self, target_id: &str) -> NativeAdapterResult<NativeCapturedFrame>;
 
+    /// Captures one still image with encoding options, independent of live-view state.
+    async fn capture_still(
+        &self,
+        target_id: &str,
+        _options: NativeCaptureOptions,
+    ) -> NativeAdapterResult<NativeCapturedFrame> {
+        self.capture(target_id).await
+    }
+
     /// Starts placement-local resources for a bounded live-frame stream.
     /// Stateless platforms may leave this as a no-op and implement
     /// [`capture_stream`](Self::capture_stream) as one-shot capture.

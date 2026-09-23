@@ -406,6 +406,7 @@ import {
 import {
   environmentsEncryptionKeyBytes,
   SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
+  SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
@@ -480,9 +481,11 @@ import {
   type NewSessionDraftSnapshot,
 } from "./new-session-drafts";
 import {
+  isRetryableDatabaseTransportFailure,
   nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
   safeDatabaseErrorFacts,
+  SessionEventPersistenceError,
   type IdempotentPersistenceTransactionOptions,
 } from "./persistence-errors";
 import {
@@ -648,6 +651,10 @@ export * from "./xai-subscription";
 export * from "./organization-xai-subscriptions";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
+export {
+  loadIntegrationOAuthPendingState,
+  storeIntegrationOAuthPendingState,
+} from "./integration-oauth-pending-states";
 export {
   decryptEnvironmentValue as decryptVariableSetValue,
   encryptEnvironmentValue as encryptVariableSetValue,
@@ -7323,6 +7330,39 @@ export async function getRetainedScreenshotArtifact(
       )
       .limit(1);
     return row ? mapRetainedScreenshotArtifact(row.artifact, row.file) : null;
+  });
+}
+
+/** Recover a legacy damaged receipt only when its tool call has one exact
+ * screenshot in this session. Never infer an artifact across fork ancestry. */
+export async function getRetainedScreenshotArtifactForToolCall(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  toolCallId: string,
+): Promise<RetainedScreenshotArtifact | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
+      .from(schema.retainedScreenshotArtifacts)
+      .innerJoin(
+        schema.files,
+        and(
+          eq(schema.files.workspaceId, schema.retainedScreenshotArtifacts.workspaceId),
+          eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.retainedScreenshotArtifacts.workspaceId, workspaceId),
+          eq(schema.retainedScreenshotArtifacts.sessionId, sessionId),
+          eq(schema.retainedScreenshotArtifacts.toolCallId, toolCallId),
+        ),
+      )
+      .limit(2);
+    return rows.length === 1
+      ? mapRetainedScreenshotArtifact(rows[0]!.artifact, rows[0]!.file)
+      : null;
   });
 }
 
@@ -41350,101 +41390,183 @@ function assertPendingToolOutputPolicyMatches(
   }
 }
 
+// Receipt inputs have already passed the strict JSON storage boundary. Compare
+// exact keys structurally: locale collation can equate distinct Unicode keys.
+function pendingToolCallItemsEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object")
+    return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => pendingToolCallItemsEqual(value, right[index]))
+    );
+  }
+  const keys = Object.keys(left);
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every(
+      (key) =>
+        Object.hasOwn(right, key) &&
+        pendingToolCallItemsEqual(
+          (left as Record<string, unknown>)[key],
+          (right as Record<string, unknown>)[key],
+        ),
+    )
+  );
+}
+
 /**
  * Durably capture the raw SDK call item at the exact attempt boundary. This is
  * model-facing truth, deliberately separate from the session-event timeline.
  * The receipt belongs to the logical turn so an approval resume can
  * settle it from a newer attempt. Duplicate SDK delivery converges on the
  * unique (turn, call) identity.
+ * Pass the root database handle so each rollback retry starts a fresh
+ * transaction, not a savepoint in a caller-owned transaction.
  */
 export async function registerPendingSessionToolCall(
   db: Database,
   input: PendingSessionToolCallInput,
 ): Promise<{ accepted: boolean; registered: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const fence = await lockTurnAttemptWriteFenceTx(tx, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          executionGeneration: input.executionGeneration,
-          attemptId: input.attemptId,
-        });
-        if (!fence.allowed) return { accepted: false, registered: false };
-        const inserted = await tx
-          .insert(schema.sessionPendingToolCalls)
-          .values(
-            withLosslessContentWriteVersion(
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: input.turnId,
-                executionGeneration: input.executionGeneration,
-                attemptId: input.attemptId,
-                callId: input.callId,
-                callType: input.callType,
-                callItem: input.callItem,
-                modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
-              },
-              "callItem",
-              "callItemCodecVersion",
-            ),
-          )
-          .onConflictDoNothing({
-            target: [
-              schema.sessionPendingToolCalls.workspaceId,
-              schema.sessionPendingToolCalls.turnId,
-              schema.sessionPendingToolCalls.callId,
-            ],
-          })
-          .returning({ id: schema.sessionPendingToolCalls.id });
-        if (inserted.length === 0) {
-          const [pending] = await tx
-            .select({
-              id: schema.sessionPendingToolCalls.id,
-              modelToolOutputTruncationTokens:
-                schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
-            })
-            .from(schema.sessionPendingToolCalls)
-            .where(
-              and(
-                eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
-                eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
-                eq(schema.sessionPendingToolCalls.turnId, input.turnId),
-                eq(schema.sessionPendingToolCalls.callId, input.callId),
-              ),
-            )
-            .for("update")
-            .limit(1);
-          if (!pending) {
-            throw new Error(
-              `Pending SDK tool call disappeared during registration: ${input.callId}`,
-            );
-          }
-          assertPendingToolOutputPolicyMatches(
-            pending.modelToolOutputTruncationTokens,
-            input.modelToolOutputTruncationTokens,
-            input.callId,
-          );
-          if (
-            pending.modelToolOutputTruncationTokens === null &&
-            input.modelToolOutputTruncationTokens !== undefined
-          ) {
-            await tx
-              .update(schema.sessionPendingToolCalls)
-              .set({
-                modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
+  const correlationId = crypto.randomUUID();
+  const registerOnce = async (attempt: number) => {
+    try {
+      return await withRlsContext(
+        db,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        async (scopedDb) =>
+          await scopedDb.transaction(async (tx) => {
+            const fence = await lockTurnAttemptWriteFenceTx(tx, {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              executionGeneration: input.executionGeneration,
+              attemptId: input.attemptId,
+            });
+            if (!fence.allowed) return { accepted: false, registered: false };
+            const inserted = await tx
+              .insert(schema.sessionPendingToolCalls)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    turnId: input.turnId,
+                    executionGeneration: input.executionGeneration,
+                    attemptId: input.attemptId,
+                    callId: input.callId,
+                    callType: input.callType,
+                    callItem: input.callItem,
+                    modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
+                  },
+                  "callItem",
+                  "callItemCodecVersion",
+                ),
+              )
+              .onConflictDoNothing({
+                target: [
+                  schema.sessionPendingToolCalls.workspaceId,
+                  schema.sessionPendingToolCalls.turnId,
+                  schema.sessionPendingToolCalls.callId,
+                ],
               })
-              .where(eq(schema.sessionPendingToolCalls.id, pending.id));
-          }
-        }
-        return { accepted: true, registered: inserted.length === 1 };
-      }),
+              .returning({ id: schema.sessionPendingToolCalls.id });
+            if (inserted.length === 0) {
+              const [pending] = await tx
+                .select({
+                  id: schema.sessionPendingToolCalls.id,
+                  accountId: schema.sessionPendingToolCalls.accountId,
+                  callType: schema.sessionPendingToolCalls.callType,
+                  callItem: schema.sessionPendingToolCalls.callItem,
+                  callItemCodecVersion: schema.sessionPendingToolCalls.callItemCodecVersion,
+                  modelToolOutputTruncationTokens:
+                    schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
+                })
+                .from(schema.sessionPendingToolCalls)
+                .where(
+                  and(
+                    eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+                    eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+                    eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+                    eq(schema.sessionPendingToolCalls.callId, input.callId),
+                  ),
+                )
+                .for("update")
+                .limit(1);
+              if (
+                !pending ||
+                pending.accountId !== input.accountId ||
+                pending.callType !== input.callType ||
+                !pendingToolCallItemsEqual(
+                  fromPostgresLosslessJson(pending.callItem, pending.callItemCodecVersion),
+                  input.callItem,
+                )
+              ) {
+                // A duplicate acknowledges only this exact call. It neither
+                // replaces the originating attempt nor authorizes effect replay.
+                throw new Error("Pending tool receipt conflicts with the registered call");
+              }
+              assertPendingToolOutputPolicyMatches(
+                pending.modelToolOutputTruncationTokens,
+                input.modelToolOutputTruncationTokens,
+                input.callId,
+              );
+              if (
+                pending.modelToolOutputTruncationTokens === null &&
+                input.modelToolOutputTruncationTokens !== undefined
+              ) {
+                await tx
+                  .update(schema.sessionPendingToolCalls)
+                  .set({
+                    modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
+                  })
+                  .where(eq(schema.sessionPendingToolCalls.id, pending.id));
+              }
+            }
+            return { accepted: true, registered: inserted.length === 1 };
+          }),
+      );
+    } catch (error) {
+      if (!isRetryableDatabaseTransportFailure(error)) throw error;
+      // Stop before the shared SQLSTATE traversal can prefer an older nested
+      // rollback over a transport/commit-ack failure. This private outcome is
+      // converted to a sanitized error outside the retry helper, never success.
+      return { transportFailure: error, attempt };
+    }
+  };
+  // Only PostgreSQL-confirmed rollback is retryable. Re-enter RLS and acquire
+  // the complete attempt fence each time; never include inference or tools.
+  const result = await runIdempotentPersistenceTransaction(
+    {
+      stage: "pending_tool_registration",
+      correlationId,
+      maxAttempts: 3,
+      onRetry: async ({ attempt }) => {
+        await new Promise((resolve) => setTimeout(resolve, 25 * attempt));
+      },
+    },
+    registerOnce,
   );
+  if ("transportFailure" in result) {
+    throw new SessionEventPersistenceError(
+      {
+        code: "db_failure",
+        sqlState: null,
+        stage: "pending_tool_registration",
+        eventTypes: [],
+        correlationId,
+        attempts: result.attempt,
+        retryOutcome: "not_retryable",
+        database: safeDatabaseErrorFacts(result.transportFailure),
+      },
+      result.transportFailure,
+    );
+  }
+  return result;
 }
 
 /** Record the raw SDK result without dropping the call receipt. */
@@ -50296,6 +50418,13 @@ export async function enrollUnobservableCommandIdleDrain(
             'quarantined_provider_binding_mismatch')
       `);
     }
+    // A deadline gives a legacy command two minutes after cancellation intent
+    // to exit. Even when the provider cannot signal or observe that command,
+    // capture its current files while the old box still exists. Ordinary idle
+    // containment retains its longer grace.
+    const deadlineStopGraceMs = SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS;
+    const deadlineRotation =
+      initial.rotationReason === "provider_deadline" && initial.rotationRequestedAt !== null;
     // Preserve process -> admission -> lease ordering used by settlement.
     const processes = await rawRows<{
       id: string;
@@ -50329,10 +50458,43 @@ export async function enrollUnobservableCommandIdleDrain(
                     (${input.idleGraceMs}::bigint * interval '1 millisecond')
               )
             )
+            or (
+              ${deadlineRotation}
+              and process.deadline_cancellation_requested_at < now() -
+                (${deadlineStopGraceMs}::bigint * interval '1 millisecond')
+              and process.reconcile_attempts >= 1
+              and (
+                (process.owner_actor_kind = 'turn' and attempt.state = 'closed'
+                  and attempt.quiesced_at is not null
+                  and greatest(attempt.quiesced_at, process.started_at) < now() -
+                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
+                or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
+                  and process.started_at < now() -
+                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
+              )
+            )
           )
-          and attempt.state = 'closed'
-          and greatest(coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at), process.started_at) < now() -
-            (${input.idleGraceMs}::bigint * interval '1 millisecond')) as eligible
+          and (attempt.state = 'closed' or (
+            ${deadlineRotation}
+            and process.owner_actor_kind = 'direct' and process.owner_attempt_id is null))
+          and (
+            (attempt.state = 'closed' and
+              greatest(coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at), process.started_at) < now() -
+                (${input.idleGraceMs}::bigint * interval '1 millisecond'))
+            or (
+              ${deadlineRotation}
+              and process.deadline_cancellation_requested_at < now() -
+                (${deadlineStopGraceMs}::bigint * interval '1 millisecond')
+              and (
+                (process.owner_actor_kind = 'turn' and attempt.quiesced_at is not null
+                  and greatest(attempt.quiesced_at, process.started_at) < now() -
+                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
+                or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
+                  and process.started_at < now() -
+                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
+              )
+            )
+          )) as eligible
       from sandbox_retained_processes process
       left join session_turn_attempts attempt on attempt.id = process.owner_attempt_id
         and attempt.workspace_id = process.workspace_id and attempt.session_id = process.session_id
@@ -50383,7 +50545,13 @@ export async function enrollUnobservableCommandIdleDrain(
     )
       return null;
     if (!enrolled) {
-      if (lease.archive_capture_id !== null || (await hasSandboxGroupAttemptActivityTx(tx, input)))
+      if (
+        lease.archive_capture_id !== null ||
+        (await hasSandboxGroupAttemptActivityTx(tx, {
+          ...input,
+          idleGraceMs: deadlineRotation ? deadlineStopGraceMs : input.idleGraceMs,
+        }))
+      )
         return null;
       await tx.execute(sql`
         update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
@@ -51102,6 +51270,9 @@ export type SandboxRetainedProcess = {
   reconcileClaimedAt: string | null;
   reconcileAttempts: number;
   lastReconcileOutcome: string | null;
+  cancellationRequestedAt: string | null;
+  cancellationReason: string | null;
+  deadlineCancellationRequestedAt: string | null;
   reconcileProofOutcome: "exited" | "lost" | null;
   reconcileProofExitCode: number | null;
   reconcileProofReason:
@@ -51450,6 +51621,9 @@ function mapRetainedProcess(
     reconcileClaimedAt: row.reconcileClaimedAt?.toISOString() ?? null,
     reconcileAttempts: row.reconcileAttempts,
     lastReconcileOutcome: row.lastReconcileOutcome ?? null,
+    cancellationRequestedAt: row.cancellationRequestedAt?.toISOString() ?? null,
+    cancellationReason: row.cancellationReason ?? null,
+    deadlineCancellationRequestedAt: row.deadlineCancellationRequestedAt?.toISOString() ?? null,
     reconcileProofOutcome: row.reconcileProofOutcome ?? null,
     reconcileProofExitCode: row.reconcileProofExitCode ?? null,
     reconcileProofReason:

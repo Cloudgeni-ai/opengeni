@@ -119,6 +119,7 @@ export function providerRecoveryResult(input: {
           input.failureCode === "sandbox_command_start_unavailable" ||
           input.failureCode === "mcp_transport_timeout" ||
           input.failureCode === "mcp_transport_unavailable" ||
+          input.failureCode === "turn_execution_policy_definition_mismatch" ||
           input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
         ? Math.max(
             providerDelay ?? 0,

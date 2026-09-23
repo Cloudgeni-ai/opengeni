@@ -17,6 +17,8 @@ import {
   MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
   MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES,
   boundModelToolOutputItem,
+  canonicalizePersistedHistoryItem,
+  normalizedCodexRequestBody,
   codexRequestStorage,
   codexSubscriptionFetch,
   type CodexRequestContext,
@@ -393,6 +395,34 @@ function xaiProviderJson(): string {
 }
 
 describe("pinned Responses large-output boundary", () => {
+  test("hosted search status survives persisted history, SDK conversion and Codex wire normalization", async () => {
+    const { getInputItems } = await pinnedResponsesModule();
+    for (const status of ["completed", "in_progress", "failed"] as const) {
+      const source = {
+        type: "hosted_tool_call" as const,
+        id: "ws_synthetic",
+        name: "web_search_call",
+        status,
+        providerData: {
+          type: "web_search_call",
+          id: "ws_synthetic",
+          action: { type: "search", query: "synthetic documentation" },
+        },
+      };
+      const persisted = JSON.parse(JSON.stringify(canonicalizePersistedHistoryItem(source)));
+      const wire = normalizedCodexRequestBody({ input: getInputItems([persisted]) }, (s) => s);
+      expect(wire.input).toEqual([
+        {
+          type: "web_search_call",
+          status,
+          action: source.providerData.action,
+        },
+      ]);
+      expect(source.status).toBe(status);
+      expect(persisted.status).toBe(status);
+    }
+  });
+
   test("serializes a 10,000-part mixed bounded result entirely inside the pinned wire union", async () => {
     const { getInputItems } = await pinnedResponsesModule();
     const raw = {

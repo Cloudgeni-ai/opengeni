@@ -1,5 +1,31 @@
 # @opengeni/db
 
+## 6.0.1
+
+### Patch Changes
+
+- d92af11: Keep original command text through ambiguous launch recovery and persist it separately from bounded previews. Preserve whitespace, mark clipped previews with an ellipsis, and show complete commands on expansion and hover.
+- f60ca2b: Raise Skill folder limits eightfold to 1,024 files, 2 MiB per file, and 8 MiB total, while retaining bounded reads and existing validation.
+- 56ddcfb: Resolve retained screenshots referenced by copied fork history through their original session, including existing and nested forks. Require recorded fork ancestry and a copied image receipt, retaining workspace and private-file access checks.
+- 38b9857: Track child unread attention from meaningful content rather than housekeeping, and acknowledge complete parent-consumed results for the exact initiating human. Preserve newer unseen work and manual attention intent, decode retained evidence losslessly, and reconcile proven historical consumption conservatively. Requires maintenance migration 0503 before starting the matching attention-aware writers.
+- 90e089a: Add a rollout-gated short MCP OAuth state that stores encrypted, time-limited callback context in Postgres. Preserve legacy in-flight callbacks and one-use replay protection.
+- b1ad0c6: Start Slack tasks with the initiating user's saved website repositories, variable sets, compute and tool selections in the destination workspace. Preserve draft content, explicit empty tools, and ordinary resource authorization.
+- a463199: Repair workspace control revisions behind their retained event frontier, preventing historical control replay on each fresh browser load. Reject subsequent revision rollback without altering pause state, timers, or historical events. Stop refreshing last-started model metadata for unrelated control changes.
+- Updated dependencies [a642885]
+- Updated dependencies [793a6c9]
+- Updated dependencies [d92af11]
+- Updated dependencies [f60ca2b]
+- Updated dependencies [a11d810]
+- Updated dependencies [86c710a]
+- Updated dependencies [ab3adb3]
+- Updated dependencies [2f8bc58]
+- Updated dependencies [a11d810]
+- Updated dependencies [90e089a]
+  - @opengeni/codex@0.2.25
+  - @opengeni/config@2.1.0
+  - @opengeni/contracts@5.1.0
+  - @opengeni/codemode@0.6.1
+
 ## 6.0.0
 
 ### Major Changes

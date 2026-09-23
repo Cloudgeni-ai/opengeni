@@ -5,6 +5,7 @@ import {
   ChevronRightIcon,
   Globe2Icon,
   KeyRoundIcon,
+  SparklesIcon,
   ZapIcon,
 } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
@@ -37,10 +38,27 @@ const LazyModelPolicyPickerMenu = lazy(() =>
 
 type ClientPickerModelRow = PickerModelRow<ClientModel>;
 
+/** Presentation only; never changes model identity, billing or availability. */
+export type ModelPolicyPickerGroupPresentation = Partial<
+  Record<
+    PickerBillingClass,
+    {
+      label?: string | undefined;
+      /** Omit to preserve the default; null hides the supporting text. */
+      description?: string | null | undefined;
+      /** Decorative, non-interactive content. Omit for the default; null hides it. */
+      icon?: ReactNode | undefined;
+    }
+  >
+>;
+
 export type ModelPolicyPickerMessages = {
   label: string;
   loading: string;
   noModels: string;
+  connectTitle: string;
+  connectBody: string;
+  connectAction: string;
   thinking: string;
   fast: string;
   fastRateHint: string;
@@ -61,6 +79,9 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
   label: "Model and effort",
   loading: "Loading model catalog…",
   noModels: "No models available.",
+  connectTitle: "Connect a model",
+  connectBody: "Use a subscription or a provider key you already have.",
+  connectAction: "Open Models",
   thinking: "Thinking",
   fast: "Fast",
   fastRateHint: "2× rate",
@@ -85,6 +106,8 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
 };
 
 export type ModelPolicyPickerProps = {
+  /** Host branding for payment-source groups, shared by menu and trigger. */
+  groupPresentation?: ModelPolicyPickerGroupPresentation | undefined;
   /** Lightweight deployment models. Catalog rows take precedence when supplied. */
   models?: ClientModel[] | undefined;
   /** Warn only when the draft actually contains images this model cannot view. */
@@ -110,6 +133,8 @@ export type ModelPolicyPickerProps = {
   menuSide?: "top" | "bottom" | undefined;
   /** Hide latency controls on surfaces whose saved policy does not include latency. */
   allowLatencyMode?: boolean | undefined;
+  /** Settings → Models. Shown when the catalog has no model that can run. */
+  connectModelsHref?: string | undefined;
   /** Classes for the portalled menu surface. Prefer --og-* tokens for theming. */
   contentClassName?: string | undefined;
   /** Inline styles for the portalled menu, applied after inherited --og-* tokens. */
@@ -157,6 +182,7 @@ function XaiMark(props: SVGProps<SVGSVGElement>) {
 
 export function BillingClassMark(props: {
   billingClass: PickerBillingClass;
+  presentation?: ModelPolicyPickerGroupPresentation[PickerBillingClass] | undefined;
   className?: string | undefined;
   "aria-label"?: string | undefined;
 }) {
@@ -168,13 +194,14 @@ export function BillingClassMark(props: {
     byok: "Workspace provider account",
     organization_byok: "Organization provider account",
   };
-  const label = props["aria-label"] ?? labels[props.billingClass];
+  if (props.presentation?.icon === null) return null;
+  const label = props["aria-label"] ?? props.presentation?.label ?? labels[props.billingClass];
   const accessibility =
     label.length === 0
       ? { "aria-hidden": true as const }
       : { role: "img" as const, "aria-label": label };
   const shell = cn(
-    "inline-flex size-3.5 shrink-0 items-center justify-center overflow-hidden text-og-fg-subtle",
+    "inline-flex size-3.5 shrink-0 items-center justify-center overflow-hidden text-og-fg-subtle [&>svg]:size-full [&>img]:size-full",
     props.className,
   );
   const mark = "size-3.5";
@@ -184,7 +211,9 @@ export function BillingClassMark(props: {
       data-testid={`billing-class-icon-${props.billingClass}`}
       {...accessibility}
     >
-      {props.billingClass === "opengeni_credits" ? (
+      {props.presentation?.icon !== undefined ? (
+        props.presentation.icon
+      ) : props.billingClass === "opengeni_credits" ? (
         <OpenGeniMark className={mark} />
       ) : props.billingClass === "external" ? (
         <Globe2Icon className={mark} aria-hidden />
@@ -235,7 +264,10 @@ function applyCodexOnly(
 export function effectiveRows(props: ModelPolicyPickerProps): ClientPickerModelRow[] {
   const rows = props.rows !== undefined ? props.rows : projectClientModelRows(props.models ?? []);
   const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
-  return applyCodexOnly(rows, props.codexOnly === true, messages.codexOnly);
+  return applyCodexOnly(rows, props.codexOnly === true, messages.codexOnly).map((row) => {
+    const label = props.groupPresentation?.[row.billingClass]?.label;
+    return label === undefined ? row : { ...row, billingClassLabel: label };
+  });
 }
 
 export function PickerNavRow(props: {
@@ -346,6 +378,8 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
   );
   const { open, setOpen, rows } = useModelPolicyPickerState(props);
   const selected = findPickerRow(rows, props.model);
+  const needsModel =
+    !rows.some((row) => row.selectable) && (rows.length > 0 || Boolean(props.connectModelsHref));
 
   if (props.loading) {
     return (
@@ -372,21 +406,36 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
         disabled={props.disabled}
         aria-label={messages.label}
         className={cn(
-          "og-root og-model-policy-trigger inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border border-transparent px-2.5 text-og-control text-og-fg-muted outline-hidden transition-colors hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:px-2",
+          "og-root og-model-policy-trigger inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border px-2.5 text-og-control outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:px-2",
+          needsModel
+            ? "border-og-border bg-og-surface-2 text-og-fg hover:bg-og-surface-3"
+            : "border-transparent text-og-fg-muted hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg",
           props.className,
         )}
       >
-        <BillingClassMark
-          billingClass={selected?.billingClass ?? billingClassForMissingSelection(props.model)}
-          className="text-og-fg"
-        />
+        {needsModel ? (
+          <SparklesIcon className="size-3.5 shrink-0" aria-hidden />
+        ) : (
+          <BillingClassMark
+            billingClass={selected?.billingClass ?? billingClassForMissingSelection(props.model)}
+            presentation={
+              props.groupPresentation?.[
+                selected?.billingClass ?? billingClassForMissingSelection(props.model)
+              ]
+            }
+            className="text-og-fg"
+          />
+        )}
         <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden @max-[20rem]/model-controls:hidden">
-          {selected?.label ?? props.model}
+          {needsModel ? messages.connectTitle : (selected?.label ?? props.model)}
         </span>
         <span className="og-model-policy-label-short min-w-0 truncate font-medium text-og-fg sm:hidden @max-[20rem]/model-controls:block">
-          {selected?.shortLabel ?? selected?.label ?? props.model}
+          {needsModel
+            ? messages.connectTitle
+            : (selected?.shortLabel ?? selected?.label ?? props.model)}
         </span>
         {selected &&
+        !needsModel &&
         effortOptionsForModel(selected.catalog).length > 1 &&
         selected.catalog.capabilities?.reasoning.runnable !== false ? (
           <span
@@ -396,7 +445,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
             {labelReasoningEffort(props.effort)}
           </span>
         ) : null}
-        {props.latencyMode === "fast" ? (
+        {props.latencyMode === "fast" && !needsModel ? (
           <ZapIcon
             className="size-3.5 shrink-0 fill-current stroke-current text-og-fg"
             aria-label={messages.fast}

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const backendPath = new URL("./dev-stack-backend.sh", import.meta.url).pathname;
 const nativeInfraPath = new URL("./dev-native-infra.sh", import.meta.url).pathname;
@@ -18,6 +18,7 @@ async function resolveBackend(
   requested: string | undefined,
   dockerExitCode: number,
   fileBackend?: string,
+  dockerDelaySeconds = 0,
 ) {
   const root = await mkdtemp(join(tmpdir(), "opengeni-backend-"));
   temporaryRoots.push(root);
@@ -26,6 +27,7 @@ async function resolveBackend(
     docker,
     `#!/bin/sh
 [ "\${1:-}" = info ] || exit 99
+${dockerDelaySeconds ? `sleep ${dockerDelaySeconds}` : ""}
 exit ${dockerExitCode}
 `,
   );
@@ -34,7 +36,7 @@ exit ${dockerExitCode}
   if (fileBackend !== undefined) await writeFile(dotenv, `OPENGENI_DEV_BACKEND=${fileBackend}\n`);
   const env: Record<string, string | undefined> = {
     ...Bun.env,
-    PATH: `${root}:/usr/bin:/bin`,
+    PATH: `${root}:${dirname(process.execPath)}:/usr/bin:/bin`,
     OPENGENI_DOCKER_PROBE_TIMEOUT_SECONDS: "1",
   };
   if (requested === undefined) delete env.OPENGENI_DEV_BACKEND;
@@ -100,6 +102,13 @@ describe("development infrastructure backend", () => {
     expect(result.stdout.trim()).toBe("docker");
   });
 
+  test("a hung Docker probe is bounded without GNU timeout", async () => {
+    const started = Date.now();
+    const result = await resolveBackend("auto", 0, undefined, 3);
+    expect(result.stdout.trim()).toBe("native");
+    expect(Date.now() - started).toBeLessThan(2500);
+  });
+
   test("an explicit Docker request fails closed without a daemon", async () => {
     const result = await resolveBackend("docker", 1);
     expect(result.exitCode).toBe(1);
@@ -122,12 +131,17 @@ describe("development infrastructure backend", () => {
     );
   });
 
-  test("the full launcher records native backend, sandbox, and MinIO authority", async () => {
+  test("the full launcher resolves native storage before selecting ports and credentials", async () => {
     const source = await Bun.file(devStackPath).text();
     expect(source).toContain("opengeni_load_dev_environment ./.env");
     expect(source).toContain('OPENGENI_DEV_BACKEND="$(opengeni_resolve_dev_backend)"');
     expect(source).toContain("OPENGENI_SANDBOX_BACKEND=local");
-    expect(source).toContain("OPENGENI_OBJECT_STORAGE_FIXTURE=minio");
+    expect(source).not.toContain("OPENGENI_OBJECT_STORAGE_FIXTURE=minio");
+    expect(source).toContain("bun scripts/dev-native-storage.ts resolve");
+    expect(source.indexOf("bun scripts/dev-native-storage.ts resolve")).toBeLessThan(
+      source.indexOf("choose_port OPENGENI_GARAGE_HOST_PORT"),
+    );
+    expect(source).toContain("choose_port OPENGENI_GARAGE_RPC_HOST_PORT 3901");
     expect(source).toContain("bash scripts/dev-native-infra.sh status --quiet");
     expect(source).toContain("bash scripts/dev-native-infra.sh start");
     expect(source).toContain(

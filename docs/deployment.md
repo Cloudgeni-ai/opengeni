@@ -311,6 +311,15 @@ operation, source, and outcome labels. The same observer emits
 (`surface`, `op`, `provider`, `outcome`, `durationMs`). It never emits workspace,
 subject, tool-name, argument, result, credential, or approval-token values.
 
+## MCP provider OAuth short-state rollout (0507)
+
+Apply rolling migration `0507_integration_oauth_pending_states.sql`, then deploy
+the new API with `OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED=false` on all
+replicas. Once every old API replica has drained, set the flag to `true` in a
+separate configuration rollout. Both flag values accept old and short callback
+states; only new replicas can read short states. Providers such as Resend that
+limit `state` length work after the flag is enabled.
+
 ## Personal GitHub OAuth
 
 Personal GitHub is disabled by default. Managed staging and production must use
@@ -1431,14 +1440,21 @@ Current profiles:
 
 `bun run dev` is the primary full local path. `OPENGENI_DEV_BACKEND=auto`
 prefers Docker only when its daemon answers a bounded server probe, then falls
-back to native PostgreSQL, NATS, Temporal, and pinned MinIO processes. Set
+back to native PostgreSQL, NATS, Temporal, and Garage processes. Set
 `OPENGENI_DEV_BACKEND=docker` or `native` to require one path. The native path
-is Linux-only, changes a copied Docker sandbox default to the credentials-free
+is Linux/WSL2-only (macOS uses Docker), changes a copied Docker sandbox default to the credentials-free
 in-process local provider, and preserves explicit remote sandbox providers.
+Fresh native storage defaults to Garage, while recorded or legacy MinIO state
+retains MinIO. Incompatible provider changes fail before startup; there is no
+automatic data migration. `bun run dev:check` checks the selected prerequisites
+without starting services. `bun run dev:tools` prints the opt-in, project-local
+pinned tool installation plan.
 
 Both infrastructure paths run migrations, import the fingerprinted reviewed
-integrations catalog, and start the API, control and turn workers, Connected
-Machines relay, artifact materializer, artifact outbox dispatcher, and web.
+integrations catalog, and start the API, control and turn workers, artifact
+materializer, artifact outbox dispatcher, and web. Connected Machines is opt-in
+for fresh local configuration; its relay is prepared before application startup
+only when `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true`.
 Docker additionally builds the local sandbox image when that sandbox backend is
 selected. The two artifact roles receive distinct generated least-privilege
 database logins and independently selected health ports (defaults `9465` and
@@ -3114,7 +3130,7 @@ Minimum production dashboards should cover:
 
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
 - Advisory work discovery: request/outcome rate, p50/p95/p99 duration, result count, response bytes, overlap count, stable match-class distribution, and observer errors from the `opengeni_work_discovery_*` family. Keep only its fixed surface/mode/outcome/scope/match labels; never add workspace, session, query, subject, title, goal, claim, version, or provenance labels. See [`work-discovery.md`](work-discovery.md).
-- Workspace Insights: `opengeni_workspace_insights_request_duration_seconds{range,provider_filter,model_filter,outcome}` measures the complete route handler, including access resolution, aggregation, contract projection, and response construction. Its exact `le="2"` bucket verifies the default unfiltered weekly view's two-second target. Labels carry only closed range/outcome values and filter-presence flags, never workspace, subject, provider, or model values. If the `usage_bundle` or `model_bundle` phase dominates `opengeni_workspace_insights_phase_duration_seconds`, check the fact authority functions still carry `enable_nestloop=off` (migration 0507): a time window newer than the last `ANALYZE` is estimated at about one row, and a nested-loop plan rescans every workspace session per fact. The route shares one in-flight rollup only between concurrent requests with the same workspace, range, filters, and database RLS actor.
+- Workspace Insights: `opengeni_workspace_insights_request_duration_seconds{range,provider_filter,model_filter,outcome}` measures the complete route handler, including access resolution, aggregation, contract projection, and response construction. Its exact `le="2"` bucket verifies the default unfiltered weekly view's two-second target. Labels carry only closed range/outcome values and filter-presence flags, never workspace, subject, provider, or model values. If the `usage_bundle` or `model_bundle` phase dominates `opengeni_workspace_insights_phase_duration_seconds`, check the fact authority functions still carry `enable_nestloop=off` (migration 0509): a time window newer than the last `ANALYZE` is estimated at about one row, and a nested-loop plan rescans every workspace session per fact. The route shares one in-flight rollup only between concurrent requests with the same workspace, range, filters, and database RLS actor.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Google Drive sync: run outcome and failure ratio, reconnect-required events, p95 terminal activity-batch duration, logical provider requests, physical provider attempts/retries, explicit limit hits, and bounded terminal failure reasons, scoped by namespace, environment, release, and provider where applicable.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`. In-flight and progress gauges are worker-local and exact-attempt-qualified: recoverable replacement attempts coexist without overwriting one another, and physical activity finalization always removes its own attempt even when durable outcome classification is unavailable.

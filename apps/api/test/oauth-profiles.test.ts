@@ -5,7 +5,9 @@ import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
   createDb,
   createImportBatch,
+  decryptEnvironmentValue,
   getGlobalCatalogOAuthProfile,
+  loadIntegrationOAuthPendingState,
   upsertRegistryCapabilityCatalogItem,
   type DbClient,
 } from "@opengeni/db";
@@ -41,6 +43,27 @@ let settings: Settings;
 
 const rawKey = randomBytes(32);
 
+async function readMcpOAuthState(referenceState: string): Promise<Record<string, unknown>> {
+  const reference = readSignedState(referenceState, STATE_SECRET) as Record<string, unknown> | null;
+  if (
+    reference?.kind !== "mcp_oauth_reference" ||
+    typeof reference.id !== "string" ||
+    typeof reference.accountId !== "string" ||
+    typeof reference.workspaceId !== "string"
+  ) {
+    throw new Error("expected a short MCP OAuth state reference");
+  }
+  const encrypted = await loadIntegrationOAuthPendingState(client.db, {
+    id: reference.id,
+    accountId: reference.accountId,
+    workspaceId: reference.workspaceId,
+  });
+  if (!encrypted) throw new Error("pending MCP OAuth state missing");
+  const payload = readSignedState(decryptEnvironmentValue(rawKey, encrypted), STATE_SECRET);
+  if (!payload) throw new Error("pending MCP OAuth state invalid");
+  return payload as Record<string, unknown>;
+}
+
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("api_oauth_profiles");
   if (!shared) {
@@ -55,6 +78,7 @@ beforeAll(async () => {
     delegationSecret: DELEGATION_SECRET,
     environmentsEncryptionKey: rawKey.toString("base64"),
     integrationsEnabled: true,
+    integrationsOauthShortStateEnabled: true,
     integrationsStateSecret: STATE_SECRET,
     publicBaseUrl: "https://api.opengeni.test",
   }) as Settings;
@@ -430,9 +454,8 @@ describe("catalog-profile-driven OAuth start", () => {
       // An explicit choice overrides the suggested personal default.
       const workspaceStart = await start({ ownership: "workspace" });
       expect(workspaceStart.status).toBe(200);
-      const workspaceState = readSignedState(
+      const workspaceState = await readMcpOAuthState(
         ((await workspaceStart.json()) as { state: string }).state,
-        STATE_SECRET,
       );
       expect(workspaceState?.ownership).toBe("workspace");
 
@@ -444,7 +467,7 @@ describe("catalog-profile-driven OAuth start", () => {
       const authUrl = new URL(body.authorizationUrl);
       expect(authUrl.searchParams.get("scope")).toBe("files:read");
       expect(authUrl.searchParams.get("audience")).toBe("pinned");
-      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
+      const state = await readMcpOAuthState(body.state);
       expect(state?.ownership).toBe("personal");
       expect(state?.requestedScopes).toEqual(["files:read"]);
       expect(state?.authorizeScopes).toEqual(["files:read"]);
@@ -546,7 +569,7 @@ describe("catalog-profile-driven OAuth start", () => {
       );
       expect(response.status).toBe(200);
       const body = (await response.json()) as { state: string };
-      expect(readSignedState(body.state, STATE_SECRET)?.ownership).toBe("personal");
+      expect((await readMcpOAuthState(body.state)).ownership).toBe("personal");
     } finally {
       as.close();
       mcp.close();

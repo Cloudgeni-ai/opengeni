@@ -89,6 +89,15 @@ silently dropping supporting files.
 
 ## Authority and receipts
 
+The session UI also offers nonblocking approval of pending Skills. It reads the
+paginated Skill content catalog with `sessionId`, after session-read authorization,
+and filters by the originating agent's durable write receipt. This lookup does
+not depend on the loaded conversation window. Only current, unsettled proposals
+are returned; file bodies are fetched for the exact revision through the existing
+content API. Approval uses the same human-authorized Skill endpoint and revision
+fences as the Skills page. Deleted and settled proposals do not reappear from
+historical tool outputs. The chat does not need to enter `requires_action`.
+
 HTTP callers must authenticate and authorize workspace/scope management before
 constructing a human actor. `principalKind: human_session` is a trusted boundary
 fact, not a model argument. Humans bypass Learning, not authorization. Existing

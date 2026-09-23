@@ -13,6 +13,7 @@ import {
 import {
   RetainedScreenshotQuotaExceededError,
   getRetainedScreenshotArtifact,
+  getRetainedScreenshotArtifactForToolCall,
   isDatabasePersistenceFailure,
   isSessionEventPersistenceError,
   prepareRetainedScreenshotArtifact,
@@ -874,6 +875,26 @@ async function materializeRetainedScreenshotHistoryWithCache(
   cache: Map<string, string>,
 ): Promise<Array<Record<string, unknown>>> {
   const now = input.now ?? new Date();
+  const receiptForMarker = async (
+    marker: unknown,
+    callId: string | null,
+  ): Promise<RetainedArtifactMetadata | null> => {
+    if (!isRetainedImageMarker(marker)) return null;
+    const receipt = retainedReceipt(marker.artifact);
+    if (receipt) return receipt;
+    // Older canonical history could truncate the artifact UUID and reason as
+    // ordinary text. Recover only from this exact session and an unambiguous
+    // tool call; otherwise fail before constructing a malformed model image.
+    if (!callId) throw new Error("Retained screenshot receipt has no tool call identity");
+    const artifact = await getRetainedScreenshotArtifactForToolCall(
+      input.db,
+      input.workspaceId,
+      input.sessionId,
+      callId,
+    );
+    if (!artifact) throw new Error("Retained screenshot receipt cannot be recovered");
+    return reference(artifact);
+  };
   const dataUrlForReceipt = async (receipt: RetainedArtifactMetadata): Promise<string> => {
     let dataUrl = cache.get(receipt.artifactId);
     if (!dataUrl) {
@@ -921,8 +942,12 @@ async function materializeRetainedScreenshotHistoryWithCache(
     }
     return dataUrl;
   };
-  const materializeEntry = async (entry: unknown): Promise<unknown> => {
-    const receipt = retainedReceiptFromImageContent(entry);
+  const materializeEntry = async (entry: unknown, callId: string | null): Promise<unknown> => {
+    const image =
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? (entry as Record<string, unknown>).image
+        : null;
+    const receipt = await receiptForMarker(image, callId);
     if (!receipt) return entry;
     const dataUrl = await dataUrlForReceipt(receipt);
     return { ...(entry as Record<string, unknown>), image: dataUrl };
@@ -930,7 +955,8 @@ async function materializeRetainedScreenshotHistoryWithCache(
 
   const materialized: Array<Record<string, unknown>> = [];
   for (const item of input.history) {
-    const directReceipt = retainedReceiptFromDirectOutput(item.output);
+    const callId = historyCallId(item);
+    const directReceipt = await receiptForMarker(item.output, callId);
     if (directReceipt) {
       materialized.push({
         ...item,
@@ -954,7 +980,7 @@ async function materializeRetainedScreenshotHistoryWithCache(
     let changed = false;
     const output: unknown[] = [];
     for (const entry of outputEntries) {
-      const next = await materializeEntry(entry);
+      const next = await materializeEntry(entry, callId);
       changed ||= next !== entry;
       output.push(next);
     }
@@ -1108,6 +1134,18 @@ function retainedReceiptFromImageContent(entry: unknown): RetainedArtifactMetada
   const marker = image as Record<string, unknown>;
   if (marker.type !== RETAINED_IMAGE_MARKER) return null;
   return retainedReceipt(marker.artifact);
+}
+
+function isRetainedImageMarker(value: unknown): value is {
+  type: "retained_artifact";
+  artifact: unknown;
+} {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>).type === RETAINED_IMAGE_MARKER,
+  );
 }
 
 function retainedReceiptFromDirectOutput(output: unknown): RetainedArtifactMetadata | null {

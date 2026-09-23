@@ -184,8 +184,7 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       await page.keyboard.press("Escape");
       await dialog.waitFor({ state: "hidden" });
       for (const key of ["Enter", "Space"]) {
-        await search.focus();
-        await page.keyboard.press(key);
+        await search.press(key);
         await dialog
           .getByRole("searchbox", { name: "Search session titles and messages", exact: true })
           .waitFor();
@@ -194,8 +193,8 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       }
 
       await filter.click();
-      await page.getByRole("menuitem", { name: "Status Active" }).hover();
-      await page.getByRole("menuitemradio", { name: "Archived", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Status Active" }).click();
+      await page.getByRole("menuitemradio", { name: "Archived", exact: true }).press("Enter");
       const customized = header.getByRole("button", {
         name: "Session view, customized",
         exact: true,
