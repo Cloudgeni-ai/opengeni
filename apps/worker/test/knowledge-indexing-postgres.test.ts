@@ -294,6 +294,80 @@ test("paid indexing waits for funding, settles accepted batches and finishes a f
   expect(calls).toBe(2);
 });
 
+test("paid indexing waits for publication without charging a review-first draft", async () => {
+  const accountId = crypto.randomUUID();
+  const workspaceId = crypto.randomUUID();
+  await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Review-gated index')`;
+  await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Review workspace')`;
+  const settings = {
+    billingMode: "stripe",
+    usageLimitsMode: "managed",
+    staticUsageLimitsJson: "{}",
+    documentEmbeddingProvider: "openai",
+    documentEmbeddingBillingMode: "credits",
+    documentEmbeddingCreditsActivatedAt: "2026-01-01T00:00:00Z",
+    documentEmbeddingRateMicrosPerMillionBytes: 1_000_000,
+  } as Settings;
+  let calls = 0;
+  const embedder: DocumentServices["embedder"] = {
+    model: "review-gated-index-test",
+    dimensions: 3,
+    embedMany: async (inputs) => {
+      calls++;
+      return inputs.map(() => [1, 0, 0]);
+    },
+    embedQuery: async () => [1, 0, 0],
+  };
+  const worker = createKnowledgeIndexingActivities(
+    async () =>
+      ({
+        db: client.db,
+        settings,
+        observability: { warn: () => undefined },
+      }) as ControlActivityServices,
+    async () => ({ embedder }) as DocumentServices,
+  );
+  const saved = await saveKnowledgeEntry(
+    client.db,
+    {
+      accountId,
+      workspaceId,
+      actor: {
+        kind: "human",
+        principalKind: "human_session",
+        subjectId: "user:review-owner",
+        writeScopes: ["workspace"],
+        settingsScopes: ["workspace"],
+        review: true,
+      },
+    },
+    {
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      scope: "workspace",
+      entry: { kind: "fact", title: "Review-first draft", content: "Pending review" },
+    },
+  );
+  // Model a review-first revision's exact publication pointer without changing
+  // its immutable body or bypassing the worker's leased indexing capability.
+  await shared.admin`UPDATE knowledge_entries SET published_revision_id=NULL WHERE id=${saved.entryId}`;
+  await shared.admin`INSERT INTO credit_ledger_entries(account_id,type,amount_micros,idempotency_key)
+    VALUES(${accountId},'grant',1,${`review-index:${saved.revisionId}`})`;
+  expect((await worker.indexKnowledge()).deferred).toBe(1);
+  expect(calls).toBe(0);
+  const [waiting] = await shared.admin`
+    SELECT state,last_failure FROM knowledge_index_jobs WHERE revision_id=${saved.revisionId}`;
+  expect(waiting).toMatchObject({ state: "pending", last_failure: "waiting_for_review" });
+  expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(1);
+  await shared.admin`UPDATE knowledge_entries SET published_revision_id=${saved.revisionId} WHERE id=${saved.entryId}`;
+  await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second'
+    WHERE revision_id=${saved.revisionId}`;
+  expect((await worker.indexKnowledge()).completed).toBe(1);
+  expect(calls).toBe(1);
+  expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBeLessThan(1);
+});
+
 test("deterministic embeddings still index without funds under the credits-mode switch", async () => {
   const accountId = crypto.randomUUID();
   const workspaceId = crypto.randomUUID();
@@ -350,6 +424,70 @@ test("deterministic embeddings still index without funds under the credits-mode 
     SELECT billing_mode, state FROM knowledge_index_jobs WHERE revision_id=${saved.revisionId}`;
   expect(job).toMatchObject({ billing_mode: "usage_only", state: "ready" });
   expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(0);
+});
+
+test("shadow indexing records its frozen cost estimate without a credit debit", async () => {
+  const accountId = crypto.randomUUID();
+  const workspaceId = crypto.randomUUID();
+  await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Shadow index')`;
+  await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Shadow workspace')`;
+  const settings = {
+    billingMode: "stripe",
+    usageLimitsMode: "managed",
+    staticUsageLimitsJson: "{}",
+    documentEmbeddingProvider: "openai",
+    documentEmbeddingBillingMode: "shadow",
+    documentEmbeddingRateMicrosPerMillionBytes: 1_000_000,
+  } as Settings;
+  const embedder: DocumentServices["embedder"] = {
+    model: "shadow-index-test",
+    dimensions: 3,
+    embedMany: async (inputs) => inputs.map(() => [1, 0, 0]),
+    embedQuery: async () => [1, 0, 0],
+  };
+  const worker = createKnowledgeIndexingActivities(
+    async () =>
+      ({
+        db: client.db,
+        settings,
+        observability: { warn: () => undefined },
+      }) as ControlActivityServices,
+    async () => ({ embedder }) as DocumentServices,
+  );
+  await worker.indexKnowledge();
+  const saved = await saveKnowledgeEntry(
+    client.db,
+    {
+      accountId,
+      workspaceId,
+      actor: {
+        kind: "human",
+        principalKind: "human_session",
+        subjectId: "user:shadow-owner",
+        writeScopes: ["workspace"],
+        settingsScopes: ["workspace"],
+        review: true,
+      },
+    },
+    {
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      scope: "workspace",
+      entry: { kind: "fact", title: "Shadow estimate", content: "Count these bytes only" },
+    },
+  );
+  expect((await worker.indexKnowledge()).completed).toBe(1);
+  const [meter] = await shared.admin<
+    Array<{ mode: string; estimate: number | string; ledger: number }>
+  >`
+    SELECT (SELECT billing_mode FROM knowledge_index_jobs WHERE revision_id=${saved.revisionId}) AS mode,
+      (SELECT sum(quantity)::bigint FROM usage_events WHERE event_type='document.embedding_shadow_estimate'
+       AND source_resource_id=${saved.revisionId}) AS estimate,
+      (SELECT count(*)::int FROM credit_ledger_entries WHERE account_id=${accountId}) AS ledger`;
+  expect(meter?.mode).toBe("shadow");
+  expect(Number(meter?.estimate)).toBeGreaterThan(0);
+  expect(meter?.ledger).toBe(0);
 });
 
 test("a queued Knowledge generation remains unpriced when paid mode starts later", async () => {

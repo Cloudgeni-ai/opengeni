@@ -26,7 +26,8 @@ export async function knowledgeIndexBillingActivationTime(db: Database): Promise
   return z.coerce.date().parse(row?.activatedAt);
 }
 
-/** Persist the chosen mode for exactly this leased generation. */
+/** Persist the chosen mode for exactly this leased generation. Paid review-first
+ * revisions release the lease without embedding until published. */
 export async function freezeKnowledgeIndexBillingMode(
   db: Database,
   raw: KnowledgeIndexClaim,
@@ -45,7 +46,7 @@ export async function freezeKnowledgeIndexBillingMode(
     );
     return z
       .object({
-        mode: z.enum(["usage_only", "shadow", "credits"]),
+        mode: z.enum(["usage_only", "shadow", "credits", "awaiting_review"]),
         rateMicrosPerMillionBytes: z.number().int().nonnegative(),
       })
       .parse(row?.policy);

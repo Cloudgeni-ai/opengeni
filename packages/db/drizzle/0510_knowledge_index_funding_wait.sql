@@ -38,12 +38,28 @@ BEGIN
   IF job.billed_generation IS DISTINCT FROM job.generation THEN
     decided:=CASE WHEN job.created_at>=p_activation_at THEN p_requested ELSE 'usage_only' END;
     frozen_rate:=CASE WHEN decided='usage_only' THEN 0 ELSE p_rate END;
-    UPDATE knowledge_index_jobs SET billing_mode=decided,billed_generation=job.generation,
-      billing_rate_micros_per_million_bytes=frozen_rate
-      WHERE revision_id=p_revision;
   ELSE
     decided:=job.billing_mode;
     frozen_rate:=job.billing_rate_micros_per_million_bytes;
+  END IF;
+  -- A review-first draft is not a paid purchase. Keep its lease checkpoint
+  -- intact and poll until this exact revision is published; a rejected latest
+  -- revision may remain visible for review but must never incur an embedding
+  -- charge. Recheck on every batch so a publication change fences work.
+  IF decided='credits' AND NOT EXISTS (
+    SELECT 1 FROM knowledge_entries e WHERE e.account_id=p_account
+      AND e.id=job.entry_id AND e.published_revision_id=p_revision AND NOT e.archived
+  ) THEN
+    UPDATE knowledge_index_jobs SET state='pending',lease_id=NULL,lease_until=NULL,
+      last_failure='waiting_for_review',next_attempt_at=clock_timestamp()+interval '1 minute',
+      attempts=0 WHERE revision_id=p_revision;
+    PERFORM set_config('opengeni.knowledge_index_dispatcher',coalesce(previous,''),true);
+    RETURN jsonb_build_object('mode','awaiting_review','rateMicrosPerMillionBytes',0);
+  END IF;
+  IF job.billed_generation IS DISTINCT FROM job.generation THEN
+    UPDATE knowledge_index_jobs SET billing_mode=decided,billed_generation=job.generation,
+      billing_rate_micros_per_million_bytes=frozen_rate
+      WHERE revision_id=p_revision;
   END IF;
   PERFORM set_config('opengeni.knowledge_index_dispatcher',coalesce(previous,''),true);
   RETURN jsonb_build_object('mode',decided,

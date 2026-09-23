@@ -100,7 +100,10 @@ async function backdateMeterCursor(
   secondsAgo: number,
 ): Promise<void> {
   await admin`
-    update sandbox_leases set last_meter_at = now() - (${String(secondsAgo)} || ' seconds')::interval
+    update sandbox_leases set
+      last_meter_at = now() - (${String(secondsAgo)} || ' seconds')::interval,
+      resume_state = jsonb_set(resume_state, '{opengeniRecovery,restore,completedAt}',
+        to_jsonb((now() - (${String(secondsAgo)} || ' seconds')::interval)::text))
     where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
 }
 
@@ -216,7 +219,8 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
         SandboxPaidComputeAdmissionError,
       );
     }
-    expect(await readLiveness(ws.workspaceId, ws.groupId)).toBe("cold");
+    // The rejected cold admission rolls back the lease insert with its holder.
+    expect(await readLiveness(ws.workspaceId, ws.groupId)).toBeUndefined();
     expect(
       (await acquire("viewer", "free", { mode: "credits", rateMicrosPerSecond: 0 })).role,
     ).toBe("spawner");
@@ -417,6 +421,10 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       mode: "credits",
       rateMicrosPerSecond: 20,
     });
+    await admin`
+      update sandbox_leases set resume_state = jsonb_set(resume_state,
+        '{opengeniProviderInstanceId}', '"box"'::jsonb)
+      where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
     await releaseLeaseHolder(db, {
       ...ws,
       sandboxGroupId: ws.groupId,
@@ -447,6 +455,64 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       select resume_state as state from sandbox_leases
       where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
     expect(rearmed?.state.opengeniWarmBilling.stopChargeAt).toBeUndefined();
+    await releaseLeaseHolder(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      kind: "viewer",
+      holderId: "second",
+      idleGraceMs: 0,
+    });
+    expect(
+      await markWarmBillingStopCutoff(db, {
+        ...ws,
+        sandboxGroupId: ws.groupId,
+        expectedEpoch: epoch,
+      }),
+    ).toBeInstanceOf(Date);
+    expect(
+      (await reArmDrainingLease(db, { ...ws, sandboxGroupId: ws.groupId, leaseTtlMs: 90_000 }))
+        .rearmed,
+    ).toBe(true);
+    const [explicit] = await admin<{ state: { opengeniWarmBilling: { stopChargeAt?: string } } }[]>`
+      select resume_state as state from sandbox_leases
+      where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
+    expect(explicit?.state.opengeniWarmBilling.stopChargeAt).toBeUndefined();
+  }, 60_000);
+
+  test("a zero-priced credits lease needs no paid cutoff to drain cold", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const epoch = await warmGroup(ws, [{ kind: "viewer", holderId: "free" }], {
+      mode: "credits",
+      rateMicrosPerSecond: 0,
+    });
+    await releaseLeaseHolder(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      kind: "viewer",
+      holderId: "free",
+      idleGraceMs: 0,
+    });
+    expect(
+      await markWarmBillingStopCutoff(db, {
+        ...ws,
+        sandboxGroupId: ws.groupId,
+        expectedEpoch: epoch,
+      }),
+    ).toBeNull();
+    const final = await accrueWarmSeconds(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      billingMode: "credits",
+      warmRateMicrosPerSecond: 0,
+      finalDrain: true,
+    });
+    expect(final.costMicros).toBe(0);
+    expect(
+      (await confirmDrainCold(db, { ...ws, sandboxGroupId: ws.groupId, expectedEpoch: epoch }))
+        .wentCold,
+    ).toBe(true);
   }, 60_000);
 
   test("paid lease extension refuses zero balance without removing its active holder", async () => {
@@ -458,6 +524,17 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       rateMicrosPerSecond: 10,
     });
     await seedBalance(ws.accountId, -100);
+    expect(
+      await heartbeatLeaseHolderStatus(db, {
+        ...ws,
+        sandboxGroupId: ws.groupId,
+        kind: "turn",
+        holderId: "t1",
+        expectedEpoch: epoch - 1,
+        leaseTtlMs: 90_000,
+        billingMode: "credits",
+      }),
+    ).toMatchObject({ holderAlive: true, leaseExtended: false, fence: "epoch" });
     expect(
       await heartbeatLeaseHolderStatus(db, {
         ...ws,
@@ -792,7 +869,10 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     if (!available) return;
     const ws = await freshWorkspace();
     await seedBalance(ws.accountId, 100);
-    const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "t1" }]);
+    const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "t1" }], {
+      mode: "credits",
+      rateMicrosPerSecond: 100,
+    });
     await backdateWarmStart(ws.workspaceId, ws.groupId, 4);
     const accrue = await accrueWarmSeconds(db, {
       accountId: ws.accountId,
@@ -835,7 +915,11 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
   test("a conflicting debit key rolls back the usage rows and cursor, leaving the tick retryable", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "t1" }]);
+    await seedBalance(ws.accountId, 1);
+    const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "t1" }], {
+      mode: "credits",
+      rateMicrosPerSecond: 100,
+    });
     await backdateWarmStart(ws.workspaceId, ws.groupId, 4);
     const key = `debit:sandbox.warm_cost:${ws.groupId}:${epoch}:1`;
     await admin`

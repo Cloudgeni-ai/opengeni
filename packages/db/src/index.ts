@@ -49999,6 +49999,14 @@ export async function heartbeatLeaseHolderStatus(
         if (lease.resume_state?.opengeniWarmBilling && !snapshot) {
           throw new Error("sandbox warm billing snapshot is invalid");
         }
+        // An exhausted balance must not mask an older epoch or a drain/rotation
+        // that requires the client to detach and negotiate a new viewer.
+        if (Number(lease.lease_epoch) !== input.expectedEpoch)
+          return { holderAlive: true, leaseExtended: false, fence: "epoch" };
+        if (lease.liveness !== "warm" && lease.liveness !== "warming")
+          return { holderAlive: true, leaseExtended: false, fence: "liveness" };
+        if (lease.rotation_requested_at !== null)
+          return { holderAlive: true, leaseExtended: false, fence: "rotation_requested" };
         if (
           (input.billingMode ?? snapshot?.mode) === "credits" &&
           snapshot?.mode === "credits" &&
@@ -51159,6 +51167,7 @@ export async function reArmDrainingLease(
         const rows = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
           liveness = 'warm',
+          resume_state = resume_state #- '{opengeniWarmBilling,stopChargeAt}',
           expires_at = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
           updated_at = now()
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
@@ -61240,7 +61249,7 @@ export async function accrueWarmSeconds(
         }
         const cursorMs = row.last_meter_at ? new Date(row.last_meter_at).getTime() : 0;
         const startMs = Number.isFinite(warmStartMs) ? Math.max(cursorMs, warmStartMs) : cursorMs;
-        if (mode === "credits" && input.finalDrain && !snapshot?.stopChargeAt) {
+        if (mode === "credits" && rate > 0 && input.finalDrain && !snapshot?.stopChargeAt) {
           throw new Error("paid sandbox final tick has no durable stop cutoff");
         }
         const upperBound =

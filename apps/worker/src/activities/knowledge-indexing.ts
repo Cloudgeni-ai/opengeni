@@ -82,12 +82,17 @@ export function createKnowledgeIndexingActivities(
                 claim,
                 // Deterministic embeddings incur no provider charge; a valid
                 // credits-mode config with zero tariff must still index them.
-                paidDocumentEmbedding(settings)
+                // OpenAI shadow keeps its price snapshot for internal estimates.
+                settings.documentEmbeddingProvider === "openai"
                   ? (settings.documentEmbeddingBillingMode ?? "usage_only")
                   : "usage_only",
                 policyActivatedAt,
                 settings.documentEmbeddingRateMicrosPerMillionBytes ?? 0,
               );
+              if (frozenPolicy.mode === "awaiting_review") {
+                result.deferred++;
+                return;
+              }
               const paid = frozenPolicy.mode === "credits" && paidDocumentEmbedding(settings);
               if (paid && current.nextIndex === 0) {
                 const balance = await getBillingBalance(lockedDb, claim.accountId);
@@ -149,6 +154,27 @@ export function createKnowledgeIndexingActivities(
                 sourceResourceId: claim.revisionId,
                 idempotencyKey: `knowledge.embedding_bytes:${claim.revisionId}:${claim.generation}:${current.nextIndex}`,
               });
+              if (frozenPolicy.mode === "shadow" && frozenPolicy.rateMicrosPerMillionBytes > 0) {
+                const estimate = documentEmbeddingCostMicros(
+                  {
+                    ...settings,
+                    documentEmbeddingRateMicrosPerMillionBytes:
+                      frozenPolicy.rateMicrosPerMillionBytes,
+                  },
+                  bytes,
+                );
+                if (estimate > 0)
+                  await recordUsageEvent(lockedDb, {
+                    accountId: claim.accountId,
+                    workspaceId: current.billingWorkspaceId,
+                    eventType: "document.embedding_shadow_estimate",
+                    quantity: estimate,
+                    unit: "micro_usd",
+                    sourceResourceType: "knowledge_revision",
+                    sourceResourceId: claim.revisionId,
+                    idempotencyKey: `knowledge.embedding_shadow:${claim.revisionId}:${claim.generation}:${current.nextIndex}`,
+                  });
+              }
               if (paid) {
                 const cost = documentEmbeddingCostMicros(
                   {

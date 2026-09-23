@@ -132,7 +132,10 @@ async function backdateMeterCursor(
   secondsAgo: number,
 ): Promise<void> {
   await admin`
-    update sandbox_leases set last_meter_at = now() - (${String(secondsAgo)} || ' seconds')::interval
+    update sandbox_leases set
+      last_meter_at = now() - (${String(secondsAgo)} || ' seconds')::interval,
+      resume_state = jsonb_set(resume_state, '{opengeniRecovery,restore,completedAt}',
+        to_jsonb((now() - (${String(secondsAgo)} || ' seconds')::interval)::text))
     where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
 }
 

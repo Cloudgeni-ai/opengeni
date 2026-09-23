@@ -45,7 +45,8 @@ person proof, so monitor grants and abuse before scaling the offer.
    explicit `OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT` ISO UTC cutoff;
    jobs queued before that instant must remain unpriced when the mode changes.
    Observe `shadow` one mode at a time on a
-   known test account; shadow estimates are not customer spend. Check provider
+   known test account; Knowledge's `document.embedding_shadow_estimate` usage
+   event records an internal micro-USD estimate, not customer spend. Check provider
    costs, shared-box once-only metering, vector query traffic, and retry rates.
 3. If a verified-email signup campaign is approved, enable the trial flag
    separately. Confirm new receipts get one $10 ledger entry, old receipts and
@@ -56,7 +57,9 @@ person proof, so monitor grants and abuse before scaling the offer.
    positive-balance admission for *new* work, idempotent full post-use settlement
    and possible negative balance for work already underway, customer-owned
    compute bypass, funding-wait/resume for semantic indexing, and preservation
-   of source/keyword access. Then expand gradually using operator review.
+   of source/keyword access. Paid Knowledge embedding also waits for the exact
+   revision to be published; pending or rejected review drafts are not charged.
+   Then expand gradually using operator review.
 
 Do not treat a `shadow` estimate as a debit or a provider bill. Leave quotas
 independent of tariff: an exhausted monthly chunk cap is not `awaiting_funding`.
