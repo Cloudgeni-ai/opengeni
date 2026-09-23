@@ -52,3 +52,27 @@ test("explicit auth contracts, host-managed refs and uninstalled endpoints never
     applyCapabilityEnablement(item, { ...installation, status: "disabled" }).authKind,
   ).toBeNull();
 });
+
+test("Fiken retains connection-derived enablement before the generic API fallback", () => {
+  for (const enabled of [true, false]) {
+    const fiken = CapabilityCatalogItem.parse({
+      id: "api:fiken",
+      name: "Fiken",
+      kind: "api",
+      source: "built_in",
+      surfaceType: "first_party_fiken",
+      enabled,
+      enabledReason: enabled ? "workspace Fiken connection active" : null,
+      metadata: { connectionStatus: enabled ? "active" : null },
+    });
+    expect(applyCapabilityEnablement(fiken, undefined)).toMatchObject({
+      enabled,
+      enabledReason: fiken.enabledReason,
+      connectionRef: null,
+      metadata: fiken.metadata,
+    });
+    expect(applyCapabilityEnablement({ ...fiken, surfaceType: null }, undefined).enabled).toBe(
+      false,
+    );
+  }
+});
