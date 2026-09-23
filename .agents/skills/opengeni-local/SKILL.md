@@ -88,7 +88,9 @@ task works after observing a model response and the requested tool execution.
 ## Stop or restart
 
 Stop the owning `bun run dev` launcher first (Ctrl-C in its terminal, or signal
-the exact process you started). Then `bun run dev:down` stops this checkout's
+the exact process you started). Give the user that terminal or a verified PID;
+never suggest name-wide `pkill` or `killall`, since other checkouts may be running.
+Then `bun run dev:down` stops this checkout's
 infrastructure; it does not stop the host app processes by itself. Restart with
 `bun run dev` from the same checkout, preserving its `.env` and data.
 
