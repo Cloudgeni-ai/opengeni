@@ -5854,9 +5854,14 @@ function registerCapabilityDiscoveryTools(
   // This is a readiness projection, never credential resolution or a new grant.
   const setupProjections = async (items: CapabilityCatalogItem[]) => {
     const availableServerIds = new Set<string>();
+    const availableFirstPartyTools = new Set<string>();
     const acceptedServerIds = new Set<string>();
     let accountSelectionKnown = false;
-    if (items.some((item) => item.enabled && item.connectionRef)) {
+    if (
+      items.some(
+        (item) => item.enabled && (item.connectionRef || item.surfaceType === "first_party_fiken"),
+      )
+    ) {
       const claims = exactAgentCommandContext(grant, sessionId);
       const attemptCatalog = await getAttemptToolCatalog(deps.db, {
         accountId: grant.accountId,
@@ -5868,7 +5873,11 @@ function registerCapabilityDiscoveryTools(
         attemptCatalog.turnId === claims.callerTurnId &&
         attemptCatalog.executionGeneration === claims.callerExecutionGeneration
       ) {
-        for (const entry of attemptCatalog.entries) availableServerIds.add(entry.identity.serverId);
+        for (const entry of attemptCatalog.entries) {
+          availableServerIds.add(entry.identity.serverId);
+          if (entry.identity.serverId === "opengeni")
+            availableFirstPartyTools.add(entry.identity.toolName);
+        }
         const bindings = await getSessionTurnMcpAccountBindings(
           deps.db,
           grant.workspaceId,
@@ -5890,6 +5899,8 @@ function registerCapabilityDiscoveryTools(
           availableServerIds,
           acceptedServerIds,
           accountSelectionKnown,
+          availableFirstPartyTools,
+          new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
         ),
       ),
     );
@@ -6024,7 +6035,45 @@ async function capabilitySetupProjection(
   availableServerIds: ReadonlySet<string>,
   acceptedServerIds: ReadonlySet<string>,
   accountSelectionKnown: boolean,
+  availableFirstPartyTools: ReadonlySet<string>,
+  selectedFirstPartyTools: ReadonlySet<string>,
 ): Promise<CapabilitySetupProjection> {
+  if (item.surfaceType === "first_party_fiken") {
+    if (!item.enabled || item.metadata.connectionStatus !== "active") {
+      return {
+        status: "authorization_required",
+        action: "connect",
+        detail:
+          item.metadata.connectionStatus === "needs_reauth"
+            ? "The workspace Fiken connection needs reconnection."
+            : "Connect Fiken through the protected setup form.",
+      };
+    }
+    const selected = FIRST_PARTY_MCP_TOOL_NAMES.filter(
+      (name) => name.startsWith("fiken_") && selectedFirstPartyTools.has(name),
+    );
+    if (selected.length === 0) {
+      return {
+        status: "authorization_required",
+        action: "enable",
+        detail:
+          "Fiken is connected, but its tools are not selected for this conversation. Ask the user to add its tools through the setup card, then send a new message.",
+      };
+    }
+    if (selected.some((name) => availableFirstPartyTools.has(name))) {
+      return {
+        status: "ready",
+        action: null,
+        detail: "Fiken is connected and has tools available in this turn.",
+      };
+    }
+    return {
+      status: "unavailable",
+      action: null,
+      detail:
+        "Fiken is connected, but its selected tools are unavailable in this execution. Check tool permissions and setup before retrying; reconnection is not required by this status.",
+    };
+  }
   if (item.id === "api:github-app" || item.surfaceType === "first_party_github") {
     const missing = githubAppMissingSettings(deps.settings);
     if (missing.length > 0) {
