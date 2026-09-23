@@ -1,0 +1,5 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": { "noEmit": true },
+  "include": ["install-development-tools.ts", "install-development-tools.native-bootstrap.test.ts"]
+}
