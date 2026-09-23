@@ -1705,7 +1705,7 @@ describe("turn execution policy V1", () => {
       () => getSettings(),
     );
     const policy = resolveTurnExecutionPolicyV1(settings, {
-      modelId: "codex/gpt-5.6-sol",
+      modelId: "codex/gpt-6-sol",
       requestedModelId: null,
       modelSource: "continuation",
       reasoningEffort: "xhigh",
@@ -1713,7 +1713,7 @@ describe("turn execution policy V1", () => {
     });
     const preWireProfilePolicy = {
       ...policy,
-      definitionVersion: "sha256:45a93d5876fdb2a3b3d485c83ea6ac758fddb64e7fe493384a05a198bc582c00",
+      definitionVersion: "sha256:bf9dd6bdfc7416edc345ab77a8f2b8fbf904fd654cd5d5f0aece43da5689dc7a",
     };
 
     expect(() =>
@@ -1733,16 +1733,16 @@ describe("turn execution policy V1", () => {
       () => getSettings(),
     );
     const policy = resolveTurnExecutionPolicyV1(settings, {
-      modelId: "codex/gpt-5.6-sol",
+      modelId: "codex/gpt-6-sol",
       requestedModelId: null,
       modelSource: "session",
       reasoningEffort: "max",
       reasoningSource: "session",
     });
     expect(policy).toMatchObject({
-      productModelId: "codex/gpt-5.6-sol",
+      productModelId: "codex/gpt-6-sol",
       providerId: "codex-subscription",
-      upstreamModelId: "gpt-5.6-sol",
+      upstreamModelId: "gpt-6-sol",
       credentialSource: { kind: "connected_subscription", provider: "codex" },
       billing: {
         upstreamPayer: "connected_subscription",
@@ -1983,7 +1983,14 @@ describe("configuredModelPricing", () => {
     expect(defaultModelPricing["gpt-5.4"]).toBeUndefined();
     expect(defaultModelPricing["gpt-5"]).toBeUndefined();
 
-    const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_MODEL: "gpt-5.6-luna",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.6-luna",
+      },
+      () => getSettings(),
+    );
     // 100k input @ $0.20/M = 20_000 micros, then +5% margin -> 21_000
     expect(
       calculateModelUsageCostMicros(settings, "gpt-5.6-luna", {

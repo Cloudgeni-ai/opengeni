@@ -108,7 +108,7 @@ describe("API edge credit gate — codex bypass", () => {
         workspaceId: WORKSPACE,
         action: "agent_run:create",
         quantity: 1,
-        model: "supergrok/grok-4.6",
+        model: "supergrok/grok-4.7",
       });
       expect(decision.allowed).toBe(true);
       await requireLimit(deps(settings), {
@@ -116,7 +116,7 @@ describe("API edge credit gate — codex bypass", () => {
         workspaceId: WORKSPACE,
         action: "agent_run:create",
         quantity: 1,
-        model: "supergrok/grok-4.6",
+        model: "supergrok/grok-4.7",
       });
     } finally {
       restoreCred();

@@ -1989,13 +1989,13 @@ describe("GET /v1/config/client", () => {
   test("supports a Codex subscription model as the client default", async () => {
     const settings = testSettings({
       codexSubscriptionEnabled: true,
-      openaiModel: "codex/gpt-5.6-sol",
-      openaiAllowedModels: "codex/gpt-5.6-sol",
+      openaiModel: "codex/gpt-6-sol",
+      openaiAllowedModels: "codex/gpt-6-sol",
     });
     const config = await fetchClientConfig(settings);
 
-    expect(config.defaultModel).toBe("codex/gpt-5.6-sol");
-    expect(config.allowedModels).toContain("codex/gpt-5.6-sol");
+    expect(config.defaultModel).toBe("codex/gpt-6-sol");
+    expect(config.allowedModels).toContain("codex/gpt-6-sol");
     const defaultModel = config.models.find((model) => model.id === config.defaultModel);
     expect(defaultModel).toMatchObject({
       provider: "codex",
