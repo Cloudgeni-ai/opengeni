@@ -46,7 +46,13 @@ describe("published HTML artifacts", () => {
     expect(markup).toContain("Live");
     expect(markup).toContain('aria-label="Reload Site"');
     expect(markup).toContain('aria-label="Open Site full screen"');
+    expect(markup).toContain('aria-label="Status"');
     expect(markup).toContain("v4");
+    expect(
+      renderToStaticMarkup(
+        <ArtifactSandbox html="<h1>App</h1>" title="Preview" showTitle={false} />,
+      ),
+    ).toContain('aria-label="Preview"');
   });
 
   it("promotes the chat preview to the modal top layer without replacing its iframe", async () => {

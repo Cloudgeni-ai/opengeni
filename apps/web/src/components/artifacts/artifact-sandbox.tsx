@@ -66,6 +66,7 @@ export function ArtifactSandbox(props: {
     <dialog
       ref={frameRef}
       open
+      aria-label={props.title}
       onCancel={(event) => {
         event.preventDefault();
         setFocused(false);
