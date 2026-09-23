@@ -3146,6 +3146,7 @@ export type FirstPartyMcpToolName =
   | "run_on"
   | "sandbox_provision"
   | "connected_machine_remove"
+  | "connected_machine_enroll_token"
   | "project_list"
   | "project_get"
   | "project_create"

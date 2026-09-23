@@ -90,6 +90,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   run_on: { sessionRequired: true, allOf: ["sessions:control"] },
   sandbox_provision: { sessionRequired: true, allOf: ["sessions:control"] },
   connected_machine_remove: { allOf: ["enrollments:manage"] },
+  connected_machine_enroll_token: { allOf: ["enrollments:manage"] },
   rig_list: { allOf: ["rigs:use"] },
   rig_get: { allOf: ["rigs:use"] },
   rig_propose_change: { allOf: ["rigs:use"] },
