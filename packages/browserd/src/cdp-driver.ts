@@ -1587,6 +1587,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     info: TargetInfo,
   ): Promise<BrowserObservationValue> {
     if (!state.dialog) await this.refreshFrame(state);
+    const viewport = state.dialog ? null : await this.viewport(state);
     const accessibility =
       state.dialog && state.accessibility
         ? state.accessibility
@@ -1605,6 +1606,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         nodeCount: accessibility.nodeCount,
       },
       screenshot: null,
+      viewport,
       focusedRef: accessibility.focusedRef,
       changedRegions: [],
       diagnostics: state.diagnostics,
@@ -1734,6 +1736,38 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const viewport = dimensionsRecord(response.cssVisualViewport, true);
     const content = dimensionsRecord(response.cssContentSize, false);
     return { viewport, content };
+  }
+
+  private async viewport(state: TargetState): Promise<BrowserObservationValue["viewport"]> {
+    if (this.engine === "lightpanda") return null;
+    const result = await this.sendTarget<{
+      result?: unknown;
+      exceptionDetails?: unknown;
+    }>(state, "Runtime.evaluate", {
+      expression:
+        "({width:innerWidth,height:innerHeight,visualWidth:visualViewport?.width??innerWidth,visualHeight:visualViewport?.height??innerHeight,deviceScaleFactor:devicePixelRatio,maxTouchPoints:navigator.maxTouchPoints??0})",
+      returnByValue: true,
+    });
+    const value = isRecord(result.result) ? result.result.value : null;
+    if (result.exceptionDetails || !isRecord(value)) {
+      return null;
+    }
+    const { width, height, visualWidth, visualHeight, deviceScaleFactor, maxTouchPoints } = value;
+    if (
+      ![width, height, visualWidth, visualHeight, deviceScaleFactor, maxTouchPoints].every(
+        (part) => typeof part === "number" && Number.isFinite(part),
+      )
+    ) {
+      return null;
+    }
+    return {
+      width: Number(width),
+      height: Number(height),
+      visualWidth: Number(visualWidth),
+      visualHeight: Number(visualHeight),
+      deviceScaleFactor: Number(deviceScaleFactor),
+      maxTouchPoints: Number(maxTouchPoints),
+    };
   }
 
   private imageFrame(options: {
@@ -2153,6 +2187,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.ensureConnection()
         ).send("Target.activateTarget", {
           targetId: state.targetId,
+        });
+        return;
+      case "viewport":
+        if (this.engine === "lightpanda") {
+          throw new InteractionDefiniteDriverError(
+            "unsupported",
+            "this browser engine does not support viewport emulation",
+          );
+        }
+        await this.sendActionTarget(state, "Emulation.setDeviceMetricsOverride", {
+          width: action.width,
+          height: action.height,
+          deviceScaleFactor: action.deviceScaleFactor ?? 1,
+          mobile: action.mobile,
+          screenWidth: action.width,
+          screenHeight: action.height,
+        });
+        await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
+          enabled: action.mobile,
+          ...(action.mobile ? { maxTouchPoints: 1 } : {}),
         });
         return;
       case "click": {

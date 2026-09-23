@@ -802,6 +802,14 @@ export type BrowserObservation = {
   frameId: string | null;
   semantic: InteractionSemanticSnapshot | InteractionSemanticDiff | null;
   screenshot: RetainedArtifactReference | null;
+  viewport?: {
+    width: number;
+    height: number;
+    visualWidth: number;
+    visualHeight: number;
+    deviceScaleFactor: number;
+    maxTouchPoints: number;
+  } | null | undefined;
   focusedRef: string | null;
   changedRegions: InteractionRect[];
   diagnostics: InteractionDiagnosticSummary;
@@ -865,6 +873,13 @@ export type BrowserAction =
   | { type: "navigate"; url: string }
   | { type: "history"; direction: "back" | "forward" }
   | { type: "activate" }
+  | {
+      type: "viewport";
+      width: number;
+      height: number;
+      mobile: boolean;
+      deviceScaleFactor?: number | undefined;
+    }
   | {
       type: "click";
       locator: BrowserLocator;
