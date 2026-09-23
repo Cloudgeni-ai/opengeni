@@ -149,6 +149,7 @@ function fixtureBotToken(): string {
 }
 
 type SlackCall = {
+  blocks: string | null;
   method: string;
   channel: string | null;
   count: string | null;
@@ -275,6 +276,7 @@ function fakeSlack(
     const method = url.pathname.replace(/^\/api\//, "");
     const params = new URLSearchParams(String(init?.body ?? ""));
     calls.push({
+      blocks: params.get("blocks"),
       method,
       channel: params.get("channel"),
       count: params.get("count"),
@@ -3389,11 +3391,28 @@ describe("OpenGeni Slack bot connection", () => {
       text: "Approved once",
       blocks: [
         { type: "section" as const, text: { type: "mrkdwn" as const, text: "Approved once" } },
+        {
+          type: "actions" as const,
+          block_id: "follow-up-choice",
+          elements: ["first", "second"].map((value) => ({
+            type: "button" as const,
+            action_id: "opengeni.human_input.select",
+            value,
+            text: { type: "plain_text" as const, text: value },
+          })),
+        },
       ],
     };
     const first = await bot.updateMessage(update);
     expect(await bot.updateMessage(update)).toEqual(first);
     expect(slack.calls.filter((call) => call.method === "chat.update")).toHaveLength(1);
+    const sent = slack.calls.find((call) => call.method === "chat.update")!;
+    const wire = JSON.parse(sent.blocks!);
+    expect(wire).toHaveLength(3);
+    expect(wire.slice(1).map((block: { elements: unknown[] }) => block.elements.length)).toEqual([
+      1, 1,
+    ]);
+    expect(update.blocks[1]!.elements).toHaveLength(2);
     await expect(bot.updateMessage({ ...update, text: "Rejected" })).rejects.toThrow(
       "already bound",
     );
