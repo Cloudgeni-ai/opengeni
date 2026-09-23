@@ -406,8 +406,9 @@ export async function retainedProcessCancellationRequested(
   });
 }
 
-/** Called by the reaper for an exact retained command. Ordinary completed turns
- * are intentionally irrelevant. Lock order remains process -> lease. */
+/** Record deadline cancellation for an exact retained Modal command. Legacy
+ * PTY callers send Ctrl-C first because cancellation fences stdin; non-PTY
+ * callers only probe, since Ctrl-C would be data. Lock order: process -> lease. */
 export async function requestRetainedProcessDeadlineCancellation(
   db: Database,
   scope: ProcessScope,
@@ -422,8 +423,8 @@ export async function requestRetainedProcessDeadlineCancellation(
     if (
       !row ||
       row.state !== "active" ||
-      !row.providerCommand ||
-      !supervisionDescriptor(row.providerCommand)
+      row.providerBackend !== "modal" ||
+      row.routeTargetId !== null
     )
       return false;
     const [lease] = await tx.execute<{ id: string }>(sql`

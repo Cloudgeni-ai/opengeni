@@ -49,6 +49,7 @@ import {
   enrollUnobservableCommandIdleDrain,
   reapStaleLeaseHoldersGlobal,
   advanceWorkspaceGeneration,
+  advanceWorkspaceGenerationForDirectRequest,
   advanceWorkspaceGenerationForRetainedProcess,
   verifyRetainedProcessMutationSettlement,
   beginSandboxRematerialization,
@@ -58,6 +59,7 @@ import {
   confirmDrainCold,
   createSession,
   createDb,
+  deferRetainedProcessReconciliation,
   getRetainedProcess,
   initializeSessionStartAtomically,
   mutateSessionControlInTransaction,
@@ -354,7 +356,7 @@ async function insertLease(
 async function insertHolder(
   ids: { accountId: string; workspaceId: string },
   leaseId: string,
-  kind: "turn" | "viewer",
+  kind: "turn" | "viewer" | "direct",
   holderId: string,
   heartbeatAgoMs: number,
   subjectId?: string,
@@ -4042,7 +4044,316 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     }, 180_000);
   }
 
-  test("stopping-command inventory migration replays without widening public authority", async () => {
+  test("deadline rotation saves files with both stubborn and unobservable legacy commands", async () => {
+    if (!available) throw new Error("Real PostgreSQL required for deadline capture regression");
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const instanceId = "box-stubborn-deadline-command";
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 12,
+      expiresInMs: 600_000,
+      instanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: instanceId } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+    const admission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 12,
+      expectedInstanceId: instanceId,
+      operation: "stubbornDeadlineCommand",
+      routeKind: "home",
+      routeTargetId: null,
+      routeEpoch: 0,
+    });
+    const processId = crypto.randomUUID();
+    await retainWorkspaceMutationProcess(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      processId,
+      providerSessionId: 41,
+      admissionId: admission.id,
+      admittedWorkspaceGeneration: admission.workspaceGeneration,
+      operation: "stubbornDeadlineCommand",
+      providerBinding: MODAL_PROVIDER_BINDING,
+      backgroundCommand: { commandId: processId, command: "legacy command ignoring Ctrl-C" },
+      owner: {
+        kind: "turn",
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 12,
+        expectedInstanceId: instanceId,
+        routeKind: "home",
+        routeTargetId: null,
+        routeEpoch: 0,
+      },
+    });
+    const secondAdmission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 12,
+      expectedInstanceId: instanceId,
+      operation: "unobservableDeadlineCommand",
+      routeKind: "home",
+      routeTargetId: null,
+      routeEpoch: 0,
+    });
+    const secondProcessId = crypto.randomUUID();
+    await retainWorkspaceMutationProcess(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      processId: secondProcessId,
+      providerSessionId: 42,
+      admissionId: secondAdmission.id,
+      admittedWorkspaceGeneration: secondAdmission.workspaceGeneration,
+      operation: "unobservableDeadlineCommand",
+      providerBinding: MODAL_PROVIDER_BINDING,
+      backgroundCommand: { commandId: secondProcessId, command: "legacy PTY render" },
+      owner: {
+        kind: "turn",
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 12,
+        expectedInstanceId: instanceId,
+        routeKind: "home",
+        routeTargetId: null,
+        routeEpoch: 0,
+      },
+    });
+    await admin`update sandbox_leases set rotation_requested_at = now() - interval '3 minutes',
+      rotation_reason = 'provider_deadline',
+      provider_created_at = now() - interval '30 minutes',
+      provider_deadline_at = now() + interval '30 minutes'
+      where id = ${leaseId}`;
+    await admin`update sandbox_retained_processes set
+      started_at = now(), reconcile_attempts = 1,
+      last_reconcile_outcome = 'provider_running',
+      cancellation_requested_at = now() - interval '3 minutes', cancellation_reason = 'provider_deadline'
+      where id = ${processId}`;
+    await admin`update sandbox_retained_processes set
+      started_at = now(), reconcile_attempts = 1,
+      last_reconcile_outcome = 'quarantined_process_observation_unavailable',
+      cancellation_requested_at = now() - interval '3 minutes', cancellation_reason = 'provider_deadline'
+      where id = ${secondProcessId}`;
+    const scope = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      idleGraceMs: 15 * 60_000,
+    };
+    // A live owner remains a writer, even after the command stop window.
+    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+    await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'turn'`;
+    await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
+      closed_at = now() - interval '3 minutes', quiesced_at = now() - interval '3 minutes'
+      where id = ${attempt.attemptId}`;
+    // The command itself still gets the full stop window.
+    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+    // Deadline capture must not depend on an observer reason or a crashed claim.
+    const strandedClaimId = crypto.randomUUID();
+    await admin`update sandbox_retained_processes
+      set last_reconcile_outcome = 'future_provider_observer_state',
+          reconcile_claim_id = ${strandedClaimId},
+          reconcile_claimed_at = now() - interval '3 minutes',
+          reconcile_after = now() + interval '2 minutes'
+      where id = ${secondProcessId}`;
+    await admin`update sandbox_retained_processes
+      set started_at = now() - interval '3 minutes' where id in (${processId}, ${secondProcessId})`;
+    const strandedProcess = await getRetainedProcess(db, {
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      processId: secondProcessId,
+    });
+    expect(strandedProcess).not.toBeNull();
+    expect(await enrollUnobservableCommandIdleDrain(db, scope)).not.toBeNull();
+    const target = (
+      await reapStaleLeaseHoldersGlobal(db, {
+        viewerHolderTtlMs: 60_000,
+        idleGraceMs: scope.idleGraceMs,
+      })
+    ).find((row) => row.sandboxGroupId === ids.groupId);
+    expect(target).toBeDefined();
+    expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("draining");
+    expect(
+      (
+        await getRetainedProcess(db, {
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId,
+        })
+      )?.state,
+    ).toBe("active");
+    const spy = makeTerminateSpy();
+    const { drainSandboxLease } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: spy.fn,
+    });
+    const result = await drainSandboxLease({
+      target: target!,
+      timeoutClass: "fast",
+      snapshotTimeoutMs: 60_000,
+      captureTimeoutMs: 120_000,
+      operationId: crypto.randomUUID(),
+    });
+    expect(result.status).toBe("terminated");
+    expect(spy.persisted).toContainEqual({ group: ids.groupId, wrote: true });
+    expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
+    expect(
+      (
+        await getRetainedProcess(db, {
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId,
+        })
+      )?.state,
+    ).toBe("lost");
+    expect(
+      await deferRetainedProcessReconciliation(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        processId: secondProcessId,
+        expected: retainedProcessSettlementIdentity(strandedProcess!),
+        claimId: strandedClaimId,
+        outcome: "provider_running",
+        retryAfterMs: 1,
+      }),
+    ).toBe(false);
+    expect(
+      (
+        await getRetainedProcess(db, {
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId: secondProcessId,
+        })
+      )?.state,
+    ).toBe("lost");
+  }, 180_000);
+
+  test("deadline rotation can enroll a returned direct request's retained command", async () => {
+    if (!available) throw new Error("Real PostgreSQL required for deadline capture regression");
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const instanceId = "box-direct-deadline-command";
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      leaseEpoch: 12,
+      expiresInMs: 600_000,
+      instanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: instanceId } },
+      },
+    });
+    const requestId = crypto.randomUUID();
+    const holderId = `direct:${requestId}`;
+    await insertHolder(ids, leaseId, "direct", holderId, 0, attempt.sessionId);
+    const admission = await advanceWorkspaceGenerationForDirectRequest(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      requestId,
+      holderId,
+      initiatorSubjectId: "direct-deadline-test",
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 12,
+      expectedInstanceId: instanceId,
+      routeTargetId: null,
+      routeEpoch: 0,
+      operation: "directDeadlineCommand",
+    });
+    const processId = crypto.randomUUID();
+    await retainWorkspaceMutationProcess(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      processId,
+      providerSessionId: 43,
+      admissionId: admission.id,
+      admittedWorkspaceGeneration: admission.workspaceGeneration,
+      operation: "directDeadlineCommand",
+      providerBinding: MODAL_PROVIDER_BINDING,
+      owner: {
+        kind: "direct",
+        requestId,
+        holderId,
+        initiatorSubjectId: "direct-deadline-test",
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 12,
+        expectedInstanceId: instanceId,
+        routeTargetId: null,
+        routeEpoch: 0,
+      },
+    });
+    await admin`update sandbox_leases set rotation_requested_at = now() - interval '3 minutes',
+      rotation_reason = 'provider_deadline',
+      provider_created_at = now() - interval '30 minutes',
+      provider_deadline_at = now() + interval '30 minutes'
+      where id = ${leaseId}`;
+    await admin`update sandbox_retained_processes set
+      started_at = now() - interval '3 minutes', reconcile_attempts = 1,
+      last_reconcile_outcome = 'provider_running',
+      cancellation_requested_at = now() - interval '3 minutes', cancellation_reason = 'provider_deadline'
+      where id = ${processId}`;
+    await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
+      closed_at = now() - interval '3 minutes', quiesced_at = now() - interval '3 minutes'
+      where id = ${attempt.attemptId}`;
+    const scope = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      idleGraceMs: 15 * 60_000,
+    };
+    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+    await releaseLeaseHolder(db, {
+      ...scope,
+      kind: "direct",
+      holderId,
+    });
+    const target = await enrollUnobservableCommandIdleDrain(db, scope);
+    expect(target).not.toBeNull();
+    const spy = makeTerminateSpy();
+    const { drainSandboxLease } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: spy.fn,
+    });
+    expect(
+      (
+        await drainSandboxLease({
+          target: target!,
+          timeoutClass: "fast",
+          snapshotTimeoutMs: 60_000,
+          captureTimeoutMs: 120_000,
+          operationId: crypto.randomUUID(),
+        })
+      ).status,
+    ).toBe("terminated");
+  }, 180_000);
+
+  test("deadline-command inventory migration replays without widening public authority", async () => {
     if (!available) throw new Error("Real PostgreSQL required for containment migration");
     const definition = async () => {
       const [row] = await admin`select pg_get_functiondef(
@@ -4053,9 +4364,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const before = await definition();
     expect(before).toContain("process.reconcile_attempts >= 5");
     expect(before).toContain("command.cancel_requested_at IS NOT NULL");
+    expect(before).toContain("process.cancellation_requested_at < now() - interval '2 minutes'");
+    expect(before).toContain("THEN lease.provider_deadline_at END NULLS LAST");
     const migration = await Bun.file(
       new URL(
-        "../../../packages/db/drizzle/0493_stopping_command_error_containment.sql",
+        "../../../packages/db/drizzle/0508_deadline_command_workspace_capture.sql",
         import.meta.url,
       ),
     ).text();

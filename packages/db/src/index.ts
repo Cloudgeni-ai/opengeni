@@ -406,6 +406,7 @@ import {
 import {
   environmentsEncryptionKeyBytes,
   SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
+  SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
@@ -50300,6 +50301,13 @@ export async function enrollUnobservableCommandIdleDrain(
             'quarantined_provider_binding_mismatch')
       `);
     }
+    // A deadline gives a legacy command two minutes after cancellation intent
+    // to exit. Even when the provider cannot signal or observe that command,
+    // capture its current files while the old box still exists. Ordinary idle
+    // containment retains its longer grace.
+    const deadlineStopGraceMs = SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS;
+    const deadlineRotation =
+      initial.rotationReason === "provider_deadline" && initial.rotationRequestedAt !== null;
     // Preserve process -> admission -> lease ordering used by settlement.
     const processes = await rawRows<{
       id: string;
@@ -50333,10 +50341,45 @@ export async function enrollUnobservableCommandIdleDrain(
                     (${input.idleGraceMs}::bigint * interval '1 millisecond')
               )
             )
+            or (
+              ${deadlineRotation}
+              and process.cancellation_reason = 'provider_deadline'
+              and process.cancellation_requested_at < now() -
+                (${deadlineStopGraceMs}::bigint * interval '1 millisecond')
+              and process.reconcile_attempts >= 1
+              and (
+                (process.owner_actor_kind = 'turn' and attempt.state = 'closed'
+                  and attempt.quiesced_at is not null
+                  and greatest(attempt.quiesced_at, process.started_at) < now() -
+                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
+                or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
+                  and process.started_at < now() -
+                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
+              )
+            )
           )
-          and attempt.state = 'closed'
-          and greatest(coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at), process.started_at) < now() -
-            (${input.idleGraceMs}::bigint * interval '1 millisecond')) as eligible
+          and (attempt.state = 'closed' or (
+            ${deadlineRotation}
+            and process.owner_actor_kind = 'direct' and process.owner_attempt_id is null))
+          and (
+            (attempt.state = 'closed' and
+              greatest(coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at), process.started_at) < now() -
+                (${input.idleGraceMs}::bigint * interval '1 millisecond'))
+            or (
+              ${deadlineRotation}
+              and process.cancellation_reason = 'provider_deadline'
+              and process.cancellation_requested_at < now() -
+                (${deadlineStopGraceMs}::bigint * interval '1 millisecond')
+              and (
+                (process.owner_actor_kind = 'turn' and attempt.quiesced_at is not null
+                  and greatest(attempt.quiesced_at, process.started_at) < now() -
+                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
+                or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
+                  and process.started_at < now() -
+                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
+              )
+            )
+          )) as eligible
       from sandbox_retained_processes process
       left join session_turn_attempts attempt on attempt.id = process.owner_attempt_id
         and attempt.workspace_id = process.workspace_id and attempt.session_id = process.session_id
@@ -50387,7 +50430,13 @@ export async function enrollUnobservableCommandIdleDrain(
     )
       return null;
     if (!enrolled) {
-      if (lease.archive_capture_id !== null || (await hasSandboxGroupAttemptActivityTx(tx, input)))
+      if (
+        lease.archive_capture_id !== null ||
+        (await hasSandboxGroupAttemptActivityTx(tx, {
+          ...input,
+          idleGraceMs: deadlineRotation ? deadlineStopGraceMs : input.idleGraceMs,
+        }))
+      )
         return null;
       await tx.execute(sql`
         update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
@@ -51106,6 +51155,7 @@ export type SandboxRetainedProcess = {
   reconcileClaimedAt: string | null;
   reconcileAttempts: number;
   lastReconcileOutcome: string | null;
+  cancellationRequestedAt: string | null;
   reconcileProofOutcome: "exited" | "lost" | null;
   reconcileProofExitCode: number | null;
   reconcileProofReason:
@@ -51454,6 +51504,7 @@ function mapRetainedProcess(
     reconcileClaimedAt: row.reconcileClaimedAt?.toISOString() ?? null,
     reconcileAttempts: row.reconcileAttempts,
     lastReconcileOutcome: row.lastReconcileOutcome ?? null,
+    cancellationRequestedAt: row.cancellationRequestedAt?.toISOString() ?? null,
     reconcileProofOutcome: row.reconcileProofOutcome ?? null,
     reconcileProofExitCode: row.reconcileProofExitCode ?? null,
     reconcileProofReason:

@@ -143,6 +143,9 @@ describe("release schema contract", () => {
     const oauthPendingStates = completeSourceContract.migrations.some(
       (migration) => migration.path === "0507_integration_oauth_pending_states.sql",
     );
+    const deadlineCommandWorkspaceCapture = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0508_deadline_command_workspace_capture.sql",
+    );
     const controlRevisionFrontier = completeSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -376,6 +379,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (deadlineCommandWorkspaceCapture ? 1 : 0) +
         (oauthPendingStates ? 1 : 0) +
         (backgroundCommandText ? 1 : 0) +
         (controlRevisionFrontier ? 1 : 0) +
@@ -639,8 +643,15 @@ describe("release schema contract", () => {
       ...(oauthPendingStates
         ? { latestMigration: "0507_integration_oauth_pending_states.sql" }
         : {}),
+      ...(deadlineCommandWorkspaceCapture
+        ? { latestMigration: "0508_deadline_command_workspace_capture.sql" }
+        : {}),
     });
-    expect(completeSourceContract.migrations.at(oauthPendingStates ? -2 : -1)).toMatchObject({
+    expect(
+      completeSourceContract.migrations.at(
+        -1 - Number(oauthPendingStates) - Number(deadlineCommandWorkspaceCapture),
+      ),
+    ).toMatchObject({
       path: backgroundCommandText
         ? "0506_background_command_text.sql"
         : controlRevisionFrontier
@@ -750,8 +761,16 @@ describe("release schema contract", () => {
                                     : "rolling",
     });
     if (oauthPendingStates) {
-      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+      expect(
+        completeSourceContract.migrations.at(deadlineCommandWorkspaceCapture ? -2 : -1),
+      ).toMatchObject({
         path: "0507_integration_oauth_pending_states.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (deadlineCommandWorkspaceCapture) {
+      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+        path: "0508_deadline_command_workspace_capture.sql",
         deploymentMode: "rolling",
       });
     }
@@ -1854,6 +1873,9 @@ describe("release schema contract", () => {
     const oauthPendingStates = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0507_integration_oauth_pending_states.sql",
     );
+    const deadlineCommandWorkspaceCapture = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0508_deadline_command_workspace_capture.sql",
+    );
     const controlRevisionFrontier = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -2472,6 +2494,7 @@ describe("release schema contract", () => {
       "0505_workspace_control_revision_frontier.sql",
       "0506_background_command_text.sql",
       "0507_integration_oauth_pending_states.sql",
+      "0508_deadline_command_workspace_capture.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -3030,8 +3053,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0507_integration_oauth_pending_states.sql",
       };
+    if (deadlineCommandWorkspaceCapture)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0508_deadline_command_workspace_capture.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (deadlineCommandWorkspaceCapture ? 1 : 0) +
         (oauthPendingStates ? 1 : 0) +
         (backgroundCommandText ? 1 : 0) +
         (controlRevisionFrontier ? 1 : 0) +
@@ -3496,6 +3525,9 @@ describe("release schema contract", () => {
       ...(backgroundCommandText ? { latestMigration: "0506_background_command_text.sql" } : {}),
       ...(oauthPendingStates
         ? { latestMigration: "0507_integration_oauth_pending_states.sql" }
+        : {}),
+      ...(deadlineCommandWorkspaceCapture
+        ? { latestMigration: "0508_deadline_command_workspace_capture.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(

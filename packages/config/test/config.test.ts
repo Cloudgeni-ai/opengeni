@@ -2359,12 +2359,19 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
 
   test("an explicit drain budget must fit dispatch, capture, and handoff inside the wait ceiling", () => {
     expect(() =>
-      withEnv({ OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: String(3_590_000) }, () =>
-        getSettings(),
+      withEnv(
+        {
+          OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: String(3_590_000),
+          OPENGENI_SANDBOX_ROTATION_LEAD_MS: "4000000",
+        },
+        () => getSettings(),
       ),
     ).toThrow(/requires a sandbox lifecycle transition wait/i);
     const settings = withEnv(
-      { OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: String(3_550_000) },
+      {
+        OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: String(3_550_000),
+        OPENGENI_SANDBOX_ROTATION_LEAD_MS: "4000000",
+      },
       () => getSettings(),
     );
     expect(sandboxLifecycleTransitionWaitMs(settings)).toBe(60 * 60_000);
@@ -2380,7 +2387,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
           OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS: String(59 * 60_000 + 30_000),
           // Preserve the independent rotation-safety invariant while probing
           // the exact schema ceiling.
-          OPENGENI_SANDBOX_ROTATION_LEAD_MS: String(61 * 60_000),
+          OPENGENI_SANDBOX_ROTATION_LEAD_MS: String(63 * 60_000),
         },
         () => getSettings(),
       ).sandboxSnapshotTimeoutMs,
@@ -2420,7 +2427,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       },
       () => getSettings(),
     );
-    expect(settings.sandboxRotationLeadMs).toBe(150_000);
+    expect(settings.sandboxRotationLeadMs).toBe(220_001);
     expect(settings.sandboxIdleGraceMs).toBe(150_000);
   });
 
@@ -2459,29 +2466,29 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     ).toThrow(/rotation_lead_ms.*strictly less/i);
   });
 
-  test("boot reserves the full capture window plus one reaper tick before rotation", () => {
+  test("boot reserves stop grace, capture, and one reaper tick before rotation", () => {
     expect(() =>
       withEnv(
         {
           OPENGENI_SANDBOX_BACKEND: "modal",
           OPENGENI_MODAL_TOKEN_ID: "ak",
           OPENGENI_MODAL_TOKEN_SECRET: "as",
-          OPENGENI_SANDBOX_ROTATION_LEAD_MS: "100000",
+          OPENGENI_SANDBOX_ROTATION_LEAD_MS: "220000",
         },
         () => getSettings(),
       ),
-    ).toThrow(/must exceed the largest durable snapshot or drain capture timeout/i);
+    ).toThrow(/must exceed the legacy command stop grace/i);
     expect(
       withEnv(
         {
           OPENGENI_SANDBOX_BACKEND: "modal",
           OPENGENI_MODAL_TOKEN_ID: "ak",
           OPENGENI_MODAL_TOKEN_SECRET: "as",
-          OPENGENI_SANDBOX_ROTATION_LEAD_MS: "100001",
+          OPENGENI_SANDBOX_ROTATION_LEAD_MS: "220001",
         },
         () => getSettings(),
       ).sandboxRotationLeadMs,
-    ).toBe(100_001);
+    ).toBe(220_001);
   });
 
   test("boot reserves Modal rotation headroom for an extended drain capture", () => {
@@ -2492,12 +2499,12 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: "120000",
     };
     expect(() =>
-      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "160000" }, () => getSettings()),
+      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "280000" }, () => getSettings()),
     ).toThrow(/largest durable snapshot or drain capture timeout/i);
     expect(
-      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "160001" }, () => getSettings())
+      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "280001" }, () => getSettings())
         .sandboxRotationLeadMs,
-    ).toBe(160_001);
+    ).toBe(280_001);
   });
 
   test("boot preserves rotation headroom for historical Modal leases after a backend rollout", () => {
@@ -2506,12 +2513,12 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: "120000",
     };
     expect(() =>
-      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "160000" }, () => getSettings()),
+      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "280000" }, () => getSettings()),
     ).toThrow(/persisted Modal leases after a default-backend rollout/i);
     expect(
-      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "160001" }, () => getSettings())
+      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "280001" }, () => getSettings())
         .sandboxRotationLeadMs,
-    ).toBe(160_001);
+    ).toBe(280_001);
   });
 
   test("the rotation batch is positive and bounded", () => {
@@ -2551,7 +2558,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
           OPENGENI_MODAL_TOKEN_SECRET: "as",
           OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
           OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "600",
-          OPENGENI_SANDBOX_ROTATION_LEAD_MS: "180000",
+          OPENGENI_SANDBOX_ROTATION_LEAD_MS: "240000",
         },
         () => getSettings(),
       ),

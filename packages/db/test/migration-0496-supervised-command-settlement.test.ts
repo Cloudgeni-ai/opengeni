@@ -426,6 +426,16 @@ test("deadline intent uses exact original lease and never completed-turn status"
   expect(await f.persistence.cancellationRequested()).toBe(true);
 });
 
+test("legacy deadline stop can send its control byte before cancellation closes stdin", async () => {
+  const f = await fixture(false);
+  await shared.admin`update sandbox_leases set rotation_requested_at=now(),
+    rotation_reason='provider_deadline' where id=${f.leaseId}`;
+  expect(await f.persistence.reserveInput(1)).toBe(0);
+  expect(await requestRetainedProcessDeadlineCancellation(client.db, f.scope)).toBe(true);
+  expect(await f.persistence.cancellationRequested()).toBe(true);
+  await expect(f.persistence.reserveInput(1)).rejects.toThrow("input is closed");
+});
+
 test("legacy processes cannot be retrofitted, even after another update in the transaction", async () => {
   const f = await fixture(false);
   await expect(

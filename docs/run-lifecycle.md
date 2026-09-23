@@ -1868,6 +1868,17 @@ lost, never successful; a real exit arriving during drain retains its exit code.
 Failed checkpoints retain the provider and command holders for retry. Filesystem
 snapshots preserve neither running processes nor application transaction state.
 
+For scheduled provider-deadline rotation, legacy commands have a separate
+two-minute cancellation grace. A PTY receives one Ctrl-C; non-PTY stdin is not
+a signal, so the worker records cancellation intent without writing Ctrl-C
+bytes. After that grace, exact process holders may be enrolled even without
+exit proof if the owner is closed and quiesced (or its direct request returned),
+and no unrelated holder or mutation admission remains. An outstanding
+reconciliation claim does not grant writer authority or block this deadline
+capture. The provider is terminated only after the current workspace generation
+is captured; remaining commands settle lost. Supervised commands keep their
+separate proof gate. This path does not apply to idle or operator rotation.
+
 The same containment path covers an explicitly stopping managed command after
 at least five provider-error observations. Its cancellation request and owner
 quiescence must both predate idle grace; an absent quiescence receipt is not

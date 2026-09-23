@@ -1504,6 +1504,13 @@ holder, mutation, and idle-grace checks. Records remain until termination;
 unobserved outcomes become lost. Command backoff never suppresses rotation's
 provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
 
+Scheduled provider-deadline rotation also stops legacy commands where possible,
+then may capture the workspace after a bounded cancellation grace despite an
+unresponsive command. This requires a quiesced owner, no other holders or
+mutation admissions, and the exact lease fence. Capture precedes provider
+termination; surviving commands settle lost. Supervised commands retain their
+separate proof path. Details: `docs/design/modal-workspace-durability-2026-09-23.md`.
+
 Desktop/browser images and daemons release separately. Desktop/terminal data
 use the relay; the control plane retains authority. Large edits require
 capability-gated transactional transfers and verified receipts, never blind replay.

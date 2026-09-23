@@ -1583,6 +1583,28 @@ describe("retained-process terminal-owner reconciliation", () => {
     });
   }, 60_000);
 
+  test("an unbound legacy observer cannot strand deadline cancellation", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed" });
+    await admin`update sandbox_retained_processes
+      set provider_binding_key = null, provider_binding = null
+      where id = ${fixture.process.id}`;
+    await admin`update sandbox_leases
+      set rotation_requested_at = now(), rotation_reason = 'provider_deadline'
+      where id = ${fixture.leaseId}`;
+    await runReaper(
+      async () => {
+        throw new Error("unbound command must be inspected before provider process probing");
+      },
+      async () => ({ status: "not_found" }),
+    );
+    expect(await durableProcess(fixture)).toMatchObject({
+      state: "active",
+      lastReconcileOutcome: "provider_binding_missing",
+      cancellationRequestedAt: expect.any(String),
+    });
+  }, 60_000);
+
   test("a terminal historical Modal box settles its stale process holder after lease succession", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({ outcome: "completed" });
