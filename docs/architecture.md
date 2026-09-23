@@ -980,6 +980,16 @@ Each new fact also freezes provider cost and equivalent OpenGeni credit price as
 separate nullable comparisons, while `priced_cost_micros` remains the actual
 credits-path price and is zero for externally billed calls.
 
+Verified first self-service organization setup can issue one account-wide $10
+grant behind a default-off deployment switch; invitations and later
+organizations do not grant it. The signed account ledger nets a negative
+post-use balance against subsequent top-ups. Sandbox warm time and
+deployment-funded Knowledge embeddings each have independent `usage_only`
+(default), `shadow`, and `credits` modes; Stripe and model billing do not
+implicitly activate either. Metered paid work settles after use without an
+upfront reservation. Unpriced document source preparation and sandbox access
+do not require a positive credit balance.
+
 Insights usage uses a four-column projection (0484), preserving full-row readers
 and identical tenant/actor/visibility checks. Transaction-capability writes still
 require a writable database.
@@ -1021,6 +1031,7 @@ Before/after guards reject live runtime DB sessions. Preserve checkpoints and
 recover—not cancel—accepted turns. Never restart pre-0492 binaries.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
+[`credit-boundaries-rollout.md`](credit-boundaries-rollout.md),
 [`model-providers.md`](model-providers.md),
 [`codex-subscription-rotation.md`](codex-subscription-rotation.md), and
 [`supergrok-subscription.md`](supergrok-subscription.md).

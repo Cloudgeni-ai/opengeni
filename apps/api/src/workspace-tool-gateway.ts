@@ -299,6 +299,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
               routeDeps.getDocumentServices(),
               {
                 knowledge: await knowledgeContextForGateway(routeDeps, grant),
+                settings: gatewaySettings,
               },
             ),
           ),

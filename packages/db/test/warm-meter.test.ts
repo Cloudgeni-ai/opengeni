@@ -9,8 +9,13 @@ import {
   createDb,
   forceDrainOverLimitViewerOnlyBoxes,
   listMeterableWarmLeases,
+  markWarmBillingStopCutoff,
   listSandboxViewerForceDrainWorkspaceIds,
+  reArmDrainingLease,
+  releaseLeaseHolder,
   SandboxViewerAdmissionBlockedError,
+  SandboxPaidComputeAdmissionError,
+  heartbeatLeaseHolderStatus,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -19,8 +24,8 @@ import {
 // (accrueWarmSeconds / forceDrainOverLimitViewerOnlyBoxes / listMeterableWarmLeases)
 // against a THROWAWAY postgres. We prove the Critical meter key:
 //
-//   (1) a warm box accrues sandbox.warm_seconds on a tick; the FIRST tick only
-//       seeds the cursor (delta-since-last-tick contract).
+//   (1) a warm box accrues sandbox.warm_seconds from the warm transition,
+//       including its FIRST tick and the final draining tick.
 //   (2) IDEMPOTENCY — re-running a tick at the SAME (group, epoch, tick) does NOT
 //       double-charge (the meter cursor + the usage insert are atomic, so a
 //       re-fire at the same epoch with no elapsed seconds is a no-op; a forced
@@ -31,7 +36,7 @@ import {
 //   (5) the cursor advances (last_meter_tick increments per accrual).
 //   (6) FORCE-DRAIN — a 0-balance / over-cap workspace force-drains its VIEWER-ONLY
 //       box while a TURN-HELD box in the SAME workspace SURVIVES (turn_holders=0
-//       guard), and warm_cost is debited at the configured rate.
+//       guard). Only credits mode debits warm cost.
 //
 // pgvector/pgvector:pg16 (0000_initial does CREATE EXTENSION vector). The package
 // fns connect as opengeni_app (a NON-superuser so FORCE RLS applies; the warm-lease
@@ -62,7 +67,8 @@ async function freshWorkspace(): Promise<{
 // elapsed seconds without a real sleep.
 async function warmGroup(
   ids: { accountId: string; workspaceId: string; groupId: string },
-  holders: { kind: "turn" | "viewer"; holderId: string }[],
+  holders: { kind: "turn" | "viewer" | "direct" | "interaction"; holderId: string }[],
+  warmBilling?: { mode: "usage_only" | "shadow" | "credits"; rateMicrosPerSecond: number },
 ): Promise<number> {
   for (const h of holders) {
     await acquireLease(db, {
@@ -72,6 +78,7 @@ async function warmGroup(
       kind: h.kind,
       holderId: h.holderId,
       backend: "modal",
+      ...(warmBilling ? { warmBilling } : {}),
       leaseTtlMs: 90_000,
     });
   }
@@ -94,6 +101,14 @@ async function backdateMeterCursor(
 ): Promise<void> {
   await admin`
     update sandbox_leases set last_meter_at = now() - (${String(secondsAgo)} || ' seconds')::interval
+    where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+}
+
+async function backdateWarmStart(workspaceId: string, groupId: string, secondsAgo: number) {
+  await admin`
+    update sandbox_leases set resume_state = jsonb_set(
+      resume_state, '{opengeniRecovery,restore,completedAt}',
+      to_jsonb((now() - (${String(secondsAgo)} || ' seconds')::interval)::text))
     where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
 }
 
@@ -175,26 +190,258 @@ afterAll(async () => {
 }, 180_000);
 
 describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
-  test("(1) the FIRST tick seeds the cursor (no accrual); the SECOND tick accrues warm-seconds", async () => {
+  test("paid admissions fence zero balance before cold create, warm join and draining re-arm; unpriced modes remain usable", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const paid = { mode: "credits" as const, rateMicrosPerSecond: 100 };
+    const acquire = (
+      kind: "turn" | "viewer" | "direct" | "interaction",
+      holderId: string,
+      warmBilling: {
+        mode: "usage_only" | "shadow" | "credits";
+        rateMicrosPerSecond: number;
+      } = paid,
+    ) =>
+      acquireLease(db, {
+        ...ws,
+        sandboxGroupId: ws.groupId,
+        kind,
+        holderId,
+        backend: "modal",
+        leaseTtlMs: 90_000,
+        warmBilling,
+      });
+    for (const kind of ["turn", "viewer", "direct", "interaction"] as const) {
+      await expect(acquire(kind, `unfunded-${kind}`)).rejects.toBeInstanceOf(
+        SandboxPaidComputeAdmissionError,
+      );
+    }
+    expect(await readLiveness(ws.workspaceId, ws.groupId)).toBe("cold");
+    expect(
+      (await acquire("viewer", "free", { mode: "credits", rateMicrosPerSecond: 0 })).role,
+    ).toBe("spawner");
+    const committed = await commitWarmingToWarm(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: 0,
+      instanceId: "box",
+      leaseTtlMs: 90_000,
+    });
+    expect(committed.committed).toBe(true);
+    // Enabling a paid rate cannot turn an already-running free box into a
+    // paid box: every holder type can still join it at zero balance.
+    for (const kind of ["turn", "viewer", "direct", "interaction"] as const) {
+      expect((await acquire(kind, `free-${kind}`)).role).toBe("attached");
+    }
+    expect(await readLiveness(ws.workspaceId, ws.groupId)).toBe("warm");
+
+    const paidWs = await freshWorkspace();
+    await seedBalance(paidWs.accountId, 500);
+    await warmGroup(paidWs, [{ kind: "viewer", holderId: "paid-viewer" }], paid);
+    await seedBalance(paidWs.accountId, -500);
+    const paidAcquire = (kind: "turn" | "viewer" | "direct" | "interaction", holderId: string) =>
+      acquireLease(db, {
+        ...paidWs,
+        sandboxGroupId: paidWs.groupId,
+        kind,
+        holderId,
+        backend: "modal",
+        leaseTtlMs: 90_000,
+        warmBilling: paid,
+      });
+    for (const kind of ["turn", "viewer", "direct", "interaction"] as const) {
+      await expect(paidAcquire(kind, `zero-${kind}`)).rejects.toBeInstanceOf(
+        SandboxPaidComputeAdmissionError,
+      );
+    }
+    // Once its last holder releases, the paid lease may drain; standalone
+    // re-arm still checks credits before prolonging it.
+    await releaseLeaseHolder(db, {
+      ...paidWs,
+      sandboxGroupId: paidWs.groupId,
+      kind: "viewer",
+      holderId: "paid-viewer",
+      idleGraceMs: 0,
+    });
+    expect(await readLiveness(paidWs.workspaceId, paidWs.groupId)).toBe("draining");
+    await expect(
+      reArmDrainingLease(db, {
+        ...paidWs,
+        sandboxGroupId: paidWs.groupId,
+        leaseTtlMs: 90_000,
+        warmBilling: paid,
+      }),
+    ).rejects.toBeInstanceOf(SandboxPaidComputeAdmissionError);
+    await expect(paidAcquire("direct", "zero-rearm")).rejects.toBeInstanceOf(
+      SandboxPaidComputeAdmissionError,
+    );
+    // A new top-up reopens paid admission without depending on the reaper.
+    await seedBalance(paidWs.accountId, 500);
+    expect((await paidAcquire("turn", "funded-rearm")).role).toBe("rearmed");
+  }, 60_000);
+
+  test("paid first and fractional final intervals retain the admitted payer and rate while paid mode remains enabled", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    await seedBalance(ws.accountId, 2_000);
+    const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "t1" }], {
+      mode: "credits",
+      rateMicrosPerSecond: 400,
+    });
+    await backdateWarmStart(ws.workspaceId, ws.groupId, 3);
+    const first = await accrueWarmSeconds(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      billingMode: "credits",
+      warmRateMicrosPerSecond: 900,
+    });
+    expect(first.seconds).toBeGreaterThanOrEqual(3);
+    expect(first.costMicros).toBe(first.seconds * 400);
+    // A later configured rate cannot rewrite the running box's admitted price.
+    await releaseLeaseHolder(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      kind: "turn",
+      holderId: "t1",
+      idleGraceMs: 0,
+    });
+    await admin`update sandbox_leases set last_meter_at = now() - interval '600 milliseconds'
+      where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
+    const cutoff = await markWarmBillingStopCutoff(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+    });
+    expect(cutoff).toBeInstanceOf(Date);
+    const final = await accrueWarmSeconds(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      billingMode: "credits",
+      warmRateMicrosPerSecond: 90_000,
+      finalDrain: true,
+    });
+    expect(final.accrued).toBe(true);
+    expect(final.seconds).toBe(0);
+    expect(final.costMicros).toBeGreaterThan(0);
+    expect(final.costMicros).toBeLessThan(400);
+    expect(await eventCount(ws.workspaceId, "sandbox.warm_cost")).toBe(2);
+    // A delayed settlement retry cannot advance beyond the durable stop time.
+    expect(
+      (
+        await accrueWarmSeconds(db, {
+          ...ws,
+          sandboxGroupId: ws.groupId,
+          expectedEpoch: epoch,
+          warmRateMicrosPerSecond: 99,
+          billingMode: "credits",
+          finalDrain: true,
+        })
+      ).accrued,
+    ).toBe(false);
+  }, 60_000);
+
+  test("usage_only rollback stops an old paid lease's charge and funding fence", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    await seedBalance(ws.accountId, 100);
+    const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "old-turn" }], {
+      mode: "credits",
+      rateMicrosPerSecond: 10,
+    });
+    await backdateWarmStart(ws.workspaceId, ws.groupId, 2);
+    await seedBalance(ws.accountId, -100);
+    const tick = await accrueWarmSeconds(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      billingMode: "usage_only",
+      warmRateMicrosPerSecond: 0,
+    });
+    expect(tick.accrued).toBe(true);
+    expect(tick.costMicros).toBe(0);
+    expect(await eventCount(ws.workspaceId, "sandbox.warm_cost")).toBe(0);
+    expect(
+      await heartbeatLeaseHolderStatus(db, {
+        ...ws,
+        sandboxGroupId: ws.groupId,
+        kind: "turn",
+        holderId: "old-turn",
+        expectedEpoch: epoch,
+        leaseTtlMs: 90_000,
+        billingMode: "usage_only",
+      }),
+    ).toMatchObject({ holderAlive: true, leaseExtended: true, fence: null });
+    expect(
+      (
+        await acquireLease(db, {
+          ...ws,
+          sandboxGroupId: ws.groupId,
+          kind: "viewer",
+          holderId: "new-viewer",
+          backend: "modal",
+          leaseTtlMs: 90_000,
+          warmBilling: { mode: "usage_only", rateMicrosPerSecond: 0 },
+        })
+      ).role,
+    ).toBe("attached");
+  }, 60_000);
+
+  test("paid lease extension refuses zero balance without removing its active holder", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    await seedBalance(ws.accountId, 100);
+    const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "t1" }], {
+      mode: "credits",
+      rateMicrosPerSecond: 10,
+    });
+    await seedBalance(ws.accountId, -100);
+    expect(
+      await heartbeatLeaseHolderStatus(db, {
+        ...ws,
+        sandboxGroupId: ws.groupId,
+        kind: "turn",
+        holderId: "t1",
+        expectedEpoch: epoch,
+        leaseTtlMs: 90_000,
+      }),
+    ).toMatchObject({ holderAlive: true, leaseExtended: false, fence: "funding" });
+    expect(await readLiveness(ws.workspaceId, ws.groupId)).toBe("warm");
+    await seedBalance(ws.accountId, 100);
+    expect(
+      await heartbeatLeaseHolderStatus(db, {
+        ...ws,
+        sandboxGroupId: ws.groupId,
+        kind: "turn",
+        holderId: "t1",
+        expectedEpoch: epoch,
+        leaseTtlMs: 90_000,
+      }),
+    ).toMatchObject({ holderAlive: true, leaseExtended: true, fence: null });
+  }, 60_000);
+
+  test("(1) the FIRST tick includes the interval since warm transition", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "t1" }]);
 
-    // commitWarmingToWarm leaves last_meter_at null → the first tick only seeds.
-    const seed = await accrueWarmSeconds(db, {
+    await backdateWarmStart(ws.workspaceId, ws.groupId, 5);
+    const first = await accrueWarmSeconds(db, {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
       sandboxGroupId: ws.groupId,
       expectedEpoch: epoch,
       warmRateMicrosPerSecond: 0,
     });
-    expect(seed.accrued).toBe(false);
-    const afterSeed = await readMeterRow(ws.workspaceId, ws.groupId);
-    expect(afterSeed?.last_meter_at).not.toBeNull();
-    expect(afterSeed?.last_meter_tick).toBe(0);
-    expect(await warmSecondsEvents(ws.workspaceId, ws.groupId)).toHaveLength(0);
+    expect(first.accrued).toBe(true);
+    expect(first.seconds).toBeGreaterThanOrEqual(5);
+    const afterFirst = await readMeterRow(ws.workspaceId, ws.groupId);
+    expect(afterFirst?.last_meter_at).not.toBeNull();
+    expect(afterFirst?.last_meter_tick).toBe(1);
+    expect(await warmSecondsEvents(ws.workspaceId, ws.groupId)).toHaveLength(1);
 
-    // Backdate the cursor 5s and tick again → 5 warm-seconds accrue at tick 1.
+    // A subsequent tick advances the same stream.
     await backdateMeterCursor(ws.workspaceId, ws.groupId, 5);
     const accrue = await accrueWarmSeconds(db, {
       accountId: ws.accountId,
@@ -205,12 +452,11 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     });
     expect(accrue.accrued).toBe(true);
     expect(accrue.seconds).toBeGreaterThanOrEqual(5);
-    expect(accrue.tick).toBe(1);
+    expect(accrue.tick).toBe(2);
     const events = await warmSecondsEvents(ws.workspaceId, ws.groupId);
-    expect(events).toHaveLength(1);
-    expect(events[0]!.quantity).toBeGreaterThanOrEqual(5);
+    expect(events).toHaveLength(2);
     const afterAccrue = await readMeterRow(ws.workspaceId, ws.groupId);
-    expect(afterAccrue?.last_meter_tick).toBe(1);
+    expect(afterAccrue?.last_meter_tick).toBe(2);
   }, 60_000);
 
   test("(2) IDEMPOTENCY: re-running a tick at the same (group, epoch, tick) does NOT double-charge", async () => {
@@ -353,37 +599,38 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     expect(await warmSecondsEvents(ws.workspaceId, ws.groupId)).toHaveLength(3);
   }, 60_000);
 
-  test("(6) FORCE-DRAIN: a 0-balance workspace drains a VIEWER-ONLY box while a TURN-HELD box survives", async () => {
+  test("(6) zero balance cannot drain any already active holder", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     // Box V: viewer-only (turn_holders=0) — eligible for force-drain.
     const viewerOnly = { ...ws, groupId: crypto.randomUUID() };
     await warmGroup(viewerOnly, [{ kind: "viewer", holderId: "v1" }]);
-    // Box T: turn-held (a paying turn) in the SAME workspace — must NEVER be killed.
-    const turnHeld = { ...ws, groupId: crypto.randomUUID() };
-    await warmGroup(turnHeld, [{ kind: "turn", holderId: "t1" }]);
+    const groups = await Promise.all(
+      (["turn", "direct", "interaction"] as const).map(async (kind) => {
+        const group = { ...ws, groupId: crypto.randomUUID() };
+        await warmGroup(group, [{ kind, holderId: kind }]);
+        return group;
+      }),
+    );
 
     expect(await readLiveness(ws.workspaceId, viewerOnly.groupId)).toBe("warm");
-    expect(await readLiveness(ws.workspaceId, turnHeld.groupId)).toBe("warm");
+    for (const group of groups)
+      expect(await readLiveness(ws.workspaceId, group.groupId)).toBe("warm");
 
-    // 0 balance + balance enforcement on → force-drain viewer-only boxes only.
+    // Balance is a NEW paid admission boundary, never a running-holder drain.
     const result = await forceDrainOverLimitViewerOnlyBoxes(db, {
       workspaceId: ws.workspaceId,
-      balanceMicros: 0,
       enforceBalance: true,
       maxWarmSecondsPerWorkspace: 0,
       idleGraceMs: 0,
     });
-    expect(result.overLimit).toBe(true);
-    expect(result.reason).toBe("balance");
-    expect(result.drained.map((d) => d.sandboxGroupId)).toContain(viewerOnly.groupId);
-    expect(result.drained.map((d) => d.sandboxGroupId)).not.toContain(turnHeld.groupId);
-
-    expect(await readLiveness(ws.workspaceId, viewerOnly.groupId)).toBe("draining"); // drained
-    expect(await readLiveness(ws.workspaceId, turnHeld.groupId)).toBe("warm"); // SPARED
+    expect(result).toEqual({ overLimit: false, reason: null, drained: [] });
+    expect(await readLiveness(ws.workspaceId, viewerOnly.groupId)).toBe("warm");
+    for (const group of groups)
+      expect(await readLiveness(ws.workspaceId, group.groupId)).toBe("warm");
   }, 60_000);
 
-  test("(6b) FORCE-DRAIN by warm-cap: a workspace over its warm-second cap drains viewer-only boxes", async () => {
+  test("(6b) warm cap fences new viewers but preserves an active viewer", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const viewerOnly = { ...ws, groupId: crypto.randomUUID() };
@@ -405,35 +652,35 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       warmRateMicrosPerSecond: 0,
     });
 
-    // Balance enforcement OFF, but the warm cap (5) is exceeded → force-drain.
+    // Balance enforcement OFF; cap closes new admission but cannot drop v1.
     const result = await forceDrainOverLimitViewerOnlyBoxes(db, {
       workspaceId: ws.workspaceId,
-      balanceMicros: 1_000_000,
       enforceBalance: false,
       maxWarmSecondsPerWorkspace: 5,
       idleGraceMs: 0,
     });
     expect(result.overLimit).toBe(true);
     expect(result.reason).toBe("warm_cap");
-    expect(result.drained.map((d) => d.sandboxGroupId)).toContain(viewerOnly.groupId);
-    expect(await readLiveness(ws.workspaceId, viewerOnly.groupId)).toBe("draining");
+    expect(result.drained).toHaveLength(0);
+    expect(await readLiveness(ws.workspaceId, viewerOnly.groupId)).toBe("warm");
   }, 60_000);
 
-  test("(6c) a durable over-limit gate blocks viewer re-arm and cold respawn until a fresh limit evaluation clears it", async () => {
+  test("(6c) a durable warm-cap gate blocks new viewers until fresh cap evaluation clears it", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const epoch = await warmGroup(ws, [{ kind: "viewer", holderId: "v1" }]);
+    await warmGroup(ws, [{ kind: "viewer", holderId: "v1" }]);
+    await admin`insert into usage_events (account_id, workspace_id, event_type, quantity, unit, idempotency_key, occurred_at)
+      values (${ws.accountId}, ${ws.workspaceId}, 'sandbox.warm_seconds', 10, 'seconds', ${crypto.randomUUID()}, now())`;
 
     const drained = await forceDrainOverLimitViewerOnlyBoxes(db, {
       workspaceId: ws.workspaceId,
-      balanceMicros: 0,
-      enforceBalance: true,
-      maxWarmSecondsPerWorkspace: 0,
+      enforceBalance: false,
+      maxWarmSecondsPerWorkspace: 5,
       idleGraceMs: 60_000,
     });
-    expect(drained.reason).toBe("balance");
+    expect(drained.reason).toBe("warm_cap");
     expect(await readViewerForceDrain(ws.workspaceId)).toMatchObject({
-      reason: "balance",
+      reason: "warm_cap",
       requested_at: expect.any(Date),
     });
     expect(await listSandboxViewerForceDrainWorkspaceIds(db)).toContain(ws.workspaceId);
@@ -456,37 +703,19 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       drainingError = error;
     }
     expect(drainingError).toBeInstanceOf(SandboxViewerAdmissionBlockedError);
-    expect((drainingError as SandboxViewerAdmissionBlockedError).reason).toBe("balance");
-    expect(await readLiveness(ws.workspaceId, ws.groupId)).toBe("draining");
+    expect((drainingError as SandboxViewerAdmissionBlockedError).reason).toBe("warm_cap");
+    expect(await readLiveness(ws.workspaceId, ws.groupId)).toBe("warm");
 
-    // The intent belongs to the workspace, not this provider instance, so
-    // teardown cannot make a cold successor viewer-admissible.
-    expect(
-      await confirmDrainCold(db, {
-        accountId: ws.accountId,
-        workspaceId: ws.workspaceId,
-        sandboxGroupId: ws.groupId,
-        expectedEpoch: epoch,
-      }),
-    ).toEqual({ wentCold: true });
-    let coldError: unknown;
-    try {
-      await acquireViewer("v3");
-    } catch (error) {
-      coldError = error;
-    }
-    expect(coldError).toBeInstanceOf(SandboxViewerAdmissionBlockedError);
-    expect(await readLiveness(ws.workspaceId, ws.groupId)).toBe("cold");
+    // The existing holder and its box remain intact.
+    // The existing viewer stays protected even while new viewers are fenced.
 
-    // A top-up is not inferred from time: the same serialized limit evaluator
-    // clears the gate from fresh balance truth, after which normal cold
-    // materialization can resume.
+    // A cap-window reset is evaluated explicitly; no balance top-up is needed.
+    await admin`delete from usage_events where workspace_id = ${ws.workspaceId} and event_type = 'sandbox.warm_seconds'`;
     expect(
       await forceDrainOverLimitViewerOnlyBoxes(db, {
         workspaceId: ws.workspaceId,
-        balanceMicros: 1,
-        enforceBalance: true,
-        maxWarmSecondsPerWorkspace: 0,
+        enforceBalance: false,
+        maxWarmSecondsPerWorkspace: 5,
         idleGraceMs: 60_000,
       }),
     ).toEqual({ overLimit: false, reason: null, drained: [] });
@@ -495,28 +724,22 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       requested_at: null,
     });
     expect(await listSandboxViewerForceDrainWorkspaceIds(db)).not.toContain(ws.workspaceId);
-    expect((await acquireViewer("v4")).role).toBe("spawner");
+    expect((await acquireViewer("v4")).role).toBe("attached");
   }, 60_000);
 
-  test("(7) warm-cost: a configured rate debits credits and records sandbox.warm_cost (orthogonal to warm_seconds)", async () => {
+  test("(7) credits settles the full signed warm cost, idempotently, below zero", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    await seedBalance(ws.accountId, 1_000_000);
+    await seedBalance(ws.accountId, 100);
     const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "t1" }]);
-    await accrueWarmSeconds(db, {
-      accountId: ws.accountId,
-      workspaceId: ws.workspaceId,
-      sandboxGroupId: ws.groupId,
-      expectedEpoch: epoch,
-      warmRateMicrosPerSecond: 100,
-    });
-    await backdateMeterCursor(ws.workspaceId, ws.groupId, 4);
+    await backdateWarmStart(ws.workspaceId, ws.groupId, 4);
     const accrue = await accrueWarmSeconds(db, {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
       sandboxGroupId: ws.groupId,
       expectedEpoch: epoch,
       warmRateMicrosPerSecond: 100,
+      billingMode: "credits",
     });
     expect(accrue.accrued).toBe(true);
     expect(accrue.costMicros).toBe(accrue.seconds * 100);
@@ -526,7 +749,8 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     // The credit balance is debited by the actual warm-cost.
     const [bal] = await admin<{ b: number }[]>`
       select coalesce(sum(amount_micros), 0)::bigint as b from credit_ledger_entries where account_id = ${ws.accountId}`;
-    expect(Number(bal!.b)).toBe(1_000_000 - accrue.costMicros);
+    expect(Number(bal!.b)).toBe(100 - accrue.costMicros);
+    expect(Number(bal!.b)).toBeLessThan(0);
 
     // IDEMPOTENT DEBIT: a re-fire at the same (group, epoch, tick) does NOT
     // double-debit (rewind the cursor + tick to replay the same tick index).
@@ -539,11 +763,122 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       sandboxGroupId: ws.groupId,
       expectedEpoch: epoch,
       warmRateMicrosPerSecond: 100,
+      billingMode: "credits",
     });
     expect(replay.tick).toBe(1);
     const [bal2] = await admin<{ b: number }[]>`
       select coalesce(sum(amount_micros), 0)::bigint as b from credit_ledger_entries where account_id = ${ws.accountId}`;
-    expect(Number(bal2!.b)).toBe(1_000_000 - accrue.costMicros); // unchanged — no double-debit
+    expect(Number(bal2!.b)).toBe(100 - accrue.costMicros); // unchanged — no double-debit
+  }, 60_000);
+
+  test("a conflicting debit key rolls back the usage rows and cursor, leaving the tick retryable", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "t1" }]);
+    await backdateWarmStart(ws.workspaceId, ws.groupId, 4);
+    const key = `debit:sandbox.warm_cost:${ws.groupId}:${epoch}:1`;
+    await admin`
+      insert into credit_ledger_entries (account_id, type, amount_micros, idempotency_key)
+      values (${ws.accountId}, 'grant', 1, ${key})`;
+
+    const tick = () =>
+      accrueWarmSeconds(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: ws.groupId,
+        expectedEpoch: epoch,
+        warmRateMicrosPerSecond: 100,
+        billingMode: "credits",
+      });
+    await expect(tick()).rejects.toThrow("idempotency key conflicts");
+    expect(await warmSecondsEvents(ws.workspaceId, ws.groupId)).toHaveLength(0);
+    expect(await eventCount(ws.workspaceId, "sandbox.warm_cost")).toBe(0);
+    expect((await readMeterRow(ws.workspaceId, ws.groupId))?.last_meter_tick).toBe(0);
+    await admin`delete from credit_ledger_entries where account_id = ${ws.accountId}
+                and idempotency_key = ${key}`;
+    expect((await tick()).accrued).toBe(true);
+    expect(await eventCount(ws.workspaceId, "sandbox.warm_cost")).toBe(1);
+  }, 60_000);
+
+  test("usage_only ignores a configured rate; shadow records an estimate but never debits", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "t1" }]);
+    await backdateWarmStart(ws.workspaceId, ws.groupId, 5);
+    const usage = await accrueWarmSeconds(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 100,
+      billingMode: "usage_only",
+    });
+    expect(usage.costMicros).toBe(0);
+    expect(await eventCount(ws.workspaceId, "sandbox.warm_cost")).toBe(0);
+    await backdateMeterCursor(ws.workspaceId, ws.groupId, 4);
+    const shadow = await accrueWarmSeconds(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 100,
+      billingMode: "shadow",
+    });
+    expect(shadow.costMicros).toBeGreaterThanOrEqual(400);
+    expect(await eventCount(ws.workspaceId, "sandbox.warm_cost")).toBe(0);
+    const [seconds] = await admin<{ context: { warmCostShadowMicros: number } }[]>`
+      select initiator_context as context from usage_events
+      where workspace_id = ${ws.workspaceId} and event_type = 'sandbox.warm_seconds'
+      order by occurred_at desc limit 1`;
+    expect(seconds?.context.warmCostShadowMicros).toBe(shadow.costMicros);
+    const [ledger] = await admin<{ n: number }[]>`
+      select count(*)::int as n from credit_ledger_entries where account_id = ${ws.accountId}`;
+    expect(ledger!.n).toBe(0);
+  }, 60_000);
+
+  test("final drain meters the last interval once and spares a re-armed or cold epoch", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    await seedBalance(ws.accountId, 1_000);
+    const epoch = await warmGroup(ws, [{ kind: "viewer", holderId: "v1" }], {
+      mode: "credits",
+      rateMicrosPerSecond: 100,
+    });
+    await backdateWarmStart(ws.workspaceId, ws.groupId, 5);
+    await releaseLeaseHolder(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      kind: "viewer",
+      holderId: "v1",
+      idleGraceMs: 0,
+    });
+    expect(
+      await markWarmBillingStopCutoff(db, {
+        ...ws,
+        sandboxGroupId: ws.groupId,
+        expectedEpoch: epoch,
+      }),
+    ).toBeInstanceOf(Date);
+    const tick = () =>
+      accrueWarmSeconds(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: ws.groupId,
+        expectedEpoch: epoch,
+        warmRateMicrosPerSecond: 100,
+        billingMode: "credits",
+        finalDrain: true,
+      });
+    expect((await tick()).seconds).toBeGreaterThanOrEqual(5);
+    expect((await tick()).accrued).toBe(false);
+    expect(await eventCount(ws.workspaceId, "sandbox.warm_cost")).toBe(1);
+    expect(
+      await confirmDrainCold(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: ws.groupId,
+        expectedEpoch: epoch,
+      }),
+    ).toEqual({ wentCold: true });
+    expect((await tick()).accrued).toBe(false);
   }, 60_000);
 
   test("(8) a NON-warm (draining) lease does not meter and is not listed as meterable", async () => {

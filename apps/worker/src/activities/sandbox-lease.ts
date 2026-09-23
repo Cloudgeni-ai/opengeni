@@ -39,10 +39,10 @@ import {
   countSandboxLeasesByLiveness,
   deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
-  getBillingBalance,
   listCreditBalancesByAccount,
   listLegacyModalCheckpointSlots,
   listLiveModalSandboxLeaseAttributions,
+  markWarmBillingStopCutoff,
   listMeterableWarmLeases,
   listSandboxViewerForceDrainWorkspaceIds,
   markSandboxCheckpointArtifactDeletePending,
@@ -186,8 +186,7 @@ export type ReapSandboxLeasesResult = {
   skipped: number;
   /** Warm viewer-only leases that accrued warm-seconds this tick (P2.1). */
   metered: number;
-  /** Viewer-only boxes force-drained because their workspace is over a limit
-   *  (0 balance / over the warm cap) — turn-held boxes are never drained (P2.1). */
+  /** Holderless boxes accelerated to draining by the optional warm cap. */
   forceDrained: number;
   /** Provider-side Modal orphan sandboxes terminated by the defensive sweep. */
   modalOrphansTerminated: number;
@@ -735,8 +734,7 @@ export function createSandboxLeaseActivities(
       metered = meterResult.accrued;
       const forceDrainWorkspaceIds = new Set<string>();
       if (
-        settings.billingMode === "stripe" ||
-        settings.usageLimitsMode === "managed" ||
+        settings.sandboxWarmBillingMode === "credits" ||
         settings.sandboxMaxWarmSecondsPerWorkspace > 0
       ) {
         for (const workspaceId of meterResult.workspaceIds) {
@@ -2255,19 +2253,25 @@ async function accrueWarmTick(
   }
   await forEachWithConcurrency(leases, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (lease) => {
     try {
-      const rate = sandboxWarmRateMicrosPerSecond(settings, lease.backend);
+      const rate =
+        settings.sandboxWarmBillingMode === "usage_only"
+          ? 0
+          : sandboxWarmRateMicrosPerSecond(settings, lease.backend);
       const result = await accrueWarmSeconds(db, {
         accountId: lease.accountId,
         workspaceId: lease.workspaceId,
         sandboxGroupId: lease.sandboxGroupId,
         expectedEpoch: lease.leaseEpoch,
         warmRateMicrosPerSecond: rate,
+        billingMode: settings.sandboxWarmBillingMode,
         subjectId: lease.sandboxGroupId,
       });
       if (result.accrued) {
         accrued += 1;
       }
-      recordCreditMicros(observability, "usage", result.costMicros);
+      if (result.costMicros > 0 && settings.sandboxWarmBillingMode === "credits") {
+        recordCreditMicros(observability, "usage", result.costMicros);
+      }
     } catch (error) {
       observability.warn("sandbox reaper: warm-seconds accrual failed for lease", {
         workspaceId: lease.workspaceId,
@@ -2383,8 +2387,8 @@ async function refreshSandboxInventoryGauge(
 
 /**
  * The per-workspace warm-cap + force-drain pass (P2.1). For each workspace with a
- * live warm box, under the usage lock: if it is at 0 balance (when a billing /
- * managed mode is on) or over its warm cap, force-drain its VIEWER-ONLY boxes
+ * live warm box, under the usage lock: if it is over its optional warm cap,
+ * accelerate only holderless boxes to draining
  * (guarded turn_holders=0 — a paying turn is never killed). Returns the count of
  * viewer-only boxes force-drained. Per-workspace best-effort.
  */
@@ -2394,8 +2398,7 @@ async function forceDrainOverLimitWorkspaces(
   workspaceIds: Set<string>,
   observability: ActivityServices["observability"],
 ): Promise<number> {
-  const enforceBalance =
-    settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
+  const enforceBalance = false;
   const cap = settings.sandboxMaxWarmSecondsPerWorkspace;
   let forceDrained = 0;
   await forEachWithConcurrency(
@@ -2403,13 +2406,8 @@ async function forceDrainOverLimitWorkspaces(
     SANDBOX_MAINTENANCE_ITEM_CONCURRENCY,
     async (workspaceId) => {
       try {
-        const { accountId } = await rlsContextForWorkspace(db, workspaceId);
-        const balance = enforceBalance
-          ? await getBillingBalance(db, accountId)
-          : ({ balanceMicros: 1 } as { balanceMicros: number });
         const result = await forceDrainOverLimitViewerOnlyBoxes(db, {
           workspaceId,
-          balanceMicros: balance.balanceMicros,
           enforceBalance,
           maxWarmSecondsPerWorkspace: cap,
           idleGraceMs: settings.sandboxIdleGraceMs,
@@ -2997,6 +2995,16 @@ async function terminateDrainableBox(
   ) {
     return false;
   }
+  // Persist the customer charge horizon before the non-transactional provider
+  // stop. A retry after stop success cannot charge post-termination wall time.
+  if (!providerMissingBeforeCapture && settings.sandboxWarmBillingMode === "credits") {
+    await markWarmBillingStopCutoff(db, {
+      accountId,
+      workspaceId: row.workspaceId,
+      sandboxGroupId: row.sandboxGroupId,
+      expectedEpoch: row.leaseEpoch,
+    });
+  }
   const termination: ProviderTerminationOutcome | boolean = providerMissingBeforeCapture
     ? { terminated: true, providerMissingBeforeCapture: true }
     : await terminateBox(
@@ -3024,6 +3032,32 @@ async function terminateDrainableBox(
   const terminated = typeof termination === "boolean" ? termination : termination.terminated;
   if (!terminated) {
     return false;
+  }
+
+  // Stop was confirmed but the lease is not cold yet. This final epoch-fenced
+  // tick settles the interval since the last heartbeat/reaper sweep, including
+  // a box drained before its first periodic tick. If settlement fails, keep
+  // the draining receipt for retry instead of silently losing the charge.
+  const finalRate =
+    settings.sandboxWarmBillingMode === "usage_only"
+      ? 0
+      : sandboxWarmRateMicrosPerSecond(settings, backend);
+  if (
+    !providerMissingBeforeCapture &&
+    !(typeof termination !== "boolean" && termination.providerMissingBeforeCapture)
+  ) {
+    const finalTick = await accrueWarmSeconds(db, {
+      accountId,
+      workspaceId: row.workspaceId,
+      sandboxGroupId: row.sandboxGroupId,
+      expectedEpoch: row.leaseEpoch,
+      warmRateMicrosPerSecond: finalRate,
+      billingMode: settings.sandboxWarmBillingMode,
+      finalDrain: true,
+    });
+    if (finalTick.costMicros > 0 && settings.sandboxWarmBillingMode === "credits") {
+      recordCreditMicros(observability, "usage", finalTick.costMicros);
+    }
   }
 
   const providerMissing =

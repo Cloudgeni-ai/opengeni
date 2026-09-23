@@ -756,7 +756,6 @@ describe("durable ComputerSession lifecycle", () => {
 
     const drained = await forceDrainOverLimitViewerOnlyBoxes(client.db, {
       workspaceId: scope.workspaceId,
-      balanceMicros: 0,
       enforceBalance: true,
       maxWarmSecondsPerWorkspace: 0,
       idleGraceMs: 0,

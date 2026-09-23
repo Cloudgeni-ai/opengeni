@@ -1034,6 +1034,12 @@ describe("deployment contract", () => {
       "OPENGENI_PUBLIC_BASE_URL=https://staging.app.opengeni.ai",
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_BILLING_MODE=stripe");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE=usage_only");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES=0",
+    );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_CLIENT_ID=slack-staging-client");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_CLIENT_SECRET=slack-staging-secret");
     expect(artifacts.runtimeEnv).toContain(

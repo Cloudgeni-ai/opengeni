@@ -171,3 +171,29 @@ test("a personal upload marks the original private before requesting source prep
     await view.close();
   }
 });
+test("the saved original appears before background text preparation finishes", async () => {
+  let finishPreparation!: (result: { status: string; error: null }) => void;
+  const asset = { ...original, id: "22222222-2222-4222-8222-222222222222", filename: "New.pdf" };
+  uploadFile.mockResolvedValueOnce(asset);
+  createKnowledgeDrop.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finishPreparation = resolve;
+      }),
+  );
+  const view = await mount();
+  try {
+    const input = view.container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const files = new DataTransfer();
+    files.items.add(new File(["pdf"], "New.pdf", { type: "application/pdf" }));
+    await act(async () => {
+      Object.defineProperty(input, "files", { configurable: true, value: files.files });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(view.container.querySelector('[aria-label="New.pdf"]')).not.toBeNull();
+    expect(view.container.textContent).toContain("Original saved");
+    await act(async () => finishPreparation({ status: "pending", error: null }));
+  } finally {
+    await view.close();
+  }
+});

@@ -237,6 +237,9 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
             subjectId,
             subjectLabel: session.user.email || session.user.name,
             ...payload,
+            trialCreditsEnabled:
+              deps.settings.productAccessMode === "managed" &&
+              deps.settings.verifiedSignupTrialCreditsEnabled,
           }),
         ),
         201,

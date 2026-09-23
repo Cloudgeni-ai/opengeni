@@ -2,7 +2,7 @@ import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-worksp
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { StoredKnowledgeEntryContent } from "@opengeni/contracts";
-import { rawRows, withRlsContext, type Database } from "./database";
+import { rawRows, withRlsContext, withWorkspaceUsageLock, type Database } from "./database";
 import { fromPostgresLosslessJson, toPostgresLosslessText } from "./lossless-json";
 
 const Claim = z.object({
@@ -16,6 +16,56 @@ const Claim = z.object({
   nextIndex: z.number().int().nonnegative(),
 });
 export type KnowledgeIndexClaim = z.infer<typeof Claim>;
+
+/** DB-clock cutoff for this worker's first indexing poll, not a host-clock guess. */
+export async function knowledgeIndexBillingActivationTime(db: Database): Promise<Date> {
+  const [row] = await rawRows<{ activatedAt: Date }>(
+    db,
+    sql`SELECT clock_timestamp() AS "activatedAt"`,
+  );
+  return z.coerce.date().parse(row?.activatedAt);
+}
+
+/** Persist the chosen mode for exactly this leased generation. */
+export async function freezeKnowledgeIndexBillingMode(
+  db: Database,
+  raw: KnowledgeIndexClaim,
+  requested: "usage_only" | "shadow" | "credits",
+  activatedAt: Date,
+  rateMicrosPerMillionBytes: number,
+) {
+  const claim = Claim.parse(raw);
+  return withRlsContext(db, { accountId: claim.accountId }, async (tx) => {
+    const [row] = await rawRows<{ policy: unknown }>(
+      tx,
+      sql`SELECT knowledge_index_billing_policy(${claim.accountId}::uuid,
+        ${claim.revisionId}::uuid,${claim.leaseId}::uuid,${requested},
+        ${activatedAt.toISOString()}::timestamptz,
+        ${rateMicrosPerMillionBytes}::bigint) AS policy`,
+    );
+    return z
+      .object({
+        mode: z.enum(["usage_only", "shadow", "credits"]),
+        rateMicrosPerMillionBytes: z.number().int().nonnegative(),
+      })
+      .parse(row?.policy);
+  });
+}
+
+/** Serialize paid query admission and settlement across an entire account. */
+export async function withKnowledgeQueryAccountLock<T>(
+  db: Database,
+  accountId: string,
+  workspaceId: string,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return withWorkspaceUsageLock(db, workspaceId, async (tx) => {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtext(${`knowledge-query-account:${accountId}`}))`,
+    );
+    return fn(tx);
+  });
+}
 
 /** Internal projection dispatcher. No HTTP, MCP or agent tool exposes this capability. */
 export async function claimKnowledgeIndexJobs(
@@ -119,6 +169,19 @@ export async function completeKnowledgeIndexJob(
 }
 export async function deferKnowledgeIndexJob(db: Database, claim: KnowledgeIndexClaim) {
   return work(db, claim, { operation: "fail" });
+}
+
+/** A funding wait is not a provider failure. Keep the lease checkpoint intact. */
+export async function waitKnowledgeIndexForFunding(db: Database, raw: KnowledgeIndexClaim) {
+  const claim = Claim.parse(raw);
+  return withRlsContext(db, { accountId: claim.accountId }, async (tx) => {
+    const [row] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`SELECT knowledge_index_wait_for_funding(${claim.accountId}::uuid,
+        ${claim.revisionId}::uuid,${claim.leaseId}::uuid) AS result`,
+    );
+    return z.object({ status: z.enum(["pending", "obsolete"]) }).parse(row?.result);
+  });
 }
 
 export async function continueKnowledgeIndexJob(db: Database, claim: KnowledgeIndexClaim) {

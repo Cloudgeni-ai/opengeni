@@ -1320,7 +1320,6 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
 
     await forceDrainOverLimitViewerOnlyBoxes(db, {
       workspaceId,
-      balanceMicros: 0,
       enforceBalance: true,
       maxWarmSecondsPerWorkspace: 0,
       idleGraceMs: settings.sandboxIdleGraceMs,
@@ -1341,9 +1340,11 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
       viewerHolders: 0,
     });
 
+    await admin`
+      insert into credit_ledger_entries (account_id, type, amount_micros, idempotency_key)
+      values (${accountId}, 'grant', 1, ${`viewer-top-up:${crypto.randomUUID()}`})`;
     await forceDrainOverLimitViewerOnlyBoxes(db, {
       workspaceId,
-      balanceMicros: 1,
       enforceBalance: true,
       maxWarmSecondsPerWorkspace: 0,
       idleGraceMs: settings.sandboxIdleGraceMs,

@@ -26,6 +26,7 @@ import {
   hasGitHubRepositorySelection,
   resolveStreamTokenSecret,
   sandboxLifecycleTransitionWaitMs,
+  sandboxWarmRateMicrosPerSecond,
   stableSandboxEnvironmentForRun,
 } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
@@ -47,6 +48,7 @@ import {
   releaseLeaseHolder,
   SandboxLeaseSupersededError,
   SandboxViewerAdmissionBlockedError,
+  SandboxPaidComputeAdmissionError,
   type Database,
   type LeaseSnapshot,
   type SandboxRecord,
@@ -300,6 +302,10 @@ export async function attachViewer(
       ...(attachSubjectId ? { viewerSubjectId: attachSubjectId } : {}),
       ...(attachAuthorityEpoch !== null ? { viewerAuthorityEpoch: attachAuthorityEpoch } : {}),
       backend: session.sandboxBackend,
+      warmBilling: {
+        mode: settings.sandboxWarmBillingMode,
+        rateMicrosPerSecond: sandboxWarmRateMicrosPerSecond(settings, session.sandboxBackend),
+      },
       os: session.sandboxOs,
       image: sandboxRuntime.image,
       rigVersionId: session.rigVersionId,
@@ -309,6 +315,9 @@ export async function attachViewer(
       ...(input.waitSignal ? { waitSignal: input.waitSignal } : {}),
     });
   } catch (error) {
+    if (error instanceof SandboxPaidComputeAdmissionError) {
+      throw new HTTPException(402, { message: error.message, cause: error });
+    }
     if (error instanceof SandboxViewerAdmissionBlockedError) {
       throw new HTTPException(error.reason === "balance" ? 402 : 429, {
         message:
@@ -600,6 +609,7 @@ export async function heartbeatViewer(
     holderId: input.viewerId,
     leaseTtlMs: services.settings.sandboxLeaseTtlMs,
     expectedEpoch: input.expectedEpoch,
+    billingMode: services.settings.sandboxWarmBillingMode,
   });
   if (!alive) return false;
   const lease = await readLease(services.db, input.workspaceId, input.sandboxGroupId);

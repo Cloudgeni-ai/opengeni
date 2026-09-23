@@ -12,6 +12,7 @@ import type {
   KnowledgeEntryRecord,
   KnowledgeEntryScope,
   KnowledgeEntrySummary,
+  KnowledgeEntryListResponse,
   KnowledgeReviewBatch,
 } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
@@ -49,6 +50,11 @@ import {
 } from "./knowledge-labels";
 import { KnowledgeTree, KnowledgeRow, type KnowledgeCollection } from "./knowledge-tree";
 import { FormDisclosure } from "@/components/ui/form-disclosure";
+import {
+  KnowledgeIndexNotice,
+  KnowledgeSearchFallback,
+  knowledgeIndexLabel,
+} from "./knowledge-index-status";
 
 type View = "published" | "needs_review" | "archived" | "rejected";
 type Selection = { id: string; revisionId?: string; view?: View; requiredFor?: string };
@@ -101,7 +107,18 @@ export function KnowledgeBrowser({
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [fallbackReason, setFallbackReason] =
+    useState<KnowledgeEntryListResponse["fallbackReason"]>();
   const [refresh, setRefresh] = useState(0);
+  useEffect(() => {
+    if (
+      !sourceOnly ||
+      !entries.some((entry) => entry.indexStatus && entry.indexStatus !== "indexed")
+    )
+      return;
+    const timer = setTimeout(() => setRefresh((value) => value + 1), 30_000);
+    return () => clearTimeout(timer);
+  }, [entries, sourceOnly]);
   const [selection, setSelection] = useState<Selection | null>(
     focusEntryId ? { id: focusEntryId } : null,
   );
@@ -175,6 +192,7 @@ export function KnowledgeBrowser({
     setEntries([]);
     setCursor(null);
     setError(null);
+    setFallbackReason(undefined);
     setSelected(new Set());
     if (view === "needs_review" && !reviewGroup) {
       setLoading(false);
@@ -188,6 +206,7 @@ export function KnowledgeBrowser({
         if (current) {
           setEntries(result.entries);
           setCursor(result.nextCursor);
+          setFallbackReason(result.fallbackReason);
           if (startReview.current && reviewGroup?.id === startReview.current) {
             const first = result.entries[0]
               ? await firstReviewableEntry(result.entries[0].id, (id, options) =>
@@ -296,9 +315,11 @@ export function KnowledgeBrowser({
           description={
             search
               ? (entry.excerpts[0]?.text ?? entry.revision.preview)
-              : entry.revision.kind === "group"
-                ? entry.revision.preview
-                : undefined
+              : entry.revision.kind === "source"
+                ? (knowledgeIndexLabel(entry.indexStatus) ?? undefined)
+                : entry.revision.kind === "group"
+                  ? entry.revision.preview
+                  : undefined
           }
           onClick={() => {
             setTrail([]);
@@ -466,6 +487,9 @@ export function KnowledgeBrowser({
             </Link>
           </Button>
         </div>
+      ) : null}
+      {search && fallbackReason ? (
+        <KnowledgeSearchFallback reason={fallbackReason} workspaceId={workspaceId} />
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
         {view !== "needs_review" || reviewGroup ? (
@@ -1095,6 +1119,9 @@ function KnowledgeInspector(props: {
               </p>
             ) : historical ? (
               <p className="text-sm text-fg-muted">You are viewing an earlier revision.</p>
+            ) : null}
+            {!historical && entry.kind === "source" && !pending ? (
+              <KnowledgeIndexNotice status={record.indexStatus} workspaceId={props.workspaceId} />
             ) : null}
             {editing ? (
               <KnowledgeEditor
