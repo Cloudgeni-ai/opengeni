@@ -42,6 +42,7 @@ const PERSONAL_GITHUB_IDENTITY_E2E = "test/e2e/personal-github-identity.browser.
 const CRYPTO_RANDOM_UUID_E2E = "test/e2e/crypto-random-uuid.browser.e2e.ts";
 const WORKSPACE_SWITCHER_TRIGGER_E2E = "test/e2e/workspace-switcher-trigger.browser.e2e.ts";
 const SESSION_RAIL_ROW_METADATA_E2E = "test/e2e/session-rail-row-metadata.browser.e2e.ts";
+const SESSION_SKILL_REVIEW_E2E = "test/e2e/session-skill-review.browser.e2e.ts";
 const SITE_CONVERSATIONS_E2E = "test/e2e/site-conversations.browser.e2e.ts";
 const SETUP_ACCOUNT_TOKEN_E2E = "test/e2e/setup-account-token.browser.e2e.ts";
 const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
@@ -51,6 +52,27 @@ const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
 const PREVIEW_LOADING_E2E = "test/e2e/preview-loading.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
+  test("session Skill review follows its web and shared dependencies without widening leaf plans", () => {
+    for (const path of [
+      SESSION_SKILL_REVIEW_E2E,
+      "apps/web/src/components/session/session-skill-reviews.tsx",
+      "apps/web/test/fixtures/session-skill-review/main.tsx",
+      "packages/react/src/components/MessageTimeline.tsx",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(SESSION_SKILL_REVIEW_E2E);
+      expect(plan.unitTests, path).not.toContain(SESSION_SKILL_REVIEW_E2E);
+      expect(plan.integrationTests, path).not.toContain(SESSION_SKILL_REVIEW_E2E);
+    }
+    expect(usesBrowserRunner(SESSION_SKILL_REVIEW_E2E)).toBe(true);
+    const unrelated = createImpactPlan(["packages/browserd/src/index.ts"]);
+    expect(unrelated.mode).toBe("focused");
+    expect(unrelated.e2eTests).not.toContain(SESSION_SKILL_REVIEW_E2E);
+  });
+
   test("managed actor response coverage follows web and fixture dependencies", () => {
     const suite = "test/e2e/managed-actor-response.browser.e2e.ts";
     for (const path of [
@@ -226,6 +248,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/session-capability-cards.browser.e2e.ts",
       "test/e2e/session-lazy-panels.browser.e2e.ts",
       SESSION_RAIL_ROW_METADATA_E2E,
+      SESSION_SKILL_REVIEW_E2E,
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",
       SITE_CONVERSATIONS_E2E,
@@ -667,6 +690,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/session-capability-cards.browser.e2e.ts",
       "test/e2e/session-lazy-panels.browser.e2e.ts",
       SESSION_RAIL_ROW_METADATA_E2E,
+      SESSION_SKILL_REVIEW_E2E,
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",
       SITE_CONVERSATIONS_E2E,
