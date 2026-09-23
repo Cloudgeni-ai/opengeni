@@ -3081,32 +3081,46 @@ export async function verifyEnrollToken(
 // epoch) the URL is re-minted with epoch+1 and the old tunnel is torn down, so a
 // stale token points at a dead tunnel. Epoch mismatch is enforced at USE (by the
 // caller comparing the claim against the live lease), not inside verify.
-export const StreamTokenPayload = z.object({
-  workspaceId: z.string().uuid(),
-  sessionId: z.string().uuid(),
-  // Identifies the sandbox_lease_holders row (the viewer holder).
-  viewerId: z.string().uuid(),
-  // Fence: the token logically dies when the box is re-elected (epoch++).
-  leaseEpoch: z.number().int().nonnegative(),
-  // v1 is always "view"; "control" is the never-granted raw-input plane.
-  mode: z.enum(["view", "control"]),
-  // 6080 (noVNC); pins the token to ONE exposed port.
-  port: z.number().int().positive(),
-  // Short TTL (120s default); rotation is event-driven under the epoch fence,
-  // not on a keepalive clock.
-  exp: z.number().int().positive(),
-  // The authenticated subject the token was minted for (0281). Optional for
-  // rolling compatibility: old verifiers strip it, old mints omit it.
-  subjectId: z.string().min(1).max(512).optional(),
-  // The session authority epoch observed at mint (0281). The relay tracks the
-  // highest value presented per LIVE channel and rejects tokens below that
-  // floor. The floor is defense-in-depth, not the revocation authority: it
-  // lives only as long as the channel does (both sides detached, the
-  // half-open reaper, or a relay restart reset it), so a stale in-TTL token
-  // can still attach to a fresh channel. Real revocation is the mint refusing
-  // to issue new tokens plus the 120 s TTL bounding the old ones.
-  authorityEpoch: z.number().int().positive().optional(),
-});
+export const StreamTokenPayload = z
+  .object({
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    // Identifies the sandbox_lease_holders row (the viewer holder).
+    viewerId: z.string().uuid(),
+    // Fence: the token logically dies when the box is re-elected (epoch++).
+    leaseEpoch: z.number().int().nonnegative(),
+    // Input authority is granted explicitly by the API attach route.
+    mode: z.enum(["view", "control"]),
+    // Pins the token to exactly one exposed stream port.
+    port: z.number().int().positive(),
+    // Self-hosted relay tokens pin the viewer to one agent and stream channel.
+    // Non-relay provider tunnels do not have an OpenGeni relay channel to bind.
+    agentId: z.string().min(1).max(512).optional(),
+    channelId: z.string().min(1).max(128).optional(),
+    // Short TTL (120s default); rotation is event-driven under the epoch fence,
+    // not on a keepalive clock.
+    exp: z.number().int().positive(),
+    // The authenticated subject the token was minted for (0281). Optional for
+    // rolling compatibility: old verifiers strip it, old mints omit it.
+    subjectId: z.string().min(1).max(512).optional(),
+    // The session authority epoch observed at mint (0281). The relay tracks the
+    // highest value presented per LIVE channel and rejects tokens below that
+    // floor. The floor is defense-in-depth, not the revocation authority: it
+    // lives only as long as the channel does (both sides detached, the
+    // half-open reaper, or a relay restart reset it), so a stale in-TTL token
+    // can still attach to a fresh channel. Real revocation is the mint refusing
+    // to issue new tokens plus the 120 s TTL bounding the old ones.
+    authorityEpoch: z.number().int().positive().optional(),
+  })
+  .superRefine((claims, context) => {
+    if ((claims.agentId === undefined) !== (claims.channelId === undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["agentId"],
+        message: "agentId and channelId must be provided together",
+      });
+    }
+  });
 export type StreamTokenPayload = z.infer<typeof StreamTokenPayload>;
 
 export async function signStreamToken(

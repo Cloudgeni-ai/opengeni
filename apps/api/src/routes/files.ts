@@ -64,6 +64,9 @@ import {
   prepareMcpOAuthWorkspaceToolGateway,
 } from "../workspace-tool-gateway";
 
+const RETAINED_ARTIFACT_CONTENT_SECURITY_POLICY =
+  "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
 export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage } = deps;
 
@@ -689,6 +692,8 @@ async function serveRetainedArtifactContent(
     "Cache-Control": "private, no-store",
     "Content-Length": String(range.length),
     "Content-Type": metadata.contentType,
+    "Content-Disposition": "attachment",
+    "Content-Security-Policy": RETAINED_ARTIFACT_CONTENT_SECURITY_POLICY,
     "X-Content-Type-Options": "nosniff",
     ...(range.contentRange ? { "Content-Range": range.contentRange } : {}),
   };

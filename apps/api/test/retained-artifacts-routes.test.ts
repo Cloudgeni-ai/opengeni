@@ -82,7 +82,16 @@ function storageFixture() {
     bucket: "retained-test-bucket",
     backend: "s3-compatible",
     maxSinglePutSizeBytes: 5_000_000_000,
-    createPutUrl: unavailable,
+    async createPutUrl({ key, contentType, sha256 }) {
+      return {
+        url: `https://storage.example.test/upload/${encodeURIComponent(key)}?signature=opaque`,
+        requiredHeaders: {
+          "content-type": contentType,
+          ...(sha256 ? { "x-amz-meta-sha256": sha256 } : {}),
+        },
+        expiresAt: new Date(Date.now() + 60_000),
+      };
+    },
     async createGetUrl({ key }) {
       signedGetCalls.push(key);
       return {
@@ -90,7 +99,15 @@ function storageFixture() {
         expiresAt: new Date("2026-08-10T12:05:00.000Z"),
       };
     },
-    headFile: unavailable,
+    async headFile(file) {
+      const bytes = objects.get(file.objectKey);
+      if (!bytes) throw new Error("uploaded test object is missing");
+      return {
+        ContentLength: bytes.byteLength,
+        ...(file.contentType ? { ContentType: file.contentType } : {}),
+        ...(file.sha256 ? { Metadata: { sha256: file.sha256 } } : {}),
+      };
+    },
     async fileExists(file) {
       existenceCalls.push(file.id);
       return objects.has(file.objectKey);
@@ -189,6 +206,22 @@ function sessionArtifactUrl(
   content = false,
 ): string {
   return `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/artifacts/${artifactId}${content ? "/content" : ""}`;
+}
+
+const RETAINED_ARTIFACT_CONTENT_SECURITY_POLICY =
+  "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+function expectSafeRetainedArtifactByteResponse(response: Response): void {
+  expect(response.headers.get("content-disposition")).toBe("attachment");
+  expect(response.headers.get("content-security-policy")).toBe(
+    RETAINED_ARTIFACT_CONTENT_SECURITY_POLICY,
+  );
+  expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function createScreenshotArtifact(
@@ -478,6 +511,90 @@ async function createGeneratedVideoArtifact(
 }
 
 describe("retained artifact metadata and bounded content", () => {
+  test("secures uploaded HTML and SVG while authenticated fetch-to-blob previews keep working", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture(["files:read", "files:upload"]);
+    const fixture = storageFixture();
+    const app = routeApp(fixture.storage);
+    const uploads = [
+      {
+        contentType: "text/html",
+        filename: "report.html",
+        bytes: new TextEncoder().encode(
+          '<script>document.documentElement.dataset.xss="ran"</script>',
+        ),
+      },
+      {
+        contentType: "image/svg+xml",
+        filename: "graphic.svg",
+        bytes: new TextEncoder().encode(
+          '<svg xmlns="http://www.w3.org/2000/svg"><script>document.documentElement.dataset.xss="ran"</script></svg>',
+        ),
+      },
+      {
+        contentType: "application/pdf",
+        filename: "report.pdf",
+        bytes: new TextEncoder().encode("%PDF-1.7\npreview bytes\n%%EOF"),
+      },
+      {
+        contentType: "image/png",
+        filename: "pixel.png",
+        bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]),
+      },
+    ];
+
+    for (const uploadInput of uploads) {
+      const bytes = uploadInput.bytes;
+      const sha256 = await sha256Hex(bytes);
+      const uploadResponse = await app.request(
+        `http://x/v1/workspaces/${workspace.workspaceId}/files/uploads`,
+        {
+          method: "POST",
+          headers: {
+            authorization: workspace.authorization,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            filename: uploadInput.filename,
+            contentType: uploadInput.contentType,
+            sizeBytes: bytes.byteLength,
+            sha256,
+          }),
+        },
+      );
+      expect(uploadResponse.status).toBe(201);
+      const upload = (await uploadResponse.json()) as { fileId: string; uploadId: string };
+      const objectKey = `workspaces/${workspace.workspaceId}/files/${upload.fileId}/original/${uploadInput.filename}`;
+      fixture.objects.set(objectKey, bytes);
+
+      const complete = await app.request(
+        `http://x/v1/workspaces/${workspace.workspaceId}/files/uploads/${upload.uploadId}/complete`,
+        { method: "POST", headers: { authorization: workspace.authorization } },
+      );
+      expect(complete.status).toBe(200);
+
+      const contentUrl = `http://x/v1/workspaces/${workspace.workspaceId}/artifacts/${upload.fileId}/content`;
+      const full = await app.request(contentUrl, {
+        headers: { authorization: workspace.authorization },
+      });
+      expect(full.status).toBe(200);
+      expect(full.headers.get("content-type")).toStartWith(uploadInput.contentType);
+      expectSafeRetainedArtifactByteResponse(full);
+      const previewBlob = await full.blob();
+      expect(previewBlob.type).toStartWith(uploadInput.contentType);
+      expect(new Uint8Array(await previewBlob.arrayBuffer())).toEqual(bytes);
+
+      const range = await app.request(contentUrl, {
+        headers: { authorization: workspace.authorization, range: "bytes=0-7" },
+      });
+      expect(range.status).toBe(206);
+      expect(range.headers.get("content-type")).toStartWith(uploadInput.contentType);
+      expectSafeRetainedArtifactByteResponse(range);
+      expect(range.headers.get("content-range")).toBe(`bytes 0-7/${bytes.byteLength}`);
+      expect(new Uint8Array(await range.arrayBuffer())).toEqual(bytes.slice(0, 8));
+    }
+  });
+
   test("authorizes retained workspace-file fallbacks before serving bytes", async () => {
     const source = await readFile(new URL("../src/routes/files.ts", import.meta.url), "utf8");
     const fallback = source.slice(source.indexOf("async function getWorkspaceArtifact"));
@@ -536,6 +653,8 @@ describe("retained artifact metadata and bounded content", () => {
       },
     );
     expect(content.status).toBe(206);
+    expectSafeRetainedArtifactByteResponse(content);
+    expect(content.headers.get("content-type")).toStartWith("image/png");
     expect(new Uint8Array(await content.arrayBuffer())).toEqual(bytes.slice(1, 3));
   });
 
@@ -632,6 +751,7 @@ describe("retained artifact metadata and bounded content", () => {
     expect(exact.headers.get("content-length")).toBe("1000");
     expect(exact.headers.get("accept-ranges")).toBe("bytes");
     expect(exact.headers.get("cache-control")).toBe("private, no-store");
+    expectSafeRetainedArtifactByteResponse(exact);
     expect(new Uint8Array(await exact.arrayBuffer())).toEqual(bytes.slice(1000, 2000));
 
     const firstPage = await app.request(artifactUrl(workspace.workspaceId, artifact.fileId, true), {
@@ -641,6 +761,7 @@ describe("retained artifact metadata and bounded content", () => {
     expect(firstPage.headers.get("content-length")).toBe(
       String(RETAINED_OUTPUT_DEFAULT_PAGE_BYTES),
     );
+    expectSafeRetainedArtifactByteResponse(firstPage);
     expect(fixture.calls).toEqual([
       { fileId: artifact.fileId, start: 1000, end: 1999 },
       {
@@ -702,6 +823,7 @@ describe("retained artifact metadata and bounded content", () => {
     expect(present.status).toBe(200);
     expect(present.headers.get("content-length")).toBe("0");
     expect(present.headers.get("accept-ranges")).toBe("bytes");
+    expectSafeRetainedArtifactByteResponse(present);
     expect(new Uint8Array(await present.arrayBuffer())).toHaveLength(0);
 
     const missing = await createArtifact(workspace, {
@@ -881,12 +1003,33 @@ describe("retained artifact metadata and bounded content", () => {
       },
     );
     expect(range.status).toBe(206);
+    expectSafeRetainedArtifactByteResponse(range);
+    expect(range.headers.get("content-type")).toStartWith("image/png");
     expect(range.headers.get("content-range")).toBe(`bytes 1048576-1572863/${bytes.byteLength}`);
     expect(range.headers.get("content-length")).toBe("524288");
     expect(new Uint8Array(await range.arrayBuffer())).toEqual(bytes.slice(1_048_576, 1_572_864));
     expect(fixture.calls).toEqual([
       { fileId: artifact.artifactId, start: 1_048_576, end: 1_572_863 },
     ]);
+
+    const previewBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const previewArtifact = await createScreenshotArtifact(workspace, { bytes: previewBytes });
+    fixture.objects.set(previewArtifact.objectKey, previewBytes);
+    const full = await app.request(
+      sessionArtifactUrl(
+        workspace.workspaceId,
+        previewArtifact.sessionId,
+        previewArtifact.artifactId,
+        true,
+      ),
+      { headers: { authorization: workspace.authorization } },
+    );
+    expect(full.status).toBe(200);
+    expect(full.headers.get("content-type")).toStartWith("image/png");
+    expectSafeRetainedArtifactByteResponse(full);
+    const previewBlob = await full.blob();
+    expect(previewBlob.type).toBe("image/png");
+    expect(new Uint8Array(await previewBlob.arrayBuffer())).toEqual(previewBytes);
   });
 
   test("session screenshot lookups deny wrong-session and cross-workspace IDs before storage", async () => {

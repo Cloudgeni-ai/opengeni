@@ -66,6 +66,7 @@ import {
   startDeviceEnrollment,
   toLookupResponse,
 } from "../sandbox/enrollment";
+import { trustedRequestSourceAddress } from "../http/request-source";
 
 export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings, db } = deps;
@@ -98,7 +99,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   function rateLimit(c: Context, limiter: TokenBucket): void {
-    const ip = clientIp(c);
+    const ip = trustedRequestSourceAddress(c, settings.apiTrustedProxyHops);
     if (!limiter.take(ip)) {
       throw new HTTPException(429, { message: "too many requests; slow down" });
     }
@@ -471,50 +472,47 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 }
 
-// The remote client IP for the per-IP rate-limit bucket. Honors the proxy's
-// X-Forwarded-For (the first hop) when present, falling back to a constant key when
-// neither is available (the bucket then caps the whole edge — still a useful cap).
-function clientIp(c: Context): string {
-  const xff = c.req.header("x-forwarded-for");
-  if (xff) {
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
-  }
-  return c.req.header("x-real-ip")?.trim() || "unknown";
-}
+const MAX_TRACKED_RATE_LIMIT_BUCKETS = 10_000;
 
 // A minimal per-key token bucket. capacity = burst; refillPerSecond = sustained
-// rate. Buckets are created lazily and reset their tokens by elapsed time on each
-// take, so an idle key fully refills without a background timer.
-class TokenBucket {
+// rate. Source buckets are created lazily and refill on access without a timer.
+// Once the storage cap is reached, new sources share one overflow bucket; existing
+// buckets are never evicted, so source churn cannot reset a depleted bucket.
+export class TokenBucket {
   private readonly capacity: number;
   private readonly refillPerSecond: number;
+  private readonly maxBuckets = MAX_TRACKED_RATE_LIMIT_BUCKETS;
   private readonly buckets = new Map<string, { tokens: number; updatedAt: number }>();
+  private overflowBucket: { tokens: number; updatedAt: number } | undefined;
 
   constructor(options: { capacity: number; refillPerSecond: number }) {
     this.capacity = options.capacity;
     this.refillPerSecond = options.refillPerSecond;
   }
 
+  get bucketCount(): number {
+    return this.buckets.size + (this.overflowBucket ? 1 : 0);
+  }
+
   take(key: string, now = Date.now()): boolean {
-    const bucket = this.buckets.get(key) ?? {
-      tokens: this.capacity,
-      updatedAt: now,
-    };
+    const existingBucket = this.buckets.get(key);
+    let bucket = existingBucket;
+    if (!bucket) {
+      if (this.buckets.size < this.maxBuckets - 1) {
+        bucket = { tokens: this.capacity, updatedAt: now };
+        this.buckets.set(key, bucket);
+      } else {
+        bucket = this.overflowBucket ??= { tokens: this.capacity, updatedAt: now };
+      }
+    }
+
     const elapsedSeconds = Math.max(0, (now - bucket.updatedAt) / 1000);
     bucket.tokens = Math.min(this.capacity, bucket.tokens + elapsedSeconds * this.refillPerSecond);
-    bucket.updatedAt = now;
-    // Prune the map opportunistically so it never grows unbounded: a fully-refilled
-    // bucket carries no state worth keeping.
-    if (bucket.tokens >= this.capacity && this.buckets.size > 10_000) {
-      this.buckets.delete(key);
-    }
+    bucket.updatedAt = Math.max(now, bucket.updatedAt);
     if (bucket.tokens < 1) {
-      this.buckets.set(key, bucket);
       return false;
     }
     bucket.tokens -= 1;
-    this.buckets.set(key, bucket);
     return true;
   }
 }

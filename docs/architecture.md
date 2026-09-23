@@ -1103,6 +1103,12 @@ One installed agent process may maintain independent connections to multiple
 OpenGeni deployments and workspaces while sharing the physical machine's host
 capacity and OS containment. The relay carries live terminal and desktop bytes;
 it is stateless beyond active channels and does not own session or lease truth.
+Viewer tokens bind to the exact agent and channel and carry view or control mode.
+The API grants control only when its stream-control flag and `stream:control` permission are enabled, and Connected Machine desktop control also requires the machine owner's `allowScreenControl` consent.
+The relay permits client `DesktopInput` only on desktop port 6080 when the verified viewer token claims control and the relay stream-control flag is enabled.
+It rejects raw client desktop `Frame` messages, agent `DesktopInput`, and client input on unknown ports.
+PTY port 7681 retains bidirectional `Frame` traffic under the API's `terminal:attach` authorization, independently of desktop control.
+View-mode tokens continue to receive agent frames on both ports.
 
 Canonical: [`../agent/README.md`](../agent/README.md) and
 [`connected-machines.md`](connected-machines.md).

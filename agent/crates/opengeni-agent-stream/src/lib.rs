@@ -63,9 +63,10 @@
 //!    match it (defense in depth).
 //! 2. **Validate the token**: the AGENT's token is its enrollment-scoped relay
 //!    token; the VIEWER's token is the control-plane-minted scoped `ogs_` token
-//!    (`verifyStreamToken`, `packages/runtime/src/sandbox/stream-token.ts`) — the
-//!    relay validates authenticity + the lease/active-epoch fence. A bad/expired
-//!    token ⇒ reply `StreamOpenAck { accepted:false, error }` then close.
+//!    (`verifyStreamToken`, `packages/runtime/src/sandbox/stream-token.ts`). The
+//!    relay validates authenticity, workspace/port, the exact agent/channel
+//!    binding, and the lease/active-epoch fence. A view token cannot send input.
+//!    A bad/expired token ⇒ reply `StreamOpenAck { accepted:false, error }` then close.
 //! 3. **Pair** a producer (`role=AGENT`) with a consumer (`role=CLIENT`) by the
 //!    channel key. Reply each accepted side `StreamOpenAck { accepted:true,
 //!    resume_from_seq }` (the sequence the peer will resume sending from — `0`, or

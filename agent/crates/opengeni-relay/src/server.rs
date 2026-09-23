@@ -140,10 +140,10 @@ pub(crate) mod conn {
     use futures_util::{SinkExt as _, StreamExt as _};
     use opengeni_agent_proto::v1;
     use opengeni_agent_stream::codec::RelayMessage;
-    use opengeni_agent_stream::ChannelKey;
+    use opengeni_agent_stream::{ChannelKey, DESKTOP_STREAM_PORT, PTY_STREAM_PORT};
 
     use crate::registry::{AttachError, Role, ViewerEpochs};
-    use crate::token::{self, TokenError};
+    use crate::token::{self, StreamTokenClaims, TokenError};
 
     /// The bound on the per-connection outbound queue (the peer-sink). A slow socket
     /// fills this; the registry then sheds toward this side (backpressure point).
@@ -173,6 +173,8 @@ pub(crate) mod conn {
         key: ChannelKey,
         role: Role,
         conn_gen: crate::registry::ConnGen,
+        // Derived once from the verified viewer token and relay rollout flag.
+        can_control_desktop: bool,
         peer_rx: tokio::sync::mpsc::Receiver<RelayMessage>,
     }
 
@@ -197,7 +199,9 @@ pub(crate) mod conn {
 
         // 2. Resolve + authorize the key (token + channel-key scope). A client's
         // fence claims come from this exact token verification.
-        let (key, role, resume_from_seq, viewer) = match authorize(&open, query, state) {
+        let (key, role, resume_from_seq, viewer, can_control_desktop) = match authorize(
+            &open, query, state,
+        ) {
             Ok(parts) => parts,
             Err(reason) => {
                 tracing::warn!(reason = %reason, ws = %query.ws, agent = %query.agent, port = query.port, "relay open rejected");
@@ -245,6 +249,7 @@ pub(crate) mod conn {
             key,
             role,
             conn_gen,
+            can_control_desktop,
             peer_rx,
         })
     }
@@ -291,23 +296,31 @@ pub(crate) mod conn {
     ) -> bool {
         match inbound {
             Some(Ok(WsMessage::Binary(bytes))) => match RelayMessage::decode(&bytes) {
-                Ok(RelayMessage::Frame(frame)) => {
-                    state
-                        .registry
-                        .forward(&est.key, est.role, frame, Instant::now());
-                    true
+                Ok(msg) => {
+                    if !may_forward_message(est.key.port, est.role, est.can_control_desktop, &msg) {
+                        tracing::debug!(port = est.key.port, role = ?est.role, "relay: dropping unauthorized input");
+                        return true;
+                    }
+                    match msg {
+                        RelayMessage::Frame(frame) => {
+                            state
+                                .registry
+                                .forward(&est.key, est.role, frame, Instant::now());
+                            true
+                        }
+                        msg @ RelayMessage::DesktopInput(_) => {
+                            // Typed computer-use input → forward verbatim.
+                            state.registry.forward_message(&est.key, est.role, msg);
+                            true
+                        }
+                        close @ RelayMessage::Close(_) => {
+                            state.registry.close(&est.key, est.role, close);
+                            false // channel torn down; this side is done.
+                        }
+                        // A duplicate Open/OpenAck mid-stream is ignored (already attached).
+                        RelayMessage::Open(_) | RelayMessage::OpenAck(_) => true,
+                    }
                 }
-                Ok(msg @ RelayMessage::DesktopInput(_)) => {
-                    // Typed computer-use input → forward verbatim.
-                    state.registry.forward_message(&est.key, est.role, msg);
-                    true
-                }
-                Ok(close @ RelayMessage::Close(_)) => {
-                    state.registry.close(&est.key, est.role, close);
-                    false // channel torn down; this side is done.
-                }
-                // A duplicate Open/OpenAck mid-stream is ignored (already attached).
-                Ok(RelayMessage::Open(_) | RelayMessage::OpenAck(_)) => true,
                 Err(e) => {
                     tracing::warn!(error = %e, "relay: undecodable inbound datagram; ignoring");
                     true
@@ -347,7 +360,7 @@ pub(crate) mod conn {
         open: &v1::StreamOpen,
         query: &DialQuery,
         state: &RelayState,
-    ) -> Result<(ChannelKey, Role, u64, ViewerEpochs), String> {
+    ) -> Result<(ChannelKey, Role, u64, ViewerEpochs, bool), String> {
         let channel = open
             .channel
             .as_ref()
@@ -399,14 +412,17 @@ pub(crate) mod conn {
                 }
                 let claims = token::verify_stream_token(secret, &open.token, now)
                     .map_err(|e: TokenError| format!("viewer token: {e}"))?;
-                // The viewer token is workspace+port scoped; the agent is identified
-                // by the channel key (the token does not carry the agentId — it is
-                // minted per session, not per machine). Assert workspace + port.
+                // Assert the workspace and port, then bind newer tokens to the exact
+                // agent/channel key returned by the self-hosted stream producer.
                 if claims.workspace_id != key.workspace_id {
                     return Err("viewer token workspace does not match the channel key".to_string());
                 }
                 if claims.port != key.port {
                     return Err("viewer token port does not match the channel key".to_string());
+                }
+                validate_viewer_channel_binding(&claims, &key)?;
+                if claims.mode != "view" && claims.mode != "control" {
+                    return Err("viewer token has an unsupported input mode".to_string());
                 }
                 // The epoch fences are applied at attach (the floors), from the
                 // claims of THIS exact verification — no re-verify, no window
@@ -419,11 +435,54 @@ pub(crate) mod conn {
                         lease: Some(claims.lease_epoch),
                         authority: claims.authority_epoch,
                     },
+                    claims.mode == "control" && state.config.stream_control_enabled,
                 ));
             }
         }
 
-        Ok((key, role, open.resume_from_seq, ViewerEpochs::default()))
+        Ok((
+            key,
+            role,
+            open.resume_from_seq,
+            ViewerEpochs::default(),
+            false,
+        ))
+    }
+
+    fn validate_viewer_channel_binding(
+        claims: &StreamTokenClaims,
+        key: &ChannelKey,
+    ) -> Result<(), String> {
+        match (&claims.agent_id, &claims.channel_id) {
+            (None, None) => Err("viewer token is missing a channel binding".to_string()),
+            (Some(agent_id), Some(channel_id))
+                if agent_id == &key.agent_id && channel_id == &key.channel_id =>
+            {
+                Ok(())
+            }
+            (Some(_), Some(_)) => {
+                Err("viewer token channel does not match the channel key".to_string())
+            }
+            _ => Err("viewer token has an incomplete channel binding".to_string()),
+        }
+    }
+
+    /// Classify by the token-bound port, never the peer's unverified kind label.
+    /// PTY frames carry terminal typing, authorized by the API's terminal:attach
+    /// check. Only typed desktop input uses the desktop-control claim and flag.
+    fn may_forward_message(
+        port: u32,
+        role: Role,
+        can_control_desktop: bool,
+        message: &RelayMessage,
+    ) -> bool {
+        match message {
+            RelayMessage::Frame(_) => role == Role::Agent || port == PTY_STREAM_PORT,
+            RelayMessage::DesktopInput(_) => {
+                role == Role::Client && port == DESKTOP_STREAM_PORT && can_control_desktop
+            }
+            RelayMessage::Close(_) | RelayMessage::Open(_) | RelayMessage::OpenAck(_) => true,
+        }
     }
 
     /// Write a `StreamOpenAck` over the socket.
@@ -466,5 +525,92 @@ pub(crate) mod conn {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn channel_key() -> ChannelKey {
+            ChannelKey {
+                workspace_id: "workspace".to_string(),
+                agent_id: "agent-a".to_string(),
+                port: 6080,
+                channel_id: "channel-a".to_string(),
+            }
+        }
+
+        fn claims(agent_id: Option<&str>, channel_id: Option<&str>) -> StreamTokenClaims {
+            StreamTokenClaims {
+                workspace_id: "workspace".to_string(),
+                session_id: "session".to_string(),
+                viewer_id: "viewer".to_string(),
+                lease_epoch: 1,
+                mode: "view".to_string(),
+                port: 6080,
+                exp: 9_999_999_999,
+                subject_id: None,
+                authority_epoch: None,
+                agent_id: agent_id.map(str::to_string),
+                channel_id: channel_id.map(str::to_string),
+            }
+        }
+
+        #[test]
+        fn viewer_tokens_are_bound_to_their_agent_and_channel() {
+            let key = channel_key();
+            assert!(validate_viewer_channel_binding(
+                &claims(Some("agent-a"), Some("channel-a")),
+                &key
+            )
+            .is_ok());
+            assert!(validate_viewer_channel_binding(
+                &claims(Some("agent-b"), Some("channel-a")),
+                &key
+            )
+            .is_err());
+            assert!(validate_viewer_channel_binding(
+                &claims(Some("agent-a"), Some("channel-b")),
+                &key
+            )
+            .is_err());
+            assert!(validate_viewer_channel_binding(&claims(Some("agent-a"), None), &key).is_err());
+            assert!(validate_viewer_channel_binding(&claims(None, None), &key).is_err());
+        }
+
+        #[test]
+        fn forwarding_respects_port_role_and_desktop_control() {
+            let frame = RelayMessage::Frame(v1::StreamFrame::default());
+            let desktop_input = RelayMessage::DesktopInput(v1::DesktopInput::default());
+            let lifecycle = [
+                RelayMessage::Close(v1::StreamClose::default()),
+                RelayMessage::Open(v1::StreamOpen::default()),
+                RelayMessage::OpenAck(v1::StreamOpenAck::default()),
+            ];
+            for port in [PTY_STREAM_PORT, DESKTOP_STREAM_PORT, 9999] {
+                for role in [Role::Client, Role::Agent] {
+                    for can_control_desktop in [false, true] {
+                        assert_eq!(
+                            may_forward_message(port, role, can_control_desktop, &frame),
+                            role == Role::Agent || port == PTY_STREAM_PORT,
+                            "Frame on port {port}, role {role:?}, control {can_control_desktop}"
+                        );
+                        assert_eq!(
+                            may_forward_message(port, role, can_control_desktop, &desktop_input),
+                            role == Role::Client && port == DESKTOP_STREAM_PORT && can_control_desktop,
+                            "DesktopInput on port {port}, role {role:?}, control {can_control_desktop}"
+                        );
+                        for message in &lifecycle {
+                            assert!(may_forward_message(
+                                port,
+                                role,
+                                can_control_desktop,
+                                message
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
 }

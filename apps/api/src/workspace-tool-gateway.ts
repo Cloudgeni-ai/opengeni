@@ -143,6 +143,14 @@ export function requireWorkspaceToolGatewayAuthorization(
   return grant;
 }
 
+function requireCanonicalHumanToolApprovalAuthority(authorization: AccessGrantAuthorization): void {
+  if (!authorization.canonicalManagedHumanSession && !authorization.canonicalLocalHumanSession) {
+    throw new HTTPException(403, {
+      message: "canonical human session required for tool approval",
+    });
+  }
+}
+
 export async function prepareWorkspaceToolGateway(
   routeDeps: ApiRouteDeps,
   authorization: AccessGrantAuthorization,
@@ -499,7 +507,7 @@ export function buildWorkspaceToolGatewayMcpServer(
 
 export async function callWorkspaceToolGateway(
   prepared: PreparedWorkspaceToolGateway,
-  grant: AccessGrant,
+  authorization: AccessGrantAuthorization,
   input: unknown,
   db?: ApiRouteDeps["db"],
   consumeApproval: typeof consumeToolGatewayApproval = consumeToolGatewayApproval,
@@ -507,6 +515,10 @@ export async function callWorkspaceToolGateway(
   authorizeSiteTool: AuthorizeWorkspaceSiteTool = requireWorkspaceSiteToolAuthorization,
   resolveOrigin: typeof resolveSiteSessionOrigin = resolveSiteSessionOrigin,
 ) {
+  const grant = requireResolvedAccessGrantAuthorization(
+    authorization,
+    authorization.grant.workspaceId,
+  );
   const request = ToolGatewayCallRequest.parse(input);
   const operationId = request.operationId ?? crypto.randomUUID();
   const entry = prepared.toolGatewayCatalog.entries.find(
@@ -529,6 +541,12 @@ export async function callWorkspaceToolGateway(
           }
         : null;
     await prepared.reauthorize?.();
+    if (
+      entry?.approval === "human" &&
+      request.catalogDigest === prepared.toolGatewayCatalog.digest
+    ) {
+      requireCanonicalHumanToolApprovalAuthority(authorization);
+    }
     if (siteContext) {
       if (!db) throw new HTTPException(503, { message: "site_tool_authorization_unavailable" });
       await authorizeSiteTool(db, grant, siteContext);
@@ -549,6 +567,7 @@ export async function callWorkspaceToolGateway(
     await prepared.reauthorize?.();
     let approvalConfirmed = false;
     const approvalRequired = preparedCall.entry.approval === "human";
+    if (approvalRequired) requireCanonicalHumanToolApprovalAuthority(authorization);
     if (approvalRequired && request.approvalToken && db) {
       approvalConfirmed = await consumeApproval(db, {
         tokenHash: hashOpaqueValue(request.approvalToken),
@@ -593,13 +612,28 @@ export async function callWorkspaceToolGateway(
 
 export async function approveWorkspaceToolGatewayCall(
   prepared: PreparedWorkspaceToolGateway,
-  grant: AccessGrant,
+  authorization: AccessGrantAuthorization,
   db: ApiRouteDeps["db"],
   input: unknown,
   issueApproval: typeof issueToolGatewayApproval = issueToolGatewayApproval,
   observability?: Observability,
 ) {
+  const grant = requireResolvedAccessGrantAuthorization(
+    authorization,
+    authorization.grant.workspaceId,
+  );
   const request = ToolGatewayApprovalRequest.parse(input);
+  const catalogEntry = prepared.toolGatewayCatalog.entries.find(
+    (candidate) =>
+      candidate.identity.serverId === request.identity.serverId &&
+      candidate.identity.toolName === request.identity.toolName,
+  );
+  if (
+    catalogEntry?.approval === "human" &&
+    request.catalogDigest === prepared.toolGatewayCatalog.digest
+  ) {
+    requireCanonicalHumanToolApprovalAuthority(authorization);
+  }
   let preparedCall: PreparedToolGatewayCall;
   try {
     await prepared.reauthorize?.();
@@ -619,6 +653,7 @@ export async function approveWorkspaceToolGatewayCall(
   if (preparedCall.entry.approval !== "human") {
     throw new HTTPException(422, { message: "tool_does_not_require_human_approval" });
   }
+  requireCanonicalHumanToolApprovalAuthority(authorization);
   const observation = startWorkspaceToolGatewayObservation(observability, {
     adapter: "http",
     operation: "approval",

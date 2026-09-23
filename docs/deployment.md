@@ -243,6 +243,15 @@ authority checks before session-create, visibility-change, and fork commits.
 The former remote host MCP credential adapter and its environment setting are
 removed. Use native OAuth connections; see [cutover notes](remote-mcp-credentials.md).
 
+## API request source attribution
+
+Public API rate limits use the transport peer address reported by Bun and ignore
+`X-Forwarded-For` and `X-Real-IP` by default. To use a fixed trusted proxy chain,
+set `OPENGENI_API_TRUSTED_PROXY_HOPS=<count>` and block direct access to the API.
+Each trusted proxy must append or overwrite `X-Forwarded-For`; OpenGeni selects
+the address from the server side of that chain. Missing or short chains fall
+back to the transport peer.
+
 ## Workspace MCP OAuth
 
 The public MCP authorization server is disabled by default. Enable it only in
@@ -2873,6 +2882,13 @@ Connected Machines:
   `OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD`, and
   `OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD` — the NATS auth-callout account
   seed/public key and the control/callout logins.
+
+`OPENGENI_STREAM_CONTROL_ENABLED` is a non-secret rollout flag.
+Set it to `true` in the runtime environment and Helm config to permit desktop-control stream tokens.
+The API still requires `stream:control` access, and Connected Machine desktop control also requires the machine owner's `allowScreenControl` consent.
+The relay receives the same config-map value and independently drops typed desktop input on port 6080 when the flag is off, even if a signed token claims control.
+Raw client frames on desktop channels are always rejected.
+Terminal typing on PTY port 7681 remains available under `terminal:attach` authorization, independently of this desktop-control flag.
 
 Non-secret wiring goes in config/values: `OPENGENI_SELFHOSTED_NATS_URL` and
 `OPENGENI_SELFHOSTED_RELAY_URL` (the public wss URLs the agent dials, matching the

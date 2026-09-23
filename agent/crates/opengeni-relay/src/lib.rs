@@ -29,8 +29,10 @@
 //! * VALIDATES the token on its own merits — the AGENT's enrollment-scoped `ogr_`
 //!   producer token ([`token::verify_relay_token`]) or the VIEWER's
 //!   control-plane-minted `ogs_` token ([`token::verify_stream_token`]) INCLUDING
-//!   the lease/active-epoch fence (a stale-epoch viewer is rejected so it can never
-//!   reach a swapped-away box — [`registry`]);
+//!   the exact agent/channel binding and desktop-control mode. View-mode tokens
+//!   can send PTY frames but cannot send desktop input,
+//!   and the lease/active-epoch fence rejects stale viewers before they reach a
+//!   swapped-away box ([`registry`]);
 //! * replies [`StreamOpenAck`](opengeni_agent_proto::v1::StreamOpenAck);
 //! * PAIRS the producer with the consumer by the channel key;
 //! * SPLICES frames bidirectionally with bounded ring buffers ([`ring`]),
@@ -45,7 +47,10 @@
 //!
 //! The agent and the viewer dial INDEPENDENTLY and present DIFFERENT tokens (the
 //! agent's `ogr_` producer token vs. the viewer's `ogs_` stream token) but the SAME
-//! channel key. The relay validates each side on its own merits and pairs by key.
+//! channel key. Viewer tokens bind to that exact agent and channel and explicitly
+//! grant desktop view or control access. PTY typing uses the API's separate
+//! terminal:attach authorization. The relay validates each side on its own
+//! merits and pairs by key.
 //! The token verify ([`token`]) is the single place the Rust relay and the
 //! TypeScript control plane must agree on the HMAC envelope; it mirrors
 //! `packages/contracts`'s `signStreamToken`/`signRelayToken` byte-for-byte (proven

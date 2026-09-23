@@ -63,6 +63,7 @@ import { ensureManagedAccessForUser, getSession } from "@opengeni/db";
 import { sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import { trustedRequestSourceAddress } from "../http/request-source";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
 import { z } from "zod";
@@ -1009,8 +1010,7 @@ function digest(deps: ApiRouteDeps, value: unknown): string {
 }
 
 function loginTransactionClientScope(context: Context, deps: ApiRouteDeps): string {
-  const forwarded = context.req.header("x-forwarded-for")?.split(",")[0]?.trim();
-  const address = forwarded || context.req.header("x-real-ip")?.trim() || "unknown";
+  const address = trustedRequestSourceAddress(context, deps.settings.apiTrustedProxyHops);
   return digest(deps, {
     purpose: "managed-auth-login-transaction-rate-limit",
     client: address.slice(0, 128),

@@ -120,6 +120,20 @@ describe("MCP OAuth settings", () => {
   });
 });
 
+describe("API request source settings", () => {
+  test("ignores forwarded addresses by default and bounds trusted proxy hops", () => {
+    expect(withEnv({}, () => getSettings()).apiTrustedProxyHops).toBe(0);
+    expect(
+      withEnv({ OPENGENI_API_TRUSTED_PROXY_HOPS: "2" }, () => getSettings()).apiTrustedProxyHops,
+    ).toBe(2);
+    for (const value of ["-1", "1.5", "17", "invalid"]) {
+      expect(() =>
+        withEnv({ OPENGENI_API_TRUSTED_PROXY_HOPS: value }, () => getSettings()),
+      ).toThrow();
+    }
+  });
+});
+
 describe("goal continuation pacing settings", () => {
   test("defaults to the input-aware idle backoff schedule and cap", () => {
     const settings = withEnv({}, () => getSettings());

@@ -18,12 +18,13 @@
 //! # The two tokens (a documented seam for M8b)
 //!
 //! The relay pairs a *producer* (agent) registration with a *consumer* (viewer)
-//! attach by the channel key `{workspaceId, agentId, port}`. The viewer presents
-//! the control-plane-minted scoped `ogs_` token (`mintStreamToken`); the AGENT
-//! presents its enrollment-scoped relay token here. The proto `StreamOpen.token`
-//! carries whichever side is registering. M8b's relay MUST validate BOTH sides'
-//! tokens and only splice a producer↔consumer pair when the keys match and both
-//! tokens pass (see the crate-level relay-dial protocol doc).
+//! attach by the channel key `{workspaceId, agentId, port, channelId}`. The viewer
+//! presents a control-plane-minted `ogs_` token (`mintStreamToken`) bound to that
+//! exact agent/channel; its mode decides whether viewer input may be forwarded.
+//! The AGENT presents its enrollment-scoped relay token here. The proto
+//! `StreamOpen.token` carries whichever side is registering. The relay MUST
+//! validate BOTH sides' tokens and only splice a producer↔consumer pair when the
+//! keys match and both tokens pass (see the crate-level relay-dial protocol doc).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};

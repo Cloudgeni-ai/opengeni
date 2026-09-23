@@ -56,6 +56,14 @@ spec:
             # The wss listener bind. The container port is the single source of truth.
             - name: OPENGENI_RELAY_BIND
               value: {{ printf "0.0.0.0:%d" (int .Values.relay.containerPort) | quote }}
+            # The API and relay read the same operator flag. The relay checks it
+            # independently so a control-claim token cannot enable input by itself.
+            - name: OPENGENI_STREAM_CONTROL_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "opengeni.fullname" . }}-config
+                  key: OPENGENI_STREAM_CONTROL_ENABLED
+                  optional: true
             # The viewer (ogs_) + producer (ogr_) HMAC token secrets the relay
             # verifies connections with. Sourced from the runtime secret (never the
             # Helm-clobbered configmap); a missing key resolves to "" and the relay
