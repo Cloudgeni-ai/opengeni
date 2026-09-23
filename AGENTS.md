@@ -16,7 +16,7 @@ The stack means everything needed to run the Hono API, React web app, Temporal w
    bun run dev
    ```
 
-   This first validates the pinned host Bun and native build prerequisites, then installs dependencies, starts infrastructure, runs migrations and the runtime posture check, builds the local sandbox image, and starts API, worker, and web processes. `scripts/run-development-stack.ts` owns a per-project OS-backed lock before generated environment or role changes; a second launcher must use the existing run or stop it first. The first launch may spend several minutes building; wait for the aggregate readiness message.
+   This first validates the pinned host Bun and selected backend prerequisites, then installs dependencies, prepares runtimes, starts infrastructure, runs migrations and the runtime posture check, and starts API, worker, and web processes. A local sandbox image is built only for the Docker sandbox. `bun run dev:check` checks prerequisites without starting services. `scripts/run-development-stack.ts` owns a per-project OS-backed lock before generated environment or role changes; a second launcher must use the existing run or stop it first. The first launch may spend several minutes preparing runtimes; wait for the aggregate readiness message, then verify the rendered app and a real agent task when a model is connected.
 
 Manual equivalent:
 
@@ -47,7 +47,7 @@ Manual equivalent:
    - `OPENGENI_TEMPORAL_HOST`
    - `OPENGENI_STARTUP_DEPENDENCY_RETRY_*` when dependencies need longer startup windows
    - OpenAI or Azure OpenAI credentials
-   - `OPENGENI_SANDBOX_BACKEND` (see Sandbox Notes for the full backend list; `docker` is the default for local dev)
+   - `OPENGENI_SANDBOX_BACKEND` (see Sandbox Notes for the full backend list; `local` is the default for local dev)
    - sandbox preparation profiles / env allowlist when needed
 
 5. Start long-running processes in separate terminals:
@@ -75,6 +75,13 @@ Default URLs:
 Garage is the local S3-compatible object storage default for Docker Compose and optional self-contained Kubernetes smoke tests. Native development uses pinned MinIO; Docker MinIO remains an explicit opt-in (`OPENGENI_OBJECT_STORAGE_FIXTURE=minio` or Helm `minio.enabled`). Production deployments should use provider-native storage instead of deploying Garage or MinIO manually: `azure-blob` for Azure Blob, `aws-s3` for AWS S3, and `gcs` for Google Cloud Storage.
 
 ## Architecture Notes
+
+Fresh local checkouts leave Connected Machines disabled. An explicit
+`OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true` enables self-initializing enrollment,
+NATS auth-callout and the local relay. Its cold build completes before application
+startup. The editable-artifact runtime is separate and remains enabled without
+Connected Machines. Linux and macOS are supported launcher hosts; Windows uses
+WSL2, not a mixed Windows/Unix toolchain.
 
 For organization-key and `asUser` integration development, set
 `OPENGENI_PRODUCT_ACCESS_MODE=managed`. Single-user `local` access mode deliberately

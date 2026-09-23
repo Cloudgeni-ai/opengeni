@@ -7,21 +7,31 @@ kernel) see [`deployment.md` § Local Development Stack](deployment.md#local-dev
 
 ## Prerequisites
 
-- Bun
+- Linux or macOS; on Windows, run the full stack inside WSL2. Keep the checkout and executable tools in the same environment. An agent's isolated sandbox is not automatically your physical computer.
+- Bun at the exact version in `.bun-version`, plus Git, Bash and curl.
 - Docker, for local Postgres, NATS, Temporal, and Garage when the daemon is up. The agent sandbox defaults to `local` (this machine). Set `OPENGENI_SANDBOX_BACKEND=docker` to run the agent in the local sandbox image instead.
 - rustup (the artifact kernel uses its checked-in exact Rust toolchain)
-- OpenAI or Azure OpenAI credentials for real model runs
+- Model credentials for real agent runs. They are not required to start the app; use Settings → Models afterward. The `OPENGENI_OPENAI_API_KEY` example is commented out and empty.
+
+Run `bun run dev:check` to collect missing prerequisites without starting services.
+The native infrastructure path additionally needs PostgreSQL server/client tools
+(`pg_config`, `psql`, `pg_isready`, `initdb`, `pg_ctl`) with `pgcrypto` and
+`vector` extensions, NATS server, Temporal CLI and the selected object-storage
+server. The Docker path needs a responding daemon and Compose; an installed
+Docker CLI alone is not enough. Follow the checker diagnostics for your host,
+rather than copying Linux package commands to macOS or Windows.
 
 ## Start the full stack
 
 ```bash
-cp .env.example .env
 bun run dev
 ```
 
 `bun run dev` installs dependencies, creates `.env` from `.env.example` when
 missing, runs migrations, and starts the API, both workers (control and turn),
-artifact services, Connected Machines relay, and web app. With
+artifact services and web app. Connected Machines is optional and off in a fresh
+checkout; set `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true` to prepare and start its
+relay. Existing explicit values are preserved. With
 `OPENGENI_DEV_BACKEND=auto` (the default), it uses Docker when the daemon is
 reachable and otherwise starts PostgreSQL, NATS, Temporal, and MinIO as native
 processes. Set the backend explicitly to `docker` or `native` when required.
@@ -52,11 +62,25 @@ toolchains and declared targets are installed without changing the rustup
 default or the shell `PATH`. Set `RUSTUP_AUTO_INSTALL=0` to forbid that setup
 and receive the exact manual install command instead.
 
+The artifact kernel and Connected Machines relay are separate dependencies.
+Turning off Connected Machines does not turn off editable artifacts. An opted-in
+relay is built before application startup, so its cold compilation does not
+compete with readiness checks on a small host.
+
 `bun run dev` isolates each checkout/worktree (project from the directory name,
 free host ports, loopback URL rewrite including `nats://`, `.env.runtime`
 overlay for `dev:*`/`db:*`). Copied `.env` host-port pins are ignored unless
 `OPENGENI_PIN_PORTS=1`. Native and Docker warm restarts reuse only a healthy
 recorded stack's generated ports.
+
+Wait for the aggregate readiness message, then open the printed web URL and
+check that the app renders. If a model is connected, verify an assistant reply
+and a harmless command in the default sandbox; a sandbox-free model response
+does not test agent compute. Otherwise verify the model-connection screen and
+complete that step when credentials are available. Keep the exact foreground
+launcher running; Ctrl-C stops its application processes, and `dev:down` stops
+this project's infrastructure. Do not kill processes by name or delete data as
+a restart workaround.
 
 Default URLs:
 

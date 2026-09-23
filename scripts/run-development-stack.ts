@@ -7,9 +7,14 @@ import { acquireDevelopmentStackLock } from "./dev-stack-lock";
 
 export async function runDevelopmentStack(
   repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
+  options: { checkOnly?: boolean } = {},
 ): Promise<number> {
   process.chdir(repositoryRoot);
   await checkDevelopmentPrerequisites();
+  if (options.checkOnly) {
+    console.log("OpenGeni startup prerequisites are satisfied; no services started.");
+    return 0;
+  }
   // Read the same project authority as the shell, before creating .env or
   // touching generated environment, database roles, ports, or infrastructure.
   const identity = Bun.spawnSync(
@@ -66,7 +71,9 @@ export async function runDevelopmentStack(
 
 if (import.meta.main) {
   try {
-    process.exitCode = await runDevelopmentStack();
+    process.exitCode = await runDevelopmentStack(undefined, {
+      checkOnly: process.argv.includes("--check"),
+    });
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;

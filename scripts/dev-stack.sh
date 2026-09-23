@@ -42,12 +42,10 @@ fi
 OPENGENI_SANDBOX_BACKEND="${OPENGENI_SANDBOX_BACKEND:-local}"
 export OPENGENI_SANDBOX_BACKEND
 
-# Connected Machines are part of the normal localhost product surface. Keep the
-# deployment/config-library default fail-closed, but make `bun run dev`
-# self-contained even for an older copied .env that predates this setting. An
-# explicit false remains authoritative for local testing of the disabled state.
+# Connecting another computer is optional. A basic local stack does not need
+# relay binaries or enrollment credentials. Preserve an existing explicit opt-in.
 if [ -z "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-}" ]; then
-  OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true
+  OPENGENI_SANDBOX_SELFHOSTED_ENABLED=false
 fi
 export OPENGENI_SANDBOX_SELFHOSTED_ENABLED
 
@@ -962,6 +960,7 @@ fi
 
 # A clean checkout must establish the canonical workspace package links before
 # the generated facade is verified. The facade never searches alternate roots.
+echo "OpenGeni setup: installing pinned JavaScript dependencies."
 bun install --frozen-lockfile
 
 # Connected Machines use the real NATS auth-callout boundary in local development,
@@ -1056,6 +1055,7 @@ if [ -n "${OPENGENI_DEV_CARGO_TARGET_DIR:-}" ]; then
   artifact_kernel_cargo_env=("CARGO_TARGET_DIR=${OPENGENI_DEV_CARGO_TARGET_DIR}/artifact-kernel")
   relay_cargo_env=("CARGO_TARGET_DIR=${OPENGENI_DEV_CARGO_TARGET_DIR}/agent")
 fi
+echo "OpenGeni setup: preparing the source-matched artifact runtime."
 env "${artifact_kernel_cargo_env[@]+"${artifact_kernel_cargo_env[@]}"}" \
   bun scripts/prepare-development-artifact-runtime.ts \
   --repository-root "$(pwd)" \
@@ -1068,6 +1068,13 @@ export OPENGENI_ARTIFACT_OUTBOX_ENABLED=true
 export OPENGENI_ARTIFACT_LOCAL_DEVELOPMENT=true
 export OPENGENI_ARTIFACT_MATERIALIZER_UNSANDBOXED_DEVELOPMENT=true
 export OPENGENI_ARTIFACT_MATERIALIZER_HTTP_HOST=127.0.0.1
+
+# Finish an explicitly enabled relay's cold build before readiness monitoring.
+# Compiling beside the API/workers can otherwise exhaust a small fresh host.
+if [ "$start_local_relay" = "1" ]; then
+  echo "OpenGeni setup: preparing the optional Connected Machines relay."
+  (cd agent && env "${relay_cargo_env[@]+"${relay_cargo_env[@]}"}" cargo build --locked -p opengeni-relay)
+fi
 
 # Native agent skills require a source-matched Linux runtime inside the sandbox
 # image. Resolve only the exact clean-HEAD CI artifact; never reuse a stale
@@ -1201,6 +1208,7 @@ fi
 echo "  artifact-materializer=http://127.0.0.1:${OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT}  artifact-outbox=http://127.0.0.1:${OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT}"
 echo "  Wrote .env.runtime (source it in sibling shells)."
 
+echo "OpenGeni setup: starting ${OPENGENI_DEV_BACKEND} infrastructure (${OPENGENI_OBJECT_STORAGE_FIXTURE})."
 if [ "$OPENGENI_DEV_BACKEND" = "native" ]; then
   bash scripts/dev-native-infra.sh start
 elif [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
@@ -1208,6 +1216,7 @@ elif [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
 else
   docker compose up -d postgres nats temporal garage garage-init
 fi
+echo "OpenGeni setup: applying database migrations and runtime roles."
 (cd packages/db && bun run migrate)
 (cd packages/db && bun run provision-roles)
 # Diagnose schema/role incompatibilities before expensive builds and before the
@@ -1246,6 +1255,7 @@ else
   echo "Skipping local Docker sandbox image build (backend=${OPENGENI_SANDBOX_BACKEND:-docker})."
 fi
 
+echo "OpenGeni setup: starting application services."
 if [ "$start_local_relay" = "1" ]; then
   env "${relay_cargo_env[@]+"${relay_cargo_env[@]}"}" \
     bash scripts/run-development-relay.sh &
@@ -1281,6 +1291,7 @@ register_process "$!" "web"
 bun scripts/watch-development-schema.ts "$(pwd)" &
 register_process "$!" "database schema guard"
 
+echo "OpenGeni setup: waiting for aggregate application readiness."
 if ! wait_for_stack_readiness; then
   exit "$failed_process_status"
 fi

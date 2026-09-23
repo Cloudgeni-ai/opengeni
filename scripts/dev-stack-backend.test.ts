@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const backendPath = new URL("./dev-stack-backend.sh", import.meta.url).pathname;
 const nativeInfraPath = new URL("./dev-native-infra.sh", import.meta.url).pathname;
@@ -18,6 +18,7 @@ async function resolveBackend(
   requested: string | undefined,
   dockerExitCode: number,
   fileBackend?: string,
+  dockerDelaySeconds = 0,
 ) {
   const root = await mkdtemp(join(tmpdir(), "opengeni-backend-"));
   temporaryRoots.push(root);
@@ -26,6 +27,7 @@ async function resolveBackend(
     docker,
     `#!/bin/sh
 [ "\${1:-}" = info ] || exit 99
+${dockerDelaySeconds ? `sleep ${dockerDelaySeconds}` : ""}
 exit ${dockerExitCode}
 `,
   );
@@ -34,7 +36,7 @@ exit ${dockerExitCode}
   if (fileBackend !== undefined) await writeFile(dotenv, `OPENGENI_DEV_BACKEND=${fileBackend}\n`);
   const env: Record<string, string | undefined> = {
     ...Bun.env,
-    PATH: `${root}:/usr/bin:/bin`,
+    PATH: `${root}:${dirname(process.execPath)}:/usr/bin:/bin`,
     OPENGENI_DOCKER_PROBE_TIMEOUT_SECONDS: "1",
   };
   if (requested === undefined) delete env.OPENGENI_DEV_BACKEND;
@@ -98,6 +100,13 @@ describe("development infrastructure backend", () => {
     const result = await resolveBackend("auto", 0);
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe("docker");
+  });
+
+  test("a hung Docker probe is bounded without GNU timeout", async () => {
+    const started = Date.now();
+    const result = await resolveBackend("auto", 0, undefined, 3);
+    expect(result.stdout.trim()).toBe("native");
+    expect(Date.now() - started).toBeLessThan(2500);
   });
 
   test("an explicit Docker request fails closed without a daemon", async () => {
