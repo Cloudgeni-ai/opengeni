@@ -1685,9 +1685,9 @@ describe("turn execution policy V1", () => {
         { modelId: policy.productModelId, reasoningEffort: policy.reasoningEffort },
       ),
     ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
-    const error = new TurnExecutionPolicyDefinitionMismatchError();
-    expect(error.code).toBe("turn_execution_policy_definition_mismatch");
-    expect(error.message).toBe(
+    const definitionMismatch = new TurnExecutionPolicyDefinitionMismatchError();
+    expect(definitionMismatch.code).toBe("turn_execution_policy_definition_mismatch");
+    expect(definitionMismatch.message).toBe(
       "Turn execution policy does not match the current provider definition",
     );
 
