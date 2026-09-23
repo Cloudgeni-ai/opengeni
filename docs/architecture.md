@@ -347,9 +347,9 @@ Gateway and OpenRouter rows are provider-qualified workspace overlays, never
 deployment catalog or billing rows. Deployment-managed `openrouter/*` and
 workspace-managed `workspace-openrouter/*` remain separate provider and billing
 identities even when they name the same upstream slug.
-The accepted turn policy freezes executable provider identity, not the separate
-workspace-facing cost policy. Operators must drain or fence accepted turns
-before changing `free`/`credits` for a product.
+Accepted turns freeze provider identity, not cost policy. Drain or fence them
+before changing `free`/`credits`. Database `codexModels` overrides membership,
+not credentials; retirement preserves only exact accepted execution.
 
 Documentation explains contracts without duplicating drift-prone lists.
 Cross-boundary enums are additive within major releases unless the whole release
@@ -977,14 +977,7 @@ credits-path price and is zero for externally billed calls.
 
 Insights usage uses a four-column projection (0484), preserving full-row readers
 and identical tenant/actor/visibility checks. Transaction-capability writes still
-require a writable database. Migration 0507 pins `enable_nestloop = off` on the
-five fact authority functions (0359, 0484): a time-series window newer than the
-last `ANALYZE` is estimated as about one row, which otherwise turns the
-MATERIALIZED visible-session join into a per-fact rescan of every workspace
-session (minutes per request on a busy workspace); the pin keeps that join a
-hash join and changes no authorization semantics. The Insights route also
-coalesces identical in-flight reads per API process, so a reload joins the
-running rollup instead of starting another.
+require a writable database.
 Canonical: `packages/db/src/insights-usage-bundle.ts`.
 
 Codex and SuperGrok pools own credentials and capacity without changing logical
@@ -1697,7 +1690,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
-| Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
+| Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |
@@ -1718,7 +1711,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 
 ## 14. Keeping this current
 
-Update ownership, invariants, flows, lifecycles and sources here.
+Update ownership, invariants, flows, lifecycles and sources.
 Keep mechanics and rollout in [`README.md`](README.md)'s focused docs.
 
 Goal resume/pause semantics: [goals](goals.md).

@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- The four insights authority functions (0359, 0484) join the exact fact window
+-- The five insights fact authority functions (0359, 0484) join the exact fact window
 -- against a MATERIALIZED visible-session CTE so private-session checks run once
 -- per session rather than once per fact. The planner estimates the fact window
 -- from occurred_at statistics, and a time-series window newer than the last

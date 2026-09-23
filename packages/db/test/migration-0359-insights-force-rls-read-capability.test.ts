@@ -559,7 +559,7 @@ describe("migration 0359 Insights FORCE-RLS read capability", () => {
       expect(procedure.publicExecute).toBe(false);
       expect(procedure.configuration).toEqual([
         "search_path=pg_catalog, public, opengeni_private, pg_temp",
-        // 0506 pins the hash-join-safe planner setting on every fact authority.
+        // 0507 pins the hash-join-safe planner setting on every fact authority.
         "enable_nestloop=off",
       ]);
       expect(procedure.volatility).toBe("v");

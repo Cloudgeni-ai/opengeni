@@ -9,6 +9,7 @@ import {
   type ApiRouteDeps,
   type WorkspaceInsightsFilterField,
 } from "@opengeni/core";
+import { currentSessionRlsActorIdentityKey } from "@opengeni/db";
 import { workspaceInsightsMetricObserver } from "@opengeni/observability";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -30,11 +31,11 @@ export function normalizeWorkspaceInsightsQueryFilter(
 /**
  * Share one in-flight computation between identical concurrent callers.
  *
- * An Insights response is workspace-scoped and identical for every workspace
- * admin, so a reload, a second tab, or a retried fetch must join the rollup
- * that is already running instead of starting another multi-second aggregate
- * on the database. Authorization and filter validation still run per request
- * before a caller may join; the map only ever holds settled-or-running work.
+ * A reload, a second tab, or a retried fetch joins the rollup already running
+ * instead of starting another multi-second aggregate on the database.
+ * Authorization and filter validation still run per request before a caller
+ * may join; the map only ever holds running work. The caller supplies the
+ * complete sharing key, which must identify everything the result depends on.
  */
 export function createInFlightCoalescer<T>(): {
   run: (key: string, work: () => Promise<T>) => Promise<T>;
@@ -57,13 +58,26 @@ export function createInFlightCoalescer<T>(): {
   };
 }
 
+/**
+ * Insights rows are filtered by the database RLS actor (private sessions are
+ * visible only to their owner), so two administrators of one workspace can
+ * legitimately receive different responses. The actor identity is part of
+ * the key; requests share work only when every visibility input is equal.
+ */
 export function workspaceInsightsCoalesceKey(input: {
   workspaceId: string;
   range: string;
   provider: string | null;
   model: string | null;
+  rlsActor: string | null;
 }): string {
-  return [input.workspaceId, input.range, input.provider ?? "", input.model ?? ""].join("\u0000");
+  return JSON.stringify([
+    input.workspaceId,
+    input.range,
+    input.provider,
+    input.model,
+    input.rlsActor,
+  ]);
 }
 
 export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -95,7 +109,13 @@ export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
       model = normalizeWorkspaceInsightsQueryFilter(modelRaw, "model");
 
       const response = await coalesce.run(
-        workspaceInsightsCoalesceKey({ workspaceId, range: rangeParsed.data, provider, model }),
+        workspaceInsightsCoalesceKey({
+          workspaceId,
+          range: rangeParsed.data,
+          provider,
+          model,
+          rlsActor: currentSessionRlsActorIdentityKey(),
+        }),
         () =>
           getWorkspaceInsights(
             deps.db,
