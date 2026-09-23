@@ -12,6 +12,7 @@ import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { isEditableArtifactKind } from "@/lib/artifact-catalog";
 import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
+import { SessionSkillReviews } from "@/components/session/session-skill-reviews";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
 import { needsSandboxRecoveryCheck } from "@/lib/sandbox-failure";
@@ -2532,6 +2533,11 @@ function SessionChatPane(props: {
                     {/* Recovery follows the failed request, only in the latest history window.
                         Credit exhaustion also surfaces on idle sessions. */}
                     {failureRecovery}
+                    <SessionSkillReviews
+                      context={context}
+                      workspaceId={props.session.workspaceId}
+                      events={props.events}
+                    />
                     {props.humanInput.requests.length > 0 &&
                     props.session.status === "requires_action" ? (
                       <div className="pb-1" data-human-input-timeline-surface="">
