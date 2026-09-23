@@ -223,6 +223,12 @@ export async function publishArtifactRuntime(options: {
   }
 }
 
+export function runtimeDownloadAccept(path: string): string {
+  // Actions ZIP endpoints redirect to the archive but require the JSON API
+  // media type. Release-asset endpoints require octet-stream for binary data.
+  return path.startsWith("actions/") ? "application/vnd.github+json" : "application/octet-stream";
+}
+
 function githubPublisherApi(token: string): RuntimePublisherApi {
   const base = `https://api.github.com/repos/${RUNTIME_REPOSITORY}/`;
   const request = async (method: string, path: string, body?: unknown, optional = false) => {
@@ -255,7 +261,7 @@ function githubPublisherApi(token: string): RuntimePublisherApi {
         "--hostname",
         "github.com",
         "-H",
-        "Accept: application/octet-stream",
+        `Accept: ${runtimeDownloadAccept(path)}`,
         `repos/${RUNTIME_REPOSITORY}/${path}`,
       ],
       {

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { canonicalArtifactKernelBuildReceiptBytes } from "../packages/artifact-tool/kernel/bindings/package-receipt";
 import {
   publishArtifactRuntime,
+  runtimeDownloadAccept,
   validateRuntimeProducer,
   type RuntimePublisherApi,
 } from "./publish-artifact-runtime";
@@ -28,6 +29,10 @@ import { parse as parseYaml } from "yaml";
 import { resolveDevelopmentArtifactRuntime } from "./resolve-development-artifact-runtime";
 
 const roots: string[] = [];
+test("Actions ZIP and release assets use their distinct required API media types", () => {
+  expect(runtimeDownloadAccept("actions/artifacts/123/zip")).toBe("application/vnd.github+json");
+  expect(runtimeDownloadAccept("releases/assets/123")).toBe("application/octet-stream");
+});
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
