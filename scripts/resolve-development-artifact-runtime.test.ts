@@ -88,7 +88,20 @@ async function fixture(target: NativeArtifactRuntimeTarget = "linux-x64-gnu") {
     if (path.includes("actions/runs/")) return Buffer.from(JSON.stringify(producer));
     return Buffer.from(JSON.stringify({ artifacts: [artifact] }));
   };
-  return { repositoryRoot, target, command, calls, artifact, producer, state, entries };
+  const publicDownload = async () => {
+    throw new Error("fixture: no public release");
+  };
+  return {
+    repositoryRoot,
+    target,
+    command,
+    calls,
+    artifact,
+    producer,
+    state,
+    entries,
+    publicDownload,
+  };
 }
 
 for (const target of targets) {

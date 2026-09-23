@@ -50,6 +50,7 @@ import {
   runArtifactKernelRustTool,
 } from "./artifact-kernel-rust";
 import { resolveDevelopmentArtifactRuntime } from "./resolve-development-artifact-runtime";
+import { checkDevelopmentSourceBuildPrerequisites } from "./check-development-prerequisites";
 
 export { assertArtifactKernelRustcVersion } from "./artifact-kernel-rust";
 
@@ -143,6 +144,11 @@ export async function prepareDevelopmentArtifactRuntime(
           "Current-host artifact kernel receipt is absent or stale",
         );
       }
+      await checkDevelopmentSourceBuildPrerequisites({
+        repositoryRoot,
+        artifactRuntime: "source-build",
+        relayRuntime: "disabled",
+      });
       await buildCurrentHostKernel(repositoryRoot, assetRoot, target, sourceFingerprint);
       rebuiltKernel = true;
     }
@@ -272,6 +278,7 @@ export async function developmentArtifactRuntimeSourceFingerprint(
     "scripts/artifact-kernel-rust.ts",
     "scripts/prepare-development-artifact-runtime.ts",
     "scripts/resolve-development-artifact-runtime.ts",
+    "scripts/artifact-runtime-distribution.ts",
   ];
   const files: string[] = [];
   for (const input of inputs) {
