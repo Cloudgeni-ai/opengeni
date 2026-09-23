@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// Current native-helper wire protocol.
-pub const NATIVE_RPC_PROTOCOL_VERSION: u16 = 2;
+pub const NATIVE_RPC_PROTOCOL_VERSION: u16 = 3;
 
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -68,6 +68,10 @@ enum NativeOperation {
     Capture {
         target_id: String,
         options: Option<NativeCaptureOptions>,
+    },
+    CaptureStill {
+        target_id: String,
+        options: NativeCaptureOptions,
     },
     StartCapture {
         target_id: String,
@@ -310,6 +314,15 @@ async fn handle_request(
             },
             None => adapter.capture(&target_id).await.and_then(frame_payload),
         },
+        NativeOperation::CaptureStill { target_id, options } => {
+            match validate_capture_options(options) {
+                Ok(options) => adapter
+                    .capture_still(&target_id, options)
+                    .await
+                    .and_then(frame_payload),
+                Err(error) => Err(error),
+            }
+        }
         NativeOperation::StartCapture { target_id, options } => {
             match validate_capture_options(options) {
                 Ok(options) => adapter
@@ -543,6 +556,25 @@ mod tests {
             })
         }
 
+        async fn capture_still(
+            &self,
+            target_id: &str,
+            options: NativeCaptureOptions,
+        ) -> NativeAdapterResult<NativeCapturedFrame> {
+            assert_eq!(options.max_width, 1024);
+            self.capture(target_id).await
+        }
+
+        async fn capture_stream(
+            &self,
+            _target_id: &str,
+            _options: NativeCaptureOptions,
+        ) -> NativeAdapterResult<NativeCapturedFrame> {
+            Err(NativeAdapterError::unsupported(
+                "live capture was not started",
+            ))
+        }
+
         async fn clipboard(&self) -> NativeAdapterResult<NativeClipboard> {
             Ok(NativeClipboard {
                 text: Some("hello".to_string()),
@@ -693,8 +725,9 @@ mod tests {
         let request = serde_json::to_vec(&json!({
             "protocolVersion": NATIVE_RPC_PROTOCOL_VERSION,
             "requestId": "r_capture",
-            "method": "capture",
+            "method": "capture_still",
             "targetId": "screen:test",
+            "options": { "format": "jpeg", "quality": 55, "maxWidth": 1024, "maxHeight": 768 },
         }))
         .expect("serialize request");
         write_frame(&mut client_write, &request, MAX_REQUEST_BYTES)

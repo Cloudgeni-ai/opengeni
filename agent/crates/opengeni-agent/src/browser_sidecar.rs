@@ -166,8 +166,11 @@ impl BrowserSidecarManager {
             PlatformError::os("browser controller sidecar stderr was not captured")
         })?;
         let stderr_diagnostic = Arc::new(Mutex::new(Vec::new()));
-        let stderr_task =
-            tokio::spawn(drain_bounded_stderr(stderr, Arc::clone(&stderr_diagnostic)));
+        let stderr_task = tokio::spawn(drain_bounded_stderr(
+            stderr,
+            Arc::clone(&stderr_diagnostic),
+            admin_token.to_string(),
+        ));
         let ready = match tokio::time::timeout(READY_TIMEOUT, read_ready_line(stdout)).await {
             Ok(result) => result,
             Err(_) => Err(PlatformError::Timeout(
@@ -200,7 +203,7 @@ impl BrowserSidecarManager {
                 stderr_diagnostic,
                 admin_token,
                 PlatformError::os(
-                    "browser controller sidecar returned an incompatible ready document",
+                    format!("browser controller sidecar returned an incompatible ready document (expected runtime build {}; received {})", expected_runtime_build_id(), ready.runtime_build_id.chars().take(128).collect::<String>()),
                 ),
             )
             .await);
@@ -433,16 +436,48 @@ async fn read_ready_line(stdout: tokio::process::ChildStdout) -> PlatformResult<
         .map_err(|_| PlatformError::os("browser controller sidecar ready document is invalid"))
 }
 
-async fn drain_bounded_stderr(mut stderr: ChildStderr, diagnostic: Arc<Mutex<Vec<u8>>>) {
+async fn drain_bounded_stderr(
+    mut stderr: ChildStderr,
+    diagnostic: Arc<Mutex<Vec<u8>>>,
+    admin_token: String,
+) {
     let mut chunk = [0_u8; 1_024];
+    let mut line = Vec::new();
+    let mut oversized = false;
     loop {
         let count = match stderr.read(&mut chunk).await {
             Ok(0) | Err(_) => return,
             Ok(count) => count,
         };
-        let mut diagnostic = diagnostic.lock().await;
-        let remaining = MAX_STARTUP_DIAGNOSTIC_BYTES.saturating_sub(diagnostic.len());
-        diagnostic.extend_from_slice(&chunk[..count.min(remaining)]);
+        {
+            let mut diagnostic = diagnostic.lock().await;
+            let remaining = MAX_STARTUP_DIAGNOSTIC_BYTES.saturating_sub(diagnostic.len());
+            diagnostic.extend_from_slice(&chunk[..count.min(remaining)]);
+        }
+        for byte in &chunk[..count] {
+            if *byte == b'\n' {
+                if oversized {
+                    tracing::warn!(
+                        service = "opengeni-browserd",
+                        "controller diagnostic exceeded the line limit"
+                    );
+                } else if !line.is_empty() {
+                    let message =
+                        String::from_utf8_lossy(&line).replace(&admin_token, "[redacted]");
+                    tracing::warn!(service = "opengeni-browserd", diagnostic = %message, "controller diagnostic");
+                }
+                line.clear();
+                oversized = false;
+            } else if !oversized {
+                if line.len() < MAX_STARTUP_DIAGNOSTIC_BYTES {
+                    line.push(*byte);
+                } else {
+                    // Discard the whole oversized line, including partial credentials.
+                    line.clear();
+                    oversized = true;
+                }
+            }
+        }
     }
 }
 

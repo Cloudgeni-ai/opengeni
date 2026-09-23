@@ -1056,6 +1056,12 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             resolved.kind !== "selfhosted" ||
             resolved.sandboxId !== expectedPlacement.sandboxId
           ) {
+            if (operation === "computer.create") {
+              throw new HTTPException(422, {
+                message:
+                  "The requested Connected Machine is not this session's current placement. Move the session to that machine before creating an interaction resource.",
+              });
+            }
             return await throwComputerSourcePlacementChanged(
               grant,
               sourceSession.id,
