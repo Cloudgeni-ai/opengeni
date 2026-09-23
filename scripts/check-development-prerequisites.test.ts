@@ -199,11 +199,19 @@ describe("backend-aware read-only preflight", () => {
     expect(result.errors).toHaveLength(3);
   });
 
-  test("macOS native Garage explicitly reports unsupported bootstrap; Windows requires WSL2", async () => {
+  test("macOS native supervision is unsupported with either fixture; Windows requires WSL2", async () => {
     const { host } = fixture({ platform: "darwin" });
-    const result = await collectDevelopmentPrerequisites({ ...prebuilt, environment: { OPENGENI_DEV_BACKEND: "native" } }, host);
-    expect(result.errors).toEqual([expect.stringContaining("no verified repository bootstrap path")]);
+    for (const storage of ["garage", "minio"]) {
+      const result = await collectDevelopmentPrerequisites({ ...prebuilt, environment: { OPENGENI_DEV_BACKEND: "native", OPENGENI_OBJECT_STORAGE_FIXTURE: storage } }, host);
+      expect(result.errors).toEqual([expect.stringContaining("macOS native supervision is unsupported")]);
+      expect(result.errors[0]).toContain("OPENGENI_DEV_BACKEND=docker");
+    }
     expect(developmentPrerequisiteErrors({ ...ready, ...prebuilt, platform: "win32" }).join("\n")).toContain("WSL2");
+  });
+
+  test("macOS Docker remains supported without native utilities or service binaries", async () => {
+    const { host } = fixture({ platform: "darwin", which: (command) => ["bash", "git", "curl", "ps", "docker"].includes(command) ? `/bin/${command}` : null });
+    expect(await collectDevelopmentPrerequisites({ ...prebuilt, environment: { OPENGENI_DEV_BACKEND: "docker" } }, host)).toEqual({ backend: "docker", errors: [] });
   });
 
   test("remote/disabled sandboxes do not require Buildx", async () => {
