@@ -3359,6 +3359,44 @@ describe("OpenGeni Slack bot connection", () => {
     expect(slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(1);
   });
 
+  test("audits update wire overflow before claiming or calling Slack", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+    const operationId = crypto.randomUUID();
+    await expect(
+      bot.updateMessage({
+        operationId,
+        channelId: "C_MEMBER",
+        timestamp: "1800000000.000001",
+        text: "Choose",
+        blocks: Array.from({ length: 26 }, (_, index) => ({
+          type: "actions" as const,
+          block_id: `choice-${index}`,
+          elements: ["first", "second"].map((value) => ({
+            type: "button" as const,
+            action_id: "opengeni.human_input.select",
+            value,
+            text: { type: "plain_text" as const, text: value },
+          })),
+        })),
+      }),
+    ).rejects.toThrow("count");
+    expect(slack.calls.filter((call) => call.method === "chat.update")).toHaveLength(0);
+    const operations = await shared!.admin`
+      select operation_id from slack_bot_update_operations where operation_id = ${operationId}`;
+    expect(operations).toHaveLength(0);
+    const audits = await shared!.admin`
+      select metadata from audit_events where workspace_id = ${workspace.workspaceId}
+      and action = 'slack_bot.message.update' and metadata->>'operationId' = ${operationId}`;
+    expect(audits).toHaveLength(1);
+    expect(audits[0]!.metadata).toMatchObject({
+      outcome: "failed",
+      failureCode: "local_validation_failed",
+    });
+  });
+
   test("updates one exact bot message through a durable operation identity", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

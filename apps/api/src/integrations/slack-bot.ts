@@ -1197,8 +1197,8 @@ export class OpenGeniSlackBotClient {
     let claimAcquired = false;
     let providerCallStarted = false;
     const blocks = validateSlackMessageBlocks(input.blocks);
-    const wireBlocks = slackMessageWireBlocks(blocks);
     try {
+      const wireBlocks = slackMessageWireBlocks(blocks);
       const headers = await this.headersFor(operation);
       await this.requireMemberChannel(headers, input.channelId);
       const requestDigest = this.updateRequestDigest({ ...input, ...(blocks ? { blocks } : {}) });
