@@ -1604,6 +1604,22 @@ export function stackPlanFor(
 ): DeploymentStackPlan {
   const terraformRoot = terraformRootFor(contract);
   const helmValuesFile = helmValuesFileFor(contract);
+  // Only Terraform-backed stacks generate runtime.env and Helm config from
+  // these inputs. Other Kubernetes profiles intentionally deploy reviewed
+  // values files. Refuse an apparent paid activation that their plan would
+  // otherwise silently drop and leave at the free chart defaults.
+  if (
+    !terraformRoot &&
+    contract.runtime.platform === "kubernetes" &&
+    ((env.OPENGENI_SANDBOX_WARM_BILLING_MODE !== undefined &&
+      env.OPENGENI_SANDBOX_WARM_BILLING_MODE !== "usage_only") ||
+      (env.OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON !== undefined &&
+        env.OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON !== "{}"))
+  ) {
+    throw new Error(
+      "Non-Terraform Kubernetes stack plans do not render sandbox warm billing environment settings; set and review both config.OPENGENI_SANDBOX_WARM_BILLING_MODE and config.OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON in the Helm values file",
+    );
+  }
   const platformDependencies = platformDependencyPlans(contract);
   const requiredSecretKeys = [
     ...requiredRuntimeEnvVars(contract, env).filter((name) => secretLikeRuntimeEnv(name)),

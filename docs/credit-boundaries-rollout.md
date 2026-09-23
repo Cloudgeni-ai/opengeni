@@ -48,6 +48,18 @@ person proof, so monitor grants and abuse before scaling the offer.
    known test account; Knowledge's `document.embedding_shadow_estimate` usage
    event records an internal micro-USD estimate, not customer spend. Check provider
    costs, shared-box once-only metering, vector query traffic, and retry rates.
+
+   Terraform-backed managed stacks render the reviewed warm-rate JSON into
+   both the private runtime environment and Helm values. Non-Terraform
+   Kubernetes stack plans do not run that generator: set both
+   `config.OPENGENI_SANDBOX_WARM_BILLING_MODE` and
+   `config.OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON` in the reviewed
+   Helm values file, using the actual backend key (`modal` or `opensandbox`).
+   Verify the rendered ConfigMap and API/worker pod environments before
+   enabling charges. Exporting paid warm settings only into the stack-plan
+   environment now fails instead of silently deploying the free chart default.
+   The trial and document switches on these non-Terraform profiles likewise
+   require explicit reviewed Helm values; neither is enabled by a shell export.
 3. If a verified-email signup campaign is approved, enable the trial flag
    separately. Confirm new receipts get one $10 ledger entry, old receipts and
    invitation accounts get none, and balance/top-up screens handle negative

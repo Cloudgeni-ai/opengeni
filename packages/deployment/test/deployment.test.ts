@@ -339,7 +339,7 @@ describe("deployment contract", () => {
 
   test("carries the admitted sandbox warm tariff through runtime and Helm generation", () => {
     const contract = deploymentProfiles["local-kubernetes"];
-    const rate = '{"modal":45,"open_sandbox":12}';
+    const rate = '{"modal":45,"opensandbox":12}';
     const defaults = generateRuntimeArtifacts(contract, {}, {});
     expect(defaults.runtimeEnv).toContain("OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only");
     expect(defaults.runtimeEnv).toContain("OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON={}");
@@ -360,6 +360,15 @@ describe("deployment contract", () => {
     expect(priced.helmValuesYaml).toContain('OPENGENI_SANDBOX_WARM_BILLING_MODE: "credits"');
     expect(priced.helmValuesYaml).toContain(
       `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON: ${JSON.stringify(rate)}`,
+    );
+    expect(() =>
+      stackPlanFor(contract, "none", {
+        OPENGENI_SANDBOX_WARM_BILLING_MODE: "credits",
+        OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON: rate,
+      }),
+    ).toThrow("Non-Terraform Kubernetes stack plans do not render sandbox warm billing");
+    expect(stackPlanFor(contract, "none", {}).deployCommands.join("\n")).toContain(
+      "values.local-kubernetes.example.yaml",
     );
   });
 
