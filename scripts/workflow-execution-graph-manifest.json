@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/local-startup.yml",
-      "sha256": "b75412b0ac66ef80f3e822cd52e8846d7b7b77f2a3cb530f14cf38c06f1c1761"
+      "sha256": "32c9092f1a6262dfe73e6a53ea5a1f8c8a11657e55c1a318ab5b59b058a44dce"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -35,6 +35,10 @@
     {
       "path": ".github/workflows/production-pr-heads.yml",
       "sha256": "48a8726756c75dc74b33e4824adcd0fdad9bc50fa1f55da1e410375e7dd2db3a"
+    },
+    {
+      "path": ".github/workflows/publish-artifact-runtime.yml",
+      "sha256": "92543a710cd808d8d930c827c8f877953406993e8965e1c01d1097afef7f9a47"
     },
     {
       "path": ".github/workflows/publish-canary-chart.yml",

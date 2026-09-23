@@ -8,10 +8,11 @@ description: >-
 
 # Run OpenGeni
 
-Get a local checkout running. Read `.env.example`, `docs/local-development.md`, and `scripts/dev-stack.sh`, and follow those. Start with `bun run dev` and the defaults already in the repo. Do not ask the user to choose a sandbox, models, or feature flags first.
+Get OpenGeni running with the repository defaults. Make routine setup decisions yourself; the user can customize it once it works.
 
-Treat it as done only when a session returns an assistant message, or the app is up and the user still needs to connect a model. A health URL is not done. If startup fails, fix it and start again.
+1. Clone `https://github.com/Cloudgeni-ai/opengeni` or use the existing checkout. Install the Bun version in `.bun-version`. On Windows, run setup inside WSL2; on macOS, have Docker running.
+2. Run `bun run dev:check` and resolve the prerequisites it reports. On Linux without Docker, `bun run dev:tools -- --install` installs the local service tools; PostgreSQL 17 with pgcrypto and pgvector needs host packages. See `docs/local-development.md` for platform-specific help.
+3. Run `bun run dev`. It prepares the checkout and starts the app. Wait for `OpenGeni dev stack ready` and keep it running.
+4. Open the printed web URL and check that the app renders. If a model connection is available, send a message and ask the agent to run a simple command to confirm it works. Otherwise, show the user where to connect one under **Settings → Models**.
 
-After it is up, tell the user the app URL and how to connect a model. In the app, open Settings, then Models. From there they can connect a ChatGPT / Codex subscription, a SuperGrok subscription, a Vercel AI Gateway key, or an OpenRouter key. The other path is a deployment key in `.env` for the built-in OpenAI or Azure provider. The copied file has `OPENGENI_OPENAI_API_KEY=your-key` until they replace it.
-
-If they ask what else they can change, or ask to turn something on, answer from the current checkout. The usual other choice is where the agent runs. Explain the one they asked about, then change it if they want it. Leave every other default as it is.
+Give the user the working app URL and any remaining setup step. To stop, interrupt `bun run dev`, then run `bun run dev:down`. To start again, run `bun run dev`.

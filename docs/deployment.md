@@ -1440,14 +1440,21 @@ Current profiles:
 
 `bun run dev` is the primary full local path. `OPENGENI_DEV_BACKEND=auto`
 prefers Docker only when its daemon answers a bounded server probe, then falls
-back to native PostgreSQL, NATS, Temporal, and pinned MinIO processes. Set
+back to native PostgreSQL, NATS, Temporal, and Garage processes. Set
 `OPENGENI_DEV_BACKEND=docker` or `native` to require one path. The native path
-is Linux-only, changes a copied Docker sandbox default to the credentials-free
+is Linux/WSL2-only (macOS uses Docker), changes a copied Docker sandbox default to the credentials-free
 in-process local provider, and preserves explicit remote sandbox providers.
+Fresh native storage defaults to Garage, while recorded or legacy MinIO state
+retains MinIO. Incompatible provider changes fail before startup; there is no
+automatic data migration. `bun run dev:check` checks the selected prerequisites
+without starting services. `bun run dev:tools` prints the opt-in, project-local
+pinned tool installation plan.
 
 Both infrastructure paths run migrations, import the fingerprinted reviewed
-integrations catalog, and start the API, control and turn workers, Connected
-Machines relay, artifact materializer, artifact outbox dispatcher, and web.
+integrations catalog, and start the API, control and turn workers, artifact
+materializer, artifact outbox dispatcher, and web. Connected Machines is opt-in
+for fresh local configuration; its relay is prepared before application startup
+only when `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true`.
 Docker additionally builds the local sandbox image when that sandbox backend is
 selected. The two artifact roles receive distinct generated least-privilege
 database logins and independently selected health ports (defaults `9465` and
