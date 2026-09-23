@@ -1339,8 +1339,8 @@ impl AtspiComputerAdapter {
         self.finish_window_capture(
             record,
             window,
-            captured.width,
-            captured.height,
+            (captured.width, captured.height),
+            (captured.width, captured.height),
             "image/png",
             captured.png,
         )
@@ -1373,16 +1373,23 @@ impl AtspiComputerAdapter {
                 )
             })?;
         let (width, height, mime_type, bytes) = encode_live_frame(&captured, options)?;
-        self.finish_window_capture(record, window, width, height, mime_type, bytes)
-            .await
+        self.finish_window_capture(
+            record,
+            window,
+            (captured.width, captured.height),
+            (width, height),
+            mime_type,
+            bytes,
+        )
+        .await
     }
 
     async fn finish_window_capture(
         &self,
         record: TargetRecord,
         window: LinuxWindow,
-        width: u32,
-        height: u32,
+        source_size: (u32, u32),
+        frame_size: (u32, u32),
         mime_type: &str,
         bytes: Vec<u8>,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
@@ -1415,7 +1422,7 @@ impl AtspiComputerAdapter {
                 true,
             ));
         }
-        if width != current.bounds.width || height != current.bounds.height {
+        if source_size != (current.bounds.width, current.bounds.height) {
             return Err(NativeAdapterError::definite(
                 NativeAdapterErrorCode::FrameStale,
                 "X11 window resized during capture",
@@ -1433,8 +1440,8 @@ impl AtspiComputerAdapter {
                 frame_id: frame_id.clone(),
                 target_generation: record.target.target_generation.clone(),
                 window: current,
-                width,
-                height,
+                width: frame_size.0,
+                height: frame_size.1,
             },
         );
         while frames.len() > MAX_WINDOW_FRAME_FENCES {
@@ -1452,8 +1459,8 @@ impl AtspiComputerAdapter {
             frame_id,
             target_id: record.target.id,
             target_generation: record.target.target_generation,
-            width,
-            height,
+            width: frame_size.0,
+            height: frame_size.1,
             mime_type: mime_type.to_string(),
             sha256: hex::encode(Sha256::digest(&bytes)),
             bytes,
@@ -1550,6 +1557,8 @@ impl AtspiComputerAdapter {
             &command.action,
             f64::from(frame.window.bounds.x),
             f64::from(frame.window.bounds.y),
+            f64::from(frame.window.bounds.width) / f64::from(frame.width),
+            f64::from(frame.window.bounds.height) / f64::from(frame.height),
         )?;
         self.latest_window_frames
             .write()
@@ -2346,13 +2355,15 @@ fn validate_screen_point(x: f64, y: f64, bounds: NativeRect) -> NativeAdapterRes
 }
 
 fn screen_inputs(action: &NativeAction) -> NativeAdapterResult<Vec<v1::DesktopInput>> {
-    pixel_inputs(action, 0.0, 0.0)
+    pixel_inputs(action, 0.0, 0.0, 1.0, 1.0)
 }
 
 fn pixel_inputs(
     action: &NativeAction,
     offset_x: f64,
     offset_y: f64,
+    scale_x: f64,
+    scale_y: f64,
 ) -> NativeAdapterResult<Vec<v1::DesktopInput>> {
     match action {
         NativeAction::Pointer {
@@ -2366,8 +2377,8 @@ fn pixel_inputs(
             button,
             ..
         } => {
-            let x = checked_i32(*x + offset_x, "pointer x")?;
-            let y = checked_i32(*y + offset_y, "pointer y")?;
+            let x = checked_i32(*x * scale_x + offset_x, "pointer x")?;
+            let y = checked_i32(*y * scale_y + offset_y, "pointer y")?;
             let button = match button.unwrap_or(NativePointerButton::Left) {
                 NativePointerButton::Left => v1::PointerButton::Left,
                 NativePointerButton::Right => v1::PointerButton::Right,
@@ -2378,17 +2389,25 @@ fn pixel_inputs(
                     v1::desktop_input::Event::Scroll(v1::ScrollEvent {
                         x,
                         y,
-                        delta_x: checked_i32(delta_x.unwrap_or(0.0), "horizontal scroll delta")?,
-                        delta_y: checked_i32(delta_y.unwrap_or(0.0), "vertical scroll delta")?,
+                        delta_x: checked_i32(
+                            delta_x.unwrap_or(0.0) * scale_x,
+                            "horizontal scroll delta",
+                        )?,
+                        delta_y: checked_i32(
+                            delta_y.unwrap_or(0.0) * scale_y,
+                            "vertical scroll delta",
+                        )?,
                     }),
                 )]),
                 NativePointerAction::Drag => {
                     let end_x = checked_i32(
-                        end_x.ok_or_else(|| invalid_action("drag requires endX"))? + offset_x,
+                        end_x.ok_or_else(|| invalid_action("drag requires endX"))? * scale_x
+                            + offset_x,
                         "drag end x",
                     )?;
                     let end_y = checked_i32(
-                        end_y.ok_or_else(|| invalid_action("drag requires endY"))? + offset_y,
+                        end_y.ok_or_else(|| invalid_action("drag requires endY"))? * scale_y
+                            + offset_y,
                         "drag end y",
                     )?;
                     Ok(vec![
@@ -2723,6 +2742,26 @@ mod live_tests {
     }
 
     #[test]
+    fn scaled_window_frame_coordinates_map_to_the_native_window() {
+        let click = NativeAction::Pointer {
+            frame_id: "frame:test".to_string(),
+            action: NativePointerAction::Click,
+            x: 105.0,
+            y: 45.0,
+            end_x: None,
+            end_y: None,
+            delta_x: None,
+            delta_y: None,
+            button: Some(NativePointerButton::Left),
+        };
+        let inputs = pixel_inputs(&click, 510.0, 20.0, 2.0, 2.0).expect("mapped click");
+        let Some(v1::desktop_input::Event::Pointer(pointer)) = &inputs[0].event else {
+            panic!("expected pointer input");
+        };
+        assert_eq!((pointer.x, pointer.y), (720, 110));
+    }
+
+    #[test]
     fn live_frame_encoding_preserves_bounded_png_geometry() {
         let frame = LinuxRgbaFrame {
             rgba: vec![128_u8; 640 * 360 * 4],
@@ -2975,6 +3014,58 @@ Gtk.main()
             .await
             .expect("observe XTEST result");
         assert!(has_text(&after_pixel.roots, "Applied: hello from XTEST"));
+
+        let entry_ref = find_ref(&after_pixel.roots, "Fixture input").expect("fresh entry ref");
+        let set_scaled_value = command(
+            &after_pixel,
+            entry_ref,
+            NativeSemanticAction::SetValue,
+            Some(NativeActionValue::String(
+                "hello from scaled XTEST".to_string(),
+            )),
+        );
+        let before_scaled_click = adapter
+            .dispatch(&set_scaled_value)
+            .await
+            .expect("set value before scaled click")
+            .expect("semantic set-value returns an observation");
+        let scaled_button =
+            find_bounds(&before_scaled_click.roots, "Apply").expect("scaled button bounds");
+        let scaled_window = before_scaled_click
+            .target
+            .bounds
+            .expect("scaled fixture window bounds");
+        let scaled_frame = adapter
+            .capture_still(
+                &target.id,
+                crate::NativeCaptureOptions {
+                    format: crate::NativeFrameFormat::Jpeg,
+                    quality: 72,
+                    max_width: 210,
+                    max_height: 90,
+                },
+            )
+            .await
+            .expect("capture a scaled X11 window still");
+        assert_eq!((scaled_frame.width, scaled_frame.height), (210, 90));
+        let scaled_click = pointer_command(
+            &target,
+            &scaled_frame,
+            (scaled_button.x - scaled_window.x + scaled_button.width / 2.0) / 2.0,
+            (scaled_button.y - scaled_window.y + scaled_button.height / 2.0) / 2.0,
+        );
+        adapter
+            .dispatch(&scaled_click)
+            .await
+            .expect("click GTK button through a scaled window frame");
+        let after_scaled_click = adapter
+            .observe(&target.id)
+            .await
+            .expect("observe scaled XTEST result");
+        assert!(has_text(
+            &after_scaled_click.roots,
+            "Applied: hello from scaled XTEST"
+        ));
 
         let newer_frame = adapter
             .capture(&target.id)

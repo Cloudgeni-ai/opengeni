@@ -557,7 +557,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "observe"],
     title: "Observe browser tab",
     description:
-      "Read one tab's current URL/title, causal generations, compact semantic accessibility tree, dialog, and diagnostic counts without taking control. Set includeScreenshot=true to receive a current still image as tool image content; the structured screenshot field is only a retained-artifact reference and can remain null.",
+      "Read one tab's current URL/title, measured page viewport, causal generations, compact semantic accessibility tree, dialog, and diagnostic counts without taking control. Set includeScreenshot=true to receive a current still image as tool image content; the structured screenshot field is only a retained-artifact reference and can remain null.",
     input: BrowserObserveInput,
     output: BrowserObservation,
     readOnly: true,
@@ -605,7 +605,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to use a fresh observation automatically; provide them to require exact previously observed state. Returns the durable receipt and changed observation.",
+      "Perform one semantic-first browser action or bounded batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to use a fresh observation automatically; provide them to require exact previously observed state. Returns the durable receipt and changed observation.",
     input: BrowserActInput,
     output: BrowserActionReceipt,
     readOnly: false,
