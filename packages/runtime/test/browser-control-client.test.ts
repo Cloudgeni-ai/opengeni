@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
@@ -249,6 +249,66 @@ describe("BrowserControlClient", () => {
       expect(new URL(routes[1]!).searchParams.toString()).toBe(
         "format=jpeg&quality=80&fullPage=true",
       );
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("reads a Computer screenshot through the private transport with its 32 MiB bound", async () => {
+    const computerSessionId = randomUUID();
+    const controllerGeneration = "controller-1";
+    const targetId = "screen-1";
+    const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+    const metadata = {
+      frameId: "frame-1",
+      computerSessionId,
+      controllerGeneration,
+      targetId,
+      targetGeneration: "target-1",
+      sequence: 1,
+      mediaType: "image/jpeg",
+      width: 1024,
+      height: 640,
+      capturedAt: "2026-09-23T12:00:00.000Z",
+      sha256: createHash("sha256").update(image).digest("hex"),
+    };
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        expect(request.headers.get("authorization")).toBe(`Bearer ${viewToken}`);
+        expect(new URL(request.url).searchParams.toString()).toBe(
+          "format=jpeg&quality=55&maxWidth=1024&maxHeight=768",
+        );
+        return new Response(image.slice().buffer, {
+          headers: {
+            "content-type": "image/jpeg",
+            "x-opengeni-computer-frame": Buffer.from(JSON.stringify(metadata)).toString(
+              "base64url",
+            ),
+          },
+        });
+      },
+    });
+    const placement = await localPlacement();
+    delete placement.session.resolveExposedPort;
+    try {
+      const session = new BrowserControlClient(placement.session, {
+        adminToken,
+        port: server.port,
+      }).computerSessionClient({
+        reference: { computerSessionId, controllerGeneration },
+        controlToken,
+        viewToken,
+      });
+      const frame = await session.capture(targetId, {
+        format: "jpeg",
+        quality: 55,
+        maxWidth: 1024,
+        maxHeight: 768,
+      });
+      expect(frame.data).toEqual(image);
+      expect(frame.metadata).toEqual(metadata);
+      expect(placement.commands.some((command) => command.includes("curl --disable"))).toBe(true);
     } finally {
       server.stop(true);
     }
