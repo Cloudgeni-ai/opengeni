@@ -1473,13 +1473,37 @@ export class BrowserControlSessionClient {
   }
 
   async targetState(targetId: string): Promise<BrowserTargetStateValue> {
-    const state = BrowserTargetState.parse(
-      await this.parent.requestForSession({
-        method: "GET",
-        path: this.targetPath(targetId, "state"),
-        token: this.viewToken,
-      }),
-    );
+    let state: BrowserTargetStateValue;
+    try {
+      state = BrowserTargetState.parse(
+        await this.parent.requestForSession({
+          method: "GET",
+          path: this.targetPath(targetId, "state"),
+          token: this.viewToken,
+        }),
+      );
+    } catch (error) {
+      // Active Connected Machines can run an older browserd during an API rollout.
+      // Only its exact unknown-route response permits the existing observation path.
+      // A missing session or target must keep its original error.
+      if (
+        !(error instanceof BrowserControlRequestError) ||
+        error.status !== 404 ||
+        error.error.code !== "resource_not_found" ||
+        error.error.message !== "route not found"
+      ) {
+        throw error;
+      }
+      const observation = await this.observe(targetId);
+      state = BrowserTargetState.parse({
+        browserSessionId: observation.browserSessionId,
+        controllerGeneration: observation.target.controllerGeneration,
+        targetId: observation.target.id,
+        targetGeneration: observation.target.targetGeneration,
+        documentGeneration: observation.target.documentGeneration,
+        frameId: observation.frameId,
+      });
+    }
     if (
       state.browserSessionId !== this.reference.browserSessionId ||
       state.controllerGeneration !== this.reference.controllerGeneration ||

@@ -1934,8 +1934,10 @@ const BrowserDomReadFence = z.object({
 });
 
 /** A fixed, read-only query. The caller never supplies executable JavaScript.
- * CSS count is scoped to the target's main document; child frames and shadow
- * roots are not part of its count. */
+ * CSS reads accept only simple tag, class, id, descendant, and child selectors
+ * so predicate queries cannot probe protected attribute values. CSS count is
+ * scoped to the target's main document; child frames and shadow roots are not
+ * part of its count. */
 export const BrowserDomReadRequest = z.discriminatedUnion("kind", [
   BrowserDomReadFence.extend({
     kind: z.literal("element"),

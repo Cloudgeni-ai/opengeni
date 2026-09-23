@@ -42,7 +42,10 @@ describe("OpenGeni Codemode interaction facade", () => {
     const tab = createOpenGeniCodemode(fake.client)
       .browsers.use(browserSessionId)
       .tabs.use("tab-1");
-    const screenshot = await tab.screenshot({ fullPage: true }, { operationId: "op-1" });
+    const screenshot = await tab.screenshot(
+      { fullPage: true, quality: 40 },
+      { operationId: "op-1" },
+    );
     try {
       expect(screenshot).toMatchObject({ mimeType: "image/png", sizeBytes: png.length, metadata });
       expect(screenshot.path).toEndWith("/frame.png");
@@ -55,7 +58,7 @@ describe("OpenGeni Codemode interaction facade", () => {
       expect(fake.calls).toEqual([
         {
           path: "interaction.browser.screenshot",
-          args: { browserSessionId, targetId: "tab-1", fullPage: true },
+          args: { browserSessionId, targetId: "tab-1", fullPage: true, quality: 40 },
           options: { operationId: "op-1" },
         },
         {
@@ -103,6 +106,7 @@ describe("OpenGeni Codemode interaction facade", () => {
       }
       if (path === "interaction.browser.read") {
         return result({
+          source: "accessibility",
           mode: "matches",
           nodes: [{ ref: "b1", role: "button", depth: 0, states: [], actions: [] }],
         });
@@ -114,7 +118,9 @@ describe("OpenGeni Codemode interaction facade", () => {
       .tabs.use("tab-1");
     expect((await tab.observe()).agentView?.kind).toBe("compact");
     await tab.observeFull();
-    expect((await tab.read({ role: "button", nameContains: "Save", limit: 4 })).nodes).toEqual([
+    const focused = await tab.read({ role: "button", nameContains: "Save", limit: 4 });
+    if (focused.source !== "accessibility") throw new Error("expected accessibility read");
+    expect(focused.nodes).toEqual([
       { ref: "b1", role: "button", depth: 0, states: [], actions: [] },
     ]);
     expect(fake.calls.map(({ path, args }) => ({ path, args }))).toEqual([
@@ -137,6 +143,50 @@ describe("OpenGeni Codemode interaction facade", () => {
         },
       },
     ]);
+  });
+
+  test("types and forwards focused DOM text, value, attributes, and count", async () => {
+    const fake = fakeClient((_path, args) =>
+      result({
+        source: "dom",
+        kind: (args.dom as { kind: string }).kind,
+        count: 1,
+        text: "Email",
+        value: "user@example.test",
+        attributes: { placeholder: "Email address" },
+        redacted: null,
+        truncated: false,
+      }),
+    );
+    const tab = createOpenGeniCodemode(fake.client)
+      .browsers.use(browserSessionId)
+      .tabs.use("tab-1");
+    const read = await tab.read({
+      mode: "dom",
+      dom: {
+        kind: "element",
+        locator: { kind: "css", selector: "#email" },
+        attributes: ["placeholder"],
+      },
+      expectedTargetGeneration: "target-1",
+      expectedDocumentGeneration: "document-1",
+      expectedFrameId: "frame-1",
+    });
+    if (read.source !== "dom") throw new Error("expected DOM read");
+    expect(read.value).toBe("user@example.test");
+    expect(read.attributes?.placeholder).toBe("Email address");
+    const counted = await tab.read({ mode: "dom", dom: { kind: "count", selector: "button" } });
+    if (counted.source !== "dom") throw new Error("expected DOM count");
+    expect(counted.count).toBe(1);
+    expect(fake.calls[0]?.args).toMatchObject({
+      mode: "dom",
+      dom: { kind: "element", locator: { kind: "css", selector: "#email" } },
+      expectedDocumentGeneration: "document-1",
+    });
+    expect(fake.calls[1]?.args).toMatchObject({
+      mode: "dom",
+      dom: { kind: "count", selector: "button" },
+    });
   });
 
   test("uses the same atomic Browser paths with implicit selected-tab resolution", async () => {

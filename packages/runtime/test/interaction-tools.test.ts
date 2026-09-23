@@ -1045,10 +1045,10 @@ describe("interaction attempt tools", () => {
       permissions: ["sessions:read"],
     });
     const result = await definitions[0]!.execute(
-      { browserSessionId, targetId: target.id, fullPage: true },
+      { browserSessionId, targetId: target.id, fullPage: true, quality: 40 },
       { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
     );
-    expect(capturedOptions).toEqual({ fullPage: true });
+    expect(capturedOptions).toEqual({ fullPage: true, quality: 40 });
     expect(result.structuredContent).toMatchObject({
       kind: "browser_screenshot",
       fullPage: true,
@@ -1062,6 +1062,44 @@ describe("interaction attempt tools", () => {
       data: Buffer.from(image).toString("base64"),
       mimeType: "image/jpeg",
     });
+  });
+
+  test("rejects a screenshot before the 16 MiB Code Mode result journal can overflow", async () => {
+    const target = browserTarget();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        captureBrowserTarget: async () => ({
+          frameId: "captured-browser-frame",
+          browserSessionId,
+          controllerGeneration: target.controllerGeneration,
+          targetId: target.id,
+          targetGeneration: target.targetGeneration,
+          documentGeneration: target.documentGeneration!,
+          sequence: 1,
+          mediaType: "image/jpeg",
+          width: 120,
+          height: 200,
+          deviceScaleFactor: 1,
+          scrollX: 0,
+          scrollY: 0,
+          capturedAt: now,
+          data: Buffer.alloc(8 * 1024 * 1024 + 1),
+        }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_screenshot"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: "browser_screenshot_too_large", retryable: false } },
+    });
+    expect(JSON.stringify(result)).not.toContain("AAAAAA");
   });
 
   test("publishes every declared atomic name only once", () => {

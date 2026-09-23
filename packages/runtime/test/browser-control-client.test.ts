@@ -34,6 +34,73 @@ afterEach(async () => {
 });
 
 describe("BrowserControlClient", () => {
+  test("uses the old observation route only when an active controller lacks target state", async () => {
+    const browserSessionId = randomUUID();
+    const controllerGeneration = "controller-1";
+    const target = browserTarget(browserSessionId, controllerGeneration);
+    const observation = browserObservation(target);
+    const routes: string[] = [];
+    let stateFailure = { code: "resource_not_found", message: "route not found" };
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const path = new URL(request.url).pathname;
+        routes.push(path);
+        expect(request.headers.get("authorization")).toBe(`Bearer ${viewToken}`);
+        if (path.endsWith("/state")) {
+          return failure(404, stateFailure.code, stateFailure.message);
+        }
+        if (path.endsWith("/observation")) return success(observation);
+        return failure(404, "resource_not_found", "route not found");
+      },
+    });
+    try {
+      const placement: BrowserControlPlacementSession = {
+        resolveExposedPort: async () => ({
+          host: "127.0.0.1",
+          port: server.port,
+          tls: false,
+          path: "/",
+          query: "",
+        }),
+      };
+      const browser = new BrowserControlClient(placement, { adminToken }).sessionClient({
+        reference: { browserSessionId, controllerGeneration },
+        controlToken,
+        viewToken,
+      });
+      expect(await browser.targetState(target.id)).toEqual({
+        browserSessionId,
+        controllerGeneration,
+        targetId: target.id,
+        targetGeneration: target.targetGeneration,
+        documentGeneration: target.documentGeneration,
+        frameId: observation.frameId,
+      });
+      expect(routes).toEqual([
+        `/v1/browser-sessions/${browserSessionId}/targets/${target.id}/state`,
+        `/v1/browser-sessions/${browserSessionId}/targets/${target.id}/observation`,
+      ]);
+      for (const failureCase of [
+        { code: "target_not_found", message: "browser target not found" },
+        { code: "resource_not_found", message: "browser session not found" },
+      ]) {
+        stateFailure = failureCase;
+        const priorRouteCount = routes.length;
+        await expect(browser.targetState(target.id)).rejects.toMatchObject({
+          name: "BrowserControlRequestError",
+          status: 404,
+          error: failureCase,
+        });
+        expect(routes.slice(priorRouteCount)).toEqual([
+          `/v1/browser-sessions/${browserSessionId}/targets/${target.id}/state`,
+        ]);
+      }
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("focused reads use view authority and reject foreign or stale responses", async () => {
     const browserSessionId = randomUUID();
     const targetId = "tab-1";

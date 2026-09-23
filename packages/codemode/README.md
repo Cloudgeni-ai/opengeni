@@ -66,8 +66,9 @@ const browser = await openGeni.browsers.open({ initialUrl: "http://127.0.0.1:300
 const tab = await browser.tabs.selected();
 const page = await tab.observe(); // Compact refs and explicit omission counts.
 const buttons = await tab.read({ role: "button", nameContains: "Save", limit: 5 });
+const email = await tab.read({ mode: "dom", dom: { kind: "element", locator: { kind: "css", selector: "#email" }, attributes: ["placeholder"] } });
 await tab.getByRole("button", { name: "Save" }).click();
-const still = await tab.screenshot();
+const still = await tab.screenshot({ quality: 40 });
 console.log(still.path); // Open this local PNG/JPEG/WebP with view_image.
 
 const computer = await openGeni.computers.open();
@@ -76,9 +77,13 @@ await app.getByRole("button", { name: "1" }).invoke();
 ```
 
 `tab.observeFull()` retrieves the complete accessibility snapshot when compact
-refs or a focused `tab.read()` query are insufficient. Focused reads search the
-accessibility tree; they do not return arbitrary DOM attributes or hidden
-input values.
+refs or a focused `tab.read()` query are insufficient. The default focused read
+searches accessibility; `mode: "dom"` returns bounded text, editable values,
+safe attributes, or counts. Sensitive fields are redacted. DOM CSS reads accept
+simple tag, class, id, descendant, and child selectors; attribute and pseudo
+selectors are rejected to prevent secret-value probing. Browser image blocks
+are bounded below the Code Mode journal limit; for an oversized screenshot,
+capture the viewport or lower JPEG quality.
 
 Both surfaces return the same durable tool receipts. Human approval, catalog
 generation, operation idempotency, and outcome-unknown behavior remain enforced

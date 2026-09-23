@@ -598,6 +598,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     request: BrowserDomReadRequestValue,
   ): Promise<BrowserDomReadResponseValue> {
     return await this.withTarget(targetId, async (state) => {
+      if (request.kind === "count") {
+        assertSafeDomReadSelector(request.selector);
+      } else if (request.locator.kind === "css") {
+        assertSafeDomReadSelector(request.locator.selector);
+      }
       if (this.protectedAuthQuiet(state)) {
         throw new InteractionDefiniteDriverError(
           "permission_denied",
@@ -3805,18 +3810,26 @@ const SCROLL_FUNCTION = `function(deltaX, deltaY) {
 const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes) {
   const element = this && this.nodeType === 1 ? this : this?.parentElement;
   if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false };
+  const privateSelector = "[data-private], [data-sensitive], [data-opengeni-private]";
+  const sensitiveReason = (node) => {
+    const nodeTag = String(node.tagName || "").toLowerCase();
+    const type = nodeTag === "input" ? String(node.getAttribute("type") || "text").toLowerCase() : "";
+    const autocomplete = String(node.getAttribute("autocomplete") || "").toLowerCase();
+    const fieldName = String(node.getAttribute("name") || "") + " " + String(node.getAttribute("id") || "");
+    if (type === "password" || /(?:current|new)-password|one-time-code/.test(autocomplete)) return "password";
+    if (/(?:^|\\s)cc-/.test(autocomplete) || /(?:card.?number|credit.?card|cvv|cvc|security.?code|expiry|expiration)/i.test(fieldName)) return "payment";
+    if (type === "hidden" || node.matches(privateSelector)) return "private";
+    return null;
+  };
   const tag = String(element.tagName || "").toLowerCase();
-  const type = tag === "input" ? String(element.getAttribute("type") || "text").toLowerCase() : "";
-  const autocomplete = String(element.getAttribute("autocomplete") || "").toLowerCase();
-  const fieldName = String(element.getAttribute("name") || "") + " " + String(element.getAttribute("id") || "");
-  const redacted = type === "password" || /(?:current|new)-password|one-time-code/.test(autocomplete)
-    ? "password"
-    : /(?:^|\\s)cc-/.test(autocomplete) || /(?:card.?number|credit.?card|cvv|cvc|security.?code|expiry|expiration)/i.test(fieldName)
-      ? "payment"
-      : type === "hidden" || !!element.closest("[data-private], [data-sensitive], [data-opengeni-private]")
-        ? "private"
-        : null;
+  const redacted = sensitiveReason(element) || (element.closest(privateSelector) ? "private" : null);
   if (redacted) return { ok: true, text: null, value: null, attributes: {}, redacted, truncated: false };
+  // A container's innerText includes sensitive descendants. Refuse the whole
+  // container rather than returning their protected text through an ancestor.
+  for (const node of element.querySelectorAll("[id], [name], [autocomplete], input, " + privateSelector)) {
+    const reason = sensitiveReason(node);
+    if (reason) return { ok: true, text: null, value: null, attributes: {}, redacted: reason, truncated: false };
+  }
   const allowed = new Set(["href", "src", "alt", "title", "role", "aria-label", "aria-expanded",
     "aria-checked", "aria-selected", "placeholder", "type", "name", "data-testid"]);
   let remaining = maxChars;
@@ -3838,6 +3851,16 @@ const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes) {
   }
   return { ok: true, text, value, attributes, redacted: null, truncated };
 }`;
+
+/** Attribute and pseudo selectors would turn count/not-found into a secret-value oracle. */
+function assertSafeDomReadSelector(selector: string): void {
+  if (!/^[A-Za-z0-9_#.,\s>*-]+$/u.test(selector)) {
+    throw new InteractionDefiniteDriverError(
+      "invalid_action",
+      "browser DOM read supports only tag, class, id, descendant, and child selectors",
+    );
+  }
+}
 
 const COPY_BROWSER_TEXT_FUNCTION = `function(content) {
   const element = this && this.nodeType === 1 ? this : this?.parentElement;

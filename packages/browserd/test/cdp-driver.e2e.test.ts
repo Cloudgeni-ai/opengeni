@@ -219,7 +219,7 @@ e2e(
       expect(
         await driver.readDom(initial.target.id, {
           kind: "element",
-          locator: { kind: "css", selector: "main > p:first-of-type" },
+          locator: { kind: "css", selector: "#static-copy" },
           maxChars: 6,
           ...readFence,
         }),
@@ -417,6 +417,47 @@ e2e(
         attributes: {},
         redacted: "payment",
       });
+      const privateContainer = await driver.readDom(authPage.target.id, {
+        kind: "element",
+        locator: { kind: "css", selector: "#private-container" },
+        expectedTargetGeneration: authState.targetGeneration,
+        expectedDocumentGeneration: authState.documentGeneration!,
+        expectedFrameId: authState.frameId!,
+      });
+      expect(privateContainer).toMatchObject({
+        text: null,
+        value: null,
+        attributes: {},
+        redacted: "private",
+      });
+      expect(JSON.stringify(privateContainer)).not.toContain("fixture-private-secret");
+      const paymentContainer = await driver.readDom(authPage.target.id, {
+        kind: "element",
+        locator: { kind: "css", selector: "#payment-container" },
+        expectedTargetGeneration: authState.targetGeneration,
+        expectedDocumentGeneration: authState.documentGeneration!,
+        expectedFrameId: authState.frameId!,
+      });
+      expect(paymentContainer).toMatchObject({ text: null, redacted: "payment" });
+      expect(JSON.stringify(paymentContainer)).not.toContain("fixture-card-text-secret");
+      await expect(
+        driver.readDom(authPage.target.id, {
+          kind: "count",
+          selector: 'input[type="password"][value^="f"]',
+          expectedTargetGeneration: authState.targetGeneration,
+          expectedDocumentGeneration: authState.documentGeneration!,
+          expectedFrameId: authState.frameId!,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_action" });
+      await expect(
+        driver.readDom(authPage.target.id, {
+          kind: "element",
+          locator: { kind: "css", selector: 'input[type="password"][value^="f"]' },
+          expectedTargetGeneration: authState.targetGeneration,
+          expectedDocumentGeneration: authState.documentGeneration!,
+          expectedFrameId: authState.frameId!,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_action" });
       const protectedResult = await driver.protectedFill(
         protectedAuthCommand(authPage, parallelOrigin),
       );
@@ -581,7 +622,7 @@ function fixture(title: string): string {
     <title>${title}</title>
     <style>#pointer-increment { position: fixed; z-index: 10; left: 100px; top: 300px; width: 120px; height: 30px; }</style>
     <main>
-      <p>Static page content</p>
+      <p id="static-copy">Static page content</p>
       <button id="increment" onclick="this.textContent='Increment ' + ((Number(this.textContent.split(' ')[1]) || 0) + 1)">Increment 0</button>
       <button id="pointer-increment" onclick="increment.click()">Pointer increment</button>
       <button onclick="console.error('Fixture console failure')">Log failure</button>
@@ -612,7 +653,9 @@ function authFixture(): string {
       <label>Password <input id="password" name="password" type="password" autocomplete="current-password" oninput="console.error('credential:' + this.value)"></label>
       <button id="login" type="submit">Sign in</button>
     </form>
-    <input id="card" name="card-number" autocomplete="cc-number" value="fixture-card-secret">`;
+    <input id="card" name="card-number" autocomplete="cc-number" value="fixture-card-secret">
+    <section id="private-container">Public intro <span data-private>fixture-private-secret</span></section>
+    <section id="payment-container">Public intro <span id="card-number">fixture-card-text-secret</span></section>`;
 }
 
 function dataUrl(html: string): string {

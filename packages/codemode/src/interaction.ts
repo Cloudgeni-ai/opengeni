@@ -9,6 +9,8 @@ import type {
   BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserDiagnosticKind,
+  BrowserDomReadResponse,
+  BrowserDomSafeAttribute,
   BrowserIdentity,
   BrowserIdentityListResponse,
   BrowserIdentityMutationResponse,
@@ -115,6 +117,8 @@ export type BrowserActionFences = {
 export type CodemodeBrowserScreenshotOptions = {
   /** Capture the entire scrollable page when supported by the browser. */
   fullPage?: boolean | undefined;
+  /** JPEG quality, 1–100. Reduce it if a large image exceeds the journal bound. */
+  quality?: number | undefined;
   /** Save the still at this exact path. Existing files are never overwritten. */
   saveTo?: string | undefined;
 };
@@ -178,7 +182,7 @@ export type CodemodeBrowserActionOptions = BrowserActionFences & {
   view?: "compact" | "full" | "none" | undefined;
 };
 
-export type CodemodeBrowserReadOptions = Readonly<{
+export type CodemodeBrowserAxReadOptions = Readonly<{
   mode?: "matches" | "count" | "subtree";
   ref?: string;
   scopeRef?: string;
@@ -190,7 +194,24 @@ export type CodemodeBrowserReadOptions = Readonly<{
   limit?: number;
 }>;
 
-export type CodemodeBrowserReadResult = Readonly<{
+export type CodemodeBrowserDomReadOptions = BrowserActionFences &
+  Readonly<{
+    mode: "dom";
+    dom:
+      | {
+          kind: "element";
+          locator: BrowserLocator;
+          attributes?: readonly BrowserDomSafeAttribute[];
+          maxChars?: number;
+        }
+      | { kind: "count"; selector: string };
+  }>;
+
+export type CodemodeBrowserReadOptions =
+  | CodemodeBrowserAxReadOptions
+  | CodemodeBrowserDomReadOptions;
+
+export type CodemodeBrowserAxReadResult = Readonly<{
   browserSessionId: string;
   targetId: string;
   observationId: string;
@@ -206,6 +227,10 @@ export type CodemodeBrowserReadResult = Readonly<{
   clippedFieldCount: number;
   maxNodeBytes: number;
 }>;
+
+export type CodemodeBrowserReadResult =
+  | CodemodeBrowserAxReadResult
+  | (BrowserDomReadResponse & { source: "dom" });
 
 export type ComputerActionFences = {
   expectedTargetGeneration?: string | undefined;
@@ -710,6 +735,7 @@ export class CodemodeBrowserTab {
         browserSessionId: this.browserSessionId,
         targetId: this.id,
         ...(options.fullPage === undefined ? {} : { fullPage: options.fullPage }),
+        ...(options.quality === undefined ? {} : { quality: options.quality }),
       },
       callOptions,
     );

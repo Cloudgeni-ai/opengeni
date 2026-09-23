@@ -83,6 +83,9 @@ const BROWSER_AGENT_MAX_NODES = 60;
 const BROWSER_AGENT_MAX_NODE_BYTES = 12_000;
 const BROWSER_AGENT_MAX_FIELD_LENGTH = 180;
 const BROWSER_READ_MAX_NODES = 80;
+// A base64 image is journaled inside a 16 MiB Code Mode result. Leave room
+// for JSON framing, metadata, and other content instead of failing after capture.
+const BROWSER_TOOL_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 
 const BrowserAgentNode = z
   .object({
@@ -127,6 +130,7 @@ const BrowserScreenshotInput = z
     browserSessionId: z.string().uuid(),
     targetId: z.string().min(1).max(512),
     fullPage: z.boolean().optional(),
+    quality: z.number().int().min(1).max(100).optional(),
   })
   .strict();
 const BrowserScreenshotOutput = z
@@ -788,13 +792,7 @@ export function createInteractionAttemptToolDefinitions(
       }
       return new InteractionExecutionResult(
         projectBrowserObservation(observation, value.view ?? "compact"),
-        [
-          {
-            type: "image",
-            data: Buffer.from(frame.data).toString("base64"),
-            mimeType: frame.mediaType,
-          },
-        ],
+        [browserToolImageContent(frame.data, frame.mediaType)],
       );
     },
   });
@@ -804,7 +802,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "read"],
     title: "Read focused browser content",
     description:
-      "Search, count, or read a subtree from one tab's accessibility snapshot; filter by ref, role, name, accessibility text, state, or action, and scopeRef. AX mode refreshes the full tree internally and cannot return DOM attributes or editable input values. Use mode=dom with a locator for bounded element text, editable value, or allowlisted attributes, or a CSS selector for count. DOM reads use exact causal fences and only fixed, read-only browser-side projection; callers cannot supply JavaScript. Role/ref DOM locators can still refresh accessibility; CSS/test-id/placeholder locators avoid that scan.",
+      "Search, count, or read a subtree from one tab's accessibility snapshot; filter by ref, role, name, accessibility text, state, or action, and scopeRef. AX mode refreshes the full tree internally and cannot return DOM attributes or editable input values. Use mode=dom with a locator for bounded element text, editable value, or allowlisted attributes, or a CSS selector for count. DOM CSS reads accept simple tag, class, id, descendant, and child selectors; attribute and pseudo selectors are rejected to prevent secret-value probing. DOM reads use exact causal fences and only fixed, read-only browser-side projection; callers cannot supply JavaScript. Role/ref DOM locators can still refresh accessibility; CSS/test-id/placeholder locators avoid that scan.",
     input: BrowserReadInput,
     output: BrowserReadToolOutput,
     readOnly: true,
@@ -880,7 +878,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "screenshot"],
     title: "Capture browser screenshot",
     description:
-      "Capture a current browser tab screenshot without reading its accessibility tree. The image is returned as tool image content, with small structured frame metadata. Set fullPage=true to capture the whole scrollable page when supported; large pages may take longer or exceed capture bounds.",
+      "Capture a current browser tab screenshot without reading its accessibility tree. The image is returned as tool image content, with small structured frame metadata. Set fullPage=true to capture the whole scrollable page when supported; large pages may take longer or exceed capture bounds. Set quality lower to reduce JPEG bytes if a large capture exceeds the Code Mode image limit.",
     input: BrowserScreenshotInput,
     output: BrowserScreenshotOutput,
     readOnly: true,
@@ -891,7 +889,7 @@ export function createInteractionAttemptToolDefinitions(
         value.browserSessionId,
         value.targetId,
         {},
-        { fullPage: value.fullPage ?? false },
+        { fullPage: value.fullPage ?? false, ...(value.quality ? { quality: value.quality } : {}) },
       );
       return new InteractionExecutionResult(
         {
@@ -910,13 +908,7 @@ export function createInteractionAttemptToolDefinitions(
           capturedAt: frame.capturedAt,
           fullPage: value.fullPage ?? false,
         },
-        [
-          {
-            type: "image",
-            data: Buffer.from(frame.data).toString("base64"),
-            mimeType: frame.mediaType,
-          },
-        ],
+        [browserToolImageContent(frame.data, frame.mediaType)],
       );
     },
   });
@@ -1891,6 +1883,20 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     }
     throw error;
   }
+}
+
+function browserToolImageContent(
+  data: Uint8Array,
+  mimeType: string,
+): AttemptToolResultValue["content"][number] {
+  if (data.byteLength > BROWSER_TOOL_IMAGE_MAX_BYTES) {
+    throw new OpenGeniApiError(
+      413,
+      "Browser screenshot exceeds the Code Mode image limit; capture the viewport or lower JPEG quality.",
+      { code: "browser_screenshot_too_large", retryable: false },
+    );
+  }
+  return { type: "image", data: Buffer.from(data).toString("base64"), mimeType };
 }
 
 function interactionErrorResult(
