@@ -52,7 +52,20 @@ describe("native prerequisite bootstrap", () => {
       }
     }
     expect(garageDiagnostic(detectTarget("darwin", "arm64", "24"))).toContain("no official macOS binary");
-    expect(garageDiagnostic(target)).toContain("no trust-on-first-use");
+    expect(garageDiagnostic(target)).toContain("derived from the existing digest-pinned official Docker image");
+    expect(() => assetFor("garage", detectTarget("darwin", "arm64", "24"))).toThrow("no official macOS binary");
+    for (const cpu of ["x64", "arm64"]) {
+      const selected = assetFor("garage", detectTarget("linux", cpu, "6"));
+      expect(selected.format).toBe("binary");
+      expect(selected.sha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(selected.checksumSource).toContain("dxflrs/garage:v2.3.0@sha256:");
+    }
+  });
+  test("raw Garage binaries also fail closed on checksum mismatch", () => {
+    const selected = assetFor("garage", target);
+    expect(() => extractBinary(Buffer.from("unverified binary"), selected)).toThrow("SHA-256 mismatch");
+    const bytes = Buffer.from("verified fixture");
+    expect(extractBinary(bytes, { ...selected, sha256: sha256(bytes) })).toEqual(bytes);
   });
   test("verifies before parsing and extracts only intended member", () => {
     expect(() => extractBinary(Buffer.from("bad"), asset)).toThrow("SHA-256 mismatch");

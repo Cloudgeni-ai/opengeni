@@ -5,10 +5,11 @@ import { arch, platform, release } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
+import garageProvenance from "./install-development-tools.garage-provenance.json";
 
 export type Target = { os: "linux" | "darwin"; arch: "amd64" | "arm64"; wsl2: boolean };
 export type ToolName = "nats" | "temporal" | "garage";
-export type Asset = { tool: ToolName; version: string; url: string; sha256: string; member: string; binary: string; checksumSource: string };
+export type Asset = { tool: ToolName; version: string; url: string; sha256: string; member: string; binary: string; checksumSource: string; format: "tar.gz" | "binary" };
 const MAX_DOWNLOAD = 100 * 1024 * 1024;
 const MAX_EXPANDED = 250 * 1024 * 1024;
 
@@ -40,18 +41,23 @@ export function detectTarget(os = platform(), cpu = arch(), kernel = release()):
 export function garageDiagnostic(target: Target): string {
   return target.os === "darwin"
     ? "Garage 2.3.0 has no official macOS binary. Use the repository Docker infrastructure, or manually build the tagged source with upstream-supported prerequisites; source-build compatibility is not guaranteed by this installer. Rust is never auto-installed."
-    : "Garage 2.3.0 Linux binaries exist, but no official SHA-256 manifest was found. Automatic Garage download is blocked (no trust-on-first-use). Use the repository digest-pinned Docker image, or manually verify/build Garage 2.3.0 and provide it on PATH. Evidence: official _releases.json has no digests; Forgejo v2.3.0 assets are empty; tagged shell.nix publishes only the binary.";
+    : "Garage 2.3.0 Linux binaries are verified against repository SHA-256 pins derived from the existing digest-pinned official Docker image (not an upstream native checksum manifest). No Docker daemon or source compiler is needed. See install-development-tools.garage-provenance.json and its opt-in verification test.";
 }
 
-export function assetFor(tool: Exclude<ToolName, "garage">, target: Target): Asset {
+export function assetFor(tool: ToolName, target: Target): Asset {
+  if (tool === "garage") {
+    if (target.os !== "linux") throw new Error(garageDiagnostic(target));
+    const provenance = garageProvenance.targets[target.arch];
+    return { tool, version: "2.3.0", url: provenance.nativeUrl, sha256: provenance.binarySha256, member: "garage", binary: "garage", checksumSource: garageProvenance.image, format: "binary" };
+  }
   const key = `${target.os}-${target.arch}` as const;
   if (tool === "nats") {
     const base = "https://github.com/nats-io/nats-server/releases/download/v2.11.8";
     const stem = `nats-server-v2.11.8-${key}`;
-    return { tool, version: "2.11.8", url: `${base}/${stem}.tar.gz`, sha256: hashes.nats[key], member: `${stem}/nats-server`, binary: "nats-server", checksumSource: `${base}/SHA256SUMS` };
+    return { tool, version: "2.11.8", url: `${base}/${stem}.tar.gz`, sha256: hashes.nats[key], member: `${stem}/nats-server`, binary: "nats-server", checksumSource: `${base}/SHA256SUMS`, format: "tar.gz" };
   }
   const base = "https://github.com/temporalio/cli/releases/download/v1.4.1";
-  return { tool, version: "1.4.1", url: `${base}/temporal_cli_1.4.1_${target.os}_${target.arch}.tar.gz`, sha256: hashes.temporal[key], member: "temporal", binary: "temporal", checksumSource: `${base}/checksums.txt` };
+  return { tool, version: "1.4.1", url: `${base}/temporal_cli_1.4.1_${target.os}_${target.arch}.tar.gz`, sha256: hashes.temporal[key], member: "temporal", binary: "temporal", checksumSource: `${base}/checksums.txt`, format: "tar.gz" };
 }
 
 export function sha256(bytes: Uint8Array): string { return createHash("sha256").update(bytes).digest("hex"); }
@@ -59,6 +65,7 @@ export function sha256(bytes: Uint8Array): string { return createHash("sha256").
 /** Never extract paths to disk. Accept only bounded, ordinary ustar files/directories. */
 export function extractBinary(archive: Uint8Array, asset: Asset): Buffer {
   if (sha256(archive) !== asset.sha256) throw new Error(`${asset.tool}: SHA-256 mismatch; nothing installed.`);
+  if (asset.format === "binary") return Buffer.from(archive);
   const tar = gunzipSync(archive, { maxOutputLength: MAX_EXPANDED });
   let result: Buffer | undefined;
   let ended = false;
@@ -94,7 +101,7 @@ export function extractBinary(archive: Uint8Array, asset: Asset): Buffer {
 export async function downloadAsset(url: string): Promise<Uint8Array> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 90_000);
-  const allowed = new Set(["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"]);
+  const allowed = new Set(["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "garagehq.deuxfleurs.fr"]);
   try {
     for (let redirects = 0; redirects <= 4; redirects++) {
       const parsed = new URL(url);
@@ -144,7 +151,7 @@ export async function installBinary(root: string, target: Target, asset: Asset, 
     directory = join(directory, part);
     await ensureDirectory(directory);
   }
-  if (asset.binary !== "nats-server" && asset.binary !== "temporal") throw new Error("Unsupported binary destination");
+  if (!["nats-server", "temporal", "garage"].includes(asset.binary)) throw new Error("Unsupported binary destination");
   const destination = join(directory, asset.binary);
   try {
     const existing = await lstat(destination);
@@ -181,8 +188,8 @@ export async function main(args = process.argv.slice(2)) {
   const options = parseArgs(args);
   const target = detectTarget();
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const assets = options.tools.filter((name): name is "nats" | "temporal" => name !== "garage").map((name) => assetFor(name, target));
-  const blockers = options.tools.includes("garage") ? [garageDiagnostic(target)] : [];
+  const assets = options.tools.filter((name) => name !== "garage" || target.os === "linux").map((name) => assetFor(name, target));
+  const blockers = options.tools.includes("garage") && target.os !== "linux" ? [garageDiagnostic(target)] : [];
   const manualPreconditions = [
     "Use the repository-pinned Bun version, Git and Bash; Windows users must run the entire launcher inside WSL2.",
     "Provision PostgreSQL 16+ server/client and contrib (pgcrypto) using your OS package manager; ensure initdb, pg_ctl, psql and createdb are on PATH. Match extensions to the server major; this script never sudo-installs packages or changes database data.",
