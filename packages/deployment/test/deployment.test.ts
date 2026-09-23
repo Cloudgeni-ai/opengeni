@@ -337,6 +337,32 @@ describe("deployment contract", () => {
     expect(missingOrigin.missingEnvVars).toContain("OPENGENI_PUBLIC_BASE_URL");
   });
 
+  test("carries the admitted sandbox warm tariff through runtime and Helm generation", () => {
+    const contract = deploymentProfiles["local-kubernetes"];
+    const rate = '{"modal":45,"open_sandbox":12}';
+    const defaults = generateRuntimeArtifacts(contract, {}, {});
+    expect(defaults.runtimeEnv).toContain("OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only");
+    expect(defaults.runtimeEnv).toContain("OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON={}");
+    expect(defaults.helmValuesYaml).toContain(
+      'OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON: "{}"',
+    );
+    const priced = generateRuntimeArtifacts(
+      contract,
+      {},
+      {
+        OPENGENI_SANDBOX_WARM_BILLING_MODE: "credits",
+        OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON: rate,
+      },
+    );
+    expect(priced.runtimeEnv).toContain(
+      `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON=${rate}`,
+    );
+    expect(priced.helmValuesYaml).toContain('OPENGENI_SANDBOX_WARM_BILLING_MODE: "credits"');
+    expect(priced.helmValuesYaml).toContain(
+      `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON: ${JSON.stringify(rate)}`,
+    );
+  });
+
   test("rejects MCP OAuth artifacts for configured product-access deployments", () => {
     const env = { OPENGENI_MCP_OAUTH_ENABLED: "true" };
     expect(() => requiredRuntimeEnvVars(deploymentProfiles["azure-managed"], env)).toThrow(
