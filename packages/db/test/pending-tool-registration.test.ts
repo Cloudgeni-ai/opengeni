@@ -162,7 +162,8 @@ async function inject(
 }
 
 async function attemptCount() {
-  const [row] = await shared.admin`SELECT last_value, is_called FROM pending_receipt_registration_attempt`;
+  const [row] =
+    await shared.admin`SELECT last_value, is_called FROM pending_receipt_registration_attempt`;
   return row!.is_called ? Number(row!.last_value) : 0;
 }
 
