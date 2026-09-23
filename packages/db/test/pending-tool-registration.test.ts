@@ -33,10 +33,10 @@ beforeAll(async () => {
       appUrl.hostname !== adminUrl.hostname ||
       appUrl.port !== adminUrl.port ||
       appUrl.pathname !== adminUrl.pathname ||
-      !/^\/ope74_test_[a-z0-9_]+$/.test(adminUrl.pathname) ||
+      !/^\/pending_receipt_test_[a-z0-9_]+$/.test(adminUrl.pathname) ||
       appUrl.username !== "opengeni_app"
     )
-      throw new Error("Native fixture must be a dedicated loopback ope74_test database");
+      throw new Error("Native fixture must be a dedicated loopback pending_receipt_test database");
     const admin = postgres(nativeAdmin, { max: 4 });
     shared = { admin, adminUrl: nativeAdmin, appUrl: nativeApp, release: () => admin.end() };
   } else {
@@ -46,20 +46,20 @@ beforeAll(async () => {
   }
   client = createDb(shared.appUrl);
   await shared.admin.unsafe(`
-    CREATE SEQUENCE ope74_registration_attempt;
-    CREATE SEQUENCE ope74_registration_first_xid;
-    CREATE SEQUENCE ope74_registration_last_xid;
-    CREATE TABLE ope74_registration_fault (call_id text PRIMARY KEY, failures int NOT NULL, code text NOT NULL, delay_seconds double precision NOT NULL DEFAULT 0);
-    CREATE FUNCTION ope74_registration_fault() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-    DECLARE fault ope74_registration_fault%ROWTYPE; attempt bigint;
+    CREATE SEQUENCE pending_receipt_registration_attempt;
+    CREATE SEQUENCE pending_receipt_registration_first_xid;
+    CREATE SEQUENCE pending_receipt_registration_last_xid;
+    CREATE TABLE pending_receipt_registration_fault (call_id text PRIMARY KEY, failures int NOT NULL, code text NOT NULL, delay_seconds double precision NOT NULL DEFAULT 0);
+    CREATE FUNCTION pending_receipt_registration_fault() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+    DECLARE fault pending_receipt_registration_fault%ROWTYPE; attempt bigint;
     BEGIN
-      SELECT * INTO fault FROM ope74_registration_fault WHERE call_id = NEW.call_id;
+      SELECT * INTO fault FROM pending_receipt_registration_fault WHERE call_id = NEW.call_id;
       IF FOUND THEN
-        attempt := nextval('ope74_registration_attempt');
+        attempt := nextval('pending_receipt_registration_attempt');
         IF attempt = 1 THEN
-          PERFORM setval('ope74_registration_first_xid', txid_current());
+          PERFORM setval('pending_receipt_registration_first_xid', txid_current());
         END IF;
-        PERFORM setval('ope74_registration_last_xid', txid_current());
+        PERFORM setval('pending_receipt_registration_last_xid', txid_current());
         IF attempt <= fault.failures THEN
           PERFORM pg_sleep(fault.delay_seconds);
           RAISE EXCEPTION USING ERRCODE = fault.code, MESSAGE = 'sensitive synthetic fixture detail';
@@ -67,8 +67,8 @@ beforeAll(async () => {
       END IF;
       RETURN NEW;
     END $$;
-    CREATE TRIGGER ope74_registration_fault BEFORE INSERT ON session_pending_tool_calls
-      FOR EACH ROW EXECUTE FUNCTION ope74_registration_fault();
+    CREATE TRIGGER pending_receipt_registration_fault BEFORE INSERT ON session_pending_tool_calls
+      FOR EACH ROW EXECUTE FUNCTION pending_receipt_registration_fault();
   `);
 }, 180_000);
 
@@ -76,12 +76,12 @@ afterAll(async () => {
   await client?.close();
   if (shared) {
     await shared.admin.unsafe(`
-      DROP TRIGGER IF EXISTS ope74_registration_fault ON session_pending_tool_calls;
-      DROP FUNCTION IF EXISTS ope74_registration_fault();
-      DROP TABLE IF EXISTS ope74_registration_fault;
-      DROP SEQUENCE IF EXISTS ope74_registration_attempt;
-      DROP SEQUENCE IF EXISTS ope74_registration_first_xid;
-      DROP SEQUENCE IF EXISTS ope74_registration_last_xid;
+      DROP TRIGGER IF EXISTS pending_receipt_registration_fault ON session_pending_tool_calls;
+      DROP FUNCTION IF EXISTS pending_receipt_registration_fault();
+      DROP TABLE IF EXISTS pending_receipt_registration_fault;
+      DROP SEQUENCE IF EXISTS pending_receipt_registration_attempt;
+      DROP SEQUENCE IF EXISTS pending_receipt_registration_first_xid;
+      DROP SEQUENCE IF EXISTS pending_receipt_registration_last_xid;
     `);
     await shared.release();
   }
@@ -156,13 +156,13 @@ async function inject(
   code: string,
   delay = 0,
 ) {
-  await shared.admin`ALTER SEQUENCE ope74_registration_attempt RESTART WITH 1`;
-  await shared.admin`INSERT INTO ope74_registration_fault (call_id, failures, code, delay_seconds)
+  await shared.admin`ALTER SEQUENCE pending_receipt_registration_attempt RESTART WITH 1`;
+  await shared.admin`INSERT INTO pending_receipt_registration_fault (call_id, failures, code, delay_seconds)
     VALUES (${input.callId}, ${failures}, ${code}, ${delay})`;
 }
 
 async function attemptCount() {
-  const [row] = await shared.admin`SELECT last_value, is_called FROM ope74_registration_attempt`;
+  const [row] = await shared.admin`SELECT last_value, is_called FROM pending_receipt_registration_attempt`;
   return row!.is_called ? Number(row!.last_value) : 0;
 }
 
@@ -197,8 +197,8 @@ describe("pending tool registration rollback retries", () => {
       expect(result).toEqual({ accepted: true, registered: true });
       expect(await attemptCount()).toBe(2);
       const [transactions] = await shared.admin`SELECT
-        (SELECT last_value FROM ope74_registration_first_xid) AS first,
-        (SELECT last_value FROM ope74_registration_last_xid) AS last`;
+        (SELECT last_value FROM pending_receipt_registration_first_xid) AS first,
+        (SELECT last_value FROM pending_receipt_registration_last_xid) AS last`;
       expect(Number(transactions!.last)).toBeGreaterThan(Number(transactions!.first));
       expect(await receipts(input)).toHaveLength(1);
       expect(effects).toBe(1);
