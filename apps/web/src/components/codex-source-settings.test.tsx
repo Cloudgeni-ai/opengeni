@@ -6,7 +6,7 @@ import {
 } from "@tanstack/react-router";
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { WorkspaceCodexSubscriptionSource } from "@opengeni/sdk";
+import type { CodexOverviewResponse, WorkspaceCodexSubscriptionSource } from "@opengeni/sdk";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { CodexSourceSettings, codexSourceSummary } from "./codex-source-settings";
@@ -31,6 +31,128 @@ const source: WorkspaceCodexSubscriptionSource = {
   workspaceAvailable: false,
   organizationAvailable: true,
 };
+
+for (const outcome of ["weekly", "empty", "error"] as const) {
+  test(`Codex waits for initial overview without flashing cached limits: ${outcome}`, async () => {
+    let resolve!: (value: CodexOverviewResponse) => void;
+    let reject!: (error: Error) => void;
+    const overview = new Promise<CodexOverviewResponse>((yes, no) => {
+      resolve = yes;
+      reject = no;
+    });
+    const window = {
+      used: 90,
+      limit: 100,
+      remaining: 10,
+      percent: 90,
+      resetAt: null,
+      resetAfterSeconds: null,
+      limitWindowSeconds: 18000,
+    };
+    const client = {
+      listCodexAccounts: async () => ({
+        accounts: [
+          {
+            id: "subscription",
+            source: "organization",
+            label: "Team plan",
+            status: "active",
+            active: true,
+            allocatorEnabled: true,
+            fiveHour: window,
+            weekly: window,
+          },
+        ],
+        activeAccountId: "subscription",
+        source,
+        settings: { rotationEnabled: false },
+      }),
+      codexOverview: () => overview,
+    } as unknown as OpenGeniBrowserClient;
+    const route = createRootRoute({
+      component: () => (
+        <CodexSubscriptionsCardWithClient client={client} workspaceId="workspace-a" canManage />
+      ),
+    });
+    const router = createRouter({
+      routeTree: route,
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        await router.load();
+        root.render(<RouterProvider router={router} />);
+      });
+      expect(container.textContent).toContain("Team plan");
+      expect(container.querySelector('[aria-label="Checking usage"]')).not.toBeNull();
+      expect(container.textContent).not.toContain("remaining");
+      await act(async () => {
+        if (outcome === "error") reject(new Error("Provider unavailable"));
+        else
+          resolve({
+            accounts: {
+              subscription: {
+                accountId: "subscription",
+                usage: {
+                  source: "provider",
+                  fetchedAt: null,
+                  stale: false,
+                  error: null,
+                  value:
+                    outcome === "empty"
+                      ? null
+                      : {
+                          status: "ok",
+                          planType: null,
+                          fiveHour: null,
+                          weekly: {
+                            ...window,
+                            used: 25,
+                            remaining: 75,
+                            percent: 25,
+                            limitWindowSeconds: 604800,
+                          },
+                          limitReached: false,
+                          fetchedAt: new Date().toISOString(),
+                        },
+                },
+                resetCredits: {
+                  source: "none",
+                  fetchedAt: null,
+                  stale: false,
+                  error: null,
+                  detailState: "unknown",
+                  detailsComplete: false,
+                  availableCount: null,
+                  credits: [],
+                },
+                canRedeem: false,
+                canResumeRedemption: false,
+                redemptions: [],
+                redemptionAccess: { ownership: "unowned", canClaimUnownedViaReconnect: false },
+              },
+            },
+          });
+      });
+      expect(container.querySelector('[aria-label="Checking usage"]')).toBeNull();
+      expect(container.textContent).not.toContain("10% remaining");
+      if (outcome === "weekly") {
+        expect(container.textContent).toContain("75% remaining");
+        expect(container.textContent).not.toContain("5h");
+      } else {
+        expect(container.textContent).toContain(
+          outcome === "error" ? "Usage unavailable" : "Usage not reported",
+        );
+      }
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+}
 
 describe("Codex subscription source", () => {
   test("reports the effective source, including disconnected and disabled states", () => {
