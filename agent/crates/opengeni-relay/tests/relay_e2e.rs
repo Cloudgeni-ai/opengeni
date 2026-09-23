@@ -484,9 +484,7 @@ async fn desktop_input_with_a_different_channel_id_is_dropped() {
 
     viewer
         .socket
-        .send(WsMessage::Binary(
-            desktop_input("another-channel").encode(),
-        ))
+        .send(WsMessage::Binary(desktop_input("another-channel").encode()))
         .await
         .unwrap();
     assert!(

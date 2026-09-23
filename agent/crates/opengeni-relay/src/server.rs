@@ -626,7 +626,13 @@ pub(crate) mod conn {
                 for role in [Role::Client, Role::Agent] {
                     for can_control_desktop in [false, true] {
                         assert_eq!(
-                            may_forward_message(channel_id, port, role, can_control_desktop, &frame),
+                            may_forward_message(
+                                channel_id,
+                                port,
+                                role,
+                                can_control_desktop,
+                                &frame
+                            ),
                             role == Role::Agent || port == PTY_STREAM_PORT,
                             "Frame on port {port}, role {role:?}, control {can_control_desktop}"
                         );
