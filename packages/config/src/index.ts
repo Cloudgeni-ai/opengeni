@@ -4729,6 +4729,33 @@ function legacyImplicitOpenAiDefinitionVersionFor(
   });
 }
 
+function legacyCodexAstraImplicitCachingDefinitionVersionFor(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+): string | null {
+  // The GPT-6 rollout only made the already-implicit Codex cache discoverable.
+  // Bound this compatibility to that product/transport and exact declaration;
+  // never normalize explicit caching, another capability, or another model.
+  if (
+    model.id !== "codex/gpt-6-astra" ||
+    model.upstreamModelId !== "gpt-6-astra" ||
+    provider.id !== CODEX_PROVIDER_ID ||
+    provider.kind !== "codex-subscription" ||
+    provider.api !== "responses" ||
+    provider.wireProfile !== "openai" ||
+    canonicalJson(model.capabilities.promptCaching) !==
+      canonicalJson({ upstream: "supported", runnable: true, mode: "implicit" })
+  ) {
+    return null;
+  }
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  const { promptCaching: _promptCaching, ...capabilities } = model.capabilities;
+  // Recompute, rather than allowlisting an incident hash: all other current
+  // fields must still reproduce the accepted digest. Do not compose this with
+  // the older wire-profile compatibility or rewrite the accepted policy.
+  return definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider);
+}
+
 /**
  * The built-in provider's stable id: "openai" on the OpenAI platform, "azure"
  * on Azure. Exported because the workspace model-policy gate must attribute
@@ -5421,6 +5448,16 @@ export function resolveTurnExecutionPolicyV1(
   });
 }
 
+/** Explicit accepted execution identity matches, but its definition digest differs. */
+export class TurnExecutionPolicyDefinitionMismatchError extends Error {
+  readonly code = "turn_execution_policy_definition_mismatch";
+
+  constructor() {
+    super("Turn execution policy does not match the current provider definition");
+    this.name = "TurnExecutionPolicyDefinitionMismatchError";
+  }
+}
+
 /**
  * Parse-time validation lives in @opengeni/contracts; this verifier binds a
  * present snapshot to the current executable definition and exact turn row.
@@ -5474,16 +5511,22 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   );
   const definitionVersionMatches =
     parsed.definitionVersion === resolved.model.definitionVersion ||
-    parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion;
-  const mismatched =
+    parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion ||
+    parsed.definitionVersion ===
+      legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider);
+  const identityMismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
     parsed.wireApi !== resolved.model.api ||
-    !definitionVersionMatches ||
     canonicalJson(parsed.credentialSource) !== canonicalJson(resolved.model.credentialSource) ||
     canonicalJson(parsed.billing) !== canonicalJson(resolved.model.billing);
-  if (mismatched) {
+  // Identity/source changes must never enter a rollout-retry classification,
+  // even when their definition digest also differs.
+  if (identityMismatched) {
     throw new Error("Turn execution policy does not match the current provider definition");
+  }
+  if (!definitionVersionMatches) {
+    throw new TurnExecutionPolicyDefinitionMismatchError();
   }
   return { policy: parsed, provider: resolved.provider, model: resolved.model };
 }

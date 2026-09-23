@@ -1,6 +1,7 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 
 import * as opengeniDb from "@opengeni/db";
+import { TurnExecutionPolicyDefinitionMismatchError } from "@opengeni/config";
 import { CODEX_TRANSPORT_ERROR_HEADER } from "@opengeni/codex";
 import * as parentWake from "../src/activities/parent-wake";
 
@@ -11,6 +12,7 @@ import {
   settleTurnFailure,
 } from "../src/activities/agent-turn/failure-settlement";
 import { CodexCredentialLeaseLostError } from "../src/activities/agent-turn/credential-leases";
+import { providerRecoveryResult } from "../src/activities/agent-turn/errors";
 
 const base = {
   rotationEnabled: true,
@@ -297,6 +299,149 @@ function codexFailureDeps(
     },
   };
 }
+
+describe("early accepted-definition mismatch", () => {
+  function earlyDeps(error: unknown = new TurnExecutionPolicyDefinitionMismatchError()) {
+    const { deps } = codexFailureDeps({ error });
+    deps.billingState.isCodexTurn = false;
+    deps.attempt.modelRequestStarted = false;
+    deps.eventing.turnStartedPublished = false;
+    Object.assign(deps.eventing, { publish: undefined });
+    return deps;
+  }
+
+  test("checkpoints the exact turn before eventing without reconciling model history", async () => {
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "stale",
+    } as never);
+    const deps = earlyDeps();
+    const reconcile = mock(async () => {
+      throw new Error("must not reconcile before inference");
+    });
+    deps.historySink.reconcileConversationTruth = reconcile;
+    const lost = mock(() => undefined);
+    deps.acknowledgeLostAttemptOwnership = lost;
+    try {
+      expect(await settleTurnFailure(deps as any)).toMatchObject({ status: "cancelled" });
+      expect(recovery).toHaveBeenCalledWith(
+        {},
+        "workspace-1",
+        expect.objectContaining({
+          turnId: "turn-1",
+          triggerEventId: "trigger-1",
+          attemptId: "attempt-1",
+          reason: "turn_execution_policy_definition_mismatch",
+          providerRecoveryCount: 1,
+          detail: expect.objectContaining({ continueDelayMs: 2000 }),
+        }),
+      );
+      expect(lost).toHaveBeenCalledTimes(1);
+      expect(reconcile).not.toHaveBeenCalled();
+    } finally {
+      recovery.mockRestore();
+    }
+  });
+
+  test("exhaustion preserves the typed configuration cause without another checkpoint", async () => {
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery");
+    const deps = earlyDeps();
+    deps.attempt.providerRecoveryCount = 5;
+    try {
+      await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
+        type: "TurnExecutionPolicyDefinitionMismatchError",
+        nonRetryable: true,
+        message: expect.stringContaining("configuration recovery exhausted after 5 retries"),
+      });
+      expect(recovery).not.toHaveBeenCalled();
+    } finally {
+      recovery.mockRestore();
+    }
+  });
+
+  test("successful checkpoint acknowledges drain and returns bounded backoff", async () => {
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    try {
+      for (const [index, delay] of [2000, 5000, 15000, 30000, 60000].entries()) {
+        const deps = earlyDeps();
+        deps.attempt.providerRecoveryCount = index;
+        const drain = mock(() => undefined);
+        deps.acknowledgeRecoveryQuiescence = drain;
+        expect(await settleTurnFailure(deps as any)).toMatchObject({
+          status: "recovering",
+          continueDelayMs: delay,
+          turnId: "turn-1",
+        });
+        expect(drain).toHaveBeenCalledTimes(1);
+        expect(deps.control.activityStatus).toBe("recovering");
+      }
+      expect(
+        providerRecoveryResult({
+          failureCode: "turn_execution_policy_definition_mismatch",
+          attemptNumber: 6,
+        }).status,
+      ).toBe("exhausted");
+    } finally {
+      recovery.mockRestore();
+    }
+  });
+
+  test("untyped errors and mismatches after startup never enter setup recovery", async () => {
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery");
+    try {
+      for (const [error, modelStarted, turnStarted] of [
+        [
+          new Error("Turn execution policy does not match the current provider definition"),
+          false,
+          false,
+        ],
+        [
+          Object.assign(new Error("lookalike"), {
+            code: "turn_execution_policy_definition_mismatch",
+          }),
+          false,
+          false,
+        ],
+        [new TurnExecutionPolicyDefinitionMismatchError(), true, false],
+        [new TurnExecutionPolicyDefinitionMismatchError(), false, true],
+      ] as const) {
+        const deps = earlyDeps(error);
+        deps.attempt.modelRequestStarted = modelStarted;
+        deps.eventing.turnStartedPublished = turnStarted;
+        await expect(settleTurnFailure(deps as any)).rejects.toBe(error);
+      }
+      expect(recovery).not.toHaveBeenCalled();
+    } finally {
+      recovery.mockRestore();
+    }
+  });
+
+  test("checkpoint database outage carries the exact next count to control recovery", async () => {
+    const outage = Object.assign(new Error("database disconnected"), { code: "CONNECTION_CLOSED" });
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockRejectedValue(outage);
+    const deps = earlyDeps();
+    deps.attempt.providerRecoveryCount = 2;
+    try {
+      await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
+        type: "OpenGeniPostClaimDatabaseRecovery",
+        nonRetryable: true,
+        details: [
+          expect.objectContaining({
+            turnId: "turn-1",
+            triggerEventId: "trigger-1",
+            executionGeneration: 1,
+            providerFailureCode: "turn_execution_policy_definition_mismatch",
+            providerRecoveryCount: 3,
+          }),
+        ],
+      });
+    } finally {
+      recovery.mockRestore();
+    }
+  });
+});
 
 test("persistence failure diagnostic is captured before a failing settlement dependency", async () => {
   const source = databaseReadFailure("accounts");
