@@ -112,7 +112,7 @@ describe("backend-aware read-only preflight", () => {
 
   test("empty fresh host aggregates missing programs, Bun, and source build requirements", async () => {
     const { host } = fixture({ which: () => null, bunVersion: "1.0.0", uid: 0 });
-    const result = await collectDevelopmentPrerequisites({ environment: { OPENGENI_DEV_BACKEND: "native" } }, host);
+    const result = await collectDevelopmentPrerequisites({ environment: { OPENGENI_DEV_BACKEND: "native", OPENGENI_SANDBOX_SELFHOSTED_ENABLED: "true" } }, host);
     for (const requirement of ["Bun", "bash", "git", "curl", "ps", "rustup", "cc", "setsid", "sha256sum", "runuser", "pg_config", "psql", "pg_isready", "nats-server", "temporal", "garage", "cargo"]) {
       expect(result.errors.join("\n")).toContain(requirement);
     }
@@ -129,7 +129,7 @@ describe("backend-aware read-only preflight", () => {
 
   test("source build probes pinned Rust without installing it", async () => {
     const { host, commands } = fixture();
-    const result = await collectDevelopmentPrerequisites({ environment: {} }, host);
+    const result = await collectDevelopmentPrerequisites({ environment: { OPENGENI_SANDBOX_SELFHOSTED_ENABLED: "true" } }, host);
     expect(result.errors).toEqual([]);
     expect(commands).toContain("rustup run 1.97.0 rustc --version");
     expect(commands).toContain("rustup run stable rustc --version");
@@ -145,6 +145,17 @@ describe("backend-aware read-only preflight", () => {
     const probe = host.probe;
     host.probe = (command, args) => ["minio", "mc"].includes(command) ? { ok: true, stdout: "unversioned" } : probe(command, args);
     expect((await collectDevelopmentPrerequisites(options, host)).errors).toHaveLength(2);
+  });
+
+  test("fresh or disabled selfhosted does not require relay tools with verified artifacts", async () => {
+    const { host, commands } = fixture({ which: (command) => ["rustup", "cc", "cargo"].includes(command) ? null : `/bin/${command}` });
+    for (const enabled of [undefined, "false"]) {
+      const result = await collectDevelopmentPrerequisites({ artifactRuntime: "verified-prebuilt", environment: { OPENGENI_SANDBOX_SELFHOSTED_ENABLED: enabled } }, host);
+      expect(result.errors).toEqual([]);
+    }
+    expect(commands.some((command) => command.includes("cargo"))).toBe(false);
+    const enabled = await collectDevelopmentPrerequisites({ artifactRuntime: "verified-prebuilt", environment: { OPENGENI_SANDBOX_SELFHOSTED_ENABLED: "true" } }, host);
+    expect(enabled.errors).toHaveLength(3);
   });
 
   test("invalid selectors do not print their possibly sensitive values", async () => {
