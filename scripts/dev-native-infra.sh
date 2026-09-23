@@ -304,7 +304,7 @@ start_stack() {
     require_command minio
     require_command mc
   else
-    garage_binary="$(storage_helper install "$STATE_DIR")"
+    garage_binary="$(storage_helper binary "$STATE_DIR")"
     garage_config="$(storage_helper configure "$STATE_DIR")"
   fi
 
