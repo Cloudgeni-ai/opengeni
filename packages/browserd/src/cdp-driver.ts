@@ -623,10 +623,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         result = { kind: "count", count, truncated: false };
       } else {
         const entry = await this.resolveLocator(state, request.locator);
-        const value = await this.callOnNode(state, entry.backendDOMNodeId, DOM_READ_FUNCTION, [
-          { value: request.maxChars ?? 4_096 },
-          { value: request.attributes ?? [] },
-        ]);
+        const value = await this.callOnNode(
+          state,
+          entry.backendDOMNodeId,
+          DOM_READ_FUNCTION,
+          [{ value: request.maxChars ?? 4_096 }, { value: request.attributes ?? [] }],
+          { isolatedFrameId: entry.frameId ?? state.frame.id },
+        );
         if (!isRecord(value) || value.ok !== true) {
           throw new InteractionDefiniteDriverError(
             "locator_not_found",
@@ -3283,6 +3286,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     backendDOMNodeId: number | null,
     functionDeclaration: string,
     args: Array<{ objectId?: string; value?: unknown }>,
+    options: { isolatedFrameId?: string } = {},
   ): Promise<unknown> {
     if (backendDOMNodeId === null) {
       throw new InteractionDefiniteDriverError(
@@ -3290,8 +3294,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "browser node has no DOM action target",
       );
     }
+    // DOM reads enforce redaction in JavaScript. Resolve the node into a
+    // separate world so page scripts cannot replace getAttribute, matches,
+    // querySelectorAll, or value accessors used by that policy.
+    let executionContextId: number | undefined;
+    if (options.isolatedFrameId) {
+      const world = await this.sendTarget<{ executionContextId?: unknown }>(
+        state,
+        "Page.createIsolatedWorld",
+        { frameId: options.isolatedFrameId, worldName: "opengeni-dom-read" },
+      );
+      if (!Number.isSafeInteger(world.executionContextId)) {
+        throw new Error("CDP did not create an isolated DOM read world");
+      }
+      executionContextId = world.executionContextId as number;
+    }
     const resolved = await this.sendTarget<{ object?: unknown }>(state, "DOM.resolveNode", {
       backendNodeId: backendDOMNodeId,
+      ...(executionContextId === undefined ? {} : { executionContextId }),
     });
     if (!isRecord(resolved.object) || typeof resolved.object.objectId !== "string") {
       throw new InteractionDefiniteDriverError(
