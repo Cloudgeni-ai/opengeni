@@ -345,7 +345,7 @@ describe("buildModelResolver", () => {
     expect(resolve("o3-pro")).toBe("gpt-5.6-sol");
   });
 
-  test("all exposed Codex GPT-5.6 ids reach the exact upstream slug unchanged", () => {
+  test("all exposed Codex GPT-6 ids reach the exact upstream slug unchanged", () => {
     const resolveExact = buildModelResolver(
       CODEX_FALLBACK_MODEL_SLUGS,
       CODEX_FALLBACK_MODEL_SLUGS[0],

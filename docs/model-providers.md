@@ -21,8 +21,8 @@ OpenGeni does not scrape `GET /models`. Membership is the reviewed catalog
 
 Exactly one built-in provider. `OPENGENI_OPENAI_PROVIDER` is `openai` (default)
 or `azure`. In code mode its catalog is `OPENGENI_OPENAI_MODEL` (default
-`gpt-5.6-sol`) and `OPENGENI_OPENAI_ALLOWED_MODELS` (default
-`gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna`). A custom base URL still speaks
+`gpt-6-luna`) and `OPENGENI_OPENAI_ALLOWED_MODELS` (default
+`gpt-6-luna,gpt-6-sol`). A custom base URL still speaks
 Responses; it does not become Chat Completions.
 
 | | OpenAI | Azure |
@@ -189,13 +189,13 @@ Choose an active deployment default before retiring its old entry.
 ```json
 {
   "schemaVersion": 1,
-  "defaultModel": "gpt-5.6-sol",
-  "builtInModels": ["gpt-5.6-sol", "gpt-5.6-luna"],
+  "defaultModel": "gpt-6-luna",
+  "builtInModels": ["gpt-6-luna", "gpt-6-sol"],
   "registryProviders": [],
   "gatewayModels": [],
   "openrouterModels": [],
   "modelNotes": {
-    "gpt-5.6-sol": "Use when the task is genuinely difficult."
+    "gpt-6-sol": "Use when the task is genuinely difficult."
   }
 }
 ```
@@ -643,9 +643,9 @@ the same membership, connection-readiness, workspace-policy, and provider-health
 decision as the human picker. Its result is one text string in catalog order:
 
 ```text
-Current: gpt-5.6-sol
+Current: gpt-6-luna
 - openrouter/nvidia/nemotron-3-super-120b-a12b:free | Nemotron 3 Super 120B | free | Good for bounded tool-driven work.
-- gpt-5.6-sol | GPT-5.6 Sol | credits
+- gpt-6-luna | GPT-6 Luna | credits
 ```
 
 Each selectable line is `id | label | cost` with an optional final note. It

@@ -556,8 +556,8 @@ const SettingsSchema = z.object({
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
   openaiBaseUrl: z.string().optional(),
-  openaiModel: z.string().default("gpt-5.6-sol"),
-  openaiAllowedModels: z.string().default("gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna"),
+  openaiModel: z.string().default("gpt-6-luna"),
+  openaiAllowedModels: z.string().default("gpt-6-luna,gpt-6-sol"),
   // OpenGeni-managed Vercel AI Gateway. When configured, the two reviewed
   // Gateway models below are added to the managed-credit catalog. Workspace
   // Gateway keys use the encrypted connection broker and never this secret.
@@ -2743,6 +2743,48 @@ export function configuredOpenRouterOrganizationProductModelIds(settings: Settin
  * llm-prices.com as a ground-truth canary; it does not generate this table.
  */
 export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
+  "gpt-6-luna": {
+    default: {
+      inputMicrosPerMillionTokens: 100_000,
+      cachedInputMicrosPerMillionTokens: 10_000,
+      cacheWriteMicrosPerMillionTokens: 125_000,
+      outputMicrosPerMillionTokens: 500_000,
+      marginBps: 500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 200_000,
+          cachedInputMicrosPerMillionTokens: 20_000,
+          cacheWriteMicrosPerMillionTokens: 250_000,
+          outputMicrosPerMillionTokens: 750_000,
+          marginBps: 500,
+        },
+      },
+    ],
+  },
+  "gpt-6-sol": {
+    default: {
+      inputMicrosPerMillionTokens: 2_000_000,
+      cachedInputMicrosPerMillionTokens: 200_000,
+      cacheWriteMicrosPerMillionTokens: 2_500_000,
+      outputMicrosPerMillionTokens: 10_000_000,
+      marginBps: 500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 4_000_000,
+          cachedInputMicrosPerMillionTokens: 400_000,
+          cacheWriteMicrosPerMillionTokens: 5_000_000,
+          outputMicrosPerMillionTokens: 15_000_000,
+          marginBps: 500,
+        },
+      },
+    ],
+  },
   "gpt-5.6-sol": {
     default: {
       // Promotional OpenAI pricing, guaranteed through at least 2026-11-21.
@@ -4323,6 +4365,10 @@ export function productShortLabelForModelId(modelId: string): string | null {
       return "5.6 Terra";
     case "gpt-5.6-luna":
       return "5.6 Luna";
+    case "gpt-6-sol":
+      return "6 Sol";
+    case "gpt-6-luna":
+      return "6 Luna";
     case "gpt-6-astra":
       return "6 Astra";
     default:
@@ -4349,6 +4395,13 @@ function builtinContextLimitsForModel(
       contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
       effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
       autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+    };
+  }
+  if (modelId === "gpt-6-luna" || modelId === "gpt-6-sol") {
+    return {
+      contextWindowTokens: 1_050_000,
+      effectiveContextWindowTokens: 997_500,
+      autoCompactTokenLimit: 900_000,
     };
   }
   return { contextWindowTokens: settings.contextWindowTokens };
@@ -4384,7 +4437,7 @@ function builtinPromptCachingForModel(
   const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
     ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
     : modelId;
-  return slug.startsWith("gpt-5.6-")
+  return slug.startsWith("gpt-5.6-") || slug.startsWith("gpt-6-")
     ? { upstream: "supported", runnable: true, mode: "implicit" }
     : undefined;
 }
@@ -4754,7 +4807,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
           ...legacyModelCapabilities(settings, {
             reasoningEffort: true,
             hostedWebSearch: true,
-            vision: slug.startsWith("gpt-5.6-") || slug === "gpt-6-astra",
+            vision: slug.startsWith("gpt-5.6-") || slug.startsWith("gpt-6-"),
           }),
           ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
             ? {
@@ -5021,7 +5074,7 @@ export function configuredModels(
           reasoningEffort: true,
           hostedWebSearch: settings.webSearchEnabled,
           hostedImageGeneration: builtinHostedImageGenerationForModel(settings, id),
-          vision: id.startsWith("gpt-5.6-"),
+          vision: id.startsWith("gpt-5.6-") || id.startsWith("gpt-6-"),
         }),
         ...(builtinPromptCachingForModel(id)
           ? { promptCaching: builtinPromptCachingForModel(id)! }

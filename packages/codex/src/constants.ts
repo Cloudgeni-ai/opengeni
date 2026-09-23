@@ -25,19 +25,12 @@ export const CODEX_PROVIDER_ID = "codex-subscription";
 export const CODEX_PROVIDER_BASE_URL = "https://chatgpt.com/backend-api";
 export const CODEX_MODEL_ID_PREFIX = "codex/";
 
-// The only Codex subscription models OpenGeni exposes. Astra is deliberately
-// pre-advertised before an account receives provider rollout access so the
-// picker becomes runnable without another OpenGeni release once access arrives.
-// Older or internal live models never broaden this product allowlist.
-export const CODEX_FALLBACK_MODEL_SLUGS = [
-  "gpt-5.6-sol",
-  "gpt-5.6-terra",
-  "gpt-5.6-luna",
-  "gpt-6-astra",
-] as const;
+// The only Codex subscription models OpenGeni exposes. Older or internal live
+// models never broaden this product allowlist.
+export const CODEX_FALLBACK_MODEL_SLUGS = ["gpt-6-sol", "gpt-6-luna", "gpt-6-astra"] as const;
 
 // Live Codex model-catalog values for every exposed subscription slug.
-// Verified 2026-09-04 against Codex CLI 0.153.2's bundled model catalog:
+// Verified 2026-09-23 against the Codex model cache for GPT-6 Sol/Luna/Astra:
 //   raw context window                = 272,000
 //   effective input window (95%)      = 258,400
 //   automatic compaction limit (90%)  = 244,800
