@@ -2145,6 +2145,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "navigate":
         await this.navigate(state, action.url);
         return;
+      case "history":
+        await this.navigateHistory(state, action.direction);
+        return;
+      case "activate":
+        await (
+          await this.ensureConnection()
+        ).send("Target.activateTarget", {
+          targetId: state.targetId,
+        });
+        return;
       case "click": {
         const node = await this.resolveLocator(state, action.locator);
         await this.clickNode(state, node.backendDOMNodeId, action.button ?? "left", 1);
@@ -2908,6 +2918,28 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     await this.refreshFrame(state);
   }
 
+  private async navigateHistory(state: TargetState, direction: "back" | "forward"): Promise<void> {
+    const history = await this.sendActionTarget<{
+      currentIndex?: unknown;
+      entries?: unknown;
+    }>(state, "Page.getNavigationHistory", {});
+    const nextIndex =
+      typeof history.currentIndex === "number"
+        ? history.currentIndex + (direction === "back" ? -1 : 1)
+        : -1;
+    const entries = Array.isArray(history.entries) ? history.entries : [];
+    const entry = entries[nextIndex];
+    if (!isRecord(entry) || typeof entry.id !== "number") {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        `browser target has no ${direction} history entry`,
+      );
+    }
+    await this.sendActionTarget(state, "Page.navigateToHistoryEntry", { entryId: entry.id });
+    await this.waitForDocumentReady(state, DEFAULT_ACTION_TIMEOUT_MS);
+    await this.refreshFrame(state);
+  }
+
   private async waitForCondition(
     state: TargetState,
     action: Extract<BrowserAction, { type: "wait" }>,
@@ -3128,7 +3160,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       documentGeneration: state?.documentGeneration ?? null,
       kind: targetKind(info),
       title: info.title,
-      url: state?.frame.url ?? info.url,
+      // A newly created target may briefly report an empty main-frame URL
+      // after it has already appeared with a valid TargetInfo URL. Keep the
+      // response parseable so a successful tab create is never reported as 500.
+      url: state?.frame.url || info.url || "about:blank",
       selected: this.selectedTargetId === info.targetId,
       attached: state !== null,
       createdAt: state?.createdAt ?? this.firstSeen(info.targetId),

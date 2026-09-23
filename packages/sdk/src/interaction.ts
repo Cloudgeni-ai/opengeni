@@ -863,6 +863,8 @@ export type BrowserPermissionSetting = "granted" | "denied" | "prompt";
 
 export type BrowserAction =
   | { type: "navigate"; url: string }
+  | { type: "history"; direction: "back" | "forward" }
+  | { type: "activate" }
   | {
       type: "click";
       locator: BrowserLocator;
@@ -1475,6 +1477,12 @@ export interface InteractionTransport {
     targetId: string,
     options?: OpenGeniRequestOptions,
   ): Promise<BrowserObservation>;
+  captureBrowserTarget(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<BrowserFrame>;
   actInBrowser(
     workspaceId: string,
     browserSessionId: string,
@@ -2119,6 +2127,10 @@ export class BrowserSessionResource {
     options: OpenGeniRequestOptions = {},
   ): Promise<BrowserObservation> {
     return await this.transport.observeBrowserTarget(this.workspaceId, this.id, targetId, options);
+  }
+
+  async capture(targetId: string, options: OpenGeniRequestOptions = {}): Promise<BrowserFrame> {
+    return await this.transport.captureBrowserTarget(this.workspaceId, this.id, targetId, options);
   }
 
   async act(

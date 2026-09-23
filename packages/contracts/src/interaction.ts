@@ -1942,6 +1942,8 @@ export type BrowserPermissionSetting = z.infer<typeof BrowserPermissionSetting>;
 
 const browserActionVariants = [
   z.object({ type: z.literal("navigate"), url: boundedUrl }).strict(),
+  z.object({ type: z.literal("history"), direction: z.enum(["back", "forward"]) }).strict(),
+  z.object({ type: z.literal("activate") }).strict(),
   z
     .object({
       type: z.literal("click"),

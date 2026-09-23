@@ -68,6 +68,7 @@ import {
 import {
   OpenGeniInteractionClient,
   decodeComputerFrameMetadataHeader,
+  parseBrowserFrameMetadata,
   type AuthRun,
   type AuthRunListOptions,
   type AuthRunListResponse,
@@ -89,6 +90,8 @@ import {
   type BrowserIdentityListResponse,
   type BrowserIdentityMutationResponse,
   type BrowserObservation,
+  type BrowserFrame,
+  type BrowserFrameMetadata,
   type BrowserOpenTargetRequest,
   type BrowserSession,
   type BrowserSessionAttachment,
@@ -3924,6 +3927,48 @@ export class OpenGeniClient {
       {},
       options,
     );
+  }
+
+  async captureBrowserTarget(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserFrame> {
+    const response = await this.requestResponse(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/${encodeURIComponent(targetId)}/screenshot`,
+      {},
+      options,
+    );
+    const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+    const header = response.headers.get("x-opengeni-browser-frame");
+    if (
+      (mediaType !== "image/jpeg" && mediaType !== "image/png") ||
+      !header ||
+      header.length > 64 * 1024
+    ) {
+      await cancelResponseBody(response, "browser frame metadata is invalid");
+      throw new OpenGeniApiError(502, "browser frame metadata is invalid");
+    }
+    let metadata: BrowserFrameMetadata;
+    try {
+      metadata = parseBrowserFrameMetadata(
+        JSON.parse(atob(header.replace(/-/gu, "+").replace(/_/gu, "/"))),
+      );
+    } catch {
+      await cancelResponseBody(response, "browser frame metadata is invalid");
+      throw new OpenGeniApiError(502, "browser frame metadata is invalid");
+    }
+    const data = await readBoundedResponseBytes(response, 24 * 1024 * 1024, null);
+    if (
+      metadata.browserSessionId !== browserSessionId ||
+      metadata.targetId !== targetId ||
+      metadata.mediaType !== mediaType
+    ) {
+      throw new OpenGeniApiError(502, "browser frame evidence does not match its request");
+    }
+    return { ...metadata, data };
   }
 
   async closeBrowserTarget(

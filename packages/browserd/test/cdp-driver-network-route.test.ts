@@ -99,6 +99,17 @@ test("installs route emulation on about:blank before the first external navigati
             currentUrl = String(params?.url);
           }
           return {} as T;
+        case "Page.getNavigationHistory":
+          return {
+            currentIndex: currentUrl === destination ? 0 : 1,
+            entries: [
+              { id: 10, url: destination },
+              { id: 11, url: "https://next.example.test/" },
+            ],
+          } as T;
+        case "Page.navigateToHistoryEntry":
+          currentUrl = params?.entryId === 10 ? destination : "https://next.example.test/";
+          return {} as T;
         case "Runtime.evaluate":
           if (String(params?.expression).includes("navigator.userAgentData")) {
             if (
@@ -226,6 +237,56 @@ test("installs route emulation on about:blank before the first external navigati
         sessionId: undefined,
       },
     );
+    const next = await driver.dispatch({
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      browserSessionId,
+      controllerGeneration,
+      targetId: observation.target.id,
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration,
+      expectedFrameId: observation.frameId,
+      actor: { kind: "agent", subjectId: "agent:test" },
+      action: { type: "navigate", url: "https://next.example.test/" },
+    });
+    expect(next?.target.url).toBe("https://next.example.test/");
+    const back = await driver.dispatch({
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      browserSessionId,
+      controllerGeneration,
+      targetId: next!.target.id,
+      expectedTargetGeneration: next!.target.targetGeneration,
+      expectedDocumentGeneration: next!.target.documentGeneration,
+      expectedFrameId: next!.frameId,
+      actor: { kind: "agent", subjectId: "agent:test" },
+      action: { type: "history", direction: "back" },
+    });
+    expect(back?.target.url).toBe(destination);
+    expect(
+      cdpCalls.some(
+        (call) => call.method === "Page.navigateToHistoryEntry" && call.params?.entryId === 10,
+      ),
+    ).toBe(true);
+    await driver.dispatch({
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      browserSessionId,
+      controllerGeneration,
+      targetId: back!.target.id,
+      expectedTargetGeneration: back!.target.targetGeneration,
+      expectedDocumentGeneration: back!.target.documentGeneration,
+      expectedFrameId: back!.frameId,
+      actor: { kind: "agent", subjectId: "agent:test" },
+      action: { type: "activate" },
+    });
+    expect(
+      cdpCalls.some(
+        (call) =>
+          call.method === "Target.activateTarget" &&
+          call.params?.targetId === observation.target.id,
+      ),
+    ).toBe(true);
   } finally {
     await driver.close();
   }
@@ -239,6 +300,7 @@ test.each(["runner", "cdp"] as const)(
     let created = false;
     let createdTargetReads = 0;
     let createdFrameReads = 0;
+    let regressFrameToEmpty = false;
     const jpeg = Uint8Array.from([
       0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 2, 0, 3, 1, 1, 0x11, 0, 0xff, 0xd9,
     ]);
@@ -318,9 +380,11 @@ test.each(["runner", "cdp"] as const)(
                 id: second ? "frame-2" : "frame-1",
                 loaderId: second ? "loader-2" : "loader-1",
                 url: second
-                  ? createdFrameReads >= 3
-                    ? "https://second.example.test/"
-                    : ""
+                  ? regressFrameToEmpty
+                    ? ""
+                    : createdFrameReads >= 3
+                      ? "https://second.example.test/"
+                      : ""
                   : "https://first.example.test/",
               },
             },
@@ -378,6 +442,13 @@ test.each(["runner", "cdp"] as const)(
       expect(createdTargetReads).toBeGreaterThanOrEqual(2);
       expect(createdFrameReads).toBeGreaterThanOrEqual(3);
       expect(calls.some((call) => call.method === "Target.activateTarget")).toBe(false);
+      // Chromium can briefly regress the frame URL during navigation even
+      // after the target itself advertises the requested absolute URL.
+      regressFrameToEmpty = true;
+      expect((await driver.observe(opened.target.id)).target.url).toBe(
+        "https://second.example.test/",
+      );
+      regressFrameToEmpty = false;
       const frames = await driver.subscribeFrames(opened.target.id, {
         format: "jpeg",
         maxWidth: 640,
