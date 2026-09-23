@@ -251,6 +251,8 @@ export type AgentBrowserDriverOptions = {
    * targets to the connection that created them, so they require `cdp`. */
   targetLifecycle?: "runner" | "cdp";
   tabControl?: boolean;
+  /** Private managed Chromium tabs must be foregrounded for scheduled UI updates. */
+  foregroundManagedTabs?: boolean;
   frameStreaming?: boolean;
   emulation?: BrowserSessionEmulation;
   permissionControl?: boolean;
@@ -310,6 +312,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly engine: "chromium" | "chrome" | "lightpanda";
   private readonly targetLifecycle: "runner" | "cdp";
   private readonly tabControl: boolean;
+  private readonly foregroundManagedTabs: boolean;
+  private foregroundTail: Promise<void> = Promise.resolve();
   private readonly frameStreaming: boolean;
   private readonly emulation: BrowserSessionEmulation | null;
   private readonly permissionControl: boolean;
@@ -350,6 +354,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.engine = options.engine ?? "chromium";
     this.targetLifecycle = options.targetLifecycle ?? "runner";
     this.tabControl = options.tabControl ?? true;
+    this.foregroundManagedTabs = options.foregroundManagedTabs ?? false;
     this.frameStreaming = options.frameStreaming ?? true;
     this.emulation = hasBrowserEmulation(options.emulation) ? options.emulation : null;
     this.permissionControl = options.permissionControl ?? true;
@@ -411,6 +416,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       visiblePageTargets(targets)[0];
     if (!target) throw new Error("managed browser launched without a page target");
     this.selectedTargetId = target.targetId;
+    await this.activateManagedTarget(target.targetId);
     if (deferNavigation) {
       await this.navigate(await this.ensureTargetState(target), url);
     }
@@ -464,6 +470,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const createdState = await this.ensureTargetState(createdTarget);
     await this.waitForCreatedTargetFrame(createdState);
     this.selectedTargetId = result.targetId;
+    await this.activateManagedTarget(result.targetId);
     if (deferNavigation) {
       await this.navigate(createdState, url);
     }
@@ -474,6 +481,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
     this.selectedTargetId = targetId;
+    await this.activateManagedTarget(targetId);
     return await this.observe(targetId);
   }
 
@@ -618,52 +626,56 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     options: BrowserScreenshotOptions = {},
   ): Promise<BrowserImageFrame> {
     const normalized = normalizeScreenshotOptions(options);
-    return await this.withTarget(targetId, async (state) => {
-      await this.refreshFrame(state);
-      const metrics = await this.layoutMetrics(state);
-      const capture: Record<string, unknown> = {
-        format: normalized.format,
-        fromSurface: true,
-        captureBeyondViewport: normalized.fullPage,
-        ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
-      };
-      let cssWidth = metrics.viewport.width;
-      let cssHeight = metrics.viewport.height;
-      let scrollX = metrics.viewport.x;
-      let scrollY = metrics.viewport.y;
-      if (normalized.fullPage) {
-        cssWidth = metrics.content.width;
-        cssHeight = metrics.content.height;
-        scrollX = 0;
-        scrollY = 0;
-        assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
-        capture.clip = {
-          x: 0,
-          y: 0,
-          width: cssWidth,
-          height: cssHeight,
-          scale: 1,
+    return await this.withTarget(
+      targetId,
+      async (state) => {
+        await this.refreshFrame(state);
+        const metrics = await this.layoutMetrics(state);
+        const capture: Record<string, unknown> = {
+          format: normalized.format,
+          fromSurface: true,
+          captureBeyondViewport: normalized.fullPage,
+          ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
         };
-      }
-      const response = await this.sendTarget<{ data?: unknown }>(
-        state,
-        "Page.captureScreenshot",
-        capture,
-      );
-      const data = decodeBoundedBase64Image(response.data);
-      const dimensions = imageDimensions(data, normalized.format);
-      return this.imageFrame({
-        state,
-        sequence: 0,
-        format: normalized.format,
-        data,
-        width: dimensions.width,
-        height: dimensions.height,
-        deviceScaleFactor: finiteScale(dimensions.width / cssWidth),
-        scrollX,
-        scrollY,
-      });
-    });
+        let cssWidth = metrics.viewport.width;
+        let cssHeight = metrics.viewport.height;
+        let scrollX = metrics.viewport.x;
+        let scrollY = metrics.viewport.y;
+        if (normalized.fullPage) {
+          cssWidth = metrics.content.width;
+          cssHeight = metrics.content.height;
+          scrollX = 0;
+          scrollY = 0;
+          assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
+          capture.clip = {
+            x: 0,
+            y: 0,
+            width: cssWidth,
+            height: cssHeight,
+            scale: 1,
+          };
+        }
+        const response = await this.sendTarget<{ data?: unknown }>(
+          state,
+          "Page.captureScreenshot",
+          capture,
+        );
+        const data = decodeBoundedBase64Image(response.data);
+        const dimensions = imageDimensions(data, normalized.format);
+        return this.imageFrame({
+          state,
+          sequence: 0,
+          format: normalized.format,
+          data,
+          width: dimensions.width,
+          height: dimensions.height,
+          deviceScaleFactor: finiteScale(dimensions.width / cssWidth),
+          scrollX,
+          scrollY,
+        });
+      },
+      true,
+    );
   }
 
   async subscribeFrames(
@@ -766,53 +778,57 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   async dispatch(commandInput: BrowserActionCommandValue): Promise<BrowserObservationValue>;
   async dispatch(commandInput: BrowserActionCommandValue): Promise<BrowserObservationValue | null> {
     const command = BrowserActionCommand.parse(commandInput);
-    const observation = await this.withTarget(command.targetId, async (state, info) => {
-      if (!state.dialog) await this.refreshFrame(state);
-      this.assertExpectedGenerations(command, state);
-      const actions = command.action.type === "batch" ? command.action.actions : [command.action];
-      if (state.dialog && actions[0]?.type !== "handle_dialog") {
-        throw new InteractionDefiniteDriverError(
-          "invalid_action",
-          "browser JavaScript dialog must be handled before another action",
-        );
-      }
-      let completedActions = 0;
-      for (const action of actions) {
-        try {
-          await this.dispatchAction(state, action, command.operationId);
-          completedActions += 1;
-          if (state.dialog) {
-            if (completedActions < actions.length) {
-              throw new Error("browser action batch paused on a JavaScript dialog");
-            }
-            break;
-          }
-        } catch (error) {
-          if (error instanceof DialogOpenedSignal) {
-            completedActions += 1;
-            if (completedActions < actions.length) {
-              throw new Error("browser action batch paused on a JavaScript dialog", {
-                cause: error,
-              });
-            }
-            break;
-          }
-          if (error instanceof InteractionDefiniteDriverError && completedActions === 0)
-            throw error;
-          throw error instanceof InteractionDefiniteDriverError
-            ? new Error("browser action batch had a partial outcome", {
-                cause: error,
-              })
-            : error;
+    const observation = await this.withTarget(
+      command.targetId,
+      async (state, info) => {
+        if (!state.dialog) await this.refreshFrame(state);
+        this.assertExpectedGenerations(command, state);
+        const actions = command.action.type === "batch" ? command.action.actions : [command.action];
+        if (state.dialog && actions[0]?.type !== "handle_dialog") {
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            "browser JavaScript dialog must be handled before another action",
+          );
         }
-      }
-      if (command.observationMode === "none") return null;
-      const currentInfo = await this.requireTargetInfo(
-        await this.ensureConnection(),
-        info.targetId,
-      );
-      return await this.observeUnlocked(state, currentInfo);
-    });
+        let completedActions = 0;
+        for (const action of actions) {
+          try {
+            await this.dispatchAction(state, action, command.operationId);
+            completedActions += 1;
+            if (state.dialog) {
+              if (completedActions < actions.length) {
+                throw new Error("browser action batch paused on a JavaScript dialog");
+              }
+              break;
+            }
+          } catch (error) {
+            if (error instanceof DialogOpenedSignal) {
+              completedActions += 1;
+              if (completedActions < actions.length) {
+                throw new Error("browser action batch paused on a JavaScript dialog", {
+                  cause: error,
+                });
+              }
+              break;
+            }
+            if (error instanceof InteractionDefiniteDriverError && completedActions === 0)
+              throw error;
+            throw error instanceof InteractionDefiniteDriverError
+              ? new Error("browser action batch had a partial outcome", {
+                  cause: error,
+                })
+              : error;
+          }
+        }
+        if (command.observationMode === "none") return null;
+        const currentInfo = await this.requireTargetInfo(
+          await this.ensureConnection(),
+          info.targetId,
+        );
+        return await this.observeUnlocked(state, currentInfo);
+      },
+      true,
+    );
     this.refreshSubscribedFrame(command.targetId);
     return observation;
   }
@@ -835,116 +851,122 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     commandInput: BrowserProtectedAuthFillCommandValue,
   ): Promise<BrowserProtectedAuthObservationValue> {
     const command = BrowserProtectedAuthFillCommand.parse(commandInput);
-    return await this.withTarget(command.targetId, async (state, info) => {
-      if (state.dialog) {
-        throw new InteractionDefiniteDriverError(
-          "invalid_action",
-          "browser JavaScript dialog must be handled before protected fill",
-        );
-      }
-      await this.refreshFrame(state);
-      this.assertProtectedAuthGenerations(command, state);
-      state.protectedAuthActive = true;
-      const startingDocumentGeneration = state.documentGeneration;
-      const startingNetworkActivitySequence = state.networkActivitySequence;
-      const allowedOrigins = new Set(command.allowedOrigins);
-      const resolvedFields: ResolvedProtectedField[] = [];
-      let submitNodeId: number | null = null;
-      let submitted = false;
-      try {
-        for (const field of command.fields) {
-          const node = await this.resolveLocator(state, field.locator);
-          if (node.backendDOMNodeId === null) {
-            throw new InteractionDefiniteDriverError(
-              "invalid_action",
-              "protected-fill field has no DOM action target",
-            );
-          }
-          const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
-          this.assertProtectedField(metadata, field.purpose, allowedOrigins);
-          resolvedFields.push({
-            backendDOMNodeId: node.backendDOMNodeId,
-            purpose: field.purpose,
-            value: field.value,
-          });
+    return await this.withTarget(
+      command.targetId,
+      async (state, info) => {
+        if (state.dialog) {
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            "browser JavaScript dialog must be handled before protected fill",
+          );
         }
-        if (command.submit.type === "click") {
-          const node = await this.resolveLocator(state, command.submit.locator);
-          if (node.backendDOMNodeId === null) {
-            throw new InteractionDefiniteDriverError(
-              "invalid_action",
-              "protected-fill submit control has no DOM action target",
-            );
-          }
-          const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
-          this.assertProtectedSubmit(metadata, allowedOrigins);
-          submitNodeId = node.backendDOMNodeId;
-        } else if (command.submit.type === "press" && command.submit.locator) {
-          const node = await this.resolveLocator(state, command.submit.locator);
-          if (node.backendDOMNodeId === null) {
-            throw new InteractionDefiniteDriverError(
-              "invalid_action",
-              "protected-fill key target has no DOM action target",
-            );
-          }
-          const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
-          this.assertProtectedSubmit(metadata, allowedOrigins);
-          submitNodeId = node.backendDOMNodeId;
-        }
-
-        // Locator resolution refreshes browser state. Recheck every causal
-        // fence once more immediately before the first value crosses CDP.
         await this.refreshFrame(state);
         this.assertProtectedAuthGenerations(command, state);
-        for (const field of resolvedFields) {
-          await this.focusNode(state, field.backendDOMNodeId);
-          await this.selectAllAndDelete(state);
-          await this.sendActionTarget(state, "Input.insertText", {
-            text: field.value,
-          });
-        }
+        state.protectedAuthActive = true;
+        const startingDocumentGeneration = state.documentGeneration;
+        const startingNetworkActivitySequence = state.networkActivitySequence;
+        const allowedOrigins = new Set(command.allowedOrigins);
+        const resolvedFields: ResolvedProtectedField[] = [];
+        let submitNodeId: number | null = null;
+        let submitted = false;
+        try {
+          for (const field of command.fields) {
+            const node = await this.resolveLocator(state, field.locator);
+            if (node.backendDOMNodeId === null) {
+              throw new InteractionDefiniteDriverError(
+                "invalid_action",
+                "protected-fill field has no DOM action target",
+              );
+            }
+            const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
+            this.assertProtectedField(metadata, field.purpose, allowedOrigins);
+            resolvedFields.push({
+              backendDOMNodeId: node.backendDOMNodeId,
+              purpose: field.purpose,
+              value: field.value,
+            });
+          }
+          if (command.submit.type === "click") {
+            const node = await this.resolveLocator(state, command.submit.locator);
+            if (node.backendDOMNodeId === null) {
+              throw new InteractionDefiniteDriverError(
+                "invalid_action",
+                "protected-fill submit control has no DOM action target",
+              );
+            }
+            const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
+            this.assertProtectedSubmit(metadata, allowedOrigins);
+            submitNodeId = node.backendDOMNodeId;
+          } else if (command.submit.type === "press" && command.submit.locator) {
+            const node = await this.resolveLocator(state, command.submit.locator);
+            if (node.backendDOMNodeId === null) {
+              throw new InteractionDefiniteDriverError(
+                "invalid_action",
+                "protected-fill key target has no DOM action target",
+              );
+            }
+            const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
+            this.assertProtectedSubmit(metadata, allowedOrigins);
+            submitNodeId = node.backendDOMNodeId;
+          }
 
-        if (command.submit.type === "click") {
-          await this.clickNode(state, submitNodeId, "left", 1);
-          submitted = true;
-        } else if (command.submit.type === "press") {
-          await this.focusNode(
+          // Locator resolution refreshes browser state. Recheck every causal
+          // fence once more immediately before the first value crosses CDP.
+          await this.refreshFrame(state);
+          this.assertProtectedAuthGenerations(command, state);
+          for (const field of resolvedFields) {
+            await this.focusNode(state, field.backendDOMNodeId);
+            await this.selectAllAndDelete(state);
+            await this.sendActionTarget(state, "Input.insertText", {
+              text: field.value,
+            });
+          }
+
+          if (command.submit.type === "click") {
+            await this.clickNode(state, submitNodeId, "left", 1);
+            submitted = true;
+          } else if (command.submit.type === "press") {
+            await this.focusNode(
+              state,
+              submitNodeId ?? resolvedFields.at(-1)?.backendDOMNodeId ?? null,
+            );
+            await this.pressKey(state, command.submit.key);
+            submitted = true;
+          }
+
+          const transitioned = await this.waitForProtectedAuthTransition(
             state,
-            submitNodeId ?? resolvedFields.at(-1)?.backendDOMNodeId ?? null,
+            startingDocumentGeneration,
+            startingNetworkActivitySequence,
           );
-          await this.pressKey(state, command.submit.key);
-          submitted = true;
+          if (!submitted && !transitioned) {
+            await this.clearProtectedFields(state, resolvedFields);
+            throw new Error(
+              "protected fill without submit did not produce an observable transition",
+            );
+          }
+          if (!transitioned && state.documentGeneration === startingDocumentGeneration) {
+            await this.clearProtectedFields(state, resolvedFields);
+          }
+          const currentInfo = await this.requireTargetInfo(
+            await this.ensureConnection(),
+            info.targetId,
+          );
+          await this.refreshFrame(state);
+          return {
+            target: this.targetFromInfo(currentInfo, state),
+            status: submitted || transitioned ? "submitted" : "working",
+          };
+        } catch (error) {
+          await this.clearProtectedFields(state, resolvedFields).catch(() => undefined);
+          throw error;
+        } finally {
+          state.protectedAuthActive = false;
+          state.protectedAuthQuietUntil = Date.now() + PROTECTED_AUTH_DIAGNOSTIC_QUIET_MS;
         }
-
-        const transitioned = await this.waitForProtectedAuthTransition(
-          state,
-          startingDocumentGeneration,
-          startingNetworkActivitySequence,
-        );
-        if (!submitted && !transitioned) {
-          await this.clearProtectedFields(state, resolvedFields);
-          throw new Error("protected fill without submit did not produce an observable transition");
-        }
-        if (!transitioned && state.documentGeneration === startingDocumentGeneration) {
-          await this.clearProtectedFields(state, resolvedFields);
-        }
-        const currentInfo = await this.requireTargetInfo(
-          await this.ensureConnection(),
-          info.targetId,
-        );
-        await this.refreshFrame(state);
-        return {
-          target: this.targetFromInfo(currentInfo, state),
-          status: submitted || transitioned ? "submitted" : "working",
-        };
-      } catch (error) {
-        await this.clearProtectedFields(state, resolvedFields).catch(() => undefined);
-        throw error;
-      } finally {
-        state.protectedAuthActive = false;
-        state.protectedAuthQuietUntil = Date.now() + PROTECTED_AUTH_DIAGNOSTIC_QUIET_MS;
-      }
-    });
+      },
+      true,
+    );
   }
 
   /** Controller-private provider authentication. Provider credentials and
@@ -1141,16 +1163,41 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async withTarget<T>(
     targetId: string,
     operation: (state: TargetState, info: TargetInfo) => Promise<T>,
+    foreground = false,
   ): Promise<T> {
     const connection = await this.ensureConnection();
     const info = await this.requireTargetInfo(connection, targetId);
     const state = await this.ensureTargetState(info);
-    const result = state.tail.then(async () => await operation(state, info));
+    const result = state.tail.then(async () =>
+      foreground
+        ? await this.withForegroundTarget(targetId, async () => await operation(state, info))
+        : await operation(state, info),
+    );
     state.tail = result.then(
       () => undefined,
       () => undefined,
     );
     return await result;
+  }
+
+  private async withForegroundTarget<T>(targetId: string, operation: () => Promise<T>): Promise<T> {
+    if (!this.foregroundManagedTabs) return await operation();
+    // One managed browser has one foreground tab. Keep it active until the
+    // operation completes so concurrent inputs cannot hide each other.
+    const result = this.foregroundTail.then(async () => {
+      const connection = await this.ensureConnection();
+      await connection.send("Target.activateTarget", { targetId });
+      return await operation();
+    });
+    this.foregroundTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return await result;
+  }
+
+  private async activateManagedTarget(targetId: string): Promise<void> {
+    await this.withForegroundTarget(targetId, async () => undefined);
   }
 
   private async ensureTargetState(info: TargetInfo): Promise<TargetState> {
@@ -3214,10 +3261,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       documentGeneration: state?.documentGeneration ?? null,
       kind: targetKind(info),
       title: info.title,
-      // A newly created target may briefly report an empty main-frame URL
-      // after it has already appeared with a valid TargetInfo URL. Keep the
-      // response parseable so a successful tab create is never reported as 500.
-      url: state?.frame.url || info.url || "about:blank",
+      // Chromium can briefly report ":" or an empty main-frame URL during
+      // target creation. Use the first absolute URL so an accepted tab create
+      // cannot turn into a schema-validation 500.
+      url: absoluteTargetUrl(state?.frame.url) ?? absoluteTargetUrl(info.url) ?? "about:blank",
       selected: this.selectedTargetId === info.targetId,
       attached: state !== null,
       createdAt: state?.createdAt ?? this.firstSeen(info.targetId),
@@ -3268,7 +3315,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       last =
         (await this.targetInfos(connection)).find((candidate) => candidate.targetId === targetId) ??
         null;
-      if (last && isVisibleTarget(last) && last.url.length > 0) return last;
+      if (last && isVisibleTarget(last) && absoluteTargetUrl(last.url)) return last;
       await delay(25);
     } while (Date.now() < deadline);
     if (!last || !isVisibleTarget(last)) {
@@ -3285,7 +3332,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const deadline = Date.now() + TARGET_CREATION_SETTLE_TIMEOUT_MS;
     do {
       await this.refreshFrame(state);
-      if (state.frame.url.length > 0) return;
+      if (absoluteTargetUrl(state.frame.url)) return;
       await delay(25);
     } while (Date.now() < deadline);
     throw new InteractionDefiniteDriverError(
@@ -3409,6 +3456,15 @@ function normalizeTargetInfo(value: unknown): TargetInfo {
     attached: value.attached === true,
     openerId: typeof value.openerId === "string" ? value.openerId : null,
   };
+}
+
+function absoluteTargetUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > 16_384) return null;
+  try {
+    return new URL(value).href.length > 0 ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 function visibleTargets(infos: readonly TargetInfo[]): TargetInfo[] {
