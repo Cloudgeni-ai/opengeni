@@ -400,9 +400,9 @@ describe("SuperGrok subscription routes", () => {
         subject: "xai-user-1",
         scope: "workspace",
       },
-      models: [{ id: "supergrok/grok-4.6", provider: "supergrok" }],
+      models: [{ id: "supergrok/grok-4.7", provider: "supergrok" }],
     });
-    expect(statusBody.models.map((model) => model.id)).toEqual(["supergrok/grok-4.6"]);
+    expect(statusBody.models.map((model) => model.id)).toEqual(["supergrok/grok-4.7"]);
 
     const renamed = await request(`/supergrok/accounts/${connected.accountId}`, {
       method: "PATCH",

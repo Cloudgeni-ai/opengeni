@@ -21,8 +21,8 @@ OpenGeni does not scrape `GET /models`. Membership is the reviewed catalog
 
 Exactly one built-in provider. `OPENGENI_OPENAI_PROVIDER` is `openai` (default)
 or `azure`. In code mode its catalog is `OPENGENI_OPENAI_MODEL` (default
-`gpt-5.6-sol`) and `OPENGENI_OPENAI_ALLOWED_MODELS` (default
-`gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna`). A custom base URL still speaks
+`gpt-6-astra`) and `OPENGENI_OPENAI_ALLOWED_MODELS` (default
+`gpt-6-astra,gpt-6-sol,gpt-6-luna`). A custom base URL still speaks
 Responses; it does not become Chat Completions.
 
 | | OpenAI | Azure |
@@ -737,13 +737,12 @@ The catalog describes:
 - SSE, Responses WebSocket, and realtime-audio transports; and
 - standard, priority, and fast latency modes.
 
-GPT-5.6 Sol, Terra, and Luna (including their Codex subscription variants)
+GPT-6 Astra, Sol, and Luna (including their Codex subscription variants)
 advertise runnable **Fast** mode. Fast requests set the provider service tier,
 use a 2× billing multiplier, and fail the turn if the provider response omits
 or downgrades that tier; OpenGeni never silently falls back to Standard. The
-same billed GPT-5.6 family pins Codex's 272,000 / 258,400 / 244,800
-raw / effective / auto-compact catalog rather than the 1.05M deployment
-fallback.
+GPT-6 family uses the 1.05M context window. A configured GPT-5.6 id still pins
+Codex's 272,000 / 258,400 / 244,800 raw / effective / auto-compact catalog.
 
 Upstream documentation alone never makes a capability runnable. For example,
 provider support for X search or Responses WebSocket remains `runnable: false`

@@ -32,14 +32,14 @@ opengeni_load_dev_environment ./.env
 OPENGENI_DEV_BACKEND="$(opengeni_resolve_dev_backend)"
 export OPENGENI_DEV_BACKEND
 
-# A native infrastructure host cannot provide the Docker sandbox provider. The
-# in-process local provider preserves sandbox execution without credentials or a
-# daemon. Preserve explicit remote providers such as Modal/OpenSandbox.
+# `bun run dev` runs the agent on the host. An explicit docker, modal, or other
+# backend in .env is preserved. A native infrastructure host cannot provide the
+# Docker sandbox provider, so an explicit docker value is rewritten to local.
 if [ "$OPENGENI_DEV_BACKEND" = "native" ] &&
-  [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "docker" ]; then
+  [ "${OPENGENI_SANDBOX_BACKEND:-local}" = "docker" ]; then
   OPENGENI_SANDBOX_BACKEND=local
 fi
-OPENGENI_SANDBOX_BACKEND="${OPENGENI_SANDBOX_BACKEND:-docker}"
+OPENGENI_SANDBOX_BACKEND="${OPENGENI_SANDBOX_BACKEND:-local}"
 export OPENGENI_SANDBOX_BACKEND
 
 # Connected Machines are part of the normal localhost product surface. Keep the
