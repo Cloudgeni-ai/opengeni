@@ -449,6 +449,38 @@ e2e(
       });
       expect(paymentChild).toMatchObject({ text: null, redacted: "payment" });
       expect(JSON.stringify(paymentChild)).not.toContain("fixture-card-text-secret");
+      const spoofedPage = await driver.openTarget(
+        dataUrl(`<!doctype html><title>Spoofed DOM</title>
+          <input id="spoofed-password" type="password" value="fixture-spoofed-password">
+          <div id="spoofed-container"><span data-private>fixture-spoofed-private</span></div>
+          <script>
+            document.getElementById('spoofed-password').getAttribute = function(name) {
+              return name === 'type' ? 'text' : Element.prototype.getAttribute.call(this, name);
+            };
+            document.getElementById('spoofed-container').querySelectorAll = () => [];
+          </script>`),
+      );
+      const spoofedState = await driver.targetState(spoofedPage.target.id);
+      const spoofedFences = {
+        expectedTargetGeneration: spoofedState.targetGeneration,
+        expectedDocumentGeneration: spoofedState.documentGeneration!,
+        expectedFrameId: spoofedState.frameId!,
+      };
+      const spoofedPassword = await driver.readDom(spoofedPage.target.id, {
+        kind: "element",
+        locator: { kind: "css", selector: "#spoofed-password" },
+        ...spoofedFences,
+      });
+      expect(spoofedPassword).toMatchObject({ value: null, redacted: "password" });
+      expect(JSON.stringify(spoofedPassword)).not.toContain("fixture-spoofed-password");
+      const spoofedContainer = await driver.readDom(spoofedPage.target.id, {
+        kind: "element",
+        locator: { kind: "css", selector: "#spoofed-container" },
+        ...spoofedFences,
+      });
+      expect(spoofedContainer).toMatchObject({ text: null, redacted: "private" });
+      expect(JSON.stringify(spoofedContainer)).not.toContain("fixture-spoofed-private");
+      await driver.closeTarget(spoofedPage.target.id);
       await expect(
         driver.readDom(authPage.target.id, {
           kind: "count",
