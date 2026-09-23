@@ -5,6 +5,11 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
+-- Keep the original cancellation intent immutable. A deadline can arrive after
+-- an explicit stop, so it needs its own clock for the bounded capture grace.
+ALTER TABLE sandbox_retained_processes
+  ADD COLUMN deadline_cancellation_requested_at timestamptz;
+
 DO $install$
 DECLARE target_schema text := current_schema();
 BEGIN
@@ -44,8 +49,7 @@ BEGIN
               OR (
                 lease.rotation_reason = 'provider_deadline'
                 AND lease.rotation_requested_at IS NOT NULL
-                AND process.cancellation_reason = 'provider_deadline'
-                AND process.cancellation_requested_at < now() - interval '2 minutes'
+                AND process.deadline_cancellation_requested_at < now() - interval '2 minutes'
                 AND process.reconcile_attempts >= 1
               )
             )

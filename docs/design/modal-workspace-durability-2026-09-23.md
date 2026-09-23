@@ -20,7 +20,8 @@ may leave incomplete output; losing the entire workspace is worse.
 2. For each retained legacy Modal command, try a stop if the command has a PTY.
    A non-PTY Ctrl-C byte is ordinary stdin data, not a signal, so do not send
    it. Probe that command and record deadline cancellation intent. Continue
-   observing without repeated stop bytes.
+   observing without repeated stop bytes. If an earlier explicit stop is still
+   pending, preserve that request and start a separate deadline grace.
 3. After two minutes, allow the existing drain path to capture the workspace
    even if any legacy command is still running or observation failed. Require
    a closed, physically quiesced turn owner or a returned direct request; reject
@@ -35,7 +36,7 @@ to scheduled provider-deadline rotations. The saved files are a point-in-time
 view: a command that ignored stop may have left an incomplete generated file.
 The command result is never reported as successful because of the save.
 Configuration validation reserves the two-minute stop window, full capture
-budget, and a reaper tick before the provider deadline.
+budget, and two reaper ticks before the provider deadline.
 
 This is not yet a hard guarantee under an overloaded reaper: its retained
 process claim batch is limited, and a worker can crash before recording

@@ -4149,12 +4149,14 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     await admin`update sandbox_retained_processes set
       started_at = now(), reconcile_attempts = 1,
       last_reconcile_outcome = 'provider_running',
-      cancellation_requested_at = now() - interval '3 minutes', cancellation_reason = 'provider_deadline'
+      cancellation_requested_at = now() - interval '3 minutes', cancellation_reason = 'provider_deadline',
+      deadline_cancellation_requested_at = now() - interval '3 minutes'
       where id = ${processId}`;
     await admin`update sandbox_retained_processes set
       started_at = now(), reconcile_attempts = 1,
       last_reconcile_outcome = 'quarantined_process_observation_unavailable',
-      cancellation_requested_at = now() - interval '3 minutes', cancellation_reason = 'provider_deadline'
+      cancellation_requested_at = now() - interval '3 minutes', cancellation_reason = 'provider_deadline',
+      deadline_cancellation_requested_at = now() - interval '3 minutes'
       where id = ${secondProcessId}`;
     const scope = {
       accountId: ids.accountId,
@@ -4317,7 +4319,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     await admin`update sandbox_retained_processes set
       started_at = now() - interval '3 minutes', reconcile_attempts = 1,
       last_reconcile_outcome = 'provider_running',
-      cancellation_requested_at = now() - interval '3 minutes', cancellation_reason = 'provider_deadline'
+      cancellation_requested_at = now() - interval '3 minutes', cancellation_reason = 'provider_deadline',
+      deadline_cancellation_requested_at = now() - interval '3 minutes'
       where id = ${processId}`;
     await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
       closed_at = now() - interval '3 minutes', quiesced_at = now() - interval '3 minutes'
@@ -4353,7 +4356,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     ).toBe("terminated");
   }, 180_000);
 
-  test("deadline-command inventory migration replays without widening public authority", async () => {
+  test("deadline-command inventory function replays without widening public authority", async () => {
     if (!available) throw new Error("Real PostgreSQL required for containment migration");
     const definition = async () => {
       const [row] = await admin`select pg_get_functiondef(
@@ -4364,7 +4367,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const before = await definition();
     expect(before).toContain("process.reconcile_attempts >= 5");
     expect(before).toContain("command.cancel_requested_at IS NOT NULL");
-    expect(before).toContain("process.cancellation_requested_at < now() - interval '2 minutes'");
+    expect(before).toContain(
+      "process.deadline_cancellation_requested_at < now() - interval '2 minutes'",
+    );
     expect(before).toContain("THEN lease.provider_deadline_at END NULLS LAST");
     const migration = await Bun.file(
       new URL(
@@ -4373,7 +4378,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       ),
     ).text();
     await admin.begin(async (tx) => {
-      await tx.unsafe(migration);
+      await tx.unsafe(migration.slice(migration.indexOf("DO $install$")));
     });
     expect(await definition()).toBe(before);
     const [permission] = await admin`select coalesce(bool_or(acl.grantee = 0

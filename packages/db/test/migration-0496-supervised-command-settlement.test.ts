@@ -436,6 +436,24 @@ test("legacy deadline stop can send its control byte before cancellation closes 
   await expect(f.persistence.reserveInput(1)).rejects.toThrow("input is closed");
 });
 
+test("deadline intent preserves an earlier explicit stop and starts its own grace window", async () => {
+  const f = await fixture(false);
+  await shared.admin`update sandbox_retained_processes set
+    cancellation_requested_at = now() - interval '10 minutes',
+    cancellation_reason = 'explicit_stop' where id = ${f.scope.processId}`;
+  await shared.admin`update sandbox_leases set rotation_requested_at=now(),
+    rotation_reason='provider_deadline' where id=${f.leaseId}`;
+  expect(await requestRetainedProcessDeadlineCancellation(client.db, f.scope)).toBe(true);
+  const upgraded = await getRetainedProcess(client.db, f.scope);
+  expect(upgraded?.cancellationReason).toBe("explicit_stop");
+  expect(Date.now() - Date.parse(upgraded!.cancellationRequestedAt!)).toBeGreaterThan(9 * 60_000);
+  expect(Date.now() - Date.parse(upgraded!.deadlineCancellationRequestedAt!)).toBeLessThan(5_000);
+  expect(await requestRetainedProcessDeadlineCancellation(client.db, f.scope)).toBe(true);
+  expect((await getRetainedProcess(client.db, f.scope))?.deadlineCancellationRequestedAt).toBe(
+    upgraded?.deadlineCancellationRequestedAt,
+  );
+});
+
 test("legacy processes cannot be retrofitted, even after another update in the transaction", async () => {
   const f = await fixture(false);
   await expect(

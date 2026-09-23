@@ -50343,8 +50343,7 @@ export async function enrollUnobservableCommandIdleDrain(
             )
             or (
               ${deadlineRotation}
-              and process.cancellation_reason = 'provider_deadline'
-              and process.cancellation_requested_at < now() -
+              and process.deadline_cancellation_requested_at < now() -
                 (${deadlineStopGraceMs}::bigint * interval '1 millisecond')
               and process.reconcile_attempts >= 1
               and (
@@ -50367,8 +50366,7 @@ export async function enrollUnobservableCommandIdleDrain(
                 (${input.idleGraceMs}::bigint * interval '1 millisecond'))
             or (
               ${deadlineRotation}
-              and process.cancellation_reason = 'provider_deadline'
-              and process.cancellation_requested_at < now() -
+              and process.deadline_cancellation_requested_at < now() -
                 (${deadlineStopGraceMs}::bigint * interval '1 millisecond')
               and (
                 (process.owner_actor_kind = 'turn' and attempt.quiesced_at is not null
@@ -51156,6 +51154,8 @@ export type SandboxRetainedProcess = {
   reconcileAttempts: number;
   lastReconcileOutcome: string | null;
   cancellationRequestedAt: string | null;
+  cancellationReason: string | null;
+  deadlineCancellationRequestedAt: string | null;
   reconcileProofOutcome: "exited" | "lost" | null;
   reconcileProofExitCode: number | null;
   reconcileProofReason:
@@ -51505,6 +51505,8 @@ function mapRetainedProcess(
     reconcileAttempts: row.reconcileAttempts,
     lastReconcileOutcome: row.lastReconcileOutcome ?? null,
     cancellationRequestedAt: row.cancellationRequestedAt?.toISOString() ?? null,
+    cancellationReason: row.cancellationReason ?? null,
+    deadlineCancellationRequestedAt: row.deadlineCancellationRequestedAt?.toISOString() ?? null,
     reconcileProofOutcome: row.reconcileProofOutcome ?? null,
     reconcileProofExitCode: row.reconcileProofExitCode ?? null,
     reconcileProofReason:

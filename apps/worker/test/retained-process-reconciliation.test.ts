@@ -1602,7 +1602,52 @@ describe("retained-process terminal-owner reconciliation", () => {
       state: "active",
       lastReconcileOutcome: "provider_binding_missing",
       cancellationRequestedAt: expect.any(String),
+      deadlineCancellationRequestedAt: expect.any(String),
     });
+  }, 60_000);
+
+  test("deadline rotation records its own grace after an earlier explicit stop", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed", backgroundCommand: "work" });
+    await admin`update sandbox_retained_processes set
+      cancellation_requested_at = now() - interval '10 minutes',
+      cancellation_reason = 'explicit_stop'
+      where id = ${fixture.process.id}`;
+    await admin`update sandbox_leases set rotation_requested_at = now(),
+      rotation_reason = 'provider_deadline' where id = ${fixture.leaseId}`;
+    let probes = 0;
+    await runReaper(async (_settings, _lease, process, mode) => {
+      probes += 1;
+      expect(process.cancellationReason).toBe("explicit_stop");
+      expect(mode).toBe("cancel");
+      return { status: "deferred", reason: "provider_running" };
+    });
+    expect(probes).toBe(1);
+    const upgraded = await durableProcess(fixture);
+    expect(upgraded.cancellationReason).toBe("explicit_stop");
+    expect(Date.now() - Date.parse(upgraded.deadlineCancellationRequestedAt!)).toBeLessThan(5_000);
+  }, 60_000);
+
+  test("deadline cancellation probes a stopping command without sending another stop", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed", backgroundCommand: "work" });
+    await admin`update sandbox_retained_processes set
+      cancellation_requested_at = now(), cancellation_reason = 'provider_deadline',
+      deadline_cancellation_requested_at = now()
+      where id = ${fixture.process.id}`;
+    await admin`update session_background_commands set state = 'stopping',
+      cancel_requested_at = now(), cancel_requested_by = 'test-user'
+      where id = ${fixture.process.id}`;
+    await admin`update sandbox_leases set rotation_requested_at = now(),
+      rotation_reason = 'provider_deadline' where id = ${fixture.leaseId}`;
+    let probes = 0;
+    await runReaper(async (_settings, _lease, process, mode) => {
+      probes += 1;
+      expect(process.deadlineCancellationRequestedAt).not.toBeNull();
+      expect(mode).toBe("observe");
+      return { status: "deferred", reason: "provider_running" };
+    });
+    expect(probes).toBe(1);
   }, 60_000);
 
   test("a terminal historical Modal box settles its stale process holder after lease succession", async () => {

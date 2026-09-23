@@ -1511,7 +1511,7 @@ async function reconcileTerminalRetainedProcesses(
         observation?.status === "deferred" &&
         process.providerBackend === "modal" &&
         !process.providerBindingKey &&
-        !process.cancellationRequestedAt
+        !process.deadlineCancellationRequestedAt
       ) {
         // An unbound historical command cannot be signalled safely. Still
         // record deadline intent when its lease matches: a failed observer
@@ -1605,12 +1605,14 @@ async function reconcileTerminalRetainedProcesses(
             const legacyDeadlineStop =
               lease!.rotationReason === "provider_deadline" &&
               !supervised &&
-              !process.cancellationRequestedAt;
+              !process.deadlineCancellationRequestedAt;
             const probeOutcome = await probe(
               settings,
               lease!,
               process,
-              claim.ownerState === "background_stopping" || legacyDeadlineStop
+              (claim.ownerState === "background_stopping" &&
+                !process.deadlineCancellationRequestedAt) ||
+                legacyDeadlineStop
                 ? "cancel"
                 : "observe",
               async (result, chunkId, stream, streamFidelity) => {

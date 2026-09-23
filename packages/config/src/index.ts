@@ -3456,10 +3456,12 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
               Math.floor((parsed.modalTimeoutSeconds * 1000) / 2),
               SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS +
                 sandboxArchiveCaptureTimeoutMs({
-                  sandboxSnapshotTimeoutMs:
+                  sandboxSnapshotTimeoutMs: Math.max(
+                    parsed.sandboxSnapshotTimeoutMs,
                     parsed.sandboxDrainSnapshotTimeoutMs ?? parsed.sandboxSnapshotTimeoutMs,
+                  ),
                 }) +
-                parsed.sandboxLeaseReaperPeriodMs +
+                2 * parsed.sandboxLeaseReaperPeriodMs +
                 1,
             ),
           )
@@ -7129,11 +7131,11 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       drainCaptureTimeoutMs,
     );
     const requiredRotationLeadMs =
-      SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS + providerDeadlineCaptureTimeoutMs + reaperPeriod;
+      SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS + providerDeadlineCaptureTimeoutMs + 2 * reaperPeriod;
     if (!(rotationLeadMs > requiredRotationLeadMs)) {
       throw new Error(
         `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must exceed the ` +
-          `legacy command stop grace, largest durable snapshot or drain capture timeout, and one reaper period ` +
+          `legacy command stop grace, largest durable snapshot or drain capture timeout, and two reaper periods ` +
           `(${requiredRotationLeadMs}), including for persisted Modal ` +
           `leases after a default-backend rollout.`,
       );

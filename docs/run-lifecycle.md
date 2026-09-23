@@ -1605,8 +1605,9 @@ instance is not yet known; inventory read errors skip provider termination.
 The append-only migration is rolling and atomic with an unchanged SQL signature.
 Provision roles after migrating; never weaken RLS or use a broad owner bypass as
 a fallback for an incomplete inventory.
-Boot validation requires the larger configured capture budget and one reaper
-period to fit strictly inside provider-deadline rotation headroom even when the
+Boot validation requires the larger configured capture budget, the legacy
+command stop grace, and two reaper periods to fit strictly inside
+provider-deadline rotation headroom even when the
 default backend is no longer Modal, because historical Modal leases remain
 durable across that rollout. The explicit drain budget is independently
 rejected unless reaper dispatch, the full durable capture, and retry handoff fit
@@ -1877,7 +1878,8 @@ and no unrelated holder or mutation admission remains. An outstanding
 reconciliation claim does not grant writer authority or block this deadline
 capture. The provider is terminated only after the current workspace generation
 is captured; remaining commands settle lost. Supervised commands keep their
-separate proof gate. This path does not apply to idle or operator rotation.
+separate proof gate. A prior explicit stop remains immutable; deadline intent
+starts its own grace. This path does not apply to idle or operator rotation.
 
 The same containment path covers an explicitly stopping managed command after
 at least five provider-error observations. Its cancellation request and owner
