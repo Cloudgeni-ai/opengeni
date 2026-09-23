@@ -84,20 +84,45 @@ test("generic and custom application-RLS plans bound cleanup tails and oversized
     for (const { name, query, maximumRows } of queries) {
       await withWorkspaceSubjectRls(client.db, grant.workspaceId, grant.subjectId, async (tx) => {
         const posture = await tx.execute(
-          sql`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`,
+          sql`select pg_backend_pid() as backend_pid, rolsuper, rolbypassrls,
+            relowner = pg_roles.oid as owns_events, relrowsecurity, relforcerowsecurity
+            from pg_roles cross join pg_class
+            where rolname = current_user and pg_class.oid = 'session_events'::regclass`,
         );
-        expect(posture[0]).toMatchObject({ rolsuper: false, rolbypassrls: false });
+        expect(posture[0]).toMatchObject({
+          rolsuper: false,
+          rolbypassrls: false,
+          owns_events: false,
+          relrowsecurity: true,
+          relforcerowsecurity: true,
+        });
         await tx.execute(sql.raw(`set local plan_cache_mode = ${mode}`));
         // PREPARE really exercises the generic/custom cache decision. An
         // unprepared EXPLAIN plus enable_seqscan=off would not prove this path.
         await tx.execute(sql.raw(`prepare ${name}(uuid,uuid) as ${query.sql}`));
+        let initializationPlan: unknown;
+        let plan: unknown;
         try {
+          // The bound below guards event-index work, not backend-local RLS
+          // initialization. Measure that first-use work separately on this same
+          // transaction/backend, without touching the event index or disabling
+          // RLS. Keep it visible: this is not an end-to-end cold-start budget.
+          const initialization = await tx.execute(
+            sql`explain (analyze,buffers,format json)
+              select session_reference_visible(${grant.accountId}::uuid,
+                ${grant.workspaceId}::uuid, ${target.id}::uuid)`,
+          );
+          initializationPlan = initialization[0]?.["QUERY PLAN"];
+          console.info(
+            "attention plan RLS initialization",
+            JSON.stringify({ mode, name, backend: posture[0], initializationPlan }),
+          );
           const rows = await tx.execute(
             sql.raw(
               `explain (analyze,buffers,format json) execute ${name}('${grant.workspaceId}'::uuid,'${target.id}'::uuid)`,
             ),
           );
-          const plan = rows[0]?.["QUERY PLAN"];
+          plan = rows[0]?.["QUERY PLAN"];
           const eventNodes: Record<string, unknown>[] = [];
           const walk = (value: unknown): void => {
             if (Array.isArray(value)) {
@@ -118,6 +143,12 @@ test("generic and custom application-RLS plans bound cleanup tails and oversized
           expect(
             Number(node["Shared Hit Blocks"] ?? 0) + Number(node["Shared Read Blocks"] ?? 0),
           ).toBeLessThan(512);
+        } catch (error) {
+          console.error(
+            "attention plan failure",
+            JSON.stringify({ mode, name, backend: posture[0], initializationPlan, plan }),
+          );
+          throw error;
         } finally {
           await tx.execute(sql.raw(`deallocate ${name}`));
         }
