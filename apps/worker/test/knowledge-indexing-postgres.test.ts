@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import { searchKnowledgeEntries } from "@opengeni/core";
 import {
@@ -15,6 +15,7 @@ import type { ControlActivityServices } from "../src/activities/types";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
+const fixtureAccounts: string[] = [];
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("knowledge-index-worker");
   if (!acquired) throw new Error("Knowledge indexing verification requires PostgreSQL");
@@ -25,10 +26,18 @@ afterAll(async () => {
   await client?.close();
   await shared?.release();
 }, 180_000);
+afterEach(async () => {
+  // A later worker may re-claim a ready job when its embedding model changes.
+  // Keep the disposable accounts isolated even if a test assertion fails.
+  for (const accountId of fixtureAccounts.splice(0)) {
+    await shared.admin`DELETE FROM managed_accounts WHERE id=${accountId}`;
+  }
+});
 
 test("worker resumes batches, meters committed chunks once, and serves scoped semantic excerpts", async () => {
   const accountId = crypto.randomUUID(),
     workspaceId = crypto.randomUUID();
+  fixtureAccounts.push(accountId);
   await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Index account')`;
   await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Index workspace')`;
   const context: KnowledgeContext = {
@@ -161,6 +170,7 @@ test("worker resumes batches, meters committed chunks once, and serves scoped se
 test("paid indexing waits for funding, settles accepted batches and finishes a funded generation in debt", async () => {
   const accountId = crypto.randomUUID();
   const workspaceId = crypto.randomUUID();
+  fixtureAccounts.push(accountId);
   await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Funded index account')`;
   await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Funded index workspace')`;
   const context: KnowledgeContext = {
@@ -297,6 +307,7 @@ test("paid indexing waits for funding, settles accepted batches and finishes a f
 test("paid indexing waits for publication without charging a review-first draft", async () => {
   const accountId = crypto.randomUUID();
   const workspaceId = crypto.randomUUID();
+  fixtureAccounts.push(accountId);
   await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Review-gated index')`;
   await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Review workspace')`;
   const settings = {
@@ -393,6 +404,7 @@ test("paid indexing waits for publication without charging a review-first draft"
 test("deterministic embeddings still index without funds under the credits-mode switch", async () => {
   const accountId = crypto.randomUUID();
   const workspaceId = crypto.randomUUID();
+  fixtureAccounts.push(accountId);
   await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Deterministic index')`;
   await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Deterministic workspace')`;
   const settings = {
@@ -451,6 +463,7 @@ test("deterministic embeddings still index without funds under the credits-mode 
 test("shadow indexing records its frozen cost estimate without a credit debit", async () => {
   const accountId = crypto.randomUUID();
   const workspaceId = crypto.randomUUID();
+  fixtureAccounts.push(accountId);
   await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Shadow index')`;
   await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Shadow workspace')`;
   const settings = {
@@ -515,6 +528,7 @@ test("shadow indexing records its frozen cost estimate without a credit debit", 
 test("a queued Knowledge generation remains unpriced when paid mode starts later", async () => {
   const accountId = crypto.randomUUID();
   const workspaceId = crypto.randomUUID();
+  fixtureAccounts.push(accountId);
   await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Legacy queued index')`;
   await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Legacy index workspace')`;
   const context: KnowledgeContext = {

@@ -846,6 +846,9 @@ BEGIN
       IF to_regprocedure(format('%I.knowledge_index_wait_for_funding(uuid,uuid,uuid)', ${literal(schema)})) IS NOT NULL THEN
         EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_index_wait_for_funding(uuid,uuid,uuid) TO %I', ${literal(schema)}, ${literal(role)});
       END IF;
+      IF to_regprocedure(format('%I.knowledge_index_paid_publication_guard(uuid,uuid,uuid)', ${literal(schema)})) IS NOT NULL THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_index_paid_publication_guard(uuid,uuid,uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      END IF;
       IF to_regprocedure(format('%I.knowledge_visible_index_status(uuid,uuid,jsonb,jsonb,text)', ${literal(schema)})) IS NOT NULL THEN
         EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_visible_index_status(uuid,uuid,jsonb,jsonb,text) TO %I', ${literal(schema)}, ${literal(role)});
       END IF;

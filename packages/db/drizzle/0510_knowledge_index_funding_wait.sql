@@ -20,6 +20,7 @@ DECLARE
   job knowledge_index_jobs%ROWTYPE;
   decided text;
   frozen_rate bigint;
+  decision_outcome text;
   previous text := current_setting('opengeni.knowledge_index_dispatcher',true);
 BEGIN
   IF p_account IS DISTINCT FROM opengeni_private.current_account_id() OR
@@ -42,6 +43,18 @@ BEGIN
     decided:=job.billing_mode;
     frozen_rate:=job.billing_rate_micros_per_million_bytes;
   END IF;
+  IF decided='credits' THEN
+    SELECT d.outcome INTO decision_outcome FROM knowledge_entry_decisions d
+      WHERE d.account_id=p_account AND d.entry_id=job.entry_id AND d.revision_id=p_revision
+      ORDER BY d.version DESC LIMIT 1;
+    IF decision_outcome='rejected' THEN
+      UPDATE knowledge_index_jobs SET state='obsolete',lease_id=NULL,lease_until=NULL
+        WHERE revision_id=p_revision;
+      DELETE FROM knowledge_entry_vectors WHERE account_id=p_account AND revision_id=p_revision;
+      PERFORM set_config('opengeni.knowledge_index_dispatcher',coalesce(previous,''),true);
+      RETURN jsonb_build_object('mode','obsolete','rateMicrosPerMillionBytes',0);
+    END IF;
+  END IF;
   -- A review-first draft is not a paid purchase. Keep its lease checkpoint
   -- intact and poll until this exact revision is published; a rejected latest
   -- revision may remain visible for review but must never incur an embedding
@@ -49,9 +62,6 @@ BEGIN
   IF decided='credits' AND NOT EXISTS (
     SELECT 1 FROM knowledge_entries e WHERE e.account_id=p_account
       AND e.id=job.entry_id AND e.published_revision_id=p_revision AND NOT e.archived
-      AND coalesce((SELECT d.outcome FROM knowledge_entry_decisions d
-        WHERE d.account_id=p_account AND d.entry_id=job.entry_id AND d.revision_id=p_revision
-        ORDER BY d.version DESC LIMIT 1),'published') <> 'rejected'
   ) THEN
     UPDATE knowledge_index_jobs SET state='pending',lease_id=NULL,lease_until=NULL,
       last_failure='waiting_for_review',next_attempt_at=clock_timestamp()+interval '1 minute',
@@ -108,10 +118,11 @@ REVOKE ALL ON FUNCTION knowledge_index_wait_for_funding(uuid,uuid,uuid) FROM PUB
 -- that entry until the append, usage and debit transaction commits. A concurrent
 -- review writer takes FOR UPDATE and cannot change the publication in between.
 CREATE FUNCTION knowledge_index_paid_publication_guard(p_account uuid, p_revision uuid, p_lease uuid)
-RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   job knowledge_index_jobs%ROWTYPE;
   entry knowledge_entries%ROWTYPE;
+  decision_outcome text;
   previous text := current_setting('opengeni.knowledge_index_dispatcher',true);
 BEGIN
   IF p_account IS DISTINCT FROM opengeni_private.current_account_id() THEN
@@ -126,19 +137,25 @@ BEGIN
   END IF;
   SELECT * INTO entry FROM knowledge_entries e WHERE e.account_id=p_account
     AND e.id=job.entry_id FOR SHARE;
-  IF entry.id IS NULL OR entry.archived OR
-     entry.published_revision_id IS DISTINCT FROM p_revision OR
-     (SELECT d.outcome FROM knowledge_entry_decisions d WHERE d.account_id=p_account
-       AND d.entry_id=job.entry_id AND d.revision_id=p_revision
-       ORDER BY d.version DESC LIMIT 1) = 'rejected' THEN
+  SELECT d.outcome INTO decision_outcome FROM knowledge_entry_decisions d
+    WHERE d.account_id=p_account AND d.entry_id=job.entry_id AND d.revision_id=p_revision
+    ORDER BY d.version DESC LIMIT 1;
+  IF decision_outcome='rejected' THEN
+    UPDATE knowledge_index_jobs SET state='obsolete',lease_id=NULL,lease_until=NULL
+      WHERE revision_id=p_revision;
+    DELETE FROM knowledge_entry_vectors WHERE account_id=p_account AND revision_id=p_revision;
+    PERFORM set_config('opengeni.knowledge_index_dispatcher',coalesce(previous,''),true);
+    RETURN 'obsolete';
+  END IF;
+  IF entry.id IS NULL OR entry.archived OR entry.published_revision_id IS DISTINCT FROM p_revision THEN
     UPDATE knowledge_index_jobs SET state='pending',lease_id=NULL,lease_until=NULL,
       last_failure='waiting_for_review',next_attempt_at=clock_timestamp()+interval '1 minute',
       attempts=0 WHERE revision_id=p_revision;
     PERFORM set_config('opengeni.knowledge_index_dispatcher',coalesce(previous,''),true);
-    RETURN false;
+    RETURN 'awaiting_review';
   END IF;
   PERFORM set_config('opengeni.knowledge_index_dispatcher',coalesce(previous,''),true);
-  RETURN true;
+  RETURN 'published';
 EXCEPTION WHEN OTHERS THEN
   PERFORM set_config('opengeni.knowledge_index_dispatcher',coalesce(previous,''),true);
   RAISE;

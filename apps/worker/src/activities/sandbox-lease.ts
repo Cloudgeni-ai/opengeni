@@ -3008,13 +3008,16 @@ async function terminateDrainableBox(
   // Stamp the charge horizon after verified capture and immediately before
   // provider stop. Capture can fail and release its claim, allowing re-arm.
   // A retry after stop success cannot charge post-termination wall time.
+  let stopCutoffMarked = false;
   const beforeProviderStop = async (): Promise<void> => {
-    await markWarmBillingStopCutoff(db, {
+    const cutoff = await markWarmBillingStopCutoff(db, {
       accountId,
       workspaceId: row.workspaceId,
       sandboxGroupId: row.sandboxGroupId,
       expectedEpoch: row.leaseEpoch,
     });
+    if (!cutoff) throw new Error("sandbox stop cutoff was fenced before provider termination");
+    stopCutoffMarked = true;
   };
   const termination: ProviderTerminationOutcome | boolean = providerMissingBeforeCapture
     ? { terminated: true, providerMissingBeforeCapture: true }
@@ -3046,6 +3049,19 @@ async function terminateDrainableBox(
     return false;
   }
 
+  // Self-hosted/none and an unassigned lease have no provider stop callback;
+  // finish their usage at logical detach without touching customer compute.
+  // A managed instance that was stopped without its callback must fail closed.
+  const providerMissingDuringStop =
+    providerMissingBeforeCapture ||
+    (typeof termination !== "boolean" && termination.providerMissingBeforeCapture);
+  if (!stopCutoffMarked && !providerMissingDuringStop) {
+    if (managedProvider && lease.instanceId) {
+      throw new Error("managed sandbox stopped without a warm usage cutoff");
+    }
+    await beforeProviderStop();
+  }
+
   // Stop was confirmed but the lease is not cold yet. This final epoch-fenced
   // tick settles the interval since the last heartbeat/reaper sweep, including
   // a box drained before its first periodic tick. If settlement fails, keep
@@ -3054,10 +3070,7 @@ async function terminateDrainableBox(
     settings.sandboxWarmBillingMode === "usage_only"
       ? 0
       : sandboxWarmRateMicrosPerSecond(settings, backend);
-  if (
-    !providerMissingBeforeCapture &&
-    !(typeof termination !== "boolean" && termination.providerMissingBeforeCapture)
-  ) {
+  if (!providerMissingDuringStop) {
     const finalTick = await accrueWarmSeconds(db, {
       accountId,
       workspaceId: row.workspaceId,

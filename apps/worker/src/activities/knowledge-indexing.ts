@@ -94,6 +94,10 @@ export function createKnowledgeIndexingActivities(
                 result.deferred++;
                 return;
               }
+              if (frozenPolicy.mode === "obsolete") {
+                result.unavailable++;
+                return;
+              }
               const paid = frozenPolicy.mode === "credits" && paidDocumentEmbedding(settings);
               if (paid && current.nextIndex === 0) {
                 const balance = await getBillingBalance(lockedDb, claim.accountId);
@@ -127,9 +131,13 @@ export function createKnowledgeIndexingActivities(
                 throw new Error("Incomplete Knowledge embeddings");
               // A reviewer may have rejected this revision during the provider
               // call. The DB guard holds its publication row through settlement.
-              if (paid && !(await guardPaidKnowledgeIndexPublication(lockedDb, claim))) {
-                result.deferred++;
-                return;
+              if (paid) {
+                const publication = await guardPaidKnowledgeIndexPublication(lockedDb, claim);
+                if (publication !== "published") {
+                  if (publication === "obsolete") result.unavailable++;
+                  else result.deferred++;
+                  return;
+                }
               }
               const appended = await appendKnowledgeIndexChunks(
                 lockedDb,

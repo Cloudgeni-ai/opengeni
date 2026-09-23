@@ -46,7 +46,7 @@ export async function freezeKnowledgeIndexBillingMode(
     );
     return z
       .object({
-        mode: z.enum(["usage_only", "shadow", "credits", "awaiting_review"]),
+        mode: z.enum(["usage_only", "shadow", "credits", "awaiting_review", "obsolete"]),
         rateMicrosPerMillionBytes: z.number().int().nonnegative(),
       })
       .parse(row?.policy);
@@ -190,12 +190,12 @@ export async function waitKnowledgeIndexForFunding(db: Database, raw: KnowledgeI
 export async function guardPaidKnowledgeIndexPublication(db: Database, raw: KnowledgeIndexClaim) {
   const claim = Claim.parse(raw);
   return withRlsContext(db, { accountId: claim.accountId }, async (tx) => {
-    const [row] = await rawRows<{ permitted: boolean }>(
+    const [row] = await rawRows<{ status: string }>(
       tx,
       sql`SELECT knowledge_index_paid_publication_guard(${claim.accountId}::uuid,
-        ${claim.revisionId}::uuid,${claim.leaseId}::uuid) AS permitted`,
+        ${claim.revisionId}::uuid,${claim.leaseId}::uuid) AS status`,
     );
-    return z.boolean().parse(row?.permitted);
+    return z.enum(["published", "awaiting_review", "obsolete"]).parse(row?.status);
   });
 }
 
