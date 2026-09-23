@@ -480,9 +480,11 @@ import {
   type NewSessionDraftSnapshot,
 } from "./new-session-drafts";
 import {
+  isRetryableDatabaseTransportFailure,
   nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
   safeDatabaseErrorFacts,
+  SessionEventPersistenceError,
   type IdempotentPersistenceTransactionOptions,
 } from "./persistence-errors";
 import {
@@ -41354,118 +41356,160 @@ function assertPendingToolOutputPolicyMatches(
   }
 }
 
+// Receipt inputs have already passed the strict JSON storage boundary. Compare
+// exact keys structurally: locale collation can equate distinct Unicode keys.
+function pendingToolCallItemsEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object")
+    return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => pendingToolCallItemsEqual(value, right[index]))
+    );
+  }
+  const keys = Object.keys(left);
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every(
+      (key) =>
+        Object.hasOwn(right, key) &&
+        pendingToolCallItemsEqual(
+          (left as Record<string, unknown>)[key],
+          (right as Record<string, unknown>)[key],
+        ),
+    )
+  );
+}
+
 /**
  * Durably capture the raw SDK call item at the exact attempt boundary. This is
  * model-facing truth, deliberately separate from the session-event timeline.
  * The receipt belongs to the logical turn so an approval resume can
  * settle it from a newer attempt. Duplicate SDK delivery converges on the
  * unique (turn, call) identity.
+ * Pass the root database handle so each rollback retry starts a fresh
+ * transaction, not a savepoint in a caller-owned transaction.
  */
 export async function registerPendingSessionToolCall(
   db: Database,
   input: PendingSessionToolCallInput,
 ): Promise<{ accepted: boolean; registered: boolean }> {
-  const registerOnce = () =>
-    withRlsContext(
-      db,
-      { accountId: input.accountId, workspaceId: input.workspaceId },
-      async (scopedDb) =>
-        await scopedDb.transaction(async (tx) => {
-          const fence = await lockTurnAttemptWriteFenceTx(tx, {
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            executionGeneration: input.executionGeneration,
-            attemptId: input.attemptId,
-          });
-          if (!fence.allowed) return { accepted: false, registered: false };
-          const inserted = await tx
-            .insert(schema.sessionPendingToolCalls)
-            .values(
-              withLosslessContentWriteVersion(
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  turnId: input.turnId,
-                  executionGeneration: input.executionGeneration,
-                  attemptId: input.attemptId,
-                  callId: input.callId,
-                  callType: input.callType,
-                  callItem: input.callItem,
-                  modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
-                },
-                "callItem",
-                "callItemCodecVersion",
-              ),
-            )
-            .onConflictDoNothing({
-              target: [
-                schema.sessionPendingToolCalls.workspaceId,
-                schema.sessionPendingToolCalls.turnId,
-                schema.sessionPendingToolCalls.callId,
-              ],
-            })
-            .returning({ id: schema.sessionPendingToolCalls.id });
-          if (inserted.length === 0) {
-            const [pending] = await tx
-              .select({
-                id: schema.sessionPendingToolCalls.id,
-                accountId: schema.sessionPendingToolCalls.accountId,
-                callType: schema.sessionPendingToolCalls.callType,
-                callItem: schema.sessionPendingToolCalls.callItem,
-                callItemCodecVersion: schema.sessionPendingToolCalls.callItemCodecVersion,
-                modelToolOutputTruncationTokens:
-                  schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
-              })
-              .from(schema.sessionPendingToolCalls)
-              .where(
-                and(
-                  eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
-                  eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
-                  eq(schema.sessionPendingToolCalls.turnId, input.turnId),
-                  eq(schema.sessionPendingToolCalls.callId, input.callId),
+  const correlationId = crypto.randomUUID();
+  const registerOnce = async (attempt: number) => {
+    try {
+      return await withRlsContext(
+        db,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        async (scopedDb) =>
+          await scopedDb.transaction(async (tx) => {
+            const fence = await lockTurnAttemptWriteFenceTx(tx, {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              executionGeneration: input.executionGeneration,
+              attemptId: input.attemptId,
+            });
+            if (!fence.allowed) return { accepted: false, registered: false };
+            const inserted = await tx
+              .insert(schema.sessionPendingToolCalls)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    turnId: input.turnId,
+                    executionGeneration: input.executionGeneration,
+                    attemptId: input.attemptId,
+                    callId: input.callId,
+                    callType: input.callType,
+                    callItem: input.callItem,
+                    modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
+                  },
+                  "callItem",
+                  "callItemCodecVersion",
                 ),
               )
-              .for("update")
-              .limit(1);
-            if (
-              !pending ||
-              pending.accountId !== input.accountId ||
-              pending.callType !== input.callType ||
-              stableJson(
-                fromPostgresLosslessJson(pending.callItem, pending.callItemCodecVersion),
-              ) !== stableJson(input.callItem)
-            ) {
-              // A duplicate acknowledges only this exact call. It neither
-              // replaces the originating attempt nor authorizes effect replay.
-              throw new Error("Pending tool receipt conflicts with the registered call");
-            }
-            assertPendingToolOutputPolicyMatches(
-              pending.modelToolOutputTruncationTokens,
-              input.modelToolOutputTruncationTokens,
-              input.callId,
-            );
-            if (
-              pending.modelToolOutputTruncationTokens === null &&
-              input.modelToolOutputTruncationTokens !== undefined
-            ) {
-              await tx
-                .update(schema.sessionPendingToolCalls)
-                .set({
-                  modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
+              .onConflictDoNothing({
+                target: [
+                  schema.sessionPendingToolCalls.workspaceId,
+                  schema.sessionPendingToolCalls.turnId,
+                  schema.sessionPendingToolCalls.callId,
+                ],
+              })
+              .returning({ id: schema.sessionPendingToolCalls.id });
+            if (inserted.length === 0) {
+              const [pending] = await tx
+                .select({
+                  id: schema.sessionPendingToolCalls.id,
+                  accountId: schema.sessionPendingToolCalls.accountId,
+                  callType: schema.sessionPendingToolCalls.callType,
+                  callItem: schema.sessionPendingToolCalls.callItem,
+                  callItemCodecVersion: schema.sessionPendingToolCalls.callItemCodecVersion,
+                  modelToolOutputTruncationTokens:
+                    schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
                 })
-                .where(eq(schema.sessionPendingToolCalls.id, pending.id));
+                .from(schema.sessionPendingToolCalls)
+                .where(
+                  and(
+                    eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+                    eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+                    eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+                    eq(schema.sessionPendingToolCalls.callId, input.callId),
+                  ),
+                )
+                .for("update")
+                .limit(1);
+              if (
+                !pending ||
+                pending.accountId !== input.accountId ||
+                pending.callType !== input.callType ||
+                !pendingToolCallItemsEqual(
+                  fromPostgresLosslessJson(pending.callItem, pending.callItemCodecVersion),
+                  input.callItem,
+                )
+              ) {
+                // A duplicate acknowledges only this exact call. It neither
+                // replaces the originating attempt nor authorizes effect replay.
+                throw new Error("Pending tool receipt conflicts with the registered call");
+              }
+              assertPendingToolOutputPolicyMatches(
+                pending.modelToolOutputTruncationTokens,
+                input.modelToolOutputTruncationTokens,
+                input.callId,
+              );
+              if (
+                pending.modelToolOutputTruncationTokens === null &&
+                input.modelToolOutputTruncationTokens !== undefined
+              ) {
+                await tx
+                  .update(schema.sessionPendingToolCalls)
+                  .set({
+                    modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
+                  })
+                  .where(eq(schema.sessionPendingToolCalls.id, pending.id));
+              }
             }
-          }
-          return { accepted: true, registered: inserted.length === 1 };
-        }),
-    );
+            return { accepted: true, registered: inserted.length === 1 };
+          }),
+      );
+    } catch (error) {
+      if (!isRetryableDatabaseTransportFailure(error)) throw error;
+      // Stop before the shared SQLSTATE traversal can prefer an older nested
+      // rollback over a transport/commit-ack failure. This private outcome is
+      // converted to a sanitized error outside the retry helper, never success.
+      return { transportFailure: error, attempt };
+    }
+  };
   // Only PostgreSQL-confirmed rollback is retryable. Re-enter RLS and acquire
   // the complete attempt fence each time; never include inference or tools.
-  return await runIdempotentPersistenceTransaction(
+  const result = await runIdempotentPersistenceTransaction(
     {
       stage: "pending_tool_registration",
+      correlationId,
       maxAttempts: 3,
       onRetry: async ({ attempt }) => {
         await new Promise((resolve) => setTimeout(resolve, 25 * attempt));
@@ -41473,6 +41517,22 @@ export async function registerPendingSessionToolCall(
     },
     registerOnce,
   );
+  if ("transportFailure" in result) {
+    throw new SessionEventPersistenceError(
+      {
+        code: "db_failure",
+        sqlState: null,
+        stage: "pending_tool_registration",
+        eventTypes: [],
+        correlationId,
+        attempts: result.attempt,
+        retryOutcome: "not_retryable",
+        database: safeDatabaseErrorFacts(result.transportFailure),
+      },
+      result.transportFailure,
+    );
+  }
+  return result;
 }
 
 /** Record the raw SDK result without dropping the call receipt. */

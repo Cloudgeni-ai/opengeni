@@ -3,12 +3,14 @@ import postgres from "postgres";
 import { sql } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
+  applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   mutateSessionControlInTransaction,
   registerPendingSessionToolCall,
+  recordPendingSessionToolCallResult,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
   type PendingSessionToolCallInput,
@@ -145,7 +147,7 @@ async function fixture() {
     callType: "function_call",
     callItem: { type: "function_call", callId, name: "effect", arguments: '{"value":"a\\u0000b"}' },
   };
-  return { input, grant };
+  return { input, grant, triggerEventId: claim.turn.triggerEventId };
 }
 
 async function inject(
@@ -274,6 +276,84 @@ describe("pending tool registration rollback retries", () => {
     expect(await receipts(input)).toEqual(before);
   });
 
+  test("exact composed/decomposed keys survive reordered duplicates and JSONB round trips", async () => {
+    const { input } = await fixture();
+    input.callItem = { ...input.callItem, metadata: { "\u00e9": 1, "e\u0301": 2 } };
+    await registerPendingSessionToolCall(client.db, input);
+    const before = await receipts(input);
+    const [roundTrip] = await shared.admin`SELECT call_item_ordered::jsonb AS item
+      FROM session_pending_tool_calls WHERE turn_id = ${input.turnId}`;
+    for (const item of [
+      { ...input.callItem, metadata: { "e\u0301": 2, "\u00e9": 1 } },
+      roundTrip!.item as Record<string, unknown>,
+    ]) {
+      expect(await registerPendingSessionToolCall(client.db, { ...input, callItem: item })).toEqual(
+        { accepted: true, registered: false },
+      );
+    }
+    for (const metadata of [{ "\u00e9": 2, "e\u0301": 1 }, { "\u00e9": 1 }]) {
+      await expect(
+        registerPendingSessionToolCall(client.db, {
+          ...input,
+          callItem: { ...input.callItem, metadata },
+        }),
+      ).rejects.toThrow("Pending tool receipt conflicts with the registered call");
+    }
+    expect(await receipts(input)).toEqual(before);
+  });
+
+  test("transport evidence wins over nested rollback codes", async () => {
+    const { input } = await fixture();
+    for (const code of ["40P01", "40001"]) {
+      let attempts = 0;
+      const failure = Object.assign(new Error("transport outcome unknown"), {
+        code: "ECONNRESET",
+        cause: Object.assign(new Error("older rollback"), { code }),
+      });
+      const unavailable = new Proxy(client.db, {
+        get(target, key, receiver) {
+          if (key === "transaction")
+            return async () => {
+              attempts += 1;
+              throw failure;
+            };
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      await expect(registerPendingSessionToolCall(unavailable, input)).rejects.toMatchObject({
+        details: { attempts: 1, retryOutcome: "not_retryable", sqlState: null },
+      });
+      expect(attempts).toBe(1);
+    }
+    expect(await receipts(input)).toHaveLength(0);
+  });
+
+  test("mixed transport evidence stops after a prior rollback and under error arrays", async () => {
+    const { input } = await fixture();
+    let attempts = 0;
+    const failure = Object.assign(new Error("mixed failure"), {
+      code: "40001",
+      errors: [{ driverError: { code: "EPIPE" } }],
+    });
+    const unavailable = new Proxy(client.db, {
+      get(target, key, receiver) {
+        if (key === "transaction")
+          return async () => {
+            attempts += 1;
+            if (attempts === 1) throw Object.assign(new Error("rollback"), { code: "40P01" });
+            throw failure;
+          };
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    await expect(registerPendingSessionToolCall(unavailable, input)).rejects.toMatchObject({
+      details: { attempts: 2, retryOutcome: "not_retryable", sqlState: null },
+      cause: failure,
+    });
+    expect(attempts).toBe(2);
+    expect(await receipts(input)).toHaveLength(0);
+  });
+
   test("same identity with different call type or content fails closed", async () => {
     const { input } = await fixture();
     await registerPendingSessionToolCall(client.db, input);
@@ -305,18 +385,78 @@ describe("pending tool registration rollback retries", () => {
     expect(effects).toBe(1);
   });
 
-  test("the same call ID on different turns remains independent", async () => {
+  test("the same call ID on successive turns in one session remains independent", async () => {
     const first = await fixture();
-    const second = await fixture();
-    second.input.callId = first.input.callId;
-    second.input.callItem = first.input.callItem;
-    for (const { input } of [first, second]) {
-      expect(await registerPendingSessionToolCall(client.db, input)).toEqual({
-        accepted: true,
-        registered: true,
-      });
-      expect(await receipts(input)).toHaveLength(1);
-    }
+    const { input, grant } = first;
+    expect(await registerPendingSessionToolCall(client.db, input)).toEqual({
+      accepted: true,
+      registered: true,
+    });
+    await recordPendingSessionToolCallResult(client.db, {
+      ...input,
+      resultItem: {
+        type: "function_call_result",
+        callId: input.callId,
+        name: "effect",
+        output: "done",
+      },
+    });
+    await applySessionTurnSettlement(client.db, input.workspaceId, {
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      triggerEventId: first.triggerEventId,
+      attemptId: input.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { output: "done" } }],
+    });
+    await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      input.workspaceId,
+      grant.subjectId,
+      (db) =>
+        submitHumanPromptInTransaction(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          subjectId: grant.subjectId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Next independent turn",
+          resources: [],
+          reasoningEffortFallback: "medium",
+          source: "user",
+        }),
+    );
+    const claim = await claimSessionWorkForAttempt(client.db, input.workspaceId, {
+      sessionId: input.sessionId,
+      workflowId: `session-${input.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("Second turn not claimed");
+    const second = {
+      ...input,
+      turnId: claim.turn.id,
+      executionGeneration: claim.turn.executionGeneration,
+      attemptId: claim.turn.activeAttemptId!,
+      callItem: { ...input.callItem, name: "second_effect" },
+    };
+    expect(second.turnId).not.toBe(input.turnId);
+    expect(second.sessionId).toBe(input.sessionId);
+    expect(await registerPendingSessionToolCall(client.db, second)).toEqual({
+      accepted: true,
+      registered: true,
+    });
+    expect(await receipts(second)).toHaveLength(1);
+    expect(await registerPendingSessionToolCall(client.db, input)).toEqual({
+      accepted: false,
+      registered: false,
+    });
   });
 
   test("Pause between rolled-back attempts fences the retry", async () => {
