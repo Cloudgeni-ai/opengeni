@@ -11,6 +11,10 @@ const preflightKeys = [
   "DOCKER_TLS",
   "DOCKER_TLS_VERIFY",
   "DOCKER_CERT_PATH",
+  "DOCKER_API_VERSION",
+  "RUSTUP_HOME",
+  "CARGO_HOME",
+  "RUSTUP_AUTO_INSTALL",
   "OPENGENI_DEV_BACKEND",
   "OPENGENI_DOCKER_PROBE_TIMEOUT_SECONDS",
   "OPENGENI_OBJECT_STORAGE_FIXTURE",
@@ -37,6 +41,7 @@ export function readDevelopmentLaunchEnvironment(repositoryRoot: string): {
       "bash",
       "-c",
       `set -e
+{
 . ./scripts/dev-stack-backend.sh
 if [ -f .env ]; then
   opengeni_load_dev_environment ./.env
@@ -45,7 +50,8 @@ elif [ -f .env.example ]; then
 fi
 . ./scripts/dev-stack-project.sh
 export COMPOSE_PROJECT_NAME="$(resolve_compose_project_name)"
-exec "$1" -e "$2"`,
+} >/dev/null 2>&1
+exec "$1" --no-env-file -e "$2"`,
       "opengeni-preflight",
       process.execPath,
       `process.stdout.write(JSON.stringify({project:process.env.COMPOSE_PROJECT_NAME,environment:Object.fromEntries(${JSON.stringify(preflightKeys)}.filter(k=>process.env[k]!==undefined).map(k=>[k,process.env[k]]))}))`,
@@ -63,9 +69,11 @@ exec "$1" -e "$2"`,
       "Cannot read local startup configuration. Check .env shell syntax and project settings; no services were started.",
     );
   }
-  let snapshot;
+  let snapshot: { project?: unknown; environment: Record<string, unknown> };
   try {
     snapshot = JSON.parse(result.stdout.toString());
+    if (!snapshot || typeof snapshot.environment !== "object" || !snapshot.environment)
+      throw new Error("Invalid snapshot");
   } catch {
     throw new Error(
       "Cannot read local startup configuration. Remove commands that print output from .env; no services were started.",
@@ -78,6 +86,7 @@ exec "$1" -e "$2"`,
   for (const key of preflightKeys) {
     if (typeof snapshot.environment?.[key] === "string")
       environment[key] = snapshot.environment[key];
+    else delete environment[key];
   }
   // Reuse the installer's exact pinned directory without installing anything.
   environment.PATH = `${toolBin(repositoryRoot, detectTarget())}:${environment.PATH ?? ""}`;

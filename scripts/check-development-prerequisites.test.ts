@@ -85,6 +85,23 @@ function fixture(overrides: Partial<PrerequisiteHost> = {}) {
 
 const prebuilt = { artifactRuntime: "verified-prebuilt", relayRuntime: "disabled" } as const;
 
+test("Windows checks the selected MSVC host before installing a missing Rust pin", async () => {
+  for (const defaultHost of ["x86_64-pc-windows-msvc", "x86_64-pc-windows-gnu"]) {
+    const { host } = fixture({
+      platform: "win32",
+      probe: (_command, args) =>
+        args[0] === "show"
+          ? { ok: true, stdout: `Default host: ${defaultHost}\n` }
+          : { ok: false, stdout: "" },
+    });
+    const errors = await collectDevelopmentSourceBuildPrerequisites(
+      { artifactRuntime: "source-build", relayRuntime: "disabled", environment: {} },
+      host,
+    );
+    expect(errors).toHaveLength(defaultHost.endsWith("msvc") ? 0 : 1);
+  }
+});
+
 test("missing pinned Rust can be installed by the build helper unless explicitly disabled", async () => {
   const { host, commands } = fixture({ probe: () => ({ ok: false, stdout: "" }) });
   const options = { artifactRuntime: "source-build", relayRuntime: "disabled" } as const;

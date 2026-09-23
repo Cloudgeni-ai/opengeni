@@ -67,14 +67,24 @@ test("preflight carries effective Docker and remote relay settings", async () =>
   expect(environment.OPENGENI_RELAY_BIND).toBe("0.0.0.0:8280");
 });
 
-test("dotenv output never appears in a configuration parse error", async () => {
+test("dotenv output is separated from the configuration snapshot", async () => {
   const root = await fixture();
   await writeFile(join(root, ".env"), "printf 'private-test-value'\n");
+  const snapshot = readDevelopmentLaunchEnvironment(root);
+  expect(JSON.stringify(snapshot)).not.toContain("private-test-value");
+});
+
+test("dotenv can unset an ambient Docker context and disable automatic Rust setup", async () => {
+  const root = await fixture();
+  const previous = process.env.DOCKER_CONTEXT;
   try {
-    readDevelopmentLaunchEnvironment(root);
-    throw new Error("Expected configuration failure");
-  } catch (error) {
-    expect(String(error)).toContain("Cannot read local startup configuration");
-    expect(String(error)).not.toContain("private-test-value");
+    process.env.DOCKER_CONTEXT = "ambient";
+    await writeFile(join(root, ".env"), "unset DOCKER_CONTEXT\nRUSTUP_AUTO_INSTALL=0\n");
+    const { environment } = readDevelopmentLaunchEnvironment(root);
+    expect(environment.DOCKER_CONTEXT).toBeUndefined();
+    expect(environment.RUSTUP_AUTO_INSTALL).toBe("0");
+  } finally {
+    if (previous === undefined) delete process.env.DOCKER_CONTEXT;
+    else process.env.DOCKER_CONTEXT = previous;
   }
 });

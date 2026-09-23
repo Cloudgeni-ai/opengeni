@@ -11,7 +11,7 @@ export type DevelopmentPrerequisiteOptions = {
   /** resolve defers artifact build checks until the resolver needs source fallback;
    * it is NOT a verified runtime. Only the verifier may select verified-prebuilt. */
   artifactRuntime?: "source-build" | "verified-prebuilt" | "resolve";
-  /** Defaults to source-build only when effective selfhosted is enabled. */
+  /** Defaults to source-build only when startup owns a local relay. */
   relayRuntime?: "source-build" | "verified-prebuilt" | "disabled";
 };
 
@@ -356,6 +356,14 @@ export async function collectDevelopmentSourceBuildPrerequisites(
         );
       }
     }
+    if (host.platform === "win32" && !rustc.ok) {
+      await requireProbe(
+        "rustup",
+        ["show"],
+        "Standalone Windows artifact builds require the x86_64-pc-windows-msvc Rust host. Configure rustup set default-host x86_64-pc-windows-msvc.",
+        /^Default host: x86_64-pc-windows-msvc\r?$/mu,
+      );
+    }
   }
   if (
     (options.artifactRuntime ?? "source-build") === "source-build" &&
@@ -421,7 +429,8 @@ export function createPrerequisiteHost(
     arch: process.arch,
     uid: process.getuid?.() ?? -1,
     bunVersion: Bun.version,
-    which: (command) => Bun.which(command, { PATH: environment.PATH }),
+    which: (command) =>
+      Bun.which(command, environment.PATH === undefined ? undefined : { PATH: environment.PATH }),
     readable: (path) => accessible(path, constants.R_OK),
     executable: (path) => accessible(path, constants.X_OK),
     probe: async (command, args) => {
