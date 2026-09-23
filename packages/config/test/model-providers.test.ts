@@ -1633,7 +1633,7 @@ describe("turn execution policy V1", () => {
       }),
     ).toThrow("accepted turn model/reasoning");
 
-    const definitionDrifts = [
+    const identityDrifts = [
       { ...policy, providerId: "other" },
       { ...policy, upstreamModelId: "other-upstream" },
       { ...policy, wireApi: "chat" as const },
@@ -1651,16 +1651,40 @@ describe("turn execution policy V1", () => {
           metering: "external" as const,
         },
       },
-      { ...policy, definitionVersion: `sha256:${"f".repeat(64)}` },
     ];
-    for (const drift of definitionDrifts) {
-      expect(() =>
-        assertTurnExecutionPolicyMatchesConfigV1(settings, drift, {
-          modelId: policy.productModelId,
-          reasoningEffort: policy.reasoningEffort,
-        }),
-      ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
+    for (const drift of identityDrifts) {
+      // An identity mismatch wins even when the digest also mismatches.
+      for (const definitionVersion of [policy.definitionVersion, `sha256:${"f".repeat(64)}`]) {
+        let caught: unknown;
+        try {
+          assertTurnExecutionPolicyMatchesConfigV1(
+            settings,
+            { ...drift, definitionVersion },
+            {
+              modelId: policy.productModelId,
+              reasoningEffort: policy.reasoningEffort,
+            },
+          );
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBeInstanceOf(Error);
+        expect(caught).not.toBeInstanceOf(TurnExecutionPolicyDefinitionMismatchError);
+        expect((caught as Error).message).toBe(
+          "Turn execution policy does not match the current provider definition",
+        );
+      }
     }
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(
+        settings,
+        {
+          ...policy,
+          definitionVersion: `sha256:${"f".repeat(64)}`,
+        },
+        { modelId: policy.productModelId, reasoningEffort: policy.reasoningEffort },
+      ),
+    ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
     const error = new TurnExecutionPolicyDefinitionMismatchError();
     expect(error.code).toBe("turn_execution_policy_definition_mismatch");
     expect(error.message).toBe(
