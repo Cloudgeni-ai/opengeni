@@ -140,6 +140,9 @@ describe("release schema contract", () => {
     const backgroundCommandText = completeSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
     );
+    const oauthPendingStates = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0507_integration_oauth_pending_states.sql",
+    );
     const controlRevisionFrontier = completeSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -373,6 +376,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (oauthPendingStates ? 1 : 0) +
         (backgroundCommandText ? 1 : 0) +
         (controlRevisionFrontier ? 1 : 0) +
         (skillFolderLimits ? 1 : 0) +
@@ -632,8 +636,11 @@ describe("release schema contract", () => {
         ? { latestMigration: "0505_workspace_control_revision_frontier.sql" }
         : {}),
       ...(backgroundCommandText ? { latestMigration: "0506_background_command_text.sql" } : {}),
+      ...(oauthPendingStates
+        ? { latestMigration: "0507_integration_oauth_pending_states.sql" }
+        : {}),
     });
-    expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+    expect(completeSourceContract.migrations.at(oauthPendingStates ? -2 : -1)).toMatchObject({
       path: backgroundCommandText
         ? "0506_background_command_text.sql"
         : controlRevisionFrontier
@@ -742,6 +749,12 @@ describe("release schema contract", () => {
                                     ? "maintenance"
                                     : "rolling",
     });
+    if (oauthPendingStates) {
+      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+        path: "0507_integration_oauth_pending_states.sql",
+        deploymentMode: "rolling",
+      });
+    }
     expect(
       completeSourceContract.migrations.find(
         (migration) => migration.path === "0431_retained_provider_commands.sql",
@@ -1838,6 +1851,9 @@ describe("release schema contract", () => {
     const backgroundCommandText = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
     );
+    const oauthPendingStates = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0507_integration_oauth_pending_states.sql",
+    );
     const controlRevisionFrontier = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -2455,6 +2471,7 @@ describe("release schema contract", () => {
       "0504_skill_folder_limits.sql",
       "0505_workspace_control_revision_frontier.sql",
       "0506_background_command_text.sql",
+      "0507_integration_oauth_pending_states.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -3008,8 +3025,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0506_background_command_text.sql",
       };
+    if (oauthPendingStates)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0507_integration_oauth_pending_states.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (oauthPendingStates ? 1 : 0) +
         (backgroundCommandText ? 1 : 0) +
         (controlRevisionFrontier ? 1 : 0) +
         (skillFolderLimits ? 1 : 0) +
@@ -3471,6 +3494,9 @@ describe("release schema contract", () => {
         ? { latestMigration: "0505_workspace_control_revision_frontier.sql" }
         : {}),
       ...(backgroundCommandText ? { latestMigration: "0506_background_command_text.sql" } : {}),
+      ...(oauthPendingStates
+        ? { latestMigration: "0507_integration_oauth_pending_states.sql" }
+        : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport

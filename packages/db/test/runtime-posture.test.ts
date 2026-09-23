@@ -735,6 +735,12 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0507 adds the scoped, short-lived MCP OAuth state store.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0492 adds a database-authored, runtime-readable source receipt.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_READ_ONLY_TABLES ||
@@ -772,7 +778,8 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1;
+      const tableCount =
+        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1;
       for (const removed of [
         "workspace_packs",
         "pack_installations",
@@ -802,6 +809,13 @@ describe("runtime database posture evaluator", () => {
         expect(FORCE_RLS_TABLES).toContain(table);
         expect(RUNTIME_TABLE_PRIVILEGES[table]).toEqual(["SELECT", "INSERT", "UPDATE", "DELETE"]);
       }
+      expect(FORCE_RLS_TABLES).toContain("integration_oauth_pending_states");
+      expect(RUNTIME_TABLE_PRIVILEGES.integration_oauth_pending_states).toEqual([
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+      ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
           personalResourceProtectedTableCount +
