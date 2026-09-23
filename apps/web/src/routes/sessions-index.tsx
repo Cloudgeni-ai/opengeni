@@ -948,7 +948,10 @@ function SessionsIndexRouteContent({
     modelCatalog.rows.length > 0 &&
     !modelCatalog.rows.some((row) => row.selectable);
   const newSessionPolicyError =
-    !modelCatalog.loading && !newSessionPolicyValid && !noRunnableModel && selectedPolicyRow?.selectable
+    !modelCatalog.loading &&
+    !newSessionPolicyValid &&
+    !noRunnableModel &&
+    selectedPolicyRow?.selectable
       ? "Choose a supported model, reasoning level, and speed."
       : null;
   useEffect(() => {
