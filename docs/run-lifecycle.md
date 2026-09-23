@@ -694,6 +694,16 @@ turn identity, classified provider cause, and exact next recovery count into the
 DB-only control lane. That lane accepts the checkpoint only when the identity
 still owns the attempt and the count is exactly one beyond durable turn metadata;
 ambiguous commits and stale replays therefore cannot reset the retry budget.
+An accepted-model definition mismatch during mixed-version rollout uses that
+same finite budget and backoff only for the typed configuration mismatch before
+`turn.started` and before any model request. It reclaims the exact accepted turn
+without refreshing its policy, model, billing source, or credentials. Malformed
+policies, explicit provider/credential/billing identity changes, and other setup
+failures are not admitted to this retry lane. No model
+or tool history is replayed; normal control fencing and physical-attempt
+quiescence still gate successors. Exhaustion reports the fixed definition
+mismatch and configuration-recovery exhaustion, not a transient network failure
+or Temporal's generic activity wrapper.
 Every Steer commits a control wake revision, including when
 the recovering turn has no live attempt. A later coalesced Send cannot downgrade
 it to an ordinary queue signal, so the workflow interrupts the hold and processes

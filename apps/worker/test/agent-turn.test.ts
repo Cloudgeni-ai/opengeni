@@ -890,16 +890,16 @@ describe("turn exact-content boundaries", () => {
     const failureSource = await Bun.file(
       new URL("../src/activities/agent-turn/failure-settlement.ts", import.meta.url),
     ).text();
-    const failureClassifier = failureSource.indexOf("let failure = agentRunFailurePayload(error");
-    const terminalFailureStart = failureSource.indexOf(
-      'control.activityStatus = "failed";',
-      failureClassifier,
-    );
+    const failureClassifier = failureSource.indexOf("const earlyDefinitionMismatch =");
+    // Early setup exhaustion has no event sink; inspect the final common
+    // eventing path rather than its earlier typed Temporal failure branch.
+    const terminalFailureStart = failureSource.lastIndexOf('control.activityStatus = "failed";');
     const terminalFailureEnd = failureSource.indexOf(
       'control.turnMetricOutcome = "failed";',
       terminalFailureStart,
     );
     const terminalFailureBlock = failureSource.slice(terminalFailureStart, terminalFailureEnd);
+    expect(failureClassifier).toBeGreaterThan(-1);
     expect(terminalFailureStart).toBeGreaterThan(failureClassifier);
     expect(terminalFailureEnd).toBeGreaterThan(terminalFailureStart);
     expect(terminalFailureBlock).toContain('type: "turn.failed"');
