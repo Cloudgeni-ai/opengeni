@@ -573,6 +573,11 @@ const ComputerObserveInput = z
     targetId: z.string().min(1).max(512),
   })
   .strict();
+const ComputerObserveOutput = ComputerObservation.extend({
+  capturedFrame: z
+    .object({ width: z.number().int().positive(), height: z.number().int().positive() })
+    .strict(),
+}).strict();
 const ComputerClipboardInput = z.object({ computerSessionId: z.string().uuid() }).strict();
 const ComputerActInput = z
   .object({
@@ -1289,9 +1294,9 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "observe"],
     title: "Observe app or window",
     description:
-      "Read one ComputerSession app/window/screen target, causal generation, semantic accessibility tree, focus, frame identity, and a bounded current screenshot without taking control.",
+      "Read one ComputerSession app/window/screen target, causal generation, semantic accessibility tree, focus, frame identity, and a bounded current screenshot without taking control. capturedFrame gives the screenshot's exact pixel dimensions; use those pixels for pointer coordinates, not the target's native bounds or an image-preview size.",
     input: ComputerObserveInput,
-    output: ComputerObservation,
+    output: ComputerObserveOutput,
     readOnly: true,
     idempotent: true,
     execute: async (value) => {
@@ -1315,13 +1320,20 @@ export function createInteractionAttemptToolDefinitions(
       if (observation.target.targetGeneration !== frame.targetGeneration) {
         throw new Error("computer target changed while its visual observation was captured");
       }
-      return new InteractionExecutionResult({ ...observation, frameId: frame.frameId }, [
+      return new InteractionExecutionResult(
         {
-          type: "image",
-          data: Buffer.from(frame.data).toString("base64"),
-          mimeType: frame.mediaType,
+          ...observation,
+          frameId: frame.frameId,
+          capturedFrame: { width: frame.width, height: frame.height },
         },
-      ]);
+        [
+          {
+            type: "image",
+            data: Buffer.from(frame.data).toString("base64"),
+            mimeType: frame.mediaType,
+          },
+        ],
+      );
     },
   });
 
