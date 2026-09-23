@@ -365,7 +365,9 @@ export async function saveNewSessionDraftInTransaction(
   throw new NewSessionDraftConflictError(raced?.revision ?? 0);
 }
 
-function safeRepositoryResource(resource: RepositoryResourceRef): RepositoryResourceRef {
+export function reusableNewSessionRepositoryResource(
+  resource: RepositoryResourceRef,
+): RepositoryResourceRef {
   // A repository's URI/ref/mount and GitHub identity are ordinary selection
   // state. Credential bindings, connection refs, access intent, and generic
   // provider ids are per-session authorization/runtime state and must not seed
@@ -574,7 +576,7 @@ export async function seedNewSessionDraftInTransaction(
     if (!raw || typeof raw !== "object" || (raw as { kind?: unknown }).kind !== "repository") {
       return [];
     }
-    return [safeRepositoryResource(raw as RepositoryResourceRef)];
+    return [reusableNewSessionRepositoryResource(raw as RepositoryResourceRef)];
   });
   const [seeded] = await db
     .update(schema.newSessionDrafts)
