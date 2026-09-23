@@ -1392,8 +1392,9 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       afterMutation: async () => {
         parentPromotions += 1;
       },
-      adoptProcessAsBackgroundCommand: async ({ process }) => {
+      adoptProcessAsBackgroundCommand: async ({ process, command }) => {
         expect(process.providerSessionId).toBe(175);
+        expect(command).toBe("bun run render --composition Intro");
         backgroundAdoptions += 1;
       },
     });
@@ -1402,7 +1403,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(parentPromotions).toBe(1);
     expect(backgroundAdoptions).toBe(0);
 
-    await proxy.adoptRetainedProcessAsBackgroundCommand(175);
+    await proxy.adoptRetainedProcessAsBackgroundCommand(175, "bun run render --composition Intro");
     await proxy.adoptRetainedProcessAsBackgroundCommand(175);
     expect(backgroundAdoptions).toBe(1);
   });

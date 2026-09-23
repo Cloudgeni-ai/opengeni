@@ -39,7 +39,9 @@ describe("interaction attempt tools", () => {
     let createRequest: Record<string, unknown> | null = null;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
-        listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+        listBrowserSessions: async () => {
+          throw new Error("legacy inventory unavailable");
+        },
         createBrowserSession: async (_workspaceId, request) => {
           createRequest = request as unknown as Record<string, unknown>;
           return { session: { lifecycle: "starting" } } as never;
@@ -925,5 +927,40 @@ function unusedTransport(): InteractionTransport {
     get() {
       throw new Error("unexpected interaction transport call");
     },
+  });
+}
+
+for (const mismatch of ["personal-profile", "machine", "identity"] as const) {
+  test(`browser reuse respects requested authority: ${mismatch}`, async () => {
+    const candidate = discoveredBrowserSession(randomUUID(), sessionId);
+    const requestedMachine = { kind: "connected_machine" as const, sandboxId: randomUUID() };
+    const requestedIdentity = randomUUID();
+    if (mismatch === "personal-profile")
+      candidate.placement = { kind: "attached_device", deviceId: randomUUID() };
+    if (mismatch === "machine")
+      candidate.placement = { kind: "connected_machine", sandboxId: randomUUID() };
+    let created = false;
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 0, sessions: [candidate] }),
+        createBrowserSession: async () => {
+          created = true;
+          return { session: { lifecycle: "starting" } } as never;
+        },
+      }),
+    });
+    await definitions[0]!.execute(
+      {
+        mode: "reuse_or_create",
+        ...(mismatch === "machine" ? { placement: requestedMachine } : {}),
+        ...(mismatch === "identity" ? { identityId: requestedIdentity } : {}),
+      },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(created).toBe(true);
   });
 }

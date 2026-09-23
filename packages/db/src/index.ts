@@ -649,6 +649,10 @@ export * from "./organization-xai-subscriptions";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {
+  loadIntegrationOAuthPendingState,
+  storeIntegrationOAuthPendingState,
+} from "./integration-oauth-pending-states";
+export {
   decryptEnvironmentValue as decryptVariableSetValue,
   encryptEnvironmentValue as encryptVariableSetValue,
 } from "./environment-crypto";
@@ -7290,7 +7294,34 @@ export async function getRetainedScreenshotArtifact(
       .where(
         and(
           eq(schema.retainedScreenshotArtifacts.workspaceId, workspaceId),
-          eq(schema.retainedScreenshotArtifacts.sessionId, sessionId),
+          or(
+            eq(schema.retainedScreenshotArtifacts.sessionId, sessionId),
+            // A fork copies canonical receipts, not the original artifact row.
+            // Require both recorded ancestry and an actually copied image receipt;
+            // knowing an ancestor artifact UUID is not enough. All reads retain RLS.
+            sql`exists (
+              with recursive lineage(id, parent_id) as (
+                select s.id, s.forked_from_session_id from sessions s
+                where s.workspace_id = ${workspaceId} and s.id = ${sessionId}
+                union
+                select s.id, s.forked_from_session_id from sessions s
+                join lineage l on s.id = l.parent_id
+                where s.workspace_id = ${workspaceId}
+              )
+              select 1 from lineage l
+              where l.id = ${schema.retainedScreenshotArtifacts.sessionId}
+                and exists (
+                  select 1 from session_history_items h
+                  where h.workspace_id = ${workspaceId} and h.session_id = ${sessionId}
+                    and h.turn_id is null
+                    and (
+                      h.item @> ${JSON.stringify({ output: { type: "retained_artifact", artifact: { artifactId } } })}::jsonb
+                      or h.item @> ${JSON.stringify({ output: [{ image: { type: "retained_artifact", artifact: { artifactId } } }] })}::jsonb
+                      or h.item @> ${JSON.stringify({ output: { content: [{ image: { type: "retained_artifact", artifact: { artifactId } } }] } })}::jsonb
+                    )
+                )
+            )`,
+          ),
           eq(schema.retainedScreenshotArtifacts.artifactId, artifactId),
         ),
       )

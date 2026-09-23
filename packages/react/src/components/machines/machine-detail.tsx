@@ -44,9 +44,12 @@ export type MachineDetailProps = {
 };
 
 function KindIcon({ kind, session }: { kind: string; session: boolean }) {
-  if (session) return <ServerIcon className="size-4 text-og-fg-subtle" aria-hidden />;
+  if (kind === "local" || kind === "selfhosted")
+    return <LaptopIcon className="size-4 text-og-fg-subtle" aria-hidden />;
+  if (kind === "docker" || session)
+    return <ServerIcon className="size-4 text-og-fg-subtle" aria-hidden />;
   if (kind === "modal") return <CpuIcon className="size-4 text-og-fg-subtle" aria-hidden />;
-  return <LaptopIcon className="size-4 text-og-fg-subtle" aria-hidden />;
+  return <ServerIcon className="size-4 text-og-fg-subtle" aria-hidden />;
 }
 
 export function MachineDetail({

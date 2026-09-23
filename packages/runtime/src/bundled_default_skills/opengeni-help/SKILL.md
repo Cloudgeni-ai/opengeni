@@ -63,6 +63,20 @@ For connection setup, follow the shared Integration setup guidance and the
 catalog's returned next action. Account-management permissions and the ability
 to request human setup are separate.
 
+## Connected Machine enrollment
+
+Use `sandboxes_list` to check existing machine readiness before enrolling again.
+For authorized headless setup, `connected_machine_enroll_token` returns a
+short-lived token, expiry, and Unix/PowerShell installation commands bound to the
+current deployment and workspace. It requires the existing `enrollments:manage`
+permission and session tool selection; it adds no separate approval prompt.
+Screen control defaults off. Run the returned command through an existing
+authorized path to the intended machine, then verify it appears ready in
+`sandboxes_list`. Do not publish the token in code or unrelated logs. If the tool
+is unavailable, distinguish missing permission/selection from an offline target;
+`sandbox_provision` supplies the interactive human enrollment instructions.
+An already enrolled machine normally needs connection diagnosis, not a new token.
+
 ## Cost questions
 
 Read the installed SDK's reply types and formatter, then the relevant accounting

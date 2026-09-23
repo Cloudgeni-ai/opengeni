@@ -336,6 +336,33 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null, personal = 
 }
 
 describe("unified Skill real PostgreSQL lifecycle", () => {
+  test("persists eightfold Skill folder limits and rejects files beyond them", async () => {
+    if (!client) return;
+    const f = await fixture("automatic");
+    const main = skillMarkdown("Large Skill");
+    const files = [
+      { path: "SKILL.md", content: main + "x".repeat(2 * 1024 * 1024 - main.length) },
+      ...Array.from({ length: 1023 }, (_, i) => ({ path: `refs/${i}.txt`, content: "x" })),
+    ];
+    const saved = await saveSkill(client.db, { ...f.input, files });
+    const read = await readSkill(client.db, f.context, saved.skillId);
+    expect(read?.files).toHaveLength(1024);
+    expect(read?.files.find((file) => file.path === "SKILL.md")?.content.length).toBe(2097152);
+    const validator = async (value: typeof files) =>
+      (
+        await shared!.admin`
+      SELECT skill_files_valid(${shared!.admin.json(value)}::jsonb) AS valid`
+      )[0]!.valid;
+    expect(await validator(files)).toBe(true);
+    expect(await validator([...files, { path: "overflow", content: "x" }])).toBe(false);
+    expect(await validator([{ path: "SKILL.md", content: "x".repeat(2097153) }])).toBe(false);
+    const total = Array.from({ length: 4 }, (_, i) => ({
+      path: i === 0 ? "SKILL.md" : `${i}.txt`,
+      content: "x".repeat(2097152),
+    }));
+    expect(await validator(total)).toBe(true);
+    expect(await validator([...total, { path: "overflow", content: "x" }])).toBe(false);
+  });
   test("personal removal follows the accepted user scope and cannot remove workspace Skills", async () => {
     if (!client) return;
     const f = await fixture("automatic", true);
@@ -597,6 +624,20 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       reason: "Remove",
     });
     expect(pending).toMatchObject({ outcome: "pending", removed: false });
+    expect(
+      await listSkills(client.db, f.context, {
+        sessionId: f.agent.actor.sessionId,
+        metadataOnly: true,
+      }),
+    ).toMatchObject([
+      {
+        id: saved.skillId,
+        revisionId: pending.revisionId,
+        activeRevisionId: saved.revisionId,
+        removalOperationId: pending.operationId,
+        files: [],
+      },
+    ]);
     expect(pending.skillReview?.removalOperationId).toBe(pending.operationId);
     expect(skillReviewHumanInput(pending.skillReview!).questions[0]!.label).toBe(
       "Permanently delete this Skill?",
@@ -1344,6 +1385,16 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     const input = { ...f.input, ...f.agent };
     const pending = await saveSkill(client.db, input);
     expect(pending.outcome).toBe("pending");
+    const pendingInSession = await listSkills(client.db, f.context, {
+      sessionId: f.agent.actor.sessionId,
+      metadataOnly: true,
+    });
+    expect(pendingInSession.map((skill) => skill.id)).toEqual([pending.skillId]);
+    expect(pendingInSession[0]?.files).toEqual([]);
+    expect(
+      await listSkills(client.db, off.context, { sessionId: f.agent.actor.sessionId }),
+    ).toEqual([]);
+    expect(await listSkills(client.db, f.context, { sessionId: crypto.randomUUID() })).toEqual([]);
     expect((await readSkill(client.db, f.context, pending.skillId))?.pendingRevisionIds).toEqual([
       pending.revisionId,
     ]);
@@ -1359,9 +1410,30 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     };
     await expect(approveSkill(client.db, { ...f.agent, ...request })).rejects.toThrow();
     expect((await approveSkill(client.db, { ...f.human, ...request })).outcome).toBe("applied");
+    expect(await listSkills(client.db, f.context, { sessionId: f.agent.actor.sessionId })).toEqual(
+      [],
+    );
     expect((await readSkill(client.db, f.context, pending.skillId))?.pendingRevisionIds).toEqual(
       [],
     );
+  });
+  test("session review discovery does not expose another subject's personal Skill", async () => {
+    if (!client) return;
+    const f = await fixture("suggest", true);
+    const pending = await saveSkill(client.db, { ...f.input, ...f.agent });
+    const options = { sessionId: f.agent.actor.sessionId, metadataOnly: true };
+    const owner = { ...f.context, subjectId: f.human.actor.subjectId };
+    expect((await listSkills(client.db, owner, options)).map((skill) => skill.id)).toEqual([
+      pending.skillId,
+    ]);
+    expect(await listSkills(client.db, f.context, options)).toEqual([]);
+    expect(
+      await listSkills(
+        client.db,
+        { ...f.context, subjectId: `user:other-${crypto.randomUUID()}` },
+        options,
+      ),
+    ).toEqual([]);
   });
   test("Automatic is truthful, fences tenancy/generation, and cannot write org/user Skills", async () => {
     if (!client) return;

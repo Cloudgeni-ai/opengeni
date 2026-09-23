@@ -329,9 +329,8 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       return {
         events,
         cursor: events.at(-1)?.sequence ?? debuggerSequence,
-        truncated:
-          (debuggerEvents.length > 0 && command.afterSequence < firstSequence - 1) ||
-          available.length > events.length,
+        // Pagination is not history loss: the next poll continues from cursor.
+        truncated: debuggerEvents.length > 0 && command.afterSequence < firstSequence - 1,
       };
     }
   }

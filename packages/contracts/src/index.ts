@@ -11,7 +11,13 @@ export * from "./bundled-skills";
 import { BundledSkillSelection } from "./bundled-skills";
 import { SkillWriteReceipt, SkillSourceReleaseReceipt, SkillPublicationReceipt } from "./skills";
 import { readSkillMetadata } from "./skill-metadata";
-import { isSafeSkillRelativePath, validateSkillTextFiles } from "./skill-files";
+import {
+  isSafeSkillRelativePath,
+  validateSkillTextFiles,
+  SKILL_MAX_FILES,
+  SKILL_MAX_FILE_BYTES,
+  SKILL_MAX_TOTAL_BYTES,
+} from "./skill-files";
 export * from "./model-connection-access";
 export * from "./sandbox-provider-command";
 import { z } from "zod";
@@ -851,6 +857,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "run_on",
   "sandbox_provision",
   "connected_machine_remove",
+  "connected_machine_enroll_token",
   "project_list",
   "project_get",
   "project_create",
@@ -10180,7 +10187,7 @@ export const SkillArtifactFile = z.object({
   path: z.string().min(1).max(512).refine(isSafeSkillRelativePath, {
     message: "skill file path must be a safe relative POSIX path without '..' segments",
   }),
-  content: z.string().max(256 * 1024),
+  content: z.string().max(SKILL_MAX_FILE_BYTES),
 });
 export type SkillArtifactFile = z.infer<typeof SkillArtifactFile>;
 
@@ -10193,7 +10200,7 @@ export const SkillArtifactDefinition = /* @__PURE__ */ defineSkillContractSchema
       description: z.string().min(1).max(1024).optional(),
       // Installation policy stays separate from session-owned Skill content.
       activationMode: z.enum(["workspace_managed", "session_selected"]).optional(),
-      files: z.array(SkillArtifactFile).min(1).max(128),
+      files: z.array(SkillArtifactFile).min(1).max(SKILL_MAX_FILES),
     })
     .transform((skill, ctx) => {
       const main = skill.files.find((file) => file.path === "SKILL.md");
@@ -11164,13 +11171,13 @@ export type PreviewSkillImportRequest = z.infer<typeof PreviewSkillImportRequest
 
 export const SkillImportFileSummary = z.object({
   path: z.string().min(1).max(1024),
-  byteSize: z.number().int().nonnegative().max(262144),
+  byteSize: z.number().int().nonnegative().max(SKILL_MAX_FILE_BYTES),
   contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
 });
 export type SkillImportFileSummary = z.infer<typeof SkillImportFileSummary>;
 
 export const SkillImportPreview = z.object({
-  markdown: z.string().max(262144).optional(),
+  markdown: z.string().max(SKILL_MAX_FILE_BYTES).optional(),
   source: SkillImportSource,
   sourceUrl: z.string().url(),
   repositoryUrl: z.string().url(),
@@ -11181,8 +11188,8 @@ export const SkillImportPreview = z.object({
   name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
   description: z.string().min(1).max(2048),
   contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
-  totalBytes: z.number().int().positive().max(1048576),
-  files: z.array(SkillImportFileSummary).min(1).max(128),
+  totalBytes: z.number().int().positive().max(SKILL_MAX_TOTAL_BYTES),
+  files: z.array(SkillImportFileSummary).min(1).max(SKILL_MAX_FILES),
   warnings: z.array(z.string().min(1).max(500)).max(32).default([]),
   installed: z.boolean().default(false),
   installationVersion: z.number().int().positive().nullable().default(null),
@@ -12024,6 +12031,7 @@ export const SessionBackgroundCommand = z
     state: SessionBackgroundCommandState,
     observationStatus: z.literal("unavailable").optional(),
     commandPreview: z.string().max(512),
+    commandText: z.string().optional(),
     cancelRequestedAt: z.string().nullable(),
     exitCode: z.number().int().nullable(),
     settlementReason: z.string().nullable(),
@@ -15985,7 +15993,19 @@ export const MachineState = z.enum([
 ]);
 export type MachineState = z.infer<typeof MachineState>;
 
-export const MachineKind = z.enum(["modal", "selfhosted", "opensandbox"]);
+export const MachineKind = z.enum([
+  "docker",
+  "modal",
+  "local",
+  "daytona",
+  "runloop",
+  "e2b",
+  "blaxel",
+  "cloudflare",
+  "vercel",
+  "selfhosted",
+  "opensandbox",
+]);
 export type MachineKind = z.infer<typeof MachineKind>;
 
 /** Diagnostic projection of the single live Connected-Machine runner authority.
@@ -16119,7 +16139,7 @@ export type UpdateMachineOperationPolicyRequest = z.infer<
 
 /**
  * A machine as the Machines dashboard renders it. The workspace's enrolled
- * selfhosted machines PLUS the session's synthetic Modal group box
+ * selfhosted machines PLUS the session's own managed sandbox
  * (`isSessionGroup: true`). `active` marks the session's currently-active
  * routing target. `sharedSessionCount` is the lease refcount (how many sessions
  * share this whole machine). `metrics` is the latest sample, or null when none

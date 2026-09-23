@@ -504,6 +504,7 @@ export { ModelPolicyPickerMenu } from "./components/model-policy-picker-menu";
 export type {
   ModelPolicyPickerMessages,
   ModelPolicyPickerProps,
+  ModelPolicyPickerGroupPresentation,
 } from "./components/model-policy-picker";
 export {
   advancedSourceSummary,

@@ -21,8 +21,8 @@ OpenGeni does not scrape `GET /models`. Membership is the reviewed catalog
 
 Exactly one built-in provider. `OPENGENI_OPENAI_PROVIDER` is `openai` (default)
 or `azure`. In code mode its catalog is `OPENGENI_OPENAI_MODEL` (default
-`gpt-5.6-sol`) and `OPENGENI_OPENAI_ALLOWED_MODELS` (default
-`gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna`). A custom base URL still speaks
+`gpt-6-astra`) and `OPENGENI_OPENAI_ALLOWED_MODELS` (default
+`gpt-6-astra,gpt-6-sol,gpt-6-luna`). A custom base URL still speaks
 Responses; it does not become Chat Completions.
 
 | | OpenAI | Azure |
@@ -163,16 +163,39 @@ workspace-facing cost are deliberately independent:
 Database documents use schema version 1 and contain only reviewed membership
 and optional line-safe notes:
 
+The optional `codexModels` array replaces connected Codex membership without
+changing its credential broker. Omission preserves built-in defaults; `[]`
+removes all Codex models. Each entry requires `id: "codex/<slug>"`, matching
+`upstreamModelId: "<slug>"`, and a complete V1 `capabilities` object. Labels,
+aliases and context/compaction/tool-output token settings use the registry-model
+schema. Credentials, transport URLs, pricing and billing overrides are rejected.
+An explicit Codex default must belong to this list when supplied. Update through
+the existing version-checked catalog upsert below; subsequent catalog reads and
+new-turn admission use that membership, while accepted turn policy remains
+frozen. Subscription enablement, credential readiness and workspace policy still
+apply. Catalog inclusion does not prove the provider supports a slug.
+Removal also makes previously accepted queued/resumed attempts fail their
+current-catalog check; this is not a hidden-but-executable retirement list.
+To retire only from new selection, keep the exact model definition and set
+`retired: true` instead of deleting it. Retired entries are absent from pickers,
+`list_models`, and new-turn/child-session admission. A worker may restore only
+the exact retired definition referenced by an already persisted accepted-turn
+policy, after verifying its executable digest. Retirement itself does not change
+that digest. Missing-policy legacy turns are not granted this exception. Live
+workspace deny policy, session restrictions, subscription enablement, and broker
+credential checks still apply; retirement is not permission to bypass revocation.
+Choose an active deployment default before retiring its old entry.
+
 ```json
 {
   "schemaVersion": 1,
-  "defaultModel": "gpt-5.6-sol",
-  "builtInModels": ["gpt-5.6-sol", "gpt-5.6-luna"],
+  "defaultModel": "gpt-6-astra",
+  "builtInModels": ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
   "registryProviders": [],
   "gatewayModels": [],
   "openrouterModels": [],
   "modelNotes": {
-    "gpt-5.6-sol": "Use when the task is genuinely difficult."
+    "gpt-6-sol": "Use for difficult implementation work."
   }
 }
 ```
@@ -180,6 +203,11 @@ and optional line-safe notes:
 `defaultModel` may name deployment membership or an enabled Codex/SuperGrok
 connected-subscription product. Omission retains schema-v1 compatibility by
 using the first `builtInModels` entry, but operators should set it explicitly.
+Provider-only deployments may set `builtInModels: []`; they must supply an
+explicit `defaultModel`. The default must belong to the catalog (or the preserved
+connected-subscription fallback), be active, and resolve through an enabled
+provider. No dummy built-in model is required. Runtime catalog preflight still
+rejects defaults that cannot execute.
 The strict document rejects keys, billing, pricing policy, enabled flags,
 bands, unknown note IDs, duplicate product IDs, and reserved provider IDs.
 Notes are at most 500 characters and cannot contain a newline or `|`.
@@ -615,9 +643,9 @@ the same membership, connection-readiness, workspace-policy, and provider-health
 decision as the human picker. Its result is one text string in catalog order:
 
 ```text
-Current: gpt-5.6-sol
+Current: gpt-6-astra
 - openrouter/nvidia/nemotron-3-super-120b-a12b:free | Nemotron 3 Super 120B | free | Good for bounded tool-driven work.
-- gpt-5.6-sol | GPT-5.6 Sol | credits
+- gpt-6-sol | GPT-6 Sol | credits
 ```
 
 Each selectable line is `id | label | cost` with an optional final note. It
@@ -709,13 +737,12 @@ The catalog describes:
 - SSE, Responses WebSocket, and realtime-audio transports; and
 - standard, priority, and fast latency modes.
 
-GPT-5.6 Sol, Terra, and Luna (including their Codex subscription variants)
+GPT-6 Astra, Sol, and Luna (including their Codex subscription variants)
 advertise runnable **Fast** mode. Fast requests set the provider service tier,
 use a 2× billing multiplier, and fail the turn if the provider response omits
 or downgrades that tier; OpenGeni never silently falls back to Standard. The
-same billed GPT-5.6 family pins Codex's 272,000 / 258,400 / 244,800
-raw / effective / auto-compact catalog rather than the 1.05M deployment
-fallback.
+GPT-6 family uses the 1.05M context window. A configured GPT-5.6 id still pins
+Codex's 272,000 / 258,400 / 244,800 raw / effective / auto-compact catalog.
 
 Upstream documentation alone never makes a capability runnable. For example,
 provider support for X search or Responses WebSocket remains `runnable: false`

@@ -47,8 +47,7 @@ export function useLastStartedTurnPolicy(
   sessionId: string | null | undefined,
   options: UseLastStartedTurnPolicyOptions = {},
 ): UseLastStartedTurnPolicyResult {
-  const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
-    useOpenGeni(options);
+  const { client, workspaceId, registerSessionReconciler } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
 
   const load = useCallback(
@@ -69,17 +68,14 @@ export function useLastStartedTurnPolicy(
   });
 
   useEffect(() => {
-    if (enabled && workspaceControlEvent) void refresh();
-  }, [enabled, refresh, workspaceControlEvent]);
-
-  useEffect(() => {
     if (!sessionId || !enabled) return;
     return registerSessionReconciler(sessionId, "last-started-turn-policy", refresh);
   }, [enabled, refresh, registerSessionReconciler, sessionId]);
 
   // Shared-feed only: the session header lives outside the route event log and
   // must not open a second SSE. Without `events`, rely on the initial fetch +
-  // optional poll / workspace-control / reconciler.
+  // optional poll / reconciler. Pause/resume controls do not change the last
+  // admitted turn; its own turn.started event supplies that invalidation.
   useSessionEventTrigger(
     client,
     workspaceId,

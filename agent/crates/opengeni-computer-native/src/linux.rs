@@ -1702,6 +1702,15 @@ impl ComputerAdapter for AtspiComputerAdapter {
         self.capture_window_target(record).await
     }
 
+    async fn capture_still(
+        &self,
+        target_id: &str,
+        options: crate::NativeCaptureOptions,
+    ) -> NativeAdapterResult<NativeCapturedFrame> {
+        // Linux captures each frame independently; no live-stream resource is required.
+        self.capture_stream(target_id, options).await
+    }
+
     async fn capture_stream(
         &self,
         target_id: &str,

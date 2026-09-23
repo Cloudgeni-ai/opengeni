@@ -146,7 +146,7 @@ describe("model-policy", () => {
       ),
     ).toBe(true);
   });
-  test("keeps missing-credential deployment models visible but unavailable", () => {
+  test("omits deployment models that have no credential", () => {
     const model = catalogModel({
       id: "openrouter/starter:free",
       label: "Starter",
@@ -165,13 +165,7 @@ describe("model-policy", () => {
         checkedAt: null,
       },
     });
-    const rows = projectPickerRows([model]);
-    expect(rows[0]).toMatchObject({
-      billingClassLabel: "OpenGeni",
-      selectable: false,
-      unavailableReason: "Credentials required",
-    });
-    expect(rows[0]?.catalog).toBe(model);
+    expect(projectPickerRows([model])).toEqual([]);
   });
   test("labels organization provider billing separately from workspace BYOK", () => {
     const model = catalogModel({

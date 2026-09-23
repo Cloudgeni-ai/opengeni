@@ -395,6 +395,7 @@ const SettingsSchema = z.object({
   environmentsEncryptionKey: z.string().optional(),
   integrationsEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
+  integrationsOauthShortStateEnabled: EnvBoolean.default(false),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   integrationsOauthClientsJson: z.string().default("{}"),
   slackClientId: z.string().optional(),
@@ -556,8 +557,8 @@ const SettingsSchema = z.object({
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
   openaiBaseUrl: z.string().optional(),
-  openaiModel: z.string().default("gpt-5.6-sol"),
-  openaiAllowedModels: z.string().default("gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna"),
+  openaiModel: z.string().default("gpt-6-astra"),
+  openaiAllowedModels: z.string().default("gpt-6-astra,gpt-6-sol,gpt-6-luna"),
   // OpenGeni-managed Vercel AI Gateway. When configured, the two reviewed
   // Gateway models below are added to the managed-credit catalog. Workspace
   // Gateway keys use the encrypted connection broker and never this secret.
@@ -686,6 +687,7 @@ const SettingsSchema = z.object({
   // binding so database mode cannot be bypassed with a second source.
   resolvedGatewayModelsJson: z.string().optional(),
   resolvedOpenRouterModelsJson: z.string().optional(),
+  resolvedCodexModelsJson: z.string().optional(),
   // Extra (non-built-in) model providers, declared by the host as a JSON
   // provider registry. Each entry carries its own base URL, API key, wire API
   // ("responses" | "chat") and the models it exposes. The models a client may
@@ -1553,6 +1555,10 @@ export type VoiceInputProviderConfig =
       experimental: true;
     };
 
+function usableDeploymentSecret(value: string | null | undefined): string | undefined {
+  return isUsableVoiceInputSecret(value) ? value : undefined;
+}
+
 /**
  * Reject empty / template secrets so `.env.example` placeholders like
  * `your-key` cannot advertise voice input as available and then 401 upstream.
@@ -2244,6 +2250,24 @@ const DeploymentGatewayCatalogModelSchema = GatewayCatalogModel.safeExtend({
   pricing: z.never().optional(),
 }).strict();
 
+const CodexCatalogModelSchema = RegistryModelSchema.safeExtend({
+  retired: z.boolean().optional(),
+  id: z.string().regex(/^codex\/[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
+  upstreamModelId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
+  capabilities: ModelCapabilitiesV1Schema,
+  pricing: z.never().optional(),
+})
+  .strict()
+  .superRefine((model, context) => {
+    if (model.id !== `${CODEX_MODEL_ID_PREFIX}${model.upstreamModelId}`) {
+      context.addIssue({
+        code: "custom",
+        path: ["id"],
+        message: "Codex product id must match its upstream model slug",
+      });
+    }
+  });
+
 export const ModelCatalogDocument = z
   .object({
     schemaVersion: z.literal(1),
@@ -2251,8 +2275,9 @@ export const ModelCatalogDocument = z
      * fallback for existing documents; operators should set this explicitly
      * when cutting over a registry or connected-subscription default. */
     defaultModel: z.string().min(1).optional(),
-    builtInModels: z.array(z.string().min(1)).min(1),
+    builtInModels: z.array(z.string().min(1)),
     registryProviders: z.array(DeploymentRegistryProviderSchema).default([]),
+    codexModels: z.array(CodexCatalogModelSchema).optional(),
     gatewayModels: z.array(DeploymentGatewayCatalogModelSchema).default([]),
     openrouterModels: z.array(OpenRouterCatalogModel).default([]),
     modelNotes: z.record(z.string().min(1), ModelNote).default({}),
@@ -2263,6 +2288,13 @@ export const ModelCatalogDocument = z
   })
   .strict()
   .superRefine((document, context) => {
+    if (document.builtInModels.length === 0 && !document.defaultModel) {
+      context.addIssue({
+        code: "custom",
+        path: ["defaultModel"],
+        message: "catalogs without built-in models require an explicit default model",
+      });
+    }
     const productIds = new Set<string>();
     const providerIds = new Set<string>();
     const gatewayUpstreamIds = new Set<string>();
@@ -2284,6 +2316,16 @@ export const ModelCatalogDocument = z
       productIds.add(id);
     };
     document.builtInModels.forEach((id, index) => add(id, ["builtInModels", index]));
+    document.codexModels?.forEach((model, index) => add(model.id, ["codexModels", index, "id"]));
+    if (
+      document.codexModels?.some((model) => model.retired && model.id === document.defaultModel)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["defaultModel"],
+        message: "a retired model cannot be the deployment default",
+      });
+    }
     document.registryProviders.forEach((provider, providerIndex) => {
       if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id)) {
         context.addIssue({
@@ -2333,7 +2375,10 @@ export const ModelCatalogDocument = z
     if (
       document.defaultModel &&
       !productIds.has(document.defaultModel) &&
-      !document.defaultModel.startsWith(CODEX_MODEL_ID_PREFIX) &&
+      !(
+        document.codexModels === undefined &&
+        document.defaultModel.startsWith(CODEX_MODEL_ID_PREFIX)
+      ) &&
       !document.defaultModel.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)
     ) {
       context.addIssue({
@@ -2418,6 +2463,8 @@ export function applyModelCatalogDocument(settings: Settings, rawDocument: unkno
     ),
     resolvedGatewayModelsJson: JSON.stringify(document.gatewayModels),
     resolvedOpenRouterModelsJson: JSON.stringify(document.openrouterModels),
+    resolvedCodexModelsJson:
+      document.codexModels === undefined ? undefined : JSON.stringify(document.codexModels),
     modelNotesJson: JSON.stringify(document.modelNotes),
   };
   return resolved;
@@ -2701,6 +2748,73 @@ export function configuredOpenRouterOrganizationProductModelIds(settings: Settin
  * llm-prices.com as a ground-truth canary; it does not generate this table.
  */
 export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
+  "gpt-6-astra": {
+    default: {
+      // OpenAI list price: $10 / $1 cached / $12.50 cache write / $50 output.
+      inputMicrosPerMillionTokens: 10_000_000,
+      cachedInputMicrosPerMillionTokens: 1_000_000,
+      cacheWriteMicrosPerMillionTokens: 12_500_000,
+      outputMicrosPerMillionTokens: 50_000_000,
+      marginBps: 500,
+    },
+    inputTokenTiers: [
+      {
+        // Prompts with more than 272K input tokens use 2x input and 1.5x output.
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 20_000_000,
+          cachedInputMicrosPerMillionTokens: 2_000_000,
+          cacheWriteMicrosPerMillionTokens: 25_000_000,
+          outputMicrosPerMillionTokens: 75_000_000,
+          marginBps: 500,
+        },
+      },
+    ],
+  },
+  "gpt-6-sol": {
+    default: {
+      // OpenAI list price: $2 / $0.20 cached / $2.50 cache write / $10 output.
+      inputMicrosPerMillionTokens: 2_000_000,
+      cachedInputMicrosPerMillionTokens: 200_000,
+      cacheWriteMicrosPerMillionTokens: 2_500_000,
+      outputMicrosPerMillionTokens: 10_000_000,
+      marginBps: 500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 4_000_000,
+          cachedInputMicrosPerMillionTokens: 400_000,
+          cacheWriteMicrosPerMillionTokens: 5_000_000,
+          outputMicrosPerMillionTokens: 15_000_000,
+          marginBps: 500,
+        },
+      },
+    ],
+  },
+  "gpt-6-luna": {
+    default: {
+      // OpenAI list price: $0.10 / $0.01 cached / $0.125 cache write / $0.50 output.
+      inputMicrosPerMillionTokens: 100_000,
+      cachedInputMicrosPerMillionTokens: 10_000,
+      cacheWriteMicrosPerMillionTokens: 125_000,
+      outputMicrosPerMillionTokens: 500_000,
+      marginBps: 500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 200_000,
+          cachedInputMicrosPerMillionTokens: 20_000,
+          cacheWriteMicrosPerMillionTokens: 250_000,
+          outputMicrosPerMillionTokens: 750_000,
+          marginBps: 500,
+        },
+      },
+    ],
+  },
   "gpt-5.6-sol": {
     default: {
       // Promotional OpenAI pricing, guaranteed through at least 2026-11-21.
@@ -2981,6 +3095,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
+    integrationsOauthShortStateEnabled: optional("OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED"),
     integrationsAllowPrivateNetworkTargets: optional(
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
     ),
@@ -4273,8 +4388,8 @@ export function productShortLabelForModelId(modelId: string): string | null {
     ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
     : modelId;
   switch (slug) {
-    case "grok-4.6":
-      return "4.6";
+    case "grok-4.7":
+      return "4.7";
     case "gpt-5.6-sol":
       return "5.6 Sol";
     case "gpt-5.6-terra":
@@ -4283,6 +4398,10 @@ export function productShortLabelForModelId(modelId: string): string | null {
       return "5.6 Luna";
     case "gpt-6-astra":
       return "6 Astra";
+    case "gpt-6-sol":
+      return "6 Sol";
+    case "gpt-6-luna":
+      return "6 Luna";
     default:
       return null;
   }
@@ -4320,8 +4439,9 @@ function builtinLatencyModesForModel(modelId: string): Array<{
 }> {
   if (
     isBuiltinGpt56ModelId(modelId) ||
+    modelId.startsWith("gpt-6-") ||
     modelId.startsWith("codex/gpt-5.6-") ||
-    modelId === "codex/gpt-6-astra"
+    modelId.startsWith("codex/gpt-6-")
   ) {
     return [
       { id: "standard", upstream: "supported", runnable: true },
@@ -4342,7 +4462,7 @@ function builtinPromptCachingForModel(
   const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
     ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
     : modelId;
-  return slug.startsWith("gpt-5.6-")
+  return slug.startsWith("gpt-5.6-") || slug.startsWith("gpt-6-")
     ? { upstream: "supported", runnable: true, mode: "implicit" }
     : undefined;
 }
@@ -4352,7 +4472,7 @@ function builtinHostedImageGenerationForModel(settings: Settings, modelId: strin
   return (
     settings.openaiProvider === "openai" &&
     isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl) &&
-    isBuiltinGpt56ModelId(modelId)
+    (isBuiltinGpt56ModelId(modelId) || modelId.startsWith("gpt-6-"))
   );
 }
 
@@ -4650,12 +4770,13 @@ export function configuredProviders(
   if (settings.openaiProvider === "azure") {
     const baseUrl = settings.azureOpenaiBaseUrl ?? settings.azureOpenaiEndpoint;
     builtin.baseUrl = baseUrl ? normalizeRegistryBaseUrl(baseUrl, builtin.id) : undefined;
-    builtin.apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken;
+    builtin.apiKey =
+      usableDeploymentSecret(settings.azureOpenaiApiKey) ?? settings.azureOpenaiAdToken;
   } else {
     builtin.baseUrl = settings.openaiBaseUrl
       ? normalizeRegistryBaseUrl(settings.openaiBaseUrl, builtin.id)
       : undefined;
-    builtin.apiKey = settings.openaiApiKey;
+    builtin.apiKey = usableDeploymentSecret(settings.openaiApiKey);
   }
   const registry = configuredRegistryProviders(settings).map(
     (provider): ResolvedModelProvider => ({
@@ -4689,6 +4810,15 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
   if (providers.some((provider) => provider.id === CODEX_PROVIDER_ID)) {
     return settings;
   }
+  const catalogModels =
+    settings.resolvedCodexModelsJson === undefined
+      ? undefined
+      : z
+          .array(CodexCatalogModelSchema)
+          .parse(JSON.parse(settings.resolvedCodexModelsJson))
+          .filter((model) => !model.retired)
+          .map(({ retired: _retired, ...model }) => model);
+  if (catalogModels?.length === 0) return settings;
   const provider: RegistryProvider = {
     kind: "codex-subscription",
     id: CODEX_PROVIDER_ID,
@@ -4696,40 +4826,42 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
     api: "responses",
     wireProfile: "openai",
     baseUrl: CODEX_PROVIDER_BASE_URL,
-    models: CODEX_FALLBACK_MODEL_SLUGS.map((slug) => {
-      const capabilities = {
-        ...legacyModelCapabilities(settings, {
+    models:
+      catalogModels ??
+      CODEX_FALLBACK_MODEL_SLUGS.map((slug) => {
+        const capabilities = {
+          ...legacyModelCapabilities(settings, {
+            reasoningEffort: true,
+            hostedWebSearch: true,
+            vision: slug.startsWith("gpt-5.6-") || slug.startsWith("gpt-6-"),
+          }),
+          ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
+            ? {
+                promptCaching: builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)!,
+              }
+            : {}),
+          latencyModes: builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`),
+        };
+        return {
+          id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
+          upstreamModelId: slug,
+          label: productLabelForModelId(slug),
+          ...(productShortLabelForModelId(slug)
+            ? { shortLabel: productShortLabelForModelId(slug)! }
+            : {}),
           reasoningEffort: true,
+          // The ChatGPT/Codex Responses backend accepts the native web_search
+          // hosted tool (unlike hosted apply_patch/computer transports). Declaring
+          // this here makes provider resolution truthful; the worker still applies
+          // the durable session/turn policy gate before attaching it.
           hostedWebSearch: true,
-          vision: slug.startsWith("gpt-5.6-") || slug === "gpt-6-astra",
-        }),
-        ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
-          ? {
-              promptCaching: builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)!,
-            }
-          : {}),
-        latencyModes: builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`),
-      };
-      return {
-        id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
-        upstreamModelId: slug,
-        label: productLabelForModelId(slug),
-        ...(productShortLabelForModelId(slug)
-          ? { shortLabel: productShortLabelForModelId(slug)! }
-          : {}),
-        reasoningEffort: true,
-        // The ChatGPT/Codex Responses backend accepts the native web_search
-        // hosted tool (unlike hosted apply_patch/computer transports). Declaring
-        // this here makes provider resolution truthful; the worker still applies
-        // the durable session/turn policy gate before attaching it.
-        hostedWebSearch: true,
-        capabilities,
-        contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
-        effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
-        autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
-        toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
-      };
-    }),
+          capabilities,
+          contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+          effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+          autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+          toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+        };
+      }),
   };
   return {
     ...settings,
@@ -4968,7 +5100,7 @@ export function configuredModels(
           reasoningEffort: true,
           hostedWebSearch: settings.webSearchEnabled,
           hostedImageGeneration: builtinHostedImageGenerationForModel(settings, id),
-          vision: id.startsWith("gpt-5.6-"),
+          vision: id.startsWith("gpt-5.6-") || id.startsWith("gpt-6-"),
         }),
         ...(builtinPromptCachingForModel(id)
           ? { promptCaching: builtinPromptCachingForModel(id)! }
@@ -5079,7 +5211,78 @@ export function canonicalizeConfiguredModelId(settings: Settings, modelId: strin
  * openai allow-list, then registry ids.
  */
 export function configuredAllowedModels(settings: Settings): string[] {
-  return configuredModels(settings).map((model) => model.id);
+  return configuredModels(settings)
+    .filter((model) => isModelAvailableForNewSelection(settings, model.id))
+    .map((model) => model.id);
+}
+
+/** Retirement is selection metadata, never provider authority or executable identity. */
+export function isModelAvailableForNewSelection(settings: Settings, modelId: string): boolean {
+  if (!modelId.startsWith(CODEX_MODEL_ID_PREFIX) || settings.resolvedCodexModelsJson === undefined)
+    return true;
+  const models = z
+    .array(CodexCatalogModelSchema)
+    .parse(JSON.parse(settings.resolvedCodexModelsJson));
+  return models.some((model) => model.id === modelId && !model.retired);
+}
+
+/** Called only with the durable policy installed for a claimed accepted attempt. */
+export function settingsForAcceptedSubscriptionTurn(
+  settings: Settings,
+  policy: TurnExecutionPolicyV1,
+  expected: {
+    modelId: string;
+    reasoningEffort: Settings["openaiReasoningEffort"];
+    latencyMode?: LatencyMode;
+  },
+): Settings {
+  const parsed = TurnExecutionPolicyV1.parse(policy);
+  if (!parsed.productModelId.startsWith(CODEX_MODEL_ID_PREFIX)) return settings;
+  if (!settings.codexSubscriptionEnabled) throw new Error("Codex subscription is disabled");
+  const models =
+    settings.resolvedCodexModelsJson === undefined
+      ? []
+      : z.array(CodexCatalogModelSchema).parse(JSON.parse(settings.resolvedCodexModelsJson));
+  const retained = models.find((model) => model.id === parsed.productModelId && model.retired);
+  if (!retained) {
+    assertTurnExecutionPolicyMatchesConfigV1(settings, parsed, expected);
+    return settings;
+  }
+  const { retired: _retired, ...model } = retained;
+  // Use the existing fixed broker transport. Only this exact definition is added;
+  // selection metadata remains retired in the original catalog JSON.
+  const withoutCodex = {
+    ...settings,
+    modelProvidersJson: JSON.stringify(
+      parseModelProvidersJson(settings.modelProvidersJson).filter(
+        (provider) => provider.id !== CODEX_PROVIDER_ID,
+      ),
+    ),
+  };
+  const providerSettings = withCodexCatalogProvider({
+    ...withoutCodex,
+    resolvedCodexModelsJson: JSON.stringify([model]),
+  });
+  const retainedProvider = parseModelProvidersJson(providerSettings.modelProvidersJson).find(
+    (provider) => provider.id === CODEX_PROVIDER_ID,
+  )!;
+  const providers = parseModelProvidersJson(settings.modelProvidersJson);
+  const current = providers.find((provider) => provider.id === CODEX_PROVIDER_ID);
+  const restored = {
+    ...settings,
+    modelProvidersJson: JSON.stringify([
+      ...providers.filter((provider) => provider.id !== CODEX_PROVIDER_ID),
+      {
+        ...retainedProvider,
+        models: [
+          ...(current?.models ?? []).filter((candidate) => candidate.id !== model.id),
+          model,
+        ],
+      },
+    ]),
+  };
+  assertTurnExecutionPolicyMatchesConfigV1(restored, parsed, expected);
+  return restored;
 }
 
 /**
@@ -5184,6 +5387,9 @@ export function resolveTurnExecutionPolicyV1(
 ): TurnExecutionPolicyV1 {
   const catalogSettings = settingsForTurnExecutionPolicy(settings, input.modelId);
   const productModelId = canonicalizeConfiguredModelId(catalogSettings, input.modelId);
+  if (!isModelAvailableForNewSelection(catalogSettings, productModelId)) {
+    throw new Error("Turn execution policy model is retired from new selection");
+  }
   const resolved = resolveModelProvider(catalogSettings, productModelId);
   if (!resolved) {
     throw new Error("Turn execution policy model is not present in the configured catalog");
@@ -7073,6 +7279,13 @@ export function validateModelCatalogSettings(
     models.filter((model) => model.credentialSource.kind === "deployment").map((model) => model.id),
   );
   const noteProductIds = new Set(models.map((model) => model.id));
+  if (settings.resolvedCodexModelsJson !== undefined) {
+    for (const model of z
+      .array(CodexCatalogModelSchema)
+      .parse(JSON.parse(settings.resolvedCodexModelsJson))) {
+      noteProductIds.add(model.id);
+    }
+  }
   for (const model of configuredGatewayCatalogModels(settings)) {
     deploymentProductIds.add(model.productId);
     noteProductIds.add(model.productId);

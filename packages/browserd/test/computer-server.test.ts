@@ -463,7 +463,11 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
       mediaType: "image/png",
       width: 3,
       height: 2,
-      data: png(),
+      // Native RPC returns a view into a larger framed Buffer allocation.
+      data: Buffer.concat([Buffer.from("head"), Buffer.from(png()), Buffer.from("tail")]).subarray(
+        4,
+        4 + png().length,
+      ),
       capturedAt: "2026-08-10T12:00:00.000Z",
     };
   }

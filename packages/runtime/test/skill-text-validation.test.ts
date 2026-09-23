@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { buildPortableSkillArtifact, parsePortableSkillFrontmatter } from "../src/skill-library";
+import {
+  SKILL_MAX_FILES,
+  SKILL_MAX_FILE_BYTES,
+  SKILL_MAX_TOTAL_BYTES,
+  validateSkillTextFiles,
+} from "@opengeni/contracts";
+import { SKILL_READ_MAX_OUTPUT_BYTES, SKILL_READ_MAX_PATHS } from "../src/skill-files";
 
 const main = {
   path: "SKILL.md",
@@ -7,6 +14,29 @@ const main = {
 };
 
 describe("portable Skill text validation", () => {
+  test("admits eightfold storage boundaries without increasing read output limits", () => {
+    expect([SKILL_MAX_FILES, SKILL_MAX_FILE_BYTES, SKILL_MAX_TOTAL_BYTES]).toEqual([
+      1024, 2097152, 8388608,
+    ]);
+    expect([SKILL_READ_MAX_PATHS, SKILL_READ_MAX_OUTPUT_BYTES]).toEqual([128, 524288]);
+    const files = [
+      main,
+      ...Array.from({ length: 1023 }, (_, i) => ({ path: `refs/${i}.txt`, content: "x" })),
+    ];
+    expect(buildPortableSkillArtifact(files).files).toHaveLength(1024);
+    expect(() => buildPortableSkillArtifact([...files, { path: "extra", content: "x" }])).toThrow();
+    const full = { path: "large.json", content: "x".repeat(SKILL_MAX_FILE_BYTES) };
+    expect(() => buildPortableSkillArtifact([main, full])).not.toThrow();
+    expect(() =>
+      buildPortableSkillArtifact([main, { ...full, content: full.content + "x" }]),
+    ).toThrow();
+    const total = Array.from({ length: 4 }, (_, i) => ({
+      path: `${i}.txt`,
+      content: full.content,
+    }));
+    expect(validateSkillTextFiles(total).totalBytes).toBe(SKILL_MAX_TOTAL_BYTES);
+    expect(() => validateSkillTextFiles([...total, { path: "extra", content: "x" }])).toThrow();
+  });
   test("requires frontmatter and derives exact metadata including long descriptions", () => {
     expect(() =>
       buildPortableSkillArtifact([{ path: "SKILL.md", content: "Instructions" }]),

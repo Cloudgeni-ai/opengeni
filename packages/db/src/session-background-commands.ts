@@ -75,8 +75,11 @@ type ConnectedMachineBackgroundCommandClaimRow = {
 };
 
 function commandPreview(value: string): string {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  return Array.from(normalized).slice(0, 512).join("");
+  if (value.length <= 512) return value;
+  let preview = value.slice(0, 511);
+  // Do not split a UTF-16 surrogate pair at the preview boundary.
+  if (/[\uD800-\uDBFF]$/.test(preview)) preview = preview.slice(0, -1);
+  return `${preview}…`;
 }
 
 const commandObservationUnavailable = sql<boolean>`
@@ -138,6 +141,7 @@ function mapCommand(
       ? { observationStatus: "unavailable" as const }
       : {}),
     commandPreview: row.commandPreview,
+    ...(row.commandText !== null ? { commandText: row.commandText } : {}),
     cancelRequestedAt: row.cancelRequestedAt?.toISOString() ?? null,
     exitCode: row.exitCode ?? null,
     settlementReason: row.settlementReason ?? null,
@@ -271,6 +275,7 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
       state: "running",
       retainedProcessId: input.retainedProcessId,
       commandPreview: commandPreview(input.command),
+      commandText: input.command,
       launchTurnId: input.turnId ?? null,
       launchAttemptId: input.attemptId ?? null,
       launchExecutionGeneration: input.executionGeneration ?? null,
@@ -339,6 +344,7 @@ export async function insertConnectedMachineSessionBackgroundCommandInTransactio
       connectionInstanceId: input.connectionInstanceId,
       opId: input.opId,
       commandPreview: commandPreview(input.command),
+      commandText: input.command,
       launchTurnId: input.turnId ?? null,
       launchAttemptId: input.attemptId ?? null,
       launchExecutionGeneration: input.executionGeneration ?? null,

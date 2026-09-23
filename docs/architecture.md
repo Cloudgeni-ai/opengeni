@@ -77,6 +77,8 @@ validation active while restoring wide-session locking and compatibility writes.
 
 Commands acknowledge durable commits, independent of replayable NATS/Temporal notifications.
 
+Control revisions increase.
+
 Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 `packages/sdk/src/stream.ts`, and [`run-lifecycle.md`](run-lifecycle.md).
 
@@ -345,9 +347,9 @@ Gateway and OpenRouter rows are provider-qualified workspace overlays, never
 deployment catalog or billing rows. Deployment-managed `openrouter/*` and
 workspace-managed `workspace-openrouter/*` remain separate provider and billing
 identities even when they name the same upstream slug.
-The accepted turn policy freezes executable provider identity, not the separate
-workspace-facing cost policy. Operators must drain or fence accepted turns
-before changing `free`/`credits` for a product.
+Accepted turns freeze provider identity, not cost policy. Drain or fence them
+before changing `free`/`credits`. Database `codexModels` overrides membership,
+not credentials; retirement preserves only exact accepted execution.
 
 Documentation explains contracts without duplicating drift-prone lists.
 Cross-boundary enums are additive within major releases unless the whole release
@@ -1196,6 +1198,9 @@ approval classification, and execution. Runtime builds one enabled first-party
 and integration MCP catalog. Model, exact-attempt Codemode, current-human MCP,
 and workspace HTTP/SDK adapters share its executor closures. Friendly names and
 JavaScript paths project opaque `{serverId, toolName}` identities, never authority.
+Bounded MCP aliases preserve readable actions; historical hashes resolve only
+against the current authorized catalog. Event display metadata never changes
+call identity or approval authority.
 Normalized paths receive identity-derived suffixes, remaining stable across
 neighbor changes. Allocation rejects namespace/tool-prefix and exact collisions
 before publication. Local model tools bind only to the final combined local/MCP
@@ -1292,16 +1297,12 @@ direct-call path.
 Provider adapters may narrow destinations, credentials, and retries, never
 weaken shared connection, approval, idempotency, or audit boundaries.
 
-The attempt-frozen connector Allow/Ask/Block policy and
-`connector_action_requests` ledger apply to model and Codemode execution only.
-Current-human HTTP/SDK and workspace MCP calls are direct human actions: they
-use the ordinary `requireApproval` classification and preserve a caller-generated
-operation id only for provider-specific handling. Sites retain ordinary per-call
-approval after active-Site and selected-version allowlist revalidation. Older
-published versions remain callable using their own declared tools and the
-viewer’s current permissions. These direct surfaces do
-not synthesize attempt-owned connector rows or a second generalized exactly-once
-journal.
+The attempt-frozen Allow/Ask/Block policy and `connector_action_requests` apply
+to model and Codemode execution. Human HTTP/SDK and workspace MCP calls use
+`requireApproval`; provider handling may retain caller operation IDs. Sites
+approve each call after active-Site and version-allowlist checks. Older versions
+expose their declared tools under current viewer permissions. These paths create
+no attempt-owned connector rows or duplicate exactly-once journal.
 
 GitHub App binding offers explicit selection of existing owner-authorized
 installations or GitHub's new-installation flow for another personal account/organization.
@@ -1316,6 +1317,9 @@ DB connector-policy rows and accepted-attempt snapshots govern execution.
 Canonical: [`capabilities.md`](capabilities.md),
 [`integrations-design.md`](integrations-design.md),
 [`mcp-surfaces.md`](mcp-surfaces.md), and [`credentials.md`](credentials.md).
+
+MCP OAuth redirects carry a short signed reference to encrypted, time-limited
+Postgres state under workspace RLS, then check the existing one-use nonce.
 
 ### 7.5 Artifacts, browser control, and managed computer sessions
 
@@ -1350,6 +1354,10 @@ artifacts, generated images, and published files, preserving existing content
 authority. File provenance stays separate from bytes; `kind:id` identifies list
 entries. Browsing never executes Sites or wakes compute. See
 [`artifact-library.md`](artifact-library.md).
+
+Published-file links use `Markdown.artifactHref`; `retained-file-preview.tsx`
+shares media/PDF previews through authorized storage APIs. Sandbox links remain
+workspace-inspector requests.
 
 Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
@@ -1524,7 +1532,7 @@ Turn-end review capture yields to queued turns and fences late commits. Single-r
 `@opengeni/db` owns cross-service Postgres contracts, forward migrations, and
 runtime-role/RLS posture.
 
-Postgres owns object access, upload completion, and retained-evidence liveness.
+Postgres owns file access/liveness; fork screenshots require ancestry and copied receipts, preserving RLS.
 Storage endpoints and signed URLs are transport details; keep URLs, object keys,
 and provider identities out of prompt history when a provider-neutral receipt suffices.
 
@@ -1681,7 +1689,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
-| Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
+| Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |
@@ -1702,7 +1710,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 
 ## 14. Keeping this current
 
-Update ownership, invariants, flows, lifecycles and sources here.
+Update ownership, invariants, flows, lifecycles and sources.
 Keep mechanics and rollout in [`README.md`](README.md)'s focused docs.
 
 Goal resume/pause semantics: [goals](goals.md).

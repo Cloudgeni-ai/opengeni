@@ -1378,6 +1378,7 @@ export type SessionBackgroundCommand = {
   provider: "managed" | "connected_machine";
   state: "running" | "stopping" | "exited" | "lost";
   commandPreview: string;
+  commandText?: string | undefined;
   cancelRequestedAt: string | null;
   exitCode: number | null;
   settlementReason: string | null;
@@ -3145,6 +3146,7 @@ export type FirstPartyMcpToolName =
   | "run_on"
   | "sandbox_provision"
   | "connected_machine_remove"
+  | "connected_machine_enroll_token"
   | "project_list"
   | "project_get"
   | "project_create"
@@ -7787,7 +7789,18 @@ export type MachineState =
   | "display_unavailable"
   | "enrolling";
 
-export type MachineKind = "modal" | "selfhosted" | "opensandbox";
+export type MachineKind =
+  | "docker"
+  | "modal"
+  | "local"
+  | "daytona"
+  | "runloop"
+  | "e2b"
+  | "blaxel"
+  | "cloudflare"
+  | "vercel"
+  | "selfhosted"
+  | "opensandbox";
 
 export type MachineConnectionAuthority = {
   state: "not_applicable" | "unclaimed" | "active" | "expired";

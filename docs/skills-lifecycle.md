@@ -62,8 +62,9 @@ conversation or Skill content; it adds the removal marker and guarded lifecycle.
 A Skill has exactly one scoped identity and current head in
 `preference_registry_preferences`, and one immutable revision history in
 `preference_registry_revisions`. A revision's `skill_files` is its complete
-UTF-8 text folder, including nonempty `SKILL.md`. Limits are 128 files,
-256 KiB per file, and 1 MiB total. Paths are root-relative, unique, and cannot
+UTF-8 text folder, including nonempty `SKILL.md`. Limits are 1,024 files,
+2 MiB per file, and 8 MiB total. Individual reads remain limited to 128 paths
+and 512 KiB of output; use checkout for larger files. Paths are root-relative, unique, and cannot
 contain traversal, backslashes, absolute paths, control characters, or drive
 prefixes. NUL, malformed Unicode, and binary storage are unsupported.
 
@@ -87,6 +88,15 @@ Skill. Legacy single-text saves of source-bound Skills fail closed rather than
 silently dropping supporting files.
 
 ## Authority and receipts
+
+The session UI also offers nonblocking approval of pending Skills. It reads the
+paginated Skill content catalog with `sessionId`, after session-read authorization,
+and filters by the originating agent's durable write receipt. This lookup does
+not depend on the loaded conversation window. Only current, unsettled proposals
+are returned; file bodies are fetched for the exact revision through the existing
+content API. Approval uses the same human-authorized Skill endpoint and revision
+fences as the Skills page. Deleted and settled proposals do not reappear from
+historical tool outputs. The chat does not need to enter `requires_action`.
 
 HTTP callers must authenticate and authorize workspace/scope management before
 constructing a human actor. `principalKind: human_session` is a trusted boundary

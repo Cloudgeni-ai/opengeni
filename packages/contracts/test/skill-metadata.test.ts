@@ -74,7 +74,7 @@ test("every inline admission rejects non-text, oversized and conflicting folder 
   const invalidFiles = [
     [...files, { path: "data.bin", content: "a\u0000b" }],
     [...files, { path: "bad.txt", content: "\ud800" }],
-    [...files, { path: "big.txt", content: "é".repeat(140_000) }],
+    [...files, { path: "big.txt", content: "é".repeat(1_120_000) }],
     [...files, { path: "scripts", content: "file" }, { path: "scripts/run", content: "code" }],
     [...files, { path: "bad:path", content: "text" }],
     [...files, { path: "bad\ud800path", content: "text" }],
@@ -82,7 +82,7 @@ test("every inline admission rejects non-text, oversized and conflicting folder 
       ...files,
       ...Array.from({ length: 5 }, (_, index) => ({
         path: `part-${index}`,
-        content: "x".repeat(250_000),
+        content: "x".repeat(2_000_000),
       })),
     ],
   ];

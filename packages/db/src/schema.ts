@@ -3717,6 +3717,31 @@ export const integrationOauthStateNonces = pgTable(
   }),
 );
 
+export const integrationOauthPendingStates = pgTable(
+  "integration_oauth_pending_states",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    stateEncrypted: text("state_encrypted").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "integration_oauth_pending_states_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    expiry: index("integration_oauth_pending_states_expiry_idx").on(
+      table.workspaceId,
+      table.expiresAt,
+    ),
+  }),
+);
+
 export const hostMcpBindings = pgTable(
   "host_mcp_bindings",
   {
@@ -10241,6 +10266,7 @@ export const sessionBackgroundCommands = pgTable(
     connectionInstanceId: text("connection_instance_id"),
     opId: text("op_id"),
     commandPreview: text("command_preview").notNull().default(""),
+    commandText: text("command_text"),
     cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
     cancelRequestedBy: text("cancel_requested_by"),
     exitCode: integer("exit_code"),

@@ -7,14 +7,18 @@
 // is added to isAuthExempt. Secrets never leave the server: status/usage read the
 // decrypted token only to call the codex backend; the token is never returned.
 
-import { environmentsEncryptionKeyBytes, productLabelForModelId } from "@opengeni/config";
+import {
+  environmentsEncryptionKeyBytes,
+  configuredModels,
+  getSettings,
+  withCodexCatalogProvider,
+  type Settings,
+} from "@opengeni/config";
 import {
   accessTokenExpiry,
   buildCodexUsageWindowFromCache,
   CODEX_CLIENT_VERSION,
-  CODEX_FALLBACK_MODEL_SLUGS,
   CODEX_FIVE_HOUR_WINDOW_SECONDS,
-  CODEX_MODEL_ID_PREFIX,
   CODEX_PROVIDER_ID,
   CODEX_WEEKLY_WINDOW_SECONDS,
   CodexDeviceError,
@@ -193,20 +197,22 @@ function codexUsageJson(payload: CodexUsagePayload): {
   return { status: payload.status, usage: payload };
 }
 
-export function codexModelsForPicker(): Array<{
+export function codexModelsForPicker(settings: Settings = getSettings()): Array<{
   id: string;
   label: string;
   provider: string;
   providerLabel: string;
   api: "responses";
 }> {
-  return CODEX_FALLBACK_MODEL_SLUGS.map((slug) => ({
-    id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
-    label: productLabelForModelId(slug),
-    provider: CODEX_PROVIDER_ID,
-    providerLabel: CODEX_PROVIDER_LABEL,
-    api: "responses" as const,
-  }));
+  return configuredModels(withCodexCatalogProvider(settings))
+    .filter((model) => model.providerId === CODEX_PROVIDER_ID)
+    .map((model) => ({
+      id: model.id,
+      label: model.label,
+      provider: CODEX_PROVIDER_ID,
+      providerLabel: CODEX_PROVIDER_LABEL,
+      api: "responses" as const,
+    }));
 }
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
@@ -214,6 +220,7 @@ import {
   hasPermission,
   requireAccessGrant,
   requireCanonicalLocalAccountAdministrator,
+  resolveCatalogSettings,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
@@ -1284,7 +1291,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       now: new Date(),
     });
     let valid = false;
-    const models = codexModelsForPicker();
+    const models = codexModelsForPicker((await resolveCatalogSettings(db, settings)).settings);
     let catalogError: string | null = null;
     try {
       const cred = status?.credentialId

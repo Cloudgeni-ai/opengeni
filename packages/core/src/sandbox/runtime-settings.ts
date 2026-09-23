@@ -34,6 +34,29 @@ export function managedSessionGroupBackend(
   return backend === "none" || backend === "selfhosted" ? null : backend;
 }
 
+const SESSION_GROUP_MACHINE_NAMES: Record<ManagedSessionGroupBackend, string> = {
+  local: "this computer",
+  docker: "Docker",
+  modal: "Modal",
+  daytona: "Daytona",
+  runloop: "Runloop",
+  e2b: "E2B",
+  blaxel: "Blaxel",
+  cloudflare: "Cloudflare",
+  vercel: "Vercel",
+  opensandbox: "OpenSandbox",
+};
+
+/** Display name and kind for the session's own managed box. The kind is the
+ * real provider. Callers must not collapse local, Docker, or other providers
+ * into Modal. */
+export function sessionGroupMachinePresentation(backend: ManagedSessionGroupBackend): {
+  name: string;
+  kind: ManagedSessionGroupBackend;
+} {
+  return { name: SESSION_GROUP_MACHINE_NAMES[backend], kind: backend };
+}
+
 /** A machine-home row carries the machine's host OS; its managed group uses the
  * platform's canonical managed-sandbox OS instead. Ordinary sessions preserve
  * their explicitly selected OS. */

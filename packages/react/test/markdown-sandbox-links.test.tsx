@@ -11,6 +11,23 @@ import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 registerDom();
 
 describe("sandbox markdown links", () => {
+  test("artifact links resolve to host URLs without exposing custom-scheme navigation", () => {
+    const id = "33333333-3333-4333-8333-333333333333";
+    const html = renderToStaticMarkup(
+      <Markdown
+        artifactHref={(value) => `/workspaces/demo/artifacts/files/${value}`}
+      >{`[Watch video](artifact:${id})`}</Markdown>,
+    );
+    expect(html).toContain(`href="/workspaces/demo/artifacts/files/${id}"`);
+    expect(html).not.toContain('href="artifact:');
+    const standalone = renderToStaticMarkup(<Markdown>{`[Watch video](artifact:${id})`}</Markdown>);
+    expect(standalone).toContain("artifact unavailable");
+    expect(standalone).not.toContain('href="artifact:');
+    const malformed = renderToStaticMarkup(
+      <Markdown artifactHref={() => "/unexpected"}>{"[Invalid](artifact:not-an-id)"}</Markdown>,
+    );
+    expect(malformed).not.toContain("/unexpected");
+  });
   test("preserves the exact decoded sandbox path and parses an optional positive line", () => {
     expect(sandboxFileLocationFromHref("sandbox:/workspace/reports/final.pdf")).toEqual({
       path: "/workspace/reports/final.pdf",

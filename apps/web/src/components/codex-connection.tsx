@@ -345,45 +345,47 @@ export function CompactUsageMeter({
   );
 }
 
-function accountUsageWindows(
-  account: CodexAccount,
-  live: CodexUsage | undefined,
-): { fiveHour: CodexUsageWindow | null; weekly: CodexUsageWindow | null; status?: string } {
+function accountUsageWindows(live: CodexUsage | undefined): {
+  fiveHour: CodexUsageWindow | null;
+  weekly: CodexUsageWindow | null;
+  status?: string;
+} {
   return {
     status: live?.status,
-    fiveHour: live?.usage?.fiveHour ?? account.fiveHour ?? null,
-    weekly: live?.usage?.weekly ?? account.weekly ?? null,
+    fiveHour: live?.usage?.fiveHour ?? null,
+    weekly: live?.usage?.weekly ?? null,
   };
 }
 
 /** Short 5h + weekly meters for the collapsed row. */
 function CompactAccountUsage({
-  account,
   live,
   refreshing,
   onRetry,
 }: {
-  account: CodexAccount;
   live: CodexUsage | undefined;
   refreshing: boolean;
   onRetry: () => void;
 }) {
-  const { fiveHour, weekly, status } = accountUsageWindows(account, live);
-  if (refreshing && !fiveHour && !weekly) {
-    return <div className="h-3 w-28 animate-pulse rounded bg-surface-2" />;
+  const { fiveHour, weekly, status } = accountUsageWindows(live);
+  if (refreshing && !live) {
+    return (
+      <div role="status" aria-label="Checking usage" className="min-h-4 w-48">
+        <div className="h-3 w-full animate-pulse rounded bg-surface-2" />
+      </div>
+    );
   }
-  if (status === "error" && !fiveHour && !weekly) {
+  if (!fiveHour && !weekly) {
     return (
       <button
         type="button"
         className="text-2xs text-fg-subtle underline hover:text-fg"
         onClick={onRetry}
       >
-        retry usage
+        {status === "no-data" ? "Usage not reported · Retry" : "Usage unavailable · Retry"}
       </button>
     );
   }
-  if (!fiveHour && !weekly) return null;
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1" aria-live="polite">
       <CompactUsageMeter label="5h" window={fiveHour} />
@@ -394,17 +396,15 @@ function CompactAccountUsage({
 
 /** Expanded-only usage meta (timestamps / limit-reached); bars stay on the row. */
 function AccountUsageMeta({
-  account,
   live,
   overview,
   now,
 }: {
-  account: CodexAccount;
   live: CodexUsage | undefined;
   overview: CodexAccountOverview | undefined;
   now: number;
 }) {
-  const { fiveHour, weekly, status } = accountUsageWindows(account, live);
+  const { fiveHour, weekly, status } = accountUsageWindows(live);
   if (!overview && !fiveHour && !weekly) return null;
   const limitReached =
     status === "limit_reached" || (fiveHour?.percent ?? 0) >= 100 || (weekly?.percent ?? 0) >= 100;
@@ -736,9 +736,9 @@ export function CodexSubscriptionsCardWithClient({
   } | null>(null);
   // The row whose label is being edited + its draft value.
   // True while a LIVE batched usage refresh is in flight (drives the bar skeleton).
-  const [refreshingUsage, setRefreshingUsage] = useState(false);
+  const [refreshingUsage, setRefreshingUsage] = useState(true);
   // The latest LIVE usage per account (carries the explicit ok/limit/error/no-data
-  // status the cached columns can't). Merged over the cached windows for display.
+  // status the cached columns can't). Never merge it with cached account windows.
   const [usageMap, setUsageMap] = useState<CodexUsageMap>({});
   const [overviewMap, setOverviewMap] = useState<CodexOverviewResponse["accounts"]>({});
   // The row whose single-account live refresh is in flight (per-row spinner).
@@ -786,19 +786,13 @@ export function CodexSubscriptionsCardWithClient({
         setOverviewMap(result.accounts);
         setUsageMap(
           Object.fromEntries(
-            Object.entries(result.accounts).flatMap(([id, overview]) =>
-              overview.usage.value
-                ? [
-                    [
-                      id,
-                      {
-                        status: overview.usage.value.status,
-                        usage: overview.usage.value,
-                      },
-                    ],
-                  ]
-                : [],
-            ),
+            Object.entries(result.accounts).map(([id, overview]) => [
+              id,
+              {
+                status: overview.usage.value?.status ?? "no-data",
+                usage: overview.usage.value ?? null,
+              },
+            ]),
           ) as CodexUsageMap,
         );
       }
@@ -820,12 +814,10 @@ export function CodexSubscriptionsCardWithClient({
         if (!cancelled.current) {
           setOverviewMap(result.accounts);
           const usage = result.accounts[accountId]?.usage.value;
-          if (usage) {
-            setUsageMap((prev) => ({
-              ...prev,
-              [accountId]: { status: usage.status, usage },
-            }));
-          }
+          setUsageMap((prev) => ({
+            ...prev,
+            [accountId]: { status: usage?.status ?? "no-data", usage: usage ?? null },
+          }));
         }
       } catch {
         /* surfaced as the row's "usage unavailable" state */
@@ -848,8 +840,8 @@ export function CodexSubscriptionsCardWithClient({
 
   // Detailed reset rows are deliberately never cached as redemption authority, so
   // every mount performs exactly ONE independently-settled live overview read. The
-  // cached usage/count summary still renders immediately while that read is in
-  // flight. This is event-driven by navigation/explicit refresh, never an interval.
+  // account identity renders immediately, but usage waits for this read rather
+  // than flashing cached limits. Navigation/explicit refresh only, never an interval.
   useEffect(() => {
     if (loading || !data || usageRefreshedRef.current) return;
     if (data.accounts.length > 0) {
@@ -1305,7 +1297,6 @@ export function CodexSubscriptionsCardWithClient({
                     {!needsRelogin ? (
                       <div onClick={(event) => event.stopPropagation()}>
                         <CompactAccountUsage
-                          account={account}
                           live={usageMap[account.id]}
                           refreshing={refreshingUsage || refreshingRow === account.id}
                           onRetry={() => void refreshAccountUsage(account.id)}
@@ -1412,7 +1403,6 @@ export function CodexSubscriptionsCardWithClient({
                   </div>
                 ) : (
                   <AccountUsageMeta
-                    account={account}
                     live={usageMap[account.id]}
                     overview={overviewMap[account.id]}
                     now={now}

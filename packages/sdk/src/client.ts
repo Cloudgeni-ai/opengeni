@@ -7262,11 +7262,12 @@ export class OpenGeniClient {
   /** Shared authored/installed catalog metadata. File bodies are read on demand. */
   async listWorkspaceSkills(
     workspaceId: string,
-    options: { cursor?: string; limit?: number } = {},
+    options: { cursor?: string; limit?: number; sessionId?: string } = {},
   ): Promise<{ skills: SkillSummary[]; nextCursor: string | null }> {
     const query = new URLSearchParams();
     if (options.cursor !== undefined) query.set("cursor", options.cursor);
     if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.sessionId !== undefined) query.set("sessionId", options.sessionId);
     const suffix = query.size ? `?${query.toString()}` : "";
     return this.requestJson("GET", `/v1/workspaces/${workspaceId}/skills/content${suffix}`);
   }

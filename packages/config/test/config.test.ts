@@ -377,6 +377,14 @@ describe("Google Drive integration settings", () => {
     expect(settings.googleDriveClientSecret).toBe("client-secret");
   });
 
+  test("keeps short MCP OAuth state issuance off until the callback reader is deployed", () => {
+    expect(withEnv({}, () => getSettings()).integrationsOauthShortStateEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED: "true" }, () => getSettings())
+        .integrationsOauthShortStateEnabled,
+    ).toBe(true);
+  });
+
   test("requires the Google OAuth client id and secret together", () => {
     expect(() =>
       withEnv(

@@ -217,10 +217,7 @@ function organizationProviderPayerSummary(model: ClientModel): string {
 
 export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerModelRow[] {
   return models
-    .filter((catalog) => {
-      const billingClass = billingClassForModel(catalog);
-      return billingClass === "opengeni_credits" || catalog.credentialReadiness.status === "ready";
-    })
+    .filter((catalog) => catalog.credentialReadiness.status === "ready")
     .map((catalog) => {
       const billingClass = billingClassForModel(catalog);
       return {

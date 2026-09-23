@@ -23,7 +23,7 @@ export type MachineDockBarProps = {
  * chrome (the dock-parity contract: selfhosted == Modal for the surfaces).
  */
 export function MachineDockBar({ name, kind, state, className }: MachineDockBarProps) {
-  const Icon = kind === "selfhosted" ? LaptopIcon : CpuIcon;
+  const Icon = kind === "selfhosted" || kind === "local" ? LaptopIcon : CpuIcon;
   const stateBadge = MACHINE_STATE_BADGE_META[state];
   return (
     <div

@@ -1,5 +1,25 @@
 # @opengeni/config
 
+## 2.1.0
+
+### Minor Changes
+
+- a11d810: Support explicit database Codex model membership and capabilities while preserving existing subscription credential and policy boundaries.
+- a11d810: Allow Codex catalog entries to retire from new selection while retaining exact already-accepted execution under unchanged live authorization checks.
+
+### Patch Changes
+
+- 793a6c9: Use the Codex subscription's 272K context limits for GPT-6 models instead of the direct API limits.
+- ab3adb3: Allow provider-only database model catalogs with an explicit valid default and no dummy built-in models, preserving executable-default and retirement validation.
+- 90e089a: Add a rollout-gated short MCP OAuth state that stores encrypted, time-limited callback context in Postgres. Preserve legacy in-flight callbacks and one-use replay protection.
+- Updated dependencies [a642885]
+- Updated dependencies [d92af11]
+- Updated dependencies [f60ca2b]
+- Updated dependencies [86c710a]
+- Updated dependencies [2f8bc58]
+  - @opengeni/codex@0.2.25
+  - @opengeni/contracts@5.1.0
+
 ## 2.0.0
 
 ### Major Changes

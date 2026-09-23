@@ -681,6 +681,10 @@ state remains application-owned; durable draft and session state remain in
   callback return type. Custom loaders can use `createOlderHistoryLoadReceipt`
   and call `markCommitted` immediately before publishing their accepted older
   window.
+- Browser retention limits are exported as `SESSION_EVENT_BROWSER_MAX_BYTES`
+  and `SESSION_EVENT_BROWSER_MAX_COUNT`; they do not change fetch page sizes.
+  Live appends reuse the retained window's byte total, measuring only incoming
+  and evicted events. History still pages when either retention limit is reached.
 - Newer history uses `hasNewer`, `loadingNewer`, and `loadNewer`. A failed
   `loadNewer()` preserves the retained events and cursors, exposes the original
   failure through `error`, and still rejects for the caller to handle. Pass
@@ -986,6 +990,36 @@ The trigger renders immediately; the searchable popover loads when opened. Hosts
 can translate its search, current-selection, empty-result, attachment-warning, and
 thinking labels through `messages`, and override payment descriptions through
 `messages.billingHints`.
+
+Hosts can rebrand the full picker without replacing its interaction logic:
+
+```tsx
+<ModelPolicyPicker
+  {...pickerProps}
+  groupPresentation={{
+    opengeni_credits: {
+      label: "Acme Assist",
+      icon: <AcmeMark aria-hidden="true" />,
+      description: "Provided by your workspace",
+    },
+    codex_subscription: { description: null },
+  }}
+/>
+```
+
+`groupPresentation` is a partial map keyed by `PickerBillingClass`. Labels apply
+to group headings, search, and trigger-icon accessibility. Icons apply to both
+the menu and trigger; supply decorative, non-interactive content (SVG or image)
+that fits the existing 14px slot. Explicit `null` hides an icon or description;
+omitted fields retain defaults. Descriptions override `messages.billingHints`,
+can also be shown for the deployment-provided group, and are searchable. Existing
+`rows[].billingClassLabel` remains the fallback when no label override is supplied.
+This is presentation only: model IDs, billing, ordering, availability and callbacks
+are unchanged. The type `ModelPolicyPickerGroupPresentation` is exported from
+both `@opengeni/react` and `@opengeni/react/composer`. The native `ModelPicker`
+is a separate control; this API targets the full `ModelPolicyPicker` shown above.
+
+For a rendered example, open the composer-responsive demo with `?branding=host`.
 
 Subscription descriptions appear once per provider group. Free models carry a
 Free badge. Pass `hasImageAttachments` for the current draft to show an image

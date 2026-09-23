@@ -19,6 +19,7 @@ export const CHANNEL_NAME_MAX_LENGTH = 80;
 
 export function ChannelCreateDialog(props: {
   open: boolean;
+  mode?: "create" | "rename";
   name: string;
   busy: boolean;
   onNameChange: (name: string) => void;
@@ -26,17 +27,22 @@ export function ChannelCreateDialog(props: {
   onSubmit: () => void;
 }) {
   return (
-    <Dialog open={props.open} onOpenChange={props.onOpenChange}>
+    <Dialog
+      open={props.open}
+      onOpenChange={(open) => {
+        if (!props.busy) props.onOpenChange(open);
+      }}
+    >
       <DialogContent className="sm:max-w-sm">
         <form
           autoComplete="off"
           onSubmit={(event) => {
             event.preventDefault();
-            props.onSubmit();
+            if (!props.busy && props.name.trim()) props.onSubmit();
           }}
         >
           <DialogHeader>
-            <DialogTitle>New project</DialogTitle>
+            <DialogTitle>{props.mode === "rename" ? "Rename project" : "New project"}</DialogTitle>
             <DialogDescription>
               Projects keep related sessions together for everyone in this workspace.
             </DialogDescription>
@@ -55,6 +61,7 @@ export function ChannelCreateDialog(props: {
               data-lpignore="true"
               data-protonpass-ignore="true"
               value={props.name}
+              disabled={props.busy}
               maxLength={CHANNEL_NAME_MAX_LENGTH}
               placeholder="security"
               onChange={(event) => props.onNameChange(event.target.value)}
@@ -71,7 +78,7 @@ export function ChannelCreateDialog(props: {
             </Button>
             <Button type="submit" disabled={props.busy || !props.name.trim()}>
               {props.busy ? <Loader2Icon className="size-4 animate-spin" /> : null}
-              Create project
+              {props.mode === "rename" ? "Rename" : "Create project"}
             </Button>
           </DialogFooter>
         </form>

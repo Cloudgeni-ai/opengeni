@@ -9,6 +9,11 @@ over this doc; the canonical sources are `apps/worker/src/workflows/session.ts`,
 
 ## Turns
 
+Workspace control revisions never move backwards. Migration 0505 repairs heads
+behind retained control events by advancing only the revision, preserving pause
+state, timers and event history. Fresh browser streams start at that head; old
+pause/resume events must not replay as current UI invalidations on every load.
+
 Externally owned SDK history preserves retained messages across opaque compaction
 checkpoints in both provider input and returned history. The turn history sink
 checks the identities and order of its durable prefix before advancing its append
@@ -1694,6 +1699,11 @@ row before returning; that row freezes the physical control workspace,
 enrollment, connection instance, and op ID. The exact parent admission,
 process UUID, and provider locator or Connected Machine locator remain pinned
 across active-pointer movement.
+New background-command registrations retain the original command text separately
+from their 512-character preview. Clipped previews end in an ellipsis; the UI
+uses the complete text for hover and expansion. Existing rows without full text
+fall back to their saved preview. Managed exec recovery preserves the original
+command before any later read adopts the retained process.
 Both provider paths serialize session adoption with Steer, Pause, terminal
 Cancel, and session-tree deletion through the canonical workspace-control,
 workspace, session, turn, and exact-attempt fence. Managed retention and session

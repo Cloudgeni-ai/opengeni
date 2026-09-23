@@ -9,6 +9,7 @@ import {
   setSessionChannel,
 } from "@opengeni/db";
 import { createHash, randomUUID } from "node:crypto";
+import { mintEnrollToken } from "../sandbox/enrollment";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import {
   prepareWorkspaceArtifactUpload,
@@ -1711,7 +1712,7 @@ function registerSandboxFileArtifactTool(
     "sandbox_file_publish",
     {
       description:
-        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Returns a permanent, authenticated artifact receipt; never invent or expose a sandbox: URL as the durable result.",
+        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a video, ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Present the returned artifact.artifactId as [Open file](artifact:<artifactId>), or ![Preview](artifact:<artifactId>) for inline image/video/audio/PDF previews. Replace <artifactId> with the exact returned ID and use a descriptive label. Never expose a sandbox: URL as the durable result.",
       inputSchema: {
         path: z4.string().min(1).max(4_096),
       },
@@ -3782,7 +3783,7 @@ function registerFleetTools(
     "sandbox_provision",
     {
       description:
-        "Provision a new sandbox for the fleet. kind=selfhosted returns device-flow enrollment instructions to share with a HUMAN (install the agent + enroll their machine with loud whole-machine consent — the agent cannot self-consent). kind=modal creates a named Modal sandbox record, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so sandbox_swap to its id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
+        "Provision a new sandbox for the fleet. kind=selfhosted returns interactive device-flow instructions for a human to approve. For authorized headless enrollment, use connected_machine_enroll_token when available instead. kind=modal creates a named Modal sandbox record, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so sandbox_swap to its id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
       inputSchema: {
         kind: z4.enum(["selfhosted", "modal"]),
         name: z4.string().min(1).max(120).optional(),
@@ -3798,11 +3799,11 @@ function registerFleetTools(
   );
 }
 
-// Workspace-admin/operator surface for removing a connected machine. This is
+// Enrollment-management surface for creating tokens and removing machines. This is
 // deliberately separate from the session-scoped fleet tools: a worker can list,
 // attach, or run on a machine only with session authority, while removal requires
-// the explicit high-trust enrollments:manage permission and never accepts a
-// sandbox id. A Modal record therefore cannot be removed through this operation.
+// the explicit enrollments:manage permission. Removal accepts enrollment ids,
+// never sandbox ids; a Modal record cannot be removed through this operation.
 function registerConnectedMachineTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -3811,10 +3812,39 @@ function registerConnectedMachineTools(
   json: JsonResult,
 ): void {
   server.registerTool(
+    "connected_machine_enroll_token",
+    {
+      description:
+        "Create a short-lived Connected Machine enrollment token for this workspace using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Run the appropriate command on the intended machine through an already-authorized execution path, then verify it with sandboxes_list. No separate device approval is required. Screen control is optional and defaults off. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved.",
+      inputSchema: { allowScreenControl: z4.boolean().optional() },
+    },
+    async ({ allowScreenControl }) => {
+      if (sessionId) {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      }
+      const minted = await mintEnrollToken(deps, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        allowScreenControl: allowScreenControl ?? false,
+      });
+      if (!minted) throw new Error("enrollment credential plane is not configured");
+      const base = (deps.settings.publicBaseUrl ?? "https://app.opengeni.ai").replace(/\/+$/, "");
+      const unixQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+      const windowsQuote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+      return json({
+        ...minted,
+        workspaceId: grant.workspaceId,
+        allowScreenControl: allowScreenControl ?? false,
+        installCommandUnix: `curl -fsSL ${unixQuote(`${base}/install.sh`)} | OPENGENI_API_URL=${unixQuote(base)} OPENGENI_ENROLL_TOKEN=${unixQuote(minted.token)} sh`,
+        installCommandWindows: `$env:OPENGENI_API_URL=${windowsQuote(base)}; $env:OPENGENI_ENROLL_TOKEN=${windowsQuote(minted.token)}; irm ${windowsQuote(`${base}/install.ps1`)} | iex`,
+      });
+    },
+  );
+  server.registerTool(
     "connected_machine_remove",
     {
       description:
-        "Remove one enrolled self-hosted machine while it is offline. Access is revoked, future heartbeat/reconnect credentials are rejected, and session, route, lease, archive, and audit history is retained. Idle dependent sessions are detached atomically; machine-home sessions become compute-less (backend none) until another sandbox is selected. Active turns, live leases, and recovery work remain fail-closed blockers whose typed outcome explains what must settle before retrying. Pass the enrollmentId from the Machines surface, never a Modal sandbox id. Reconnecting later requires a fresh human-approved device-flow enrollment.",
+        "Remove one enrolled self-hosted machine while it is offline. Access is revoked, future heartbeat/reconnect credentials are rejected, and session, route, lease, archive, and audit history is retained. Idle dependent sessions are detached atomically; machine-home sessions become compute-less (backend none) until another sandbox is selected. Active turns, live leases, and recovery work remain fail-closed blockers whose typed outcome explains what must settle before retrying. Pass the enrollmentId from the Machines surface, never a Modal sandbox id. Reconnecting later requires fresh enrollment through device approval or an authorized enrollment token.",
       inputSchema: {
         enrollmentId: z4.string().uuid(),
         expectedUpdatedAt: z4.string().datetime({ offset: true }).optional(),

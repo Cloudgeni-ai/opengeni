@@ -31,6 +31,8 @@ import {
   getSessionTurnPersonalConnectionDelegations,
   listConnectionsMetadata,
   loadIntegrationOAuthClient,
+  loadIntegrationOAuthPendingState,
+  storeIntegrationOAuthPendingState,
   loadConnectionCredentialForBroker,
   loadWorkspaceOpenRouterApiKey,
   loadWorkspaceVercelAiGatewayApiKey,
@@ -68,6 +70,28 @@ let settings: Settings;
 
 const rawKey = randomBytes(32);
 const encryptionKey = rawKey.toString("base64");
+
+async function readMcpOAuthState(referenceState: string): Promise<Record<string, unknown>> {
+  const reference = readSignedState(referenceState, STATE_SECRET) as Record<string, unknown> | null;
+  if (
+    reference?.kind !== "mcp_oauth_reference" ||
+    typeof reference.id !== "string" ||
+    typeof reference.accountId !== "string" ||
+    typeof reference.workspaceId !== "string"
+  ) {
+    throw new Error("expected a short MCP OAuth state reference");
+  }
+  const encrypted = await loadIntegrationOAuthPendingState(client.db, {
+    id: reference.id,
+    accountId: reference.accountId,
+    workspaceId: reference.workspaceId,
+  });
+  if (!encrypted) throw new Error("pending MCP OAuth state missing");
+  const fullState = decryptEnvironmentValue(rawKey, encrypted);
+  const payload = readSignedState(fullState, STATE_SECRET);
+  if (!payload) throw new Error("pending MCP OAuth state invalid");
+  return payload as Record<string, unknown>;
+}
 
 async function acquireDatabase(): Promise<SharedTestDatabase | null> {
   const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
@@ -142,6 +166,7 @@ beforeAll(async () => {
     delegationSecret: DELEGATION_SECRET,
     environmentsEncryptionKey: encryptionKey,
     integrationsEnabled: true,
+    integrationsOauthShortStateEnabled: true,
     integrationsStateSecret: STATE_SECRET,
     publicBaseUrl: "https://api.opengeni.test",
   }) as Settings;
@@ -613,7 +638,7 @@ describe("connections routes", () => {
       );
       expect(response.status).toBe(200);
       const body = (await response.json()) as { state: string };
-      const payload = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      const payload = await readMcpOAuthState(body.state);
       expect(payload.ownership).toBe("personal");
       expect(payload.personalOwnerVerified).toBe(true);
 
@@ -1931,7 +1956,8 @@ describe("connections routes", () => {
       );
       expect(response.status).toBe(200);
       const body = await response.json();
-      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      expect(body.state.length).toBeLessThan(1024);
+      const state = await readMcpOAuthState(body.state);
       expect(typeof state.encryptedExternalContinuation).toBe("string");
       expect(state.returnUrl).toBe(returnUrl);
       expect(JSON.stringify(state)).not.toContain(identity.externalId);
@@ -2687,8 +2713,13 @@ describe("connections routes", () => {
       expect(authUrl.searchParams.get("code_challenge_method")).toBe("S256");
       expect(as.issuerRootRequests).toEqual([]);
       expect(authUrl.searchParams.has("code_verifier")).toBe(false);
+      expect(body.state.length).toBeLessThan(1024);
+      expect(authUrl.searchParams.get("state")).toBe(body.state);
+      const reference = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      expect(reference.kind).toBe("mcp_oauth_reference");
+      expect(reference.encryptedPkceVerifier).toBeUndefined();
 
-      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
+      const state = await readMcpOAuthState(body.state);
       expect(state?.workspaceId).toBe(workspace.workspaceId);
       expect(state?.accountId).toBe(workspace.accountId);
       expect(state?.subjectId).toBe("subject-a");
@@ -2705,6 +2736,7 @@ describe("connections routes", () => {
 
       const callback = await publicApp(client.db, {
         webBaseUrl: "http://127.0.0.1:3000",
+        integrationsOauthShortStateEnabled: false,
       }).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );
@@ -2765,6 +2797,30 @@ describe("connections routes", () => {
       expect(loaded?.metadata.mcpTools).toEqual(
         expect.arrayContaining([expect.objectContaining({ name: "search_documents" })]),
       );
+
+      const legacyStart = await app({ integrationsOauthShortStateEnabled: false }).request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ providerDomain: "mcp.example.com", mcpUrl: mcp.url }),
+        },
+      );
+      expect(legacyStart.status).toBe(200);
+      const legacyBody = (await legacyStart.json()) as { state: string };
+      expect(readSignedState(legacyBody.state, STATE_SECRET)).toMatchObject({
+        providerDomain: "mcp.example.com",
+        encryptedPkceVerifier: expect.any(String),
+      });
+      const legacyCallback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(legacyBody.state)}`,
+      );
+      expect(legacyCallback.status).toBe(302);
+      expect(legacyCallback.headers.get("location")).toContain("integration_oauth=success");
+      expect(as.tokenRequests).toHaveLength(2);
     } finally {
       mcp.close();
       as.close();
@@ -2861,7 +2917,7 @@ describe("connections routes", () => {
       expect(authorizationUrl.searchParams.get("resource")).toBeNull();
       expect(authorizationUrl.searchParams.get("scope")).toBe("documents:read");
       expect(authorizationUrl.searchParams.get("code_challenge_method")).toBe("S256");
-      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      const state = await readMcpOAuthState(body.state);
       expect(state).toMatchObject({
         discoveryMode: "legacy_2025_03_26_metadata",
         resource: mcpUrl,
@@ -3105,9 +3161,7 @@ describe("connections routes", () => {
         state: string;
         authorizationUrl: string;
       };
-      expect(
-        (readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null)?.ownership,
-      ).toBe("personal");
+      expect((await readMcpOAuthState(body.state)).ownership).toBe("personal");
       expect(new URL(body.authorizationUrl).searchParams.get("resource")).toBe("urn:test:mcp");
 
       const callback = await publicApp(client.db).request(
@@ -3180,7 +3234,7 @@ describe("connections routes", () => {
       const responseText = await response.clone().text();
       expect(response.status, responseText).toBe(200);
       const body = (await response.json()) as { state: string };
-      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      const state = await readMcpOAuthState(body.state);
       expect(state.subjectId).toBe(`api_key:${apiKey.id}`);
       expect(state.ownership).toBe("workspace");
 
@@ -3249,7 +3303,7 @@ describe("connections routes", () => {
     try {
       expect(response.status).toBe(200);
       const body = (await response.json()) as { state: string };
-      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      const state = await readMcpOAuthState(body.state);
       const verifier = decryptEnvironmentValue(rawKey, state.encryptedPkceVerifier as string);
 
       const callback = await publicAppWithDeps(client.db, {}, { observability }).request(
@@ -3512,9 +3566,7 @@ describe("connections routes", () => {
       );
       expect(response.status).toBe(200);
       const body = (await response.json()) as { state: string };
-      expect(
-        (readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null)?.ownership,
-      ).toBe("personal");
+      expect((await readMcpOAuthState(body.state)).ownership).toBe("personal");
       const callback = await publicApp(client.db).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );
@@ -3743,7 +3795,7 @@ describe("connections routes", () => {
         const authUrl = new URL(body.authorizationUrl);
         expect(authUrl.searchParams.get("client_id")).toBe("slack-client-id");
         expect(authUrl.searchParams.get("scope")).toBe("search:read.public chat:write");
-        const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
+        const state = await readMcpOAuthState(body.state);
         expect(state?.providerDomain).toBe("slack.com");
         expect(state?.ownership).toBe(ownership);
         expect(state?.clientRegistrationMethod).toBe("operator");
@@ -3883,7 +3935,7 @@ describe("connections routes", () => {
       expect(authUrl.searchParams.get("scope")).toBe("read write");
       expect(as.registrations).toHaveLength(1);
 
-      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
+      const state = await readMcpOAuthState(body.state);
       expect(state?.clientRegistrationMethod).toBe("dcr");
       expect(state?.clientId).toBe(`${as.url}/registered-client/1`);
 
@@ -4377,6 +4429,56 @@ describe("connections routes", () => {
         },
       );
       const body = (await response.json()) as { state: string };
+      const reference = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      const encrypted = await loadIntegrationOAuthPendingState(client.db, {
+        id: reference.id as string,
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+      });
+      expect(encrypted).not.toBeNull();
+
+      const missing = createSignedState(STATE_SECRET, {
+        kind: "mcp_oauth_reference",
+        id: randomUUID(),
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+      });
+      const missingCallback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(missing)}`,
+      );
+      expect(missingCallback.headers.get("location")).toContain("reason=state_invalid");
+
+      const wrongScope = createSignedState(STATE_SECRET, {
+        kind: "mcp_oauth_reference",
+        id: reference.id,
+        accountId: workspace.accountId,
+        workspaceId: randomUUID(),
+      });
+      const wrongScopeCallback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(wrongScope)}`,
+      );
+      expect(wrongScopeCallback.headers.get("location")).toContain("reason=state_invalid");
+
+      const expiredId = randomUUID();
+      await storeIntegrationOAuthPendingState(client.db, {
+        id: expiredId,
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        stateEncrypted: encrypted!,
+        expiresAt: new Date(Date.now() - 1000),
+      });
+      const expiredReference = createSignedState(STATE_SECRET, {
+        kind: "mcp_oauth_reference",
+        id: expiredId,
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+      });
+      const expiredReferenceCallback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(expiredReference)}`,
+      );
+      expect(expiredReferenceCallback.headers.get("location")).toContain("reason=state_invalid");
+      expect(as.tokenRequests).toHaveLength(0);
+
       const first = await publicApp(client.db).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );

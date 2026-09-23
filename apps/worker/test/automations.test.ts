@@ -138,7 +138,7 @@ describe("automation dispatch activity", () => {
         ...run.acceptedExecution,
         sessionTemplate: {
           ...run.acceptedExecution.sessionTemplate,
-          model: "codex/gpt-5.6-sol",
+          model: "codex/gpt-6-sol",
         },
       },
     };
@@ -189,14 +189,14 @@ describe("automation dispatch activity", () => {
     expect(admit).toHaveBeenCalledWith(expect.anything(), {
       accountId,
       workspaceId,
-      model: "codex/gpt-5.6-sol",
+      model: "codex/gpt-6-sol",
       requestedAgentRuns: 1,
     });
     expect(createInput).toMatchObject({
-      model: "codex/gpt-5.6-sol",
+      model: "codex/gpt-6-sol",
       turnExecutionPolicy: {
-        productModelId: "codex/gpt-5.6-sol",
-        requestedModelId: "codex/gpt-5.6-sol",
+        productModelId: "codex/gpt-6-sol",
+        requestedModelId: "codex/gpt-6-sol",
         modelSource: "explicit",
         credentialSource: { kind: "connected_subscription", provider: "codex" },
         billing: {

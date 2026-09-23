@@ -1,5 +1,44 @@
 # @opengeni/worker-bundle
 
+## 2.0.1
+
+### Patch Changes
+
+- 701ea95: Preserve the original shell command when adopting background processes, so running command rows and completion notices show the command instead of execCommand. Keep long command rows ellipsized and expose their saved preview on hover and expansion.
+- a11d810: Allow Codex catalog entries to retire from new selection while retaining exact already-accepted execution under unchanged live authorization checks.
+- Updated dependencies [701ea95]
+- Updated dependencies [e9c4379]
+- Updated dependencies [a642885]
+- Updated dependencies [793a6c9]
+- Updated dependencies [d92af11]
+- Updated dependencies [f60ca2b]
+- Updated dependencies [56ddcfb]
+- Updated dependencies [a11d810]
+- Updated dependencies [86c710a]
+- Updated dependencies [38b9857]
+- Updated dependencies [ab3adb3]
+- Updated dependencies [2f8bc58]
+- Updated dependencies [a11d810]
+- Updated dependencies [90e089a]
+- Updated dependencies [a184108]
+- Updated dependencies [b1ad0c6]
+- Updated dependencies [a463199]
+- Updated dependencies [5fbb333]
+  - @opengeni/runtime@4.0.1
+  - @opengeni/codex@0.2.25
+  - @opengeni/config@2.1.0
+  - @opengeni/db@6.0.1
+  - @opengeni/contracts@5.1.0
+  - @opengeni/sdk@7.1.0
+  - @opengeni/core@4.0.1
+  - @opengeni/documents@0.8.32
+  - @opengeni/github@0.7.15
+  - @opengeni/storage@0.2.132
+  - @opengeni/events@0.4.30
+  - @opengeni/codemode@0.6.1
+  - @opengeni/observability@0.8.31
+  - @opengeni/tool-gateway@0.1.12
+
 ## 2.0.0
 
 ### Major Changes

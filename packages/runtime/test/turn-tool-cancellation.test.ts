@@ -181,8 +181,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const exec = functionTool("exec_command", async () => running(116, "ready\n"));
     const session = {
       hasRetainedProcess: (sessionId: number) => sessionId === 116,
-      adoptRetainedProcessAsBackgroundCommand: async (sessionId: number) => {
+      adoptRetainedProcessAsBackgroundCommand: async (sessionId: number, command?: string) => {
         expect(sessionId).toBe(116);
+        expect(command).toBe("long-task");
         adoptions += 1;
       },
     };
@@ -213,7 +214,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
           writeStdin: async () => (++reads === 1 ? running(117, "middle\n") : exited(0, "done\n")),
         },
       }),
-      adoptProcessAsBackgroundCommand: async () => {},
+      adoptProcessAsBackgroundCommand: async ({ command }) => {
+        expect(command).toBe("work");
+      },
       observeProcessTerminal: async () => {
         observations += 1;
       },
@@ -700,6 +703,39 @@ describe("turn sandbox-tool physical cancellation fence", () => {
 
     expect(helperCommands).toHaveLength(0);
     expect(retained).toBe(true);
+  });
+
+  test("preserves the original command when an ambiguous launch is adopted by a later read", async () => {
+    const controller = createTurnToolCancellationController();
+    const command = "printf 'two  spaces\\n'\nbun run render --composition Intro";
+    const adopted: Array<string | undefined> = [];
+    const exec = functionTool("exec_command", async () => {
+      throw new RoutingMutationOutcomeUnknownError("execCommand", "promotion transaction lost", {
+        retainedProcess: {
+          id: "77777777-7777-4777-8777-777777777777",
+          providerSessionId: 34,
+        },
+      });
+    });
+    const session = {
+      hasRetainedProcess: (id: number) => id === 34,
+      writeStdinForProcessMutation: async () => running(34),
+      adoptRetainedProcessAsBackgroundCommand: async (_id: number, text?: string) => {
+        adopted.push(text);
+      },
+    };
+    const [wrappedExec, wrappedWrite] = controller.wrapTools(
+      [exec, functionTool("write_stdin", async () => running(34))],
+      session,
+    ) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+    await expect(
+      wrappedExec!.invoke(runContext, JSON.stringify({ cmd: command, yield_time_ms: 0 })),
+    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    await wrappedWrite!.invoke(
+      runContext,
+      JSON.stringify({ session_id: 34, chars: "", yield_time_ms: 0 }),
+    );
+    expect(adopted).toEqual([command]);
   });
 
   test("registers a durably promoted process even when stale authority rejects the exec output", async () => {

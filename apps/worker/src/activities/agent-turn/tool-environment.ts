@@ -31,6 +31,7 @@ import {
   type ConnectorAttachmentMaterializationRequest,
   type ConnectorActionPolicyHooks,
   createFirstPartyInteractionAttemptToolDefinitions,
+  mcpToolDisplayMetadata,
 } from "@opengeni/runtime";
 import {
   createGoogleDrivePublicationAttemptTool,
@@ -1095,6 +1096,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         executionGeneration: attempt.executionGeneration,
       },
       cancellationSignal,
+      undefined,
+      {},
+      (name) => mcpToolDisplayMetadata(tools.mcpServers, name),
     );
     eventing.codemodeDispatcher.start();
   };
@@ -1113,6 +1117,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   return {
     attemptConnectorActionBindings,
     connectorActionPolicy,
+    mcpServers: runSettings.mcpServers,
     generateSessionTitleInParallel: titleToolPlan.generateTitleInParallel,
     postToolPreparationStartedAt,
     preparationIndependentToolNames: [

@@ -12,6 +12,7 @@ import {
 import { ComputerSupervisor } from "./computer-supervisor";
 import { BrowserControlServer } from "./server";
 import { BrowserSupervisor } from "./supervisor";
+import { retainControllerDiagnostic } from "./controller-diagnostics";
 
 /** Exact release identity baked into compiled sidecars. Development builds share
  * one explicit marker with the Rust agent. Missing/mismatched identities fail
@@ -66,7 +67,8 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
       ...(config.browserExecutablePath
         ? { browserExecutablePath: config.browserExecutablePath }
         : {}),
-      onUnexpectedError: reportUnexpectedControllerError,
+      onUnexpectedError: (error, context) =>
+        reportUnexpectedControllerError(error, context, config.rootDirectory, config.adminToken),
     });
   } catch (error) {
     await Promise.allSettled([
@@ -93,6 +95,8 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
 function reportUnexpectedControllerError(
   error: unknown,
   context: { method: string; pathname: string },
+  rootDirectory: string,
+  adminToken: string,
 ): void {
   const value =
     error instanceof Error
@@ -106,15 +110,19 @@ function reportUnexpectedControllerError(
           message: boundedDiagnostic(nonErrorDiagnostic(error), 4_096),
           stack: "",
         };
-  process.stderr.write(
-    `${JSON.stringify({
-      service: "opengeni-browserd",
-      event: "unexpected_request_error",
-      method: context.method,
-      pathname: context.pathname,
-      error: value,
-    })}\n`,
-  );
+  const line = `${JSON.stringify({
+    service: "opengeni-browserd",
+    event: "unexpected_request_error",
+    method: context.method,
+    pathname: context.pathname,
+    error: value,
+  })}\n`.replaceAll(adminToken, "[redacted]");
+  process.stderr.write(line);
+  try {
+    retainControllerDiagnostic(rootDirectory, line);
+  } catch {
+    process.stderr.write("opengeni-browserd: could not retain controller diagnostic\n");
+  }
 }
 
 function nonErrorDiagnostic(value: unknown): string {

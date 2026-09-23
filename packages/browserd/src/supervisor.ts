@@ -1441,6 +1441,7 @@ async function createBrowserDriver(
       browserSessionId: context.browserSessionId,
       controllerGeneration: context.controllerGeneration,
       runner: attached.runner,
+      targetLifecycle: "cdp",
       connect: async () => attached.connection,
       engine: "chrome",
       permissionControl: false,

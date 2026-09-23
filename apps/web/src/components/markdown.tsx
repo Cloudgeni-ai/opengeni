@@ -14,8 +14,10 @@ export function MarkdownText({
   renderInteractiveBlock,
   renderImage,
   searchTarget,
+  artifactHref,
 }: {
   text: string;
+  artifactHref?: MarkdownProps["artifactHref"];
   searchTarget?: MarkdownProps["searchTarget"];
   renderImage?: MarkdownProps["renderImage"];
   renderInteractiveBlock?: MarkdownProps["renderInteractiveBlock"];
@@ -25,6 +27,7 @@ export function MarkdownText({
 }) {
   return (
     <Markdown
+      artifactHref={artifactHref}
       searchTarget={searchTarget}
       streaming={streaming}
       renderImage={renderImage}

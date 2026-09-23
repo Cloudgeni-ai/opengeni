@@ -510,7 +510,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
     description:
-      "Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Returns exact session and tab state.",
+      "Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser. BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Returns exact session and tab state.",
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -1131,7 +1131,8 @@ async function openBrowser(
   if (value.browserSessionId) {
     session = await transport.getBrowserSession(workspaceId, value.browserSessionId);
   } else {
-    const listed = await transport.listBrowserSessions(workspaceId);
+    const listed =
+      value.mode === "new" ? { sessions: [] } : await transport.listBrowserSessions(workspaceId);
     // The agent-facing browser is human-capable by default. A headless session
     // is a deliberately narrower execution mode and must never be silently
     // reused for an omitted/default headed request: OAuth providers such as
@@ -1141,7 +1142,18 @@ async function openBrowser(
       value.mode === "new"
         ? null
         : newestRelevant(
-            listed.sessions.filter((candidate) => candidate.headless === requestedHeadless),
+            listed.sessions.filter(
+              (candidate) =>
+                candidate.headless === requestedHeadless &&
+                compatibleInteractionPlacement(candidate.placement, value.placement) &&
+                (value.identityId === undefined || candidate.identityId === value.identityId) &&
+                (value.baseRevisionId === undefined ||
+                  candidate.baseRevisionId === value.baseRevisionId) &&
+                (value.networkRouteId === undefined ||
+                  candidate.networkRouteId === value.networkRouteId) &&
+                (value.linkedComputerSessionId === undefined ||
+                  candidate.linkedComputerSessionId === value.linkedComputerSessionId),
+            ),
             sourceSessionId,
           );
     if (reusable) {
@@ -1205,8 +1217,14 @@ async function openComputer(
   if (value.computerSessionId) {
     session = await transport.getComputerSession(workspaceId, value.computerSessionId);
   } else {
-    const listed = await transport.listComputerSessions(workspaceId);
-    const reusable = value.mode === "new" ? null : newestRelevant(listed.sessions, sourceSessionId);
+    const listed =
+      value.mode === "new" ? { sessions: [] } : await transport.listComputerSessions(workspaceId);
+    const reusable = newestRelevant(
+      listed.sessions.filter((candidate) =>
+        compatibleInteractionPlacement(candidate.placement, value.placement),
+      ),
+      sourceSessionId,
+    );
     session = reusable
       ? reusable
       : (
@@ -1225,6 +1243,16 @@ async function openComputer(
         ? (await transport.listComputerTargets(workspaceId, session.id)).targets
         : [],
   };
+}
+
+function compatibleInteractionPlacement(
+  candidate: z.infer<typeof InteractionPlacement>,
+  requested: z.infer<typeof InteractionPlacement> | undefined,
+): boolean {
+  if (!requested) return candidate.kind !== "attached_device";
+  return Object.entries(requested).every(
+    ([key, value]) => (candidate as Record<string, unknown>)[key] === value,
+  );
 }
 
 function newestRelevant<

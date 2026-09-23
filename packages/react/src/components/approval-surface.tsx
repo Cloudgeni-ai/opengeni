@@ -2,6 +2,7 @@ import { CheckIcon, ShieldCheckIcon, XIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { PendingApproval } from "../approvals";
 import { cn } from "../lib/cn";
+import { toolDisplayName } from "../timeline/tool-display-name";
 
 export type ApprovalSurfaceMessages = {
   title: string;
@@ -20,7 +21,10 @@ export const defaultApprovalSurfaceMessages: ApprovalSurfaceMessages = {
   reject: "Reject",
   approving: "Approving…",
   rejecting: "Rejecting…",
-  formatToolName: (name) => name.replaceAll("_", " ").replaceAll(".", " › "),
+  formatToolName: (name) =>
+    name.includes("__") || /^[a-f0-9]{64}$/.test(name)
+      ? toolDisplayName(name)
+      : name.replaceAll("_", " ").replaceAll(".", " › "),
 };
 
 export type ApprovalSurfaceProps = {
@@ -154,8 +158,14 @@ export function ApprovalSurface({
               ) : (
                 <>
                   <p className="text-og-sm font-medium text-og-fg">
-                    {messages.formatToolName(approval.name)}
+                    {approval.display?.title ??
+                      messages.formatToolName(approval.display?.toolName ?? approval.name)}
                   </p>
+                  {approval.display?.accountLabel ? (
+                    <p className="mt-1 break-words text-og-xs text-og-fg-muted">
+                      {approval.display.accountLabel}
+                    </p>
+                  ) : null}
                   {argumentsPreview !== null ? (
                     <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-og-sm bg-og-surface-2 p-2 font-mono text-og-xs text-og-fg-muted">
                       {argumentsPreview}

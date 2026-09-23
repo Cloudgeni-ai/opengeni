@@ -4,6 +4,7 @@ import {
   XAI_CLIENT_MODE,
   XAI_CLIENT_VERSION,
   XAI_RESPONSE_STREAM_IDLE_TIMEOUT_MS,
+  XAI_SUBSCRIPTION_MODEL_SLUGS,
   XAI_TOKEN_AUTH_HEADER_VALUE,
 } from "./constants";
 import {
@@ -101,7 +102,9 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
       : normalizeXaiSubscriptionRequestBody(parsed, context.resolveModel, context.hostedSearch);
     const model =
       handedOffModel ??
-      (typeof normalizedBody.model === "string" ? normalizedBody.model : "grok-4.6");
+      (typeof normalizedBody.model === "string"
+        ? normalizedBody.model
+        : XAI_SUBSCRIPTION_MODEL_SLUGS[0]);
 
     const streamIdleTimeoutMs = boundedStreamIdleTimeout(
       context.streamIdleTimeoutMs ?? context.hostedToolContinuationTimeoutMs,

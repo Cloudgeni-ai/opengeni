@@ -431,6 +431,11 @@ User-message file attachments enter the runtime manifest and eager materializati
 
 ## Verification
 
+Published-file chat links use `artifact:<id>` and host artifact navigation;
+`sandbox:` links still open the workspace inspector. Media previews share
+`apps/web/src/components/artifacts/retained-file-preview.tsx`. Preserve closed
+publication receipts and legacy non-media identities; see `docs/artifact-library.md`.
+
 Unit tests and typechecks do not require Temporal, NATS, Postgres, a sandbox backend, or live model credentials:
 
 ```bash

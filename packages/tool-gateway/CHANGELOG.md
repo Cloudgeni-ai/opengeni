@@ -1,5 +1,15 @@
 # @opengeni/tool-gateway
 
+## 0.1.12
+
+### Patch Changes
+
+- Updated dependencies [d92af11]
+- Updated dependencies [f60ca2b]
+- Updated dependencies [86c710a]
+- Updated dependencies [2f8bc58]
+  - @opengeni/contracts@5.1.0
+
 ## 0.1.11
 
 ### Patch Changes
