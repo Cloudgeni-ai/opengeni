@@ -4501,7 +4501,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       browserSession.id,
       {
         text: "Switch this session to my connected Codex model",
-        model: "codex/gpt-5.6-sol",
+        model: "codex/gpt-6-sol",
         clientEventId: `browser-model-switch-${crypto.randomUUID()}`,
       },
     );
@@ -4529,7 +4529,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       select model from sessions
       where workspace_id = ${value.owner.workspaceId}
         and id = ${route!.session_id}`;
-    expect(session!.model).toBe("codex/gpt-5.6-sol");
+    expect(session!.model).toBe("codex/gpt-6-sol");
   });
 
   test("subject model lookup orders turns across sessions, resolves ties, and falls back without turns", async () => {
@@ -4552,7 +4552,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       olderSession.id,
       {
         text: "Choose Codex later in the older session",
-        model: "codex/gpt-5.6-sol",
+        model: "codex/gpt-6-sol",
         clientEventId: `older-session-model-switch-${crypto.randomUUID()}`,
       },
     );
@@ -4575,7 +4575,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     await shared!.admin`
       update session_turns
       set created_at = case
-        when model = 'codex/gpt-5.6-sol' then '2026-08-02T13:00:00Z'::timestamptz
+        when model = 'codex/gpt-6-sol' then '2026-08-02T13:00:00Z'::timestamptz
         else '2026-08-02T10:00:00Z'::timestamptz
       end
       where workspace_id = ${value.owner.workspaceId}
@@ -4597,7 +4597,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         value.owner.workspaceId,
         value.owner.subjectId,
       ),
-    ).toBe("codex/gpt-5.6-sol");
+    ).toBe("codex/gpt-6-sol");
 
     await shared!.admin`
       update session_turns
@@ -4610,7 +4610,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         value.owner.workspaceId,
         value.owner.subjectId,
       ),
-    ).toBe("codex/gpt-5.6-sol");
+    ).toBe("codex/gpt-6-sol");
 
     const fallbackSession = await createSessionForRequest(
       value.deps,
@@ -4676,7 +4676,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       value.owner.workspaceId,
       {
         initialMessage: "Other subject Codex session",
-        model: "codex/gpt-5.6-sol",
+        model: "codex/gpt-6-sol",
         sandboxBackend: "none",
       },
     );
@@ -4697,7 +4697,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       crossWorkspaceGrant.workspaceId,
       {
         initialMessage: "Same subject in another workspace",
-        model: "codex/gpt-5.6-sol",
+        model: "codex/gpt-6-sol",
         sandboxBackend: "none",
       },
     );

@@ -62,6 +62,7 @@ describe("bundled editable-artifact skills", () => {
     expect((await readdir(join(repoRoot, ".agents", "skills"))).sort()).toEqual([
       "opengeni",
       "opengeni-client",
+      "run-opengeni",
     ]);
   });
 

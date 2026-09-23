@@ -182,7 +182,7 @@ export function ScenarioStack({
   composer: ComposerState;
   variant?: "gallery" | "phone";
 }) {
-  const [model, setModel] = useState("gpt-5.6-sol");
+  const [model, setModel] = useState("gpt-6-astra");
   const [effort, setEffort] = useState<IntelligenceEffort>("medium");
   const [toolSelection, setToolSelection] = useState(galleryToolSelection);
   const [connectorCustomizing, setConnectorCustomizing] = useState(false);

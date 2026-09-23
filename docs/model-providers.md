@@ -189,13 +189,13 @@ Choose an active deployment default before retiring its old entry.
 ```json
 {
   "schemaVersion": 1,
-  "defaultModel": "gpt-5.6-sol",
-  "builtInModels": ["gpt-5.6-sol", "gpt-5.6-luna"],
+  "defaultModel": "gpt-6-astra",
+  "builtInModels": ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
   "registryProviders": [],
   "gatewayModels": [],
   "openrouterModels": [],
   "modelNotes": {
-    "gpt-5.6-sol": "Use when the task is genuinely difficult."
+    "gpt-6-sol": "Use for difficult implementation work."
   }
 }
 ```
@@ -643,9 +643,9 @@ the same membership, connection-readiness, workspace-policy, and provider-health
 decision as the human picker. Its result is one text string in catalog order:
 
 ```text
-Current: gpt-5.6-sol
+Current: gpt-6-astra
 - openrouter/nvidia/nemotron-3-super-120b-a12b:free | Nemotron 3 Super 120B | free | Good for bounded tool-driven work.
-- gpt-5.6-sol | GPT-5.6 Sol | credits
+- gpt-6-sol | GPT-6 Sol | credits
 ```
 
 Each selectable line is `id | label | cost` with an optional final note. It

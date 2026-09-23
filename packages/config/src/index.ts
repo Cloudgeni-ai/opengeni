@@ -558,9 +558,7 @@ const SettingsSchema = z.object({
   openaiApiKey: z.string().optional(),
   openaiBaseUrl: z.string().optional(),
   openaiModel: z.string().default("gpt-6-astra"),
-  openaiAllowedModels: z
-    .string()
-    .default("gpt-6-astra,gpt-6-sol,gpt-6-luna"),
+  openaiAllowedModels: z.string().default("gpt-6-astra,gpt-6-sol,gpt-6-luna"),
   // OpenGeni-managed Vercel AI Gateway. When configured, the two reviewed
   // Gateway models below are added to the managed-credit catalog. Workspace
   // Gateway keys use the encrypted connection broker and never this secret.
@@ -4853,15 +4851,9 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
           // the durable session/turn policy gate before attaching it.
           hostedWebSearch: true,
           capabilities,
-          contextWindowTokens: slug.startsWith("gpt-6-")
-            ? 1_050_000
-            : CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
-          effectiveContextWindowTokens: slug.startsWith("gpt-6-")
-            ? 997_500
-            : CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
-          autoCompactTokenLimit: slug.startsWith("gpt-6-")
-            ? 945_000
-            : CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+          contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+          effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+          autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
           toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
         };
       }),
