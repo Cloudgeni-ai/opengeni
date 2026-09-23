@@ -92,7 +92,7 @@ describe("workspace model catalog availability", () => {
       codexSubscriptionActive: false,
       xaiSubscriptionActive: false,
     });
-    const blocked = unavailable.models.find((model) => model.id === "supergrok/grok-4.6")!;
+    const blocked = unavailable.models.find((model) => model.id === "supergrok/grok-4.7")!;
     expect(blocked).toMatchObject({
       provider: "supergrok",
       providerLabel: "SuperGrok",
@@ -108,7 +108,7 @@ describe("workspace model catalog availability", () => {
       codexSubscriptionActive: false,
       xaiSubscriptionActive: true,
     });
-    expect(available.models.find((model) => model.id === "supergrok/grok-4.6")).toMatchObject({
+    expect(available.models.find((model) => model.id === "supergrok/grok-4.7")).toMatchObject({
       credentialReadiness: { status: "ready", basis: "connection" },
       availability: { status: "unknown", selectable: true },
     });
