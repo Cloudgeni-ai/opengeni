@@ -2534,8 +2534,10 @@ function SessionChatPane(props: {
                         Credit exhaustion also surfaces on idle sessions. */}
                     {failureRecovery}
                     <SessionSkillReviews
+                      key={`${context.accessContext.subjectId}:${props.session.workspaceId}:${props.session.id}`}
                       context={context}
                       workspaceId={props.session.workspaceId}
+                      sessionId={props.session.id}
                       events={props.events}
                     />
                     {props.humanInput.requests.length > 0 &&

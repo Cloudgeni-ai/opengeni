@@ -1,6 +1,7 @@
 import { act } from "react";
 import { expect, mock, test } from "bun:test";
 import type { SessionEvent, SkillRecord } from "@opengeni/sdk";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { AppContextValue } from "@/context";
 import {
   registerDom,
@@ -61,7 +62,11 @@ function fixture(value = record, human = true) {
   const context = {
     authSession: human ? {} : null,
     accessContext: { subjectId: "human:a", workspaceGrants: [], accountGrants: [] },
-    client: { readWorkspaceSkill: read, approveWorkspaceSkill: approve },
+    client: {
+      readWorkspaceSkill: read,
+      approveWorkspaceSkill: approve,
+      listWorkspaceSkills: async () => ({ skills: [record], nextCursor: null }),
+    },
   } as unknown as AppContextValue;
   return { context, read, approve };
 }
@@ -69,7 +74,12 @@ function fixture(value = record, human = true) {
 test("reviews exact text and approves without sending a chat message or interrupting the session", async () => {
   const f = fixture();
   const view = await renderComponent(
-    <SessionSkillReviews context={f.context} workspaceId="workspace" events={events} />,
+    <SessionSkillReviews
+      context={f.context}
+      workspaceId="workspace"
+      sessionId="session"
+      events={events}
+    />,
   );
   try {
     await flush();
@@ -100,7 +110,12 @@ test("settled or changed heads cannot be approved from historical receipts", asy
   ]) {
     const f = fixture(value);
     const view = await renderComponent(
-      <SessionSkillReviews context={f.context} workspaceId="workspace" events={events} />,
+      <SessionSkillReviews
+        context={f.context}
+        workspaceId="workspace"
+        sessionId="session"
+        events={events}
+      />,
     );
     try {
       await flush();
@@ -115,7 +130,12 @@ test("settled or changed heads cannot be approved from historical receipts", asy
 test("non-human viewers cannot approve", async () => {
   const f = fixture(record, false);
   const view = await renderComponent(
-    <SessionSkillReviews context={f.context} workspaceId="workspace" events={events} />,
+    <SessionSkillReviews
+      context={f.context}
+      workspaceId="workspace"
+      sessionId="session"
+      events={events}
+    />,
   );
   try {
     await flush();
@@ -129,7 +149,12 @@ test("non-human viewers cannot approve", async () => {
 test("account changes discard previously loaded Skill files", async () => {
   const f = fixture();
   const view = await renderComponent(
-    <SessionSkillReviews context={f.context} workspaceId="workspace" events={events} />,
+    <SessionSkillReviews
+      context={f.context}
+      workspaceId="workspace"
+      sessionId="session"
+      events={events}
+    />,
   );
   try {
     await flush();
@@ -139,10 +164,102 @@ test("account changes discard previously loaded Skill files", async () => {
       client: { ...f.context.client, readWorkspaceSkill: () => new Promise(() => {}) },
     } as unknown as AppContextValue;
     await view.rerender(
-      <SessionSkillReviews context={other} workspaceId="workspace" events={events} />,
+      <SessionSkillReviews
+        context={other}
+        workspaceId="workspace"
+        sessionId="session"
+        events={events}
+      />,
     );
     expect(view.container.textContent).not.toContain("Supporting text");
     expect(view.container.querySelector("button")).toBeNull();
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("reopening outside the receipt history window still discovers pending Skills", async () => {
+  const f = fixture();
+  const list = mock(async () => ({ skills: [record], nextCursor: null }));
+  f.context.client.listWorkspaceSkills = list;
+  const view = await renderComponent(
+    <SessionSkillReviews
+      context={f.context}
+      workspaceId="workspace"
+      sessionId="session"
+      events={[]}
+    />,
+  );
+  try {
+    await flush();
+    expect(list.mock.calls.length).toBe(1);
+    expect(view.container.textContent).toContain("Review Test Skill");
+    expect(view.container.querySelector("button")?.textContent).toBe("Approve Skill");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("historical receipts do not resurrect deleted or settled reviews", async () => {
+  const f = fixture();
+  f.context.client.listWorkspaceSkills = async () => ({ skills: [], nextCursor: null });
+  const view = await renderComponent(
+    <SessionSkillReviews
+      context={f.context}
+      workspaceId="workspace"
+      sessionId="session"
+      events={events}
+    />,
+  );
+  try {
+    await flush();
+    expect(view.container.textContent).toBe("");
+    expect(f.read).not.toHaveBeenCalled();
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a deletion racing the preview settles a 404 instead of leaving a retry card", async () => {
+  const f = fixture();
+  f.read.mockImplementation(async () => {
+    throw new OpenGeniApiError(404, "Skill not found");
+  });
+  const view = await renderComponent(
+    <SessionSkillReviews
+      context={f.context}
+      workspaceId="workspace"
+      sessionId="session"
+      events={[]}
+    />,
+  );
+  try {
+    await flush();
+    expect(view.container.textContent).toBe("");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("uncertain approval retries keep the same operation and exact revision", async () => {
+  const f = fixture();
+  f.approve.mockImplementationOnce(async () => {
+    throw new Error("Connection interrupted");
+  });
+  const view = await renderComponent(
+    <SessionSkillReviews
+      context={f.context}
+      workspaceId="workspace"
+      sessionId="session"
+      events={[]}
+    />,
+  );
+  try {
+    await flush();
+    await act(async () => (view.container.querySelector("button") as HTMLButtonElement).click());
+    expect(view.container.textContent).toContain("Connection interrupted");
+    await act(async () => (view.container.querySelector("button") as HTMLButtonElement).click());
+    expect(f.approve.mock.calls[0]).toEqual(f.approve.mock.calls[1]);
   } finally {
     await view.unmount();
   }

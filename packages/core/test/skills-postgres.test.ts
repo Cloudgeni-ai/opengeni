@@ -1371,6 +1371,13 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     const input = { ...f.input, ...f.agent };
     const pending = await saveSkill(client.db, input);
     expect(pending.outcome).toBe("pending");
+    const pendingInSession = await listSkills(client.db, f.context, {
+      sessionId: f.agent.actor.sessionId,
+      metadataOnly: true,
+    });
+    expect(pendingInSession.map((skill) => skill.id)).toEqual([pending.skillId]);
+    expect(pendingInSession[0]?.files).toEqual([]);
+    expect(await listSkills(client.db, f.context, { sessionId: crypto.randomUUID() })).toEqual([]);
     expect((await readSkill(client.db, f.context, pending.skillId))?.pendingRevisionIds).toEqual([
       pending.revisionId,
     ]);
@@ -1386,6 +1393,9 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     };
     await expect(approveSkill(client.db, { ...f.agent, ...request })).rejects.toThrow();
     expect((await approveSkill(client.db, { ...f.human, ...request })).outcome).toBe("applied");
+    expect(await listSkills(client.db, f.context, { sessionId: f.agent.actor.sessionId })).toEqual(
+      [],
+    );
     expect((await readSkill(client.db, f.context, pending.skillId))?.pendingRevisionIds).toEqual(
       [],
     );

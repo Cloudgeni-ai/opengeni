@@ -1,29 +1,103 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { SessionEvent, SkillRecord } from "@opengeni/sdk";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { SkillReviewReference } from "@opengeni/contracts";
 import type { AppContextValue } from "@/context";
 import { Button } from "@/components/ui/button";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { sessionSkillReviews } from "@/lib/session-skill-reviews";
 
+type ReviewReference = Omit<SkillReviewReference, "sourceOperationId">;
+
 export function SessionSkillReviews({
   context,
   workspaceId,
+  sessionId,
   events,
 }: {
   context: AppContextValue;
   workspaceId: string;
+  sessionId: string;
   events: readonly SessionEvent[];
 }) {
-  const reviews = useMemo(() => sessionSkillReviews(events), [events]);
-  return reviews.map((reference) => (
-    <SkillReview
-      key={`${context.accessContext.subjectId}:${workspaceId}:${reference.revisionId}`}
-      context={context}
-      workspaceId={workspaceId}
-      reference={reference}
-    />
-  ));
+  const receipts = useMemo(() => sessionSkillReviews(events), [events]);
+  const receiptIdentity = JSON.stringify(receipts);
+  const [catalog, setCatalog] = useState<ReviewReference[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+  const [reload, setReload] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [page, setPage] = useState<string | undefined>();
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    setError(false);
+    void context.client
+      .listWorkspaceSkills(workspaceId, {
+        sessionId,
+        limit: 100,
+        ...(page ? { cursor: page } : {}),
+      })
+      .then((result) => {
+        if (!live) return;
+        const pending = result.skills.flatMap((skill) =>
+          skill.pendingRevisionIds.map((revisionId) => ({
+            skillId: skill.id,
+            revisionId,
+            expectedRevisionId: skill.activeRevisionId,
+            expectedScopeVersion: skill.scopeVersion,
+            ...(skill.removalOperationId ? { removalOperationId: skill.removalOperationId } : {}),
+          })),
+        );
+        setCatalog((previous) => (page ? [...previous, ...pending] : pending));
+        setCursor(result.nextCursor);
+      })
+      .catch(() => {
+        if (live) setError(true);
+      })
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [context.client, workspaceId, sessionId, receiptIdentity, reload, page]);
+  useEffect(() => {
+    const refresh = () => {
+      setPage(undefined);
+      setReload((value) => value + 1);
+    };
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, []);
+  const reviews = [
+    ...new Map(catalog.map((reference) => [reference.revisionId, reference])).values(),
+  ];
+  return (
+    <>
+      {reviews.map((reference) => (
+        <SkillReview
+          key={`${context.accessContext.subjectId}:${workspaceId}:${reference.revisionId}:${reference.expectedScopeVersion}:${reference.expectedRevisionId}:${reference.removalOperationId ?? ""}`}
+          context={context}
+          workspaceId={workspaceId}
+          reference={reference}
+        />
+      ))}
+      {error ? (
+        <p role="alert" className="text-sm">
+          Could not load pending Skill reviews.{" "}
+          <Button variant="ghost" onClick={() => setReload((value) => value + 1)}>
+            Retry
+          </Button>
+        </p>
+      ) : null}
+      {cursor ? (
+        <Button variant="ghost" disabled={loading} onClick={() => setPage(cursor)}>
+          More pending Skills
+        </Button>
+      ) : null}
+    </>
+  );
 }
 
 function SkillReview({
@@ -33,7 +107,7 @@ function SkillReview({
 }: {
   context: AppContextValue;
   workspaceId: string;
-  reference: SkillReviewReference;
+  reference: ReviewReference;
 }) {
   const [record, setRecord] = useState<SkillRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -66,8 +140,10 @@ function SkillReview({
         }
         setRecord(value);
       })
-      .catch(() => {
-        if (live) setError("Could not load this Skill review.");
+      .catch((reason) => {
+        if (!live) return;
+        if (reason instanceof OpenGeniApiError && reason.status === 404) setSettled(true);
+        else setError("Could not load this Skill review.");
       });
     return () => {
       live = false;
