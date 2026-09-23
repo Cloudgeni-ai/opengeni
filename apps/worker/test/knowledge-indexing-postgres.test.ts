@@ -309,11 +309,13 @@ test("paid indexing waits for publication without charging a review-first draft"
     documentEmbeddingRateMicrosPerMillionBytes: 1_000_000,
   } as Settings;
   let calls = 0;
+  let onEmbed: (() => Promise<void>) | undefined;
   const embedder: DocumentServices["embedder"] = {
     model: "review-gated-index-test",
     dimensions: 3,
     embedMany: async (inputs) => {
       calls++;
+      await onEmbed?.();
       return inputs.map(() => [1, 0, 0]);
     },
     embedQuery: async () => [1, 0, 0],
@@ -363,8 +365,28 @@ test("paid indexing waits for publication without charging a review-first draft"
   await shared.admin`UPDATE knowledge_entries SET published_revision_id=${saved.revisionId} WHERE id=${saved.entryId}`;
   await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second'
     WHERE revision_id=${saved.revisionId}`;
-  expect((await worker.indexKnowledge()).completed).toBe(1);
+  // Simulate a concurrent reviewer withdrawing publication after the provider
+  // started but before the batch can append and charge. No paid projection may
+  // commit using a stale pre-provider publication check.
+  onEmbed = async () => {
+    await shared.admin`UPDATE knowledge_entries SET published_revision_id=NULL WHERE id=${saved.entryId}`;
+    onEmbed = undefined;
+  };
+  expect((await worker.indexKnowledge()).deferred).toBe(1);
   expect(calls).toBe(1);
+  expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(1);
+  const [withdrawn] = await shared.admin`
+    SELECT state,next_index,last_failure FROM knowledge_index_jobs WHERE revision_id=${saved.revisionId}`;
+  expect(withdrawn).toMatchObject({
+    state: "pending",
+    next_index: 0,
+    last_failure: "waiting_for_review",
+  });
+  await shared.admin`UPDATE knowledge_entries SET published_revision_id=${saved.revisionId} WHERE id=${saved.entryId}`;
+  await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second'
+    WHERE revision_id=${saved.revisionId}`;
+  expect((await worker.indexKnowledge()).completed).toBe(1);
+  expect(calls).toBe(2);
   expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBeLessThan(1);
 });
 

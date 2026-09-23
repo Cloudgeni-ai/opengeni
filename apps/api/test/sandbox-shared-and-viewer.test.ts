@@ -1318,8 +1318,8 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
     const session = await getSession(db, workspaceId, sessionId);
     const capEventKey = `viewer-warm-cap:${crypto.randomUUID()}`;
-    await admin`INSERT INTO usage_events(account_id,workspace_id,event_type,quantity,unit,idempotency_key)
-      VALUES(${accountId},${workspaceId},'sandbox.warm_seconds',10,'seconds',${capEventKey})`;
+    await admin`INSERT INTO usage_events(account_id,workspace_id,event_type,quantity,unit,idempotency_key,occurred_at)
+      VALUES(${accountId},${workspaceId},'sandbox.warm_seconds',10,'seconds',${capEventKey},now())`;
 
     await forceDrainOverLimitViewerOnlyBoxes(db, {
       workspaceId,

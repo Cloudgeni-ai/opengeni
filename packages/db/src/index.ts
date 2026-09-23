@@ -44690,9 +44690,10 @@ function warmBillingSnapshot(
 }
 
 /**
- * Fence the maximum customer-billable time BEFORE requesting provider stop.
- * The immutable cutoff survives a stop-success/settlement-failure retry. A
- * failed stop can underbill the idle retry interval, never overbill a customer.
+ * Fence the warm-time meter BEFORE requesting provider stop, including free
+ * and shadow usage. The immutable cutoff survives a stop-success/settlement-
+ * failure retry. A failed stop can undercount an idle retry, never count time
+ * after the provider stopped.
  */
 export async function markWarmBillingStopCutoff(
   db: Database,
@@ -44718,12 +44719,15 @@ export async function markWarmBillingStopCutoff(
         const snapshot = warmBillingSnapshot(row);
         if (row.resume_state?.opengeniWarmBilling && !snapshot)
           throw new Error("sandbox warm billing snapshot is invalid");
-        if (snapshot?.mode !== "credits" || snapshot.rateMicrosPerSecond <= 0) return null;
-        if (snapshot.stopChargeAt) return new Date(snapshot.stopChargeAt);
+        if (snapshot?.stopChargeAt) return new Date(snapshot.stopChargeAt);
         const [stamped] = await tx.execute<{ cutoff: string }>(sql`
         update sandbox_leases set
-          resume_state = jsonb_set(resume_state, '{opengeniWarmBilling,stopChargeAt}',
-            to_jsonb(clock_timestamp()), true),
+          resume_state = jsonb_set(coalesce(resume_state, '{}'::jsonb),
+            '{opengeniWarmBilling}',
+            coalesce(resume_state->'opengeniWarmBilling',
+              jsonb_build_object('mode', 'usage_only', 'rateMicrosPerSecond', 0,
+                'accountId', account_id, 'workspaceId', workspace_id)) ||
+              jsonb_build_object('stopChargeAt', clock_timestamp()), true),
           updated_at = now()
         where id = ${row.id}
         returning resume_state #>> '{opengeniWarmBilling,stopChargeAt}' as cutoff
@@ -45549,8 +45553,14 @@ async function acquireLeaseOnce(
         // elect a spawner, re-arm a drain or prolong a warm lease. Replaying an
         // existing exact holder does not create new compute authority.
         const activeMode = input.warmBilling?.mode ?? existingSnapshot?.mode ?? "usage_only";
+        // Reconfiguration may not substitute a new (possibly zero) rate for
+        // an already-running paid provider's immutable admitted tariff.
         const activeRate =
-          input.warmBilling?.rateMicrosPerSecond ?? existingSnapshot?.rateMicrosPerSecond ?? 0;
+          liveness !== "cold" && existingSnapshot?.mode === "credits"
+            ? existingSnapshot.rateMicrosPerSecond
+            : (input.warmBilling?.rateMicrosPerSecond ??
+              existingSnapshot?.rateMicrosPerSecond ??
+              0);
         if (
           activeMode === "credits" &&
           activeRate > 0 &&
@@ -61249,8 +61259,8 @@ export async function accrueWarmSeconds(
         }
         const cursorMs = row.last_meter_at ? new Date(row.last_meter_at).getTime() : 0;
         const startMs = Number.isFinite(warmStartMs) ? Math.max(cursorMs, warmStartMs) : cursorMs;
-        if (mode === "credits" && rate > 0 && input.finalDrain && !snapshot?.stopChargeAt) {
-          throw new Error("paid sandbox final tick has no durable stop cutoff");
+        if (input.finalDrain && !snapshot?.stopChargeAt) {
+          throw new Error("sandbox final tick has no durable stop cutoff");
         }
         const upperBound =
           snapshot?.stopChargeAt && input.finalDrain

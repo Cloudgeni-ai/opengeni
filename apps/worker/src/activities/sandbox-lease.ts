@@ -3009,7 +3009,6 @@ async function terminateDrainableBox(
   // provider stop. Capture can fail and release its claim, allowing re-arm.
   // A retry after stop success cannot charge post-termination wall time.
   const beforeProviderStop = async (): Promise<void> => {
-    if (settings.sandboxWarmBillingMode !== "credits") return;
     await markWarmBillingStopCutoff(db, {
       accountId,
       workspaceId: row.workspaceId,

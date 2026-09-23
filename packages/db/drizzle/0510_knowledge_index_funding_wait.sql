@@ -49,6 +49,9 @@ BEGIN
   IF decided='credits' AND NOT EXISTS (
     SELECT 1 FROM knowledge_entries e WHERE e.account_id=p_account
       AND e.id=job.entry_id AND e.published_revision_id=p_revision AND NOT e.archived
+      AND coalesce((SELECT d.outcome FROM knowledge_entry_decisions d
+        WHERE d.account_id=p_account AND d.entry_id=job.entry_id AND d.revision_id=p_revision
+        ORDER BY d.version DESC LIMIT 1),'published') <> 'rejected'
   ) THEN
     UPDATE knowledge_index_jobs SET state='pending',lease_id=NULL,lease_until=NULL,
       last_failure='waiting_for_review',next_attempt_at=clock_timestamp()+interval '1 minute',
@@ -99,6 +102,48 @@ EXCEPTION WHEN OTHERS THEN
   RAISE;
 END $$;
 REVOKE ALL ON FUNCTION knowledge_index_wait_for_funding(uuid,uuid,uuid) FROM PUBLIC;
+
+-- An approval/rejection can commit while a paid embedding provider is running.
+-- Recheck publication after the provider returns, then hold a share lock on
+-- that entry until the append, usage and debit transaction commits. A concurrent
+-- review writer takes FOR UPDATE and cannot change the publication in between.
+CREATE FUNCTION knowledge_index_paid_publication_guard(p_account uuid, p_revision uuid, p_lease uuid)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+DECLARE
+  job knowledge_index_jobs%ROWTYPE;
+  entry knowledge_entries%ROWTYPE;
+  previous text := current_setting('opengeni.knowledge_index_dispatcher',true);
+BEGIN
+  IF p_account IS DISTINCT FROM opengeni_private.current_account_id() THEN
+    RAISE EXCEPTION 'Knowledge index tenant mismatch' USING ERRCODE='42501';
+  END IF;
+  PERFORM set_config('opengeni.knowledge_index_dispatcher','1',true);
+  SELECT * INTO job FROM knowledge_index_jobs j WHERE j.account_id=p_account
+    AND j.revision_id=p_revision AND j.lease_id=p_lease AND j.state='running'
+    AND j.lease_until>clock_timestamp() AND j.billing_mode='credits' FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Paid Knowledge index lease unavailable' USING ERRCODE='40001';
+  END IF;
+  SELECT * INTO entry FROM knowledge_entries e WHERE e.account_id=p_account
+    AND e.id=job.entry_id FOR SHARE;
+  IF entry.id IS NULL OR entry.archived OR
+     entry.published_revision_id IS DISTINCT FROM p_revision OR
+     (SELECT d.outcome FROM knowledge_entry_decisions d WHERE d.account_id=p_account
+       AND d.entry_id=job.entry_id AND d.revision_id=p_revision
+       ORDER BY d.version DESC LIMIT 1) = 'rejected' THEN
+    UPDATE knowledge_index_jobs SET state='pending',lease_id=NULL,lease_until=NULL,
+      last_failure='waiting_for_review',next_attempt_at=clock_timestamp()+interval '1 minute',
+      attempts=0 WHERE revision_id=p_revision;
+    PERFORM set_config('opengeni.knowledge_index_dispatcher',coalesce(previous,''),true);
+    RETURN false;
+  END IF;
+  PERFORM set_config('opengeni.knowledge_index_dispatcher',coalesce(previous,''),true);
+  RETURN true;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM set_config('opengeni.knowledge_index_dispatcher',coalesce(previous,''),true);
+  RAISE;
+END $$;
+REVOKE ALL ON FUNCTION knowledge_index_paid_publication_guard(uuid,uuid,uuid) FROM PUBLIC;
 DO $roles$
 DECLARE runtime_role text;
 BEGIN
@@ -106,6 +151,7 @@ BEGIN
     IF runtime_role <> current_user AND EXISTS(SELECT 1 FROM pg_roles WHERE rolname=runtime_role) THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION knowledge_index_billing_policy(uuid,uuid,uuid,text,timestamptz,bigint) TO %I',runtime_role);
       EXECUTE format('GRANT EXECUTE ON FUNCTION knowledge_index_wait_for_funding(uuid,uuid,uuid) TO %I',runtime_role);
+      EXECUTE format('GRANT EXECUTE ON FUNCTION knowledge_index_paid_publication_guard(uuid,uuid,uuid) TO %I',runtime_role);
     END IF;
   END LOOP;
 END $roles$;

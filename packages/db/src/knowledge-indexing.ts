@@ -185,6 +185,20 @@ export async function waitKnowledgeIndexForFunding(db: Database, raw: KnowledgeI
   });
 }
 
+/** Hold publication stable through the paid append + post-use debit commit.
+ * Call only after embedding, inside the same transaction as settlement. */
+export async function guardPaidKnowledgeIndexPublication(db: Database, raw: KnowledgeIndexClaim) {
+  const claim = Claim.parse(raw);
+  return withRlsContext(db, { accountId: claim.accountId }, async (tx) => {
+    const [row] = await rawRows<{ permitted: boolean }>(
+      tx,
+      sql`SELECT knowledge_index_paid_publication_guard(${claim.accountId}::uuid,
+        ${claim.revisionId}::uuid,${claim.leaseId}::uuid) AS permitted`,
+    );
+    return z.boolean().parse(row?.permitted);
+  });
+}
+
 export async function continueKnowledgeIndexJob(db: Database, claim: KnowledgeIndexClaim) {
   return work(db, claim, { operation: "continue" });
 }

@@ -9,6 +9,7 @@ import {
   deferKnowledgeIndexJob,
   freezeKnowledgeIndexBillingMode,
   getBillingBalance,
+  guardPaidKnowledgeIndexPublication,
   knowledgeIndexBillingActivationTime,
   readKnowledgeIndexSource,
   recordUsageEvent,
@@ -124,6 +125,12 @@ export function createKnowledgeIndexingActivities(
               const vectors = await embedder.embedMany(inputs);
               if (vectors.length !== chunks.length)
                 throw new Error("Incomplete Knowledge embeddings");
+              // A reviewer may have rejected this revision during the provider
+              // call. The DB guard holds its publication row through settlement.
+              if (paid && !(await guardPaidKnowledgeIndexPublication(lockedDb, claim))) {
+                result.deferred++;
+                return;
+              }
               const appended = await appendKnowledgeIndexChunks(
                 lockedDb,
                 claim,

@@ -169,6 +169,8 @@ async function seedBalance(accountId: string, micros: number): Promise<void> {
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("warm-meter-worker");
   if (!shared) {
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1")
+      throw new Error("Worker warm-meter verification requires PostgreSQL");
     available = false;
     // eslint-disable-next-line no-console
     console.warn("[warm-meter-worker] docker unavailable, skipping");

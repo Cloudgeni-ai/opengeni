@@ -708,7 +708,7 @@ describe("durable ComputerSession lifecycle", () => {
     ).toMatchObject({ lifecycle: "active", failureCode: null });
   }, 60_000);
 
-  test("makes ComputerSession loss durable before force-draining its placement", async () => {
+  test("keeps an active ComputerSession alive when the account balance is exhausted", async () => {
     if (!available) return;
     const scope = await fixture();
     const operationId = crypto.randomUUID();
@@ -760,17 +760,18 @@ describe("durable ComputerSession lifecycle", () => {
       maxWarmSecondsPerWorkspace: 0,
       idleGraceMs: 0,
     });
-    expect(drained).toMatchObject({ overLimit: true, reason: "balance" });
-    expect(drained.drained).toHaveLength(1);
+    // Post-use debit may take the ledger negative, but an existing holder is
+    // allowed to finish: paid admission fences only *new* holders.
+    expect(drained).toMatchObject({ overLimit: false, reason: null, drained: [] });
     expect(
       await getComputerSession(client.db, {
         ...scope,
         computerSessionId: computer.session.id,
       }),
     ).toMatchObject({
-      lifecycle: "lost",
-      controller: null,
-      failureCode: "workspace_force_drained",
+      lifecycle: "active",
+      controller,
+      failureCode: null,
     });
   });
 

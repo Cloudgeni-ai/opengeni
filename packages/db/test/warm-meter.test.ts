@@ -173,6 +173,8 @@ async function seedBalance(accountId: string, micros: number): Promise<void> {
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("warm-meter-db");
   if (!shared) {
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1")
+      throw new Error("Warm-meter verification requires PostgreSQL");
     available = false;
     // eslint-disable-next-line no-console
     console.warn("[warm-meter-db] docker unavailable, skipping");
@@ -242,6 +244,11 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     const paidWs = await freshWorkspace();
     await seedBalance(paidWs.accountId, 500);
     await warmGroup(paidWs, [{ kind: "viewer", holderId: "paid-viewer" }], paid);
+    // A Modal drain may only be re-armed when its provider is resumable.
+    await admin`
+      update sandbox_leases set resume_state = jsonb_set(resume_state,
+        '{opengeniProviderInstanceId}', '"box"'::jsonb)
+      where workspace_id = ${paidWs.workspaceId} and sandbox_group_id = ${paidWs.groupId}`;
     await seedBalance(paidWs.accountId, -500);
     const paidAcquire = (kind: "turn" | "viewer" | "direct" | "interaction", holderId: string) =>
       acquireLease(db, {
@@ -257,6 +264,17 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       await expect(paidAcquire(kind, `zero-${kind}`)).rejects.toBeInstanceOf(
         SandboxPaidComputeAdmissionError,
       );
+      await expect(
+        acquireLease(db, {
+          ...paidWs,
+          sandboxGroupId: paidWs.groupId,
+          kind,
+          holderId: `zero-rate-${kind}`,
+          backend: "modal",
+          leaseTtlMs: 90_000,
+          warmBilling: { mode: "credits", rateMicrosPerSecond: 0 },
+        }),
+      ).rejects.toBeInstanceOf(SandboxPaidComputeAdmissionError);
     }
     // Once its last holder releases, the paid lease may drain; standalone
     // re-arm still checks credits before prolonging it.
@@ -479,7 +497,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     expect(explicit?.state.opengeniWarmBilling.stopChargeAt).toBeUndefined();
   }, 60_000);
 
-  test("a zero-priced credits lease needs no paid cutoff to drain cold", async () => {
+  test("a zero-priced credits lease has a usage cutoff but needs no paid debit to drain cold", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const epoch = await warmGroup(ws, [{ kind: "viewer", holderId: "free" }], {
@@ -499,7 +517,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
         sandboxGroupId: ws.groupId,
         expectedEpoch: epoch,
       }),
-    ).toBeNull();
+    ).toBeInstanceOf(Date);
     const final = await accrueWarmSeconds(db, {
       ...ws,
       sandboxGroupId: ws.groupId,
@@ -513,6 +531,49 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       (await confirmDrainCold(db, { ...ws, sandboxGroupId: ws.groupId, expectedEpoch: epoch }))
         .wentCold,
     ).toBe(true);
+  }, 60_000);
+
+  test("final warm usage stops at provider termination in every non-debit mode", async () => {
+    if (!available) return;
+    for (const mode of ["usage_only", "shadow", "credits"] as const) {
+      const ws = await freshWorkspace();
+      const epoch = await warmGroup(ws, [{ kind: "viewer", holderId: mode }], {
+        mode,
+        rateMicrosPerSecond: mode === "credits" ? 0 : 100,
+      });
+      await backdateWarmStart(ws.workspaceId, ws.groupId, 10);
+      await releaseLeaseHolder(db, {
+        ...ws,
+        sandboxGroupId: ws.groupId,
+        kind: "viewer",
+        holderId: mode,
+        idleGraceMs: 0,
+      });
+      expect(
+        await markWarmBillingStopCutoff(db, {
+          ...ws,
+          sandboxGroupId: ws.groupId,
+          expectedEpoch: epoch,
+        }),
+      ).toBeInstanceOf(Date);
+      // Simulate a delayed settlement retry after provider stop. Its recorded
+      // warm interval must end at the saved cutoff, not the retry's wall clock.
+      await admin`
+        update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{opengeniWarmBilling,stopChargeAt}', to_jsonb(now() - interval '5 seconds'))
+        where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
+      const final = await accrueWarmSeconds(db, {
+        ...ws,
+        sandboxGroupId: ws.groupId,
+        expectedEpoch: epoch,
+        warmRateMicrosPerSecond: 100,
+        billingMode: mode,
+        finalDrain: true,
+      });
+      expect(final.seconds).toBeGreaterThanOrEqual(4);
+      expect(final.seconds).toBeLessThanOrEqual(6);
+      expect(await eventCount(ws.workspaceId, "sandbox.warm_cost")).toBe(0);
+    }
   }, 60_000);
 
   test("paid lease extension refuses zero balance without removing its active holder", async () => {
