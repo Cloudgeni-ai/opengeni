@@ -153,7 +153,7 @@ async function seedScenario(
           temporal_workflow_id, tool_policy
         ) values (
           ${sessionId}, ${ws.accountId}, ${ws.workspaceId}, 'capacity test',
-          'codex/gpt-5.6-sol', 'medium', 'standard', 'modal', ${sessionId}, 'running', ${workflowId},
+          'codex/gpt-6-sol', 'medium', 'standard', 'modal', ${sessionId}, 'running', ${workflowId},
           jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
         )
       `);
@@ -165,7 +165,7 @@ async function seedScenario(
         execution_generation, active_attempt_id
       ) values (
         ${turnId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${crypto.randomUUID()},
-        ${workflowId}, 'running', 1, 'capacity test', 'codex/gpt-5.6-sol',
+        ${workflowId}, 'running', 1, 'capacity test', 'codex/gpt-6-sol',
         'xhigh', 'modal', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
         1, ${attemptId}
       )
@@ -315,7 +315,7 @@ describe("durable Codex capacity waits", () => {
           subjectId: "capacity-test-operator",
           request: { clientEventId: crypto.randomUUID(), failureEventId: failure.id },
           executionPolicy: resolveTurnExecutionPolicyV1(settings, {
-            modelId: "codex/gpt-5.6-sol",
+            modelId: "codex/gpt-6-sol",
             requestedModelId: null,
             modelSource: "session",
             reasoningEffort: "xhigh",
@@ -329,7 +329,7 @@ describe("durable Codex capacity waits", () => {
     expect(retried).toMatchObject({ outcome: "accepted", turnId: scenario.turnId });
     const next = await claimTestTurn(dbB, ws.workspaceId, scenario.sessionId, scenario.workflowId);
     expect(next?.id).toBe(scenario.turnId);
-    expect(next?.model).toBe("codex/gpt-5.6-sol");
+    expect(next?.model).toBe("codex/gpt-6-sol");
     expect(readCodexCapacityRecovery(next?.metadata).falseResumptions).toBe(0);
   });
 
@@ -472,7 +472,7 @@ describe("durable Codex capacity waits", () => {
               delivery: "send",
               text: "Continue",
               resources: [],
-              model: "codex/gpt-5.6-sol",
+              model: "codex/gpt-6-sol",
               reasoningEffort: "xhigh",
               reasoningEffortFallback: "xhigh",
               source: "user",
@@ -491,7 +491,7 @@ describe("durable Codex capacity waits", () => {
     );
     expect(newTurn?.id).toBe(continued.turnId);
     expect(newTurn?.id).not.toBe(scenario.turnId);
-    expect(newTurn?.model).toBe("codex/gpt-5.6-sol");
+    expect(newTurn?.model).toBe("codex/gpt-6-sol");
     expect(readCodexCapacityRecovery(newTurn?.metadata).falseResumptions).toBe(0);
   });
 
@@ -1414,7 +1414,7 @@ describe("durable Codex capacity waits", () => {
       prompt: "newer user work",
       resources: [],
       tools: [],
-      model: "codex/gpt-5.6-sol",
+      model: "codex/gpt-6-sol",
       reasoningEffort: "xhigh",
       sandboxBackend: "modal",
       metadata: {},
@@ -1677,7 +1677,7 @@ describe("durable Codex capacity waits", () => {
               delivery: "steer",
               text: "replace the blocked direction",
               resources: [],
-              model: "codex/gpt-5.6-sol",
+              model: "codex/gpt-6-sol",
               reasoningEffort: "xhigh",
               reasoningEffortFallback: "xhigh",
               source: "user",
