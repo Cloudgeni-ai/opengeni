@@ -7,6 +7,7 @@ import {
   artifactRuntimeTarget,
   type NativeArtifactRuntimeTarget,
 } from "../packages/artifact-tool/src/runtime";
+import { resolvePublicRuntimeArchive, type RuntimeDownload } from "./artifact-runtime-distribution";
 
 const REPOSITORY = "Cloudgeni-ai/opengeni";
 const REPOSITORY_ID = 1212552738;
@@ -21,7 +22,12 @@ const WORKFLOWS = new Set([
 ]);
 
 export type PrebuiltResolution =
-  | { available: true; assetRoot: string; sourceSha: string; source: "cache" | "actions" }
+  | {
+      available: true;
+      assetRoot: string;
+      sourceSha: string;
+      source: "cache" | "actions" | "release";
+    }
   | { available: false; diagnostic: string };
 
 type Command = (args: string[], cwd: string, limit: number, timeout: number) => Promise<Buffer>;
@@ -39,6 +45,7 @@ export async function resolveDevelopmentArtifactRuntime(options: {
   repositoryRoot: string;
   target: NativeArtifactRuntimeTarget;
   command?: Command;
+  publicDownload?: RuntimeDownload;
 }): Promise<PrebuiltResolution> {
   const command = options.command ?? boundedCommand;
   const deadline = Date.now() + 90_000;
@@ -109,6 +116,32 @@ export async function resolveDevelopmentArtifactRuntime(options: {
       /* A missing/corrupt cache never supplies executable authority. */
     }
 
+    let publicFailure = "";
+    try {
+      const published = await resolvePublicRuntimeArchive(
+        sourceSha,
+        options.target,
+        Math.min(deadline, Date.now() + 30_000),
+        options.publicDownload,
+      );
+      validateArtifact(published.artifact);
+      staging = await mkdtemp(join(cacheParent, ".download-"));
+      await verifyArchive(published.archive, published.artifact, options.target, staging, true);
+      await writeFile(join(staging, "archive.zip"), published.archive);
+      await writeFile(join(staging, "provenance.json"), JSON.stringify(published.artifact));
+      await rm(cache, { recursive: true, force: true });
+      await rename(staging, cache);
+      staging = undefined;
+      await pruneCache(cacheParent, cache);
+      await recheckSource();
+      return { available: true, assetRoot: cache, sourceSha, source: "release" };
+    } catch (error) {
+      publicFailure = error instanceof Error ? error.message : "public release unavailable";
+      if (staging) {
+        await rm(staging, { recursive: true, force: true });
+        staging = undefined;
+      }
+    }
     const api = async (path: string) =>
       JSON.parse(
         (
@@ -136,7 +169,7 @@ export async function resolveDevelopmentArtifactRuntime(options: {
     }
     if (!selected)
       throw new Error(
-        "no successful exact-source artifact within the bounded 10-artifact lookup (CI retention is 3 days)",
+        `public release unavailable (${publicFailure}); no successful exact-source artifact within the bounded 10-artifact lookup (CI retention is 3 days)`,
       );
     const archive = await run(
       [
@@ -162,7 +195,7 @@ export async function resolveDevelopmentArtifactRuntime(options: {
   } catch (error) {
     return {
       available: false,
-      diagnostic: `Prebuilt artifact runtime unavailable: ${error instanceof Error ? error.message : "resolution failed"}. Falling back to pinned Rust source build. For Actions downloads install/authenticate gh with Actions read access; no durable anonymous all-host release is published by this resolver.`,
+      diagnostic: `Prebuilt artifact runtime unavailable: ${error instanceof Error ? error.message : "resolution failed"}. Falling back to pinned Rust source build. Anonymous setup requires an immutable exact-source runtime release; optional Actions fallback requires gh with Actions read access and an unexpired artifact.`,
     };
   } finally {
     if (staging) await rm(staging, { recursive: true, force: true });
@@ -188,7 +221,7 @@ async function pruneCache(parent: string, current: string): Promise<void> {
   for (const entry of entries.slice(2)) await rm(entry.path, { recursive: true, force: true });
 }
 
-async function verifyArchive(
+export async function verifyArchive(
   archive: Buffer,
   artifact: Artifact,
   target: NativeArtifactRuntimeTarget,

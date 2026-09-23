@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 
@@ -81,6 +81,40 @@ afterEach(async () => {
 });
 
 describe("development artifact runtime preparation", () => {
+  test("real source fallback aggregates missing tools before compiling", async () => {
+    if (process.platform === "win32") return; // This PATH fixture uses POSIX executable names.
+    const fixture = await createRepositoryFixture();
+    await rm(fixture.assetRoot, { recursive: true, force: true });
+    const bin = join(fixture.repositoryRoot, "bun-only");
+    await mkdir(bin);
+    await symlink(process.execPath, join(bin, "bun"));
+    const errors: unknown[][] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args);
+    };
+    process.env.PATH = bin;
+    try {
+      await expect(
+        prepareDevelopmentArtifactRuntime({
+          repositoryRoot: fixture.repositoryRoot,
+          assetRoot: fixture.assetRoot,
+          outputRoot: fixture.outputRoot,
+          prebuilt: false,
+          doctor: false,
+        }),
+      ).rejects.toThrow("prerequisites");
+      const diagnostics = errors.flat().join("\n");
+      expect(diagnostics).toContain("Missing rustup");
+      expect(diagnostics).toContain("Missing cc");
+      expect(
+        await Bun.file(join(fixture.outputRoot, "installation.development.json")).exists(),
+      ).toBe(false);
+    } finally {
+      console.error = originalError;
+    }
+  });
+
   test("fingerprinting and receipt reuse need no working Rust toolchain", async () => {
     if (process.platform !== "win32") {
       const rustup = join(dirname(directRustLog), "bin", "rustup");
@@ -231,6 +265,7 @@ async function createRepositoryFixture() {
     "scripts/artifact-kernel-rust.ts": "// fixture\n",
     "scripts/prepare-development-artifact-runtime.ts": "// fixture\n",
     "scripts/resolve-development-artifact-runtime.ts": "// fixture\n",
+    "scripts/artifact-runtime-distribution.ts": "// fixture\n",
   };
   for (const [path, contents] of Object.entries(files)) {
     await mkdir(dirname(join(repositoryRoot, path)), { recursive: true });
