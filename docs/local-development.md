@@ -5,6 +5,11 @@ production deployment see [`deployment.md`](deployment.md); for the launcher's
 internals (worktree isolation, port selection, native infrastructure, artifact
 kernel) see [`deployment.md` § Local Development Stack](deployment.md#local-development-stack).
 
+For setup with a coding agent, install the focused
+[`opengeni-local` skill](../.agents/skills/opengeni-local/SKILL.md) and ask it to
+get OpenGeni running on your computer. It handles missing prerequisites and
+checks the full stack before returning the web URL.
+
 ## Prerequisites
 
 - Bun

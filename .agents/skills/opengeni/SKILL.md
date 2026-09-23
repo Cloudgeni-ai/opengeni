@@ -5,7 +5,8 @@ description: >-
   Use when editing, operating, extending, documenting, or debugging the OpenGeni
   source repository or deployment: architecture, sessions/events, worker
   orchestration, sandbox backends, files/storage, tools/MCP, scheduling,
-  configuration, and deployment. For a customer product that consumes a
+  configuration, and deployment. For simply installing or running locally,
+  use opengeni-local. For a customer product that consumes a
   standalone OpenGeni deployment through the SDK or React packages, use the
   separate opengeni-client skill instead.
 ---
@@ -13,6 +14,10 @@ description: >-
 # OpenGeni
 
 This skill is for repo-maintainer agents working in, operating, or changing the OpenGeni repository.
+
+For first-time local installation, starting, stopping, or troubleshooting the
+local stack, use the focused `opengeni-local` skill instead. It can be installed
+on its own from `.agents/skills/opengeni-local` in the public repository.
 
 ## Overview
 

@@ -54,6 +54,10 @@ Prefer to run it yourself? Everything is open source. Jump to [Run it locally](#
 
 ## Run it locally
 
+With a coding agent, use the focused [opengeni-local skill](.agents/skills/opengeni-local/SKILL.md):
+
+> Install the opengeni-local skill from https://github.com/Cloudgeni-ai/opengeni and use it to get OpenGeni running on my computer.
+
 For development, or to evaluate Opengeni before self-hosting. You need [Bun at the exact version in `.bun-version`](.bun-version), Git, curl, Docker, [rustup](https://rustup.rs), a C compiler (Xcode Command Line Tools on macOS or `build-essential` on Debian/Ubuntu), and an OpenAI or Azure OpenAI key.
 
 ```bash

@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenGeni Local"
+  short_description: "Install and run OpenGeni on your computer"
+  default_prompt: "Use $opengeni-local to get OpenGeni running on my computer."
