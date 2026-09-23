@@ -10,6 +10,31 @@ import {
 } from "../src/model-output-truncation";
 
 describe("Codex-parity model tool-output truncation", () => {
+  test("keeps a schema-valid screenshot receipt intact after text budget exhaustion", () => {
+    const marker = {
+      type: "retained_artifact",
+      artifact: {
+        available: false,
+        artifactId: "123e4567-e89b-42d3-a456-426614174000",
+        reason: "pending",
+      },
+    };
+    const item = {
+      type: "function_call_result",
+      callId: "call-screenshot",
+      output: [
+        { type: "input_text", text: "long explanation".repeat(100) },
+        { type: "input_image", image: marker },
+      ],
+    };
+    const bounded = boundModelToolOutputItem(item, 1);
+    expect((bounded.output as typeof item.output)[1]).toEqual({
+      type: "input_image",
+      image: marker,
+    });
+    expect(boundModelToolOutputItem(bounded, 1)).toEqual(bounded);
+  });
+
   test("uses the live 10k policy with Codex's 1.2x serialization allowance", () => {
     expect(modelToolOutputSerializationBudgetTokens()).toBe(12_000);
   });

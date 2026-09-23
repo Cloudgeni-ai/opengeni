@@ -7333,6 +7333,39 @@ export async function getRetainedScreenshotArtifact(
   });
 }
 
+/** Recover a legacy damaged receipt only when its tool call has one exact
+ * screenshot in this session. Never infer an artifact across fork ancestry. */
+export async function getRetainedScreenshotArtifactForToolCall(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  toolCallId: string,
+): Promise<RetainedScreenshotArtifact | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
+      .from(schema.retainedScreenshotArtifacts)
+      .innerJoin(
+        schema.files,
+        and(
+          eq(schema.files.workspaceId, schema.retainedScreenshotArtifacts.workspaceId),
+          eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.retainedScreenshotArtifacts.workspaceId, workspaceId),
+          eq(schema.retainedScreenshotArtifacts.sessionId, sessionId),
+          eq(schema.retainedScreenshotArtifacts.toolCallId, toolCallId),
+        ),
+      )
+      .limit(2);
+    return rows.length === 1
+      ? mapRetainedScreenshotArtifact(rows[0]!.artifact, rows[0]!.file)
+      : null;
+  });
+}
+
 export type RetainedScreenshotMaintenanceClaim = {
   action: "reconcile" | "delete";
   claimId: string;

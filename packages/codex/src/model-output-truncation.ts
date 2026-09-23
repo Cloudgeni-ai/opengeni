@@ -20,6 +20,7 @@
  */
 
 import { MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL } from "./oversized-image-card";
+import { RetainedArtifactMetadataSchema } from "@opengeni/contracts";
 
 export { MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL } from "./oversized-image-card";
 
@@ -402,6 +403,16 @@ function boundTextLeaves(
     return bounded;
   }
   if (!value || typeof value !== "object") return value;
+  // Screenshot receipts are image protocol, not model-visible text. They are
+  // compact, schema-bounded references whose fields must survive a zero text
+  // budget so a resumed turn can materialize the image from durable storage.
+  if (
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>).type === "retained_artifact" &&
+    RetainedArtifactMetadataSchema.safeParse((value as Record<string, unknown>).artifact).success
+  ) {
+    return value;
+  }
   if (depth >= MODEL_TOOL_OUTPUT_MAX_DEPTH) return DEPTH_OMISSION_MARKER;
   if (state.seen.has(value)) return CYCLE_OMISSION_MARKER;
   state.seen.add(value);
