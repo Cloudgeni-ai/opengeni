@@ -5448,7 +5448,7 @@ export function resolveTurnExecutionPolicyV1(
   });
 }
 
-/** A valid accepted policy resolved, but its executable definition differs. */
+/** Explicit accepted execution identity matches, but its definition digest differs. */
 export class TurnExecutionPolicyDefinitionMismatchError extends Error {
   readonly code = "turn_execution_policy_definition_mismatch";
 
@@ -5514,14 +5514,18 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion ||
     parsed.definitionVersion ===
       legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider);
-  const mismatched =
+  const identityMismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
     parsed.wireApi !== resolved.model.api ||
-    !definitionVersionMatches ||
     canonicalJson(parsed.credentialSource) !== canonicalJson(resolved.model.credentialSource) ||
     canonicalJson(parsed.billing) !== canonicalJson(resolved.model.billing);
-  if (mismatched) {
+  // Identity/source changes must never enter a rollout-retry classification,
+  // even when their definition digest also differs.
+  if (identityMismatched) {
+    throw new Error("Turn execution policy does not match the current provider definition");
+  }
+  if (!definitionVersionMatches) {
     throw new TurnExecutionPolicyDefinitionMismatchError();
   }
   return { policy: parsed, provider: resolved.provider, model: resolved.model };
