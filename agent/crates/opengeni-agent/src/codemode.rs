@@ -572,11 +572,6 @@ impl Catalog {
             entries: vec![entry.clone()],
         };
         let output = serde_json::to_string_pretty(&single.list_projection()["tools"][0])?;
-        if output.len() + 1 > 64 * 1024 {
-            return Err(CodemodeError::InvalidArguments(
-                "Tool details exceed 65536 bytes; use list --full".to_string(),
-            ));
-        }
         Ok(format!("{output}\n"))
     }
 
@@ -1135,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn show_is_single_tool_bounded_and_fails_closed() {
+    fn show_is_single_tool_lossless_and_fails_closed_for_names() {
         let tool = entry("server", "tool", "server__tool", &["server", "tool"]);
         let mut catalog = catalog(vec![
             tool,
@@ -1156,18 +1151,12 @@ mod tests {
             .contains("Ambiguous"));
         catalog.entries.pop();
         catalog.entries[0].input_schema = json!({"type": "object", "description": ""});
-        let remaining = 65_536 - catalog.show_output("server.tool").unwrap().len();
-        catalog.entries[0].input_schema["description"] = json!("x".repeat(remaining));
-        assert_eq!(catalog.show_output("server.tool").unwrap().len(), 65_536);
-        catalog.entries[0].input_schema["description"] = json!("x".repeat(remaining + 1));
-        assert!(catalog.show_output("server.tool").is_err());
         catalog.entries[0].input_schema =
             json!({"type": "object", "description": "😀".repeat(17_000)});
-        assert!(catalog
-            .show_output("server.tool")
-            .unwrap_err()
-            .to_string()
-            .contains("exceed 65536 bytes"));
+        let output = catalog.show_output("server.tool").unwrap();
+        assert!(output.len() > 65_536);
+        let shown: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(shown["inputSchema"], catalog.entries[0].input_schema);
     }
 
     #[test]

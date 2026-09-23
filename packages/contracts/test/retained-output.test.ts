@@ -7,6 +7,8 @@ import {
   RetainedOutputEvidenceSchema,
   retainedArtifactReferenceFromFile,
   retainedGeneratedImageReferenceFromFile,
+  retainedScreenshotReferenceFromFile,
+  retainedSessionScreenshotKindFromObjectKey,
   resolveRetainedOutputRange,
   validateRetainedOutputEvidence,
 } from "../src/retained-output";
@@ -130,6 +132,44 @@ describe("retained-output evidence", () => {
     });
     if (!reference) throw new Error("expected a ready image to mint a retained artifact reference");
     expect(RetainedArtifactReferenceSchema.parse(reference)).toEqual(reference);
+  });
+
+  test("distinguishes browser and legacy computer screenshots using their durable storage keys", () => {
+    const base = `workspaces/${WORKSPACE_ID}/files/${ARTIFACT_ID}/retained/`;
+    expect(retainedSessionScreenshotKindFromObjectKey(`${base}session-image.png`)).toBe(
+      "computer_screenshot",
+    );
+    expect(retainedSessionScreenshotKindFromObjectKey(`${base}browser-screenshot.webp`)).toBe(
+      "browser_screenshot",
+    );
+    expect(retainedSessionScreenshotKindFromObjectKey(`${base}other.png`)).toBeNull();
+    const screenshot = {
+      id: ARTIFACT_ID,
+      workspaceId: WORKSPACE_ID,
+      sessionId: "22222222-2222-4222-8222-222222222222",
+      status: "ready",
+      contentType: "image/webp",
+      sizeBytes: 1024,
+      sha256: "b".repeat(64),
+      updatedAt: "2026-08-08T00:00:00.000Z",
+      width: 1024,
+      height: 768,
+      expiresAt: "2026-09-07T00:00:00.000Z",
+    };
+    const browser = retainedScreenshotReferenceFromFile({
+      ...screenshot,
+      kind: "browser_screenshot",
+    });
+    if (!browser) throw new Error("browser screenshot receipt was not minted");
+    expect(browser?.kind).toBe("browser_screenshot");
+    expect(RetainedArtifactReferenceSchema.parse(browser)).toEqual(browser);
+    expect(retainedScreenshotReferenceFromFile(screenshot)?.kind).toBe("computer_screenshot");
+    expect(
+      RetainedArtifactReferenceSchema.safeParse({
+        ...browser,
+        retention: { policy: "workspace_file", expiresAt: null },
+      }).success,
+    ).toBe(false);
   });
 
   test("represents authenticated unavailable artifact metadata without a provider location", () => {

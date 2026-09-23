@@ -73,6 +73,7 @@ const EXPECTED_CAPS = [
   ["ci.yml", "browser-acceptance", "Browser account session-set acceptance", 14, "run"],
   ["ci.yml", "browser-acceptance", "Workbench browser acceptance", 4, "run"],
   ["ci.yml", "browser-acceptance", "Compact session-search header browser acceptance", 8, "run"],
+  ["ci.yml", "browserd-real-e2e", "Run actual browserd end-to-end suite", 6, "run"],
   ["desktop-e2e.yml", "desktop-image", "Desktop image e2e", 36, "run"],
   [
     "publish-desktop-image.yml",
@@ -84,6 +85,7 @@ const EXPECTED_CAPS = [
   ["ci.yml", "e2e-shards", "Install pinned browser runtimes", 17, "action"],
   ["ci.yml", "browser-acceptance", "Install pinned lane browser runtimes", 17, "action"],
   ["ci.yml", "package-contracts", "Install Chromium for packed WASM package proof", 17, "action"],
+  ["ci.yml", "browserd-real-e2e", "Install pinned Chromium", 17, "action"],
 ] as const;
 
 const EXPECTED_JOB_BUDGETS = {
@@ -99,6 +101,7 @@ const EXPECTED_JOB_BUDGETS = {
   "ci.yml:test-suite": { stepCaps: 18, needed: 19, jobCap: 30 },
   "ci.yml:browser-acceptance": { stepCaps: 63, needed: 64, jobCap: 70 },
   "ci.yml:package-contracts": { stepCaps: 38, needed: 39, jobCap: 55 },
+  "ci.yml:browserd-real-e2e": { stepCaps: 23, needed: 24, jobCap: 25 },
   "desktop-e2e.yml:desktop-image": { stepCaps: 36, needed: 37, jobCap: 45 },
   "publish-desktop-image.yml:ghcr-mirror": { stepCaps: 5, needed: 6, jobCap: 10 },
 } as const;
@@ -120,7 +123,7 @@ function numericCap(value: unknown): number | null {
 }
 
 describe("workflow timeout contract", () => {
-  test("all jobs and the exact 26 run plus 4 action steps use static native caps", async () => {
+  test("all jobs and the exact 27 run plus 5 action steps use static native caps", async () => {
     const workflows = await loadWorkflows();
     const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
     const budgets: Record<string, { stepCaps: number; needed: number; jobCap: number }> = {};
@@ -160,8 +163,8 @@ describe("workflow timeout contract", () => {
       right: readonly [string, string, string, number, "run" | "action"],
     ) => left.slice(0, 3).join("\0").localeCompare(right.slice(0, 3).join("\0"));
     expect(capped.toSorted(byIdentity)).toEqual(EXPECTED_CAPS.toSorted(byIdentity));
-    expect(capped.filter((row) => row[4] === "run")).toHaveLength(26);
-    expect(capped.filter((row) => row[4] === "action")).toHaveLength(4);
+    expect(capped.filter((row) => row[4] === "run")).toHaveLength(27);
+    expect(capped.filter((row) => row[4] === "action")).toHaveLength(5);
     for (const [job, expected] of Object.entries(EXPECTED_JOB_BUDGETS)) {
       expect(budgets[job], job).toEqual(expected);
     }
@@ -176,7 +179,7 @@ describe("workflow timeout contract", () => {
           .map((step) => ({ file, job, step })),
       ),
     );
-    expect(callers).toHaveLength(4);
+    expect(callers).toHaveLength(5);
     expect(callers.find(({ job }) => job === "browser-acceptance")?.step.with?.browsers).toBe(
       "${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || matrix.lane == 'accounts' && matrix.engine || 'chromium' }}",
     );

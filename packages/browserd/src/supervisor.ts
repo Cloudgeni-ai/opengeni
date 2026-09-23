@@ -8,6 +8,8 @@ import type {
   BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserDiagnosticKind,
+  BrowserDomReadRequest,
+  BrowserDomReadResponse,
   BrowserDownload,
   BrowserExternalAuthCommand,
   BrowserObservation,
@@ -15,6 +17,7 @@ import type {
   BrowserProtectedAuthObservation,
   BrowserRevisionMaterialization,
   BrowserTarget,
+  BrowserTargetState,
   BrowserWorkspaceFileStageRequest,
   BrowserWorkspaceFileStageResponse,
   BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
@@ -183,6 +186,8 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   openTarget(url?: string): Promise<BrowserObservation>;
   selectTarget(targetId: string): Promise<BrowserObservation>;
   closeTarget(targetId: string): Promise<BrowserTarget[]>;
+  targetState(targetId: string): Promise<BrowserTargetState>;
+  readDom(targetId: string, request: BrowserDomReadRequest): Promise<BrowserDomReadResponse>;
   captureScreenshot(
     targetId: string,
     options?: BrowserScreenshotOptions,
@@ -465,6 +470,29 @@ export class BrowserSupervisor {
     });
     this.rememberObservation(runtime, observation);
     return observation;
+  }
+
+  async targetState(
+    reference: BrowserSessionReference,
+    targetId: string,
+  ): Promise<BrowserTargetState> {
+    const runtime = this.requireActive(reference);
+    return await this.readWithRecovery(
+      runtime,
+      async () => await runtime.driver.targetState(targetId),
+    );
+  }
+
+  async readDom(
+    reference: BrowserSessionReference,
+    targetId: string,
+    request: BrowserDomReadRequest,
+  ): Promise<BrowserDomReadResponse> {
+    const runtime = this.requireActive(reference);
+    return await this.readWithRecovery(
+      runtime,
+      async () => await runtime.driver.readDom(targetId, request),
+    );
   }
 
   readClipboard(reference: BrowserSessionReference): BrowserClipboard {
@@ -1079,6 +1107,7 @@ export class BrowserSupervisor {
     try {
       return await operation();
     } catch (error) {
+      if (error instanceof InteractionDefiniteDriverError) throw error;
       if (!(await this.recoverIfUnavailable(runtime))) throw error;
       return await operation();
     }

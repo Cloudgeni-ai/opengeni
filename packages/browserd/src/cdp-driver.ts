@@ -6,6 +6,8 @@ import {
   BrowserDiagnosticBatch,
   BrowserDiagnosticEntry,
   BrowserDialog,
+  BrowserDomReadResponse,
+  BrowserTargetState,
   BrowserExternalAuthCommand,
   BrowserExternalAuthResult,
   BrowserObservation,
@@ -22,6 +24,9 @@ import {
   type BrowserExternalAuthCommand as BrowserExternalAuthCommandValue,
   type BrowserExternalAuthResult as BrowserExternalAuthResultValue,
   type BrowserLocator,
+  type BrowserDomReadRequest as BrowserDomReadRequestValue,
+  type BrowserDomReadResponse as BrowserDomReadResponseValue,
+  type BrowserTargetState as BrowserTargetStateValue,
   type BrowserObservation as BrowserObservationValue,
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
   type BrowserProtectedAuthObservation as BrowserProtectedAuthObservationValue,
@@ -580,6 +585,135 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     );
   }
 
+  /** Refresh only the main-frame generation. No accessibility tree is read. */
+  async targetState(targetId: string): Promise<BrowserTargetStateValue> {
+    return await this.withTarget(targetId, async (state) => {
+      if (!state.dialog) await this.refreshFrame(state);
+      return this.targetStateFrom(state);
+    });
+  }
+
+  async readDom(
+    targetId: string,
+    request: BrowserDomReadRequestValue,
+  ): Promise<BrowserDomReadResponseValue> {
+    return await this.withTarget(targetId, async (state) => {
+      if (request.kind === "count") {
+        assertSafeDomReadSelector(request.selector);
+      } else if (request.locator.kind === "css") {
+        assertSafeDomReadSelector(request.locator.selector);
+      }
+      if (this.protectedAuthQuiet(state)) {
+        throw new InteractionDefiniteDriverError(
+          "permission_denied",
+          "browser DOM reads are unavailable during protected authentication",
+        );
+      }
+      if (state.dialog) {
+        throw new InteractionDefiniteDriverError(
+          "resource_unavailable",
+          "browser DOM reads are unavailable while a dialog is open",
+        );
+      }
+      await this.refreshFrame(state);
+      this.assertReadGenerations(request, state);
+      let result: Record<string, unknown>;
+      if (request.kind === "count") {
+        const count = await this.domSelectorCount(state, request.selector);
+        result = { kind: "count", count, truncated: false };
+      } else {
+        const entry = await this.resolveLocator(state, request.locator);
+        const value = await this.callOnNode(state, entry.backendDOMNodeId, DOM_READ_FUNCTION, [
+          { value: request.maxChars ?? 4_096 },
+          { value: request.attributes ?? [] },
+        ]);
+        if (!isRecord(value) || value.ok !== true) {
+          throw new InteractionDefiniteDriverError(
+            "locator_not_found",
+            "browser DOM element is no longer available",
+          );
+        }
+        result = {
+          kind: "element",
+          count: 1,
+          text: value.text,
+          value: value.value,
+          attributes: value.attributes,
+          redacted: value.redacted,
+          truncated: value.truncated,
+        };
+      }
+      await this.refreshFrame(state);
+      this.assertReadGenerations(request, state);
+      if (this.protectedAuthQuiet(state)) {
+        throw new InteractionDefiniteDriverError(
+          "permission_denied",
+          "browser DOM reads are unavailable during protected authentication",
+        );
+      }
+      return BrowserDomReadResponse.parse({ ...this.targetStateFrom(state), ...result });
+    });
+  }
+
+  private targetStateFrom(state: TargetState): BrowserTargetStateValue {
+    return BrowserTargetState.parse({
+      browserSessionId: this.browserSessionId,
+      controllerGeneration: this.controllerGeneration,
+      targetId: state.targetId,
+      targetGeneration: this.targetGeneration(state.targetId),
+      documentGeneration: state.documentGeneration,
+      frameId: state.frameGeneration,
+    });
+  }
+
+  private assertReadGenerations(request: BrowserDomReadRequestValue, state: TargetState): void {
+    if (request.expectedTargetGeneration !== this.targetGeneration(state.targetId)) {
+      throw new InteractionDefiniteDriverError(
+        "target_stale",
+        "browser target changed before DOM read",
+      );
+    }
+    if (request.expectedDocumentGeneration !== state.documentGeneration) {
+      throw new InteractionDefiniteDriverError(
+        "document_stale",
+        "browser document changed before DOM read",
+      );
+    }
+    if (request.expectedFrameId !== state.frameGeneration) {
+      throw new InteractionDefiniteDriverError(
+        "frame_stale",
+        "browser frame changed before DOM read",
+      );
+    }
+  }
+
+  private async domSelectorCount(state: TargetState, selector: string): Promise<number> {
+    const document = await this.sendTarget<{ root?: unknown }>(state, "DOM.getDocument", {
+      depth: 0,
+      pierce: true,
+    });
+    if (!isRecord(document.root) || typeof document.root.nodeId !== "number") {
+      throw new Error("CDP returned an invalid DOM root");
+    }
+    let result: { nodeIds?: unknown };
+    try {
+      result = await this.sendTarget(state, "DOM.querySelectorAll", {
+        nodeId: document.root.nodeId,
+        selector,
+      });
+    } catch (error) {
+      if (error instanceof CdpProtocolError) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "browser CSS selector is invalid",
+        );
+      }
+      throw error;
+    }
+    if (!Array.isArray(result.nodeIds)) throw new Error("CDP returned an invalid DOM query result");
+    return result.nodeIds.length;
+  }
+
   async debug(
     targetId: string,
     options: {
@@ -629,6 +763,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return await this.withTarget(
       targetId,
       async (state) => {
+        if (this.protectedAuthQuiet(state)) {
+          throw new InteractionDefiniteDriverError(
+            "permission_denied",
+            "browser screenshot is unavailable during protected authentication",
+          );
+        }
         await this.refreshFrame(state);
         const metrics = await this.layoutMetrics(state);
         const capture: Record<string, unknown> = {
@@ -661,6 +801,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           capture,
         );
         const data = decodeBoundedBase64Image(response.data);
+        if (this.protectedAuthQuiet(state)) {
+          throw new InteractionDefiniteDriverError(
+            "permission_denied",
+            "browser screenshot is unavailable during protected authentication",
+          );
+        }
         const dimensions = imageDimensions(data, normalized.format);
         return this.imageFrame({
           state,
@@ -3658,6 +3804,66 @@ const SCROLL_FUNCTION = `function(deltaX, deltaY) {
   this.scrollBy({ left: deltaX, top: deltaY, behavior: "instant" });
   return true;
 }`;
+
+/** Fixed browser-side projection. Every field shares one character budget, so
+ * a huge page cannot turn a focused query into an unbounded CDP payload. */
+const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes) {
+  const element = this && this.nodeType === 1 ? this : this?.parentElement;
+  if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false };
+  const privateSelector = "[data-private], [data-sensitive], [data-opengeni-private]";
+  const sensitiveReason = (node) => {
+    const nodeTag = String(node.tagName || "").toLowerCase();
+    const type = nodeTag === "input" ? String(node.getAttribute("type") || "text").toLowerCase() : "";
+    const autocomplete = String(node.getAttribute("autocomplete") || "").toLowerCase();
+    const fieldName = String(node.getAttribute("name") || "") + " " + String(node.getAttribute("id") || "");
+    if (type === "password" || /(?:current|new)-password|one-time-code/.test(autocomplete)) return "password";
+    if (/(?:^|\\s)cc-/.test(autocomplete) || /(?:card.?number|credit.?card|cvv|cvc|security.?code|expiry|expiration)/i.test(fieldName)) return "payment";
+    if (type === "hidden" || node.matches(privateSelector)) return "private";
+    return null;
+  };
+  const tag = String(element.tagName || "").toLowerCase();
+  let redacted = sensitiveReason(element);
+  for (let ancestor = element.parentElement; !redacted && ancestor; ancestor = ancestor.parentElement) {
+    redacted = sensitiveReason(ancestor);
+  }
+  if (redacted) return { ok: true, text: null, value: null, attributes: {}, redacted, truncated: false };
+  // A container's innerText includes sensitive descendants. Refuse the whole
+  // container rather than returning their protected text through an ancestor.
+  for (const node of element.querySelectorAll("[id], [name], [autocomplete], input, " + privateSelector)) {
+    const reason = sensitiveReason(node);
+    if (reason) return { ok: true, text: null, value: null, attributes: {}, redacted: reason, truncated: false };
+  }
+  const allowed = new Set(["href", "src", "alt", "title", "role", "aria-label", "aria-expanded",
+    "aria-checked", "aria-selected", "placeholder", "type", "name", "data-testid"]);
+  let remaining = maxChars;
+  let truncated = false;
+  const bounded = (raw) => {
+    if (raw === null || raw === undefined) return null;
+    const value = String(raw);
+    const kept = value.slice(0, remaining);
+    remaining -= kept.length;
+    if (kept.length < value.length) truncated = true;
+    return kept;
+  };
+  const text = bounded(element.innerText ?? element.textContent ?? "");
+  const value = tag === "input" || tag === "textarea" || tag === "select"
+    ? bounded(element.value ?? "") : null;
+  const attributes = {};
+  for (const attribute of requestedAttributes) {
+    if (allowed.has(attribute)) attributes[attribute] = bounded(element.getAttribute(attribute));
+  }
+  return { ok: true, text, value, attributes, redacted: null, truncated };
+}`;
+
+/** Attribute and pseudo selectors would turn count/not-found into a secret-value oracle. */
+function assertSafeDomReadSelector(selector: string): void {
+  if (!/^[A-Za-z0-9_#.,\s>*-]+$/u.test(selector)) {
+    throw new InteractionDefiniteDriverError(
+      "invalid_action",
+      "browser DOM read supports only tag, class, id, descendant, and child selectors",
+    );
+  }
+}
 
 const COPY_BROWSER_TEXT_FUNCTION = `function(content) {
   const element = this && this.nodeType === 1 ? this : this?.parentElement;

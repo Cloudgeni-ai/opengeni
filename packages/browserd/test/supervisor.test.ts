@@ -902,6 +902,31 @@ function fakeDriver(
       hooks.observe?.(instance);
       return observation();
     },
+    async targetState() {
+      requireOpen();
+      return {
+        browserSessionId: context.browserSessionId,
+        controllerGeneration: context.controllerGeneration,
+        targetId: target.id,
+        targetGeneration: target.targetGeneration,
+        documentGeneration: target.documentGeneration,
+        frameId: "frame-1",
+      };
+    },
+    async readDom(_targetId, request) {
+      requireOpen();
+      return {
+        browserSessionId: context.browserSessionId,
+        controllerGeneration: context.controllerGeneration,
+        targetId: target.id,
+        targetGeneration: target.targetGeneration,
+        documentGeneration: target.documentGeneration,
+        frameId: "frame-1",
+        kind: request.kind,
+        count: request.kind === "element" ? 1 : 0,
+        truncated: false,
+      };
+    },
     async dispatch() {
       requireOpen();
       await hooks.dispatch?.(instance);

@@ -9,10 +9,15 @@ import {
   BrowserActionReceipt,
   BrowserClipboard,
   BrowserDiagnosticBatch,
+  BrowserDomReadResponse,
+  BrowserDomReadLocator,
+  BrowserDomReadSelector,
+  BrowserDomSafeAttribute,
   BrowserIdentity,
   BrowserIdentityListResponse,
   BrowserIdentityMutationResponse,
   BrowserObservation,
+  InteractionSemanticNode,
   BrowserRevisionListResponse,
   BrowserSession,
   BrowserSessionMutationResponse,
@@ -61,6 +66,7 @@ import type {
 } from "@opengeni/codemode";
 import { OpenGeniApiError, OpenGeniClient, type InteractionTransport } from "@opengeni/sdk";
 import { z } from "zod";
+import { browserActionInputJsonSchema } from "./browser-action-json-schema";
 import { guardedMcpFetch } from "./mcp-network";
 
 export const INTERACTION_ATTEMPT_TOOL_NAMES = FIRST_PARTY_IN_PROCESS_TOOL_NAMES;
@@ -74,11 +80,200 @@ class InteractionExecutionResult<T> {
   ) {}
 }
 
+const BROWSER_AGENT_MAX_NODES = 60;
+const BROWSER_AGENT_MAX_NODE_BYTES = 12_000;
+const BROWSER_AGENT_MAX_FIELD_LENGTH = 180;
+const BROWSER_READ_MAX_NODES = 80;
+// A base64 image is journaled inside a 16 MiB Code Mode result. Leave room
+// for JSON framing, metadata, and other content instead of failing after capture.
+const BROWSER_TOOL_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+
+const BrowserAgentNode = z
+  .object({
+    ref: z.string().max(512),
+    role: z.string().max(256),
+    depth: z.number().int().nonnegative(),
+    name: z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH).optional(),
+    description: z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH).optional(),
+    value: z
+      .union([
+        z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH),
+        z.object({ redacted: z.literal(true), reason: z.string().max(32) }).strict(),
+      ])
+      .optional(),
+    states: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).max(6),
+    actions: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).max(6),
+  })
+  .strict();
+const BrowserAgentView = z
+  .object({
+    kind: z.literal("compact"),
+    sourceKind: z.enum(["snapshot", "diff", "none"]),
+    nodes: z.array(BrowserAgentNode).max(BROWSER_AGENT_MAX_NODES),
+    sourceNodeCount: z.number().int().nonnegative(),
+    omittedNodeCount: z.number().int().nonnegative(),
+    removedRefCount: z.number().int().nonnegative(),
+    clippedFieldCount: z.number().int().nonnegative(),
+    maxNodes: z.number().int().positive(),
+    maxNodeBytes: z.number().int().positive(),
+  })
+  .strict();
+const CompactBrowserObservation = BrowserObservation.safeExtend({
+  semantic: z.null(),
+  agentView: BrowserAgentView,
+});
+const BrowserAgentObservation = z.union([BrowserObservation, CompactBrowserObservation]);
+const BrowserAgentActionReceipt = BrowserActionReceipt.safeExtend({
+  observation: BrowserAgentObservation.nullable(),
+});
+const BrowserScreenshotInput = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    targetId: z.string().min(1).max(512),
+    fullPage: z.boolean().optional(),
+    quality: z.number().int().min(1).max(100).optional(),
+  })
+  .strict();
+const BrowserScreenshotOutput = z
+  .object({
+    kind: z.literal("browser_screenshot"),
+    browserSessionId: z.string().uuid(),
+    targetId: z.string(),
+    frameId: z.string(),
+    targetGeneration: z.string(),
+    documentGeneration: z.string(),
+    mediaType: z.enum(["image/jpeg", "image/png"]),
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+    deviceScaleFactor: z.number().positive(),
+    scrollX: z.number(),
+    scrollY: z.number(),
+    capturedAt: z.string(),
+    fullPage: z.boolean(),
+  })
+  .strict();
+const BrowserReadInput = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    targetId: z.string().min(1).max(512),
+    mode: z.enum(["matches", "count", "subtree", "dom"]).optional(),
+    dom: z
+      .discriminatedUnion("kind", [
+        z
+          .object({
+            kind: z.literal("element"),
+            locator: BrowserDomReadLocator,
+            attributes: z.array(BrowserDomSafeAttribute).max(6).optional(),
+            maxChars: z.number().int().min(1).max(4_096).optional(),
+          })
+          .strict(),
+        z
+          .object({
+            kind: z.literal("count"),
+            selector: BrowserDomReadSelector,
+          })
+          .strict(),
+      ])
+      .optional(),
+    expectedTargetGeneration: z.string().min(1).max(256).optional(),
+    expectedDocumentGeneration: z.string().min(1).max(256).nullable().optional(),
+    expectedFrameId: z.string().min(1).max(256).nullable().optional(),
+    ref: z.string().min(1).max(512).optional(),
+    scopeRef: z.string().min(1).max(512).optional(),
+    role: z.string().min(1).max(256).optional(),
+    nameContains: z.string().min(1).max(512).optional(),
+    textContains: z.string().min(1).max(512).optional(),
+    state: z.string().min(1).max(128).optional(),
+    action: z.string().min(1).max(128).optional(),
+    limit: z.number().int().min(1).max(BROWSER_READ_MAX_NODES).optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.mode === "subtree" && !value.ref) {
+      context.addIssue({ code: "custom", path: ["ref"], message: "subtree requires a ref" });
+    }
+    if ((value.mode === "dom") !== (value.dom !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["dom"],
+        message: "dom query is required only with mode=dom",
+      });
+    }
+    if (
+      value.mode === "dom" &&
+      [
+        value.ref,
+        value.scopeRef,
+        value.role,
+        value.nameContains,
+        value.textContains,
+        value.state,
+        value.action,
+        value.limit,
+      ].some((field) => field !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["mode"],
+        message: "accessibility filters cannot be combined with a DOM query",
+      });
+    }
+    if (
+      value.mode !== "dom" &&
+      [
+        value.expectedTargetGeneration,
+        value.expectedDocumentGeneration,
+        value.expectedFrameId,
+      ].some((field) => field !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["mode"],
+        message: "DOM generation fences require mode=dom",
+      });
+    }
+  });
+const BrowserReadOutput = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    targetId: z.string(),
+    observationId: z.string(),
+    targetGeneration: z.string(),
+    documentGeneration: z.string().nullable(),
+    frameId: z.string().nullable(),
+    source: z.literal("accessibility"),
+    mode: z.enum(["matches", "count", "subtree"]),
+    scopeFound: z.boolean(),
+    nodes: z.array(BrowserAgentNode).max(BROWSER_READ_MAX_NODES),
+    totalMatches: z.number().int().nonnegative(),
+    omittedMatches: z.number().int().nonnegative(),
+    clippedFieldCount: z.number().int().nonnegative(),
+    maxNodeBytes: z.number().int().positive(),
+  })
+  .strict();
+const BrowserDomAgentReadOutput = BrowserDomReadResponse.safeExtend({
+  source: z.literal("dom"),
+});
+const BrowserReadToolOutput = z.discriminatedUnion("source", [
+  BrowserReadOutput,
+  BrowserDomAgentReadOutput,
+]);
+
+type BrowserSemanticNodeValue = z.infer<typeof InteractionSemanticNode>;
+type FlatBrowserNode = {
+  node: BrowserSemanticNodeValue;
+  depth: number;
+  index: number;
+  withinScope: boolean;
+};
+
 const TOOL_PERMISSION = {
   interaction_discover: "sessions:read",
   browser_open: "sessions:control",
   browser_tabs: "sessions:control",
   browser_observe: "sessions:read",
+  browser_read: "sessions:read",
+  browser_screenshot: "sessions:read",
   browser_act: "sessions:control",
   browser_clipboard: "sessions:read",
   browser_debug: "sessions:read",
@@ -183,6 +378,7 @@ const BrowserObserveInput = z
   .object({
     browserSessionId: z.string().uuid(),
     targetId: z.string().min(1).max(512),
+    view: z.enum(["compact", "full"]).optional(),
     includeScreenshot: z.boolean().optional(),
   })
   .strict();
@@ -193,6 +389,7 @@ const BrowserActInput = z
     expectedTargetGeneration: z.string().min(1).max(256).optional(),
     expectedDocumentGeneration: z.string().min(1).max(256).nullable().optional(),
     expectedFrameId: z.string().min(1).max(256).nullable().optional(),
+    view: z.enum(["compact", "full", "none"]).optional(),
     action: z.union([BrowserAction, BrowserActionBatch]),
   })
   .strict();
@@ -438,7 +635,10 @@ export function createInteractionAttemptToolDefinitions(
       codemodePath: options.codemodePath,
       title: options.title,
       description: options.description,
-      inputSchema: jsonSchema(options.input),
+      inputSchema:
+        options.name === "browser_act"
+          ? browserActionInputJsonSchema(options.input)
+          : jsonSchema(options.input),
       outputSchema: jsonSchema(options.output),
       annotations: {
         title: options.title,
@@ -557,9 +757,9 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "observe"],
     title: "Observe browser tab",
     description:
-      "Read one tab's current URL/title, measured page viewport, causal generations, compact semantic accessibility tree, dialog, and diagnostic counts without taking control. Set includeScreenshot=true to receive a current still image as tool image content; the structured screenshot field is only a retained-artifact reference and can remain null.",
+      "Read one tab's URL, title, viewport, causal generations, and a bounded accessibility view. Compact view is the default: agentView lists selected refs and reports omitted nodes and clipped fields; it is not a complete page tree. Set view=full for the complete accessibility snapshot. Set includeScreenshot=true to add a current still image as tool image content; browser_screenshot is faster when only pixels are needed.",
     input: BrowserObserveInput,
-    output: BrowserObservation,
+    output: BrowserAgentObservation,
     readOnly: true,
     idempotent: true,
     execute: async (value) => {
@@ -568,7 +768,8 @@ export function createInteractionAttemptToolDefinitions(
         value.browserSessionId,
         value.targetId,
       );
-      if (!value.includeScreenshot) return observation;
+      if (!value.includeScreenshot)
+        return projectBrowserObservation(observation, value.view ?? "compact");
       const frame = await input.transport.captureBrowserTarget(
         input.workspaceId,
         value.browserSessionId,
@@ -590,13 +791,126 @@ export function createInteractionAttemptToolDefinitions(
       ) {
         throw new Error("browser target changed while its visual observation was captured");
       }
-      return new InteractionExecutionResult(observation, [
+      return new InteractionExecutionResult(
+        projectBrowserObservation(observation, value.view ?? "compact"),
+        [browserToolImageContent(frame.data, frame.mediaType)],
+      );
+    },
+  });
+
+  add({
+    name: "browser_read",
+    codemodePath: ["interaction", "browser", "read"],
+    title: "Read focused browser content",
+    description:
+      "Search, count, or read a subtree from one tab's accessibility snapshot; filter by ref, role, name, accessibility text, state, or action, and scopeRef. AX mode refreshes the full tree internally and cannot return DOM attributes or editable input values. Use mode=dom with a ref, CSS, test-id, or placeholder locator for bounded element text, editable value, or allowlisted attributes, or a CSS selector for count. Content-matching role/label/text locators and CSS attribute/pseudo selectors are rejected for DOM reads to prevent secret-value probing. DOM reads use exact causal fences and only fixed, read-only browser-side projection; callers cannot supply JavaScript. Ref DOM locators refresh accessibility; CSS/test-id/placeholder locators avoid that scan.",
+    input: BrowserReadInput,
+    output: BrowserReadToolOutput,
+    readOnly: true,
+    idempotent: true,
+    execute: async (value) => {
+      if (value.mode === "dom") {
+        const state =
+          value.expectedTargetGeneration !== undefined &&
+          value.expectedDocumentGeneration !== undefined &&
+          value.expectedFrameId !== undefined
+            ? null
+            : await input.transport.getBrowserTargetState(
+                input.workspaceId,
+                value.browserSessionId,
+                value.targetId,
+              );
+        const fences = {
+          expectedTargetGeneration: value.expectedTargetGeneration ?? state!.targetGeneration,
+          expectedDocumentGeneration:
+            value.expectedDocumentGeneration === undefined
+              ? state!.documentGeneration
+              : value.expectedDocumentGeneration,
+          expectedFrameId:
+            value.expectedFrameId === undefined ? state!.frameId : value.expectedFrameId,
+        };
+        const documentGeneration = fences.expectedDocumentGeneration;
+        const frameId = fences.expectedFrameId;
+        if (documentGeneration === null || frameId === null) {
+          throw new OpenGeniApiError(409, "browser target has no inspectable document", {
+            code: "document_unavailable",
+            retryable: true,
+          });
+        }
+        const inspectedFences = {
+          expectedTargetGeneration: fences.expectedTargetGeneration,
+          expectedDocumentGeneration: documentGeneration,
+          expectedFrameId: frameId,
+        };
+        const dom = value.dom!;
+        const request =
+          dom.kind === "element"
+            ? {
+                ...inspectedFences,
+                kind: "element" as const,
+                locator: dom.locator,
+                ...(dom.attributes ? { attributes: dom.attributes } : {}),
+                maxChars: dom.maxChars ?? 4_096,
+              }
+            : { ...inspectedFences, kind: "count" as const, selector: dom.selector };
+        return {
+          ...(await input.transport.readBrowserDom(
+            input.workspaceId,
+            value.browserSessionId,
+            value.targetId,
+            request,
+          )),
+          source: "dom" as const,
+        };
+      }
+      return readBrowserObservation(
+        await input.transport.observeBrowserTarget(
+          input.workspaceId,
+          value.browserSessionId,
+          value.targetId,
+        ),
+        value,
+      );
+    },
+  });
+
+  add({
+    name: "browser_screenshot",
+    codemodePath: ["interaction", "browser", "screenshot"],
+    title: "Capture browser screenshot",
+    description:
+      "Capture a current browser tab screenshot without reading its accessibility tree. The image is returned as tool image content, with small structured frame metadata. Set fullPage=true to capture the whole scrollable page when supported; large pages may take longer or exceed capture bounds. Set quality lower to reduce JPEG bytes if a large capture exceeds the Code Mode image limit.",
+    input: BrowserScreenshotInput,
+    output: BrowserScreenshotOutput,
+    readOnly: true,
+    idempotent: true,
+    execute: async (value) => {
+      const frame = await input.transport.captureBrowserTarget(
+        input.workspaceId,
+        value.browserSessionId,
+        value.targetId,
+        {},
+        { fullPage: value.fullPage ?? false, ...(value.quality ? { quality: value.quality } : {}) },
+      );
+      return new InteractionExecutionResult(
         {
-          type: "image",
-          data: Buffer.from(frame.data).toString("base64"),
-          mimeType: frame.mediaType,
+          kind: "browser_screenshot" as const,
+          browserSessionId: frame.browserSessionId,
+          targetId: frame.targetId,
+          frameId: frame.frameId,
+          targetGeneration: frame.targetGeneration,
+          documentGeneration: frame.documentGeneration,
+          mediaType: frame.mediaType,
+          width: frame.width,
+          height: frame.height,
+          deviceScaleFactor: frame.deviceScaleFactor,
+          scrollX: frame.scrollX,
+          scrollY: frame.scrollY,
+          capturedAt: frame.capturedAt,
+          fullPage: value.fullPage ?? false,
         },
-      ]);
+        [browserToolImageContent(frame.data, frame.mediaType)],
+      );
     },
   });
 
@@ -605,29 +919,42 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to use a fresh observation automatically; provide them to require exact previously observed state. Returns the durable receipt and changed observation.",
+      "Perform one semantic-first browser action or bounded batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed.",
     input: BrowserActInput,
-    output: BrowserActionReceipt,
+    output: BrowserAgentActionReceipt,
     readOnly: false,
     idempotent: true,
     execute: async (value, context) => {
-      const current = await input.transport.observeBrowserTarget(
+      const current =
+        value.expectedTargetGeneration !== undefined &&
+        value.expectedDocumentGeneration !== undefined &&
+        value.expectedFrameId !== undefined
+          ? null
+          : await input.transport.getBrowserTargetState(
+              input.workspaceId,
+              value.browserSessionId,
+              value.targetId,
+            );
+      const receipt = await input.transport.actInBrowser(
         input.workspaceId,
         value.browserSessionId,
-        value.targetId,
+        {
+          operationId: context.operationId,
+          targetId: value.targetId,
+          expectedTargetGeneration: value.expectedTargetGeneration ?? current!.targetGeneration,
+          expectedDocumentGeneration:
+            value.expectedDocumentGeneration === undefined
+              ? current!.documentGeneration
+              : value.expectedDocumentGeneration,
+          expectedFrameId:
+            value.expectedFrameId === undefined ? current!.frameId : value.expectedFrameId,
+          ...(value.view === "none" ? { observationMode: "none" as const } : {}),
+          action: value.action,
+        },
       );
-      return await input.transport.actInBrowser(input.workspaceId, value.browserSessionId, {
-        operationId: context.operationId,
-        targetId: value.targetId,
-        expectedTargetGeneration: value.expectedTargetGeneration ?? current.target.targetGeneration,
-        expectedDocumentGeneration:
-          value.expectedDocumentGeneration === undefined
-            ? current.target.documentGeneration
-            : value.expectedDocumentGeneration,
-        expectedFrameId:
-          value.expectedFrameId === undefined ? current.frameId : value.expectedFrameId,
-        action: value.action,
-      });
+      return receipt.observation && (value.view ?? "compact") === "compact"
+        ? { ...receipt, observation: projectBrowserObservation(receipt.observation, "compact") }
+        : receipt;
     },
   });
 
@@ -1329,6 +1656,195 @@ function assertInterventionResumeMatches(
   }
 }
 
+function flattenBrowserNodes(
+  roots: readonly BrowserSemanticNodeValue[],
+  scopeRef?: string,
+): FlatBrowserNode[] {
+  const flattened: FlatBrowserNode[] = [];
+  const stack = [...roots].reverse().map((node) => ({ node, depth: 0, withinScope: !scopeRef }));
+  while (stack.length > 0) {
+    const next = stack.pop()!;
+    const withinScope = next.withinScope || next.node.ref === scopeRef;
+    flattened.push({
+      node: next.node,
+      depth: next.depth,
+      index: flattened.length,
+      withinScope,
+    });
+    for (const child of [...(next.node.children ?? [])].reverse()) {
+      stack.push({ node: child, depth: next.depth + 1, withinScope });
+    }
+  }
+  return flattened;
+}
+
+function boundedAgentField(value: string, onClip: () => void): string {
+  if (value.length <= BROWSER_AGENT_MAX_FIELD_LENGTH) return value;
+  onClip();
+  return `${value.slice(0, BROWSER_AGENT_MAX_FIELD_LENGTH - 1)}…`;
+}
+
+function projectAgentNode(flat: FlatBrowserNode): {
+  node: z.infer<typeof BrowserAgentNode>;
+  clippedFieldCount: number;
+} {
+  let clippedFieldCount = 0;
+  const clip = () => {
+    clippedFieldCount += 1;
+  };
+  const source = flat.node;
+  const nodes = {
+    ref: source.ref,
+    role: source.role,
+    depth: flat.depth,
+    ...(source.name !== undefined ? { name: boundedAgentField(source.name, clip) } : {}),
+    ...(source.description !== undefined
+      ? { description: boundedAgentField(source.description, clip) }
+      : {}),
+    ...(source.value !== undefined
+      ? {
+          value:
+            typeof source.value === "string" ? boundedAgentField(source.value, clip) : source.value,
+        }
+      : {}),
+    states: source.states.slice(0, 6).map((state) => boundedAgentField(state, clip)),
+    actions: source.actions.slice(0, 6).map((action) => boundedAgentField(action, clip)),
+  };
+  if (source.states.length > 6) clippedFieldCount += source.states.length - 6;
+  if (source.actions.length > 6) clippedFieldCount += source.actions.length - 6;
+  return { node: nodes, clippedFieldCount };
+}
+
+function selectAgentNodes(
+  flattened: readonly FlatBrowserNode[],
+  maxNodes: number,
+  maxBytes: number,
+  prioritize = true,
+): { nodes: z.infer<typeof BrowserAgentNode>[]; clippedFieldCount: number } {
+  const priority = (flat: FlatBrowserNode): number => {
+    const { node } = flat;
+    if (node.actions.length > 0) return 0;
+    if (["heading", "dialog", "alert", "status", "navigation", "main"].includes(node.role))
+      return 1;
+    if (["text", "paragraph", "listitem"].includes(node.role) && node.name) return 2;
+    if (node.name || node.value || node.description) return 3;
+    return 4;
+  };
+  const candidates = prioritize
+    ? [...flattened].sort((a, b) => priority(a) - priority(b) || a.index - b.index)
+    : flattened;
+  const selected: Array<{ index: number; node: z.infer<typeof BrowserAgentNode> }> = [];
+  let usedBytes = 0;
+  let clippedFieldCount = 0;
+  for (const flat of candidates) {
+    if (selected.length >= maxNodes) break;
+    const projected = projectAgentNode(flat);
+    const bytes = Buffer.byteLength(JSON.stringify(projected.node), "utf8");
+    if (usedBytes + bytes > maxBytes) continue;
+    selected.push({ index: flat.index, node: projected.node });
+    usedBytes += bytes;
+    clippedFieldCount += projected.clippedFieldCount;
+  }
+  return {
+    nodes: selected.sort((a, b) => a.index - b.index).map((entry) => entry.node),
+    clippedFieldCount,
+  };
+}
+
+function projectBrowserObservation(
+  observation: z.infer<typeof BrowserObservation>,
+  view: "compact" | "full",
+): z.infer<typeof BrowserAgentObservation> {
+  if (view === "full") return observation;
+  const semantic = observation.semantic;
+  const roots =
+    semantic?.kind === "snapshot"
+      ? semantic.roots
+      : semantic?.kind === "diff"
+        ? semantic.changed
+        : [];
+  const flattened = flattenBrowserNodes(roots);
+  const projected = selectAgentNodes(
+    flattened,
+    BROWSER_AGENT_MAX_NODES,
+    BROWSER_AGENT_MAX_NODE_BYTES,
+  );
+  return {
+    ...observation,
+    semantic: null,
+    agentView: {
+      kind: "compact",
+      sourceKind: semantic?.kind ?? "none",
+      nodes: projected.nodes,
+      sourceNodeCount: flattened.length,
+      omittedNodeCount: flattened.length - projected.nodes.length,
+      removedRefCount: semantic?.kind === "diff" ? semantic.removedRefs.length : 0,
+      clippedFieldCount: projected.clippedFieldCount,
+      maxNodes: BROWSER_AGENT_MAX_NODES,
+      maxNodeBytes: BROWSER_AGENT_MAX_NODE_BYTES,
+    },
+  };
+}
+
+function readBrowserObservation(
+  observation: z.infer<typeof BrowserObservation>,
+  input: z.output<typeof BrowserReadInput>,
+): z.infer<typeof BrowserReadOutput> {
+  if (observation.semantic?.kind !== "snapshot") {
+    throw new Error("browser focused read requires a complete accessibility snapshot");
+  }
+  const mode = input.mode && input.mode !== "dom" ? input.mode : "matches";
+  const scopeRef = mode === "subtree" ? input.ref : input.scopeRef;
+  const flattened = flattenBrowserNodes(observation.semantic.roots, scopeRef);
+  const scopeFound = !scopeRef || flattened.some((entry) => entry.node.ref === scopeRef);
+  const includes = (source: string | undefined, needle: string | undefined): boolean =>
+    needle === undefined || (source ?? "").toLowerCase().includes(needle.toLowerCase());
+  const matches = flattened.filter(({ node, withinScope }) => {
+    if (!withinScope) return false;
+    if (mode !== "subtree" && input.ref && node.ref !== input.ref) return false;
+    if (input.role && node.role.toLowerCase() !== input.role.toLowerCase()) return false;
+    if (!includes(node.name, input.nameContains)) return false;
+    if (
+      input.textContains &&
+      ![node.name, node.description, typeof node.value === "string" ? node.value : undefined].some(
+        (candidate) => includes(candidate, input.textContains),
+      )
+    )
+      return false;
+    if (
+      input.state &&
+      !node.states.some((state) => state.toLowerCase() === input.state!.toLowerCase())
+    )
+      return false;
+    if (
+      input.action &&
+      !node.actions.some((action) => action.toLowerCase() === input.action!.toLowerCase())
+    )
+      return false;
+    return true;
+  });
+  const projected =
+    mode === "count"
+      ? { nodes: [] as z.infer<typeof BrowserAgentNode>[], clippedFieldCount: 0 }
+      : selectAgentNodes(matches, input.limit ?? 40, BROWSER_AGENT_MAX_NODE_BYTES, false);
+  return {
+    browserSessionId: observation.browserSessionId,
+    targetId: observation.target.id,
+    observationId: observation.observationId,
+    targetGeneration: observation.target.targetGeneration,
+    documentGeneration: observation.target.documentGeneration,
+    frameId: observation.frameId,
+    source: "accessibility",
+    mode,
+    scopeFound,
+    nodes: projected.nodes,
+    totalMatches: matches.length,
+    omittedMatches: matches.length - projected.nodes.length,
+    clippedFieldCount: projected.clippedFieldCount,
+    maxNodeBytes: BROWSER_AGENT_MAX_NODE_BYTES,
+  };
+}
+
 async function safeInteractionExecution<TInput extends z.ZodType, TOutput extends z.ZodType>(
   inputSchema: TInput,
   outputSchema: TOutput,
@@ -1368,6 +1884,20 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     }
     throw error;
   }
+}
+
+function browserToolImageContent(
+  data: Uint8Array,
+  mimeType: string,
+): AttemptToolResultValue["content"][number] {
+  if (data.byteLength > BROWSER_TOOL_IMAGE_MAX_BYTES) {
+    throw new OpenGeniApiError(
+      413,
+      "Browser screenshot exceeds the Code Mode image limit; capture the viewport or lower JPEG quality.",
+      { code: "browser_screenshot_too_large", retryable: false },
+    );
+  }
+  return { type: "image", data: Buffer.from(data).toString("base64"), mimeType };
 }
 
 function interactionErrorResult(

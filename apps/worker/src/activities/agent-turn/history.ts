@@ -186,7 +186,20 @@ export function toolCallProducesRetainableSessionImage(name: string | null): boo
   return (
     name === "computer_screenshot" ||
     name === "view_image" ||
-    name === "interaction__computer_observe"
+    name === "interaction__computer_observe" ||
+    retainableBrowserScreenshotToolCall(name)
+  );
+}
+
+/** Browser interactions can carry an image block, including opt-in observe frames. */
+export function retainableBrowserScreenshotToolCall(name: string | null): boolean {
+  return (
+    name === "browser_screenshot" ||
+    name === "interaction__browser_screenshot" ||
+    name === "browser_observe" ||
+    name === "interaction__browser_observe" ||
+    name === "browser_act" ||
+    name === "interaction__browser_act"
   );
 }
 

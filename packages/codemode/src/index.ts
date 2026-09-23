@@ -37,6 +37,7 @@ import {
 } from "@opengeni/tool-gateway";
 
 import { siteSessionPath } from "@opengeni/contracts/site-session-http";
+import { materializeCodemodeImages } from "./images";
 
 export type { AttemptToolCatalog, AttemptToolCatalogEntry } from "@opengeni/contracts";
 
@@ -364,7 +365,7 @@ export class CodemodeClient {
     ).result;
   }
 
-  /** Return structured content when the catalog declares it; otherwise retain the full MCP result. */
+  /** Return structured content, or a local-image wrapper for typed multimodal results. */
   async callPathValue(
     path: readonly string[],
     argumentsValue: Record<string, unknown> = {},
@@ -385,7 +386,15 @@ export class CodemodeClient {
         `Codemode tool ${path.join(".")} declared outputSchema but returned no structured content`,
       );
     }
-    return result.structuredContent;
+    if (!result.content.some((content) => content.type === "image")) {
+      return result.structuredContent;
+    }
+    const images = await materializeCodemodeImages(result);
+    return {
+      structuredContent: result.structuredContent,
+      images,
+      otherContent: result.content.filter((content) => content.type !== "image"),
+    };
   }
 
   private async submit(
@@ -762,6 +771,7 @@ async function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<vo
 
 export * from "./environment";
 export * from "./interaction";
+export * from "./images";
 export * from "./artifacts";
 export * from "./structured";
 export * from "./declarations";

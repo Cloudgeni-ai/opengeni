@@ -3177,6 +3177,8 @@ export type FirstPartyMcpToolName =
   | "browser_tabs"
   | "browser_observe"
   | "browser_act"
+  | "browser_read"
+  | "browser_screenshot"
   | "browser_clipboard"
   | "browser_debug"
   | "browser_auth"
@@ -5813,6 +5815,7 @@ export type RetainedOutputKind =
   | "internal_update"
   | "event_media"
   | "computer_screenshot"
+  | "browser_screenshot"
   | "generated_image"
   | "generated_video"
   | "file";
