@@ -2530,7 +2530,11 @@ New history rows omit Responses output-only item `status` at persist
 subscription fetch still strips leftover item `status` on the wire for
 already-stored SuperGrok rows and mid-turn SDK items because the
 ChatGPT/Codex input schema 400s `Unknown parameter: 'input[N].status'`. That
-strip is request-local and does not rewrite stored history.
+strip is request-local and does not rewrite stored history. Hosted tool calls
+(web/file search, code interpreter and image generation) retain their actual
+`status` at both boundaries because it is required replay data, not an
+output-only annotation. Missing historical evidence is not invented or
+backfilled by normalization.
 If Codex nevertheless rejects that exact opaque artifact with its recognized
 HTTP-400 encrypted-content family, the current attempt atomically marks only
 the exact active reasoning/compaction row IDs and the current turn's latest
