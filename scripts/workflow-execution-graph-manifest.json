@@ -37,6 +37,10 @@
       "sha256": "48a8726756c75dc74b33e4824adcd0fdad9bc50fa1f55da1e410375e7dd2db3a"
     },
     {
+      "path": ".github/workflows/publish-artifact-runtime.yml",
+      "sha256": "92543a710cd808d8d930c827c8f877953406993e8965e1c01d1097afef7f9a47"
+    },
+    {
       "path": ".github/workflows/publish-canary-chart.yml",
       "sha256": "4cb5d3bb038e0a1f8997b83b93d02c7dbb579ef3c4bcc84cd831f2e3210c1288"
     },

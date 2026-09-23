@@ -49,9 +49,11 @@ jobs:
           bun-version-file: .bun-version
 
       - name: Install controller dependencies without lifecycle scripts
+        timeout-minutes: 4
         run: bun install --frozen-lockfile --ignore-scripts
 
       - name: Verify and retain all seven native archives without rebuilding
+        timeout-minutes: 8
         env:
           GH_TOKEN: ${{ github.token }}
           RUNTIME_SOURCE_ROOT: ${{ github.workspace }}/.release/runtime-source

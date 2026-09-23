@@ -73,6 +73,8 @@ function fixture(overrides: Partial<PrerequisiteHost> = {}) {
         "minio --version": "minio version RELEASE.2025-09-07T16-13-09Z",
         "mc --version": "mc version RELEASE.2025-08-13T08-35-41Z",
         "rustup run 1.97.0 rustc --version": "rustc 1.97.0 (commit date)",
+        "rustup run 1.97.0 rustc -vV":
+          "rustc 1.97.0 (commit date)\nhost: x86_64-pc-windows-msvc\r\n",
       };
       return { ok: true, stdout: stdout[key] ?? "" };
     },
@@ -247,6 +249,50 @@ describe("backend-aware read-only preflight", () => {
         ? { ok: true, stdout: "unversioned" }
         : probe(command, args);
     expect((await collectDevelopmentPrerequisites(options, host)).errors).toHaveLength(2);
+  });
+
+  test("standalone Windows artifact fallback checks MSVC instead of POSIX cc", async () => {
+    const options = {
+      artifactRuntime: "source-build",
+      relayRuntime: "disabled",
+      environment: {},
+    } as const;
+    const { host, commands } = fixture({
+      platform: "win32",
+      which: (command) => (command === "cc" ? null : `/bin/${command}`),
+    });
+    expect(await collectDevelopmentSourceBuildPrerequisites(options, host)).toEqual([]);
+    expect(commands).toContain("rustup run 1.97.0 rustc -vV");
+    const missing = fixture({
+      platform: "win32",
+      which: (command) =>
+        ["rustup", "cl.exe", "link.exe"].includes(command) ? null : `/bin/${command}`,
+    });
+    const errors = await collectDevelopmentSourceBuildPrerequisites(options, missing.host);
+    expect(errors).toHaveLength(3);
+    expect(errors.join("\n")).toContain("MSVC x64");
+    expect(errors.join("\n")).not.toContain("Missing cc");
+  });
+
+  test("Windows GNU Rust and ARM64 artifact fallback fail explicitly", async () => {
+    const options = {
+      artifactRuntime: "source-build",
+      relayRuntime: "disabled",
+      environment: {},
+    } as const;
+    const { host } = fixture({ platform: "win32" });
+    const probe = host.probe;
+    host.probe = (command, args) =>
+      args.includes("-vV")
+        ? { ok: true, stdout: "host: x86_64-pc-windows-gnu\n" }
+        : probe(command, args);
+    expect(await collectDevelopmentSourceBuildPrerequisites(options, host)).toEqual([
+      expect.stringContaining("not GNU/MinGW"),
+    ]);
+    const arm = fixture({ platform: "win32", arch: "arm64" });
+    expect(await collectDevelopmentSourceBuildPrerequisites(options, arm.host)).toEqual([
+      expect.stringContaining("Windows ARM64 source fallback is unsupported"),
+    ]);
   });
 
   test("fresh or disabled selfhosted does not require relay tools with verified artifacts", async () => {
