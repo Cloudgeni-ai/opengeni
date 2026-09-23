@@ -65,6 +65,7 @@ function fixture(overrides: Partial<PrerequisiteHost> = {}) {
         "minio --version": "minio version RELEASE.2025-09-07T16-13-09Z",
         "mc --version": "mc version RELEASE.2025-08-13T08-35-41Z",
         "rustup run 1.97.0 rustc --version": "rustc 1.97.0 (commit date)",
+        "rustup run 1.97.0 rustc -vV": "rustc 1.97.0 (commit date)\nhost: x86_64-pc-windows-msvc\r\n",
       };
       return { ok: true, stdout: stdout[key] ?? "" };
     },
@@ -156,6 +157,30 @@ describe("backend-aware read-only preflight", () => {
     const readyHost = fixture();
     expect(await collectDevelopmentSourceBuildPrerequisites({ artifactRuntime: "source-build", relayRuntime: "disabled", environment: {} }, readyHost.host)).toEqual([]);
     expect(readyHost.commands).toEqual(["rustup run 1.97.0 rustc --version", "rustup run 1.97.0 cargo --version"]);
+  });
+
+  test("standalone Windows source fallback requires MSVC, not a POSIX cc", async () => {
+    const options = { artifactRuntime: "source-build", relayRuntime: "disabled", environment: {} } as const;
+    const { host, commands } = fixture({ platform: "win32", which: (command) => command === "cc" ? null : `/bin/${command}` });
+    expect(await collectDevelopmentSourceBuildPrerequisites(options, host)).toEqual([]);
+    expect(commands).toContain("rustup run 1.97.0 rustc -vV");
+    expect(commands.some((command) => /docker|pg_config/u.test(command))).toBe(false);
+    const missing = fixture({ platform: "win32", which: (command) => ["rustup", "cl.exe", "link.exe"].includes(command) ? null : `/bin/${command}` });
+    const errors = await collectDevelopmentSourceBuildPrerequisites(options, missing.host);
+    expect(errors).toHaveLength(3);
+    expect(errors.join("\n")).toContain("MSVC x64");
+    expect(errors.join("\n")).not.toContain("Missing cc");
+    expect(developmentPrerequisiteErrors({ ...ready, platform: "win32", artifactRuntime: "verified-prebuilt", relayRuntime: "disabled" })).toEqual([expect.stringContaining("WSL2")]);
+  });
+
+  test("Windows GNU Rust host and ARM64 source fallback fail with actionable diagnostics", async () => {
+    const options = { artifactRuntime: "source-build", relayRuntime: "disabled", environment: {} } as const;
+    const { host } = fixture({ platform: "win32" });
+    const probe = host.probe;
+    host.probe = (command, args) => args.includes("-vV") ? { ok: true, stdout: "host: x86_64-pc-windows-gnu\n" } : probe(command, args);
+    expect(await collectDevelopmentSourceBuildPrerequisites(options, host)).toEqual([expect.stringContaining("not GNU/MinGW")]);
+    const arm = fixture({ platform: "win32", arch: "arm64" });
+    expect(await collectDevelopmentSourceBuildPrerequisites(options, arm.host)).toEqual([expect.stringContaining("Windows ARM64 source fallback is unsupported")]);
   });
 
   test("MinIO is explicit, pinned, and does not require Garage", async () => {

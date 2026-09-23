@@ -60,14 +60,19 @@ export function developmentPrerequisiteErrors(options: {
 
 function sourceBuildHostErrors(options: Pick<DevelopmentPrerequisiteOptions, "artifactRuntime" | "relayRuntime"> & {
   which: PrerequisiteHost["which"];
+  platform: string;
 }): string[] {
   const errors: string[] = [];
   if ((options.artifactRuntime ?? "source-build") === "source-build" ||
       (options.relayRuntime !== "verified-prebuilt" && options.relayRuntime !== "disabled")) {
-    for (const [command, hint] of [
+    const compilers: ReadonlyArray<readonly [string, string]> = options.platform === "win32"
+      ? ["cl.exe", "link.exe"].map((command) => [command, "Standalone Windows artifact source builds require the MSVC x64 toolset and Windows SDK. Install Visual Studio Build Tools with the Desktop development with C++ workload, then run from its x64 Native Tools Command Prompt so compiler, linker, SDK headers and libraries are configured. This does not enable the full Bash stack on Windows; that still requires WSL2."] as const)
+      : [["cc", "Install the Xcode Command Line Tools (xcode-select --install) on macOS, or sudo apt-get install build-essential on Debian/Ubuntu."]];
+    const commands: ReadonlyArray<readonly [string, string]> = [
       ["rustup", "Install rustup using a downloaded, inspected installer from https://rustup.rs; source builds use the checked-in Rust toolchain, not an arbitrary system rustc."],
-      ["cc", "Install the Xcode Command Line Tools (xcode-select --install) on macOS, or sudo apt-get install build-essential on Debian/Ubuntu."],
-    ] as const) {
+      ...compilers,
+    ];
+    for (const [command, hint] of commands) {
       if (!options.which(command)) errors.push(`Missing ${command} for source-build mode. ${hint}`);
     }
   }
@@ -185,7 +190,7 @@ export async function collectDevelopmentSourceBuildPrerequisites(
   const relayRuntime = options.relayRuntime ??
     (environment.OPENGENI_SANDBOX_SELFHOSTED_ENABLED === "true" ? "source-build" : "disabled");
   const host = suppliedHost ?? createPrerequisiteHost(environment, repositoryRoot);
-  const errors = sourceBuildHostErrors({ ...options, relayRuntime, which: host.which });
+  const errors = sourceBuildHostErrors({ ...options, relayRuntime, which: host.which, platform: host.platform });
   const requireProbe = async (command: string, args: string[], message: string, match?: RegExp) => {
     const result = await host.probe(command, args);
     if (!result.ok || (match && !match.test(result.stdout))) errors.push(message);
@@ -196,6 +201,12 @@ export async function collectDevelopmentSourceBuildPrerequisites(
     if (!/^\d+\.\d+\.\d+$/u.test(channel)) throw new Error("Invalid pinned artifact Rust toolchain");
     await requireProbe("rustup", ["run", channel, "rustc", "--version"], `Artifact source-build requires pinned Rust ${channel}. Run: rustup toolchain install ${channel} --profile minimal --no-self-update. Or supply a source/host/integrity-verified prebuilt artifact runtime through the launcher.`, new RegExp(`^rustc ${channel.replaceAll(".", "\\.")}\\s`, "u"));
     await requireProbe("rustup", ["run", channel, "cargo", "--version"], `Artifact source-build requires cargo in Rust ${channel}. Run: rustup toolchain install ${channel} --profile minimal --no-self-update.`);
+    if (host.platform === "win32") {
+      await requireProbe("rustup", ["run", channel, "rustc", "-vV"], `Standalone Windows artifact source builds require the x86_64-pc-windows-msvc Rust host, not GNU/MinGW. Configure rustup set default-host x86_64-pc-windows-msvc, then rustup toolchain install ${channel} --profile minimal --no-self-update; use the MSVC x64 Native Tools Command Prompt.`, /^host: x86_64-pc-windows-msvc\r?$/mu);
+    }
+  }
+  if ((options.artifactRuntime ?? "source-build") === "source-build" && host.platform === "win32" && host.arch !== "x64") {
+    errors.push("Standalone native Windows artifact source builds support x64 MSVC only. Use a supported x64 host and the MSVC x64 toolset, or a supported Linux environment; Windows ARM64 source fallback is unsupported.");
   }
   if (relayRuntime === "source-build") {
     if (!host.which("cargo")) errors.push("Missing cargo. The local relay is a separate source build. Install the toolchain selected by agent/rust-toolchain.toml, or have the launcher disable the relay/use a verified prebuilt relay.");
