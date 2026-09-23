@@ -3923,9 +3923,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       machineConsentRequired: selfhostedActive,
       machineOwnerAllowsScreenControl,
     });
+    // terminal:attach IS the interactive grant: PTY frames are keystrokes, so
+    // the terminal token claims control whenever attach was authorized above.
     const terminalCanControl = shouldGrantStreamControl({
       settingEnabled: settings.streamControlEnabled,
-      accessIncludesControl: accessIncludesStreamControl,
+      accessIncludesControl: hasPermission(grant.permissions, "terminal:attach"),
       machineConsentRequired: false,
       machineOwnerAllowsScreenControl: false,
     });

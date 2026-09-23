@@ -680,6 +680,8 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                   ttlSeconds: request.expiresInSeconds,
                   subjectId: grant.subjectId,
                   authorityEpoch: relayAuthorityEpoch,
+                  agentId: relayed.channel.agentId,
+                  channelId: relayed.channel.channelId,
                 });
                 return {
                   kind: "relay" as const,

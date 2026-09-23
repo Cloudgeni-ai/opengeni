@@ -634,8 +634,39 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
 
   test("resolveExposedPort(6080) still routes to desktopEnsure (the desktop plane)", async () => {
     const mock = new MockAgentResponder();
-    await sessionWith(mock).resolveExposedPort(6080);
+    const endpoint = await sessionWith(mock).resolveExposedPort(6080);
     expect(mock.requests.at(-1)?.req.op?.$case).toBe("desktopEnsure");
+    // The routing identity is the descriptor the producer returned — verbatim.
+    expect(endpoint.query).toContain("channel=mock-desktop");
+  });
+
+  test("a descriptor-less desktopEnsure (pre-M8b agent) fails closed: UNSUPPORTED, non-retryable, no routing key", async () => {
+    const mock = new MockAgentResponder({ omitStreamChannel: true });
+    let error: unknown;
+    try {
+      await sessionWith(mock).resolveExposedPort(6080);
+    } catch (e) {
+      error = e;
+    }
+    expect(mock.requests.at(-1)?.req.op?.$case).toBe("desktopEnsure");
+    expect(error).toBeInstanceOf(SelfhostedControlError);
+    expect((error as SelfhostedControlError).code).toBe(ErrorCode.ERROR_CODE_UNSUPPORTED);
+    expect((error as SelfhostedControlError).retryable).toBe(false);
+    expect((error as SelfhostedControlError).message).toContain("Update and reconnect");
+  });
+
+  test("a descriptor-less ptyOpen (pre-M8b agent) fails closed the same way", async () => {
+    const mock = new MockAgentResponder({ omitStreamChannel: true });
+    let error: unknown;
+    try {
+      await sessionWith(mock).resolveExposedPort(7681);
+    } catch (e) {
+      error = e;
+    }
+    expect(mock.requests.at(-1)?.req.op?.$case).toBe("ptyOpen");
+    expect(error).toBeInstanceOf(SelfhostedControlError);
+    expect((error as SelfhostedControlError).code).toBe(ErrorCode.ERROR_CODE_UNSUPPORTED);
+    expect((error as SelfhostedControlError).retryable).toBe(false);
   });
 
   test("interaction sidecar and Browser/Computer frame relays use typed control ops", async () => {

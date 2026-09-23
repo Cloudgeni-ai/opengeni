@@ -35,6 +35,7 @@ import {
 } from "playwright";
 
 import { createApp } from "../../apps/api/src/app";
+import { apiRequestBindingsForTransportPeer } from "../../apps/api/src/http/request-source";
 import { withAccountMenuAxeDiagnostics } from "./browser-account-axe-diagnostics";
 import { createAccountReadDiagnostics } from "./browser-account-read-diagnostics";
 import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
@@ -775,6 +776,13 @@ let owned: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let edge: ReturnType<typeof Bun.serve> | null = null;
 let publicOrigin = "";
+let nextActorClientOctet = 20;
+// The local edge is the trusted proxy (apiTrustedProxyHops: 1): every distinct
+// browser context or node-side client carries its own forwarded address so the
+// managed-auth rate scopes model separate clients instead of one shared peer.
+function actorClientHeaders(): Record<string, string> {
+  return { "x-forwarded-for": `198.51.100.${nextActorClientOctet++}` };
+}
 let edgeCookieSummary = "not-observed";
 let completionResponseLoss: CompletionResponseLoss | null = null;
 const actorMutationAcceptances: ActorMutationAcceptance[] = [];
@@ -822,7 +830,7 @@ async function createActualUser(input: {
   if (!owned) throw new Error("database fixture unavailable");
   const signUp = await fetch(`${publicOrigin}/v1/auth/sign-up/email`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...actorClientHeaders() },
     body: JSON.stringify({
       name: input.displayName,
       email: input.email,
@@ -2595,6 +2603,7 @@ async function captureResponsiveEvidenceInBrowser(
       storageState,
       reducedMotion: "reduce",
       viewport: { width: capture.width, height: capture.height },
+      extraHTTPHeaders: actorClientHeaders(),
     });
     const evidencePage = await evidenceContext.newPage();
     const evidenceProblems = observeBrowser(evidencePage);
@@ -2643,6 +2652,7 @@ async function captureResponsiveEvidenceInBrowser(
     reducedMotion: "reduce",
     storageState,
     viewport: { width: 768, height: 900 },
+    extraHTTPHeaders: actorClientHeaders(),
   });
   const forcedColorsPage = await forcedColors.newPage();
   const forcedColorsProblems = observeBrowser(forcedColorsPage);
@@ -2684,6 +2694,7 @@ async function captureResponsiveEvidenceInBrowser(
     viewport: { width: 384, height: 450 },
     deviceScaleFactor: 2,
     reducedMotion: "reduce",
+    extraHTTPHeaders: actorClientHeaders(),
   });
   const zoomPage = await zoom.newPage();
   const zoomProblems = observeBrowser(zoomPage);
@@ -2712,6 +2723,7 @@ async function captureResponsiveEvidenceInBrowser(
     viewport: { width: 320, height: 780 },
     hasTouch: true,
     isMobile: true,
+    extraHTTPHeaders: actorClientHeaders(),
   });
   const touchPage = await touch.newPage();
   const touchProblems = observeBrowser(touchPage);
@@ -2913,6 +2925,7 @@ beforeAll(async () => {
     runtimeDatabaseRole: "opengeni_app",
     publicBaseUrl: publicOrigin,
     betterAuthSecret: "browser-account-acceptance-secret-at-least-32-bytes",
+    apiTrustedProxyHops: 1,
     sandboxBackend: "none",
   });
   const api = createApp({
@@ -2951,16 +2964,21 @@ beforeAll(async () => {
     hostname: "127.0.0.1",
     port: Number(new URL(publicOrigin).port),
     idleTimeout: 60,
-    fetch: async (request) => {
+    fetch: async (request, server) => {
       const url = new URL(request.url);
       if (url.pathname.startsWith("/v1/") || url.pathname === "/healthz") {
+        const forward = () =>
+          api.fetch(
+            request,
+            apiRequestBindingsForTransportPeer(server.requestIP(request)?.address),
+          );
         if (completionResponseLoss?.path === url.pathname) {
           const requestBody = await request.clone().text();
           const firstBody = completionResponseLoss.firstBody;
           completionResponseLoss.firstBody ??= requestBody;
           completionResponseLoss.attempts += 1;
           completionResponseLoss.exactBodies.push(firstBody === null || firstBody === requestBody);
-          const response = await observeAccountApiRequest(request, () => api.fetch(request));
+          const response = await observeAccountApiRequest(request, forward);
           completionResponseLoss.statuses.push(response.status);
           if (completionResponseLoss.acceptedAt === null && response.ok) {
             completionResponseLoss.acceptedAt = performance.now();
@@ -3000,7 +3018,7 @@ beforeAll(async () => {
             .join(",");
           edgeCookieSummary += `;caseEqual:${lowerCookieHeader === upperCookieHeader}`;
         }
-        const response = await observeAccountApiRequest(request, () => api.fetch(request));
+        const response = await observeAccountApiRequest(request, forward);
         if (
           response.ok &&
           (new Set([
@@ -4347,7 +4365,7 @@ describe("provider-neutral browser account acceptance", () => {
     });
     const browser = await launchAccountBrowser(requestedEngine as EngineName);
     try {
-      const page = await browser.newPage();
+      const page = await browser.newPage({ extraHTTPHeaders: actorClientHeaders() });
       const problems = observeBrowser(page);
       setBrowserPhase(problems, "primary-set-sign-in");
       await signIn(page, reviewAccount);
@@ -4379,6 +4397,7 @@ describe("provider-neutral browser account acceptance", () => {
     const browser = await launchAccountBrowser(engine);
     const context = await browser.newContext({
       viewport: { width: 1440, height: 960 },
+      extraHTTPHeaders: actorClientHeaders(),
     });
     // Keep the independent account set out of the shared-tab journey's native
     // connection pool, as for responsive evidence. The two racing tabs still
@@ -4386,6 +4405,7 @@ describe("provider-neutral browser account acceptance", () => {
     const independentBrowser = await launchAccountBrowser(engine);
     const otherBrowserSet = await independentBrowser.newContext({
       viewport: { width: 1024, height: 768 },
+      extraHTTPHeaders: actorClientHeaders(),
     });
     const page = await context.newPage();
     const secondTab = await context.newPage();

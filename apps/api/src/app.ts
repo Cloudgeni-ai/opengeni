@@ -66,6 +66,7 @@ import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError, workspaceControlBusyHttpError } from "./http/api-error";
+import { trustedRequestSourceAddress } from "./http/request-source";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
@@ -87,6 +88,7 @@ import {
   createManagedAuth,
   isolatedManagedAuthOAuthCallbackRequest,
   managedAuthOAuthReturnMatches,
+  requestWithManagedAuthClientAddress,
   resolveManagedAuthOAuthAttempt,
 } from "./auth/managed-auth";
 import {
@@ -683,6 +685,7 @@ export function createAppComposition(deps: AppDependencies): {
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
+      const authClientAddress = trustedRequestSourceAddress(c, deps.settings.apiTrustedProxyHops);
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
       if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {
         const body = await c.req.raw
@@ -735,12 +738,13 @@ export function createAppComposition(deps: AppDependencies): {
         );
       }
       if (deps.settings.managedAuthSessionSetMode === "legacy") {
+        const authRequest = requestWithManagedAuthClientAddress(c.req.raw, authClientAddress);
         return oauthCallbackProvider
           ? await runManagedAuthProvider(
               oauthCallbackProvider,
-              async () => await managedAuth.handler(c.req.raw),
+              async () => await managedAuth.handler(authRequest),
             )
-          : await managedAuth.handler(c.req.raw);
+          : await managedAuth.handler(authRequest);
       }
       requireManagedAuthProviderRouteAllowed(c.req.method, pathname);
       // Provider authentication/recovery is isolated from whichever actor the
@@ -765,7 +769,9 @@ export function createAppComposition(deps: AppDependencies): {
           attempt.transactionId,
           oauthCallbackProvider,
           async () => {
-            const response = await managedAuth.handler(isolated.request);
+            const response = await managedAuth.handler(
+              requestWithManagedAuthClientAddress(isolated.request, authClientAddress),
+            );
             return {
               response,
               authSessionId: currentManagedAuthCreatedSessionId(),
@@ -824,11 +830,15 @@ export function createAppComposition(deps: AppDependencies): {
           }
         }
       } else {
-        const headers = new Headers(c.req.raw.headers);
-        headers.delete("cookie");
-        headers.delete("authorization");
-        headers.delete("x-forwarded-user");
-        const providerRequest = new Request(c.req.raw, { headers });
+        const providerRequest = requestWithManagedAuthClientAddress(
+          c.req.raw,
+          authClientAddress,
+          (headers) => {
+            headers.delete("cookie");
+            headers.delete("authorization");
+            headers.delete("x-forwarded-user");
+          },
+        );
         const discardProviderSession =
           deps.settings.managedAuthSessionSetMode === "broker" || authority !== undefined;
         providerResponse = discardProviderSession

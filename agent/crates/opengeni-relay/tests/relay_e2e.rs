@@ -265,7 +265,7 @@ async fn next_msg(
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn view_mode_pty_frames_splice_bidirectionally_with_desktop_control_disabled() {
+async fn view_mode_pty_frames_reach_the_viewer_but_viewer_input_is_dropped() {
     let port = free_port().await;
     let (base, _shutdown, _m) = start_relay_on(port, |config| {
         config.stream_control_enabled = false;
@@ -276,7 +276,7 @@ async fn view_mode_pty_frames_splice_bidirectionally_with_desktop_control_disabl
     let mut producer = RelayChannel::register(producer_config(&base, PTY_STREAM_PORT))
         .await
         .expect("producer register");
-    // Viewer connects (epoch 0).
+    // A view-mode viewer still attaches and receives the terminal output tail.
     let (mut viewer, ack) = Viewer::connect(&base, PTY_STREAM_PORT, 0, 0)
         .await
         .expect("viewer connect");
@@ -293,7 +293,33 @@ async fn view_mode_pty_frames_splice_bidirectionally_with_desktop_control_disabl
         .expect("viewer frame");
     assert_eq!(&got.data[..], b"hello-tty");
 
-    // Viewer → producer (input).
+    // Viewer → producer: PTY frames ARE keystrokes, so a view-mode token's
+    // input must never reach the tty.
+    viewer.send_frame(0, b"keystroke").await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), producer.recv())
+            .await
+            .is_err(),
+        "a view token must not forward terminal input"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn control_mode_pty_frames_reach_the_producer() {
+    let port = free_port().await;
+    let (base, _shutdown, _m) = start_relay_on(port, |config| {
+        config.stream_control_enabled = true;
+    })
+    .await;
+
+    let mut producer = RelayChannel::register(producer_config(&base, PTY_STREAM_PORT))
+        .await
+        .expect("producer register");
+    let (mut viewer, ack) = Viewer::connect_with_mode(&base, PTY_STREAM_PORT, 0, 0, "control")
+        .await
+        .expect("control viewer connect");
+    assert!(ack.accepted);
+
     viewer.send_frame(0, b"keystroke").await;
     let inbound = tokio::time::timeout(Duration::from_secs(5), producer.recv())
         .await
@@ -303,6 +329,16 @@ async fn view_mode_pty_frames_splice_bidirectionally_with_desktop_control_disabl
         Some(RelayMessage::Frame(f)) => assert_eq!(&f.data[..], b"keystroke"),
         other => panic!("expected an input frame, got {other:?}"),
     }
+
+    producer
+        .send_frame(prost::bytes::Bytes::from_static(b"tty-out"))
+        .await
+        .expect("producer send");
+    let got = tokio::time::timeout(Duration::from_secs(5), viewer.recv_frame())
+        .await
+        .expect("viewer recv timed out")
+        .expect("viewer frame");
+    assert_eq!(&got.data[..], b"tty-out");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

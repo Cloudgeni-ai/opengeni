@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { testSettings } from "@opengeni/testing";
+import { createApp } from "../src/app";
+import {
+  MANAGED_AUTH_CLIENT_IP_HEADER,
+  createManagedAuth,
+  requestWithManagedAuthClientAddress,
+  resolveManagedAuthClientAddress,
+} from "../src/auth/managed-auth";
 import {
   apiRequestBindingsForTransportPeer,
   trustedRequestSourceAddress,
@@ -185,5 +192,117 @@ describe("enrollment rate-limit source and bounded state", () => {
     expect(limiter.bucketCount).toBe(10_000);
     expect(limiter.take("source-0", 0)).toBe(false);
     expect(limiter.bucketCount).toBe(10_000);
+  });
+});
+
+describe("managed auth rate-limit source binding", () => {
+  const settings = testSettings({
+    productAccessMode: "managed",
+    publicBaseUrl: "http://127.0.0.1:3000",
+    betterAuthSecret: "request-source-test-better-auth-secret",
+  });
+  const managedAuth = createManagedAuth(settings, {} as never, {
+    sender: "test",
+    idempotency: { scope: "test", retentionSeconds: 0 },
+    send: async () => ({ status: "sent" as const, providerMessageId: null }),
+  });
+
+  test("the deployed better-auth config reads only the app-stamped header", () => {
+    expect(managedAuth?.options.advanced?.ipAddress?.ipAddressHeaders).toEqual([
+      MANAGED_AUTH_CLIENT_IP_HEADER,
+    ]);
+    // A caller-stamped header is never consulted on a bare request.
+    const forged = new Request("http://localhost/v1/auth/sign-in/email", {
+      headers: { "x-forwarded-for": "203.0.113.7" },
+    });
+    expect(resolveManagedAuthClientAddress(forged, managedAuth!.options)).not.toBe("203.0.113.7");
+  });
+
+  test("the stamp overwrites a caller-supplied client-ip header", () => {
+    const stamped = requestWithManagedAuthClientAddress(
+      new Request("http://localhost/v1/auth/sign-in/email", {
+        headers: { [MANAGED_AUTH_CLIENT_IP_HEADER]: "203.0.113.7" },
+      }),
+      "10.0.0.10",
+    );
+    expect(stamped.headers.get(MANAGED_AUTH_CLIENT_IP_HEADER)).toBe("10.0.0.10");
+  });
+
+  function mountedAuthApp(options: { trustedProxyHops: number; mode: "legacy" | "dual" }) {
+    const resolved: (string | null)[] = [];
+    const app = createApp({
+      settings: testSettings({
+        productAccessMode: "managed",
+        apiTrustedProxyHops: options.trustedProxyHops,
+        managedAuthSessionSetMode: options.mode,
+        publicBaseUrl: "http://127.0.0.1:3000",
+        betterAuthSecret: "request-source-test-better-auth-secret",
+      }),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: {
+        handler: async (request: Request) => {
+          resolved.push(resolveManagedAuthClientAddress(request, managedAuth!.options));
+          // Reads the buffered body so a broken request reconstruction hangs
+          // here instead of passing silently.
+          await request.text();
+          return Response.json({ ok: true });
+        },
+        api: {},
+      } as never,
+      managedAuthSessionAdapter: {} as never,
+    });
+    return { app, resolved };
+  }
+
+  function signInRequest(
+    app: ReturnType<typeof createApp>,
+    peer: string,
+    headers: Record<string, string>,
+  ) {
+    return app.request(
+      "/v1/auth/sign-in/email",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify({ email: "u@example.test", password: "password1234" }),
+      },
+      apiRequestBindingsForTransportPeer(peer),
+    );
+  }
+
+  test("a spoofed x-forwarded-for cannot move the rate-limit key (legacy mount)", async () => {
+    const { app, resolved } = mountedAuthApp({ trustedProxyHops: 0, mode: "legacy" });
+    for (const forged of ["203.0.113.7", "192.0.2.99", "203.0.113.7, 10.0.0.10"]) {
+      const response = await signInRequest(app, "10.0.0.10", {
+        "x-forwarded-for": forged,
+        "x-real-ip": "198.51.100.8",
+        [MANAGED_AUTH_CLIENT_IP_HEADER]: forged,
+      });
+      expect(response.status).toBe(200);
+    }
+    expect(resolved).toEqual(["10.0.0.10", "10.0.0.10", "10.0.0.10"]);
+  });
+
+  test("the dual-mode provider request is stamped the same way", async () => {
+    const { app, resolved } = mountedAuthApp({ trustedProxyHops: 0, mode: "dual" });
+    const response = await signInRequest(app, "10.0.0.10", {
+      "x-forwarded-for": "203.0.113.7",
+      [MANAGED_AUTH_CLIENT_IP_HEADER]: "203.0.113.7",
+    });
+    expect(response.status).toBe(200);
+    expect(resolved).toEqual(["10.0.0.10"]);
+  });
+
+  test("trusted proxy hops resolve the proxy-appended client, not prepended values", async () => {
+    const { app, resolved } = mountedAuthApp({ trustedProxyHops: 1, mode: "legacy" });
+    for (const forged of ["203.0.113.7", "192.0.2.99"]) {
+      const response = await signInRequest(app, "10.0.0.10", {
+        "x-forwarded-for": `${forged}, 198.51.100.42`,
+      });
+      expect(response.status).toBe(200);
+    }
+    expect(resolved).toEqual(["198.51.100.42", "198.51.100.42"]);
   });
 });

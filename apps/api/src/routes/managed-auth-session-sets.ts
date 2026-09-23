@@ -63,6 +63,10 @@ import { ensureManagedAccessForUser, getSession } from "@opengeni/db";
 import { sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import {
+  MANAGED_AUTH_CLIENT_IP_HEADER,
+  requestWithManagedAuthClientAddress,
+} from "../auth/managed-auth";
 import { trustedRequestSourceAddress } from "../http/request-source";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
@@ -98,7 +102,12 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
   app.get("/v1/auth/get-session", async (context) => {
     if (deps.settings.managedAuthSessionSetMode === "legacy") {
       if (!deps.managedAuth) throw new HTTPException(404);
-      return await deps.managedAuth.handler(context.req.raw);
+      return await deps.managedAuth.handler(
+        requestWithManagedAuthClientAddress(
+          context.req.raw,
+          trustedRequestSourceAddress(context, deps.settings.apiTrustedProxyHops),
+        ),
+      );
     }
     context.header("cache-control", "no-store");
     const available = requireAvailable(deps);
@@ -258,7 +267,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
             ? managedAuthDerivedUuid("opengeni:managed-auth:return-intent", body.operationId)
             : null,
           returnPath: body.returnIntent ?? null,
-          expiresAt: new Date(Date.now() + 600_000),
+          expiresAt: new Date(Date.now() + (MANAGED_AUTH_TRANSACTION_TTL_SECONDS - 60) * 1_000),
         }),
       );
       setTransactionCookie(context, deps, transaction.id, transactionSecret);
@@ -289,7 +298,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         completed = await authenticateAndAdoptManagedAuthSession({
           db: deps.db,
           adapter: available.adapter,
-          isolatedHeaders: isolatedManagedAuthHeaders(context.req.raw),
+          isolatedHeaders: isolatedAuthRequestHeaders(context, deps),
           authority,
           csrfHash: managedAuthCsrfHash(authority),
           operationId: body.operationId,
@@ -395,7 +404,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
               },
             },
           },
-          headers: isolatedManagedAuthHeaders(context.req.raw),
+          headers: isolatedAuthRequestHeaders(context, deps),
           returnHeaders: true,
         });
         const url = validatedManagedAuthSocialAuthorizationUrl({
@@ -1015,6 +1024,15 @@ function loginTransactionClientScope(context: Context, deps: ApiRouteDeps): stri
     purpose: "managed-auth-login-transaction-rate-limit",
     client: address.slice(0, 128),
   });
+}
+
+function isolatedAuthRequestHeaders(context: Context, deps: ApiRouteDeps): Headers {
+  const headers = isolatedManagedAuthHeaders(context.req.raw);
+  headers.set(
+    MANAGED_AUTH_CLIENT_IP_HEADER,
+    trustedRequestSourceAddress(context, deps.settings.apiTrustedProxyHops),
+  );
+  return headers;
 }
 
 function allowedOrigins(deps: ApiRouteDeps): string[] {

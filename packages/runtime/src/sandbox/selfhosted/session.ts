@@ -1816,23 +1816,18 @@ export class SelfhostedSession {
       channel = result.ptyOpen.channel;
     }
     if (channel) return this.relayEndpoint(channel);
-    const channelId = channelKey(this.controlWorkspaceId, this.agentId, port);
-    const tls = this.relay.tls ?? true;
-    // The routing key the relay pairs producer↔consumer by — IDENTICAL to the
-    // agent's `ChannelKey::query`, including the stream-instance channel id.
-    const routingQuery =
-      `ws=${encodeURIComponent(this.controlWorkspaceId)}` +
-      `&agent=${encodeURIComponent(this.agentId)}` +
-      `&port=${port}` +
-      `&channel=${encodeURIComponent(channelId)}`;
-    return {
-      host: this.relay.host,
-      port: this.relay.port ?? (tls ? 443 : 80),
-      tls,
-      // The relay's wss route (`/stream`); buildStreamUrl honors `path`.
-      path: this.relay.path ?? SELFHOSTED_RELAY_STREAM_PATH,
-      query: routingQuery,
-    };
+    // The producer is the channel authority: a descriptor-less response means
+    // an agent that predates the M8b stream-channel contract. Fail closed like
+    // the runner-upgrade path — fabricating a routing key would mint tokens
+    // bound to a channel identity the producer never claimed.
+    throw new SelfhostedControlError({
+      message:
+        `This Connected Machine does not advertise the stream channel descriptor required for relayed streams (port ${port}). ` +
+        "Update and reconnect the OpenGeni agent. No stream token was minted.",
+      code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+      reason: null,
+      retryable: false,
+    });
   }
 
   private relayEndpoint(channel: StreamChannel): ExposedPortEndpoint {
@@ -2276,10 +2271,6 @@ function execRequiresOpStream(cause?: OpStreamUnavailableError): SelfhostedContr
     reason: runnerUpgrade ? null : "agent_reconnecting",
     retryable: !runnerUpgrade,
   });
-}
-
-function channelKey(workspaceId: string, agentId: string, port: number): string {
-  return `${workspaceId}:${agentId}:${port}`;
 }
 
 /** Detect an image media type from magic bytes (with a path-extension fallback),

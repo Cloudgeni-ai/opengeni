@@ -1784,6 +1784,8 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   ttlSeconds: request.expiresInSeconds,
                   subjectId: grant.subjectId,
                   authorityEpoch: relayAuthorityEpoch,
+                  agentId: relayed.channel.agentId,
+                  channelId: relayed.channel.channelId,
                 });
                 return {
                   kind: "relay" as const,

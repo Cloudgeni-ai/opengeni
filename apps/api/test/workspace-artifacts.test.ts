@@ -257,6 +257,10 @@ test("direct uploads publish large HTML with optional downloadable source and im
     expect(mismatchedReplay.status).toBe(409);
     const runtime = await requestAsCanonicalLocalHuman(`${base}/${result.artifact.id}/html`);
     expect(await runtime.text()).toBe(html);
+    // Retained user HTML is never served inline on the API origin; clients
+    // fetch the bytes and render them inside their own sandboxed frame.
+    expect(runtime.headers.get("content-disposition")).toBe("attachment");
+    expect(runtime.headers.get("x-content-type-options")).toBe("nosniff");
     for (const endpoint of ["html", "downloads", "content"]) {
       for (const versionId of ["not-a-uuid", ""]) {
         const invalid = await requestAsCanonicalLocalHuman(
