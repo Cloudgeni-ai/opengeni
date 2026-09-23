@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "image": "dxflrs/garage:v2.3.0@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690",
+  "indexDigest": "sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690",
+  "derivation": "Native binary pins derived from digest-verified official image layers, then compared byte-for-byte with official native downloads. Not an upstream native checksum manifest or trust-on-first-use. Each target image has exactly one layer; provenance verification rejects any additional layers or non-timestamp PAX metadata.",
+  "index": {
+    "schemaVersion": 2,
+    "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+    "manifests": [
+      {
+        "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+        "size": 428,
+        "digest": "sha256:2d3f94a89a8a02dc49fa75594d6df67ed9c6ffe08fe55ed023d0c9776f71a9bd",
+        "platform": { "architecture": "arm64", "os": "linux" }
+      },
+      {
+        "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+        "size": 428,
+        "digest": "sha256:dac0c92add4f1a0b41035e94b41036a270ffbe88a37c7ac9c3f19e6dc5bdccf2",
+        "platform": { "architecture": "amd64", "os": "linux" }
+      },
+      {
+        "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+        "size": 428,
+        "digest": "sha256:31576811b11b7f0754cdc85a9562a2ea2dc045583109f9fc12349f810b7a89d0",
+        "platform": { "architecture": "386", "os": "linux" }
+      },
+      {
+        "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+        "size": 428,
+        "digest": "sha256:a1dfaeb91190f95dd2abeb02ec1d8f1f01839de14b167b223e23aa27b57aeb22",
+        "platform": { "architecture": "arm", "os": "linux" }
+      }
+    ]
+  },
+  "targets": {
+    "amd64": {
+      "manifestDigest": "sha256:dac0c92add4f1a0b41035e94b41036a270ffbe88a37c7ac9c3f19e6dc5bdccf2",
+      "manifest": {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+        "config": { "mediaType": "application/vnd.docker.container.image.v1+json", "size": 454, "digest": "sha256:5eda3acb72a0b6c3432233d19b07dffabd9ee7eb93be90031bae75e4b81e6324" },
+        "layers": [{ "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip", "size": 28498963, "digest": "sha256:1c2f4cd7067f8b57cda59904c18a6fb888ca9a1eef5177596d2ed0a7a966d13e" }]
+      },
+      "binarySha256": "f98d317942bb341151a2775162016bb50cf86b865d0108de03eb5db16e2120cd",
+      "binarySize": 71281456,
+      "nativeUrl": "https://garagehq.deuxfleurs.fr/_releases/v2.3.0/x86_64-unknown-linux-musl/garage"
+    },
+    "arm64": {
+      "manifestDigest": "sha256:2d3f94a89a8a02dc49fa75594d6df67ed9c6ffe08fe55ed023d0c9776f71a9bd",
+      "manifest": {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+        "config": { "mediaType": "application/vnd.docker.container.image.v1+json", "size": 455, "digest": "sha256:4a53620ee2088de01a185899412889ade13c420df74ac9ca12699c27a8ab18b2" },
+        "layers": [{ "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip", "size": 27085033, "digest": "sha256:6151230acbde3c6cd384cfc5f75cfa076c2eaa1ccf16bafa2a3468620ea035fb" }]
+      },
+      "binarySha256": "8ced2ad3040262571de08aa600959aa51f97576d55da7946fcde6f66140705e2",
+      "binarySize": 66349320,
+      "nativeUrl": "https://garagehq.deuxfleurs.fr/_releases/v2.3.0/aarch64-unknown-linux-musl/garage"
+    }
+  }
+}
