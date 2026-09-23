@@ -255,9 +255,9 @@ describe("Codex status readiness semantics", () => {
       },
       accountCount: 1,
       models: [
+        { id: "codex/gpt-6-astra", label: "GPT-6 Astra" },
         { id: "codex/gpt-6-sol", label: "GPT-6 Sol" },
         { id: "codex/gpt-6-luna", label: "GPT-6 Luna" },
-        { id: "codex/gpt-6-astra", label: "GPT-6 Astra" },
       ],
     });
   });

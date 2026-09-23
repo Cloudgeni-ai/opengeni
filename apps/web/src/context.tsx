@@ -618,7 +618,7 @@ export function RootRouteComponent() {
     workspaceId: string;
     accountId: string | null;
   } | null>(null);
-  const [model, setModel] = useState("gpt-6-luna");
+  const [model, setModel] = useState("gpt-6-astra");
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
   const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
   // Changes/Files dock starts collapsed; user opens via the session-panel toggle.

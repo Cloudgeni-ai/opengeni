@@ -556,8 +556,10 @@ const SettingsSchema = z.object({
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
   openaiBaseUrl: z.string().optional(),
-  openaiModel: z.string().default("gpt-6-luna"),
-  openaiAllowedModels: z.string().default("gpt-6-luna,gpt-6-sol"),
+  openaiModel: z.string().default("gpt-6-astra"),
+  openaiAllowedModels: z
+    .string()
+    .default("gpt-6-astra,gpt-6-sol,gpt-6-luna"),
   // OpenGeni-managed Vercel AI Gateway. When configured, the two reviewed
   // Gateway models below are added to the managed-credit catalog. Workspace
   // Gateway keys use the encrypted connection broker and never this secret.
@@ -2743,22 +2745,24 @@ export function configuredOpenRouterOrganizationProductModelIds(settings: Settin
  * llm-prices.com as a ground-truth canary; it does not generate this table.
  */
 export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
-  "gpt-6-luna": {
+  "gpt-6-astra": {
     default: {
-      inputMicrosPerMillionTokens: 100_000,
-      cachedInputMicrosPerMillionTokens: 10_000,
-      cacheWriteMicrosPerMillionTokens: 125_000,
-      outputMicrosPerMillionTokens: 500_000,
+      // OpenAI list price: $10 / $1 cached / $12.50 cache write / $50 output.
+      inputMicrosPerMillionTokens: 10_000_000,
+      cachedInputMicrosPerMillionTokens: 1_000_000,
+      cacheWriteMicrosPerMillionTokens: 12_500_000,
+      outputMicrosPerMillionTokens: 50_000_000,
       marginBps: 500,
     },
     inputTokenTiers: [
       {
+        // Prompts with more than 272K input tokens use 2x input and 1.5x output.
         minimumInputTokens: 272_001,
         pricing: {
-          inputMicrosPerMillionTokens: 200_000,
-          cachedInputMicrosPerMillionTokens: 20_000,
-          cacheWriteMicrosPerMillionTokens: 250_000,
-          outputMicrosPerMillionTokens: 750_000,
+          inputMicrosPerMillionTokens: 20_000_000,
+          cachedInputMicrosPerMillionTokens: 2_000_000,
+          cacheWriteMicrosPerMillionTokens: 25_000_000,
+          outputMicrosPerMillionTokens: 75_000_000,
           marginBps: 500,
         },
       },
@@ -2766,6 +2770,7 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
   },
   "gpt-6-sol": {
     default: {
+      // OpenAI list price: $2 / $0.20 cached / $2.50 cache write / $10 output.
       inputMicrosPerMillionTokens: 2_000_000,
       cachedInputMicrosPerMillionTokens: 200_000,
       cacheWriteMicrosPerMillionTokens: 2_500_000,
@@ -2780,6 +2785,28 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
           cachedInputMicrosPerMillionTokens: 400_000,
           cacheWriteMicrosPerMillionTokens: 5_000_000,
           outputMicrosPerMillionTokens: 15_000_000,
+          marginBps: 500,
+        },
+      },
+    ],
+  },
+  "gpt-6-luna": {
+    default: {
+      // OpenAI list price: $0.10 / $0.01 cached / $0.125 cache write / $0.50 output.
+      inputMicrosPerMillionTokens: 100_000,
+      cachedInputMicrosPerMillionTokens: 10_000,
+      cacheWriteMicrosPerMillionTokens: 125_000,
+      outputMicrosPerMillionTokens: 500_000,
+      marginBps: 500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 200_000,
+          cachedInputMicrosPerMillionTokens: 20_000,
+          cacheWriteMicrosPerMillionTokens: 250_000,
+          outputMicrosPerMillionTokens: 750_000,
           marginBps: 500,
         },
       },
@@ -4357,20 +4384,20 @@ export function productShortLabelForModelId(modelId: string): string | null {
     ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
     : modelId;
   switch (slug) {
-    case "grok-4.6":
-      return "4.6";
+    case "grok-4.7":
+      return "4.7";
     case "gpt-5.6-sol":
       return "5.6 Sol";
     case "gpt-5.6-terra":
       return "5.6 Terra";
     case "gpt-5.6-luna":
       return "5.6 Luna";
+    case "gpt-6-astra":
+      return "6 Astra";
     case "gpt-6-sol":
       return "6 Sol";
     case "gpt-6-luna":
       return "6 Luna";
-    case "gpt-6-astra":
-      return "6 Astra";
     default:
       return null;
   }
@@ -4397,13 +4424,6 @@ function builtinContextLimitsForModel(
       autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
     };
   }
-  if (modelId === "gpt-6-luna" || modelId === "gpt-6-sol") {
-    return {
-      contextWindowTokens: 1_050_000,
-      effectiveContextWindowTokens: 997_500,
-      autoCompactTokenLimit: 900_000,
-    };
-  }
   return { contextWindowTokens: settings.contextWindowTokens };
 }
 
@@ -4415,8 +4435,9 @@ function builtinLatencyModesForModel(modelId: string): Array<{
 }> {
   if (
     isBuiltinGpt56ModelId(modelId) ||
+    modelId.startsWith("gpt-6-") ||
     modelId.startsWith("codex/gpt-5.6-") ||
-    modelId === "codex/gpt-6-astra"
+    modelId.startsWith("codex/gpt-6-")
   ) {
     return [
       { id: "standard", upstream: "supported", runnable: true },
@@ -4447,7 +4468,7 @@ function builtinHostedImageGenerationForModel(settings: Settings, modelId: strin
   return (
     settings.openaiProvider === "openai" &&
     isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl) &&
-    isBuiltinGpt56ModelId(modelId)
+    (isBuiltinGpt56ModelId(modelId) || modelId.startsWith("gpt-6-"))
   );
 }
 
@@ -4830,9 +4851,15 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
           // the durable session/turn policy gate before attaching it.
           hostedWebSearch: true,
           capabilities,
-          contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
-          effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
-          autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+          contextWindowTokens: slug.startsWith("gpt-6-")
+            ? 1_050_000
+            : CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+          effectiveContextWindowTokens: slug.startsWith("gpt-6-")
+            ? 997_500
+            : CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+          autoCompactTokenLimit: slug.startsWith("gpt-6-")
+            ? 945_000
+            : CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
           toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
         };
       }),

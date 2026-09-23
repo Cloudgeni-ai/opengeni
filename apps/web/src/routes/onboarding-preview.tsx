@@ -59,7 +59,7 @@ const previewMethods = {
       resources: [],
       tools: [],
       toolsProvided: false,
-      model: "gpt-6-luna",
+      model: "gpt-6-astra",
       reasoningEffort: "low",
       latencyMode: "standard",
       options: {},

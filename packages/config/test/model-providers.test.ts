@@ -1024,22 +1024,15 @@ describe("productShortLabelForModelId", () => {
     expect(productShortLabelForModelId("codex/gpt-5.6-sol")).toBe("5.6 Sol");
     expect(productShortLabelForModelId("gpt-5.6-luna")).toBe("5.6 Luna");
     expect(productShortLabelForModelId("gpt-5.6-terra")).toBe("5.6 Terra");
+    expect(productShortLabelForModelId("gpt-6-sol")).toBe("6 Sol");
+    expect(productShortLabelForModelId("gpt-6-luna")).toBe("6 Luna");
     expect(productShortLabelForModelId("codex/gpt-6-astra")).toBe("6 Astra");
-    expect(productShortLabelForModelId("grok-4.6")).toBe("4.6");
+    expect(productShortLabelForModelId("grok-4.7")).toBe("4.7");
     expect(productShortLabelForModelId("gpt-5.4-mini")).toBeNull();
   });
 });
 
 describe("configuredModels", () => {
-  test("code defaults expose GPT-6 Luna and Sol without GPT-5.6", () => {
-    const settings = getSettings({ OPENGENI_OPENAI_API_KEY: "sk-test" });
-    expect(settings.openaiModel).toBe("gpt-6-luna");
-    expect(configuredAllowedModels(settings)).toEqual(["gpt-6-luna", "gpt-6-sol"]);
-    const models = configuredModels(settings);
-    expect(models.map((model) => model.id)).toEqual(["gpt-6-luna", "gpt-6-sol"]);
-    expect(models.every((model) => model.contextWindowTokens === 1_050_000)).toBe(true);
-  });
-
   test("parses the SuperGrok valid-event idle interval and rejects invalid bounds", () => {
     const configured = withEnv(
       {
@@ -1069,7 +1062,7 @@ describe("configuredModels", () => {
       () => getSettings(),
     );
     const settings = withXaiSubscriptionCatalogProvider(base);
-    const resolved = resolveModelProvider(settings, "supergrok/grok-4.6")!;
+    const resolved = resolveModelProvider(settings, "supergrok/grok-4.7")!;
     expect(resolved.provider).toMatchObject({
       id: "supergrok-subscription",
       kind: "xai-subscription",
@@ -1077,10 +1070,10 @@ describe("configuredModels", () => {
       baseUrl: "https://cli-chat-proxy.grok.com/v1",
     });
     expect(resolved.model).toMatchObject({
-      id: "supergrok/grok-4.6",
-      upstreamModelId: "grok-4.6",
-      label: "Grok 4.6",
-      shortLabel: "4.6",
+      id: "supergrok/grok-4.7",
+      upstreamModelId: "grok-4.7",
+      label: "Grok 4.7",
+      shortLabel: "4.7",
       contextWindowTokens: 500_000,
       effectiveContextWindowTokens: 475_000,
       autoCompactTokenLimit: 400_000,
@@ -1114,9 +1107,9 @@ describe("configuredModels", () => {
     );
     const settings = withXaiSubscriptionCatalogProvider({
       ...base,
-      openaiModel: "supergrok/grok-4.6",
+      openaiModel: "supergrok/grok-4.7",
     });
-    const matches = configuredModels(settings).filter((model) => model.id === "supergrok/grok-4.6");
+    const matches = configuredModels(settings).filter((model) => model.id === "supergrok/grok-4.7");
     expect(matches).toHaveLength(1);
     expect(matches[0]!.providerId).toBe("supergrok-subscription");
   });
@@ -1125,21 +1118,22 @@ describe("configuredModels", () => {
     const settings = withEnv(
       {
         OPENGENI_OPENAI_API_KEY: "sk-test",
-        OPENGENI_OPENAI_MODEL: "gpt-6-luna",
-        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-6-luna,gpt-6-sol",
+        OPENGENI_OPENAI_MODEL: "gpt-5.6-sol",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna",
         OPENGENI_CODEX_SUBSCRIPTION_ENABLED: "true",
       },
       () => withCodexCatalogProvider(getSettings()),
     );
     const models = configuredModels(settings);
-    expect(models.find((model) => model.id === "gpt-6-luna")?.label).toBe("GPT-6 Luna");
+    expect(models.find((model) => model.id === "gpt-5.6-luna")?.label).toBe("GPT-5.6 Luna");
     expect(models.find((model) => model.id === "codex/gpt-6-luna")?.label).toBe("GPT-6 Luna");
-    expect(models.find((model) => model.id === "gpt-6-sol")?.shortLabel).toBe("6 Sol");
+    expect(models.find((model) => model.id === "gpt-5.6-sol")?.shortLabel).toBe("5.6 Sol");
     expect(models.find((model) => model.id === "codex/gpt-6-sol")?.shortLabel).toBe("6 Sol");
-    expect(models.find((model) => model.id === "gpt-6-luna")?.shortLabel).toBe("6 Luna");
-    expect(models.find((model) => model.id === "gpt-6-luna")?.capabilities.inputModalities).toEqual(
-      ["text", "image"],
-    );
+    expect(models.find((model) => model.id === "gpt-5.6-luna")?.shortLabel).toBe("5.6 Luna");
+    expect(models.find((model) => model.id === "codex/gpt-6-luna")?.shortLabel).toBe("6 Luna");
+    expect(
+      models.find((model) => model.id === "gpt-5.6-luna")?.capabilities.inputModalities,
+    ).toEqual(["text", "image"]);
     expect(
       models.find((model) => model.id === "codex/gpt-6-luna")?.capabilities.inputModalities,
     ).toEqual(["text", "image"]);
@@ -1147,9 +1141,9 @@ describe("configuredModels", () => {
     expect(astra).toMatchObject({
       label: "GPT-6 Astra",
       shortLabel: "6 Astra",
-      contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
-      effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
-      autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+      contextWindowTokens: 1_050_000,
+      effectiveContextWindowTokens: 997_500,
+      autoCompactTokenLimit: 945_000,
     });
     expect(astra?.capabilities.latencyModes.map(({ id, runnable }) => ({ id, runnable }))).toEqual([
       { id: "standard", runnable: true },
@@ -1711,7 +1705,7 @@ describe("turn execution policy V1", () => {
       () => getSettings(),
     );
     const policy = resolveTurnExecutionPolicyV1(settings, {
-      modelId: "codex/gpt-6-sol",
+      modelId: "codex/gpt-5.6-sol",
       requestedModelId: null,
       modelSource: "continuation",
       reasoningEffort: "xhigh",
@@ -1719,7 +1713,7 @@ describe("turn execution policy V1", () => {
     });
     const preWireProfilePolicy = {
       ...policy,
-      definitionVersion: "sha256:dd03c9d8d001670489a9d9378167231524ab1122a34af463cf4005a2e2d185f9",
+      definitionVersion: "sha256:45a93d5876fdb2a3b3d485c83ea6ac758fddb64e7fe493384a05a198bc582c00",
     };
 
     expect(() =>
@@ -1739,16 +1733,16 @@ describe("turn execution policy V1", () => {
       () => getSettings(),
     );
     const policy = resolveTurnExecutionPolicyV1(settings, {
-      modelId: "codex/gpt-6-sol",
+      modelId: "codex/gpt-5.6-sol",
       requestedModelId: null,
       modelSource: "session",
       reasoningEffort: "max",
       reasoningSource: "session",
     });
     expect(policy).toMatchObject({
-      productModelId: "codex/gpt-6-sol",
+      productModelId: "codex/gpt-5.6-sol",
       providerId: "codex-subscription",
-      upstreamModelId: "gpt-6-sol",
+      upstreamModelId: "gpt-5.6-sol",
       credentialSource: { kind: "connected_subscription", provider: "codex" },
       billing: {
         upstreamPayer: "connected_subscription",
@@ -1939,27 +1933,6 @@ describe("resolveModelProvider", () => {
 });
 
 describe("configuredModelPricing", () => {
-  test("prices code-default GPT-6 models at reviewed OpenAI standard and long-context rates", () => {
-    expect(defaultModelPricing["gpt-6-luna"]?.default).toMatchObject({
-      inputMicrosPerMillionTokens: 100_000,
-      cachedInputMicrosPerMillionTokens: 10_000,
-      outputMicrosPerMillionTokens: 500_000,
-    });
-    expect(defaultModelPricing["gpt-6-luna"]?.inputTokenTiers?.[0]).toMatchObject({
-      minimumInputTokens: 272_001,
-      pricing: { inputMicrosPerMillionTokens: 200_000 },
-    });
-    expect(defaultModelPricing["gpt-6-sol"]?.default).toMatchObject({
-      inputMicrosPerMillionTokens: 2_000_000,
-      cachedInputMicrosPerMillionTokens: 200_000,
-      outputMicrosPerMillionTokens: 10_000_000,
-    });
-    expect(defaultModelPricing["gpt-6-sol"]?.inputTokenTiers?.[0]).toMatchObject({
-      minimumInputTokens: 272_001,
-      pricing: { inputMicrosPerMillionTokens: 4_000_000 },
-    });
-  });
-
   test("includes the built-in GLM-5.2 default pricing entry", () => {
     expect(defaultModelPricing["accounts/fireworks/models/glm-5p2"]).toEqual({
       default: {
@@ -2010,13 +1983,7 @@ describe("configuredModelPricing", () => {
     expect(defaultModelPricing["gpt-5.4"]).toBeUndefined();
     expect(defaultModelPricing["gpt-5"]).toBeUndefined();
 
-    const settings = withEnv(
-      {
-        OPENGENI_OPENAI_API_KEY: "sk-test",
-        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.6-luna",
-      },
-      () => getSettings(),
-    );
+    const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
     // 100k input @ $0.20/M = 20_000 micros, then +5% margin -> 21_000
     expect(
       calculateModelUsageCostMicros(settings, "gpt-5.6-luna", {

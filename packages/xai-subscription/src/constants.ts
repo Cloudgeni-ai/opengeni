@@ -25,7 +25,7 @@ export const XAI_CLIENT_MODE = "opengeni";
 
 export const XAI_SUBSCRIPTION_PROVIDER_ID = "supergrok-subscription";
 export const XAI_SUBSCRIPTION_MODEL_ID_PREFIX = "supergrok/";
-export const XAI_SUBSCRIPTION_MODEL_SLUGS = ["grok-4.6"] as const;
+export const XAI_SUBSCRIPTION_MODEL_SLUGS = ["grok-4.7"] as const;
 
 // Static product limits used by the OpenGeni catalog, matching the Codex seam.
 export const XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS = 500_000;
