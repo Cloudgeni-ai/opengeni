@@ -981,6 +981,7 @@ export function Attachments() {
     <AttachmentChips
       attachments={controller.attachments.attachments}
       messages={controller.messages}
+      disabled={controller.disabled}
       onRemove={controller.attachments.remove}
       onRetry={controller.attachments.retry}
       onRetainPreview={controller.attachments.retainPreview}
@@ -1685,6 +1686,7 @@ function ConfirmBar({
 function AttachmentChips({
   attachments,
   messages,
+  disabled,
   onRemove,
   onRetry,
   onRetainPreview,
@@ -1692,6 +1694,7 @@ function AttachmentChips({
 }: {
   attachments: UseFileAttachmentsResult["attachments"];
   messages: ChatComposerMessages;
+  disabled: boolean;
   onRemove: (id: string) => void;
   onRetry?: ((id: string) => void) | undefined;
   onRetainPreview: UseFileAttachmentsResult["retainPreview"];
@@ -1843,7 +1846,8 @@ function AttachmentChips({
                 <button
                   type="button"
                   onClick={() => onRetry(attachment.id)}
-                  className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg pointer-coarse:size-10"
+                  disabled={disabled}
+                  className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-10"
                   aria-label={messages.retryAttachment(attachment.name)}
                 >
                   <RotateCwIcon className="size-3.5" />
@@ -1853,7 +1857,8 @@ function AttachmentChips({
             <button
               type="button"
               onClick={() => onRemove(attachment.id)}
-              className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg pointer-coarse:size-10"
+              disabled={disabled}
+              className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-10"
               aria-label={messages.removeAttachment(attachment.name)}
             >
               <XIcon className="size-3.5" />

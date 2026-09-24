@@ -759,6 +759,57 @@ describe("ChatComposer attachments", () => {
     );
   });
 
+  test("ready attachments cannot be removed while a new-session send is pending", async () => {
+    const attachment = readyChip("sent.png");
+    const removed: string[] = [];
+    let completeCreate!: () => void;
+    const createPending = new Promise<void>((resolve) => {
+      completeCreate = resolve;
+    });
+    function Harness() {
+      const [creating, setCreating] = useState(false);
+      return (
+        <ChatComposer
+          composer={makeComposer({
+            sending: creating,
+            send: async () => {
+              setCreating(true);
+              await createPending;
+              setCreating(false);
+              return true;
+            },
+          })}
+          attachments={makeAttachments({
+            attachments: [attachment],
+            remove: (id) => removed.push(id),
+          })}
+          disabled={creating}
+        />
+      );
+    }
+    const container = await mount(<Harness />);
+    const remove = container.querySelector<HTMLButtonElement>('[aria-label="Remove sent.png"]');
+    expect(remove?.disabled).toBe(false);
+    await act(async () => {
+      sendButton(container)?.click();
+      await Promise.resolve();
+    });
+    expect(remove?.disabled).toBe(true);
+    await act(async () => {
+      remove?.click();
+    });
+    expect(removed).toEqual([]);
+    await act(async () => {
+      completeCreate();
+      await createPending;
+    });
+    expect(remove?.disabled).toBe(false);
+    await act(async () => {
+      remove?.click();
+    });
+    expect(removed).toEqual([attachment.id]);
+  });
+
   test("a drag that carries no files is ignored (does not enqueue or show the overlay)", async () => {
     let addCalls = 0;
     const attachments = makeAttachments({

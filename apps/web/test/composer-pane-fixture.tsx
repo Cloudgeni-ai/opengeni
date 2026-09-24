@@ -18,6 +18,7 @@ import "../src/styles.css";
 
 const newSession = new URLSearchParams(location.search).has("new-session");
 const sendingPreview = new URLSearchParams(location.search).has("sending");
+const attachmentPreview = new URLSearchParams(location.search).has("attachment");
 
 function PickerFixture({ leading, label }: { leading?: ReactNode; label: string }) {
   return (
@@ -74,7 +75,22 @@ function Fixture() {
             },
           })}
           disabled={sendingPreview}
-          attachments={emptyAttachments()}
+          attachments={
+            attachmentPreview
+              ? {
+                  ...emptyAttachments(),
+                  attachments: [
+                    {
+                      id: "fixture-attachment",
+                      name: "dashboard-spec.pdf",
+                      contentType: "application/pdf",
+                      sizeBytes: 2048,
+                      status: "ready",
+                    },
+                  ],
+                }
+              : emptyAttachments()
+          }
           attachButtonClassName="hidden"
           controlsLeading={
             <>
