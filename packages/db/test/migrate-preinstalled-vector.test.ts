@@ -66,7 +66,7 @@ describe("explicit preinstalled-vector migration", () => {
     await executeMigrationFile(sql, "0001_other.sql", "SELECT 1;", { preinstalledVector: true });
     expect(inspections).toEqual([]);
     expect(statements).toEqual([
-      "SELECT\n  pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),\n  pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true);\nSELECT 1;",
+      "SELECT\n  pg_catalog.set_config('lock_timeout', '5s', true),\n  pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),\n  pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true);\nSELECT 1;",
     ]);
   });
 });
