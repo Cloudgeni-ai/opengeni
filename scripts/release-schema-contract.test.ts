@@ -158,8 +158,11 @@ describe("release schema contract", () => {
     const insightsFactReadsHashJoin = completeSourceContract.migrations.some(
       (migration) => migration.path === "0512_insights_fact_reads_hash_join.sql",
     );
+    const messageForkPrefixCompaction = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0513_message_fork_prefix_compaction.sql",
+    );
     const privateSessionsFleetActivation = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0513_private_sessions_fleet_activation.sql",
+      (migration) => migration.path === "0514_private_sessions_fleet_activation.sql",
     );
     const controlRevisionFrontier = completeSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
@@ -395,6 +398,7 @@ describe("release schema contract", () => {
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (privateSessionsFleetActivation ? 1 : 0) +
+        (messageForkPrefixCompaction ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
         (knowledgeIndexFundingWait ? 1 : 0) +
@@ -678,8 +682,11 @@ describe("release schema contract", () => {
       ...(insightsFactReadsHashJoin
         ? { latestMigration: "0512_insights_fact_reads_hash_join.sql" }
         : {}),
+      ...(messageForkPrefixCompaction
+        ? { latestMigration: "0513_message_fork_prefix_compaction.sql" }
+        : {}),
       ...(privateSessionsFleetActivation
-        ? { latestMigration: "0513_private_sessions_fleet_activation.sql" }
+        ? { latestMigration: "0514_private_sessions_fleet_activation.sql" }
         : {}),
     });
     expect(
@@ -691,6 +698,7 @@ describe("release schema contract", () => {
           Number(knowledgeIndexFundingWait) -
           Number(knowledgeVisibleIndexStatus) -
           Number(insightsFactReadsHashJoin) -
+          Number(messageForkPrefixCompaction) -
           Number(privateSessionsFleetActivation),
       ),
     ).toMatchObject({
@@ -811,6 +819,7 @@ describe("release schema contract", () => {
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction) -
             Number(privateSessionsFleetActivation),
         ),
       ).toMatchObject({
@@ -826,6 +835,7 @@ describe("release schema contract", () => {
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction) -
             Number(privateSessionsFleetActivation),
         ),
       ).toMatchObject({
@@ -840,6 +850,7 @@ describe("release schema contract", () => {
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction) -
             Number(privateSessionsFleetActivation),
         ),
       ).toMatchObject({
@@ -853,6 +864,7 @@ describe("release schema contract", () => {
           -1 -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction) -
             Number(privateSessionsFleetActivation),
         ),
       ).toMatchObject({
@@ -863,7 +875,10 @@ describe("release schema contract", () => {
     if (knowledgeVisibleIndexStatus) {
       expect(
         completeSourceContract.migrations.at(
-          -1 - Number(insightsFactReadsHashJoin) - Number(privateSessionsFleetActivation),
+          -1 -
+            Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction) -
+            Number(privateSessionsFleetActivation),
         ),
       ).toMatchObject({
         path: "0511_knowledge_visible_index_status.sql",
@@ -872,15 +887,25 @@ describe("release schema contract", () => {
     }
     if (insightsFactReadsHashJoin) {
       expect(
-        completeSourceContract.migrations.at(-1 - Number(privateSessionsFleetActivation)),
+        completeSourceContract.migrations.at(
+          -1 - Number(messageForkPrefixCompaction) - Number(privateSessionsFleetActivation),
+        ),
       ).toMatchObject({
         path: "0512_insights_fact_reads_hash_join.sql",
         deploymentMode: "rolling",
       });
     }
+    if (messageForkPrefixCompaction) {
+      expect(
+        completeSourceContract.migrations.at(-1 - Number(privateSessionsFleetActivation)),
+      ).toMatchObject({
+        path: "0513_message_fork_prefix_compaction.sql",
+        deploymentMode: "rolling",
+      });
+    }
     if (privateSessionsFleetActivation) {
       expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-        path: "0513_private_sessions_fleet_activation.sql",
+        path: "0514_private_sessions_fleet_activation.sql",
         deploymentMode: "maintenance",
       });
     }
@@ -1998,8 +2023,11 @@ describe("release schema contract", () => {
     const insightsFactReadsHashJoin = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0512_insights_fact_reads_hash_join.sql",
     );
+    const messageForkPrefixCompaction = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0513_message_fork_prefix_compaction.sql",
+    );
     const privateSessionsFleetActivation = unfilteredSourceContract.migrations.some(
-      (migration) => migration.path === "0513_private_sessions_fleet_activation.sql",
+      (migration) => migration.path === "0514_private_sessions_fleet_activation.sql",
     );
     const controlRevisionFrontier = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
@@ -2624,7 +2652,8 @@ describe("release schema contract", () => {
       "0510_knowledge_index_funding_wait.sql",
       "0511_knowledge_visible_index_status.sql",
       "0512_insights_fact_reads_hash_join.sql",
-      "0513_private_sessions_fleet_activation.sql",
+      "0513_message_fork_prefix_compaction.sql",
+      "0514_private_sessions_fleet_activation.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -3208,14 +3237,20 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0512_insights_fact_reads_hash_join.sql",
       };
+    if (messageForkPrefixCompaction)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0513_message_fork_prefix_compaction.sql",
+      };
     if (privateSessionsFleetActivation)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0513_private_sessions_fleet_activation.sql",
+        latestMigration: "0514_private_sessions_fleet_activation.sql",
       };
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (privateSessionsFleetActivation ? 1 : 0) +
+        (messageForkPrefixCompaction ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
         (knowledgeIndexFundingWait ? 1 : 0) +
@@ -3701,8 +3736,11 @@ describe("release schema contract", () => {
       ...(insightsFactReadsHashJoin
         ? { latestMigration: "0512_insights_fact_reads_hash_join.sql" }
         : {}),
+      ...(messageForkPrefixCompaction
+        ? { latestMigration: "0513_message_fork_prefix_compaction.sql" }
+        : {}),
       ...(privateSessionsFleetActivation
-        ? { latestMigration: "0513_private_sessions_fleet_activation.sql" }
+        ? { latestMigration: "0514_private_sessions_fleet_activation.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(

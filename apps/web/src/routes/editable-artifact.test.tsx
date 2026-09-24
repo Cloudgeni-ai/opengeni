@@ -34,8 +34,22 @@ mock.module("@/lib/editable-artifact-client", () => ({
 }));
 mock.module("@opengeni/sdk/editable-artifacts/worker?worker&url", () => ({ default: "worker.js" }));
 mock.module("@opengeni/react/artifacts", () => ({
-  BrowserEditableArtifactWorkbench: ({ document }: { document: { title: string } }) => (
-    <h1>{document.title}</h1>
+  BrowserEditableArtifactWorkbench: ({
+    document,
+    spreadsheet,
+    presentation,
+  }: {
+    document: { title: string; showHeader: boolean };
+    spreadsheet: { showHeader: boolean };
+    presentation: { showHeader: boolean };
+  }) => (
+    <h1
+      data-document-header={String(document.showHeader)}
+      data-spreadsheet-header={String(spreadsheet.showHeader)}
+      data-presentation-header={String(presentation.showHeader)}
+    >
+      {document.title}
+    </h1>
   ),
 }));
 beforeAll(() => {
@@ -94,6 +108,16 @@ for (const kind of ["document", "spreadsheet", "presentation"]) {
                 ? "Opening artifact"
                 : "Could not open this artifact",
           );
+          if (loadState === "ready") {
+            const workbench = container.querySelector("h1")!;
+            for (const attribute of [
+              "data-document-header",
+              "data-spreadsheet-header",
+              "data-presentation-header",
+            ]) {
+              expect(workbench.getAttribute(attribute)).toBe(String(!embedded));
+            }
+          }
           if (loadState === "error" && !embedded) {
             expect(container.textContent).toContain("Try again");
             expect(container.textContent).not.toMatch(/OpenGeni API/i);

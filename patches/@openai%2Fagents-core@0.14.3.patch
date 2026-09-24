@@ -2527,3 +2527,64 @@ index 99b8962bc8a73330e8c6b7080a75fff64b39ae2f..352b3b33d60e90c641f9d06403d52093
  export function getGlobalTraceProvider() {
      const symbol = Symbol.for('openai.agents.core.traceProvider');
      try {
+diff --git a/dist/sandbox/capabilities/shell.d.ts b/dist/sandbox/capabilities/shell.d.ts
+--- a/dist/sandbox/capabilities/shell.d.ts
++++ b/dist/sandbox/capabilities/shell.d.ts
+@@ -3,9 +3,11 @@ import { Capability, type ConfigureCapabilityTools } from './base';
+ export type ShellArgs = {
+     configureTools?: ConfigureCapabilityTools;
++    execCommandErrorFunction?: (context: unknown, error: unknown, details?: unknown) => string | Promise<string>;
+ };
+ declare class ShellCapability extends Capability {
+     readonly type = "shell";
+     private readonly configureTools?;
++    private readonly execCommandErrorFunction?;
+     constructor(args?: ShellArgs);
+     tools(): Tool<any>[];
+     instructions(): string;
+diff --git a/dist/sandbox/capabilities/shell.js b/dist/sandbox/capabilities/shell.js
+--- a/dist/sandbox/capabilities/shell.js
++++ b/dist/sandbox/capabilities/shell.js
+@@ -19,9 +19,11 @@ const SHELL_INSTRUCTIONS = [
+ class ShellCapability extends base_1.Capability {
+     type = 'shell';
+     configureTools;
++    execCommandErrorFunction;
+     constructor(args = {}) {
+         super();
+         this.configureTools = args.configureTools;
++        this.execCommandErrorFunction = args.execCommandErrorFunction;
+     }
+     tools() {
+         const session = (0, base_1.requireBoundSession)(this.type, this._session);
+@@ -31,6 +33,7 @@ class ShellCapability extends base_1.Capability {
+         const tools = [
+             (0, tool_1.tool)({
+                 name: 'exec_command',
++                ...(this.execCommandErrorFunction ? { errorFunction: this.execCommandErrorFunction } : {}),
+                 description: 'Runs a command in a PTY, returning output or a session ID for ongoing interaction.',
+                 parameters: zod_1.z.object({
+                     cmd: zod_1.z.string().min(1).describe('Shell command to execute.'),
+diff --git a/dist/sandbox/capabilities/shell.mjs b/dist/sandbox/capabilities/shell.mjs
+--- a/dist/sandbox/capabilities/shell.mjs
++++ b/dist/sandbox/capabilities/shell.mjs
+@@ -16,9 +16,11 @@ const SHELL_INSTRUCTIONS = [
+ class ShellCapability extends Capability {
+     type = 'shell';
+     configureTools;
++    execCommandErrorFunction;
+     constructor(args = {}) {
+         super();
+         this.configureTools = args.configureTools;
++        this.execCommandErrorFunction = args.execCommandErrorFunction;
+     }
+     tools() {
+         const session = requireBoundSession(this.type, this._session);
+@@ -28,6 +30,7 @@ class ShellCapability extends Capability {
+         const tools = [
+             tool({
+                 name: 'exec_command',
++                ...(this.execCommandErrorFunction ? { errorFunction: this.execCommandErrorFunction } : {}),
+                 description: 'Runs a command in a PTY, returning output or a session ID for ongoing interaction.',
+                 parameters: z.object({
+                     cmd: z.string().min(1).describe('Shell command to execute.'),

@@ -1255,7 +1255,7 @@ cannot restore the legacy authority. Remain in maintenance and fix forward.
 
 ### Production all-organization Only me availability cutover
 
-Migration `0513_private_sessions_fleet_activation.sql` is a maintenance-classified
+Migration `0514_private_sessions_fleet_activation.sql` is a maintenance-classified
 release marker, not an activation shortcut. The protected production release
 parks application database clients, applies the candidate migrations, then runs
 `db:activate-session-tenancy -- --all-organizations --activated-by

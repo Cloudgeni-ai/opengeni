@@ -62,6 +62,7 @@ export type EditableSpreadsheetArtifactSurfaceProps = Omit<
   "metadataRevision" | "sheet"
 > & {
   title?: string | undefined;
+  showHeader?: boolean | undefined;
   subtitle?: ReactNode | undefined;
   actions?: ReactNode | undefined;
   initialSheetId?: string | undefined;
@@ -311,6 +312,7 @@ export function EditableSpreadsheetGrid({
 export function EditableSpreadsheetArtifactSurface({
   session,
   title = "Workbook",
+  showHeader,
   subtitle,
   actions,
   initialSheetId,
@@ -392,6 +394,7 @@ export function EditableSpreadsheetArtifactSurface({
     <ArtifactSurface
       modality="spreadsheet"
       title={title}
+      showHeader={showHeader}
       subtitle={
         subtitle ??
         (accessRevoked

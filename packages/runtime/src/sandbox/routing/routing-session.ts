@@ -28,6 +28,7 @@
 // `@opengeni/db`.
 
 import type { ExposedPortEndpoint } from "../stream-port";
+import { ModalCommandStartPreDispatchUnavailableError } from "../providers/modal-command-router-wire";
 import { isDeepStrictEqual } from "node:util";
 import {
   withProviderCommandHandle,
@@ -1687,7 +1688,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       } catch (error) {
         if (reservedProcess) {
           if (
-            error instanceof ProviderCommandStartRejectedError &&
+            (error instanceof ProviderCommandStartRejectedError ||
+              error instanceof ModalCommandStartPreDispatchUnavailableError) &&
             reservedProcess.providerCommand?.kind === "modal-router-v1"
           ) {
             const persistence = this.deps.providerCommandPersistence?.(reservedProcess);
@@ -1697,7 +1699,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
               } catch (cause) {
                 throw new RoutingMutationOutcomeUnknownError(
                   op,
-                  "Never-started provider rejection could not settle its exact reservation",
+                  "Never-started provider call could not settle its exact reservation",
                   { cause, retainedProcess: reservedProcess },
                 );
               }

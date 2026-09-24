@@ -31,6 +31,26 @@ never `git clone`s a repo onto the machine.
 | `opengeni-agent-update`   | Self-update: signed-manifest discovery, minisign+sha256 verify, atomic replace, rollback.                                    |
 | `opengeni-relay`          | The stateless stream-relay edge image.                                                                                       |
 
+## Offline document IDs
+
+`opengeni-agent codemode document-id <kind> <namespace>` prints one JSON object
+with an `id` matching `openGeni.artifacts.ids.document`. It needs no Codemode
+bearer, SDK installation, enrollment, or network connection. Supported kinds are
+`paragraph`, `table`, `page-break`, `section`, `header`, `footer`, `comment`, and
+`tracked-change`.
+
+Copy the exact decimal `idNamespace` string from the document's inspected
+`summary`; do not convert it through a JavaScript number or invent a namespace.
+For example, with that value in `DOCUMENT_NAMESPACE`:
+
+```sh
+opengeni-agent codemode document-id paragraph "$DOCUMENT_NAMESPACE"
+```
+
+This only generates a new object name. Existing objects keep their inspected IDs;
+direct artifact edits still require the inspected `headSequence` and `stateHash`.
+It does not inspect, edit, or authorize access to a document.
+
 ## Distribution + self-update (M11)
 
 The agent reaches a user's machine via one trusted line and keeps itself current.

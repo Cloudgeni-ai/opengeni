@@ -12,6 +12,8 @@ import {
   ProviderCommandStartRejectedError,
 } from "../src/sandbox/provider-command-session";
 import { installModalCommandSession } from "../src/sandbox/providers/modal-command-session";
+import { ModalCommandStartPreDispatchUnavailableError } from "../src/sandbox/providers/modal-command-router-wire";
+import { isModalTaskExecStartPreDispatchUnavailableError } from "../src/sandbox/providers/modal";
 import {
   RoutingSandboxSession,
   RoutingBackendRecoveryRequiredError,
@@ -53,6 +55,8 @@ function fixture() {
   let failCapture = false;
   let controlUnavailable = false;
   let startRejection = false;
+  let startReadinessFailure = false;
+  let providerHandle = 41;
   const actions: string[] = [];
   const persistence: ProviderCommandPersistence = {
     load: async () => structuredClone(retained),
@@ -91,6 +95,11 @@ function fixture() {
       if (admittedCommandSupervisionReady()) await reserveSupervisedLaunch(command);
       if (startRejection)
         throw new ProviderCommandStartRejectedError(new Error("provider rejected start"));
+      if (startReadinessFailure)
+        await ModalCommandStartPreDispatchUnavailableError.ensureReady({
+          waitForReady: (_deadline: number, callback: (error: Error) => void) =>
+            callback(new Error("resolver not ready")),
+        } as never);
       actions.push("launch-idle");
       return structuredClone(command);
     },
@@ -135,7 +144,7 @@ function fixture() {
     withProviderCommandHandle(41, () => session.execCommand!({ cmd: "user code" }));
   const retain = () => {
     retained = structuredClone(command);
-    session.bindProviderCommand!(41, command, persistence);
+    session.bindProviderCommand!(providerHandle, command, persistence);
   };
   const read = (target = session) =>
     target.writeStdin!({ sessionId: 41, chars: "", yieldTimeMs: 0 });
@@ -148,8 +157,17 @@ function fixture() {
     command,
     receipt,
     persistence,
+    setProviderHandle: (value: number) => {
+      providerHandle = value;
+    },
+    clearRetention: () => {
+      retained = null;
+    },
     rejectStart: () => {
       startRejection = true;
+    },
+    failReadiness: (value = true) => {
+      startReadinessFailure = value;
     },
     recreate: () => {
       const next = adapter();
@@ -435,6 +453,50 @@ test("authenticated never-started rejection settles its reservation without quie
   expect(f.actions).toEqual([]);
 });
 
+test("a pre-dispatch failure permits bounded new launch only after exact never-started settlement", async () => {
+  const f = fixture();
+  f.failReadiness();
+  let settlementFails = true;
+  let settled = 0;
+  f.persistence.rejectSupervisedLaunch = async (command) => {
+    expect(command).toEqual(f.command);
+    if (settlementFails) throw new Error("reservation settlement unavailable");
+    f.clearRetention();
+    settled++;
+  };
+  const backend = { session: f.session, sandboxId: null, kind: "modal", activeEpoch: 0 } as const;
+  let nextHandle = 40;
+  const routed = new RoutingSandboxSession({
+    defaultResolved: backend,
+    readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+    resolveActiveBackend: async () => backend,
+    providerSupervisionReady: async () => true,
+    providerCommandHandle: (admission) => admission as number,
+    providerCommandPersistence: () => f.persistence,
+    beforeMutation: async () => {
+      f.setProviderHandle(++nextHandle);
+      return nextHandle;
+    },
+    afterMutation: async () => f.retain(),
+  });
+  const uncertain = await routed.execCommand({ cmd: "once" }).catch((error) => error);
+  expect(uncertain).toMatchObject({ name: "RoutingMutationOutcomeUnknownError", retryable: false });
+  expect(isModalTaskExecStartPreDispatchUnavailableError(uncertain)).toBe(false);
+  expect(routed.hasRetainedProcess(41)).toBe(true);
+  expect(f.actions).not.toContain("launch-idle");
+
+  // An exact durable rejection is the only branch that can clear the
+  // reservation and surface proof of never-dispatch to bounded recovery.
+  settlementFails = false;
+  const safe = await routed.execCommand({ cmd: "once" }).catch((error) => error);
+  expect(safe).toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
+  expect(settled).toBe(1);
+  expect(routed.hasRetainedProcess(42)).toBe(false);
+  f.failReadiness(false);
+  await routed.execCommand({ cmd: "once" });
+  expect(f.actions.filter((action) => action === "launch-idle")).toHaveLength(1);
+});
+
 test("a fresh observer never releases an abandoned idle reservation", async () => {
   const f = fixture();
   await f.start();
@@ -449,7 +511,10 @@ test("a fresh observer never releases an abandoned idle reservation", async () =
 test("routing retains the locator when release response is ambiguous", async () => {
   const f = fixture();
   f.session.releaseSupervisedCommand = async () => {
-    throw new Error("release response lost");
+    await ModalCommandStartPreDispatchUnavailableError.ensureReady({
+      waitForReady: (_deadline: number, callback: (error: Error) => void) =>
+        callback(new Error("resolver not ready")),
+    } as never);
   };
   const backend = { session: f.session, sandboxId: null, kind: "modal", activeEpoch: 0 } as const;
   const routed = new RoutingSandboxSession({
@@ -464,7 +529,9 @@ test("routing retains the locator when release response is ambiguous", async () 
     },
     captureProcessOutput: async () => {},
   });
-  await expect(routed.execCommand({ cmd: "once" })).rejects.toThrow("release is unresolved");
+  const uncertain = await routed.execCommand({ cmd: "once" }).catch((error) => error);
+  expect(uncertain).toMatchObject({ name: "RoutingMutationOutcomeUnknownError", retryable: false });
+  expect(isModalTaskExecStartPreDispatchUnavailableError(uncertain)).toBe(false);
   expect(routed.hasRetainedProcess(41)).toBe(true);
   expect(f.actions.filter((action) => action === "launch-idle")).toHaveLength(1);
 });

@@ -6367,9 +6367,12 @@ export class OpenGeniClient {
   ): Promise<RetainedScreenshotDownload> {
     const metadata = await this.getSessionRetainedArtifact(workspaceId, sessionId, artifactId);
     if (!metadata.available) return { metadata, bytes: null };
+    const supportedScreenshot =
+      (metadata.kind === "computer_screenshot" && metadata.contentType === "image/png") ||
+      (metadata.kind === "browser_screenshot" &&
+        ["image/png", "image/jpeg", "image/webp"].includes(metadata.contentType));
     if (
-      metadata.kind !== "computer_screenshot" ||
-      metadata.contentType !== "image/png" ||
+      !supportedScreenshot ||
       !metadata.dimensions ||
       metadata.originalBytes <= 0 ||
       metadata.originalBytes > COMPUTER_SCREENSHOT_MAX_BYTES

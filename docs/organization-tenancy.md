@@ -1427,6 +1427,17 @@ silent fallback. A committed message fork still replays after compaction or a
 source authorization change. The same actor, visibility, acknowledgement,
 workspace, and grant rules apply to both fork forms.
 
+Rolling migration `0513_message_fork_prefix_compaction.sql` validates and
+copies only the current active model-history prefix through the selected
+boundary. A later message after compaction can therefore fork with its active
+summary (an opaque compaction item must match an earlier durable compaction
+receipt). Inactive rows before the selected boundary are tolerated only when
+an earlier durable compaction receipt identifies an active checkpoint after
+them; otherwise the fork rejects the unsafe prefix. Superseded rows and an
+unsafe suffix are never copied. A message
+superseded by compaction is still rejected rather than reconstructed from audit
+events. This applies equally to idle and actively running source sessions.
+
 Rolling migration `0502_active_message_boundary_forks.sql` removes only the
 message overload's source-quiescence requirement. Pending work after the
 selected boundary does not block a safe prefix copy. Whole-session forks and

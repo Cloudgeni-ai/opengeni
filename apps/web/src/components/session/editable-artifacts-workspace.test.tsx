@@ -259,7 +259,7 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       container.remove();
     }
   });
-  test("opens a session Site in the shared preview with a full-page link", async () => {
+  test("keeps a session Site in the shared preview without a full-page escape", async () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -288,9 +288,33 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
         container.querySelector("[data-site-preview]")?.getAttribute("data-site-preview"),
       ).toBe(id);
       expect(container.textContent).toContain("Embedded Site");
-      expect(container.querySelector("a")?.getAttribute("href")).toBe(
-        `/workspaces/11111111-1111-4111-8111-111111111111/artifacts/${id}?fromSession=33333333-3333-4333-8333-333333333333`,
+      expect(container.querySelector("a")).toBeNull();
+      expect(container.textContent?.match(/Dashboard/g)).toHaveLength(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+  test("keeps a native document in the session without navigation links", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <SessionEditableArtifactsWorkspace
+            workspaceId="11111111-1111-4111-8111-111111111111"
+            artifacts={[{ id: "a".repeat(32), title: "Plan", modality: "document" }]}
+            status="ready"
+            onRetry={() => undefined}
+          />,
+        );
+      });
+      expect(container.querySelector("[data-native-preview]")?.textContent).toBe(
+        "Embedded native artifact",
       );
+      expect(container.querySelector("a")).toBeNull();
+      expect(container.textContent?.match(/Plan/g)).toHaveLength(1);
     } finally {
       await act(async () => root.unmount());
       container.remove();

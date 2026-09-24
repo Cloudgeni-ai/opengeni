@@ -1615,6 +1615,51 @@ describe("OpenGeniClient files", () => {
     ).toBe(true);
   });
 
+  test("downloads a retained browser JPEG through the screenshot API", async () => {
+    const bytes = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+    const sha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.buffer))]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+    const metadata = {
+      available: true as const,
+      artifactId: FILE_ID,
+      kind: "browser_screenshot" as const,
+      contentType: "image/jpeg",
+      originalBytes: bytes.byteLength,
+      sha256,
+      retainedAt: "2026-09-24T00:00:00.000Z",
+      dimensions: { width: 1440, height: 900 },
+      retention: {
+        policy: "session_screenshot" as const,
+        expiresAt: "2026-10-24T00:00:00.000Z",
+      },
+      retrieval: {
+        method: "GET" as const,
+        path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/artifacts/${FILE_ID}/content`,
+        acceptRanges: "bytes" as const,
+        maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+      },
+    };
+    const { client, requests } = makeClient((request) =>
+      request.url.endsWith(`/artifacts/${FILE_ID}`)
+        ? jsonResponse(metadata)
+        : new Response(bytes, {
+            status: 206,
+            headers: {
+              "Accept-Ranges": "bytes",
+              "Content-Length": String(bytes.byteLength),
+              "Content-Range": `bytes 0-${bytes.byteLength - 1}/${bytes.byteLength}`,
+              "Content-Type": "image/jpeg",
+            },
+          }),
+    );
+
+    const downloaded = await client.downloadRetainedScreenshot(WORKSPACE_ID, SESSION_ID, FILE_ID);
+    expect(downloaded.metadata).toEqual(metadata);
+    expect(downloaded.bytes).toEqual(bytes);
+    expect(requests.map((request) => request.headers.range)).toEqual([undefined, "bytes=0-3"]);
+  });
+
   test("validates a generated-image receipt before minting its zero-copy URL", async () => {
     const reference = {
       available: true as const,
