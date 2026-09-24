@@ -13,6 +13,11 @@ postgres = {
   deletion_protection = false
   skip_final_snapshot = true
   # existing_host = "postgres.example.com"
+
+  # When mode = "managed" and network.create_vpc = false, declare the exact
+  # sources allowed to reach RDS; validation fails without at least one.
+  # allowed_client_cidrs       = ["10.20.0.0/16"]
+  # allowed_security_group_ids = ["sg-0123456789abcdef0"]
 }
 
 temporal = {
