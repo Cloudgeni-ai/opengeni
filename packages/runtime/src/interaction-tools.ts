@@ -1356,31 +1356,38 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "act"],
     title: "Act in app or window",
     description:
-      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. Omit fences to use a fresh observation automatically. Returns the durable causal receipt.",
+      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. A pixel frame fence applies only to pointer actions; semantic actions use the observation fence even if a frame ID is supplied. Supplying the target generation and relevant action fence preserves the exact observation without refreshing it. Omit fences to use a fresh observation automatically. Returns the durable causal receipt.",
     input: ComputerActInput,
     output: ComputerActionReceipt,
     readOnly: false,
     idempotent: true,
     execute: async (value, context) => {
-      const current = await input.transport.observeComputerTarget(
-        input.workspaceId,
-        value.computerSessionId,
-        value.targetId,
-      );
+      const current =
+        value.expectedTargetGeneration !== undefined &&
+        (value.action.type === "pointer"
+          ? (value.expectedFrameId ?? value.action.frameId) != null
+          : value.expectedObservationId != null)
+          ? null
+          : await input.transport.observeComputerTarget(
+              input.workspaceId,
+              value.computerSessionId,
+              value.targetId,
+            );
       return await input.transport.actInComputer(input.workspaceId, value.computerSessionId, {
         operationId: context.operationId,
         targetId: value.targetId,
-        expectedTargetGeneration: value.expectedTargetGeneration ?? current.target.targetGeneration,
+        expectedTargetGeneration:
+          value.expectedTargetGeneration ?? current!.target.targetGeneration,
         expectedObservationId:
           value.expectedObservationId === undefined
-            ? current.observationId
+            ? (current?.observationId ?? null)
             : value.expectedObservationId,
         expectedFrameId:
-          value.expectedFrameId === undefined
-            ? value.action.type === "pointer"
+          value.action.type === "pointer"
+            ? value.expectedFrameId === undefined
               ? value.action.frameId
-              : null
-            : value.expectedFrameId,
+              : value.expectedFrameId
+            : null,
         action: value.action,
       });
     },
