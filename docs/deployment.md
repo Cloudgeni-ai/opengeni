@@ -669,6 +669,19 @@ or changed initial preamble fails before initial migration DDL; other migrations
 and the default path remain unchanged. Do not set this flag merely to hide an
 extension permission error without independently confirming installation.
 
+The ordinary SQL migration runner applies a transaction-local 5-second
+`lock_timeout` before each migration body. This bounds lock acquisition in
+migrations without a later timeout override, including 0510. Migration-specific
+`SET LOCAL` and historical `SET`/`RESET lock_timeout` statements still control
+subsequent statements; a historical migration that resets the setting before
+more DDL does not retain this default bound. Review those files separately.
+A lock-wait timeout fails the Job without recording that migration in
+`schema_migrations`; the implicit transaction rolls back its DDL, so resolve
+the blocker and retry the forward migration Job. This is a lock-acquisition
+limit, not a statement-duration limit or permission to roll back an already-
+applied migration. Concurrent-index and batched-backfill migrations retain
+their separately governed lock-wait settings.
+
 Standalone deployments using the default `OPENGENI_RLS_STRATEGY=force` require
 two distinct secret paths:
 
