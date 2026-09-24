@@ -34,8 +34,8 @@ function receipt() {
 
 describe("sandbox-file artifact receipt", () => {
   test.each([
-    "/home/tester/project/reports/summary.pdf",
-    "/Users/tester/project/summary.pdf",
+    "/home/user/project/reports/summary.pdf",
+    "/Users/user/project/summary.pdf",
     "C:/work/project/summary.pdf",
     "//server/share/project/summary.pdf",
   ])("accepts a canonical host-native publication path %s", (sandboxPath) => {
@@ -45,7 +45,7 @@ describe("sandbox-file artifact receipt", () => {
 
   test.each([
     "relative/summary.pdf",
-    "/home/tester/../summary.pdf",
+    "/home/user/../summary.pdf",
     "/home//summary.pdf",
     "C:summary.pdf",
     "C:\\work\\summary.pdf",

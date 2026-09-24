@@ -9,7 +9,7 @@ import {
 } from "../src/sandbox-file-artifacts";
 
 describe("sandbox file artifact paths", () => {
-  test.each(["/workspace", "/home/tester/project", "C:/work/project", "//server/share/project"])(
+  test.each(["/workspace", "/home/user/project", "C:/work/project", "//server/share/project"])(
     "reads relative and absolute aliases through the same service root %s",
     async (root) => {
       const reads: string[] = [];
@@ -49,8 +49,8 @@ describe("sandbox file artifact paths", () => {
   });
 
   test.each([
-    ["/home/tester/project", "/home/tester/project/reports/final.pdf"],
-    ["/Users/tester/project", "sandbox:/Users/tester/project/reports/final.pdf"],
+    ["/home/user/project", "/home/user/project/reports/final.pdf"],
+    ["/Users/user/project", "sandbox:/Users/user/project/reports/final.pdf"],
     ["C:/work/project", "sandbox:C:\\work\\project\\reports\\final.pdf"],
     ["//server/share/project", "\\\\server\\share\\project\\reports\\final.pdf"],
   ])("uses the active host-native root %s", (root, path) => {
@@ -61,13 +61,15 @@ describe("sandbox file artifact paths", () => {
   test("rejects root aliases, siblings, traversal and cross-drive paths", () => {
     for (const path of [
       "/workspace/reports/final.pdf",
-      "/home/tester/project-other/final.pdf",
-      "/home/tester/project/../secret.txt",
+      "/home/user/project-other/final.pdf",
+      "/home/user/project/../secret.txt",
       "../secret.txt",
-      "/home/tester/project",
-      "sandbox:/home/tester/project/",
+      "/home/user/project",
+      "sandbox:/home/user/project/",
+      "C:/other/file.txt",
+      "C:\\other\\file.txt",
     ]) {
-      expect(() => sandboxArtifactRelativePath(path, "/home/tester/project")).toThrow();
+      expect(() => sandboxArtifactRelativePath(path, "/home/user/project")).toThrow();
     }
     for (const path of ["D:/work/project/file.txt", "C:secret.txt", "..\\secret.txt"]) {
       expect(() => sandboxArtifactRelativePath(path, "C:/work/project")).toThrow();
