@@ -3,8 +3,9 @@ import { CodeScene } from "./components/code";
 import { EndTagline } from "./components/end-card";
 import { ProductWindow, WINDOW } from "./components/product";
 import { Supers } from "./components/supers";
+import { LiveDot } from "./components/primitives";
 import { ease, keys, lerp, progress } from "./lib/anim";
-import { C, H, W } from "./theme";
+import { C, F, H, W } from "./theme";
 import { FPS, T } from "./timeline";
 
 type Shot = { t: number; x: number; y: number; s: number; e?: (p: number) => number };
@@ -33,28 +34,31 @@ function camera(t: number) {
   return { x: channel((s) => s.x), y: channel((s) => s.y), s: Math.exp(channel((s) => Math.log(s.s))) };
 }
 
-/** The agent panel's conversation area on screen while the camera holds the proof framing. */
+/** The agent panel's rectangle on screen while the camera holds the proof framing. */
 const PANEL_ON_SCREEN = (() => {
   const toX = (x: number) => W / 2 + (x - PROOF.x) * PROOF.s;
   const toY = (y: number) => H / 2 + (y - PROOF.y) * PROOF.s;
-  const left = WINDOW.x + 2 + PANEL.x + 2;
-  const top = WINDOW.y + 2 + PANEL.y + 81;
-  const bottom = WINDOW.y + 2 + PANEL.y + PANEL.h - 108;
-  return { x: toX(left), y: toY(top), w: (PANEL.w - 2) * PROOF.s, h: (bottom - top) * PROOF.s };
+  const left = WINDOW.x + 2 + PANEL.x;
+  const top = WINDOW.y + 2 + PANEL.y;
+  return { x: toX(left), y: toY(top), w: PANEL.w * PROOF.s, h: PANEL.h * PROOF.s };
 })();
 
+/** Height of the panel header on screen; it stays pinned while the panel is open. */
+export const OPEN_HEADER = 80 * PROOF.s;
+
 /**
- * Container transform: the agent panel's conversation area opens to fill the frame and its
- * surface becomes the page that shows the code behind it; afterwards it folds back.
+ * Container transform: the agent panel opens to fill the frame (keeping its header, so we
+ * are visibly still inside it) and its surface becomes the page that shows its source.
  */
 function PanelOpen({ t }: { t: number }) {
   if (t < T.zoomIn[0] || t > T.zoomOut[1] + 0.16) return null;
   const open = ease.inOutQuint(progress(t, T.zoomIn[0], T.zoomIn[1]));
   const close = ease.inOutQuint(progress(t, T.zoomOut[0], T.zoomOut[1]));
   const p = open * (1 - close);
-  const vanish = ease.outCubic(progress(t, T.zoomOut[1] - 0.04, T.zoomOut[1] + 0.16));
-  const edge = Math.min(1, p * 6) * (1 - p);
+  const vanish = ease.outCubic(progress(t, T.zoomOut[1] - 0.02, T.zoomOut[1] + 0.16));
+  const composer = 1 - Math.min(1, p * 4);
   const r = PANEL_ON_SCREEN;
+  const k = PROOF.s;
   return (
     <div
       style={{
@@ -65,9 +69,47 @@ function PanelOpen({ t }: { t: number }) {
         height: lerp(r.h, H, p),
         background: C.surface,
         opacity: 1 - vanish,
-        boxShadow: `inset ${2.3 * edge}px 0 0 ${C.ink}, inset 0 ${1.7 * edge}px 0 ${C.line}, inset 0 -${1.7 * edge}px 0 ${C.line}`,
+        boxShadow: `inset ${2 * k}px 0 0 rgba(36,36,35,${1 - p})`,
       }}
-    />
+    >
+      <div
+        style={{
+          height: OPEN_HEADER,
+          borderBottom: `${1.5 * k}px solid ${C.line}`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: `0 ${lerp(40 * k, 172, p)}px`,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 14 * k }}>
+          <LiveDot size={12 * k} />
+          <span style={{ fontFamily: F.body, fontSize: 27 * k, fontWeight: 650, color: C.ink, letterSpacing: "-0.01em" }}>Agent</span>
+        </div>
+        <span style={{ fontFamily: F.mono, fontSize: 18 * k, letterSpacing: "0.12em", color: C.muted }}>OPENGENI</span>
+      </div>
+      <div
+        style={{
+          position: "absolute",
+          left: 40 * k,
+          right: 40 * k,
+          bottom: 26 * k,
+          height: 64 * k,
+          border: `${1.5 * k}px solid ${C.line}`,
+          opacity: composer,
+          display: "flex",
+          alignItems: "center",
+          padding: `0 ${22 * k}px`,
+          fontFamily: F.body,
+          fontSize: 23 * k,
+          color: C.faint,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+        }}
+      >
+        Ask about your trip…
+      </div>
+    </div>
   );
 }
 

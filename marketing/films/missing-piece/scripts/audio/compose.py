@@ -388,6 +388,7 @@ def compose(cues: dict) -> dict[str, np.ndarray]:
         (dock + 3 * bar, 1.0, ["D3", "F#3", "A3", "D4"], "D2", 1.0),  # "All set."
         (dock + 4 * bar, 1.0, ["D3", "F#3", "A3", "E4"], "D2", 0.7),  # inside the panel
         (dock + 5 * bar, 1.0, ["G2", "B2", "D3", "F#3"], "G2", 0.7),
+        (dock + 6 * bar, 0.5, ["B2", "D3", "F#3", "A3"], "B1", 0.6),
     ]
     for at, length, chord, root, energy in progression:
         span = length * bar

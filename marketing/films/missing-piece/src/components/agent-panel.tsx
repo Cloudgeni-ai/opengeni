@@ -29,11 +29,13 @@ export function MessageBlock({ style }: { style?: CSSProperties }) {
 }
 
 export function AgentPanel({ t }: { t: number }) {
-  // The panel drops into the slot and lands exactly on the dock beat.
-  const drop = ease.outCubic(progress(t, T.dock - 0.24, T.dock));
-  if (t < T.dock - 0.24) return null;
-  const settle = t > T.dock ? Math.sin((t - T.dock) * 38) * Math.exp(-(t - T.dock) * 16) * 3 : 0;
-  const y = (1 - drop) * -42 + settle;
+  // The piece appears lifted above its socket, then presses home exactly on the dock beat.
+  if (t < T.dock - 0.62) return null;
+  const appear = ease.emphasized(progress(t, T.dock - 0.62, T.dock - 0.4));
+  const press = ease.inCubic(progress(t, T.dock - 0.22, T.dock));
+  const hover = Math.sin((t - (T.dock - 0.62)) * 7) * 2 * (1 - press);
+  const raise = (18 + hover) * (1 - press);
+  const settle = t > T.dock ? Math.sin((t - T.dock) * 42) * Math.exp(-(t - T.dock) * 18) * 2 : 0;
   // The camera goes inside the panel to show its source; the conversation steps aside.
   const cleared = ease.inOutCubic(progress(t, T.clearPanel[0], T.clearPanel[1]));
   const restored = ease.inOutCubic(progress(t, T.zoomOut[1] - 0.12, T.zoomOut[1] + 0.16));
@@ -48,10 +50,12 @@ export function AgentPanel({ t }: { t: number }) {
         top: PANEL.y,
         width: PANEL.w,
         height: PANEL.h,
-        transform: `translateY(${y}px)`,
-        opacity: clamp(drop * 1.6),
+        transform: `translate(${-raise * 0.55}px, ${-raise * 0.55 + settle}px) scale(${1 + 0.012 * (1 - press)})`,
+        transformOrigin: "50% 50%",
+        clipPath: `inset(0 -40px calc(${(1 - appear) * 100}% - ${40 * appear}px) -40px)`,
         background: C.surface,
         borderLeft: `2px solid ${C.ink}`,
+        boxShadow: `${raise}px ${raise}px 0 ${C.paperShadow}`,
       }}
     >
       <div
@@ -183,7 +187,7 @@ function Step({ t, at, tool, children }: { t: number; at: number; tool: string; 
     >
       <LiveDot size={11} color={done ? C.ink : C.orange} />
       <span style={{ flex: 1 }}>{children}</span>
-      <span style={{ fontSize: 16, color: C.faint, letterSpacing: "0.02em" }}>{tool}</span>
+      <span style={{ fontSize: 18, color: C.muted2, letterSpacing: "0.01em" }}>{tool}</span>
     </div>
   );
 }

@@ -3,7 +3,7 @@ import { C, F } from "../theme";
 import { T } from "../timeline";
 import { Abs, Eyebrow, Rise } from "./primitives";
 
-type Tok = [text: string, kind?: "kw" | "str" | "brand" | "hl"];
+type Tok = [text: string, kind?: "dim" | "key" | "brand" | "hl"];
 
 /**
  * Exact excerpt of the current SDK surface (verified in source, Sept 2026):
@@ -14,28 +14,28 @@ type Tok = [text: string, kind?: "kw" | "str" | "brand" | "hl"];
  * The same shape is used by examples/northstar-support/src/server.ts.
  */
 const SERVER: Tok[][] = [
-  [["const", "kw"], [" session = "], ["await", "kw"], [" "], ["opengeni", "brand"]],
-  [["  .createSession(workspaceId, {"]],
-  [["    initialMessage,"]],
-  [["    mcpServers: ["], ["tripActions", "hl"], ["],"]],
-  [["    tools: [{ kind: "], ['"mcp"', "str"], [", id: "], ['"trip"', "str"], [" }],"]],
-  [["  });"]],
+  [["const session = await ", "dim"], ["opengeni", "brand"]],
+  [["  .createSession(", "key"], ["workspaceId, {", "dim"]],
+  [["    initialMessage,", "dim"]],
+  [["    mcpServers: [", "key"], ["tripActions", "hl"], ["],", "key"]],
+  [["    tools: [{ kind: \"mcp\", id: \"trip\" }],", "dim"]],
+  [["  });", "dim"]],
 ];
-const UI: Tok[] = [["<"], ["SessionConversation", "hl"], [" sessionId={session.id} />"]];
+const UI: Tok[] = [["<", "key"], ["SessionConversation", "hl"], [" sessionId={session.id} />", "key"]];
 
 export const ACTIONS = ["get_flight", "move_car_pickup", "message_hotel", "move_dinner"];
 
 const FONT = 56;
 const CHAR = FONT * 0.6;
-const LINE = 80;
+const LINE = 76;
 const LEFT = 172;
-const SERVER_TOP = 154;
-const CHIPS_TOP = SERVER_TOP + SERVER.length * LINE + 30;
-const UI_EYEBROW_FINAL = CHIPS_TOP + 100;
-const UI_EYEBROW_SOLO = 480;
+const SERVER_TOP = 184;
+const CHIPS_TOP = SERVER_TOP + SERVER.length * LINE + 26;
+const UI_EYEBROW_FINAL = CHIPS_TOP + 96;
+const UI_EYEBROW_SOLO = 500;
 
-const colorOf = (kind?: Tok[1]) =>
-  kind === "kw" ? C.muted2 : kind === "str" ? "#6b5d4f" : kind === "hl" ? C.orange : C.ink;
+/** Everything except the two lines that matter is dimmed, so the eye knows where to go. */
+const colorOf = (kind?: Tok[1]) => (kind === "dim" ? C.faint : kind === "hl" ? C.orange : C.ink);
 
 function Line({ toks }: { toks: Tok[] }) {
   return (
@@ -51,7 +51,7 @@ function Line({ toks }: { toks: Tok[] }) {
       }}
     >
       {toks.map(([text, kind], i) => (
-        <span key={i} style={{ color: colorOf(kind), fontWeight: kind === "brand" ? 700 : kind === "hl" ? 600 : 450 }}>
+        <span key={i} style={{ color: colorOf(kind), fontWeight: kind === "brand" ? 700 : kind === "hl" ? 600 : kind === "dim" ? 400 : 500 }}>
           {text}
         </span>
       ))}
@@ -78,7 +78,7 @@ export function CodeScene({ t }: { t: number }) {
   const out = ease.exit(progress(t, exit, exit + 0.3));
 
   return (
-    <div style={{ position: "absolute", inset: 0, background: C.surface }}>
+    <div style={{ position: "absolute", inset: 0 }}>
       {t >= T.codeServer ? (
         <>
           <Abs x={LEFT} y={SERVER_TOP - 44}>
@@ -148,7 +148,7 @@ export function CodeScene({ t }: { t: number }) {
           <Abs x={LEFT} y={uiTop}>
             <Rise t={t} at={T.codeUI} dur={0.5} out={exit + 0.08} outDur={0.3}>
               <Eyebrow size={22} color={C.muted}>
-                Your UI
+                Your UI · this panel
               </Eyebrow>
             </Rise>
           </Abs>

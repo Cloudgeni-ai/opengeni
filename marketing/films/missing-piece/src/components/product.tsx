@@ -109,30 +109,29 @@ function TitleBar() {
   );
 }
 
-const SLOT = { x: 1026, y: 102, w: 668, h: 812 } as const;
+/** The panel's footprint: the hole in the product where the agent belongs. */
+const SOCKET = { x: 1000, y: 76, w: 720, h: 864 } as const;
 
-/** The empty space in the product where the agent belongs. */
+/** The missing piece: a hole cut through the product, showing the paper behind it. */
 function Slot({ t }: { t: number }) {
-  if (t < T.slotDraw[0] || t > T.dock + 0.3) return null;
-  const draw = ease.inOutCubic(progress(t, T.slotDraw[0], T.slotDraw[1]));
-  const perimeter = 2 * (SLOT.w + SLOT.h);
-  const fill = ease.outCubic(progress(t, T.slotDraw[0] + 0.3, T.slotDraw[1] + 0.2));
-  const gone = ease.outCubic(progress(t, T.dock - 0.1, T.dock + 0.05));
-  const path = `M ${SLOT.x} ${SLOT.y} H ${SLOT.x + SLOT.w} V ${SLOT.y + SLOT.h} H ${SLOT.x} Z`;
-  const cx = SLOT.x + SLOT.w / 2;
+  if (t < T.slotDraw[0] || t > T.dock + 0.05) return null;
+  const sink = ease.emphasized(progress(t, T.slotDraw[0], T.slotDraw[1]));
+  const cx = SOCKET.x + SOCKET.w / 2;
+  const depth = 14 * sink;
   return (
     <>
-      <Abs x={SLOT.x} y={SLOT.y} w={SLOT.w} h={SLOT.h} style={{ background: C.orangeWash, opacity: fill * 0.38 * (1 - gone) }} />
-      <svg width={1720} height={940} style={{ position: "absolute", left: 0, top: 0, opacity: 1 - gone, overflow: "visible" }}>
-        <defs>
-          <mask id="slot-draw">
-            <path d={path} fill="none" stroke="#fff" strokeWidth={10} strokeDasharray={`${perimeter * draw} ${perimeter}`} />
-          </mask>
-        </defs>
-        <path d={path} fill="none" stroke={C.orange} strokeWidth={3} strokeDasharray="16 11" mask="url(#slot-draw)" />
-      </svg>
-      <div style={{ position: "absolute", left: cx, top: 370, transform: "translateX(-50%)", opacity: 1 - gone }}>
-        <Rise t={t} at={T.slotText - 0.15} dur={0.5}>
+      <Abs
+        x={SOCKET.x}
+        y={SOCKET.y}
+        w={SOCKET.w}
+        h={SOCKET.h}
+        style={{
+          background: `color-mix(in srgb, ${C.paper} ${sink * 100}%, ${C.surface})`,
+          boxShadow: `inset ${depth}px ${depth}px 0 ${C.paperShadow}, inset 2px 0 0 ${C.ink}`,
+        }}
+      />
+      <div style={{ position: "absolute", left: cx + depth / 2, top: 330, transform: "translateX(-50%)" }}>
+        <Rise t={t} at={T.slotText - 0.12} dur={0.5}>
           <Eyebrow size={23} style={{ justifyContent: "center" }}>
             The missing piece
           </Eyebrow>
@@ -169,28 +168,28 @@ function SlotLine({ children }: { children: string }) {
 }
 
 /** Widget-styled bubble geometry while it waits, in window-local coordinates. */
-const WAIT = { x: 1182, y: 712, w: 356, h: 86 } as const;
+const WAIT = { x: 1190, y: 640, w: 356, h: 86 } as const;
 
 /** The customer's request, left behind when the widget pops, then carried into the panel. */
 function Orphan({ t }: { t: number }) {
-  if (t < T.pop + 0.08 || t >= T.messageLand) return null;
-  const born = ease.emphasized(progress(t, T.pop + 0.08, T.pop + 0.55));
-  const flyStart = T.dock - 0.06;
+  if (t < T.pop + 0.06 || t >= T.messageLand) return null;
+  const born = ease.emphasized(progress(t, T.pop + 0.06, T.pop + 0.7));
+  const flyStart = T.dock - 0.08;
   const fly = ease.inOutCubic(progress(t, flyStart, T.messageLand));
-  const bob = Math.sin((t - T.pop) * 3.4) * 4 * (1 - fly);
+  const bob = Math.sin((t - T.pop) * 3.1) * 5 * (1 - fly) * born;
 
-  const startX = 1310;
-  const startY = 610;
-  const wx = lerp(startX, WAIT.x, born);
-  const wy = lerp(startY, WAIT.y, born) + bob;
+  const wx = lerp(1300, WAIT.x, born);
+  const wy = lerp(560, WAIT.y, born) + bob;
+  const arc = -70 * Math.sin(Math.PI * fly);
   const x = lerp(wx, PANEL_MESSAGE.x, fly);
-  const y = lerp(wy, PANEL_MESSAGE.y, fly);
-  const w = lerp(WAIT.w, PANEL_MESSAGE.w, fly);
-  const h = lerp(WAIT.h, PANEL_MESSAGE.h, fly);
-  const radius = lerp(22, 0, ease.outCubic(progress(t, flyStart + 0.1, T.messageLand)));
-  const blend = ease.inOutCubic(progress(t, flyStart + 0.12, T.messageLand - 0.08));
-  const scale = lerp(0.82, 1, born);
-  const shadow = 1 - fly;
+  const y = lerp(wy, PANEL_MESSAGE.y, fly) + arc;
+  const w = lerp(WAIT.w, PANEL_MESSAGE.w, ease.inOutCubic(progress(fly, 0.15, 0.85)));
+  const h = lerp(WAIT.h, PANEL_MESSAGE.h, ease.inOutCubic(progress(fly, 0.15, 0.85)));
+  const shape = ease.inOutCubic(progress(fly, 0.25, 0.9));
+  const radius = lerp(22, 0, shape);
+  const colour = ease.inOutCubic(progress(fly, 0.15, 0.75));
+  const textSwap = ease.inOutCubic(progress(fly, 0.38, 0.62));
+  const lift = 1 - shape;
 
   return (
     <div
@@ -201,17 +200,17 @@ function Orphan({ t }: { t: number }) {
         width: w,
         height: h,
         borderRadius: radius,
-        borderBottomRightRadius: radius * (1 - blend) * 0.27 + radius * blend,
+        borderBottomRightRadius: lerp(6, 0, shape),
         overflow: "hidden",
-        transform: `scale(${scale})`,
+        transform: `scale(${lerp(0.86, 1, born)})`,
         transformOrigin: "50% 50%",
-        boxShadow: `0 ${18 * shadow}px ${44 * shadow}px rgba(58, 28, 108, ${0.26 * shadow})`,
-        opacity: clamp(born * 2),
+        boxShadow: `0 ${16 * lift}px ${40 * lift}px rgba(58, 28, 108, ${0.22 * lift})`,
+        opacity: clamp(born * 2.2),
         zIndex: 5,
       }}
     >
-      <div style={{ position: "absolute", inset: 0, background: widgetGradient, opacity: 1 - blend }} />
-      <div style={{ position: "absolute", inset: 0, background: C.ink, opacity: blend }} />
+      <div style={{ position: "absolute", inset: 0, background: widgetGradient, opacity: 1 - colour }} />
+      <div style={{ position: "absolute", inset: 0, background: C.ink, opacity: colour }} />
       <div
         style={{
           position: "absolute",
@@ -222,12 +221,12 @@ function Orphan({ t }: { t: number }) {
           fontSize: 20,
           lineHeight: 1.4,
           color: C.white,
-          opacity: 1 - clamp(blend * 1.6),
+          opacity: 1 - textSwap,
         }}
       >
         {MESSAGE}
       </div>
-      <div style={{ position: "absolute", left: 0, top: 0, width: PANEL_MESSAGE.w, opacity: clamp(blend * 1.6 - 0.6) }}>
+      <div style={{ position: "absolute", left: 0, top: 0, width: PANEL_MESSAGE.w, opacity: textSwap }}>
         <MessageBlock style={{ background: "transparent" }} />
       </div>
     </div>

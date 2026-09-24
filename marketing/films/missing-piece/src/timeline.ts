@@ -43,8 +43,8 @@ export const T = {
   // Act 3 — the missing piece
   pop: b(16),
   unshrink: [8.55, 9.45] as const,
-  slotDraw: [8.78, 9.55] as const,
-  slotText: 9.05,
+  slotDraw: [8.72, 9.2] as const,
+  slotText: 8.95,
   dock: b(20),
   messageLand: b(20) + 0.43,
 
@@ -64,13 +64,13 @@ export const T = {
   clearPanel: [18.6, 18.78] as const,
   codeUI: b(37),
   codeServer: b(39),
-  zoomOut: [23.35, 24.0] as const,
+  zoomOut: [24.42, 25.05] as const,
 
   // Act 6 — the same composition as act 2, opposite truth
-  endShrink: [24.1, 24.95] as const,
-  end: b(46),
-  wordmark: b(48),
-  fin: b(52),
+  endShrink: [25.28, 26.12] as const,
+  end: b(48),
+  wordmark: b(50),
+  fin: b(54),
 };
 
 export const DURATION = T.fin;
