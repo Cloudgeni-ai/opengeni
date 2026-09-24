@@ -1284,7 +1284,9 @@ mod tests {
         {
             assert_eq!(executable, &format!("/proc/{}/exe", std::process::id()));
             assert!(std::process::Command::new(executable)
-                .arg("--version")
+                // Unit tests execute the Rust test harness, which accepts
+                // --list; the production CLI accepts --version instead.
+                .arg("--list")
                 .output()
                 .expect("execute the proc link")
                 .status
