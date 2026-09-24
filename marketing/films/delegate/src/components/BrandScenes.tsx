@@ -5,6 +5,8 @@ import { clamp01, ease, lerp, prog, springAt } from "../anim";
 import { T } from "../timeline";
 import { OpenGeniWordmark } from "./OpenGeniWordmark";
 import { CursorArrow, flopPose } from "./Cursor";
+import { HourGlyph } from "./HourMark";
+import { Check } from "./Icons";
 
 type Tok = [string, "kw" | "fn" | "key" | "str" | "p" | "id"];
 
@@ -40,12 +42,85 @@ const ORIGIN = { x: 124, y: 240 };
 const BLOCK_W = 44 * CHAR_W;
 const lineTop = (i: number) => ORIGIN.y + i * LINE_H;
 
-/** One idea at a time: token, line, plain-English callout. */
+/** One idea at a time: token, line, plain-English callout — and the exact
+ * moment from the story that the line produced. */
 const CALLOUTS = [
-  { line: 5, token: "url", at: T.ann1, until: T.ann2, text: ["Your product's", "own actions."] },
-  { line: 7, token: "requireApproval", at: T.ann2, until: T.ann3, text: ["Your user", "says yes first."] },
-  { line: 0, token: "createSession", at: T.ann3, until: T.line1, text: ["A cloud agent", "for each customer."] },
+  { line: 5, token: "url", at: T.ann1, until: T.ann2, text: ["Your product's", "own actions."], echo: "move" as const },
+  { line: 7, token: "requireApproval", at: T.ann2, until: T.ann3, text: ["Your user", "says yes first."], echo: "approve" as const },
+  { line: 0, token: "createSession", at: T.ann3, until: T.line1, text: ["A cloud agent", "for each customer."], echo: "ask" as const },
 ];
+
+/** Replicas of the story's own UI, drawn exactly as they appeared in "hour". */
+const Echo: React.FC<{ kind: "move" | "approve" | "ask" }> = ({ kind }) => {
+  if (kind === "move") {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+        <div
+          style={{
+            position: "relative",
+            width: 212,
+            height: 62,
+            borderRadius: 7,
+            background: "linear-gradient(0deg, rgba(126,168,255,0.17), rgba(126,168,255,0.17)), #191c22",
+            border: "1px solid rgba(126,168,255,0.34)",
+            overflow: "hidden",
+          }}
+        >
+          <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: "#7ea8ff" }} />
+          <div style={{ position: "absolute", left: 14, top: 10, fontFamily: F.ui, fontSize: 16, fontWeight: 650, color: C.text }}>Ben Carter</div>
+          <div style={{ position: "absolute", left: 14, top: 34, fontFamily: F.ui, fontSize: 14, color: C.text2 }}>Thu 5:00 · Cut</div>
+        </div>
+        <div style={{ fontFamily: F.ui, fontSize: 18, color: C.paperDim }}>moved by the agent</div>
+      </div>
+    );
+  }
+  if (kind === "approve") {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+        <div
+          style={{
+            width: 158,
+            height: 54,
+            borderRadius: 10,
+            background: C.accent,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 9,
+            fontFamily: F.ui,
+            fontSize: 19,
+            fontWeight: 700,
+            color: "#08241a",
+          }}
+        >
+          <Check size={18} stroke={3} /> Approve
+        </div>
+        <div style={{ fontFamily: F.ui, fontSize: 18, color: C.paperDim }}>the last click</div>
+      </div>
+    );
+  }
+  return (
+    <div
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 12,
+        height: 56,
+        padding: "0 20px 0 16px",
+        borderRadius: 12,
+        background: "#191c22",
+        border: `1px solid ${C.line2}`,
+        fontFamily: F.ui,
+        fontSize: 18,
+        color: C.text,
+        whiteSpace: "nowrap",
+      }}
+    >
+      <HourGlyph size={22} />
+      I'm sick. Move tomorrow's clients…
+    </div>
+  );
+};
 
 export const BrandScenes: React.FC<{ t: number }> = ({ t }) => {
   if (t < T.wipe) return null;
@@ -171,8 +246,9 @@ const Callout: React.FC<{ t: number; c: (typeof CALLOUTS)[number] }> = ({ t, c }
   const inK = prog(t, c.at + 0.06, c.at + 0.4, ease.out);
   const outK = c.until === T.line1 ? 0 : prog(t, c.until - 0.2, c.until - 0.02, ease.in);
   const vis = inK * (1 - outK);
+  const echoK = prog(t, c.at + 0.22, c.at + 0.52, ease.out);
   const cy = lineTop(c.line) + LINE_H / 2;
-  const top = Math.min(Math.max(cy - 92, 150), 820);
+  const top = Math.min(Math.max(cy - 92, 150), 700);
   return (
     <div
       style={{
@@ -200,6 +276,9 @@ const Callout: React.FC<{ t: number; c: (typeof CALLOUTS)[number] }> = ({ t, c }
           {l}
         </div>
       ))}
+      <div style={{ marginTop: 22, opacity: echoK, transform: `translateY(${(1 - echoK) * 10}px)` }}>
+        <Echo kind={c.echo} />
+      </div>
     </div>
   );
 };
