@@ -1,5 +1,18 @@
 # @opengeni/api-router
 
+## 4.1.2
+
+### Patch Changes
+
+- f4192b2: Restore an active browser session when a suspension fails before controller dispatch.
+- Updated dependencies [6de2d5d]
+- Updated dependencies [f4192b2]
+  - @opengeni/runtime@4.0.3
+  - @opengeni/db@6.0.3
+  - @opengeni/core@4.0.3
+  - @opengeni/documents@0.8.34
+  - @opengeni/events@0.4.32
+
 ## 4.1.1
 
 ### Patch Changes
