@@ -1,5 +1,12 @@
 # @opengeni/sdk
 
+## 7.1.1
+
+### Patch Changes
+
+- Updated dependencies [23f4717]
+  - @opengeni/contracts@5.1.1
+
 ## 7.1.0
 
 ### Minor Changes
