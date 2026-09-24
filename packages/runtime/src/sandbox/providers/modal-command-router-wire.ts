@@ -47,6 +47,39 @@ export class ModalCommandStartRejectedError extends ProviderCommandStartRejected
   }
 }
 
+/** Proof created only by the native TaskExecStart boundary. A generic gRPC 14
+ * is not proof that a command was never delivered. */
+export class ModalCommandStartDnsResolutionError extends Error {
+  private constructor(cause: ServiceError) {
+    super(cause.message, { cause });
+    this.name = "ModalCommandStartDnsResolutionError";
+  }
+
+  static fromStart(
+    error: unknown,
+    routerHost: string,
+    signal?: AbortSignal,
+  ): ModalCommandStartDnsResolutionError | null {
+    if (signal?.aborted || !error || typeof error !== "object") return null;
+    const record = error as Partial<ServiceError> & Record<string, unknown>;
+    const host = /^task-[a-z0-9]+\.w\.modal\.host:443$/.test(routerHost) ? routerHost : null;
+    if (
+      !host ||
+      record.name !== "Error" ||
+      record.code !== status.UNAVAILABLE ||
+      record.details !== `Name resolution failed for target dns:${host}` ||
+      [record.status, record.statusCode, record.httpStatus, record.httpStatusCode].some(
+        (value) => value !== undefined,
+      ) ||
+      record.response !== undefined ||
+      record.cause !== undefined ||
+      record.error !== undefined
+    )
+      return null;
+    return new ModalCommandStartDnsResolutionError(record as ServiceError);
+  }
+}
+
 export type ModalRouterIdentity = { taskId: string; execId: string };
 export type ModalRouterAccess = { url: string; jwt: string };
 export type ModalRouterStart = ModalRouterIdentity & {
@@ -76,11 +109,13 @@ export class ModalCommandRouterWire {
   private readonly client: Client;
   private readonly metadata: Metadata;
   private closed = false;
+  private readonly routerHost: string;
 
   constructor(access: ModalRouterAccess, trustedRoots?: Buffer) {
     const url = new URL(access.url);
     if (url.protocol !== "https:" || url.username || url.password || !access.jwt)
       throw new Error("Modal command router requires authenticated TLS");
+    this.routerHost = `${url.hostname}:${url.port || "443"}`;
     this.client = new Client(url.host, credentials.createSsl(trustedRoots), {
       "grpc.max_receive_message_length": maxWireBytes,
       "grpc.max_send_message_length": maxWireBytes,
@@ -140,6 +175,12 @@ export class ModalCommandRouterWire {
         signal,
       );
     } catch (error) {
+      const dnsError = ModalCommandStartDnsResolutionError.fromStart(
+        error,
+        this.routerHost,
+        signal,
+      );
+      if (dnsError) throw dnsError;
       const code = (error as Partial<ServiceError> | null)?.code;
       if (
         typeof code === "number" &&

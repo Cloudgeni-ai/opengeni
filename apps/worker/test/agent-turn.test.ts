@@ -1,6 +1,7 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { RunRawModelStreamEvent, ToolCallError, Usage } from "@openai/agents-core";
+import { ModalCommandStartDnsResolutionError } from "../../../packages/runtime/src/sandbox/providers/modal-command-router-wire";
 import { ModelItem } from "@openai/agents-core/types";
 import {
   withWorkspaceGatewayCredential,
@@ -5646,6 +5647,38 @@ describe("transient provider error classifier", () => {
         attemptNumber: 1,
       }),
     ).toEqual({ status: "recovering", continueDelayMs: 2_000 });
+  });
+
+  test("recovers native pre-dispatch DNS with a finite retry budget, not arbitrary gRPC 14", () => {
+    const host = "task-fbhzq89jcdq2rfyqsxjs1uuk3.w.modal.host:443";
+    const details = `Name resolution failed for target dns:${host}`;
+    const proven = ModalCommandStartDnsResolutionError.fromStart(
+      Object.assign(new Error(`14 UNAVAILABLE: ${details}`), { code: 14, details }),
+      host,
+    );
+    expect(proven).toBeInstanceOf(ModalCommandStartDnsResolutionError);
+    const wrapped = new ToolCallError("Failed to run function tools", proven);
+    expect(agentRunFailurePayload(wrapped)).toMatchObject({
+      code: "sandbox_command_start_unavailable",
+      retryable: true,
+    });
+    expect(
+      providerRecoveryResult({
+        failureCode: "sandbox_command_start_unavailable",
+        attemptNumber: MAX_AUTOMATIC_PROVIDER_RECOVERIES + 1,
+      }),
+    ).toMatchObject({ status: "exhausted" });
+    const ambiguous = new ToolCallError(
+      "Failed to run function tools",
+      Object.assign(new Error("ambiguous start"), { code: 14 }),
+    );
+    expect(agentRunFailurePayload(ambiguous).code).not.toBe("sandbox_command_start_unavailable");
+    const statusTagged = Object.assign(new Error("request rejected", { cause: proven }), {
+      status: 503,
+    });
+    const mixed = new AggregateError([wrapped, ambiguous], "parallel tools failed");
+    expect(agentRunFailurePayload(statusTagged).code).not.toBe("sandbox_command_start_unavailable");
+    expect(agentRunFailurePayload(mixed).code).not.toBe("sandbox_command_start_unavailable");
   });
 
   test("keeps status-tagged, mixed-sibling, and shutdown Modal failures terminal", () => {

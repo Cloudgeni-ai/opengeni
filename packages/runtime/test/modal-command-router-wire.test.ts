@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   ModalCommandRouterWire,
+  ModalCommandStartDnsResolutionError,
   ModalCommandStartRejectedError,
   modalRouterWire,
 } from "../src/sandbox/providers/modal-command-router-wire";
@@ -128,6 +129,55 @@ function wire() {
   return new ModalCommandRouterWire({ url: endpoint, jwt: "test-token" }, certificate);
 }
 const identity = (execId = "normal") => ({ taskId: "task-test", execId });
+
+test("native grpc-js DNS failure is typed only at the matching Start router", async () => {
+  const host = "task-fbhzq89jcdq2rfyqsxjs1uuk3.w.modal.host";
+  const details = `Name resolution failed for target dns:${host}:443`;
+  const native = Object.assign(new Error(`14 UNAVAILABLE: ${details}`), {
+    code: status.UNAVAILABLE,
+    details,
+  });
+  const client = new ModalCommandRouterWire({ url: `https://${host}`, jwt: "test-token" });
+  let calls = 0;
+  Object.defineProperty(client, "unary", {
+    value: async () => {
+      calls++;
+      throw native;
+    },
+    configurable: true,
+  });
+  const start = () =>
+    client.start({ ...identity(), commandArgs: ["true"], workdir: "/tmp", env: {} });
+  try {
+    await expect(start()).rejects.toBeInstanceOf(ModalCommandStartDnsResolutionError);
+    expect(calls).toBe(1);
+    for (const override of [
+      { details: `${details}.` },
+      { details: "Name resolution failed for target dns:task-other.w.modal.host:443" },
+      { code: status.UNKNOWN },
+      { status: 503 },
+      { response: { status: 503 } },
+      { name: "ClientError" },
+    ]) {
+      const other = Object.assign(
+        new Error(native.message),
+        { code: status.UNAVAILABLE, details },
+        override,
+      );
+      Object.defineProperty(client, "unary", {
+        value: async () => {
+          calls++;
+          throw other;
+        },
+        configurable: true,
+      });
+      await expect(start()).rejects.toBe(other);
+    }
+    expect(calls).toBe(7); // no start is replayed inside the wire
+  } finally {
+    client.close();
+  }
+});
 
 test("authenticated Start rejection is typed separately from transport uncertainty", async () => {
   const client = wire();

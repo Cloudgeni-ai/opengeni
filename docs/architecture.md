@@ -464,6 +464,12 @@ stdin; already admitted writes remain blockers until settled. Provider loss,
 missing proof, and descriptor-free legacy commands never become successful
 supervision. See [command supervision](command-supervision.md).
 
+Native Modal `TaskExecStart` DNS failure is retryable only when the authenticated
+wire boundary binds the gRPC resolution target to its selected router host;
+the shell tool propagates that proof to bounded same-turn recovery. Generic
+`UNAVAILABLE` or ambiguous starts still retain their exact invocation and
+never authorize replay.
+
 Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotations
 may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot reserves the
 larger budget plus reaper period, including historical Modal leases after backend

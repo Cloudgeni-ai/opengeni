@@ -15,6 +15,7 @@ import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { installModalCommandSession } from "./modal-command-session";
 import { ModalCommandControl } from "./modal-command-control";
+import { ModalCommandStartDnsResolutionError } from "./modal-command-router-wire";
 import type { ModalClient } from "modal";
 import { ModalProcessObservationUnavailableError, SandboxConfigError } from "../errors";
 export { ModalProcessObservationUnavailableError } from "../errors";
@@ -271,6 +272,13 @@ export function isModalTaskExecStartDnsResolutionError(error: unknown): boolean 
     try {
       const record = current.value as Record<string, unknown>;
       if (hasContradictoryModalHttpStatus(record)) return false;
+
+      // The native grpc-js error has no RPC path. Only the authenticated
+      // Start boundary can bind its DNS target to the selected router host.
+      if (current.value instanceof ModalCommandStartDnsResolutionError) {
+        matchingLeaves += 1;
+        continue;
+      }
 
       nested = [];
       for (const key of ["cause", "error"] as const) {

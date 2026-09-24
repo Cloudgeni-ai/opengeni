@@ -5,7 +5,10 @@ import {
   withCommandSupervisionReady as withReady,
   withSupervisedLaunchReservation,
 } from "../src/sandbox/provider-command-session";
-import { ModalCommandStartRejectedError } from "../src/sandbox/providers/modal-command-router-wire";
+import {
+  ModalCommandStartDnsResolutionError,
+  ModalCommandStartRejectedError,
+} from "../src/sandbox/providers/modal-command-router-wire";
 
 function withCommandSupervisionReady<T>(ready: boolean, fn: () => T): T {
   return withSupervisedLaunchReservation({ reserve: async () => {} }, () => withReady(ready, fn));
@@ -126,6 +129,22 @@ test("authenticated definite start rejection is not converted into running", asy
   await expect(
     withCommandSupervisionReady(true, () => f.control.start({ cmd: "never" })),
   ).rejects.toBeInstanceOf(ModalCommandStartRejectedError);
+  expect(f.starts).toHaveLength(1);
+});
+
+test("pre-dispatch native DNS failure escapes supervised start without a second launch", async () => {
+  const f = fixture();
+  const host = "task-fbhzq89jcdq2rfyqsxjs1uuk3.w.modal.host:443";
+  const details = `Name resolution failed for target dns:${host}`;
+  const error = ModalCommandStartDnsResolutionError.fromStart(
+    Object.assign(new Error(`14 UNAVAILABLE: ${details}`), { code: 14, details }),
+    host,
+  );
+  expect(error).toBeInstanceOf(ModalCommandStartDnsResolutionError);
+  f.failStart(error);
+  await expect(
+    withCommandSupervisionReady(true, () => f.control.start({ cmd: "never" })),
+  ).rejects.toBe(error);
   expect(f.starts).toHaveLength(1);
 });
 
