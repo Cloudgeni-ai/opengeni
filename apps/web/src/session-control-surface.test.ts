@@ -11,6 +11,8 @@ describe("session control surface architecture", () => {
     expect(route).toContain("newSessionDraft.flushForSend(submittedSnapshot)");
     expect(route).toContain("<NewSessionDraftSyncNotice />");
     expect(route).toContain("newSessionDraft.isCurrentSignature(visibleSignature)");
+    expect(route).toContain("suspendAutosave: submitting");
+    expect(route).toContain("if (!outcomeUnknown) await preserveNewerLocalDraft()");
     expect(route).not.toContain("newSessionDraft.conflict ||");
     expect(route).not.toContain("!newSessionDraft.conflict &&");
     expect(route).not.toContain("newSessionDraft.conflict !== null ||");

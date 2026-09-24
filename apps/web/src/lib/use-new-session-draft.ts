@@ -28,6 +28,8 @@ export type UseNewSessionDraftOptions = {
   hydrateResources?: (resources: ResourceRef[]) => ResourceRef[] | Promise<ResourceRef[]>;
   /** Keep the first read pending until catalogs needed for hydration are ready. */
   resourceHydrationReady?: boolean;
+  /** A create in flight owns the exact clicked snapshot; resume autosave on settlement. */
+  suspendAutosave?: boolean;
 };
 
 export type FlushedNewSessionDraft = {
@@ -81,6 +83,7 @@ type ValidatedRemoteDraft = {
 export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSessionDraftResult {
   const { client, workspaceId } = options;
   const resourceHydrationReady = options.resourceHydrationReady ?? true;
+  const suspendAutosave = options.suspendAutosave ?? false;
   const hydrateResources = options.hydrateResources;
   const [draft, setDraft] = useState<NewSessionDraft | null>(null);
   const [loading, setLoading] = useState(true);
@@ -358,6 +361,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     }
     if (
       loading ||
+      suspendAutosave ||
       !draftRef.current ||
       conflictRef.current ||
       valueSignature === lastSavedSignature.current ||
@@ -375,7 +379,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
       autosaveTimer.current = null;
     };
-  }, [loading, persistSnapshot, valueSignature]);
+  }, [loading, persistSnapshot, suspendAutosave, valueSignature]);
 
   const flush = useCallback(async (): Promise<FlushedNewSessionDraft | null> => {
     if (loadingRef.current || conflictRef.current || !draftRef.current) return null;

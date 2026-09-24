@@ -1080,6 +1080,63 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
+  test("failed create retry restores newer typed text instead of leaving the clicked snapshot saved", async () => {
+    let authoritative = remote(0);
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const draftClient = client({
+      getNewSessionDraft: async () => authoritative,
+      saveNewSessionDraft: async (_workspaceId, request) => {
+        requests.push(request);
+        if (request.expectedRevision !== authoritative.revision) throw conflict();
+        authoritative = remote(authoritative.revision + 1, request);
+        return authoritative;
+      },
+    });
+    const hook = await renderHook(
+      (props: { suspendAutosave: boolean }) => {
+        const [value, setValue] = useState(() => editable());
+        const draft = useNewSessionDraft({
+          workspaceId: WORKSPACE_A,
+          client: draftClient,
+          value,
+          suspendAutosave: props.suspendAutosave,
+          onApplyRemote: setValue,
+          restoreReadyFiles: () => {},
+        });
+        return { draft, value, setValue };
+      },
+      { suspendAutosave: false },
+    );
+    await flush();
+    const clicked = editable({ text: "message at Send" });
+    await actRun(() => hook.result.current.setValue(clicked));
+    const first = await actRun(() => hook.result.current.draft.flushForSend(clicked));
+    expect(first?.revision).toBe(1);
+
+    await hook.rerender({ suspendAutosave: true });
+    await actRun(() =>
+      hook.result.current.setValue(editable({ text: "new unsent text during create" })),
+    );
+    await flush(550);
+    expect(requests).toHaveLength(1);
+    authoritative = remote(2, { text: "other tab" });
+    await actRun(() => hook.result.current.draft.captureConflict(conflict()));
+    const retried = await actRun(() => hook.result.current.draft.flushForSend(clicked));
+    expect(retried?.revision).toBe(3);
+    expect(requests.at(-1)).toMatchObject({ expectedRevision: 2, text: clicked.text });
+
+    // A definitive create failure resumes autosave, including when the editor
+    // has not changed again since the older clicked snapshot was retried.
+    await hook.rerender({ suspendAutosave: false });
+    await flush(550);
+    expect(requests.at(-1)).toMatchObject({
+      expectedRevision: 3,
+      text: "new unsent text during create",
+    });
+    expect(hook.result.current.value.text).toBe("new unsent text during create");
+    await hook.unmount();
+  });
+
   test("Send stops retrying persistent draft conflicts and keeps the visible message", async () => {
     let reads = 0;
     let saves = 0;

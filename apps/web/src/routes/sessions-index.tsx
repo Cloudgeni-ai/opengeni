@@ -905,6 +905,7 @@ function SessionsIndexRouteContent({
     onApplyRemote: applyRemoteDraft,
     restoreReadyFiles: attachments.restoreReadyFiles,
     hydrateResources,
+    suspendAutosave: submitting,
     // Establish the passive baseline only after effective visibility settles.
     // Otherwise a late Personal-workspace capability response turns hydration
     // into an autosave, racing navigation and sibling drafts without a user edit.
@@ -1101,6 +1102,13 @@ function SessionsIndexRouteContent({
         reasoningEffort,
         latencyMode,
       });
+      const preserveNewerLocalDraft = async () => {
+        if (!newSessionDraft.isCurrentSignature(visibleSignature)) {
+          // A definitive create failure must not leave text typed during the
+          // attempt unsaved after a retry persisted the clicked snapshot.
+          await newSessionDraft.flushForSend();
+        }
+      };
       setSubmitting(true);
       try {
         return await runNewSessionRouteSubmission({
@@ -1127,6 +1135,7 @@ function SessionsIndexRouteContent({
                   personalResourceAttachment.intent,
                 );
                 let draftConflict = false;
+                let outcomeUnknown = false;
                 const created = await context.startSession(
                   workspaceId,
                   {
@@ -1155,8 +1164,9 @@ function SessionsIndexRouteContent({
                       submission.options.visibility ?? "workspace",
                       tenancyCapabilities?.canCreatePrivate === true,
                     ),
-                    onFailure: ({ error, request }) => {
+                    onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
                       draftConflict = newSessionDraft.captureConflict(error);
+                      outcomeUnknown = uncertain;
                       recoverPersonalResourceAttachment(error, request);
                       return draftConflict;
                     },
@@ -1164,6 +1174,7 @@ function SessionsIndexRouteContent({
                 );
                 if (!created) {
                   if (draftConflict) continue;
+                  if (!outcomeUnknown) await preserveNewerLocalDraft();
                   return null;
                 }
                 return {
@@ -1171,6 +1182,7 @@ function SessionsIndexRouteContent({
                   settleDraft: async () => true,
                 };
               }
+              await preserveNewerLocalDraft();
               toast.error("Couldn't start voice", { description: "Try again." });
               return null;
             }
@@ -1192,6 +1204,7 @@ function SessionsIndexRouteContent({
                 personalResourceAttachment.intent,
               );
               let draftConflict = false;
+              let outcomeUnknown = false;
               const created = await context.startSession(
                 workspaceId,
                 {
@@ -1220,8 +1233,9 @@ function SessionsIndexRouteContent({
                     submission.options.visibility ?? "workspace",
                     tenancyCapabilities?.canCreatePrivate === true,
                   ),
-                  onFailure: ({ error, request }) => {
+                  onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
                     draftConflict = newSessionDraft.captureConflict(error);
+                    outcomeUnknown = uncertain;
                     recoverPersonalResourceAttachment(error, request);
                     return draftConflict;
                   },
@@ -1229,6 +1243,7 @@ function SessionsIndexRouteContent({
               );
               if (!created) {
                 if (draftConflict) continue;
+                if (!outcomeUnknown) await preserveNewerLocalDraft();
                 return null;
               }
               return {
@@ -1267,6 +1282,7 @@ function SessionsIndexRouteContent({
                 },
               };
             }
+            await preserveNewerLocalDraft();
             toast.error("Couldn't send", {
               description: "Your message is still here. Try again.",
             });
