@@ -209,7 +209,7 @@ const MODAL_EXEC_ALREADY_COMPLETED_DETAILS =
   /^Exec has already completed; stdin is no longer accepting writes(?: \(Error code: [A-Z0-9]+\))?$/;
 const MODAL_TASK_EXEC_START_PATH = "/modal.task_command_router.TaskCommandRouter/TaskExecStart";
 const MODAL_TASK_EXEC_START_DNS_RESOLUTION_DETAILS =
-  /^Name resolution failed for target dns:task-[a-z0-9]+\.w\.modal\.host:443$/;
+  /^Name resolution failed for target dns:task-[a-z0-9]+\.w\.modal\.host(?::443)?$/;
 const MODAL_TASK_EXEC_START_ERROR_MAX_DEPTH = 8;
 const MODAL_TASK_EXEC_START_ERROR_MAX_NODES = 64;
 const MODAL_TASK_EXEC_START_ERROR_MAX_AGGREGATE_ERRORS = 32;
