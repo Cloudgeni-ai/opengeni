@@ -21,7 +21,9 @@ const client = {
 createRoot(document.getElementById("root")!).render(
   <main className="min-h-screen bg-bg p-10 text-fg">
     <div className="mx-auto max-w-5xl">
-      <p className="mb-6 text-sm text-fg-muted">Organization settings · sample activation preview</p>
+      <p className="mb-6 text-sm text-fg-muted">
+        Organization settings · sample activation preview
+      </p>
       <OrganizationPrivateSessionsSection
         client={client}
         identity={{

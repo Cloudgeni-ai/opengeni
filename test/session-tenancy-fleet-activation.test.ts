@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { activationScope } from "../scripts/activate-session-tenancy";
+import { activationScope, requiredActivationMigrations } from "../scripts/activate-session-tenancy";
 
 const id = "00000000-0000-4000-8000-000000000001";
 
@@ -25,5 +25,11 @@ describe("session tenancy fleet activation admission", () => {
       "utf8",
     );
     expect(marker.startsWith("-- deployment-mode: maintenance\n")).toBe(true);
+    expect(requiredActivationMigrations(true)).toContain(
+      "0513_private_sessions_fleet_activation.sql",
+    );
+    expect(requiredActivationMigrations(false)).not.toContain(
+      "0513_private_sessions_fleet_activation.sql",
+    );
   });
 });

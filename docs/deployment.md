@@ -1267,6 +1267,8 @@ and calls the existing guarded SQL activation for each. All receipts commit in
 organization fails the entire Job without activating any new organization; do
 not bypass this gate or insert activation rows by hand. The maintenance lease
 owns forward recovery once the migration Job is authorized.
+An empty fleet also fails: without an initial activation receipt, migration
+0349 has no witness to auto-activate the first future signup.
 
 Before admitting that release, prepare and retain per-organization evidence
 using the fresh-key membership, resource, connection and final session

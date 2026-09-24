@@ -14,6 +14,11 @@ const REQUIRED_MIGRATIONS = [
   "0303_session_tenancy_product_activation.sql",
   "0340_tenancy_backfill_activation_evidence.sql",
 ] as const;
+const FLEET_MIGRATION = "0513_private_sessions_fleet_activation.sql";
+
+export function requiredActivationMigrations(allOrganizations: boolean): readonly string[] {
+  return allOrganizations ? [...REQUIRED_MIGRATIONS, FLEET_MIGRATION] : REQUIRED_MIGRATIONS;
+}
 
 function argument(name: string, argv: readonly string[] = process.argv): string | null {
   const index = argv.indexOf(name);
@@ -26,8 +31,10 @@ export function activationScope(argv: readonly string[]): {
 } {
   const organizationId = argument("--organization-id", argv);
   const allOrganizations = argv.includes("--all-organizations");
-  if (allOrganizations === Boolean(organizationId) ||
-    (organizationId !== null && !/^[0-9a-f-]{36}$/i.test(organizationId))) {
+  if (
+    allOrganizations === Boolean(organizationId) ||
+    (organizationId !== null && !/^[0-9a-f-]{36}$/i.test(organizationId))
+  ) {
     throw new Error("Supply exactly one of --organization-id <uuid> or --all-organizations");
   }
   return { organizationId, allOrganizations };
@@ -226,18 +233,25 @@ async function main(): Promise<void> {
       if (allOrganizations) {
         await transaction`lock table managed_accounts in share mode`;
       }
+      const requiredMigrations = requiredActivationMigrations(allOrganizations);
       const migrations = await transaction<{ name: string }[]>`
-        select name from schema_migrations where name = any(${[...REQUIRED_MIGRATIONS]})
+        select name from schema_migrations where name = any(${[...requiredMigrations]})
       `;
       const applied = new Set(migrations.map((row) => row.name));
-      const missing = REQUIRED_MIGRATIONS.filter((name) => !applied.has(name));
+      const missing = requiredMigrations.filter((name) => !applied.has(name));
       if (missing.length > 0) {
         throw new Error(`Session tenancy activation migrations are missing: ${missing.join(", ")}`);
       }
       const organizations = allOrganizations
         ? await transaction<{ id: string }[]>`select id from managed_accounts order by id`
         : [{ id: organizationId! }];
-      if (organizations.length === 0) throw new Error("No organizations to activate");
+      // An empty fleet cannot establish the first committed activation witness
+      // required for subsequent greenfield organization auto-activation (0349).
+      if (organizations.length === 0) {
+        throw new Error(
+          "No organizations exist to establish the first session-tenancy activation witness",
+        );
+      }
 
       const pending: Array<{
         id: string;
@@ -296,7 +310,8 @@ async function main(): Promise<void> {
             ${activatedBy.trim()}, ${roles}::text[]
           )
         `;
-        if (!activation) throw new Error(`Session tenancy activation returned no receipt for ${id}`);
+        if (!activation)
+          throw new Error(`Session tenancy activation returned no receipt for ${id}`);
         activations.push({ ...activation, inventoryDigest, parityDigest, backfillEvidence });
       }
       if (!allOrganizations) return activations[0];
