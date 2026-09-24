@@ -19,6 +19,7 @@ import {
   STREAM_KIND_BROWSER,
   STREAM_ROLE_CLIENT,
 } from "../lib/relay-wire";
+import { usePageLiveActivity } from "./internal";
 
 export type BrowserFrameConnectionState =
   | "idle"
@@ -73,7 +74,8 @@ export function useBrowserFrameStream(
   options: UseBrowserFrameStreamOptions,
 ): UseBrowserFrameStreamResult {
   const { client, workspaceId } = useEmbeddedBrowserInteraction(options);
-  const enabled = options.enabled ?? true;
+  const pageLive = usePageLiveActivity();
+  const enabled = (options.enabled ?? true) && pageLive;
   const [nonce, setNonce] = useState(0);
   const [result, setResult] = useState<Omit<UseBrowserFrameStreamResult, "reconnect">>({
     state: "idle",
