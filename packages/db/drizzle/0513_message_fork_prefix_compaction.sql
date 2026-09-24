@@ -18,8 +18,8 @@ BEGIN
      E'AND history.turn_id = selected_turn_id\n        AND history.active\n        AND history.item ->> ''role'' = ''user'''),
     (E'AND history.turn_id = selected_event.turn_id\n        AND history.item ->> ''role'' = ''assistant''',
      E'AND history.turn_id = selected_event.turn_id\n        AND history.active\n        AND history.item ->> ''role'' = ''assistant'''),
-    (E'AND history.session_id = p_source_session_id\n      AND (NOT history.active OR history.position <> trunc(history.position)',
-     E'AND history.session_id = p_source_session_id\n      AND history.position <= boundary_position\n      AND history.active\n      AND (history.position <> trunc(history.position)'),
+    (E'AND history.session_id = p_source_session_id\n      AND (NOT history.active OR (history.position <> trunc(history.position)',
+     E'AND history.session_id = p_source_session_id\n      AND history.position <= boundary_position\n      AND history.active\n      AND ((history.position <> trunc(history.position)'),
     ('OR history.item ->> ''type'' = ''compaction''',
      $replacement$OR (history.item ->> 'type' = 'compaction' AND NOT EXISTS (
       SELECT 1 FROM session_events compaction_event
