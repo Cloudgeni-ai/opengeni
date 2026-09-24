@@ -51,6 +51,8 @@ fn rust_verifies_a_ts_minted_stream_token() {
     assert_eq!(claims.lease_epoch, f["leaseEpoch"].parse::<u64>().unwrap());
     assert_eq!(claims.port, f["port"].parse::<u32>().unwrap());
     assert_eq!(claims.mode, "view");
+    assert_eq!(claims.agent_id.as_deref(), Some(f["agentId"].as_str()));
+    assert_eq!(claims.channel_id.as_deref(), Some(f["channelId"].as_str()));
 }
 
 #[test]

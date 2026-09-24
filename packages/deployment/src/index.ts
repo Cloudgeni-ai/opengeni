@@ -237,6 +237,12 @@ export const MCP_OAUTH_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS",
 ];
 
+/** Forwarded source addresses stay untrusted for API quotas unless the
+ * operator explicitly trusts a fixed proxy chain. */
+export const API_REQUEST_SOURCE_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_API_TRUSTED_PROXY_HOPS",
+];
+
 /** Control-plane secrets needed for a complete Connected Machine deployment.
  * The config layer permits graceful degradation when these are absent; a
  * deployment whose primary backend is selfhosted cannot. */
@@ -1562,6 +1568,9 @@ export function requiredRuntimeEnvVars(
   for (const key of MCP_OAUTH_PASSTHROUGH_ENV) {
     if (env[key]) vars.push(key);
   }
+  for (const key of API_REQUEST_SOURCE_PASSTHROUGH_ENV) {
+    if (env[key]) vars.push(key);
+  }
   if (mcpOauthDeploymentEnabled(env)) {
     vars.push("OPENGENI_MCP_OAUTH_ENABLED", "OPENGENI_PUBLIC_BASE_URL");
   }
@@ -2579,6 +2588,7 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_INTEGRATIONS_STATE_SECRET", env.OPENGENI_INTEGRATIONS_STATE_SECRET),
     valueEnv("OPENGENI_MCP_OAUTH_ENABLED", env.OPENGENI_MCP_OAUTH_ENABLED),
     valueEnv("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS", env.OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS),
+    valueEnv("OPENGENI_API_TRUSTED_PROXY_HOPS", env.OPENGENI_API_TRUSTED_PROXY_HOPS),
     valueEnv("OPENGENI_SLACK_CLIENT_ID", env.OPENGENI_SLACK_CLIENT_ID),
     valueEnv("OPENGENI_SLACK_CLIENT_SECRET", env.OPENGENI_SLACK_CLIENT_SECRET),
     valueEnv("OPENGENI_SLACK_SIGNING_SECRET", env.OPENGENI_SLACK_SIGNING_SECRET),
@@ -3109,6 +3119,7 @@ function addRuntimeConfigHelmValues(
   values["config.OPENGENI_OPENAI_REASONING_EFFORT"] = env.OPENGENI_OPENAI_REASONING_EFFORT ?? "low";
   values["config.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"] =
     env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh,max";
+  values["config.OPENGENI_STREAM_CONTROL_ENABLED"] = env.OPENGENI_STREAM_CONTROL_ENABLED ?? "false";
   for (const key of [
     "OPENGENI_ANALYTICS_ENABLED",
     "OPENGENI_ANALYTICS_CONSENT_REQUIRED",
@@ -3120,6 +3131,7 @@ function addRuntimeConfigHelmValues(
     "OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS",
     "OPENGENI_MCP_OAUTH_ENABLED",
     "OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS",
+    "OPENGENI_API_TRUSTED_PROXY_HOPS",
   ] as const) {
     const value = env[key];
     if (value) {

@@ -1103,17 +1103,13 @@ handlers because its host owns process lifecycle.
 
 ### 6.4 Rust agent and relay
 
-`agent/` is the Cargo workspace for Connected Machine execution and the relay
-edge. `agent/proto/opengeni_agent.proto` is the single wire source, generated to
-Rust and `@opengeni/agent-proto` TypeScript types.
-
-One installed agent process may maintain independent connections to multiple
-OpenGeni deployments and workspaces while sharing the physical machine's host
-capacity and OS containment. The relay carries live terminal and desktop bytes;
-it is stateless beyond active channels and does not own session or lease truth.
-
-Canonical: [`../agent/README.md`](../agent/README.md) and
-[`connected-machines.md`](connected-machines.md).
+`agent/` owns Connected Machine execution and relay transport.
+`agent/proto/opengeni_agent.proto` generates Rust and `@opengeni/agent-proto` wire types.
+Agents share host capacity and containment across independent deployment/workspace connections.
+Relays retain channels, never session/lease truth.
+Viewer tokens bind agent, channel, and mode.
+Desktop input requires API/relay flags, `stream:control`, owner consent, and port 6080; PTY authorization remains independent.
+Canonical message rules and implementation: [`agent/README.md`](../agent/README.md) and [`connected-machines.md`](connected-machines.md).
 
 ### 6.5 Deployment, docs, scripts, and tests
 

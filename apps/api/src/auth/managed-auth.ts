@@ -34,6 +34,42 @@ import {
 // importers (`app.ts`) keep the same import path.
 export type { ManagedAuth };
 
+/**
+ * The app-controlled header carrying the server-resolved client address into
+ * Better Auth. It is configured as the ONLY `ipAddressHeaders` entry so a
+ * caller-supplied forwarding header can never influence rate-limit keys or
+ * session IP tracking; every `managedAuth.handler` call site must stamp it via
+ * {@link requestWithManagedAuthClientAddress}.
+ */
+export const MANAGED_AUTH_CLIENT_IP_HEADER = "x-opengeni-client-ip";
+
+// The exact client-address resolution the mounted handler's rate limiter and
+// session writer use; re-exported so tests can assert it without importing
+// better-auth outside the managed auth module.
+export { getIp as resolveManagedAuthClientAddress } from "better-auth/api";
+
+/**
+ * Return `request` with the trusted client address stamped, overwriting any
+ * caller-supplied value; `adjustHeaders` applies additional header rewrites
+ * first. The body is moved explicitly because Bun's copy constructor does not
+ * forward an already-buffered ReadableStream body (as produced by `bodyLimit`
+ * middleware), which leaves downstream body reads hung.
+ */
+export function requestWithManagedAuthClientAddress(
+  request: Request,
+  clientAddress: string,
+  adjustHeaders?: (headers: Headers) => void,
+): Request {
+  const headers = new Headers(request.headers);
+  adjustHeaders?.(headers);
+  headers.set(MANAGED_AUTH_CLIENT_IP_HEADER, clientAddress);
+  const init: RequestInit & { duplex?: "half" } = {
+    headers,
+    ...(request.body ? { body: request.body, duplex: "half" as const } : {}),
+  };
+  return new Request(request, init);
+}
+
 export function managedAuthRequiresEmailVerification(
   settings: Pick<Settings, "environment">,
 ): boolean {
@@ -101,6 +137,9 @@ export function createManagedAuth(
         : {}),
       database: {
         generateId: () => crypto.randomUUID(),
+      },
+      ipAddress: {
+        ipAddressHeaders: [MANAGED_AUTH_CLIENT_IP_HEADER],
       },
     },
     rateLimit: {

@@ -853,6 +853,8 @@ export type MintDesktopStreamInput = {
   session: Session;
   /** The viewer holder id the scoped token is minted for. */
   viewerId: string;
+  /** The route verified stream:control and any required screen-control consent. */
+  canControl?: boolean;
   /** The live lease (must be holder-confirmed warm). A selfhosted-active
    *  session may have no Modal group lease; omit and the selfhosted branch handles it. */
   lease?: LeaseSnapshot;
@@ -892,6 +894,7 @@ export async function mintDesktopStream(
   const { db, settings, bus } = services;
   const { accountId, workspaceId, session } = input;
   const lease = input.lease;
+  const canControl = input.canControl === true && settings.sandboxDesktopInteractive !== false;
   // The scoped token's viewerId must be a UUID (StreamTokenPayload). The GET caps
   // handshake passes grant.subjectId, which is a non-UUID for an API-key principal
   // ("configured:key") — coerce it to a deterministic UUID so the mint never 500s
@@ -948,6 +951,7 @@ export async function mintDesktopStream(
           workspaceId: active.workspaceId,
           ...(input.resourceSubjectId ? { resourceSubjectId: input.resourceSubjectId } : {}),
           port: DESKTOP_STREAM_PORT,
+          mode: settings.streamControlEnabled && canControl ? "control" : "view",
           sandbox: active,
           viewerAuthority,
         },
@@ -1035,6 +1039,7 @@ export async function mintDesktopStream(
         viewerId,
         leaseEpoch: lease.leaseEpoch,
         streamTokenSecret: secret,
+        mode: settings.streamControlEnabled && canControl ? "control" : "view",
         resolution: defaultResolution(settings),
         ...viewerAuthority,
       });
@@ -1143,6 +1148,8 @@ export type MintTerminalStreamInput = {
   session: Session;
   /** The viewer holder / principal id the scoped token is minted for. */
   viewerId: string;
+  /** The route verified stream:control for this viewer. */
+  canControl?: boolean;
   /** The live lease (must be holder-confirmed warm). A selfhosted-active
    *  session may have no Modal group lease; omit and the selfhosted branch handles it. */
   lease?: LeaseSnapshot;
@@ -1170,6 +1177,7 @@ export async function mintTerminalStream(
   const { db, settings } = services;
   const { accountId, workspaceId, session } = input;
   const lease = input.lease;
+  const canControl = input.canControl === true;
   // Same caps-500 fix as the desktop mint: coerce a non-UUID principal id
   // (grant.subjectId = "configured:key" for an API key) to a deterministic UUID
   // so StreamTokenPayload.parse never throws an uncaught 500.
@@ -1224,6 +1232,9 @@ export async function mintTerminalStream(
           workspaceId: active.workspaceId,
           ...(input.resourceSubjectId ? { resourceSubjectId: input.resourceSubjectId } : {}),
           port: TERMINAL_STREAM_PORT,
+          // PTY control rides on terminal:attach alone — the desktop
+          // stream-control rollout flag never gates terminal keystrokes.
+          mode: canControl ? "control" : "view",
           sandbox: active,
           viewerAuthority,
         },
@@ -1300,6 +1311,7 @@ export async function mintTerminalStream(
         viewerId,
         leaseEpoch: lease.leaseEpoch,
         streamTokenSecret: secret,
+        mode: canControl ? "control" : "view",
         port: TERMINAL_STREAM_PORT,
         ...viewerAuthority,
       });
@@ -1379,6 +1391,7 @@ async function tryMintActiveSelfhostedStream(
     workspaceId: string;
     resourceSubjectId?: string;
     port: number;
+    mode: "view" | "control";
     sandbox: SandboxRecord;
     /** 0281 viewer authority claims stamped into the relay stream token. */
     viewerAuthority?: { subjectId?: string; authorityEpoch: number };
@@ -1444,6 +1457,7 @@ async function tryMintActiveSelfhostedStream(
     activeEpoch: session.activeEpoch,
     ...(input.viewerAuthority ? { viewerAuthority: input.viewerAuthority } : {}),
     port,
+    mode: input.mode,
     session: shSession,
   });
 }
@@ -1464,12 +1478,29 @@ export type MintSelfhostedStreamInput = {
   activeEpoch: number;
   /** 0281 viewer authority claims stamped into the relay stream token. */
   viewerAuthority?: { subjectId?: string; authorityEpoch: number };
+  /** Input authority already granted by the API attach route. */
+  mode?: "view" | "control";
   /** The exposed stream port (6080 desktop / 7681 terminal). */
   port: number;
   /** The resolvable selfhosted session (the routing proxy resolves the active
    *  selfhosted backend; its `resolveExposedPort` returns the relay endpoint). */
   session: RelayResolvableSession;
 };
+
+/** Fail closed unless the API flag and access grant allow input, and the
+ * machine owner has opted into screen control when the target is a machine. */
+export function shouldGrantStreamControl(input: {
+  settingEnabled: boolean;
+  accessIncludesControl: boolean;
+  machineConsentRequired: boolean;
+  machineOwnerAllowsScreenControl: boolean;
+}): boolean {
+  return (
+    input.settingEnabled &&
+    input.accessIncludesControl &&
+    (!input.machineConsentRequired || input.machineOwnerAllowsScreenControl)
+  );
+}
 
 /**
  * Mint the selfhosted relay stream cell for a viewer against the session's ACTIVE
@@ -1507,6 +1538,13 @@ export async function mintSelfhostedStream(
       leaseEpoch: input.activeEpoch,
       streamTokenSecret: secret,
       port: input.port,
+      // The rollout flag gates desktop input only: the terminal port's control
+      // claim comes from terminal:attach and must survive a flag-off deploy.
+      mode:
+        input.mode === "control" &&
+        (input.port === TERMINAL_STREAM_PORT || settings.streamControlEnabled)
+          ? "control"
+          : "view",
       ...(input.viewerAuthority ?? {}),
     });
     return {

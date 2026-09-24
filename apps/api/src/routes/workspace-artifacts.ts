@@ -322,7 +322,12 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "private, no-store",
+          // Retained user HTML is never rendered inline on the API origin:
+          // callers fetch the bytes and render them inside their own sandboxed
+          // frame (the SDK's getWorkspaceArtifactHtml → iframe srcDoc path).
+          "Content-Disposition": "attachment",
           "Content-Security-Policy": "sandbox allow-scripts",
+          "X-Content-Type-Options": "nosniff",
         },
       },
     );

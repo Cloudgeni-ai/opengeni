@@ -21,6 +21,7 @@ import {
   WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV,
   MCP_OAUTH_PASSTHROUGH_ENV,
+  API_REQUEST_SOURCE_PASSTHROUGH_ENV,
   SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV,
   SecretDeliveryMode,
   stackPlanFor,
@@ -335,6 +336,24 @@ describe("deployment contract", () => {
     expect(missingOrigin.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_ENABLED=true");
     expect(missingOrigin.runtimeEnv).toContain("OPENGENI_PUBLIC_BASE_URL=");
     expect(missingOrigin.missingEnvVars).toContain("OPENGENI_PUBLIC_BASE_URL");
+  });
+
+  test("passes trusted API proxy hops through deployment artifacts", () => {
+    const env = { OPENGENI_API_TRUSTED_PROXY_HOPS: "2" };
+    const vars = requiredRuntimeEnvVars(deploymentProfiles["local-kubernetes"], env);
+    expect(API_REQUEST_SOURCE_PASSTHROUGH_ENV).toContain("OPENGENI_API_TRUSTED_PROXY_HOPS");
+    expect(vars).toContain("OPENGENI_API_TRUSTED_PROXY_HOPS");
+
+    const artifacts = generateRuntimeArtifacts(deploymentProfiles["local-kubernetes"], {}, env);
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_API_TRUSTED_PROXY_HOPS=2");
+    expect(artifacts.helmValuesYaml).toContain('OPENGENI_API_TRUSTED_PROXY_HOPS: "2"');
+  });
+
+  test("passes stream input control rollout to both API config and relay runtime config", () => {
+    const env = { OPENGENI_STREAM_CONTROL_ENABLED: "true" };
+    const artifacts = generateRuntimeArtifacts(deploymentProfiles["local-kubernetes"], {}, env);
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_STREAM_CONTROL_ENABLED=true");
+    expect(artifacts.helmValuesYaml).toContain('OPENGENI_STREAM_CONTROL_ENABLED: "true"');
   });
 
   test("carries the admitted sandbox warm tariff through runtime and Helm generation", () => {

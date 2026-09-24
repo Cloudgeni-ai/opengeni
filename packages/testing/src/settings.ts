@@ -53,6 +53,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     authAllowMetrics: false,
     publicBaseUrl: "http://127.0.0.1:3000",
     mcpOauthEnabled: false,
+    apiTrustedProxyHops: 0,
     mcpOauthTrustedProxyHops: 0,
     agentReleasesBaseUrl: "https://github.com/Cloudgeni-ai/opengeni/releases",
     agentStableVersion: "0.1.16",

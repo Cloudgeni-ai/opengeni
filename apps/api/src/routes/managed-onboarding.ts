@@ -18,6 +18,7 @@ import {
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { trustedRequestSourceAddress } from "../http/request-source";
 
 import {
   organizationUserSetupRequestFingerprint,
@@ -108,7 +109,7 @@ export function registerManagedOnboardingRoutes(
     if (deps.settings.productAccessMode !== "managed" || !deps.managedAuth) {
       throw new HTTPException(404, { message: "account setup is unavailable" });
     }
-    enforceAccountSetupRateLimit(context, accountSetupLimiter);
+    enforceAccountSetupRateLimit(context, accountSetupLimiter, deps.settings.apiTrustedProxyHops);
     const parsed = PreviewOrganizationUserSetupRequest.safeParse(
       await context.req.json().catch(() => null),
     );
@@ -129,7 +130,7 @@ export function registerManagedOnboardingRoutes(
     if (deps.settings.productAccessMode !== "managed" || !deps.managedAuth) {
       throw new HTTPException(404, { message: "account setup is unavailable" });
     }
-    enforceAccountSetupRateLimit(context, accountSetupLimiter);
+    enforceAccountSetupRateLimit(context, accountSetupLimiter, deps.settings.apiTrustedProxyHops);
     const parsed = CompleteOrganizationUserSetupRequest.safeParse(
       await context.req.json().catch(() => null),
     );
@@ -193,10 +194,11 @@ export function registerManagedOnboardingRoutes(
 function enforceAccountSetupRateLimit(
   context: Context,
   limiter: { take(key: string): boolean },
+  trustedProxyHops: number,
 ): void {
   let allowed = false;
   try {
-    allowed = limiter.take(accountSetupClientKey(context));
+    allowed = limiter.take(accountSetupClientKey(context, trustedProxyHops));
   } catch {
     // A public credential-setting endpoint must fail closed if its abuse gate
     // cannot make a decision.
@@ -206,10 +208,8 @@ function enforceAccountSetupRateLimit(
   }
 }
 
-function accountSetupClientKey(context: Context): string {
-  const forwarded = context.req.header("x-forwarded-for")?.split(",")[0]?.trim();
-  const address = forwarded || context.req.header("x-real-ip")?.trim() || "unknown";
-  return address.slice(0, 128);
+function accountSetupClientKey(context: Context, trustedProxyHops: number): string {
+  return trustedRequestSourceAddress(context, trustedProxyHops);
 }
 
 /**

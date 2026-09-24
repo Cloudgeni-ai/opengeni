@@ -308,6 +308,9 @@ const SettingsSchema = z.object({
   // Standards-based OAuth authorization server for external workspace MCP
   // clients. Opt-in because it creates a new public authentication surface.
   mcpOauthEnabled: EnvBoolean.default(false),
+  // Forwarded source addresses stay untrusted for API rate limits unless the
+  // deployment explicitly trusts an exact proxy chain and blocks direct access.
+  apiTrustedProxyHops: z.coerce.number().int().min(0).max(16).default(0),
   // Forwarded client addresses are ignored by default. Operators may trust an
   // exact number of proxy hops only when direct access to the API is blocked.
   mcpOauthTrustedProxyHops: z.coerce.number().int().min(0).max(16).default(0),
@@ -372,9 +375,9 @@ const SettingsSchema = z.object({
   // BOTH while sandboxDesktopEnabled=true is a GRACEFUL DEGRADE (DesktopStream
   // transport:null + a loud boot warning), NOT a hard boot-fail (stream-token availability contract).
   streamTokenSecret: z.string().optional(),
-  // The desktop input plane (raw stream:control writes) is OFF in v1: even a
-  // holder of stream:control gets 403 until this flips. Keeps stream:control a
-  // declared-but-inert permission so later hardening is a flag flip.
+  // Client-to-agent stream input is disabled by default. The API only mints
+  // control claims when this is enabled and the caller has the required access
+  // and machine consent; the relay independently enforces the same flag.
   streamControlEnabled: EnvBoolean.default(false),
   // Provider-neutral advisory work discovery rollout. Disabling this keeps
   // ordinary session listings available while rejecting relevance discovery
@@ -3078,6 +3081,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     mcpOauthEnabled: optional("OPENGENI_MCP_OAUTH_ENABLED"),
+    apiTrustedProxyHops: optional("OPENGENI_API_TRUSTED_PROXY_HOPS"),
     mcpOauthTrustedProxyHops: optional("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS"),
     webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),

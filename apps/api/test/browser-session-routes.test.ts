@@ -146,6 +146,19 @@ describe("BrowserSession route discipline", () => {
     expect(attachment).toContain('context.req.header("x-forwarded-proto")');
   });
 
+  test("binds the relay viewer token to the minted channel key", async () => {
+    // The relay rejects a viewer token that does not claim the exact
+    // agent/channel the producer registered (validate_viewer_channel_binding),
+    // so the mint MUST pass the relayed channel key through.
+    const source = await readFile(routeUrl, "utf8");
+    const mint = source.slice(
+      source.indexOf("await mintStreamToken(relaySecret!"),
+      source.indexOf("buildStreamUrl(relayed.endpoint)"),
+    );
+    expect(mint).toContain("agentId: relayed.channel.agentId");
+    expect(mint).toContain("channelId: relayed.channel.channelId");
+  });
+
   test("rejects archived identities before acquiring a browser placement", async () => {
     const source = await readFile(routeUrl, "utf8");
     const createStart = source.indexOf('app.post("/v1/workspaces/:workspaceId/browser-sessions"');

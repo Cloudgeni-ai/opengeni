@@ -277,6 +277,7 @@ import {
   mintTerminalStream,
   readGroupLease,
   resolveActiveDesktopTransport,
+  shouldGrantStreamControl,
   viewerHeartbeatIntervalMs,
   type DesktopStreamMint,
   type TerminalStreamMint,
@@ -3991,6 +3992,28 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         )
       : null;
     const selfhostedActive = activeSandbox?.kind === "selfhosted";
+    const accessIncludesStreamControl = hasPermission(grant.permissions, "stream:control");
+    let machineOwnerAllowsScreenControl = false;
+    if (
+      wantDesktop &&
+      selfhostedActive &&
+      settings.streamControlEnabled &&
+      accessIncludesStreamControl &&
+      activeSandbox?.enrollmentId
+    ) {
+      const enrollment = await getEnrollment(db, grant, activeSandbox.enrollmentId);
+      machineOwnerAllowsScreenControl = enrollment?.allowScreenControl === true;
+    }
+    const desktopCanControl = shouldGrantStreamControl({
+      settingEnabled: settings.streamControlEnabled,
+      accessIncludesControl: accessIncludesStreamControl,
+      machineConsentRequired: selfhostedActive,
+      machineOwnerAllowsScreenControl,
+    });
+    // terminal:attach IS the interactive grant: PTY frames are keystrokes, so
+    // the terminal token claims control whenever attach was authorized above —
+    // independent of the desktop stream-control rollout flag.
+    const terminalCanControl = hasPermission(grant.permissions, "terminal:attach");
 
     let stream: DesktopStreamMint | null = null;
     let terminal: TerminalStreamMint | null = null;
@@ -4022,6 +4045,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             resourceSubjectDelegated: grant.metadata?.delegated === true,
             session,
             viewerId,
+            canControl: desktopCanControl,
             // No Modal lease for selfhosted-active; the mint routes to the relay.
           });
         }
@@ -4033,6 +4057,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             resourceSubjectDelegated: grant.metadata?.delegated === true,
             session,
             viewerId,
+            canControl: terminalCanControl,
             // No Modal lease for selfhosted-active; the mint routes to the relay.
           });
         }
@@ -4074,6 +4099,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               resourceSubjectDelegated: grant.metadata?.delegated === true,
               session,
               viewerId: result.viewerId,
+              canControl: desktopCanControl,
               lease,
             });
           }
@@ -4085,6 +4111,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               resourceSubjectDelegated: grant.metadata?.delegated === true,
               session,
               viewerId: result.viewerId,
+              canControl: terminalCanControl,
               lease,
             });
           }
