@@ -82,10 +82,12 @@ function ScopedCard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [retryFresh, setRetryFresh] = useState(false);
   const [ownership, setOwnership] = useState<ConnectOwnership>("workspace");
   const lifetime = useRef<AbortController | null>(null);
   const authorization = useRef<AbortController | null>(null);
-  const operation = useRef(false);
+  const operation = useRef<AbortController | null>(null);
+  const reservedPopup = useRef<(() => void) | null>(null);
   const startKey = useRef(crypto.randomUUID());
   const advanceKey = useRef(crypto.randomUUID());
   const storageKey = sessionId
@@ -93,13 +95,14 @@ function ScopedCard({
     : `opengeni:workspace-connect:${workspaceId}:${capabilityId}`;
   const current = () => !!lifetime.current && !lifetime.current.signal.aborted;
 
-  async function load() {
+  async function load(active: () => boolean = current) {
     const invocation = lifetime.current;
     const [catalog, session] = await Promise.all([
       client.listCapabilities(workspaceId),
       sessionId ? client.getSession(workspaceId, sessionId) : Promise.resolve(null),
     ]);
-    if (!invocation || invocation.signal.aborted || lifetime.current !== invocation) return null;
+    if (!invocation || invocation.signal.aborted || lifetime.current !== invocation || !active())
+      return null;
     const resolved = catalog.items.find((entry) => entry.id === capabilityId);
     if (!resolved || resolved.kind !== "mcp" || resolved.authKind !== "oauth2")
       throw new Error(
@@ -116,11 +119,11 @@ function ScopedCard({
         resolved.connectionRef.subjectScope === "subject"
           ? await client.listOwnConnectionAccounts(workspaceId)
           : await client.listConnections(workspaceId);
-      if (invocation.signal.aborted || lifetime.current !== invocation) return null;
+      if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
       const matches = matchingActiveMcpConnections(resolved, connections);
       accountReady = matches.length === 1;
     }
-    if (invocation.signal.aborted || lifetime.current !== invocation) return null;
+    if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
     const selected =
       session?.toolPolicy.mode === "workspace_default"
         ? session.effectiveToolPolicy?.selectedIds
@@ -189,16 +192,19 @@ function ScopedCard({
     };
   }, [client, item?.logoAssetPath]);
 
-  async function run(action: () => Promise<void>) {
+  async function run(action: (active: () => boolean) => Promise<void>) {
     if (operation.current || !current()) return;
-    operation.current = true;
+    const pending = new AbortController();
+    operation.current = pending;
+    const active = () => current() && operation.current === pending && !pending.signal.aborted;
     setBusy(true);
     setError(null);
     setNotice(null);
+    setRetryFresh(false);
     try {
-      await action();
+      await action(active);
     } catch (failure) {
-      if (current()) {
+      if (active()) {
         if (failure instanceof ConnectPopupClosedError) setNotice(failure.message);
         else
           setError(
@@ -208,8 +214,10 @@ function ScopedCard({
           );
       }
     } finally {
-      operation.current = false;
-      if (current()) setBusy(false);
+      if (operation.current === pending) {
+        operation.current = null;
+        if (current()) setBusy(false);
+      }
     }
   }
 
@@ -223,15 +231,15 @@ function ScopedCard({
     }
   }
 
-  async function reconcile(attempt: ConnectAttempt) {
-    if (!current()) return;
+  async function reconcile(attempt: ConnectAttempt, active: () => boolean = current) {
+    if (!active()) return;
     if (attempt.state !== "complete" || !attempt.account || !attempt.credentialsCommitted) return;
-    const resolved = await load();
-    if (!resolved || !current()) return;
+    const resolved = await load(active);
+    if (!resolved || !active()) return;
     const connection = (await client.listConnections(workspaceId)).find(
       (entry) => entry.id === attempt.account!.id,
     );
-    if (!current()) return;
+    if (!active()) return;
     if (
       !connection ||
       connection.status !== "active" ||
@@ -263,11 +271,12 @@ function ScopedCard({
               connectionId: connection.id,
             },
     });
-    if (!current()) return;
-    const enabled = await load();
-    if (enabled && current()) {
-      await finishConnection(enabled);
+    if (!active()) return;
+    const enabled = await load(active);
+    if (enabled && active()) {
+      await finishConnection(enabled, active);
     }
+    if (!active()) return;
     try {
       sessionStorage.removeItem(storageKey);
     } catch {
@@ -277,14 +286,14 @@ function ScopedCard({
 
   async function open() {
     setExpanded(true);
-    await run(async () => {
-      await load();
-      if (!current()) return;
-      await recoverSavedAttempt();
+    await run(async (active) => {
+      await load(active);
+      if (!active()) return;
+      await recoverSavedAttempt(active);
     });
   }
 
-  async function recoverSavedAttempt() {
+  async function recoverSavedAttempt(active: () => boolean = current) {
     let saved: string | null = null;
     try {
       saved = sessionStorage.getItem(storageKey);
@@ -293,12 +302,19 @@ function ScopedCard({
     }
     if (saved) {
       const attempt = await controller.recover(saved);
-      await reconcile(attempt);
+      if (!active()) return;
+      if (["failed", "expired", "cancelled"].includes(attempt.state)) setRetryFresh(true);
+      if (attempt.state === "complete") setReconciling(true);
+      try {
+        await reconcile(attempt, active);
+      } finally {
+        if (active()) setReconciling(false);
+      }
     }
   }
 
   async function begin(fresh = false) {
-    await run(async () => {
+    await run(async (active) => {
       if (
         fresh ||
         (view.attempt && ["failed", "expired", "cancelled"].includes(view.attempt.state))
@@ -307,9 +323,10 @@ function ScopedCard({
         advanceKey.current = crypto.randomUUID();
       }
       const reserved = reserveBrowserConnectNavigation(window);
+      reservedPopup.current = reserved.close;
       try {
-        const resolved = await load();
-        if (!resolved || !current()) return;
+        const resolved = await load(active);
+        if (!resolved || !active()) return;
         if (
           resolved.connectionRef &&
           ownership !==
@@ -333,7 +350,7 @@ function ScopedCard({
               entry.kind === "oauth2" &&
               entry.metadata.mcpUrl === mcpUrl,
           );
-          if (!current()) return;
+          if (!active()) return;
           if (connections.length > 1)
             throw new Error(
               "More than one personal account matches. Choose the account in connection settings before reconnecting.",
@@ -347,23 +364,30 @@ function ScopedCard({
           idempotencyKey: startKey.current,
           ...(reconnectAccountId ? { reconnectAccountId } : {}),
         });
-        if (!current()) return;
+        if (!active()) return;
         remember(attempt.id);
         if (attempt.state === "credential_input")
           attempt = await controller.advance(
             { type: "credentials", values: { mcpUrl } },
             advanceKey.current,
           );
+        if (!active()) return;
         if (attempt.nextAction.type === "authorize")
-          await performAuthorization(attempt, reserved.navigation);
-        else await reconcile(attempt);
+          await performAuthorization(attempt, reserved.navigation, active);
+        else await reconcile(attempt, active);
       } finally {
+        if (reservedPopup.current === reserved.close) reservedPopup.current = null;
         reserved.close();
       }
     });
   }
 
-  async function performAuthorization(attempt: ConnectAttempt, navigation: ConnectNavigation) {
+  async function performAuthorization(
+    attempt: ConnectAttempt,
+    navigation: ConnectNavigation,
+    active: () => boolean,
+  ) {
+    if (!active()) return;
     const pending = new AbortController();
     authorization.current = pending;
     const abortOnUnmount = () => pending.abort(lifetime.current?.signal.reason);
@@ -374,34 +398,45 @@ function ScopedCard({
         mode: "popup",
         signal: pending.signal,
       });
-      if (!current() || !result) return;
+      if (!active() || !result) return;
       setWaiting(false);
       setReconciling(true);
-      await reconcile(result);
+      await reconcile(result, active);
+      if (!active()) return;
       if (result.state === "cancelled") {
         setNotice("Sign-in was cancelled. You can try connecting again.");
+        setRetryFresh(true);
         return;
       }
-      if (result.state !== "complete")
+      if (result.state !== "complete") {
+        if (["failed", "expired"].includes(result.state)) setRetryFresh(true);
         throw new Error("Sign-in did not finish. You can try connecting again.");
+      }
     } finally {
-      if (current()) setReconciling(false);
       lifetime.current?.signal.removeEventListener("abort", abortOnUnmount);
       if (authorization.current === pending) authorization.current = null;
-      if (current()) setWaiting(false);
+      if (active()) {
+        setReconciling(false);
+        setWaiting(false);
+      }
     }
   }
 
   function authorize(attempt: ConnectAttempt) {
     // run invokes action synchronously, retaining the browser click gesture.
-    return run(() => performAuthorization(attempt, createBrowserConnectNavigation(window)));
+    return run((active) =>
+      performAuthorization(attempt, createBrowserConnectNavigation(window), active),
+    );
   }
 
-  async function finishConnection(capability: CapabilityCatalogItem) {
+  async function finishConnection(
+    capability: CapabilityCatalogItem,
+    active: () => boolean = current,
+  ) {
     if (!sessionId) {
       // Connection management does not select session tools.
       await onConfigured?.();
-      if (!current()) return;
+      if (!active()) return;
       setComplete(true);
       setExpanded(false);
       onClose?.();
@@ -411,29 +446,45 @@ function ScopedCard({
       const selected = (await client.listConnections(workspaceId)).find(
         (entry) => entry.id === capability.connectionRef?.connectionId,
       );
-      if (!current()) return;
+      if (!active()) return;
       if (!selected || selected.status !== "active")
         throw new Error("This account needs reconnection before it can be used here.");
     }
     if (capability.connectionRef?.subjectScope === "subject") {
       const accounts = await client.listOwnConnectionAccounts(workspaceId);
-      if (!current()) return;
+      if (!active()) return;
       if (matchingActiveMcpConnections(capability, accounts).length === 0)
         throw new Error("Your account needs reconnection before it can be used here.");
     }
-    if (!current()) return;
-    await attachSessionCapability(client, workspaceId, sessionId, capability, current);
-    if (!current()) return;
+    if (!active()) return;
+    await attachSessionCapability(client, workspaceId, sessionId, capability, active);
+    if (!active()) return;
     await onConfigured?.();
-    if (!current()) return;
+    if (!active()) return;
     setComplete(true);
     setExpanded(false);
   }
 
   async function useHere() {
-    await run(async () => {
-      if (item) await finishConnection(item);
+    await run(async (active) => {
+      if (item) await finishConnection(item, active);
     });
+  }
+
+  function close() {
+    const pending = operation.current;
+    if (pending) {
+      operation.current = null;
+      pending.abort(new ConnectPopupClosedError());
+      authorization.current?.abort(new ConnectPopupClosedError());
+      authorization.current = null;
+      reservedPopup.current?.();
+      setBusy(false);
+      setWaiting(false);
+      setReconciling(false);
+    }
+    setExpanded(false);
+    onClose?.();
   }
 
   return (
@@ -459,11 +510,7 @@ function ScopedCard({
           : "Review access before signing in. You'll return here after authorization."
       }
       onOpen={() => void open()}
-      onClose={() => {
-        setExpanded(false);
-        onClose?.();
-      }}
-      busy={(busy && !reconciling) || view.busy}
+      onClose={close}
       dialogOnly={dialogOnly}
     >
       <div className="og-session-capability-setup">
@@ -539,13 +586,13 @@ function ScopedCard({
                 <button
                   className="og-session-capability-primary"
                   onClick={() => {
-                    if (notice) void begin(true);
+                    if (notice || retryFresh) void begin(true);
                     else if (view.attempt?.nextAction.type === "authorize")
                       void authorize(view.attempt);
                     else void begin();
                   }}
                 >
-                  {(error || notice) && view.attempt?.nextAction.type === "authorize"
+                  {retryFresh || ((error || notice) && view.attempt?.nextAction.type === "authorize")
                     ? "Try signing in again"
                     : `Continue to ${item.name}`}
                 </button>

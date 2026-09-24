@@ -104,7 +104,7 @@ test("connection status retains exact workspace account ownership and endpoint",
   );
 });
 
-test("stopping sign-in restores the dialog's close control without a refresh", async () => {
+test("stopping sign-in restores retry without waiting for an unresponsive backend", async () => {
   const disconnected = {
     ...item,
     id: "service-cancel",
@@ -170,7 +170,7 @@ test("stopping sign-in restores the dialog's close control without a refresh", a
     await actRun(() => continueButton!.click());
     await flush();
     expect(document.body.textContent).toContain("Finish signing in with Example service");
-    expect(document.querySelector('button[aria-label="Close connection setup"]')).toBeNull();
+    expect(document.querySelector('button[aria-label="Close connection setup"]')).not.toBeNull();
     const stop = [...document.querySelectorAll("button")].find(
       (button) => button.textContent === "Stop waiting",
     );
@@ -188,7 +188,7 @@ test("stopping sign-in restores the dialog's close control without a refresh", a
   }
 });
 
-test("a stalled connection reconciliation remains dismissible", async () => {
+test("a stalled connection reconciliation can close and reopen the inline card", async () => {
   const disconnected = {
     ...item,
     id: "service-reconcile",
@@ -215,8 +215,13 @@ test("a stalled connection reconciliation remains dismissible", async () => {
       status: "connected" as const,
     },
   };
+  let loads = 0;
+  let recoveries = 0;
   const client = {
-    listCapabilities: async () => ({ items: [disconnected] }),
+    listCapabilities: async () => {
+      loads++;
+      return { items: [disconnected] };
+    },
     listConnections: async () => await new Promise<never>(() => {}),
     connectTransport: () => ({
       begin: async () => ({
@@ -232,7 +237,10 @@ test("a stalled connection reconciliation remains dismissible", async () => {
         credentialsCommitted: false,
         nextAction: { type: "authorize" as const, url: "https://service.example/authorize" },
       }),
-      get: async () => authorized,
+      get: async () => {
+        recoveries++;
+        return authorized;
+      },
     }),
   } as unknown as OpenGeniClient;
   const previousOpen = window.open;
@@ -242,7 +250,6 @@ test("a stalled connection reconciliation remains dismissible", async () => {
     location: { replace() {} },
     close() {},
   })) as unknown as typeof window.open;
-  let closed = false;
   const view = await renderComponent(
     <McpConnectionCard
       client={client}
@@ -250,13 +257,14 @@ test("a stalled connection reconciliation remains dismissible", async () => {
       capabilityId="service-reconcile"
       name="Example service"
       returnUrl="https://host.example/"
-      dialogOnly
-      onClose={() => {
-        closed = true;
-      }}
     />,
   );
   try {
+    await flush();
+    const cardButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Connect Example service",
+    );
+    await actRun(() => cardButton!.click());
     await flush();
     const continueButton = [...document.querySelectorAll("button")].find(
       (button) => button.textContent === "Continue to Example service",
@@ -270,8 +278,117 @@ test("a stalled connection reconciliation remains dismissible", async () => {
     );
     expect(close).not.toBeNull();
     await actRun(() => close!.click());
-    expect(closed).toBe(true);
     expect(document.querySelector('[role="dialog"]')).toBeNull();
+    const beforeReopen = loads;
+    await actRun(() => cardButton!.click());
+    await flush();
+    expect(loads).toBeGreaterThan(beforeReopen);
+    expect(recoveries).toBeGreaterThan(1);
+    expect(document.body.textContent).toContain("Finishing your connection…");
+    expect(document.querySelector('button[aria-label="Close connection setup"]')).not.toBeNull();
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});
+
+test("a failed authorization retries with a fresh attempt", async () => {
+  const disconnected = {
+    ...item,
+    id: "service-failed-auth",
+    enabled: false,
+    connectionRef: null,
+  } as CapabilityCatalogItem;
+  const begins: string[] = [];
+  let recoveries = 0;
+  const client = {
+    listCapabilities: async () => ({ items: [disconnected] }),
+    connectTransport: () => ({
+      begin: async (_workspace: string, input: { idempotencyKey: string }) => {
+        begins.push(input.idempotencyKey);
+        return {
+          id: `attempt-${begins.length}`,
+          workspaceId: "workspace",
+          providerId: "mcp-oauth",
+          ownership: "workspace" as const,
+          revision: 1,
+          state: "credential_input" as const,
+          credentialsCommitted: false,
+          integrationInstalled: false,
+          completionRequirement: "connection" as const,
+          nextAction: { type: "credentials" as const, fields: [] },
+          expiresAt: "2030-01-01T00:00:00Z",
+        };
+      },
+      advance: async (_workspace: string, id: string) => ({
+        id,
+        workspaceId: "workspace",
+        providerId: "mcp-oauth",
+        ownership: "workspace" as const,
+        revision: 2,
+        state: "requires_user_action" as const,
+        credentialsCommitted: false,
+        integrationInstalled: false,
+        completionRequirement: "connection" as const,
+        nextAction: { type: "authorize" as const, url: "https://service.example/authorize" },
+        expiresAt: "2030-01-01T00:00:00Z",
+      }),
+      get: async (_workspace: string, id: string) => {
+        recoveries++;
+        return {
+          id,
+          workspaceId: "workspace",
+          providerId: "mcp-oauth",
+          ownership: "workspace" as const,
+          revision: 3,
+          state: "failed" as const,
+          credentialsCommitted: false,
+          integrationInstalled: false,
+          completionRequirement: "connection" as const,
+          nextAction: { type: "none" as const },
+          expiresAt: "2030-01-01T00:00:00Z",
+        };
+      },
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => ({
+    opener: null,
+    closed: false,
+    location: { replace() {} },
+    close() {},
+  })) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId="service-failed-auth"
+      name="Example service"
+      returnUrl="https://host.example/"
+    />,
+  );
+  try {
+    await flush();
+    const click = async (label: string) => {
+      const button = [...document.querySelectorAll("button")].find(
+        (node) => node.textContent === label,
+      );
+      expect(button).toBeDefined();
+      await actRun(() => button!.click());
+      await flush();
+    };
+    await click("Connect Example service");
+    await click("Continue to Example service");
+    expect(document.body.textContent).toContain("Sign-in did not finish");
+    const close = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close connection setup"]',
+    );
+    await actRun(() => close!.click());
+    await click("Connect Example service");
+    expect(recoveries).toBeGreaterThan(1);
+    await click("Try signing in again");
+    expect(begins).toHaveLength(2);
+    expect(begins[1]).not.toBe(begins[0]);
   } finally {
     await view.unmount();
     window.open = previousOpen;
