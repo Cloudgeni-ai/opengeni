@@ -207,10 +207,10 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   const applyRemote = useCallback(
     (remote: ValidatedRemoteDraft): void => {
       draftRef.current = remote.draft;
-      // The visible projection may omit unavailable files. Only the raw row is
-      // durably acknowledged: an explicit Send must persist the projection so
-      // exact create matches it. The passive baseline below keeps reads inert.
-      lastSavedSignature.current = serverDraftSignature(remote.draft);
+      // A GET may project away revoked files, repositories, or tools without
+      // changing the stored row. This signature suppresses passive autosave;
+      // explicit Send always writes its exact snapshot before create.
+      lastSavedSignature.current = draftSignature(remote.editable);
       passiveProjectionSignature.current = null;
       pendingHydratedBaselineGeneration.current = targetGeneration.current;
       setDraft(remote.draft);
@@ -286,7 +286,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   }, [resourceHydrationReady, targetKey]);
 
   const persistSnapshot = useCallback(
-    (snapshot: NewSessionDraftEditable): Promise<FlushedNewSessionDraft | null> => {
+    (snapshot: NewSessionDraftEditable, force = false): Promise<FlushedNewSessionDraft | null> => {
       const generation = targetGeneration.current;
       const epoch = persistenceEpoch.current;
       const signature = draftSignature(snapshot);
@@ -296,7 +296,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         }
         const current = draftRef.current;
         if (!current) return null;
-        if (signature === lastSavedSignature.current) {
+        if (!force && signature === lastSavedSignature.current) {
           return { revision: current.revision, signature };
         }
         setSaving(true);
@@ -399,7 +399,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           const remote = await readRemote();
           if (!remote || generation !== targetGeneration.current) return null;
           draftRef.current = remote.draft;
-          lastSavedSignature.current = serverDraftSignature(remote.draft);
+          lastSavedSignature.current = draftSignature(remote.editable);
           setDraft(remote.draft);
         } catch (cause) {
           if (generation === targetGeneration.current) setError(asError(cause));
@@ -416,7 +416,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
             const remote = await readRemote();
             if (!remote || generation !== targetGeneration.current) return null;
             draftRef.current = remote.draft;
-            lastSavedSignature.current = serverDraftSignature(remote.draft);
+            lastSavedSignature.current = draftSignature(remote.editable);
             passiveProjectionSignature.current = null;
             setDraft(remote.draft);
             setCurrentConflict(null);
@@ -426,7 +426,10 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
             return null;
           }
         }
-        const flushed = await persistSnapshot(snapshot);
+        // GET can be a sanitized projection of a different stored row. An
+        // explicit Send always writes its clicked snapshot, even when its
+        // signature appears unchanged, before exact create consumes it.
+        const flushed = await persistSnapshot(snapshot, true);
         if (flushed) return flushed;
         if (!conflictRef.current) return null;
       }
@@ -491,7 +494,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
               "New-session defaults changed in another client while the session was created",
             );
             draftRef.current = remote.draft;
-            lastSavedSignature.current = serverDraftSignature(remote.draft);
+            lastSavedSignature.current = draftSignature(remote.editable);
             passiveProjectionSignature.current = null;
             setDraft(remote.draft);
             setCurrentConflict(problem);
@@ -505,7 +508,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           }
 
           draftRef.current = remote.draft;
-          lastSavedSignature.current = serverDraftSignature(remote.draft);
+          lastSavedSignature.current = draftSignature(remote.editable);
           passiveProjectionSignature.current = null;
           setDraft(remote.draft);
           // Typing may continue while the safe-seed fetch is pending.
@@ -581,7 +584,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         const remote = await readRemote();
         if (!remote || generation !== targetGeneration.current) return;
         draftRef.current = remote.draft;
-        lastSavedSignature.current = serverDraftSignature(remote.draft);
+        lastSavedSignature.current = draftSignature(remote.editable);
         passiveProjectionSignature.current = null;
         setDraft(remote.draft);
         setCurrentConflict(null);
@@ -638,16 +641,6 @@ function normalizeLegacyNewSessionDraft(remote: NewSessionDraft): NewSessionDraf
 
 function draftSignature(value: NewSessionDraftEditable): string {
   return stableJson(value);
-}
-
-function serverDraftSignature(draft: NewSessionDraft): string {
-  const {
-    revision: _revision,
-    selectionHistory: _selectionHistory,
-    updatedAt: _updatedAt,
-    ...savedEditable
-  } = draft;
-  return draftSignature(savedEditable);
 }
 
 function clientIdentity(client: object): number {

@@ -368,6 +368,52 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
+  test("Send writes a GET-filtered draft before exact create even when the visible value is unchanged", async () => {
+    const revokedRepository = {
+      kind: "repository" as const,
+      uri: "https://example.com/old.git",
+      ref: "main",
+    };
+    let stored = remote(4, {
+      text: "send what is shown",
+      resources: [revokedRepository],
+      tools: [{ kind: "mcp", id: "disabled-tool" }],
+      toolsProvided: true,
+    });
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => ({ ...stored, resources: [], tools: [] }),
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          if (request.expectedRevision !== stored.revision) throw conflict();
+          const { expectedRevision, ...savedEditable } = request;
+          stored = remote(expectedRevision + 1, savedEditable);
+          return stored;
+        },
+      }),
+    );
+    await flush(550);
+    expect(hook.result.current.value.resources).toEqual([]);
+    expect(hook.result.current.value.tools).toEqual([]);
+    expect(requests).toHaveLength(0);
+
+    const flushed = await actRun(() => hook.result.current.draft.flushForSend());
+    expect(flushed?.revision).toBe(5);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      expectedRevision: 4,
+      text: "send what is shown",
+      resources: [],
+      tools: [],
+      toolsProvided: true,
+    });
+    expect(flushed && exactCreateAccepts(stored, flushed.revision, hook.result.current.value)).toBe(
+      true,
+    );
+    await hook.unmount();
+  });
+
   test("treats an old-server response without toolsProvided as explicit", async () => {
     const { toolsProvided: _toolsProvided, ...legacy } = remote(4, {
       tools: [{ kind: "mcp", id: "docs" }],
