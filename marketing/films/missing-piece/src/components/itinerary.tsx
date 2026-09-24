@@ -32,7 +32,7 @@ const ROWS: RowSpec[] = [
     title: "Land in Lisbon",
     detail: "TP 1353 from London · was 14:10",
     chip: "Delayed 3h",
-    touchedAt: T.step1,
+    touchedAt: T.step1 + T.rowLag,
   },
   {
     icon: <Car {...iconProps} />,
@@ -42,8 +42,8 @@ const ROWS: RowSpec[] = [
     detail: "Lisbon Airport · Desk 3",
     action: "Modify pickup",
     result: "Pickup moved",
-    touchedAt: T.step2 - 0.05,
-    updatedAt: T.step2,
+    touchedAt: T.step2 + T.rowLag - 0.03,
+    updatedAt: T.step2 + T.rowLag,
   },
   {
     icon: <BedDouble {...iconProps} />,
@@ -54,8 +54,8 @@ const ROWS: RowSpec[] = [
     detail: "Casa Alfama",
     action: "Add note",
     result: "Hotel told",
-    touchedAt: T.step3 - 0.05,
-    updatedAt: T.step3,
+    touchedAt: T.step3 + T.rowLag - 0.03,
+    updatedAt: T.step3 + T.rowLag,
   },
   {
     icon: <Utensils {...iconProps} />,
@@ -65,8 +65,8 @@ const ROWS: RowSpec[] = [
     detail: "Tasca do Chico",
     action: "Change time",
     result: "Table moved",
-    touchedAt: T.step4 - 0.05,
-    updatedAt: T.step4,
+    touchedAt: T.step4 + T.rowLag - 0.03,
+    updatedAt: T.step4 + T.rowLag,
   },
 ];
 

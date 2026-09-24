@@ -377,35 +377,38 @@ def compose(cues: dict) -> dict[str, np.ndarray]:
     motif.add(dock, celesta(note("D5"), 2.6, bright=0.8), 0.5, p=0.1)
     motif.add(dock, celesta(note("D6"), 2.0, bright=0.5), 0.13, p=0.3)
 
-    # ---- inside the product: I - vi - IV V - I, then lighter under the code -----
+    # ---- inside the product: harmony follows the story, not the bar line ----------
+    # D when the agent docks, B minor under the question, G when the customer says yes,
+    # A while the last actions land, home to D on "All set", lighter under the code.
     code_start = float(cues["zoomIn"])
     zoom_out = float(cues["zoomOut"])
-    progression = [
-        (dock + 0 * bar, 1.0, ["D3", "F#3", "A3", "D4"], "D2", 1.0),
-        (dock + 1 * bar, 1.0, ["B2", "D3", "F#3", "B3"], "B1", 1.0),
-        (dock + 2 * bar, 0.5, ["G2", "B2", "D3", "G3"], "G2", 1.0),
-        (dock + 2.5 * bar, 0.5, ["A2", "C#3", "E3", "A3"], "A2", 1.0),
-        (dock + 3 * bar, 1.0, ["D3", "F#3", "A3", "D4"], "D2", 1.0),  # "All set."
-        (dock + 4 * bar, 1.0, ["D3", "F#3", "A3", "E4"], "D2", 0.7),  # inside the panel
-        (dock + 5 * bar, 1.0, ["G2", "B2", "D3", "F#3"], "G2", 0.7),
-        (dock + 6 * bar, 0.5, ["B2", "D3", "F#3", "A3"], "B1", 0.6),
+    chords = [
+        (20, ["D3", "F#3", "A3", "D4"], "D2", 1.0, 3),
+        (23, ["B2", "D3", "F#3", "B3"], "B1", 1.0, 3),
+        (26, ["G2", "B2", "D3", "G3"], "G2", 1.0, 3),
+        (29, ["A2", "C#3", "E3", "A3"], "A2", 1.0, 4),
+        (33, ["D3", "F#3", "A3", "D4"], "D2", 1.0, 4),
+        (37, ["D3", "F#3", "A3", "E4"], "D2", 0.7, 4),
+        (41, ["G2", "B2", "D3", "F#3"], "G2", 0.7, 3),
+        (44, ["B2", "D3", "F#3", "A3"], "B1", 0.6, 2),
     ]
-    for at, length, chord, root, energy in progression:
-        span = length * bar
+    for start_beat, chord, root, energy, length in chords:
+        at = B(start_beat)
+        span = length * beat
         padt.add(at, pad([note(n) for n in chord[1:]], span + 0.6, cutoff=1500 * energy + 300), 0.19 * energy)
         for off in (0.0, 1.5, 3.0):
-            if off * beat >= span - 0.05:
+            if off >= length - 0.05:
                 continue
             vel = 0.85 if off == 0 else 0.55
             for k, n in enumerate(chord):
                 keys.add(at + off * beat + 0.006 * k, epiano(note(n), 0.9 if off else 1.3, vel), 0.07 * energy, p=-0.25 + 0.17 * k)
         bass.add(at, sub_bass(note(root), min(span, 1.1)), 0.4 * energy)
-        if span > 2 * beat:
+        if length >= 3:
             bass.add(at + 2.5 * beat, pluck_bass(note(root) * 2, 0.26), 0.16 * energy)
 
     # the phrase, completed, as the agent gets going; and once more as the evening is saved
-    for at, name in [(dock + B(4), "A4"), (dock + B(5), "B4"), (dock + B(6), "C#5"), (dock + B(7), "D5"),
-                     (dock + 3 * bar, "F#5"), (dock + 3 * bar + B(1), "E5"), (dock + 3 * bar + B(2), "D5")]:
+    for at, name in [(B(24), "A4"), (B(25), "B4"), (B(26), "C#5"), (B(27), "D5"),
+                     (B(33), "F#5"), (B(34), "E5"), (B(35), "D5")]:
         motif.add(at, celesta(note(name), 1.3, bright=0.7), 0.24, p=0.2)
 
     # drums while the agent works; half as busy inside the panel; none on the final cadence
@@ -462,7 +465,7 @@ def compose(cues: dict) -> dict[str, np.ndarray]:
         sfx.add(at, soft_tick(4200, 0.04), 0.09, p=0.2)
         sfx.add(at, celesta(note(name), 0.9, bright=0.5), 0.065, p=0.25)
     for at in cues["steps"][1:]:
-        sfx.add(at + 0.01, flap(), 0.32, p=-0.35)
+        sfx.add(at + float(cues["rowLag"]), flap(), 0.32, p=-0.35)
     sfx.add(cues["question"], chime([note("B5"), note("E6")], 1.0), 0.065, p=0.25)
     sfx.add(cues["tap"], mouse_click(), 0.28, p=0.2)
     sfx.add(cues["allSet"], chime([note("D6"), note("F#6"), note("A6")], 1.8), 0.075, p=0.2)
@@ -473,7 +476,11 @@ def compose(cues: dict) -> dict[str, np.ndarray]:
     sfx.add(cues["codeUI"], soft_tick(2200, 0.05), 0.07, p=-0.1)
     sfx.add(cues["codeServer"], soft_tick(2000, 0.05), 0.06, p=-0.15)
     for k in range(4):
-        sfx.add(cues["codeServer"] + 0.78 + 0.09 * k, soft_tick(3000 + 250 * k, 0.04), 0.05, p=-0.2 + 0.15 * k)
+        sfx.add(cues["codeServer"] + 0.78 + 0.09 * k, soft_tick(3000 + 250 * k, 0.04), 0.045, p=-0.2 + 0.15 * k)
+    # the chips light up in the order the agent used them, on the same four notes as its steps
+    for at, name in zip(cues["chipReplay"], ["D6", "F#6", "A6", "D7"]):
+        sfx.add(at, soft_tick(4200, 0.04), 0.08, p=-0.1)
+        sfx.add(at, celesta(note(name), 0.9, bright=0.5), 0.06, p=-0.2)
     sfx.add(zoom_out, lp(whoosh(0.9, 180, 1400, rise=False), 3000), 0.24)
     sfx.add(cues["endShrink"], whoosh(0.8, 250, 2000, rise=False), 0.14)
 

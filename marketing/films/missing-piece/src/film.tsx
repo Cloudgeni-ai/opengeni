@@ -10,7 +10,7 @@ import { FPS, T } from "./timeline";
 
 type Shot = { t: number; x: number; y: number; s: number; e?: (p: number) => number };
 
-const PROOF = { x: 990, y: 556, s: 1.14 };
+const PROOF = { x: 960, y: 540, s: 1.08 };
 
 /** One continuous take. Each entry is a held framing; moves ease between them. */
 const SHOTS: Shot[] = [
@@ -79,7 +79,7 @@ function PanelOpen({ t }: { t: number }) {
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          padding: `0 ${lerp(40 * k, 172, p)}px`,
+          padding: `0 ${lerp(48 * k, 172, p)}px`,
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 14 * k }}>
@@ -91,8 +91,8 @@ function PanelOpen({ t }: { t: number }) {
       <div
         style={{
           position: "absolute",
-          left: 40 * k,
-          right: 40 * k,
+          left: 48 * k,
+          right: 48 * k,
           bottom: 26 * k,
           height: 64 * k,
           border: `${1.5 * k}px solid ${C.line}`,

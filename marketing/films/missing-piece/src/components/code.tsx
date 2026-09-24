@@ -1,9 +1,11 @@
+import { Check } from "lucide-react";
 import { ease, lerp, progress } from "../lib/anim";
 import { C, F } from "../theme";
 import { T } from "../timeline";
 import { Abs, Eyebrow, Rise } from "./primitives";
 
-type Tok = [text: string, kind?: "dim" | "key" | "brand" | "hl"];
+type Kind = "dim" | "key" | "brand" | "hl";
+type Tok = [text: string, kind?: Kind];
 
 /**
  * Exact excerpt of the current SDK surface (verified in source, Sept 2026):
@@ -11,9 +13,11 @@ type Tok = [text: string, kind?: "dim" | "key" | "brand" | "hl"];
  *   CreateSessionRequest.tools: ToolRef[] / mcpServers: SessionMcpServerInput[]   packages/contracts
  *   <SessionConversation sessionId />   packages/react/src/components/session-conversation.tsx
  * `tripActions` is the product's own MCP server: { id: "trip", url, allowedTools, headers }.
- * The same shape is used by examples/northstar-support/src/server.ts.
+ * The same shape is used by examples/northstar-support/src/server.ts. The comment line states
+ * plainly what the excerpt leaves out.
  */
 const SERVER: Tok[][] = [
+  [["// after your own sign-in and tenant lookup", "dim"]],
   [["const session = await ", "dim"], ["opengeni", "brand"]],
   [["  .createSession(", "key"], ["workspaceId, {", "dim"]],
   [["    initialMessage,", "dim"]],
@@ -26,18 +30,17 @@ const UI: Tok[] = [["<", "key"], ["SessionConversation", "hl"], [" sessionId={se
 export const ACTIONS = ["get_flight", "move_car_pickup", "message_hotel", "move_dinner"];
 
 const FONT = 56;
-const CHAR = FONT * 0.6;
-const LINE = 76;
+const LINE = 72;
 const LEFT = 172;
-const SERVER_TOP = 184;
-const CHIPS_TOP = SERVER_TOP + SERVER.length * LINE + 26;
-const UI_EYEBROW_FINAL = CHIPS_TOP + 96;
+const SERVER_TOP = 180;
+const CHIPS_TOP = SERVER_TOP + SERVER.length * LINE + 24;
+const UI_EYEBROW_FINAL = CHIPS_TOP + 92;
 const UI_EYEBROW_SOLO = 500;
 
 /** Everything except the two lines that matter is dimmed, so the eye knows where to go. */
-const colorOf = (kind?: Tok[1]) => (kind === "dim" ? C.faint : kind === "hl" ? C.orange : C.ink);
+const colorOf = (kind?: Kind) => (kind === "dim" ? C.faint : kind === "hl" ? C.orangeDeep : C.ink);
 
-function Line({ toks }: { toks: Tok[] }) {
+function Line({ toks, mark = 0 }: { toks: Tok[]; mark?: number }) {
   return (
     <div
       style={{
@@ -51,7 +54,21 @@ function Line({ toks }: { toks: Tok[] }) {
       }}
     >
       {toks.map(([text, kind], i) => (
-        <span key={i} style={{ color: colorOf(kind), fontWeight: kind === "brand" ? 700 : kind === "hl" ? 600 : kind === "dim" ? 400 : 500 }}>
+        <span
+          key={i}
+          style={{
+            color: colorOf(kind),
+            fontWeight: kind === "brand" ? 700 : kind === "hl" ? 600 : kind === "dim" ? 400 : 500,
+            ...(kind === "hl"
+              ? {
+                  backgroundImage: `linear-gradient(90deg, ${C.orangeWash} ${mark * 100}%, transparent ${mark * 100}%)`,
+                  boxShadow: `inset 0 -3px 0 rgba(246, 83, 39, ${0.9 * mark})`,
+                  padding: "0 6px",
+                  margin: "0 -6px",
+                }
+              : {}),
+          }}
+        >
           {text}
         </span>
       ))}
@@ -59,22 +76,15 @@ function Line({ toks }: { toks: Tok[] }) {
   );
 }
 
-const cols = (toks: Tok[], upto: number) => toks.slice(0, upto).reduce((n, [text]) => n + text.length, 0);
-
-/** Shown inside the zoomed agent panel, on the panel's own surface colour. */
+/** Shown inside the opened agent panel, on the panel's own surface. */
 export function CodeScene({ t }: { t: number }) {
   if (t < T.zoomIn[1] || t >= T.zoomOut[0]) return null;
   const exit = T.zoomOut[0] - 0.36;
 
   const settle = ease.emphasized(progress(t, T.codeServer, T.codeServer + 0.62));
   const uiTop = lerp(UI_EYEBROW_SOLO, UI_EYEBROW_FINAL, settle);
-
-  const hlUI = ease.emphasized(progress(t, T.codeUI + 0.42, T.codeUI + 0.82));
-  const hlTrip = ease.emphasized(progress(t, T.codeServer + 0.5, T.codeServer + 0.9));
-  const tripX = LEFT + cols(SERVER[3]!, 1) * CHAR;
-  const tripW = "tripActions".length * CHAR;
-  const scX = LEFT + CHAR;
-  const scW = "SessionConversation".length * CHAR;
+  const markUI = ease.emphasized(progress(t, T.codeUI + 0.42, T.codeUI + 0.86));
+  const markTrip = ease.emphasized(progress(t, T.codeServer + 0.5, T.codeServer + 0.94));
   const out = ease.exit(progress(t, exit, exit + 0.3));
 
   return (
@@ -90,18 +100,11 @@ export function CodeScene({ t }: { t: number }) {
           </Abs>
           {SERVER.map((toks, i) => (
             <Abs key={i} x={LEFT} y={SERVER_TOP + i * LINE}>
-              <Rise t={t} at={T.codeServer + 0.05 + i * 0.045} dur={0.55} out={exit + i * 0.02} outDur={0.3}>
-                <Line toks={toks} />
+              <Rise t={t} at={T.codeServer + 0.04 + i * 0.04} dur={0.55} out={exit + i * 0.018} outDur={0.3}>
+                <Line toks={toks} mark={markTrip} />
               </Rise>
             </Abs>
           ))}
-          <Abs
-            x={tripX}
-            y={SERVER_TOP + 4 * LINE - 12}
-            w={tripW * hlTrip}
-            h={4}
-            style={{ background: C.orange, opacity: 1 - out }}
-          />
           <Abs x={LEFT} y={CHIPS_TOP} style={{ display: "flex", alignItems: "center", gap: 14, opacity: 1 - out }}>
             <span
               style={{
@@ -120,14 +123,18 @@ export function CodeScene({ t }: { t: number }) {
             {ACTIONS.map((name, i) => {
               const at = T.codeServer + 0.78 + i * 0.09;
               const p = ease.emphasized(progress(t, at, at + 0.4));
+              const lit = ease.emphasized(progress(t, T.chipReplay + i * T.chipGap, T.chipReplay + i * T.chipGap + 0.3));
               return (
                 <span
                   key={name}
                   style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 8 * lit,
                     fontFamily: F.mono,
                     fontSize: 25,
-                    color: C.orangeDeep,
-                    background: C.orangeWash,
+                    color: lit > 0.5 ? C.white : C.orangeDeep,
+                    background: `color-mix(in srgb, ${C.orange} ${lit * 100}%, ${C.orangeWash})`,
                     padding: "8px 15px",
                     opacity: Math.min(1, p * 1.8),
                     transform: `translateY(${(1 - p) * 14}px)`,
@@ -135,6 +142,9 @@ export function CodeScene({ t }: { t: number }) {
                     fontVariantLigatures: "none",
                   }}
                 >
+                  <span style={{ display: "inline-flex", width: 22 * lit, overflow: "hidden" }}>
+                    <Check size={22} strokeWidth={2.8} />
+                  </span>
                   {name}
                 </span>
               );
@@ -154,18 +164,11 @@ export function CodeScene({ t }: { t: number }) {
           </Abs>
           <Abs x={LEFT} y={uiTop + 42}>
             <Rise t={t} at={T.codeUI + 0.06} dur={0.55} out={exit + 0.12} outDur={0.3}>
-              <Line toks={UI} />
+              <Line toks={UI} mark={markUI} />
             </Rise>
           </Abs>
-          <Abs x={scX} y={uiTop + 42 + LINE - 12} w={scW * hlUI} h={4} style={{ background: C.orange, opacity: 1 - out }} />
         </>
       ) : null}
-
-      <Abs x={LEFT} y={1006} style={{ opacity: ease.outCubic(progress(t, T.codeServer + 0.9, T.codeServer + 1.3)) * (1 - out) }}>
-        <div style={{ fontFamily: F.mono, fontSize: 18, letterSpacing: "0.06em", color: C.faint, textTransform: "uppercase" }}>
-          Excerpt · your auth, tenant mapping and action endpoint are not shown
-        </div>
-      </Abs>
     </div>
   );
 }

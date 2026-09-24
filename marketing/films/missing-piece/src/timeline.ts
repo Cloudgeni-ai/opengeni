@@ -46,24 +46,28 @@ export const T = {
   slotDraw: [8.72, 9.2] as const,
   slotText: 8.95,
   dock: b(20),
-  messageLand: b(20) + 0.43,
+  messageLand: b(20) + 0.62,
 
-  // Act 4 — inside the product
+  // Act 4 — inside the product. Each step appears in the panel first; the row it changes
+  // follows a beat-fraction later, so the eye travels from cause to effect.
   step1: b(22),
   question: b(23),
-  cursorIn: 12.5,
-  tap: b(25),
-  step2: b(26),
-  step3: b(28),
-  step4: b(30),
-  allSet: b(32),
+  cursorIn: 12.95,
+  tap: b(26),
+  step2: b(27),
+  step3: b(29),
+  step4: b(31),
+  allSet: b(33),
   pray: b(34),
+  rowLag: 0.22,
 
   // Act 5 — inside the agent panel: the code that put it there
-  zoomIn: [18.72, 19.5] as const,
-  clearPanel: [18.6, 18.78] as const,
+  zoomIn: [18.5, 19.3] as const,
+  clearPanel: [18.42, 18.6] as const,
   codeUI: b(37),
   codeServer: b(39),
+  chipReplay: b(39) + 1.72,
+  chipGap: 0.27,
   zoomOut: [24.42, 25.05] as const,
 
   // Act 6 — the same composition as act 2, opposite truth
@@ -127,6 +131,7 @@ export function audioCues() {
     dock: T.dock,
     messageLand: T.messageLand,
     steps: [T.step1, T.step2, T.step3, T.step4],
+    rowLag: T.rowLag,
     question: T.question,
     tap: T.tap,
     allSet: T.allSet,
@@ -134,6 +139,7 @@ export function audioCues() {
     zoomIn: T.zoomIn[0],
     codeUI: T.codeUI,
     codeServer: T.codeServer,
+    chipReplay: [0, 1, 2, 3].map((i) => T.chipReplay + i * T.chipGap),
     zoomOut: T.zoomOut[0],
     endShrink: T.endShrink[0],
     end: T.end,

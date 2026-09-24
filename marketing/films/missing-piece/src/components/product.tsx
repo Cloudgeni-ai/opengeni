@@ -1,19 +1,21 @@
-import { clamp, ease, lerp, progress } from "../lib/anim";
+import { bezier, clamp, ease, lerp, progress } from "../lib/anim";
 import { C, F } from "../theme";
 import { MESSAGE, T } from "../timeline";
 import { AgentPanel, MessageBlock, PANEL_MESSAGE } from "./agent-panel";
 import { Itinerary } from "./itinerary";
 import { Abs, Eyebrow, Rise } from "./primitives";
-import { Widget, widgetGradient } from "./widget";
+import { Widget, widgetUserColour } from "./widget";
 
 /** The product window in world coordinates. */
 export const WINDOW = { x: 100, y: 70, w: 1720, h: 940 } as const;
 
 /** Scale factor of the product during the "truth" supers, and back. */
+const settleEase = bezier(0.62, 0, 0.12, 1);
+
 export function productGroupTransform(t: number) {
-  const out = ease.inOutQuint(progress(t, T.shrink[0], T.shrink[1]));
-  const back = ease.inOutQuint(progress(t, T.unshrink[0], T.unshrink[1]));
-  const final = ease.inOutQuint(progress(t, T.endShrink[0], T.endShrink[1]));
+  const out = settleEase(progress(t, T.shrink[0], T.shrink[1]));
+  const back = settleEase(progress(t, T.unshrink[0], T.unshrink[1]));
+  const final = settleEase(progress(t, T.endShrink[0], T.endShrink[1]));
   const k = Math.max(out * (1 - back), final);
   const s = lerp(1, 0.575, k);
   // Anchor: window's right edge at x=1846, vertical centre at y=548.
@@ -174,22 +176,22 @@ const WAIT = { x: 1190, y: 640, w: 356, h: 86 } as const;
 function Orphan({ t }: { t: number }) {
   if (t < T.pop + 0.06 || t >= T.messageLand) return null;
   const born = ease.emphasized(progress(t, T.pop + 0.06, T.pop + 0.7));
-  const flyStart = T.dock - 0.08;
-  const fly = ease.inOutCubic(progress(t, flyStart, T.messageLand));
-  const bob = Math.sin((t - T.pop) * 3.1) * 5 * (1 - fly) * born;
+  const flyStart = T.dock - 0.1;
+  const along = ease.inOutCubic(progress(t, flyStart, T.messageLand));
+  // Shape, colour and type change on their own clock, so the change is seen, not snapped.
+  const morph = ease.inOutSine(progress(t, flyStart + 0.1, flyStart + 0.56));
+  const textSwap = ease.inOutSine(progress(t, flyStart + 0.24, flyStart + 0.5));
+  const bob = Math.sin((t - T.pop) * 3.1) * 5 * (1 - along) * born;
 
   const wx = lerp(1300, WAIT.x, born);
   const wy = lerp(560, WAIT.y, born) + bob;
-  const arc = -70 * Math.sin(Math.PI * fly);
-  const x = lerp(wx, PANEL_MESSAGE.x, fly);
-  const y = lerp(wy, PANEL_MESSAGE.y, fly) + arc;
-  const w = lerp(WAIT.w, PANEL_MESSAGE.w, ease.inOutCubic(progress(fly, 0.15, 0.85)));
-  const h = lerp(WAIT.h, PANEL_MESSAGE.h, ease.inOutCubic(progress(fly, 0.15, 0.85)));
-  const shape = ease.inOutCubic(progress(fly, 0.25, 0.9));
-  const radius = lerp(22, 0, shape);
-  const colour = ease.inOutCubic(progress(fly, 0.15, 0.75));
-  const textSwap = ease.inOutCubic(progress(fly, 0.38, 0.62));
-  const lift = 1 - shape;
+  const bow = 64 * Math.sin(Math.PI * along);
+  const x = lerp(wx, PANEL_MESSAGE.x, along) + bow;
+  const y = lerp(wy, PANEL_MESSAGE.y, along);
+  const w = lerp(WAIT.w, PANEL_MESSAGE.w, morph);
+  const h = lerp(WAIT.h, PANEL_MESSAGE.h, morph);
+  const radius = lerp(20, 0, morph);
+  const lift = 1 - morph;
 
   return (
     <div
@@ -200,22 +202,22 @@ function Orphan({ t }: { t: number }) {
         width: w,
         height: h,
         borderRadius: radius,
-        borderBottomRightRadius: lerp(6, 0, shape),
+        borderBottomRightRadius: lerp(6, 0, morph),
         overflow: "hidden",
         transform: `scale(${lerp(0.86, 1, born)})`,
         transformOrigin: "50% 50%",
-        boxShadow: `0 ${16 * lift}px ${40 * lift}px rgba(58, 28, 108, ${0.22 * lift})`,
+        boxShadow: `0 ${16 * lift}px ${40 * lift}px rgba(24, 18, 52, ${0.2 * lift})`,
         opacity: clamp(born * 2.2),
         zIndex: 5,
       }}
     >
-      <div style={{ position: "absolute", inset: 0, background: widgetGradient, opacity: 1 - colour }} />
-      <div style={{ position: "absolute", inset: 0, background: C.ink, opacity: colour }} />
+      <div style={{ position: "absolute", inset: 0, background: widgetUserColour }} />
+      <div style={{ position: "absolute", inset: 0, background: C.ink, opacity: morph }} />
       <div
         style={{
           position: "absolute",
           left: 18,
-          top: 14,
+          top: 13,
           width: WAIT.w - 36,
           fontFamily: F.widget,
           fontSize: 20,

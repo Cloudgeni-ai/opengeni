@@ -1,13 +1,13 @@
 import { Check } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
-import { clamp, ease, progress } from "../lib/anim";
+import { bezier, clamp, ease, progress } from "../lib/anim";
 import { C, F } from "../theme";
 import { MESSAGE, T } from "../timeline";
 import { Abs, LiveDot } from "./primitives";
 
 export const PANEL = { x: 1000, y: 76, w: 720, h: 864 } as const;
 /** Where the customer's message lands inside the panel (window-local). */
-export const PANEL_MESSAGE = { x: 1160, y: 180, w: 520, h: 106 } as const;
+export const PANEL_MESSAGE = { x: 1152, y: 180, w: 520, h: 106 } as const;
 
 export function MessageBlock({ style }: { style?: CSSProperties }) {
   return (
@@ -65,7 +65,7 @@ export function AgentPanel({ t }: { t: number }) {
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          padding: "0 40px",
+          padding: "0 48px",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
@@ -88,8 +88,8 @@ export function AgentPanel({ t }: { t: number }) {
       <div
         style={{
           position: "absolute",
-          left: 40,
-          right: 40,
+          left: 48,
+          right: 48,
           top: PANEL_MESSAGE.y - PANEL.y + PANEL_MESSAGE.h + 26,
           display: "flex",
           flexDirection: "column",
@@ -125,8 +125,8 @@ export function AgentPanel({ t }: { t: number }) {
       <div
         style={{
           position: "absolute",
-          left: 40,
-          right: 40,
+          left: 48,
+          right: 48,
           bottom: 26,
           height: 64,
           border: `1.5px solid ${C.line}`,
@@ -219,7 +219,7 @@ function Question({ t }: { t: number }) {
         <div
           style={{
             position: "relative",
-            background: tapped ? C.orangeDeep : C.orange,
+            background: tapped ? C.orangeDeep : t >= T.tap - 0.2 ? "#ff6a40" : C.orange,
             color: C.white,
             fontFamily: F.body,
             fontSize: 22,
@@ -257,15 +257,23 @@ function Question({ t }: { t: number }) {
   );
 }
 
-/** The customer's pointer. Positioned relative to the button it presses. */
+const cursorPath = bezier(0.22, 0.75, 0.28, 1);
+
+/** The customer's pointer, on a curved, decelerating path. Positioned relative to its button. */
 function Cursor({ t }: { t: number }) {
   if (t < T.cursorIn || t > T.tap + 0.9) return null;
-  const travel = ease.camera(progress(t, T.cursorIn, T.tap - 0.1));
+  const u = cursorPath(progress(t, T.cursorIn, T.tap - 0.14));
   const leave = ease.inOutCubic(progress(t, T.tap + 0.25, T.tap + 0.85));
-  const x = 120 + (1 - travel) * 300 + leave * 40;
-  const y = 30 + (1 - travel) * 340 + leave * 60;
+  // quadratic Bézier from lower right, bowing below the card, into the button's centre
+  const p0 = { x: 470, y: 330 };
+  const p1 = { x: 150, y: 250 };
+  const p2 = { x: 118, y: 24 };
+  const bx = (1 - u) * (1 - u) * p0.x + 2 * (1 - u) * u * p1.x + u * u * p2.x;
+  const by = (1 - u) * (1 - u) * p0.y + 2 * (1 - u) * u * p1.y + u * u * p2.y;
+  const x = bx + leave * 36;
+  const y = by + leave * 54;
   const click = t >= T.tap - 0.04 && t < T.tap + 0.08 ? 0.84 : 1;
-  const opacity = clamp(progress(t, T.cursorIn, T.cursorIn + 0.2)) * (1 - leave);
+  const opacity = clamp(progress(t, T.cursorIn, T.cursorIn + 0.15)) * (1 - leave);
   return (
     <svg
       width={34}

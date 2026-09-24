@@ -46,8 +46,8 @@ export function EndTagline({ t }: { t: number }) {
       <Abs x={120} y={690} style={{ opacity: url }}>
         <div style={{ fontFamily: F.mono, fontSize: 27, color: C.ink, letterSpacing: "0.02em" }}>opengeni.ai</div>
       </Abs>
-      <Abs x={1846} y={1002} style={{ opacity: note, transform: "translateX(-100%)" }}>
-        <div style={{ fontFamily: F.mono, fontSize: 16, color: C.faint, letterSpacing: "0.06em", textTransform: "uppercase", whiteSpace: "nowrap" }}>
+      <Abs x={1846} y={850} style={{ opacity: note, transform: "translateX(-100%)" }}>
+        <div style={{ fontFamily: F.mono, fontSize: 17, color: C.muted2, letterSpacing: "0.06em", textTransform: "uppercase", whiteSpace: "nowrap" }}>
           Illustrative product scenario
         </div>
       </Abs>
