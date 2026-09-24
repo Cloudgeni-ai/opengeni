@@ -1,3 +1,14 @@
+import type { NewSessionDraftEditable } from "../lib/use-new-session-draft";
+
+/** Persist exactly the message/options create will submit, without changing the visible editor. */
+export function newSessionCreateSnapshot(
+  visible: NewSessionDraftEditable,
+  initialMessage: string,
+  policy: Pick<NewSessionDraftEditable, "model" | "reasoningEffort" | "latencyMode">,
+): NewSessionDraftEditable {
+  return structuredClone({ ...visible, ...policy, text: initialMessage });
+}
+
 export type CreatedSessionRouteAuthority = Readonly<{
   sessionId: string;
   /** Null once draft settlement is durable; navigation may still need retrying. */

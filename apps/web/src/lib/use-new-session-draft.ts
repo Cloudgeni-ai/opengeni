@@ -207,13 +207,10 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   const applyRemote = useCallback(
     (remote: ValidatedRemoteDraft): void => {
       draftRef.current = remote.draft;
-      // A remote draft is projected through file revalidation before it enters
-      // controlled browser state. Acknowledge that exact visible projection,
-      // not the raw row (which may carry normalized mount paths, stale files,
-      // or resource kinds this surface deliberately does not rehydrate).
-      // Otherwise a read-only reload schedules an immediate write solely
-      // because the two equivalent representations serialize differently.
-      lastSavedSignature.current = draftSignature(remote.editable);
+      // The visible projection may omit unavailable files. Only the raw row is
+      // durably acknowledged: an explicit Send must persist the projection so
+      // exact create matches it. The passive baseline below keeps reads inert.
+      lastSavedSignature.current = serverDraftSignature(remote.draft);
       passiveProjectionSignature.current = null;
       pendingHydratedBaselineGeneration.current = targetGeneration.current;
       setDraft(remote.draft);
@@ -402,7 +399,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           const remote = await readRemote();
           if (!remote || generation !== targetGeneration.current) return null;
           draftRef.current = remote.draft;
-          lastSavedSignature.current = draftSignature(remote.editable);
+          lastSavedSignature.current = serverDraftSignature(remote.draft);
           setDraft(remote.draft);
         } catch (cause) {
           if (generation === targetGeneration.current) setError(asError(cause));
@@ -419,7 +416,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
             const remote = await readRemote();
             if (!remote || generation !== targetGeneration.current) return null;
             draftRef.current = remote.draft;
-            lastSavedSignature.current = draftSignature(remote.editable);
+            lastSavedSignature.current = serverDraftSignature(remote.draft);
             passiveProjectionSignature.current = null;
             setDraft(remote.draft);
             setCurrentConflict(null);
@@ -494,7 +491,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
               "New-session defaults changed in another client while the session was created",
             );
             draftRef.current = remote.draft;
-            lastSavedSignature.current = draftSignature(remote.editable);
+            lastSavedSignature.current = serverDraftSignature(remote.draft);
             passiveProjectionSignature.current = null;
             setDraft(remote.draft);
             setCurrentConflict(problem);
@@ -508,7 +505,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           }
 
           draftRef.current = remote.draft;
-          lastSavedSignature.current = draftSignature(remote.editable);
+          lastSavedSignature.current = serverDraftSignature(remote.draft);
           passiveProjectionSignature.current = null;
           setDraft(remote.draft);
           // Typing may continue while the safe-seed fetch is pending.
@@ -584,7 +581,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         const remote = await readRemote();
         if (!remote || generation !== targetGeneration.current) return;
         draftRef.current = remote.draft;
-        lastSavedSignature.current = draftSignature(remote.editable);
+        lastSavedSignature.current = serverDraftSignature(remote.draft);
         passiveProjectionSignature.current = null;
         setDraft(remote.draft);
         setCurrentConflict(null);
@@ -641,6 +638,16 @@ function normalizeLegacyNewSessionDraft(remote: NewSessionDraft): NewSessionDraf
 
 function draftSignature(value: NewSessionDraftEditable): string {
   return stableJson(value);
+}
+
+function serverDraftSignature(draft: NewSessionDraft): string {
+  const {
+    revision: _revision,
+    selectionHistory: _selectionHistory,
+    updatedAt: _updatedAt,
+    ...savedEditable
+  } = draft;
+  return draftSignature(savedEditable);
 }
 
 function clientIdentity(client: object): number {

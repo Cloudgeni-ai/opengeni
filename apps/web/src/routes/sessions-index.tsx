@@ -166,6 +166,7 @@ import {
 import { useNewSessionDraft, type NewSessionDraftEditable } from "@/lib/use-new-session-draft";
 import { cn } from "@/lib/utils";
 import {
+  newSessionCreateSnapshot,
   runNewSessionRouteSubmission,
   type CreatedSessionRouteAuthority,
 } from "@/routes/sessions-index-submission";
@@ -1096,12 +1097,15 @@ function SessionsIndexRouteContent({
       // One Send always refers to one visible snapshot, even if a sibling edit
       // forces a draft save or create retry while the user continues typing.
       const visibleSignature = stableJson(persistedValue);
-      const submittedSnapshot: NewSessionDraftEditable = structuredClone({
-        ...persistedValue,
-        model,
-        reasoningEffort,
-        latencyMode,
-      });
+      const submittedSnapshot = newSessionCreateSnapshot(
+        persistedValue,
+        realtimeModel ? persistedValue.text : text,
+        {
+          model,
+          reasoningEffort,
+          latencyMode,
+        },
+      );
       const preserveNewerLocalDraft = async () => {
         if (!newSessionDraft.isCurrentSignature(visibleSignature)) {
           // A definitive create failure must not leave text typed during the

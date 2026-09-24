@@ -334,7 +334,8 @@ describe("useNewSessionDraft", () => {
         },
         saveNewSessionDraft: async (_workspaceId, request) => {
           saves.push(request);
-          return remote(request.expectedRevision + 1, request);
+          const { expectedRevision, ...savedEditable } = request;
+          return remote(expectedRevision + 1, savedEditable);
         },
       }),
     );
@@ -349,6 +350,21 @@ describe("useNewSessionDraft", () => {
     expect(hook.result.current.files.map((file) => file.id)).toEqual([readyId]);
     expect(hook.result.current.draft.loading).toBe(false);
     expect(saves).toHaveLength(0);
+    const flushed = await actRun(() =>
+      hook.result.current.draft.flushForSend(hook.result.current.value),
+    );
+    expect(flushed?.revision).toBe(5);
+    expect(saves).toHaveLength(1);
+    expect(saves[0]?.resources).toEqual(hook.result.current.value.resources);
+    expect(
+      flushed &&
+        hook.result.current.draft.draft &&
+        exactCreateAccepts(
+          hook.result.current.draft.draft,
+          flushed.revision,
+          hook.result.current.value,
+        ),
+    ).toBe(true);
     await hook.unmount();
   });
 

@@ -1146,10 +1146,10 @@ admission behavior. Routes reuse domain rules shared with MCP, workers, and embe
 Composer submission's shared command, `packages/core/src/application/composer-submit.ts`,
 serves stock HTTP and in-process embedding hosts, owning validation, draft rotation,
 event append, turn routing, receipt/replay behavior, and the response contract.
-Web new-session Send rebases stale drafts, freezes text/files during creation,
-preserves late voice transcripts (`packages/react/src/hooks/use-voice-input.ts`,
-`apps/web/src/lib/use-new-session-draft.ts`, `apps/web/src/routes/sessions-index.tsx`),
-and never overwrites a sibling's later draft.
+Web Send rebases drafts (including unavailable files), aligns
+file-only text with create, freezes edits, preserves late voice transcripts
+(`packages/react/src/hooks/use-voice-input.ts`, `apps/web/src/lib/use-new-session-draft.ts`,
+`apps/web/src/routes/sessions-index.tsx`), and protects sibling drafts.
 
 Canonical: `apps/api/src/app.ts`, `apps/api/src/routes/`, and
 `packages/core/src/`.
