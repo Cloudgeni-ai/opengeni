@@ -1,0 +1,9 @@
+node_modules/
+out/
+review/
+*.mp4
+*.mov
+audio/stems/
+audio/__pycache__/
+audio/cues.json
+public/audio/*.wav
