@@ -178,10 +178,11 @@ resource "google_secret_manager_secret" "runtime" {
   }
 }
 
-resource "google_project_iam_member" "runtime_secret_accessor" {
-  project = var.project_id
-  role    = "roles/secretmanager.secretAccessor"
-  member  = "serviceAccount:${google_service_account.runtime.email}"
+resource "google_secret_manager_secret_iam_member" "runtime_secret_accessor" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.runtime.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.runtime.email}"
 }
 
 resource "google_project_iam_member" "gke_admin" {
