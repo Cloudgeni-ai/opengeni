@@ -390,6 +390,23 @@ describe("turn-capacity Prometheus alerts", () => {
 });
 
 describe("Codex pool Prometheus alerts", () => {
+  test("cache telemetry alerts distinguish missing fields from absent usage, not counter skew", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const expression = alertExpression(template, "OpenGeniCodexPromptCacheTelemetryMissing");
+    // HTTP-200 headers can arrive before streamed usage, or the stream can fail
+    // without usage. These counters are not a matched numerator/denominator.
+    // Explicit missing fields must still alert even while other calls report;
+    // absent usage must alert on active traffic but never on an idle provider.
+    expect(expression.replace(/\s+/g, " ").trim()).toBe(
+      '(sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription",status="missing"}[30m])) or vector(0)) > 0 ' +
+        'or ( sum(rate(opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}[30m])) > 0 ' +
+        'and on() (sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription"}[30m])) or vector(0)) == 0 )',
+    );
+  });
+
   test("deduplicates low-pool counters by deployment and workspace", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
