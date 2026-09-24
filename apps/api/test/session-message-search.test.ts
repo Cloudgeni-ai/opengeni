@@ -300,17 +300,32 @@ test("selected preview rejects stale, duplicate, non-message, malformed and unau
     expect((await read(original!.id, sequence)).status).toBe(400);
   }
   expect((await read("not-a-uuid", "2")).status).toBe(400);
-  for (const [sequence, type, payload, duplicate] of [
-    [4, "agent.toolCall.output", { text: "tool" }, false],
-    [5, "agent.message.completed", { text: "duplicate" }, true],
-    [6, "user.message", { text: { nested: "no scalar" } }, false],
+  for (const [sequence, type, payload] of [
+    [4, "agent.toolCall.output", { text: "tool" }],
+    [5, "agent.model.usage", { sourceKey: "canonical-usage" }],
   ] as const) {
     const [row] = await shared.admin<{ id: string }[]>`
-      insert into session_events (account_id, workspace_id, session_id, sequence, type, payload, duplicate_of_event_id)
+      insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
       values (${f.grant.accountId}, ${f.grant.workspaceId}, ${f.session.id}, ${sequence}, ${type},
-        ${shared.admin.json(payload)}, ${duplicate ? original!.id : null}) returning id`;
+        ${shared.admin.json(payload)}) returning id`;
     expect((await read(row!.id, String(sequence))).status).toBe(404);
   }
+  const [canonicalUsage] = await shared.admin<{ id: string }[]>`
+    select id from session_events where workspace_id = ${f.grant.workspaceId}
+      and session_id = ${f.session.id} and sequence = 5`;
+  // The database permits duplicate classification only for model-usage events.
+  const [duplicateUsage] = await shared.admin<{ id: string }[]>`
+    insert into session_events (account_id, workspace_id, session_id, sequence, type, payload,
+      turn_association, duplicate_of_event_id, duplicate_reason)
+    values (${f.grant.accountId}, ${f.grant.workspaceId}, ${f.session.id}, 6, 'agent.model.usage',
+      ${shared.admin.json({ sourceKey: "duplicate-usage" })}, 'duplicate', ${canonicalUsage!.id},
+      'duplicate_provider_response_usage') returning id`;
+  expect((await read(duplicateUsage!.id, "6")).status).toBe(404);
+  const [structured] = await shared.admin<{ id: string }[]>`
+    insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+    values (${f.grant.accountId}, ${f.grant.workspaceId}, ${f.session.id}, 7, 'user.message',
+      ${shared.admin.json({ text: { nested: "no scalar" } })}) returning id`;
+  expect((await read(structured!.id, "7")).status).toBe(404);
   const denied = appWith({
     authorizeSession: async () => ({ allowed: false, reason: "forbidden" }),
     resolveListScope: async () => ({ kind: "all" }),
