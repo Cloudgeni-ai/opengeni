@@ -506,7 +506,7 @@ def main() -> None:
         place(sfx, swell(0.42, 500, 2600, peak_at=0.55, seed=40 + i), t, gain=db(-33.0), pan=-0.4 + 0.12 * i)
     # Night into morning: an airy rise that crests as the paper edge passes.
     place(sfx, swell(0.8, 300, 3200, peak_at=0.92, seed=7), T["wipe"] - 0.72, gain=db(-30.0))
-    place(sfx, swell(0.62, 250, 5200, peak_at=0.82, seed=9), T["wipe"] - 0.05, gain=db(-25.0))
+    place(sfx, swell(0.95, 250, 5200, peak_at=0.8, seed=9), T["wipe"] - 0.05, gain=db(-26.0))
 
     room_ir = make_ir(rt60=0.45, length=0.7, predelay=0.006, damp=9000, seed=5)
     sfx = sfx + reverb(sfx, room_ir) * 0.12

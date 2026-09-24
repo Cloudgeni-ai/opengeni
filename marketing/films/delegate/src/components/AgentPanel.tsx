@@ -4,7 +4,8 @@ import { F } from "../fonts";
 import { G, PREVIEW, REQUEST } from "../data";
 import { ease, lerp, prog, springAt } from "../anim";
 import { T, TYPE_TIMES, flightEnd, sentAt, typedCount } from "../timeline";
-import { ArrowUp, Check, Sparkle } from "./Icons";
+import { ArrowUp, Check } from "./Icons";
+import { HourGlyph } from "./HourMark";
 
 const LINE_BREAK = REQUEST.indexOf("to next week");
 const LINE1 = REQUEST.slice(0, LINE_BREAK).trimEnd();
@@ -12,7 +13,7 @@ const LINE1 = REQUEST.slice(0, LINE_BREAK).trimEnd();
 export const APPROVAL_H = 438;
 const PAD = 26;
 export const APPROVE_BTN = { x: G.askX + G.askW - PAD - 158, y: G.askY + APPROVAL_H - PAD - 54, w: 158, h: 54 };
-const STATUS_H = 106;
+const STATUS_H = 128;
 
 function statusAt(t: number): { text: string; count?: string; done?: boolean } {
   if (t < T.flights) return { text: "Looking at each client's history" };
@@ -43,7 +44,8 @@ export const AgentPanel: React.FC<{ t: number }> = ({ t }) => {
   const typingH = lerp(G.askH, 112, twoLines ? grow2 : 0);
   const toStatus = springAt(t, T.enter + 0.06, 210, 23);
   const toApproval = springAt(t, T.approvalIn + 0.08, 150, 19);
-  const collapseAt = T.approve + 0.17;
+  // The sheet rolls up over its own fading content (never an empty box).
+  const collapseAt = T.approve + 0.13;
   const fromApproval = springAt(t, collapseAt, 340, 34);
   let h = focused ? typingH : G.askH;
   if (submitted) h = lerp(typingH, STATUS_H, toStatus);
@@ -55,14 +57,14 @@ export const AgentPanel: React.FC<{ t: number }> = ({ t }) => {
   const statusIn1 = prog(t, T.enter + 0.15, T.enter + 0.38, ease.out);
   const statusOut = prog(t, T.approvalIn, T.approvalIn + 0.12);
   const approvalIn = prog(t, T.approvalIn + 0.15, T.approvalIn + 0.42, ease.out);
-  const approvalOut = prog(t, T.approve + 0.09, T.approve + 0.19);
-  const statusIn2 = prog(t, T.approve + 0.3, T.approve + 0.5, ease.out);
-  const approvalVis = t >= T.approvalIn && t < collapseAt ? approvalIn * (1 - approvalOut) : 0;
-  const statusVis = !submitted ? 0 : t < T.approvalIn ? statusIn1 : t < T.approve + 0.3 ? 1 - statusOut : statusIn2;
+  const approvalOut = prog(t, T.approve + 0.08, T.approve + 0.22, (x) => x);
+  const statusIn2 = prog(t, T.approve + 0.44, T.approve + 0.64, ease.out);
+  const approvalVis = t >= T.approvalIn && t < T.approve + 0.36 ? approvalIn * (1 - approvalOut) : 0;
+  const statusVis = !submitted ? 0 : t < T.approvalIn ? statusIn1 : t < T.approve + 0.44 ? 1 - statusOut : statusIn2;
   const statusRise = t < T.approvalIn ? 1 - statusIn1 : 1 - statusIn2;
 
   const st = statusAt(t);
-  const spin = (t - T.enter) * 140;
+  const spin = (t - T.enter) * 200;
   const pressed = t >= T.approve - 0.03 && t < T.approve + 0.12;
   const focusRing = focused && !submitted;
   const doneK = st.done ? springAt(t, sentAt(6) + 0.35, 220, 18) : 0;
@@ -85,8 +87,8 @@ export const AgentPanel: React.FC<{ t: number }> = ({ t }) => {
     >
       {typingVis > 0 && (
         <div style={{ position: "absolute", inset: 0, opacity: typingVis, transform: `translateY(${-18 * typingOut}px)` }}>
-          <div style={{ position: "absolute", left: 20, top: 22, color: focused ? C.accent : C.text3 }}>
-            <Sparkle size={24} />
+          <div style={{ position: "absolute", left: 20, top: 22 }}>
+            <HourGlyph size={24} color={focused ? C.accent : C.text3} />
           </div>
           <div
             style={{
@@ -158,20 +160,18 @@ export const AgentPanel: React.FC<{ t: number }> = ({ t }) => {
               position: "absolute",
               left: 22,
               right: 22,
-              top: 17,
+              top: 15,
               fontFamily: F.ui,
               fontSize: 17,
+              lineHeight: "24px",
               color: C.text2,
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
             }}
           >
             <span style={{ color: C.text3 }}>You · </span>
             {REQUEST}
           </div>
-          <div style={{ position: "absolute", left: 22, right: 22, top: 53, height: 1, background: C.line }} />
-          <div style={{ position: "absolute", left: 20, top: 65, display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ position: "absolute", left: 22, right: 22, top: 75, height: 1, background: C.line }} />
+          <div style={{ position: "absolute", left: 20, top: 87, display: "flex", alignItems: "center", gap: 12 }}>
             {st.done ? (
               <div
                 style={{
@@ -188,9 +188,7 @@ export const AgentPanel: React.FC<{ t: number }> = ({ t }) => {
                 <Check size={16} stroke={3} />
               </div>
             ) : (
-              <div style={{ color: C.accent }}>
-                <Sparkle size={24} spin={spin} />
-              </div>
+              <HourGlyph size={24} sweep={spin} />
             )}
             <div style={{ fontFamily: F.ui, fontSize: 21, fontWeight: 600, color: C.text, letterSpacing: "-0.01em", whiteSpace: "nowrap" }}>
               {st.text}
@@ -201,7 +199,7 @@ export const AgentPanel: React.FC<{ t: number }> = ({ t }) => {
               style={{
                 position: "absolute",
                 right: 22,
-                top: 67,
+                top: 89,
                 fontFamily: F.ui,
                 fontSize: 18,
                 fontWeight: 600,
@@ -224,11 +222,12 @@ export const AgentPanel: React.FC<{ t: number }> = ({ t }) => {
             top: 0,
             height: APPROVAL_H,
             opacity: approvalVis,
-            transform: `translateY(${14 * (1 - approvalIn)}px)`,
+            transform: `translateY(${14 * (1 - approvalIn) - 8 * approvalOut}px) scale(${1 - 0.025 * approvalOut})`,
+            transformOrigin: "50% 40%",
           }}
         >
           <div style={{ position: "absolute", left: PAD, top: 28, display: "flex", alignItems: "center", gap: 9, color: C.accent }}>
-            <Sparkle size={20} />
+            <HourGlyph size={20} />
             <span style={{ fontFamily: F.ui, fontSize: 16, fontWeight: 650, color: C.text2 }}>hour</span>
           </div>
           <div

@@ -50,9 +50,31 @@ export const HourApp: React.FC<{ t: number }> = ({ t }) => {
           }}
         />
       )}
+      <Dawn t={t} />
       <Cursor t={t} />
       <SceneFadeIn t={t} />
     </div>
+  );
+};
+
+/** Before the paper rises, warm light gathers low in the frame: morning comes. */
+const Dawn: React.FC<{ t: number }> = ({ t }) => {
+  const k = prog(t, T.wipe - 1.0, T.wipe + 0.2);
+  if (k <= 0) return null;
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: -600,
+        top: -600,
+        width: 3120,
+        height: 2280,
+        zIndex: 47,
+        pointerEvents: "none",
+        opacity: k,
+        background: "radial-gradient(ellipse 65% 55% at 45% 95%, rgba(255,205,160,0.24) 0%, rgba(255,205,160,0.08) 45%, rgba(255,205,160,0) 72%)",
+      }}
+    />
   );
 };
 

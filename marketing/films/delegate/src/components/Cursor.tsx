@@ -141,15 +141,15 @@ export const Cursor: React.FC<{ t: number }> = ({ t }) => {
         />
       )}
       <svg
-        width={30}
-        height={42}
+        width={34}
+        height={48}
         viewBox="0 0 20 28"
         style={{
           position: "absolute",
           left: -2,
           top: -2 + ps.dy,
           transform: `rotate(${ps.rot}deg) scale(${scale * ps.sx}, ${scale * ps.sy})`,
-          transformOrigin: "9px 13px",
+          transformOrigin: "10px 15px",
           filter: "drop-shadow(0 3px 5px rgba(0,0,0,0.45))",
           overflow: "visible",
         }}
