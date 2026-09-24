@@ -1431,7 +1431,10 @@ Rolling migration `0513_message_fork_prefix_compaction.sql` validates and
 copies only the current active model-history prefix through the selected
 boundary. A later message after compaction can therefore fork with its active
 summary (an opaque compaction item must match an earlier durable compaction
-receipt), without copying superseded rows or an unsafe suffix. A message
+receipt). Inactive rows before the selected boundary are tolerated only when
+an earlier durable compaction receipt identifies an active checkpoint after
+them; otherwise the fork rejects the unsafe prefix. Superseded rows and an
+unsafe suffix are never copied. A message
 superseded by compaction is still rejected rather than reconstructed from audit
 events. This applies equally to idle and actively running source sessions.
 

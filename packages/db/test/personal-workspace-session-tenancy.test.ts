@@ -1099,6 +1099,9 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
       select ${replyEventId}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
         ${claim.turn.id}, coalesce(max(sequence), 0) + 1, 'agent.message.completed',
         '{"text":"Retained answer"}' from session_events where session_id = ${sourceSessionId}`;
+    await shared.admin`update sessions set last_sequence = (
+      select max(sequence) from session_events where session_id = ${sourceSessionId})
+      where id = ${sourceSessionId}`;
     expect(
       await registerPendingSessionToolCall(client.db, {
         accountId: human.accountId,
@@ -1281,6 +1284,7 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
       ...authority,
       replacementItems: [],
       summaryItem: { type: "message", role: "assistant", content: "Compacted later content" },
+      eventPayload: { trigger: "auto" },
     });
     try {
       await waitUntilBlockedBy(pid);
@@ -1447,6 +1451,11 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
       expect(JSON.stringify(rows)).not.toContain("Earlier answer");
       expect(JSON.stringify(rows)).not.toContain("Later secret");
     }
+    await shared.admin`update session_history_items set active = false
+      where session_id = ${sourceSessionId} and position = 5`;
+    await expect(fork(nextReplyEventId)).rejects.toThrow("Session tenancy request is invalid");
+    await shared.admin`update session_history_items set active = true
+      where session_id = ${sourceSessionId} and position = 5`;
     await shared.admin`delete from session_events where id = ${compactedEventId}`;
     await expect(fork(nextReplyEventId)).rejects.toThrow("Session tenancy request is invalid");
   }, 180_000);
