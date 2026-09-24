@@ -222,6 +222,9 @@ function SessionsIndexRouteContent({
       selectedIds: [...context.selectedCapabilityToolIds],
     },
     context.workspaceCapabilityCatalog,
+    context.accessContext === null
+      ? null
+      : hasWorkspacePermission(context.accessContext, workspaceId, "connections:read"),
   );
   const repositoryCatalogRefresh = useRepositoryCatalogRefresh(workspaceId, context);
   const firstPartyMcpToolPolicy = useMemo(

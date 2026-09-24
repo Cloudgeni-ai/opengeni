@@ -208,6 +208,7 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
   };
   const reconnect = async (serverId: string) => {
     const generation = lifecycle.generation;
+    const deniedRevision = lifecycle.deniedConnectionsRevision;
     const item = current?.items.find((candidate) => candidate.runtime.mcpServerId === serverId);
     const health = item
       ? connectionHealth(item, current?.connections ?? [], current?.connections !== null)
@@ -240,7 +241,8 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
         scope.current.client !== client ||
         scope.current.workspaceId !== workspaceId ||
         scope.current.canReadConnections !== true ||
-        lifecycle.generation !== generation
+        lifecycle.generation !== generation ||
+        lifecycle.deniedConnectionsRevision !== deniedRevision
       )
         return;
       if (!response.authorizationUrl)

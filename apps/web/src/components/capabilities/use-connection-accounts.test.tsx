@@ -30,17 +30,33 @@ function Harness({
   id = "session",
   workspaceId = "workspace",
   selectedIds = selectedMailIds,
+  canReadConnections = true,
 }: {
   client: OpenGeniBrowserClient;
   id?: string;
   workspaceId?: string;
   selectedIds?: string[];
+  canReadConnections?: boolean | null;
 }) {
-  state = useConnectionAccounts(client, { id, workspaceId, selectedIds }, catalog);
+  state = useConnectionAccounts(
+    client,
+    { id, workspaceId, selectedIds },
+    catalog,
+    canReadConnections,
+  );
   return null;
 }
 function clientFor(load: () => Promise<ConnectionMetadata[]>) {
   return { listOwnConnectionAccounts: load } as unknown as OpenGeniBrowserClient;
+}
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((settle, fail) => {
+    resolve = settle;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
 }
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -180,6 +196,94 @@ test("a member without selected native connectors retains the normal Send gate a
   expect(state.accessDenied).toBe(false);
   expect(state.requiresAccountChoice).toBe(false);
   expect(state.selections).toEqual([]);
+});
+
+test("same-client live grant loss masks cached labels and choices before effects; restoration fences old responses", async () => {
+  for (const outcome of ["success", "403", "503"] as const) {
+    const stale = deferred<ConnectionMetadata[]>();
+    const restored = deferred<ConnectionMetadata[]>();
+    let reads = 0;
+    const client = clientFor(() => {
+      reads++;
+      return reads === 1
+        ? Promise.resolve(accounts)
+        : reads === 2
+          ? stale.promise
+          : restored.promise;
+    });
+    await act(async () => root.render(<Harness client={client} />));
+    expect(state.selections).toHaveLength(2);
+    await act(async () => state.selectAccount("mail", ["two"]));
+    const oldSelect = state.selectAccount;
+    const oldReset = state.resetEmptyChoices;
+    const oldRefresh = state.refresh;
+    // The hook refresh is explicit; start a second inventory read before revocation.
+    await act(async () => {
+      void state.refresh();
+    });
+    expect(reads).toBe(2);
+
+    await act(async () => root.render(<Harness client={client} canReadConnections={false} />));
+    expect(state.availableAccountGroups).toEqual([]);
+    expect(state.accountGroups).toEqual([]);
+    expect(state.accountChoices).toEqual({});
+    expect(state.selections).toEqual([]);
+    expect(state.accessDenied).toBe(true);
+    expect(state.error).toContain("Ask a workspace admin");
+    await act(async () => {
+      oldSelect("mail", ["one"]);
+      oldReset();
+      await oldRefresh();
+    });
+    expect(reads).toBe(2);
+
+    await act(async () => root.render(<Harness client={client} canReadConnections />));
+    expect(reads).toBe(3);
+    expect(state.loading).toBe(true);
+    expect(state.accountChoices).toEqual({});
+    expect(state.availableAccountGroups).toEqual([]);
+    await act(async () => {
+      oldSelect("mail", ["two"]);
+      oldReset();
+      await oldRefresh();
+    });
+    expect(reads).toBe(3);
+    await act(async () => {
+      if (outcome === "success") stale.resolve(accounts);
+      else stale.reject({ status: Number(outcome) });
+      await Bun.sleep(0);
+    });
+    expect(state.selections).toEqual([]);
+    expect(state.availableAccountGroups).toEqual([]);
+    await act(async () => {
+      restored.resolve([accounts[0]!]);
+      await Bun.sleep(0);
+    });
+    expect(state.error).toBeNull();
+    expect(state.selections).toEqual([{ serverId: "mail", connectionId: "one" }]);
+    expect(state.accountChoices).toEqual({});
+    // Between cases use a new identity, not a stale result or an in-flight hook.
+    await act(async () => root.render(<Harness client={client} id={`done-${outcome}`} />));
+  }
+});
+
+test("bootstrapping never reads accounts and a missing grant does not block Send without a native connector", async () => {
+  let reads = 0;
+  const client = clientFor(async () => {
+    reads++;
+    return accounts;
+  });
+  await act(async () => root.render(<Harness client={client} canReadConnections={null} />));
+  expect(reads).toBe(0);
+  expect(state.selections).toEqual([]);
+  await act(async () =>
+    root.render(<Harness client={client} canReadConnections={false} selectedIds={[]} />),
+  );
+  expect(state.loading).toBe(false);
+  expect(state.error).toBeNull();
+  expect(state.requiresAccountChoice).toBe(false);
+  await act(async () => root.render(<Harness client={client} canReadConnections />));
+  expect(reads).toBe(1);
 });
 
 test("returning to connector defaults restores emptied accounts but preserves nonempty narrowing", async () => {

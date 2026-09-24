@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, expect, mock, spyOn, test } from "bun:test";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ComponentProps } from "react";
@@ -537,4 +537,98 @@ test("a new identity's transient connection failure does not inherit another ide
   expect(composer!.connectorActions?.error).not.toContain("doesn't allow connection discovery");
   await act(async () => root.unmount());
   container.remove();
+});
+
+test("a pending OAuth start cannot redirect after a connection 403, even after a newer successful read", async () => {
+  const allowed = context.accessContext!;
+  const entry = {
+    id: "mcp:slack",
+    name: "Slack",
+    kind: "mcp",
+    enabled: true,
+    runtime: { available: true, mcpServerId: "slack" },
+    lifecycle: { readiness: "ready" },
+    connectionRef: {
+      connectionId: "connection-1",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      subjectScope: "workspace",
+    },
+  } as CapabilityCatalogItem;
+  const connection = {
+    id: "connection-1",
+    providerDomain: "slack.com",
+    subjectId: null,
+    status: "needs_reauth",
+  } as ConnectionMetadata;
+  const oldStart = deferred<{ authorizationUrl: string }>();
+  const preRevocationStart = deferred<{ authorizationUrl: string }>();
+  let reads = 0;
+  let starts = 0;
+  context.client = {
+    listCapabilities: async () => ({ items: [entry] }),
+    listConnections: async () => {
+      reads++;
+      if (reads === 2) throw { status: 403 };
+      return [connection];
+    },
+    startConnectionOAuth: async () => {
+      starts++;
+      return starts === 1
+        ? oldStart.promise
+        : starts === 3
+          ? preRevocationStart.promise
+          : { authorizationUrl: "https://provider.example/new" };
+    },
+    catalogAssetUrl: () => null,
+  } as unknown as OpenGeniBrowserClient;
+  const props = {
+    workspaceId: "workspace-a",
+    servers: [],
+    firstPartyTools: [],
+    fileUploadsEnabled: false,
+    onToolSelectionChange: () => {},
+  } as unknown as ComponentProps<typeof WorkspaceComposerPlus>;
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const redirect = spyOn(window.location, "assign").mockImplementation(() => {});
+  try {
+    context.accessContext = allowed;
+    await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+    expect(composer!.servers[0]?.connectionStatus).toBe("reconnect");
+    await act(async () => composer!.connectorActions?.onReconnect?.("slack"));
+    expect(starts).toBe(1);
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(composer!.connectorActions?.error).toContain("doesn't allow connection discovery");
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(composer!.servers[0]?.connectionStatus).toBe("reconnect");
+    await act(async () => {
+      oldStart.resolve({ authorizationUrl: "https://provider.example/stale" });
+      await Bun.sleep(0);
+    });
+    expect(redirect).not.toHaveBeenCalled();
+    await act(async () => composer!.connectorActions?.onReconnect?.("slack"));
+    expect(redirect).toHaveBeenCalledTimes(1);
+    expect(redirect).toHaveBeenCalledWith("https://provider.example/new");
+    await act(async () => composer!.connectorActions?.onReconnect?.("slack"));
+    expect(starts).toBe(3);
+    context.accessContext = {
+      ...allowed,
+      workspaceGrants: [{ ...allowed.workspaceGrants[0]!, permissions: ["sessions:create"] }],
+    };
+    await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+    context.accessContext = allowed;
+    await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+    await act(async () => {
+      preRevocationStart.resolve({ authorizationUrl: "https://provider.example/old-grant" });
+      await Bun.sleep(0);
+    });
+    expect(redirect).toHaveBeenCalledTimes(1);
+  } finally {
+    context.accessContext = allowed;
+    redirect.mockRestore();
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });
