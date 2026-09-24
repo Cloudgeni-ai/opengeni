@@ -19,7 +19,7 @@ import {
   weekRect,
   type Appointment,
 } from "../data/salon";
-import { alpha, clamp, easeIn, easeInOut, easeOut, lerp, prog, settle } from "../lib/anim";
+import { alpha, clamp, easeGlide, easeIn, easeInOut, easeOut, lerp, prog } from "../lib/anim";
 
 export const PAGE_W = 1920;
 export const PAGE_H = 1080;
@@ -27,7 +27,10 @@ export const PAGE_H = 1080;
 export const FIELD = { x: 136, y: 22, w: 964, h: 52 } as const;
 export const CARD = { x: 136, y: 214, w: 660, h: 338 } as const;
 export const SEND_BUTTON = { x: CARD.x + 28, y: CARD.y + CARD.h - 80, w: 252, h: 52 } as const;
-const ICON = { cx: 960, cy: 452, size: 188, radius: 44 } as const;
+const ICON = { cx: 960, cy: 440, size: 200, radius: 46 } as const;
+const ARRIVAL = 0.82;
+const ICON_TOP = "#3a7564";
+const ICON_BOTTOM = "#27503f";
 
 const agentShadow = (k: number) =>
   k <= 0
@@ -57,6 +60,7 @@ const PageBody: React.FC<{ t: number; finished: boolean; morph: number }> = ({
   const dy = lerp(0, ICON.cy - PAGE_H / 2, morph);
   const inset = lerp(0, (PAGE_W - PAGE_H) / 2, morph);
   const radius = lerp(0, ICON.radius / (ICON.size / PAGE_H), morph);
+  const iconFill = `linear-gradient(180deg, ${ICON_TOP} 0%, ${ICON_BOTTOM} 100%)`;
   const contentOpacity = 1 - clamp((morph - 0.55) / 0.35);
   return (
     <div
@@ -69,7 +73,7 @@ const PageBody: React.FC<{ t: number; finished: boolean; morph: number }> = ({
         transformOrigin: `${PAGE_W / 2}px ${PAGE_H / 2}px`,
         transform: `translateY(${dy}px) scale(${s})`,
         clipPath: `inset(0px ${inset}px 0px ${inset}px round ${radius}px)`,
-        background: morph > 0 ? APP.accent : "transparent",
+        background: morph > 0 ? iconFill : "transparent",
       }}
     >
       <div
@@ -508,17 +512,17 @@ function appointmentState(a: Appointment, index: number, t: number, finished: bo
   if (!move) {
     return { rect: from, p: 0, flying: 0, outline: scan, tag: 0, landedAt: Infinity };
   }
-  const raw = clamp((t - move.start) / (move.land - move.start));
-  const p = easeInOut(raw);
-  const s = raw >= 1 ? settle(clamp((t - move.land) / 0.5) * 0.35 + 0.65) : p;
-  const arc = Math.sin(Math.PI * p) * -34;
+  // `land` is the perceptual arrival (note + tag); the glide's last ~1.5% settles after it.
+  const raw = clamp((t - move.start) / ((move.land - move.start) / ARRIVAL));
+  const p = easeGlide(raw);
+  const arc = Math.sin(Math.PI * p) * -30;
   const rect = {
     x: lerp(from.x, to.x, p),
-    y: lerp(from.y, to.y, p) + arc + (raw >= 1 ? (1 - s) * 6 : 0),
+    y: lerp(from.y, to.y, p) + arc,
     w: from.w,
     h: from.h,
   };
-  const flying = raw > 0 && raw < 1 ? Math.sin(Math.PI * raw) : 0;
+  const flying = raw > 0 && raw < 1 ? Math.sin(Math.PI * Math.min(1, p * 1.08)) : 0;
   const after = clamp((t - move.land) / 0.7);
   const outline = raw >= 1 ? 1 - easeOut(after) : Math.max(scan, raw > 0 ? 1 : 0);
   const tag = prog(t, move.land + 0.05, move.land + 0.4, easeOut);
@@ -795,12 +799,36 @@ const Cursor: React.FC<{ t: number }> = ({ t }) => {
 
 const ClosedApp: React.FC<{ t: number; morph: number }> = ({ t, morph }) => {
   const iconK = clamp((morph - 0.45) / 0.45);
-  const captionK = prog(t, T.closeEnd - 0.05, T.closeEnd + 0.35, easeOut) * (1 - prog(t, T.openStart - 0.2, T.openStart + 0.05, easeIn));
-  const count = 2 + T.hiddenMoves.filter((x) => t >= x).length;
-  const bump = T.hiddenMoves.reduce((acc, x) => acc + Math.max(0, 1 - Math.abs(t - x - 0.06) / 0.12), 0);
-  const badgeK = prog(t, T.closeEnd - 0.1, T.closeEnd + 0.2, easeOut) * (morph > 0.95 ? 1 : 0);
+  const captionK =
+    prog(t, T.closeEnd - 0.1, T.closeEnd + 0.3, easeOut) * (1 - prog(t, T.openStart - 0.2, T.openStart + 0.05, easeIn));
+  const done = T.hiddenMoves.filter((x) => t >= x).length;
+  const count = 2 + done;
+  const ringProgress =
+    (2 + T.hiddenMoves.reduce((acc, x) => acc + prog(t, x - 0.04, x + 0.26, easeOut), 0)) / 6;
+  const ringK = prog(t, T.closeEnd - 0.2, T.closeEnd + 0.2, easeOut) * (1 - prog(t, T.openStart - 0.15, T.openStart + 0.05, easeIn));
+  const R = 150;
+  const C = 2 * Math.PI * R;
   return (
     <>
+      <svg
+        width={2 * R + 20}
+        height={2 * R + 20}
+        viewBox={`0 0 ${2 * R + 20} ${2 * R + 20}`}
+        style={{ position: "absolute", left: ICON.cx - R - 10, top: ICON.cy - R - 10, opacity: ringK }}
+      >
+        <circle cx={R + 10} cy={R + 10} r={R} fill="none" stroke="#e2e0d6" strokeWidth={5} />
+        <circle
+          cx={R + 10}
+          cy={R + 10}
+          r={R}
+          fill="none"
+          stroke={BRAND.orange}
+          strokeWidth={5}
+          strokeLinecap="round"
+          strokeDasharray={`${C * ringProgress} ${C}`}
+          transform={`rotate(-90 ${R + 10} ${R + 10})`}
+        />
+      </svg>
       <div
         style={{
           position: "absolute",
@@ -808,40 +836,27 @@ const ClosedApp: React.FC<{ t: number; morph: number }> = ({ t, morph }) => {
           top: ICON.cy - ICON.size / 2,
           width: ICON.size,
           height: ICON.size,
+          borderRadius: ICON.radius,
+          background: `linear-gradient(180deg, ${ICON_TOP} 0%, ${ICON_BOTTOM} 100%)`,
+          boxShadow: `0 22px 50px ${alpha(BRAND.ink, 0.22)}, inset 0 1.5px 0 rgba(255,255,255,0.22)`,
           opacity: iconK,
+          color: "#f4f1ea",
+          fontFamily: inter,
+          fontWeight: 700,
+          fontSize: ICON.size * 0.6,
+          lineHeight: `${ICON.size * 0.9}px`,
+          textAlign: "center",
+          letterSpacing: -ICON.size * 0.02,
         }}
       >
-        <ChairLogo x={0} y={0} size={ICON.size} />
-        <div
-          style={{
-            position: "absolute",
-            right: -22,
-            top: -22,
-            width: 64,
-            height: 64,
-            borderRadius: 32,
-            background: BRAND.orange,
-            color: "#fff",
-            fontFamily: inter,
-            fontSize: 28,
-            fontWeight: 700,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            border: `5px solid ${BRAND.paper}`,
-            opacity: badgeK,
-            transform: `scale(${badgeK * (1 + 0.14 * bump)})`,
-          }}
-        >
-          {count}
-        </div>
+        c
       </div>
       <div
         style={{
           position: "absolute",
           left: 0,
           width: PAGE_W,
-          top: ICON.cy + ICON.size / 2 + 54,
+          top: ICON.cy + R + 58,
           textAlign: "center",
           fontFamily: dmSans,
           opacity: captionK,

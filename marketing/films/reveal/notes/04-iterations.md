@@ -60,3 +60,49 @@ Changes for v2:
   the app icon instead of cutting.
 - Reason tags become orange pills.
 - Slow camera drift on the full calendar; a gentle settle on the end card.
+
+## v2 — 28.0 s
+
+Inspected: fresh independent video-model cold read + "harshest creative
+director" critique (no memory of v1; no audio), stills at every changed
+moment, onset-timing measurement of the delivered MP4, colour measurement of
+the decoded file.
+
+Technical defects found and fixed (both invisible in stills):
+
+- Remotion's own AAC mux decoded ~39 ms late (un-trimmed encoder priming; the
+  audio stream ran 53 ms longer than the picture). Source WAV onsets were on
+  time (−3…−5 ms, deliberately anticipatory). → picture is rendered muted and
+  muxed with ffmpeg; delivered-file onsets now match the source exactly.
+- Untagged colour: the brand orange decoded as [255,96,35] on players that
+  assume BT.709 for HD. → explicit BT.709 pipeline; decodes to [244,83,38]
+  against the brand's [246,83,39].
+
+Critique triage — what I accepted and what I rejected:
+
+- Rejected as mis-sampled (the model watches sparse frames): "robotic linear
+  typing", "blocks move linearly and snap", "toast pops in with a hard cut".
+  All three are eased/rhythmic in the source. I still made typing burstier and
+  landings longer-tailed, because a stranger scrolling past sees even less.
+- Rejected as contrary to the brief: its fixes for the code beat (3D flip,
+  glassmorphism code over a blurred UI) are exactly the tilts, ghosted fades
+  and overlapping code the client already rejected.
+- Accepted (recurring across both reviews): the code beat still reads as a
+  slide; the arrows look like PowerPoint; the "App closed" icon looks
+  placeholder-grade; the split-screen leaves dead paper; the end card is
+  ~3 s of dead air.
+- Accepted, real ambiguity: during the tenant→tools handover both bands were
+  briefly lit, so Ana's appointment could be read as pointing at `user`.
+
+Changes for v3:
+
+- The code is no longer *beside* her app, it is *under* it: the app page
+  slides away and uncovers the handler in place (casting a shadow as it goes).
+  The metaphor becomes "behind her app", not "next slide".
+- No arrows: each highlight band runs straight into its replica, like a tag.
+  Highlights are strictly sequential (one out before the next in).
+- "App closed" redesigned: a real-looking app icon with depth and a thin
+  progress ring that fills with each muffled note.
+- The separate end card is gone. The thesis frame becomes the ending: both
+  supers, both pages, and the OpenGeni wordmark + URL building in beneath —
+  no dead air, no extra transition. 28.0 → ~26 s.

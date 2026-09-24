@@ -5,7 +5,7 @@ import { T } from "../timeline";
 import { CODE_LINES, HIGHLIGHTS, tokenize, type HighlightKey, type TokenKind } from "../data/code";
 import { alpha, clamp, easeOut, prog } from "../lib/anim";
 
-export const CODE_X = 2160;
+export const CODE_X = 0;
 export const CODE_FONT = 24;
 export const CODE_LINE_H = 35;
 export const CODE_TOP = 104;
@@ -27,8 +27,8 @@ const COLORS: Record<TokenKind, string> = {
 function highlightLevel(key: HighlightKey, t: number): number {
   const h = T.highlights.find((x) => x.key === key);
   if (!h) return 0;
-  const inK = prog(t, h.start, h.start + 0.22, easeOut);
-  const outK = prog(t, h.end - 0.05, h.end + 0.18, easeOut);
+  const inK = prog(t, h.start, h.start + 0.2, easeOut);
+  const outK = prog(t, h.end - 0.2, h.end, easeOut);
   return inK * (1 - outK);
 }
 
@@ -101,9 +101,9 @@ export const CodePage: React.FC<{ t: number }> = ({ t }) => {
                   position: "absolute",
                   left: CODE_LEFT - 22,
                   top: lineTop(n),
-                  width: 1140,
+                  width: bandRight(groupOf(n)) - (CODE_LEFT - 22),
                   height: CODE_LINE_H,
-                  background: alpha(BRAND.orange, 0.12 * lvl),
+                  background: alpha(BRAND.orange, 0.13 * lvl),
                 }}
               >
                 <div
@@ -121,8 +121,8 @@ export const CodePage: React.FC<{ t: number }> = ({ t }) => {
             <div
               style={{
                 position: "absolute",
-                left: CODE_LEFT - 104,
-                width: 64,
+                left: CODE_LEFT - 92,
+                width: 56,
                 top: lineTop(n),
                 height: CODE_LINE_H,
                 lineHeight: `${CODE_LINE_H}px`,
@@ -150,7 +150,7 @@ export const CodePage: React.FC<{ t: number }> = ({ t }) => {
               }}
             >
               {tokenize(line).map((tok, i) => {
-                const isCueComment = tok.kind === "com" && levels.tools > 0;
+                const isCueComment = tok.kind === "com" && levels.tools > 0.5;
                 return (
                   <span
                     key={i}
@@ -174,6 +174,18 @@ export const CodePage: React.FC<{ t: number }> = ({ t }) => {
   );
 };
 
+function groupOf(n: number): HighlightKey {
+  return (Object.keys(HIGHLIGHTS) as HighlightKey[]).find((k) => n >= HIGHLIGHTS[k].from && n <= HIGHLIGHTS[k].to) ?? "tenant";
+}
+
+function cueX(key: HighlightKey): number {
+  const h = HIGHLIGHTS[key];
+  const maxChars = Math.max(...h.clear.map((n) => CODE_LINES[n - 1].length));
+  return CODE_LEFT + maxChars * CHAR_W + 34;
+}
+
+const bandRight = (key: HighlightKey) => cueX(key) - 6;
+
 function brighten(color: string, lvl: number): string {
   return lvl > 0.5 ? "#ffffff" : color;
 }
@@ -181,13 +193,6 @@ function brighten(color: string, lvl: number): string {
 const Cue: React.FC<{ hkey: HighlightKey; level: number; t: number }> = ({ hkey, level, t }) => {
   if (level <= 0) return null;
   const h = HIGHLIGHTS[hkey];
-  const maxChars = Math.max(
-    ...h.clear.map((n) => {
-      const line = CODE_LINES[n - 1];
-      return (line.includes("//") ? line.slice(0, line.indexOf("//")).trimEnd() : line).length;
-    }),
-  );
-  const x = CODE_LEFT + maxChars * CHAR_W + 36;
   const y = lineTop(Math.floor(h.cueLine)) + (h.cueLine % 1) * CODE_LINE_H + CODE_LINE_H / 2;
   const k = clamp(level);
   const start = T.highlights.find((item) => item.key === hkey)?.start ?? 0;
@@ -195,18 +200,12 @@ const Cue: React.FC<{ hkey: HighlightKey; level: number; t: number }> = ({ hkey,
     <div
       style={{
         position: "absolute",
-        left: x,
+        left: cueX(hkey),
         top: y,
-        display: "flex",
-        alignItems: "center",
-        gap: 16,
         opacity: k,
-        transform: `translate(${(1 - k) * -14}px, -50%)`,
+        transform: `translate(${(1 - k) * -16}px, -50%)`,
       }}
     >
-      <svg viewBox="0 0 34 16" width={34} height={16} style={{ flex: "none" }}>
-        <path d="M33 8H3M9 2L3 8l6 6" fill="none" stroke={BRAND.orange} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
       {hkey === "tenant" ? <TenantChip /> : hkey === "tools" ? <MovedBlock t={t} start={start} /> : <SendReplica t={t} start={start} />}
     </div>
   );

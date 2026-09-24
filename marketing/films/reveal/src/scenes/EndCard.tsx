@@ -1,5 +1,5 @@
 import React from "react";
-import { BRAND, archivo, mono } from "../theme";
+import { BRAND, mono } from "../theme";
 import { T } from "../timeline";
 import { easeOut, prog } from "../lib/anim";
 
@@ -13,58 +13,40 @@ export const Wordmark: React.FC<{ width: number; color: string }> = ({ width, co
   </svg>
 );
 
-export const END_CX = 2040;
-export const END_CY = 2860;
-
-export const EndCard: React.FC<{ t: number }> = ({ t }) => {
-  const k1 = prog(t, T.endEnd - 0.55, T.endEnd + 0.25, easeOut);
-  const k2 = prog(t, T.endEnd - 0.25, T.endEnd + 0.5, easeOut);
-  const k3 = prog(t, T.endEnd + 0.15, T.endEnd + 0.8, easeOut);
+/** The sign-off that builds beneath the two pages in the final frame. */
+export const BrandRow: React.FC<{ t: number; cx: number; top: number }> = ({ t, cx, top }) => {
+  const k1 = prog(t, T.brandIn, T.brandIn + 0.7, easeOut);
+  const k2 = prog(t, T.brandIn + 0.35, T.brandIn + 1.0, easeOut);
   return (
     <div
       style={{
         position: "absolute",
-        left: END_CX - 1500,
-        top: END_CY - 600,
-        width: 3000,
-        height: 1200,
+        left: cx - 1200,
+        top,
+        width: 2400,
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
-        justifyContent: "center",
       }}
     >
-      <div style={{ opacity: k1, transform: `translateY(${(1 - k1) * 40}px)` }}>
-        <Wordmark width={1340} color={BRAND.ink} />
+      <div style={{ opacity: k1, transform: `translateY(${(1 - k1) * 36}px)` }}>
+        <Wordmark width={1040} color={BRAND.ink} />
       </div>
       <div
         style={{
-          marginTop: 150,
-          fontFamily: archivo,
-          fontWeight: 500,
-          fontSize: 122,
-          letterSpacing: -122 * 0.03,
-          color: BRAND.ink,
-          opacity: k2,
-          transform: `translateY(${(1 - k2) * 30}px)`,
-        }}
-      >
-        AI that works in your product.
-      </div>
-      <div
-        style={{
-          marginTop: 96,
+          marginTop: 70,
           display: "flex",
           alignItems: "center",
-          gap: 34,
+          gap: 30,
           fontFamily: mono,
-          fontSize: 66,
+          fontSize: 62,
           color: BRAND.muted,
           letterSpacing: 2,
-          opacity: k3,
+          opacity: k2,
+          transform: `translateY(${(1 - k2) * 20}px)`,
         }}
       >
-        <span style={{ width: 26, height: 26, background: BRAND.orange, display: "inline-block" }} />
+        <span style={{ width: 24, height: 24, background: BRAND.orange, display: "inline-block" }} />
         opengeni.ai
       </div>
     </div>

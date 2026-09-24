@@ -284,7 +284,7 @@ for i, (t0, n) in enumerate(zip(C["sentTicks"], sparkle)):
 
 # Resolution: D/F#.
 resolve_at = C["sentTicks"][-1]
-place(pads, pad([note("F#2"), note("D3"), note("A3"), note("E4")], C["panStart"] + 0.7 - resolve_at, 0.35, 1.0, 1400, 4), resolve_at - 0.1, 0.15)
+place(pads, pad([note("F#2"), note("D3"), note("A3"), note("E4")], C["slideStart"] + 0.7 - resolve_at, 0.35, 1.0, 1400, 4), resolve_at - 0.1, 0.15)
 place(music, felt_piano(note("D4"), 4.5, 0.75), resolve_at + 0.02, 0.22, pan=-0.15)
 place(subs, sub(note("F#1"), 2.6, 0.2), resolve_at, 0.2)
 
@@ -292,10 +292,10 @@ place(subs, sub(note("F#1"), 2.6, 0.2), resolve_at, 0.2)
 for j, n in enumerate(["D4", "F#4", "A4"]):
     place(music, felt_piano(note(n), 4.5, 0.62 - j * 0.04), C["superHer"] + j * 0.018, 0.2, pan=-0.3 + 0.3 * j)
 
-# The camera glides to the other side of the screen: E minor 9.
-place(fx, whoosh(C["panEnd"] - C["panStart"] + 0.2, 240, 1100, 80, 1.3), C["panStart"] - 0.05, 0.12)
-place(subs, sub(note("E2"), 2.4, 0.8), C["panStart"] + 0.2, 0.24)
-place(pads, pad([note("E2"), note("B2"), note("F#3"), note("G3"), note("D4")], C["highlights"][0]["start"] + 0.5 - C["panStart"] + 0.2, 1.0, 0.9, 1000, 5), C["panStart"] + 0.2, 0.14)
+# Her app slides away and uncovers the code beneath it: E minor 9.
+place(fx, whoosh(C["slideEnd"] - C["slideStart"] + 0.2, 240, 1100, 80, 1.3), C["slideStart"] - 0.05, 0.12)
+place(subs, sub(note("E2"), 2.4, 0.8), C["slideStart"] + 0.2, 0.24)
+place(pads, pad([note("E2"), note("B2"), note("F#3"), note("G3"), note("D4")], C["highlights"][0]["start"] + 0.5 - C["slideStart"] + 0.2, 1.0, 0.9, 1000, 5), C["slideStart"] + 0.2, 0.14)
 
 # "One handler for you." — the answering E minor voicing.
 for j, n in enumerate(["E4", "G4", "B4"]):
@@ -303,7 +303,7 @@ for j, n in enumerate(["E4", "G4", "B4"]):
 
 # Code highlights over A7sus4, each replaying the moment it caused.
 hl = {h["key"]: h for h in C["highlights"]}
-place(pads, pad([note("A2"), note("E3"), note("G3"), note("D4")], C["wideBothStart"] + 0.5 - hl["tenant"]["start"] + 0.3, 0.6, 0.8, 1100, 6), hl["tenant"]["start"] - 0.3, 0.14)
+place(pads, pad([note("A2"), note("E3"), note("G3"), note("D4")], C["finalStart"] + 0.5 - hl["tenant"]["start"] + 0.3, 0.6, 0.8, 1100, 6), hl["tenant"]["start"] - 0.3, 0.14)
 place(fx, whoosh(0.5, 400, 1400, 90), hl["tenant"]["start"] - 0.62, 0.05)
 place(music, felt_piano(note("D4"), 3.5, 0.7), hl["tenant"]["start"], 0.2)
 place(fx, glass(note("D7"), 0.3, 1.0), hl["tenant"]["start"] + 0.01, 0.03)
@@ -315,17 +315,16 @@ place(fx, key_click("enter", 1300), hl["approval"]["start"] + SEND_REPLICA_PRESS
 for i, n in enumerate(["A5", "B5", "D6"]):
     place(fx, glass(note(n), 0.45, 1.0), hl["approval"]["start"] + SEND_REPLICA_PRESS + 0.09 + i * 0.08, 0.065, pan=-0.2 + 0.2 * i)
 
-# The whole idea in one frame: home to D.
-place(fx, whoosh(1.2, 1400, 300, 100, 1.3), C["wideBothStart"] - 0.05, 0.07)
-place(pads, pad([note("D2"), note("A2"), note("F#3"), note("E4"), note("A4")], C["duration"] + 0.2 - C["wideBothStart"], 0.8, 2.2, 1250, 7), C["wideBothStart"] + 0.1, 0.16)
-place(subs, sub(note("D2"), 3.5, 0.5), C["wideBothStart"] + 0.15, 0.26)
+# The whole idea in one frame, with the sign-off: home to D.
+place(fx, whoosh(1.2, 1400, 300, 100, 1.3), C["finalStart"] - 0.05, 0.07)
+place(pads, pad([note("D2"), note("A2"), note("F#3"), note("E4"), note("A4")], C["duration"] + 0.2 - C["finalStart"], 0.8, 2.2, 1250, 7), C["finalStart"] + 0.1, 0.16)
+place(subs, sub(note("D2"), 3.5, 0.5), C["finalStart"] + 0.15, 0.26)
 for j, n in enumerate(["D3", "A3", "F#4", "D5"]):
-    place(music, felt_piano(note(n), 5.0, 0.7 - j * 0.05), C["wideBothEnd"] - 0.35 + j * 0.022, 0.2, pan=-0.35 + 0.23 * j)
+    place(music, felt_piano(note(n), 5.0, 0.7 - j * 0.05), C["finalEnd"] - 0.35 + j * 0.022, 0.2, pan=-0.35 + 0.23 * j)
 
-# Sign-off: a last octave D and silence.
-place(fx, whoosh(C["endEnd"] - C["endStart"] + 0.2, 300, 900, 110, 1.3), C["endStart"] - 0.05, 0.06)
-place(music, felt_piano(note("D4"), 5.0, 0.7), C["endEnd"] - 0.3, 0.22, pan=-0.1)
-place(music, felt_piano(note("D5"), 5.0, 0.55), C["endEnd"] - 0.28, 0.16, pan=0.1)
+# Sign-off: the wordmark arrives on a last octave D, then silence.
+place(music, felt_piano(note("D4"), 5.0, 0.7), C["brandIn"] + 0.05, 0.22, pan=-0.1)
+place(music, felt_piano(note("D5"), 5.0, 0.55), C["brandIn"] + 0.07, 0.16, pan=0.1)
 
 # ---------------------------------------------------------------- mix
 

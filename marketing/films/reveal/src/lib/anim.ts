@@ -7,6 +7,8 @@ export const easeOut = Easing.bezier(0.16, 1, 0.3, 1);
 export const easeInOut = Easing.bezier(0.65, 0, 0.35, 1);
 export const easeIn = Easing.bezier(0.55, 0, 0.9, 0.35);
 export const easeSoft = Easing.bezier(0.33, 0, 0.2, 1);
+/** Quick lift, long weightless deceleration: for objects being placed. */
+export const easeGlide = Easing.bezier(0.32, 0, 0.08, 1);
 
 /** Eased 0..1 progress of t through [start, end]. */
 export function prog(t: number, start: number, end: number, easing = easeOut): number {

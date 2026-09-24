@@ -16,9 +16,9 @@ const handler = createChatHandler(og, {
       user: me.userId,
       tools: [{ kind: "mcp", id: "app" }],
       create: {
-        mcpServers: [{
+        mcpServers: [{ // your app's own actions
           id: "app",
-          url: "https://yourapp.com/mcp", // your app's own actions
+          url: "https://yourapp.com/mcp",
           headers: { authorization: \`Bearer \${me.token}\` },
           requireApproval: ["send_messages"],
         }],
@@ -77,6 +77,6 @@ export type HighlightKey = "tenant" | "tools" | "approval";
  * lines whose text the cue must stay clear of horizontally. */
 export const HIGHLIGHTS: Record<HighlightKey, { from: number; to: number; cueLine: number; clear: number[] }> = {
   tenant: { from: 12, to: 13, cueLine: 12.5, clear: [12, 13] },
-  tools: { from: 14, to: 18, cueLine: 14, clear: [13, 14, 15] },
+  tools: { from: 14, to: 18, cueLine: 16, clear: [14, 15, 16, 17, 18] },
   approval: { from: 20, to: 20, cueLine: 20, clear: [19, 20, 21] },
 };

@@ -20,21 +20,22 @@ function mulberry32(seed: number) {
 
 const TYPE_START = 0.35;
 
-/** Time at which each character of REQUEST appears. Human rhythm: quick runs,
- * a breath after the first sentence, small hesitations between words. */
+/** Time at which each character of REQUEST appears. Human rhythm: quick
+ * bursts inside words, small gaps between them, a breath after the first
+ * sentence, and a beat of thought before "next week" and "let them know". */
 export const TYPE_TIMES: number[] = (() => {
   const rand = mulberry32(24092026);
   const times: number[] = [];
   let t = TYPE_START;
   for (let i = 0; i < REQUEST.length; i++) {
-    const ch = REQUEST[i];
     const prev = REQUEST[i - 1];
-    let gap = 0.03 + rand() * 0.024;
-    if (prev === " ") gap += 0.012 + rand() * 0.02;
+    let gap = 0.021 + rand() * 0.017;
+    if (prev === " ") gap += 0.026 + rand() * 0.04;
     if (prev === ".") gap += 0.34;
-    if (ch === " " && rand() > 0.7) gap += 0.03;
+    if (REQUEST.startsWith("next", i) || REQUEST.startsWith("let", i)) gap += 0.1;
+    if (rand() < 0.05) gap += 0.05;
+    if (i > 0) t += gap;
     times.push(t);
-    t += gap;
   }
   return times;
 })();
@@ -50,35 +51,34 @@ export const T = {
   scanStart: TYPE_END + 0.95,
   scanStagger: 0.07,
   moves: [
-    { start: TYPE_END + 1.62, land: TYPE_END + 2.32 },
-    { start: TYPE_END + 2.4, land: TYPE_END + 3.1 },
+    { start: TYPE_END + 1.6, land: TYPE_END + 2.42 },
+    { start: TYPE_END + 2.42, land: TYPE_END + 3.24 },
   ],
-  toast: TYPE_END + 2.47,
-  closeStart: 7.9,
-  closeEnd: 8.6,
-  hiddenMoves: [8.78, 9.08, 9.38, 9.68],
-  openStart: 9.92,
-  openEnd: 10.47,
-  cardIn: 10.62,
-  sendTap: 12.7,
-  sentTicks: [12.79, 12.87, 12.95, 13.03, 13.11, 13.19],
-  cardOut: 13.45,
-  wideHerStart: 13.6,
-  wideHerEnd: 14.9,
-  superHer: 14.35,
-  panStart: 15.6,
-  panEnd: 16.9,
-  superYou: 16.6,
+  toast: TYPE_END + 2.6,
+  closeStart: 7.95,
+  closeEnd: 8.7,
+  hiddenMoves: [8.85, 9.15, 9.45, 9.75],
+  openStart: 10.0,
+  openEnd: 10.75,
+  cardIn: 10.9,
+  sendTap: 12.95,
+  sentTicks: [13.04, 13.12, 13.2, 13.28, 13.36, 13.44],
+  cardOut: 13.7,
+  wideHerStart: 13.85,
+  wideHerEnd: 15.1,
+  superHer: 14.6,
+  slideStart: 15.9,
+  slideEnd: 17.1,
+  superYou: 16.8,
   highlights: [
-    { key: "tenant", start: 18.1, end: 19.0 },
-    { key: "tools", start: 19.0, end: 19.95 },
-    { key: "approval", start: 19.95, end: 20.95 },
+    { key: "tenant", start: 18.4, end: 19.35 },
+    { key: "tools", start: 19.35, end: 20.35 },
+    { key: "approval", start: 20.35, end: 21.35 },
   ],
-  wideBothStart: 20.95,
-  wideBothEnd: 22.15,
-  endStart: 23.8,
-  endEnd: 24.8,
-  duration: 28.0,
+  finalStart: 21.35,
+  finalEnd: 22.65,
+  brandIn: 22.8,
+  duration: 26.5,
 } as const;
 
 export const DURATION_FRAMES = Math.round(T.duration * FPS);
