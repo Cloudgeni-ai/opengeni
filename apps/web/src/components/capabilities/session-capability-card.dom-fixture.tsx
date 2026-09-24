@@ -308,6 +308,41 @@ describe("conversation connection card", () => {
     }
   });
 
+  test("a BFCache return unlocks GitHub and ignores an old pending status response", async () => {
+    context.githubStatus = null;
+    refreshGitHub.mockClear();
+    let resolveOldStatus!: (value: Awaited<ReturnType<typeof getGitHubApp>>) => void;
+    getGitHubApp.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOldStatus = resolve;
+        }),
+    );
+    const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
+    try {
+      await act(async () => button(h.container, "Connect GitHub App").click());
+      expect(button(h.container, "Opening GitHub…").disabled).toBe(true);
+      await act(async () => {
+        const restored = new Event("pageshow") as PageTransitionEvent;
+        Object.defineProperty(restored, "persisted", { value: true });
+        window.dispatchEvent(restored);
+      });
+      expect(button(h.container, "Connect GitHub App").disabled).toBe(false);
+      expect(refreshGitHub).toHaveBeenCalledWith("workspace");
+      await act(async () => resolveOldStatus({ status: "bound", configured: true, linkUrl: "" }));
+      expect(h.container.querySelector('[data-state="suggested"]')).not.toBeNull();
+      getGitHubApp.mockImplementationOnce(async () => ({
+        status: "bound",
+        configured: true,
+        linkUrl: "",
+      }));
+      await act(async () => button(h.container, "Connect GitHub App").click());
+      expect(h.container.querySelector('[data-state="complete"]')).not.toBeNull();
+    } finally {
+      await h.close();
+    }
+  });
+
   test("GitHub's failed start offers a retry in the existing dialog", async () => {
     getGitHubApp.mockImplementationOnce(async () => {
       throw new Error("Temporary status failure");

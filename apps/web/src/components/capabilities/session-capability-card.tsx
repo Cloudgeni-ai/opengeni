@@ -61,6 +61,7 @@ function ScopedSessionCapabilityCard({
   onConfigured,
 }: SessionCapabilityCardProps) {
   const context = useAppContext();
+  const refreshGitHub = context.refreshGitHub;
   const recommendation = item.capability!;
   const [expanded, setExpanded] = useState(false);
   const [complete, setComplete] = useState(false);
@@ -70,6 +71,7 @@ function ScopedSessionCapabilityCard({
   const opener = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLElement>(null);
   const githubInFlight = useRef(false);
+  const githubRequestSequence = useRef(0);
   const active = useRef(true);
   const github = recommendation.id === "api:github-app";
   useEffect(() => {
@@ -81,6 +83,21 @@ function ScopedSessionCapabilityCard({
   useEffect(() => {
     if (github && context.githubStatus) setComplete(context.githubStatus.status === "bound");
   }, [github, context.githubStatus]);
+  useEffect(() => {
+    if (!github) return;
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (!event.persisted || !githubInFlight.current) return;
+      // A cancelled authorization can restore this exact React tree from the
+      // back/forward cache. Its prior request must not navigate or settle a
+      // newer attempt after the card becomes usable again.
+      githubRequestSequence.current += 1;
+      githubInFlight.current = false;
+      setBusy(false);
+      void refreshGitHub(workspaceId);
+    };
+    window.addEventListener("pageshow", onPageShow);
+    return () => window.removeEventListener("pageshow", onPageShow);
+  }, [github, refreshGitHub, workspaceId]);
   const catalogItem =
     resolvedItem ??
     context.workspaceCapabilityCatalog.find((entry) => entry.id === recommendation.id);
@@ -96,6 +113,7 @@ function ScopedSessionCapabilityCard({
   const apiKey = catalogItem ? capabilityConnectPlan(catalogItem).mode === "api_key" : false;
   async function connectGitHub() {
     if (githubInFlight.current) return;
+    const requestSequence = ++githubRequestSequence.current;
     githubInFlight.current = true;
     setBusy(true);
     setGithubError(null);
@@ -104,7 +122,7 @@ function ScopedSessionCapabilityCard({
       const status = await context.client.getGitHubApp(workspaceId, {
         returnPath: `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
       });
-      if (!active.current) return;
+      if (!active.current || requestSequence !== githubRequestSequence.current) return;
       if (status.status === "bound") {
         setComplete(true);
         void context.refreshGitHub(workspaceId);
@@ -120,15 +138,17 @@ function ScopedSessionCapabilityCard({
       window.location.assign(status.linkUrl);
     } catch (failure) {
       navigating = false;
-      if (active.current) {
+      if (active.current && requestSequence === githubRequestSequence.current) {
         setGithubError(
           failure instanceof Error ? failure.message : "Couldn't start GitHub setup. Try again.",
         );
         setExpanded(true);
       }
     } finally {
-      if (!navigating) githubInFlight.current = false;
-      if (active.current && !navigating) setBusy(false);
+      if (requestSequence === githubRequestSequence.current && !navigating) {
+        githubInFlight.current = false;
+        if (active.current) setBusy(false);
+      }
     }
   }
   return (
