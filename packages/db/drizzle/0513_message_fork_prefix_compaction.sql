@@ -36,7 +36,7 @@ BEGIN
      E'AND source_item.session_id = p_source_session_id AND source_item.active\n      AND source_item.position <= boundary_position')
   ) AS rewrites(anchor, replacement) LOOP
     IF (length(updated) - length(replace(updated, change.anchor, ''))) / length(change.anchor) <> 1 THEN
-      RAISE EXCEPTION 'message fork prefix rewrite did not match exactly once';
+      RAISE EXCEPTION 'message fork prefix rewrite did not match exactly once at %', left(change.anchor, 96);
     END IF;
     updated := replace(updated, change.anchor, change.replacement);
   END LOOP;
