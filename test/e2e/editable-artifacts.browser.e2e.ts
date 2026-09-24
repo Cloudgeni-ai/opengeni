@@ -426,7 +426,7 @@ describe("public editable-artifact browser composition", () => {
   ): Promise<void> {
     // Metadata only, from this test's disposable Postgres and browser storage.
     // Diagnostic failures must never change the browser acceptance result.
-    const [authority, retained] = await Promise.allSettled([
+    const sample = Promise.allSettled([
       (async () => {
         if (!evidenceSql) throw new Error("diagnostic database unavailable");
         const rows = await evidenceSql<
@@ -448,12 +448,21 @@ describe("public editable-artifact browser composition", () => {
       })(),
       readRetainedSpreadsheetCausality(page, artifactId),
     ]);
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const bounded = await Promise.race([
+      sample,
+      new Promise<null>((resolve) => {
+        deadline = setTimeout(() => resolve(null), 1_500);
+      }),
+    ]);
+    if (deadline) clearTimeout(deadline);
+    const [authority, retained] = bounded ?? [];
     console.info(
       `[editable-artifact-causality] ${JSON.stringify({
         stage,
         sampledAt: new Date().toISOString(),
-        authority: authority.status === "fulfilled" ? authority.value : { unavailable: true },
-        retained: retained.status === "fulfilled" ? retained.value : { unavailable: true },
+        authority: authority?.status === "fulfilled" ? authority.value : { unavailable: true },
+        retained: retained?.status === "fulfilled" ? retained.value : { unavailable: true },
       })}`,
     );
   }
@@ -475,6 +484,25 @@ async function readRetainedSpreadsheetCausality(page: Page, artifactId: string) 
       if (stores.some((store) => !database.objectStoreNames.contains(store))) {
         return { status: "browser-stores-unavailable" };
       }
+      // Find only this artifact's scoped keys. Never clone another artifact's
+      // snapshot, operation bytes, or pending command into the diagnostic.
+      const read = <T>(request: IDBRequest<T>) =>
+        new Promise<T>((resolve, reject) => {
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+      const keyTransaction = database.transaction(["replicas", "pendingTransactions"], "readonly");
+      const [headKeys, pendingKeys] = await Promise.all([
+        read(keyTransaction.objectStore("replicas").getAllKeys(undefined, 32)),
+        read(keyTransaction.objectStore("pendingTransactions").getAllKeys(undefined, 32)),
+      ]);
+      const namespaces = [
+        ...new Set(
+          [...headKeys, ...pendingKeys].flatMap((key) =>
+            Array.isArray(key) && key[1] === id && typeof key[0] === "string" ? [key[0]] : [],
+          ),
+        ),
+      ];
       const transaction = database.transaction(stores, "readonly");
       type Stored = {
         artifactId: string;
@@ -493,53 +521,66 @@ async function readRetainedSpreadsheetCausality(page: Page, artifactId: string) 
         causalBase?: unknown;
         intentBytes?: Uint8Array;
       };
-      const read = (store: string) =>
-        new Promise<Stored[]>((resolve, reject) => {
-          const request = transaction.objectStore(store).getAll();
-          request.onsuccess = () => resolve(request.result as Stored[]);
-          request.onerror = () => reject(request.error);
-        });
-      const [heads, snapshots, commits, pending] = await Promise.all(stores.map(read));
-      const matches = (value: Stored) => value.artifactId === id;
       return {
-        head: heads.filter(matches).map(({ cursor, stateHash }) => ({ cursor, stateHash })),
-        snapshots: snapshots.filter(matches).map(({ sequence, causalFrontier, stateHash }) => ({
-          sequence,
-          causalFrontier,
-          stateHash,
-        })),
-        committed: commits
-          .filter(matches)
-          .map(({ startSequence, endSequence, causalFrontier, stateHash, requestHash }) => ({
-            startSequence,
-            endSequence,
-            causalFrontier,
-            stateHash,
-            requestHash,
-          })),
-        pending: pending
-          .filter(matches)
-          .map(
-            ({
-              replicaId,
-              replicaCounter,
-              previousLocalTransactionId,
-              clientTransactionId,
-              requestHash,
-              observedHeadSequence,
-              causalBase,
-              intentBytes,
-            }) => ({
-              replicaId,
-              replicaCounter,
-              previousLocalTransactionId,
-              clientTransactionId,
-              requestHash,
-              observedHeadSequence,
-              causalBase,
-              intentByteLength: intentBytes?.byteLength,
-            }),
-          ),
+        scopes: await Promise.all(
+          namespaces.map(async (namespace) => {
+            const key = [namespace, id];
+            const [head, snapshot, committed, pending] = await Promise.all([
+              read(transaction.objectStore("replicas").get(key) as IDBRequest<Stored | undefined>),
+              read(transaction.objectStore("snapshots").get(key) as IDBRequest<Stored | undefined>),
+              read(
+                transaction.objectStore("committedTransactions").index("byScope").getAll(key, 17),
+              ) as Promise<Stored[]>,
+              read(
+                transaction.objectStore("pendingTransactions").index("byScope").getAll(key, 17),
+              ) as Promise<Stored[]>,
+            ]);
+            return {
+              head: head ? { cursor: head.cursor, stateHash: head.stateHash } : null,
+              snapshot: snapshot
+                ? {
+                    sequence: snapshot.sequence,
+                    causalFrontier: snapshot.causalFrontier,
+                    stateHash: snapshot.stateHash,
+                  }
+                : null,
+              committedTruncated: committed.length > 16,
+              committed: committed
+                .slice(0, 16)
+                .map(({ startSequence, endSequence, causalFrontier, stateHash, requestHash }) => ({
+                  startSequence,
+                  endSequence,
+                  causalFrontier,
+                  stateHash,
+                  requestHash,
+                })),
+              pendingTruncated: pending.length > 16,
+              pending: pending
+                .slice(0, 16)
+                .map(
+                  ({
+                    replicaId,
+                    replicaCounter,
+                    previousLocalTransactionId,
+                    clientTransactionId,
+                    requestHash,
+                    observedHeadSequence,
+                    causalBase,
+                    intentBytes,
+                  }) => ({
+                    replicaId,
+                    replicaCounter,
+                    previousLocalTransactionId,
+                    clientTransactionId,
+                    requestHash,
+                    observedHeadSequence,
+                    causalBase,
+                    intentByteLength: intentBytes?.byteLength,
+                  }),
+                ),
+            };
+          }),
+        ),
       };
     } finally {
       database.close();
