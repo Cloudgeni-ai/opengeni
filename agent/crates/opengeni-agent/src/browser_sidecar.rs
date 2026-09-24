@@ -190,20 +190,14 @@ impl BrowserSidecarManager {
                 .await);
             }
         };
-        if ready.service != "opengeni-browserd"
-            || ready.status != "ready"
-            || ready.protocol_version != 1
-            || ready.runtime_build_id != expected_runtime_build_id()
-            || ready.hostname != "127.0.0.1"
-            || ready.port == 0
-        {
+        if let Some(mismatches) = ready_document_mismatches(&ready, admin_token) {
             return Err(stop_with_startup_diagnostic(
                 child,
                 stderr_task,
                 stderr_diagnostic,
                 admin_token,
                 PlatformError::os(
-                    format!("browser controller sidecar returned an incompatible ready document (expected runtime build {}; received {})", expected_runtime_build_id(), ready.runtime_build_id.chars().take(128).collect::<String>()),
+                    format!("browser controller sidecar returned an incompatible ready document: {mismatches}"),
                 ),
             )
             .await);
@@ -418,6 +412,49 @@ struct ReadyDocument {
 
 fn expected_runtime_build_id() -> &'static str {
     option_env!("OPENGENI_RUNTIME_BUILD_ID").unwrap_or("development")
+}
+
+fn ready_document_mismatches(ready: &ReadyDocument, admin_token: &str) -> Option<String> {
+    let mut mismatches = Vec::new();
+    for (field, expected, received) in [
+        ("service", "opengeni-browserd", ready.service.as_str()),
+        ("status", "ready", ready.status.as_str()),
+        (
+            "runtimeBuildId",
+            expected_runtime_build_id(),
+            ready.runtime_build_id.as_str(),
+        ),
+        ("hostname", "127.0.0.1", ready.hostname.as_str()),
+    ] {
+        if received != expected {
+            mismatches.push(format!(
+                "{field} expected {}, received {}",
+                bounded_ready_value(expected, admin_token),
+                bounded_ready_value(received, admin_token)
+            ));
+        }
+    }
+    if ready.protocol_version != 1 {
+        mismatches.push(format!(
+            "protocolVersion expected 1, received {}",
+            ready.protocol_version
+        ));
+    }
+    if ready.port == 0 {
+        mismatches.push("port expected nonzero, received 0".to_string());
+    }
+    (!mismatches.is_empty()).then(|| mismatches.join("; "))
+}
+
+fn bounded_ready_value(value: &str, admin_token: &str) -> String {
+    format!(
+        "{:?}",
+        value
+            .replace(admin_token, "[redacted]")
+            .chars()
+            .take(128)
+            .collect::<String>()
+    )
 }
 
 async fn read_ready_line(stdout: tokio::process::ChildStdout) -> PlatformResult<ReadyDocument> {
@@ -765,6 +802,41 @@ mod tests {
         let ready =
             serde_json::from_str::<ReadyDocument>(&current).expect("current ready document");
         assert_eq!(ready.runtime_build_id, expected_runtime_build_id());
+        assert!(ready_document_mismatches(&ready, "test-secret").is_none());
+    }
+
+    #[test]
+    fn incompatible_ready_document_names_every_mismatched_field() {
+        let ready = ReadyDocument {
+            service: "other-service".to_string(),
+            status: "starting".to_string(),
+            protocol_version: 2,
+            runtime_build_id: "other-build".to_string(),
+            _computer_available: true,
+            hostname: "::1".to_string(),
+            port: 0,
+        };
+        let mismatches =
+            ready_document_mismatches(&ready, "test-secret").expect("mismatched document");
+        for field in [
+            "service expected \"opengeni-browserd\", received \"other-service\"",
+            "status expected \"ready\", received \"starting\"",
+            "runtimeBuildId expected",
+            "received \"other-build\"",
+            "hostname expected \"127.0.0.1\", received \"::1\"",
+            "protocolVersion expected 1, received 2",
+            "port expected nonzero, received 0",
+        ] {
+            assert!(mismatches.contains(field), "missing {field}: {mismatches}");
+        }
+        assert_eq!(
+            bounded_ready_value(&format!("{}\nsecret", "x".repeat(128)), "test-secret"),
+            format!("\"{}\"", "x".repeat(128))
+        );
+        assert_eq!(
+            bounded_ready_value("before-test-secret-after", "test-secret"),
+            "\"before-[redacted]-after\""
+        );
     }
 
     #[cfg(unix)]
