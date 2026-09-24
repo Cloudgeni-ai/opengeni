@@ -1,0 +1,26 @@
+{
+  "name": "opengeni-film-missing-piece",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/main.tsx --outdir dist --target browser --minify",
+    "preview": "bun run build && bun scripts/serve.ts",
+    "frames": "bun scripts/render-frames.ts",
+    "audio": "python3 scripts/audio/compose.py",
+    "encode": "bash scripts/encode.sh",
+    "render": "bun run build && bun scripts/render-frames.ts && python3 scripts/audio/compose.py && bash scripts/encode.sh",
+    "qa": "bash scripts/qa.sh",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "lucide-react": "1.8.0",
+    "react": "19.2.5",
+    "react-dom": "19.2.5"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "puppeteer-core": "24.22.0",
+    "typescript": "5.9.3"
+  }
+}

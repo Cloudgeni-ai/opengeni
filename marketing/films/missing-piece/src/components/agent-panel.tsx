@@ -1,0 +1,262 @@
+import { Check } from "lucide-react";
+import type { CSSProperties, ReactNode } from "react";
+import { clamp, ease, progress } from "../lib/anim";
+import { C, F } from "../theme";
+import { MESSAGE, T } from "../timeline";
+import { Abs, LiveDot } from "./primitives";
+
+export const PANEL = { x: 1000, y: 76, w: 720, h: 864 } as const;
+/** Where the customer's message lands inside the panel (window-local). */
+export const PANEL_MESSAGE = { x: 1160, y: 180, w: 520, h: 106 } as const;
+
+export function MessageBlock({ style }: { style?: CSSProperties }) {
+  return (
+    <div
+      style={{
+        background: C.ink,
+        color: C.white,
+        fontFamily: F.body,
+        fontSize: 26,
+        lineHeight: "35px",
+        padding: "18px 24px",
+        letterSpacing: "-0.005em",
+        ...style,
+      }}
+    >
+      {MESSAGE}
+    </div>
+  );
+}
+
+export function AgentPanel({ t }: { t: number }) {
+  // The panel drops into the slot and lands exactly on the dock beat.
+  const drop = ease.outCubic(progress(t, T.dock - 0.24, T.dock));
+  if (t < T.dock - 0.24) return null;
+  const settle = t > T.dock ? Math.sin((t - T.dock) * 38) * Math.exp(-(t - T.dock) * 16) * 3 : 0;
+  const y = (1 - drop) * -42 + settle;
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: PANEL.x,
+        top: PANEL.y,
+        width: PANEL.w,
+        height: PANEL.h,
+        transform: `translateY(${y}px)`,
+        opacity: clamp(drop * 1.6),
+        background: C.surface,
+        borderLeft: `2px solid ${C.ink}`,
+      }}
+    >
+      <div
+        style={{
+          height: 80,
+          borderBottom: `1.5px solid ${C.line}`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "0 40px",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <LiveDot size={12} />
+          <span style={{ fontFamily: F.body, fontSize: 27, fontWeight: 650, color: C.ink, letterSpacing: "-0.01em" }}>Agent</span>
+        </div>
+        <span style={{ fontFamily: F.mono, fontSize: 18, letterSpacing: "0.12em", color: C.muted }}>OPENGENI</span>
+      </div>
+
+      <Abs x={PANEL_MESSAGE.x - PANEL.x} y={PANEL_MESSAGE.y - PANEL.y} w={PANEL_MESSAGE.w} h={PANEL_MESSAGE.h} style={{ visibility: t >= T.messageLand ? "visible" : "hidden" }}>
+        <MessageBlock style={{ height: PANEL_MESSAGE.h }} />
+      </Abs>
+
+      <div
+        style={{
+          position: "absolute",
+          left: 40,
+          right: 40,
+          top: PANEL_MESSAGE.y - PANEL.y + PANEL_MESSAGE.h + 26,
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        <Step t={t} at={T.step1} tool="get_flight">
+          Checked TP 1353 · lands 17:10
+        </Step>
+        <Question t={t} />
+        <Step t={t} at={T.step2} tool="move_car_pickup">
+          Moved car pickup · 17:40
+        </Step>
+        <Step t={t} at={T.step3} tool="message_hotel">
+          Told Casa Alfama · arriving 18:30
+        </Step>
+        <Step t={t} at={T.step4} tool="move_dinner">
+          Moved dinner · 21:30
+        </Step>
+        <Appear t={t} at={T.allSet} style={{ marginTop: 26 }}>
+          <div style={{ fontFamily: F.body, fontSize: 28, fontWeight: 550, color: C.ink, letterSpacing: "-0.012em", lineHeight: "38px" }}>
+            All set. Your evening still works.
+          </div>
+        </Appear>
+        <Appear t={t} at={T.pray} style={{ marginTop: 18, alignSelf: "flex-end" }} lift={14}>
+          <div style={{ background: C.ink, padding: "10px 18px 8px" }}>
+            <img src="assets/emoji/pray.png" alt="" style={{ width: 38, height: 36, display: "block" }} />
+          </div>
+        </Appear>
+      </div>
+
+      <div
+        style={{
+          position: "absolute",
+          left: 40,
+          right: 40,
+          bottom: 26,
+          height: 64,
+          border: `1.5px solid ${C.line}`,
+          display: "flex",
+          alignItems: "center",
+          padding: "0 22px",
+          fontFamily: F.body,
+          fontSize: 23,
+          color: C.faint,
+        }}
+      >
+        Ask about your trip…
+      </div>
+    </div>
+  );
+}
+
+function Appear({
+  t,
+  at,
+  children,
+  style,
+  lift = 18,
+}: {
+  t: number;
+  at: number;
+  children: ReactNode;
+  style?: CSSProperties;
+  lift?: number;
+}) {
+  if (t < at) return null;
+  const p = ease.emphasized(progress(t, at, at + 0.42));
+  return (
+    <div style={{ opacity: clamp(p * 1.8), transform: `translateY(${(1 - p) * lift}px)`, ...style }}>{children}</div>
+  );
+}
+
+function Step({ t, at, tool, children }: { t: number; at: number; tool: string; children: ReactNode }) {
+  if (t < at) return null;
+  const done = t >= at + 0.5;
+  const p = ease.emphasized(progress(t, at, at + 0.36));
+  return (
+    <div
+      style={{
+        height: 44,
+        display: "flex",
+        alignItems: "center",
+        gap: 16,
+        opacity: clamp(p * 1.8),
+        transform: `translateX(${(1 - p) * 12}px)`,
+        fontFamily: F.mono,
+        fontVariantLigatures: "none",
+        fontSize: 23,
+        color: done ? C.ink2 : C.ink,
+        fontWeight: done ? 400 : 500,
+        whiteSpace: "nowrap",
+      }}
+    >
+      <LiveDot size={11} color={done ? C.ink : C.orange} />
+      <span style={{ flex: 1 }}>{children}</span>
+      <span style={{ fontSize: 16, color: C.faint, letterSpacing: "0.02em" }}>{tool}</span>
+    </div>
+  );
+}
+
+function Question({ t }: { t: number }) {
+  if (t < T.question) return null;
+  const p = ease.emphasized(progress(t, T.question, T.question + 0.45));
+  const tapped = t >= T.tap;
+  const press = t >= T.tap - 0.02 && t < T.tap + 0.12 ? 0.96 : 1;
+  const answered = ease.outCubic(progress(t, T.tap + 0.05, T.tap + 0.35));
+  return (
+    <div
+      style={{
+        margin: "14px 0 14px",
+        background: C.ink,
+        padding: "22px 24px 24px",
+        opacity: clamp(p * 1.8),
+        transform: `translateY(${(1 - p) * 20}px)`,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 12, fontFamily: F.mono, fontSize: 16, letterSpacing: "0.1em", color: "rgba(255,255,255,0.62)" }}>
+        <LiveDot size={8} />
+        NEEDS YOUR OK
+      </div>
+      <div style={{ marginTop: 12, fontFamily: F.body, fontSize: 27, fontWeight: 550, color: C.white, lineHeight: "36px", letterSpacing: "-0.01em" }}>
+        The car change costs €12. Go ahead?
+      </div>
+      <div style={{ marginTop: 18, display: "flex", gap: 12 }}>
+        <div
+          style={{
+            position: "relative",
+            background: tapped ? C.orangeDeep : C.orange,
+            color: C.white,
+            fontFamily: F.body,
+            fontSize: 22,
+            fontWeight: 650,
+            padding: "12px 22px",
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            transform: `scale(${press})`,
+          }}
+        >
+          {answered > 0 ? (
+            <span style={{ display: "inline-flex", width: 22 * answered, overflow: "hidden" }}>
+              <Check size={22} strokeWidth={2.8} />
+            </span>
+          ) : null}
+          Yes, change it
+          <Cursor t={t} />
+        </div>
+        <div
+          style={{
+            border: "1.5px solid rgba(255,255,255,0.38)",
+            color: "rgba(255,255,255,0.86)",
+            fontFamily: F.body,
+            fontSize: 22,
+            fontWeight: 550,
+            padding: "11px 20px",
+            opacity: 1 - answered * 0.7,
+          }}
+        >
+          Keep 14:40
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The customer's pointer. Positioned relative to the button it presses. */
+function Cursor({ t }: { t: number }) {
+  if (t < T.cursorIn || t > T.tap + 0.9) return null;
+  const travel = ease.camera(progress(t, T.cursorIn, T.tap - 0.1));
+  const leave = ease.inOutCubic(progress(t, T.tap + 0.25, T.tap + 0.85));
+  const x = 120 + (1 - travel) * 300 + leave * 40;
+  const y = 30 + (1 - travel) * 340 + leave * 60;
+  const click = t >= T.tap - 0.04 && t < T.tap + 0.08 ? 0.84 : 1;
+  const opacity = clamp(progress(t, T.cursorIn, T.cursorIn + 0.2)) * (1 - leave);
+  return (
+    <svg
+      width={34}
+      height={46}
+      viewBox="0 0 34 46"
+      style={{ position: "absolute", left: x, top: y, opacity, transform: `scale(${click})`, transformOrigin: "4px 4px", pointerEvents: "none" }}
+    >
+      <path d="M4 3 L4 36 L12.5 28.5 L18.5 42 L24 39.5 L18 26.5 L29.5 26.5 Z" fill={C.ink} stroke={C.white} strokeWidth={2.4} strokeLinejoin="round" />
+    </svg>
+  );
+}
