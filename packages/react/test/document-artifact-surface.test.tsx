@@ -238,6 +238,18 @@ describe("artifact document surface", () => {
           style: { headerRows: 1, headerFill: "#000000ff" },
           rows: [[[{ text: "Contrasted" }]]],
         },
+        {
+          kind: "table",
+          id: "mid-gray-header",
+          style: { headerRows: 1, headerFill: "#767676" },
+          rows: [[[{ text: "White on gray" }]]],
+        },
+        {
+          kind: "table",
+          id: "nearby-midtone-header",
+          style: { headerRows: 1, headerFill: "#7b7b7bff" },
+          rows: [[[{ text: "Black on gray" }]]],
+        },
       ],
     };
     const rendered = await renderComponent(
@@ -245,12 +257,14 @@ describe("artifact document surface", () => {
     );
     await flush();
     const headers = rendered.container.querySelectorAll<HTMLElement>("th");
-    expect(headers.length).toBe(6);
+    expect(headers.length).toBe(8);
     expect(headers[0]!.style.color).toBe("");
     expect(headers[2]!.style.color).toBe("");
     expect(headers[3]!.style.color).toBe("#fff");
     expect(headers[4]!.style.color).toBe("#171717");
     expect(headers[5]!.style.color).toBe("#fff");
+    expect(headers[6]!.style.color).toBe("#fff");
+    expect(headers[7]!.style.color).toBe("#000");
     expect(headers[0]!.querySelectorAll("span")[0]!.style.color).toBe("");
     expect(headers[1]!.querySelector("span")!.style.color).toBe("#ffffff");
     expect(headers[0]!.closest("[data-og-document-page]")?.getAttribute("style")).toContain(

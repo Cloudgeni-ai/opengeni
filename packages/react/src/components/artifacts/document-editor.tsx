@@ -1490,23 +1490,23 @@ function tableHeaderTextColor(fill: string | undefined): string | undefined {
     });
     return linear[0]! * 0.2126 + linear[1]! * 0.7152 + linear[2]! * 0.0722;
   };
-  if (alpha < 1) {
-    // A paginated page is white; a continuous page follows its theme. Choose
-    // a fixed foreground only if it contrasts on both extreme backdrops.
-    const backdrops = [luminanceOn(0), luminanceOn(255)];
-    const darkTextLuminance = ((23 / 255 + 0.055) / 1.055) ** 2.4;
-    const whiteContrast = Math.min(...backdrops.map((value) => 1.05 / (value + 0.05)));
-    const darkContrast = Math.min(
-      ...backdrops.map(
-        (value) =>
-          (Math.max(value, darkTextLuminance) + 0.05) / (Math.min(value, darkTextLuminance) + 0.05),
-      ),
-    );
-    if (Math.max(whiteContrast, darkContrast) < 4.5) return undefined;
-    return whiteContrast > darkContrast ? "#fff" : "#171717";
+  // A paginated page is white; a continuous page follows its theme. For alpha
+  // fills, choose a fixed foreground only if it contrasts on both extremes.
+  const backdrops = alpha < 1 ? [luminanceOn(0), luminanceOn(255)] : [luminanceOn(255)];
+  const darkTextLuminance = ((23 / 255 + 0.055) / 1.055) ** 2.4;
+  const whiteContrast = Math.min(...backdrops.map((value) => 1.05 / (value + 0.05)));
+  const darkContrast = Math.min(
+    ...backdrops.map(
+      (value) =>
+        (Math.max(value, darkTextLuminance) + 0.05) / (Math.min(value, darkTextLuminance) + 0.05),
+    ),
+  );
+  if (Math.max(whiteContrast, darkContrast) < 4.5) {
+    // Opaque midtones need pure black where the softer #171717 cannot meet
+    // normal-text contrast. Translucent fills inherit the theme's text color.
+    return alpha < 1 ? undefined : "#000";
   }
-  const luminance = luminanceOn(255);
-  return luminance < 0.18 ? "#fff" : "#171717";
+  return whiteContrast > darkContrast ? "#fff" : "#171717";
 }
 
 function ToolbarButton({
