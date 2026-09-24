@@ -1293,6 +1293,36 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
       ...(await shared.admin`select item_ordered::text as item, active, position
       from session_history_items where session_id = ${stableFork.sessionId} order by position`),
     ]).toEqual([...prefix]);
+    // Real compaction deactivates the entire old history and appends a new
+    // model-facing summary. A subsequent completed message still has a safe
+    // boundary in that current active history, even while the turn runs.
+    const postCompactionMessage = crypto.randomUUID();
+    const [historyTail] = await shared.admin<Array<{ position: number }>>`
+      select max(position)::integer as position from session_history_items
+      where session_id = ${sourceSessionId}`;
+    const afterPosition = historyTail!.position + 1;
+    await shared.admin`insert into session_history_items
+      (account_id, workspace_id, session_id, turn_id, position, item)
+      values (${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${claim.turn.id}, ${afterPosition},
+        ${shared.admin.json({ type: "message", role: "assistant", content: "After compaction" })})`;
+    await shared.admin`insert into session_events
+      (id, account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+      select ${postCompactionMessage}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${claim.turn.id}, coalesce(max(sequence), 0) + 1, 'agent.message.completed',
+        '{"text":"After compaction"}' from session_events where session_id = ${sourceSessionId}`;
+    const postCompactionFork = await forkSessionContent(client.db, {
+      ...input,
+      sourceEventId: postCompactionMessage,
+      operationKey: crypto.randomUUID(),
+    });
+    expect(postCompactionFork.copiedHistoryItemCount).toBe(2);
+    const postCompactionHistory = await shared.admin<Array<{ active: boolean; item: unknown }>>`
+      select active, item from session_history_items
+      where session_id = ${postCompactionFork.sessionId} order by position`;
+    expect(postCompactionHistory.every((row) => row.active)).toBe(true);
+    expect(JSON.stringify(postCompactionHistory)).not.toContain("Retained answer");
+    expect(JSON.stringify(postCompactionHistory)).toContain("After compaction");
     await expect(
       forkSessionContent(client.db, {
         ...input,
@@ -1367,6 +1397,58 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
       where session_id = ${sourceSessionId} and position = 1`;
     await expect(fork(replyEventId)).rejects.toThrow("Session tenancy request is invalid");
     await expect(fork(userEventId)).rejects.toThrow("Session tenancy request is invalid");
+    // Model-facing history after an actual compaction consists of new active
+    // rows, while every older row is inactive. Its receipt authenticates the
+    // opaque checkpoint, and both later user/assistant boundaries can copy it.
+    await shared.admin`update session_history_items set active = false
+      where session_id = ${sourceSessionId}`;
+    await shared.admin`insert into session_history_items
+      (account_id, workspace_id, session_id, turn_id, position, item)
+      values (${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${turnId}, 4,
+        ${shared.admin.json({ type: "compaction", encrypted_content: "checkpoint" })})`;
+    const compactedEventId = crypto.randomUUID();
+    await shared.admin`insert into session_events
+      (id, account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+      values (${compactedEventId}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${turnId}, 3, 'session.context.compacted', ${shared.admin.json({ summaryPosition: 4 })})`;
+    const nextTurnId = crypto.randomUUID();
+    const nextUserEventId = crypto.randomUUID();
+    const nextReplyEventId = crypto.randomUUID();
+    await shared.admin`insert into session_turns (
+      id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+      status, position, prompt, model, reasoning_effort, sandbox_backend
+    ) values (${nextTurnId}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+      ${nextUserEventId}, 'prefix-compaction-next-turn', 'completed', 2,
+      'Later question', 'test-model', 'medium', 'none')`;
+    for (const [index, event] of [
+      { id: nextUserEventId, type: "user.message", text: "Later question" },
+      { id: nextReplyEventId, type: "agent.message.completed", text: "Later answer" },
+    ].entries()) {
+      await shared.admin`insert into session_events
+        (id, account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+        values (${event.id}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+          ${nextTurnId}, ${index + 4}, ${event.type}, ${shared.admin.json({ text: event.text })})`;
+      await shared.admin`insert into session_history_items
+        (account_id, workspace_id, session_id, turn_id, position, item)
+        values (${human.accountId}, ${workspaceId}, ${sourceSessionId},
+          ${nextTurnId}, ${index + 5}, ${shared.admin.json({
+            type: "message",
+            role: index === 0 ? "user" : "assistant",
+            content: event.text,
+          })})`;
+    }
+    for (const eventId of [nextUserEventId, nextReplyEventId]) {
+      const compactedFork = await fork(eventId);
+      expect(compactedFork.copiedHistoryItemCount).toBe(eventId === nextUserEventId ? 2 : 3);
+      const rows = await shared.admin<Array<{ active: boolean; item: unknown }>>`
+        select active, item from session_history_items
+        where session_id = ${compactedFork.sessionId} order by position`;
+      expect(rows.every((row) => row.active)).toBe(true);
+      expect(JSON.stringify(rows)).not.toContain("Earlier answer");
+      expect(JSON.stringify(rows)).not.toContain("Later secret");
+    }
+    await shared.admin`delete from session_events where id = ${compactedEventId}`;
+    await expect(fork(nextReplyEventId)).rejects.toThrow("Session tenancy request is invalid");
   }, 180_000);
 
   test("message fork copies the exact prefix and replays the same boundary", async () => {
