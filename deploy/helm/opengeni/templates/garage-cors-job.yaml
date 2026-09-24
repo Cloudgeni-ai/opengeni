@@ -25,9 +25,9 @@ spec:
       priorityClassName: {{ $priorityClassName | quote }}
       {{- end }}
       containers:
-        - name: mc
-          image: {{ printf "%s:%s" .Values.garage.mcImage.repository .Values.garage.mcImage.tag | quote }}
-          imagePullPolicy: {{ .Values.garage.mcImage.pullPolicy }}
+        - name: curl
+          image: {{ if .Values.garage.corsImage.digest }}{{ printf "%s:%s@%s" .Values.garage.corsImage.repository .Values.garage.corsImage.tag .Values.garage.corsImage.digest | quote }}{{ else }}{{ printf "%s:%s" .Values.garage.corsImage.repository .Values.garage.corsImage.tag | quote }}{{ end }}
+          imagePullPolicy: {{ .Values.garage.corsImage.pullPolicy }}
           env:
             - name: HTTP_PROXY
               value: ""
@@ -77,9 +77,13 @@ spec:
               </CORSConfiguration>
               EOF
               for i in $(seq 1 30); do
-                mc alias set local {{ include "opengeni.garageInternalEndpoint" . | quote }} "$GARAGE_ACCESS_KEY" "$GARAGE_SECRET_KEY" &&
-                mc cors set local/{{ .Values.garage.bucket }} /tmp/cors.xml &&
-                exit 0
+                if curl --fail --silent --show-error --max-time 5 \
+                  --aws-sigv4 aws:amz:us-east-1:s3 \
+                  --user "$GARAGE_ACCESS_KEY:$GARAGE_SECRET_KEY" \
+                  --request PUT --data-binary @/tmp/cors.xml \
+                  {{ printf "%s/%s?cors=" (include "opengeni.garageInternalEndpoint" .) .Values.garage.bucket | quote }}; then
+                  exit 0
+                fi
                 sleep 2
               done
               exit 1

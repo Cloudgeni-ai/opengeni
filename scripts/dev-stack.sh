@@ -1222,7 +1222,9 @@ if [ "$OPENGENI_DEV_BACKEND" = "native" ]; then
 elif [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
   docker compose --profile minio up -d postgres nats temporal minio minio-init
 else
-  docker compose up -d postgres nats temporal garage garage-init
+  docker compose up -d postgres nats temporal garage
+  # Configure the Garage fixture with its S3 API; no MinIO client image is needed.
+  bun scripts/dev-native-storage.ts provision .
 fi
 echo "OpenGeni setup: applying database migrations and runtime roles."
 (cd packages/db && bun run migrate)
