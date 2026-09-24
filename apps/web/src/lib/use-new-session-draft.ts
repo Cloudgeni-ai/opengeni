@@ -386,11 +386,25 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
 
   const flushForSend = useCallback(
     async (sendSnapshot?: NewSessionDraftEditable): Promise<FlushedNewSessionDraft | null> => {
-      if (loadingRef.current || !draftRef.current) return null;
+      if (loadingRef.current) return null;
       if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
       autosaveTimer.current = null;
       const snapshot = cloneEditable(sendSnapshot ?? valueRef.current);
       const generation = targetGeneration.current;
+      if (!draftRef.current) {
+        // A consumed draft can be followed by a newer local edit. Reacquire
+        // the safe seed before preserving that edit.
+        try {
+          const remote = await readRemote();
+          if (!remote || generation !== targetGeneration.current) return null;
+          draftRef.current = remote.draft;
+          lastSavedSignature.current = draftSignature(remote.editable);
+          setDraft(remote.draft);
+        } catch (cause) {
+          if (generation === targetGeneration.current) setError(asError(cause));
+          return null;
+        }
+      }
       // A sibling can save between our read and write. Retry a bounded number of
       // times; only the explicit Send may choose the visible snapshot over it.
       for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -445,8 +459,6 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       const generation = targetGeneration.current;
       const epoch = persistenceEpoch.current + 1;
       persistenceEpoch.current = epoch;
-      const snapshot = cloneEditable(valueRef.current);
-      const signature = draftSignature(snapshot);
       const priorSaves = saveChain.current;
 
       // Session creation accepted this exact server revision. Invalidate every
@@ -495,6 +507,9 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           lastSavedSignature.current = draftSignature(remote.editable);
           passiveProjectionSignature.current = null;
           setDraft(remote.draft);
+          // Typing may continue while the safe-seed fetch is pending.
+          const snapshot = cloneEditable(valueRef.current);
+          const signature = draftSignature(snapshot);
           if (signature === visibleSignature) {
             // The server now owns the safe seed. Keep the post-create composer
             // UI-only until the next page load instead of persisting the

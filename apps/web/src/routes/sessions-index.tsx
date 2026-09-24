@@ -1238,7 +1238,10 @@ function SessionsIndexRouteContent({
                     flushed,
                     visibleSignature,
                   );
-                  if (acknowledged?.kind === "consumed") {
+                  if (
+                    acknowledged?.kind === "consumed" &&
+                    newSessionDraft.isCurrentSignature(visibleSignature)
+                  ) {
                     setMessage("");
                     setDraft(emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend));
                     attachments.removeReadyFiles(
@@ -1247,7 +1250,7 @@ function SessionsIndexRouteContent({
                       ),
                     );
                   } else if (
-                    !acknowledged ||
+                    acknowledged?.kind !== "preserved" ||
                     !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
                   ) {
                     // The message was already accepted. If there is no newer

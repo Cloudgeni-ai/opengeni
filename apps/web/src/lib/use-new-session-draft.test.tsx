@@ -1270,6 +1270,77 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
+  test("preserves text typed while post-create safe-seed read is pending", async () => {
+    const safeSeed = deferred<NewSessionDraft>();
+    const requests: SaveNewSessionDraftRequest[] = [];
+    let reads = 0;
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => {
+          reads += 1;
+          return reads === 1 ? remote(0) : await safeSeed.promise;
+        },
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          return remote(request.expectedRevision + 1, request);
+        },
+      }),
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "sent" })));
+    const flushed = await actRun(() => hook.result.current.draft.flushForSend());
+    if (!flushed) throw new Error("Expected the submitted draft to flush");
+
+    let settlement!: ReturnType<(typeof hook.result.current.draft)["acknowledgeConsumed"]>;
+    await actRun(() => {
+      settlement = hook.result.current.draft.acknowledgeConsumed(flushed);
+    });
+    await actRun(() => hook.result.current.setValue(editable({ text: "typed during read" })));
+    const result = await actRun(async () => {
+      safeSeed.resolve(remote(2));
+      return await settlement;
+    });
+
+    expect(result).toEqual({
+      kind: "preserved",
+      flushed: expect.objectContaining({ revision: 3 }),
+    });
+    expect(requests[1]).toMatchObject({ expectedRevision: 2, text: "typed during read" });
+    expect(hook.result.current.value.text).toBe("typed during read");
+    await hook.unmount();
+  });
+
+  test("can persist a local edit after a consumed draft if the editor changed before clearing", async () => {
+    const requests: SaveNewSessionDraftRequest[] = [];
+    let reads = 0;
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => {
+          reads += 1;
+          return reads === 1 ? remote(0) : remote(2);
+        },
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          return remote(request.expectedRevision + 1, request);
+        },
+      }),
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "sent" })));
+    const flushed = await actRun(() => hook.result.current.draft.flushForSend());
+    if (!flushed) throw new Error("Expected the submitted draft to flush");
+    expect(await actRun(() => hook.result.current.draft.acknowledgeConsumed(flushed))).toEqual({
+      kind: "consumed",
+    });
+
+    await actRun(() => hook.result.current.setValue(editable({ text: "new unsent text" })));
+    const preserved = await actRun(() => hook.result.current.draft.flushForSend());
+    expect(preserved?.revision).toBe(3);
+    expect(requests[1]).toMatchObject({ expectedRevision: 2, text: "new unsent text" });
+    expect(hook.result.current.value.text).toBe("new unsent text");
+    await hook.unmount();
+  });
+
   test("a post-create sibling edit does not strand the already-created session", async () => {
     const requests: SaveNewSessionDraftRequest[] = [];
     let reads = 0;
