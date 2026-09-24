@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type Page } from "playwright";
+import postgres from "postgres";
 
 import { OpenGeniClient } from "@opengeni/sdk/artifacts";
 import { createEditableArtifactReplicaId } from "@opengeni/sdk/editable-artifacts";
@@ -40,6 +41,7 @@ describe("public editable-artifact browser composition", () => {
   let demoBaseUrl: string;
   let workspaceId: string;
   let client: OpenGeniClient;
+  let evidenceSql: postgres.Sql | undefined;
 
   beforeAll(async () => {
     try {
@@ -50,6 +52,7 @@ describe("public editable-artifact browser composition", () => {
       });
       services = await startTestServices({ temporal: true, objectStorage: true });
       await services.migrate();
+      evidenceSql = postgres(services.databaseUrl, { max: 1, prepare: false });
 
       const apiPort = await freePort();
       const demoPort = await freePort();
@@ -100,7 +103,13 @@ describe("public editable-artifact browser composition", () => {
       if (!workspace) throw new Error("Editable-artifact E2E has no seeded workspace");
       workspaceId = workspace.id;
     } catch (error) {
-      await Promise.allSettled([browser?.close(), demo?.stop(), api?.stop(), services?.down()]);
+      await Promise.allSettled([
+        browser?.close(),
+        demo?.stop(),
+        api?.stop(),
+        evidenceSql?.end({ timeout: 5 }),
+        services?.down(),
+      ]);
       if (runtimeRoot) await removeTempDir(runtimeRoot).catch(() => undefined);
       throw error;
     }
@@ -111,6 +120,7 @@ describe("public editable-artifact browser composition", () => {
       browser?.close(),
       demo?.stop(),
       api?.stop(),
+      evidenceSql?.end({ timeout: 5 }),
       services?.down(),
       runtimeRoot ? removeTempDir(runtimeRoot) : Promise.resolve(),
     ]);
@@ -129,6 +139,7 @@ describe("public editable-artifact browser composition", () => {
     });
     const page = await context.newPage();
     const observed = observeBrowser(page);
+    let spreadsheetArtifactId: string | null = null;
     try {
       await page.goto(
         `${demoBaseUrl}/editable-artifacts.html?workspaceId=${encodeURIComponent(workspaceId)}`,
@@ -149,7 +160,8 @@ describe("public editable-artifact browser composition", () => {
       await capture(page, "editable-artifact-document-dark.png");
 
       await openArtifactStart(page);
-      await createArtifact(page, "Spreadsheet", "E2E operating model");
+      const spreadsheetArtifact = await createArtifact(page, "Spreadsheet", "E2E operating model");
+      spreadsheetArtifactId = spreadsheetArtifact.id;
       const addWorksheet = page
         .getByRole("button", { name: "Add worksheet", exact: true })
         .filter({ hasText: "Add worksheet" });
@@ -169,7 +181,9 @@ describe("public editable-artifact browser composition", () => {
           describe: () => observed.diagnostics.join("\n"),
         },
       );
+      await recordSpreadsheetCausality(page, spreadsheetArtifact.id, "before-first-reload");
       await page.reload();
+      await recordSpreadsheetCausality(page, spreadsheetArtifact.id, "after-first-reload");
       await page.getByRole("grid", { name: /spreadsheet$/u }).waitFor({ timeout: 30_000 });
       await waitFor(
         async () =>
@@ -191,7 +205,9 @@ describe("public editable-artifact browser composition", () => {
           describe: () => observed.diagnostics.join("\n"),
         },
       );
+      await recordSpreadsheetCausality(page, spreadsheetArtifact.id, "before-second-reload");
       await page.reload();
+      await recordSpreadsheetCausality(page, spreadsheetArtifact.id, "after-second-reload");
       await waitFor(
         async () =>
           (await page.locator('[data-og-cell="A1"]').getAttribute("aria-label")) ===
@@ -290,6 +306,12 @@ describe("public editable-artifact browser composition", () => {
       expect(observed.webSocketUrls.length).toBeGreaterThanOrEqual(3);
       expect(observed.diagnostics).toEqual([]);
     } catch (error) {
+      if (
+        spreadsheetArtifactId !== null &&
+        new URL(page.url()).searchParams.get("artifactId") === spreadsheetArtifactId
+      ) {
+        await recordSpreadsheetCausality(page, spreadsheetArtifactId, "failure");
+      }
       throw new Error(`${String(error)}\n${await browserDiagnostics(page, observed, api.logs())}`, {
         cause: error,
       });
@@ -396,7 +418,134 @@ describe("public editable-artifact browser composition", () => {
     );
     return observedSequence;
   }
+
+  async function recordSpreadsheetCausality(
+    page: Page,
+    artifactId: string,
+    stage: string,
+  ): Promise<void> {
+    // Metadata only, from this test's disposable Postgres and browser storage.
+    // Diagnostic failures must never change the browser acceptance result.
+    const [authority, retained] = await Promise.allSettled([
+      (async () => {
+        if (!evidenceSql) throw new Error("diagnostic database unavailable");
+        const rows = await evidenceSql<
+          { headSequence: string | number; causalFrontier: unknown; stateHash: string }[]
+        >`
+          select head_sequence as "headSequence", causal_frontier as "causalFrontier",
+            state_hash as "stateHash"
+          from editable_artifacts
+          where workspace_id = ${workspaceId}::uuid and id = ${artifactId}
+        `;
+        const head = rows[0];
+        return head
+          ? {
+              sequence: Number(head.headSequence),
+              frontier: head.causalFrontier,
+              stateHash: head.stateHash,
+            }
+          : null;
+      })(),
+      readRetainedSpreadsheetCausality(page, artifactId),
+    ]);
+    console.info(
+      `[editable-artifact-causality] ${JSON.stringify({
+        stage,
+        sampledAt: new Date().toISOString(),
+        authority: authority.status === "fulfilled" ? authority.value : { unavailable: true },
+        retained: retained.status === "fulfilled" ? retained.value : { unavailable: true },
+      })}`,
+    );
+  }
 });
+
+async function readRetainedSpreadsheetCausality(page: Page, artifactId: string) {
+  return await page.evaluate(async (id) => {
+    const name = "opengeni-editable-artifacts";
+    if (!(await indexedDB.databases()).some((database) => database.name === name)) {
+      return { status: "no-browser-database" };
+    }
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(name);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      const stores = ["replicas", "snapshots", "committedTransactions", "pendingTransactions"];
+      if (stores.some((store) => !database.objectStoreNames.contains(store))) {
+        return { status: "browser-stores-unavailable" };
+      }
+      const transaction = database.transaction(stores, "readonly");
+      type Stored = {
+        artifactId: string;
+        cursor?: number;
+        sequence?: number;
+        startSequence?: number;
+        endSequence?: number;
+        stateHash?: string;
+        causalFrontier?: unknown;
+        replicaId?: string;
+        replicaCounter?: number;
+        previousLocalTransactionId?: string | null;
+        clientTransactionId?: string;
+        requestHash?: string;
+        observedHeadSequence?: number;
+        causalBase?: unknown;
+        intentBytes?: Uint8Array;
+      };
+      const read = (store: string) =>
+        new Promise<Stored[]>((resolve, reject) => {
+          const request = transaction.objectStore(store).getAll();
+          request.onsuccess = () => resolve(request.result as Stored[]);
+          request.onerror = () => reject(request.error);
+        });
+      const [heads, snapshots, commits, pending] = await Promise.all(stores.map(read));
+      const matches = (value: Stored) => value.artifactId === id;
+      return {
+        head: heads.filter(matches).map(({ cursor, stateHash }) => ({ cursor, stateHash })),
+        snapshots: snapshots.filter(matches).map(({ sequence, causalFrontier, stateHash }) => ({
+          sequence,
+          causalFrontier,
+          stateHash,
+        })),
+        committed: commits
+          .filter(matches)
+          .map(({ startSequence, endSequence, causalFrontier, stateHash, requestHash }) => ({
+            startSequence,
+            endSequence,
+            causalFrontier,
+            stateHash,
+            requestHash,
+          })),
+        pending: pending
+          .filter(matches)
+          .map(
+            ({
+              replicaId,
+              replicaCounter,
+              previousLocalTransactionId,
+              clientTransactionId,
+              requestHash,
+              observedHeadSequence,
+              causalBase,
+              intentBytes,
+            }) => ({
+              replicaId,
+              replicaCounter,
+              previousLocalTransactionId,
+              clientTransactionId,
+              requestHash,
+              observedHeadSequence,
+              causalBase,
+              intentByteLength: intentBytes?.byteLength,
+            }),
+          ),
+      };
+    } finally {
+      database.close();
+    }
+  }, artifactId);
+}
 
 function artifactApiEnvironment(
   services: TestServices,
