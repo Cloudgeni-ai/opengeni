@@ -551,11 +551,11 @@ async function summarizeWithCodexOverflowTrimming(
   } catch (error) {
     if (!isContextWindowExceeded(error)) throw error;
     // The provider is more authoritative than the byte/4 estimate. Refit once
-    // to 70% of both the configured target and the actual prepared estimate;
+    // to half of both the configured target and the actual prepared estimate;
     // then fail terminally with prior history intact. Never issue one failing
-    // request per oldest item. The production incident proved that the
-    // provider can count slightly more than twice the byte/4 estimate, so a
-    // half-size retry is the smallest honest bound for that observed skew.
+    // request per oldest item. The retry is bounded, not a guarantee: the
+    // provider can count more than twice the byte/4 estimate, and the prepared
+    // tool/instruction prefix is outside this history estimate.
     const retryBudget = Math.floor(
       Math.min(initialBudget * 0.5, preparation.estimatedInputTokens * 0.5),
     );
