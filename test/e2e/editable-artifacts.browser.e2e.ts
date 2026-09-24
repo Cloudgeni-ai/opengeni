@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type Page } from "playwright";
+import postgres from "postgres";
 
 import { OpenGeniClient } from "@opengeni/sdk/artifacts";
 import { createEditableArtifactReplicaId } from "@opengeni/sdk/editable-artifacts";
@@ -40,6 +41,7 @@ describe("public editable-artifact browser composition", () => {
   let demoBaseUrl: string;
   let workspaceId: string;
   let client: OpenGeniClient;
+  let evidenceSql: postgres.Sql | undefined;
 
   beforeAll(async () => {
     try {
@@ -50,6 +52,7 @@ describe("public editable-artifact browser composition", () => {
       });
       services = await startTestServices({ temporal: true, objectStorage: true });
       await services.migrate();
+      evidenceSql = postgres(services.databaseUrl, { max: 1, prepare: false });
 
       const apiPort = await freePort();
       const demoPort = await freePort();
@@ -100,7 +103,13 @@ describe("public editable-artifact browser composition", () => {
       if (!workspace) throw new Error("Editable-artifact E2E has no seeded workspace");
       workspaceId = workspace.id;
     } catch (error) {
-      await Promise.allSettled([browser?.close(), demo?.stop(), api?.stop(), services?.down()]);
+      await Promise.allSettled([
+        browser?.close(),
+        demo?.stop(),
+        api?.stop(),
+        evidenceSql?.end({ timeout: 5 }),
+        services?.down(),
+      ]);
       if (runtimeRoot) await removeTempDir(runtimeRoot).catch(() => undefined);
       throw error;
     }
@@ -111,6 +120,7 @@ describe("public editable-artifact browser composition", () => {
       browser?.close(),
       demo?.stop(),
       api?.stop(),
+      evidenceSql?.end({ timeout: 5 }),
       services?.down(),
       runtimeRoot ? removeTempDir(runtimeRoot) : Promise.resolve(),
     ]);
@@ -129,6 +139,7 @@ describe("public editable-artifact browser composition", () => {
     });
     const page = await context.newPage();
     const observed = observeBrowser(page);
+    let spreadsheetArtifactId: string | null = null;
     try {
       await page.goto(
         `${demoBaseUrl}/editable-artifacts.html?workspaceId=${encodeURIComponent(workspaceId)}`,
@@ -149,7 +160,8 @@ describe("public editable-artifact browser composition", () => {
       await capture(page, "editable-artifact-document-dark.png");
 
       await openArtifactStart(page);
-      await createArtifact(page, "Spreadsheet", "E2E operating model");
+      const spreadsheetArtifact = await createArtifact(page, "Spreadsheet", "E2E operating model");
+      spreadsheetArtifactId = spreadsheetArtifact.id;
       const addWorksheet = page
         .getByRole("button", { name: "Add worksheet", exact: true })
         .filter({ hasText: "Add worksheet" });
@@ -290,6 +302,12 @@ describe("public editable-artifact browser composition", () => {
       expect(observed.webSocketUrls.length).toBeGreaterThanOrEqual(3);
       expect(observed.diagnostics).toEqual([]);
     } catch (error) {
+      if (
+        spreadsheetArtifactId !== null &&
+        new URL(page.url()).searchParams.get("artifactId") === spreadsheetArtifactId
+      ) {
+        await recordSpreadsheetCausality(page, spreadsheetArtifactId, "failure");
+      }
       throw new Error(`${String(error)}\n${await browserDiagnostics(page, observed, api.logs())}`, {
         cause: error,
       });
@@ -396,7 +414,182 @@ describe("public editable-artifact browser composition", () => {
     );
     return observedSequence;
   }
+
+  async function recordSpreadsheetCausality(
+    page: Page,
+    artifactId: string,
+    stage: string,
+  ): Promise<void> {
+    // Metadata only, from this test's disposable Postgres and browser storage.
+    // Diagnostic failures must never change the browser acceptance result.
+    const authorityProbe = (async () => {
+      if (!evidenceSql) throw new Error("diagnostic database unavailable");
+      const rows = await evidenceSql<
+        { headSequence: string | number; causalFrontier: unknown; stateHash: string }[]
+      >`
+          select head_sequence as "headSequence", causal_frontier as "causalFrontier",
+            state_hash as "stateHash"
+          from editable_artifacts
+          where workspace_id = ${workspaceId}::uuid and id = ${artifactId}
+        `;
+      const head = rows[0];
+      return head
+        ? {
+            sequence: Number(head.headSequence),
+            frontier: head.causalFrontier,
+            stateHash: head.stateHash,
+          }
+        : null;
+    })();
+    const retainedProbe = readRetainedSpreadsheetCausality(page, artifactId);
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<null>((resolve) => {
+      deadline = setTimeout(() => resolve(null), 1_500);
+    });
+    const withinDeadline = async <T>(probe: Promise<T>): Promise<PromiseSettledResult<T> | null> =>
+      await Promise.race([
+        probe.then(
+          (value): PromiseFulfilledResult<T> => ({ status: "fulfilled", value }),
+          (reason): PromiseRejectedResult => ({ status: "rejected", reason }),
+        ),
+        timeout,
+      ]);
+    const [authority, retained] = await Promise.all([
+      withinDeadline(authorityProbe),
+      withinDeadline(retainedProbe),
+    ]);
+    if (deadline) clearTimeout(deadline);
+    console.info(
+      `[editable-artifact-causality] ${JSON.stringify({
+        stage,
+        sampledAt: new Date().toISOString(),
+        authority: authority?.status === "fulfilled" ? authority.value : { unavailable: true },
+        retained: retained?.status === "fulfilled" ? retained.value : { unavailable: true },
+      })}`,
+    );
+  }
 });
+
+async function readRetainedSpreadsheetCausality(page: Page, artifactId: string) {
+  return await page.evaluate(async (id) => {
+    const name = "opengeni-editable-artifacts";
+    if (!(await indexedDB.databases()).some((database) => database.name === name)) {
+      return { status: "no-browser-database" };
+    }
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(name);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      const stores = ["replicas", "snapshots", "committedTransactions", "pendingTransactions"];
+      if (stores.some((store) => !database.objectStoreNames.contains(store))) {
+        return { status: "browser-stores-unavailable" };
+      }
+      // Find only this artifact's scoped keys. Never clone another artifact's
+      // snapshot, operation bytes, or pending command into the diagnostic.
+      const read = <T>(request: IDBRequest<T>) =>
+        new Promise<T>((resolve, reject) => {
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+      const keyTransaction = database.transaction(["replicas", "pendingTransactions"], "readonly");
+      const [headKeys, pendingKeys] = await Promise.all([
+        read(keyTransaction.objectStore("replicas").getAllKeys(undefined, 33)),
+        read(keyTransaction.objectStore("pendingTransactions").getAllKeys(undefined, 33)),
+      ]);
+      const namespaces = [
+        ...new Set(
+          [...headKeys.slice(0, 32), ...pendingKeys.slice(0, 32)].flatMap((key) =>
+            Array.isArray(key) && key[1] === id && typeof key[0] === "string" ? [key[0]] : [],
+          ),
+        ),
+      ];
+      const transaction = database.transaction(stores, "readonly");
+      type Stored = {
+        artifactId: string;
+        cursor?: number;
+        sequence?: number;
+        startSequence?: number;
+        endSequence?: number;
+        stateHash?: string;
+        causalFrontier?: unknown;
+        replicaId?: string;
+        replicaCounter?: number;
+        previousLocalTransactionId?: string | null;
+        clientTransactionId?: string;
+        requestHash?: string;
+        observedHeadSequence?: number;
+        causalBase?: unknown;
+        intentBytes?: Uint8Array;
+      };
+      return {
+        scopeDiscoveryTruncated: headKeys.length > 32 || pendingKeys.length > 32,
+        scopes: await Promise.all(
+          namespaces.map(async (namespace) => {
+            const key = [namespace, id];
+            const [head, snapshot, committed, pending] = await Promise.all([
+              read(transaction.objectStore("replicas").get(key) as IDBRequest<Stored | undefined>),
+              read(transaction.objectStore("snapshots").get(key) as IDBRequest<Stored | undefined>),
+              read(
+                transaction.objectStore("committedTransactions").index("byScope").getAll(key, 17),
+              ) as Promise<Stored[]>,
+              read(
+                transaction.objectStore("pendingTransactions").index("byScope").getAll(key, 17),
+              ) as Promise<Stored[]>,
+            ]);
+            return {
+              head: head ? { cursor: head.cursor, stateHash: head.stateHash } : null,
+              snapshot: snapshot
+                ? {
+                    sequence: snapshot.sequence,
+                    causalFrontier: snapshot.causalFrontier,
+                    stateHash: snapshot.stateHash,
+                  }
+                : null,
+              committedTruncated: committed.length > 16,
+              committed: committed
+                .slice(0, 16)
+                .map(({ startSequence, endSequence, causalFrontier, stateHash, requestHash }) => ({
+                  startSequence,
+                  endSequence,
+                  causalFrontier,
+                  stateHash,
+                  requestHash,
+                })),
+              pendingTruncated: pending.length > 16,
+              pending: pending
+                .slice(0, 16)
+                .map(
+                  ({
+                    replicaId,
+                    replicaCounter,
+                    previousLocalTransactionId,
+                    clientTransactionId,
+                    requestHash,
+                    observedHeadSequence,
+                    causalBase,
+                    intentBytes,
+                  }) => ({
+                    replicaId,
+                    replicaCounter,
+                    previousLocalTransactionId,
+                    clientTransactionId,
+                    requestHash,
+                    observedHeadSequence,
+                    causalBase,
+                    intentByteLength: intentBytes?.byteLength,
+                  }),
+                ),
+            };
+          }),
+        ),
+      };
+    } finally {
+      database.close();
+    }
+  }, artifactId);
+}
 
 function artifactApiEnvironment(
   services: TestServices,
