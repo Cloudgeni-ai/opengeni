@@ -12,6 +12,33 @@ export type {
   SessionMessagePreviewReference,
 } from "./session-message-search";
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
+export {
+  OPENGENI_WEBHOOK_HEADERS,
+  OpenGeniSignatureError,
+  WORKSPACE_WEBHOOK_EVENT_TYPES,
+  signOpenGeniPayload,
+  verifyCredentialProviderRequest,
+  verifyOpenGeniSignature,
+  verifyWebhookEvent,
+} from "./workspace-integrations";
+export type {
+  CreateWorkspaceWebhookRequest,
+  CreateWorkspaceWebhookResponse,
+  CredentialProviderRequest,
+  CredentialProviderResponse,
+  GetWorkspaceCredentialProviderResponse,
+  ListWorkspaceWebhookDeliveriesResponse,
+  ListWorkspaceWebhooksResponse,
+  PutWorkspaceCredentialProviderRequest,
+  PutWorkspaceCredentialProviderResponse,
+  UpdateWorkspaceWebhookRequest,
+  WorkspaceCredentialProvider,
+  WorkspaceSandboxImages,
+  WorkspaceWebhook,
+  WorkspaceWebhookDelivery,
+  WorkspaceWebhookEvent,
+  WorkspaceWebhookEventType,
+} from "./workspace-integrations";
 export { pluginMcpUnavailableReason } from "@opengeni/contracts/plugin-discovery";
 export type { ToolDisplayMetadata } from "@opengeni/contracts";
 export { parseToolDisplayMetadata } from "./tool-display-metadata";
