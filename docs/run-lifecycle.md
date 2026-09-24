@@ -589,13 +589,14 @@ duration-based caps on legitimate run length; fix the pathology instead.
 Recoverable conditions preserve context instead of failing the session, so a
 long run survives them. Retryable provider connectivity, 5xx failures, and typed
 required-MCP connectivity failures resume the same accepted turn after a pacing
-delay. The exact Modal `TaskExecStart` `ClientError` for DNS resolution of a
-`task-*.w.modal.host` command router (with or without `:443`) is also
-recovery-safe after Modal's own ten `UNAVAILABLE` retries: DNS failed before
-the command transport connected, so OpenGeni resumes the same accepted turn
-through the connectivity backoff.
-Generic `TaskExecStart` `UNAVAILABLE`, mixed failure batches, message-only
-lookalikes, any attached HTTP status metadata, and the exact
+delay. Native Modal `TaskExecStart` recovery is safe only when the client-side
+channel-readiness gate fails before issuing the RPC. This also covers resolver
+failure for no-port `task-*.w.modal.host` URLs without trusting DNS-shaped
+server replies. After exact never-started reservation settlement, OpenGeni
+resumes the same accepted turn through bounded connectivity backoff. Retained
+or outcome-unknown routing errors veto recovery even if their causes look safe.
+Generic `TaskExecStart` `UNAVAILABLE`, server-supplied DNS text, mixed failure
+batches, message-only lookalikes, HTTP status metadata, and the exact
 `FAILED_PRECONDITION: Modal Sandbox is shutting down` condition remain
 non-retryable because pre-command safety is not proven. Required first-party
 connect/tools-list also treats a rolling API

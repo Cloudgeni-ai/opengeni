@@ -16,7 +16,8 @@ import {
   type CompactionProviderRejection,
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
-  isModalTaskExecStartDnsResolutionError,
+  isModalTaskExecStartPreDispatchUnavailableError,
+  isRoutingMutationOutcomeUnknownError,
   RoutingWorkspaceRootChangedError,
   SandboxMaterializationVerificationError,
   materializationVerificationDiagnostic,
@@ -1022,10 +1023,13 @@ function baseAgentRunFailurePayload(
       retryable: true,
     };
   }
-  if (isModalTaskExecStartDnsResolutionError(error)) {
+  if (
+    !isRoutingMutationOutcomeUnknownError(error) &&
+    isModalTaskExecStartPreDispatchUnavailableError(error)
+  ) {
     return {
       error:
-        "The managed sandbox command transport was temporarily unreachable before the command started. The same turn will retry after a short delay.",
+        "The managed sandbox command router was not ready before the command was sent. The same turn will retry after a short delay.",
       code: "sandbox_command_start_unavailable",
       retryable: true,
     };
