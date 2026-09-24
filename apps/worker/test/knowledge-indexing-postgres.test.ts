@@ -352,7 +352,7 @@ test("a frozen paid generation pauses across a billing-mode rollback and resumes
       async () => ({ embedder }) as DocumentServices,
     );
   const worker = makeWorker();
-  const content = "A paid revision that spans multiple indexing batches. ".repeat(1600);
+  const content = "A paid revision that spans multiple indexing batches. ".repeat(800);
   const saved = await saveKnowledgeEntry(client.db, context, {
     operationId: crypto.randomUUID(),
     entryId: crypto.randomUUID(),
@@ -362,6 +362,7 @@ test("a frozen paid generation pauses across a billing-mode rollback and resumes
   });
   const chunks = [...knowledgeIndexChunks({ title: "Rollback contract", content })];
   expect(chunks.length).toBeGreaterThan(32);
+  expect(chunks.length).toBeLessThanOrEqual(64);
   await shared.admin`INSERT INTO credit_ledger_entries(account_id,type,amount_micros,idempotency_key)
     VALUES(${accountId},'grant',1000000,${`rollback-index:${saved.revisionId}`})`;
   expect((await worker.indexKnowledge()).advanced).toBe(1);
