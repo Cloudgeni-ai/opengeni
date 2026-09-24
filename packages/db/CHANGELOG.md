@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 6.0.3
+
+### Patch Changes
+
+- f4192b2: Restore an active browser session when a suspension fails before controller dispatch.
+
 ## 6.0.2
 
 ### Patch Changes
