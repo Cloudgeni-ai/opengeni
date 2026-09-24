@@ -48,6 +48,8 @@ export type UseNewSessionDraftResult = {
   conflict: Error | null;
   error: Error | null;
   flush: () => Promise<FlushedNewSessionDraft | null>;
+  /** Send the visible snapshot, rebasing a stale draft revision without replacing the composer. */
+  flushForSend: () => Promise<FlushedNewSessionDraft | null>;
   isCurrentSignature: (signature: string) => boolean;
   /**
    * Fence the exact acknowledged snapshot after session creation consumes it,
@@ -381,6 +383,39 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     return await persistSnapshot(cloneEditable(valueRef.current));
   }, [persistSnapshot]);
 
+  const flushForSend = useCallback(async (): Promise<FlushedNewSessionDraft | null> => {
+    if (loadingRef.current || !draftRef.current) return null;
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = null;
+    const snapshot = cloneEditable(valueRef.current);
+    const generation = targetGeneration.current;
+    // A sibling can save between our read and write. Retry a bounded number of
+    // times; only the explicit Send may choose the visible snapshot over it.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (generation !== targetGeneration.current) return null;
+      if (conflictRef.current) {
+        await saveChain.current;
+        try {
+          const remote = await readRemote();
+          if (!remote || generation !== targetGeneration.current) return null;
+          draftRef.current = remote.draft;
+          lastSavedSignature.current = draftSignature(remote.editable);
+          passiveProjectionSignature.current = null;
+          setDraft(remote.draft);
+          setCurrentConflict(null);
+          setError(null);
+        } catch (cause) {
+          if (generation === targetGeneration.current) setError(asError(cause));
+          return null;
+        }
+      }
+      const flushed = await persistSnapshot(snapshot);
+      if (flushed) return flushed;
+      if (!conflictRef.current) return null;
+    }
+    return null;
+  }, [persistSnapshot, readRemote, setCurrentConflict]);
+
   const isCurrentSignature = useCallback(
     (signature: string): boolean => draftSignature(valueRef.current) === signature,
     [],
@@ -550,6 +585,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     conflict,
     error,
     flush,
+    flushForSend,
     isCurrentSignature,
     acknowledgeConsumed,
     reload,
@@ -596,7 +632,7 @@ function clientIdentity(client: object): number {
 const clientIdentities = new WeakMap<object, number>();
 let nextClientIdentity = 1;
 
-function isNewSessionDraftConflict(cause: unknown): boolean {
+export function isNewSessionDraftConflict(cause: unknown): boolean {
   return (
     cause instanceof OpenGeniApiError &&
     cause.status === 409 &&

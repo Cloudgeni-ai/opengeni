@@ -47,12 +47,29 @@ const voiceModel = {
 
 function Fixture() {
   const [settings, setSettings] = useState({});
+  const [message, setMessage] = useState(
+    newSession ? "Can you help me integrate an AI chat in the analytics dashboard?" : "",
+  );
+  const [sent, setSent] = useState(false);
   return (
     <TooltipProvider>
-      <main style={{ width: 448, margin: newSession ? "30vh auto 0" : 24 }}>
+      <main
+        style={{ width: "min(448px, calc(100vw - 32px))", margin: newSession ? "30vh auto 0" : 24 }}
+      >
         <ChatComposer
           responsiveBasis="container"
-          composer={idleComposer()}
+          composer={idleComposer({
+            value: message,
+            setValue: setMessage,
+            hasDraftContent: () => message.length > 0,
+            canSend: newSession && message.trim().length > 0,
+            // Preview-only delivery: exercise the production composer affordance
+            // without creating a session in the fixture.
+            send: async () => {
+              setSent(true);
+              return true;
+            },
+          })}
           attachments={emptyAttachments()}
           attachButtonClassName="hidden"
           controlsLeading={
@@ -119,6 +136,7 @@ function Fixture() {
             </>
           }
         />
+        {sent ? <p role="status">Preview only: Send was pressed.</p> : null}
       </main>
     </TooltipProvider>
   );

@@ -993,6 +993,86 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
+  test("Send rebases an autosave conflict without replacing the visible message", async () => {
+    let authoritative = remote(2, { text: "initial" });
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => authoritative,
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          if (request.expectedRevision !== authoritative.revision) throw conflict();
+          authoritative = remote(authoritative.revision + 1, request);
+          return authoritative;
+        },
+      }),
+    );
+    await flush();
+    authoritative = remote(3, { text: "another tab" });
+    await actRun(() => hook.result.current.setValue(editable({ text: "what I see" })));
+    await flush(550);
+    expect(hook.result.current.draft.conflict).not.toBeNull();
+
+    const sent = await actRun(() => hook.result.current.draft.flushForSend());
+    expect(sent?.revision).toBe(4);
+    expect(requests.at(-1)).toMatchObject({ expectedRevision: 3, text: "what I see" });
+    expect(hook.result.current.value.text).toBe("what I see");
+    expect(hook.result.current.draft.conflict).toBeNull();
+    await hook.unmount();
+  });
+
+  test("Send recovers after a create-time conflict without using the stale revision", async () => {
+    let authoritative = remote(1);
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => authoritative,
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          if (request.expectedRevision !== authoritative.revision) throw conflict();
+          authoritative = remote(authoritative.revision + 1, request);
+          return authoritative;
+        },
+      }),
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "visible message" })));
+    const first = await actRun(() => hook.result.current.draft.flushForSend());
+    expect(first?.revision).toBe(2);
+    authoritative = remote(3, { text: "sibling edit" });
+    expect(await actRun(() => hook.result.current.draft.captureConflict(conflict()))).toBe(true);
+
+    const retry = await actRun(() => hook.result.current.draft.flushForSend());
+    expect(retry?.revision).toBe(4);
+    expect(requests.at(-1)).toMatchObject({ expectedRevision: 3, text: "visible message" });
+    expect(hook.result.current.value.text).toBe("visible message");
+    expect(hook.result.current.draft.conflict).toBeNull();
+    await hook.unmount();
+  });
+
+  test("Send stops retrying persistent draft conflicts and keeps the visible message", async () => {
+    let reads = 0;
+    let saves = 0;
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => {
+          reads += 1;
+          return remote(reads);
+        },
+        saveNewSessionDraft: async () => {
+          saves += 1;
+          throw conflict();
+        },
+      }),
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "do not lose this" })));
+    expect(await actRun(() => hook.result.current.draft.flushForSend())).toBeNull();
+    expect(saves).toBe(3);
+    expect(hook.result.current.value.text).toBe("do not lose this");
+    await hook.unmount();
+  });
+
   test("a create-time conflict enters recovery instead of reusing the stale flushed revision", async () => {
     let authoritative = remote(2, { text: "initial" });
     const requests: SaveNewSessionDraftRequest[] = [];
@@ -1160,7 +1240,7 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
-  test("keeps a sibling-tab newer winner as a visible conflict", async () => {
+  test("a post-create sibling edit does not strand the already-created session", async () => {
     const requests: SaveNewSessionDraftRequest[] = [];
     let reads = 0;
     const hook = await renderDraftHook(
@@ -1188,6 +1268,11 @@ describe("useNewSessionDraft", () => {
     expect(hook.result.current.value.text).toBe("keep this local");
     expect(hook.result.current.draft.revision).toBe(3);
     expect(hook.result.current.draft.conflict?.message).toContain("another client");
+
+    const preserved = await actRun(() => hook.result.current.draft.flushForSend());
+    expect(preserved?.revision).toBe(4);
+    expect(requests[1]).toMatchObject({ expectedRevision: 3, text: "keep this local" });
+    expect(hook.result.current.draft.conflict).toBeNull();
     await hook.unmount();
   });
 

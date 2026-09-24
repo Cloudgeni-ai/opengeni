@@ -5,6 +5,15 @@ async function source(path: string): Promise<string> {
 }
 
 describe("session control surface architecture", () => {
+  test("new-session Send stays available when background draft saving conflicts", async () => {
+    const route = await source("routes/sessions-index.tsx");
+    expect(route).toContain("draftConflict: null,");
+    expect(route).toContain("newSessionDraft.flushForSend()");
+    expect(route).not.toContain("newSessionDraft.conflict ||");
+    expect(route).not.toContain("!newSessionDraft.conflict &&");
+    expect(route).not.toContain("newSessionDraft.conflict !== null ||");
+  });
+
   test("new and existing composers use the same popover pattern", async () => {
     const newSession = await source("routes/sessions-index.tsx");
     const existingSession = await source("routes/session.tsx");

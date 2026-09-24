@@ -994,13 +994,11 @@ function SessionsIndexRouteContent({
               : "model_policy_unavailable"
           : privateCreateUnavailable
             ? "private_session_unavailable"
-            : newSessionDraft.conflict
-              ? "draft_conflict"
-              : attachments.hasUnresolved
-                ? "attachments_pending"
-                : !computeReady
-                  ? "compute_unavailable"
-                  : null;
+            : attachments.hasUnresolved
+              ? "attachments_pending"
+              : !computeReady
+                ? "compute_unavailable"
+                : null;
   useEffect(() => {
     const record = () => {
       if (startBlocker)
@@ -1047,7 +1045,6 @@ function SessionsIndexRouteContent({
         busy ||
         !context.workspaceMcpCatalogReady ||
         newSessionDraft.loading ||
-        newSessionDraft.conflict ||
         !newSessionPolicyValid ||
         privateCreateUnavailable ||
         personalResourceCatalogRefreshPending ||
@@ -1104,13 +1101,78 @@ function SessionsIndexRouteContent({
             // an initial message. Persist the draft so a pending autosave is not
             // lost on navigate, but do not consume it — text stays for later.
             if (realtimeModel) {
-              const flushed = await newSessionDraft.flush();
+              for (let attempt = 0; attempt < 3; attempt += 1) {
+                const flushed = await newSessionDraft.flushForSend();
+                if (!flushed) {
+                  toast.error("Couldn't save the draft", {
+                    description:
+                      (newSessionDraft.conflict ? null : newSessionDraft.error?.message) ??
+                      "Your message is still here. Try again.",
+                  });
+                  return null;
+                }
+                const submission = submissionFromSessionDraft(
+                  draft,
+                  defaultFirstPartyMcpTools,
+                  personalResourceAttachment.intent,
+                );
+                let draftConflict = false;
+                const created = await context.startSession(
+                  workspaceId,
+                  {
+                    text: "",
+                    resources: [],
+                    tools: persistedValue.tools,
+                    model,
+                    reasoningEffort,
+                    latencyMode,
+                    ...submission.extras,
+                  },
+                  {
+                    targetSandboxId: submission.options.targetSandboxId,
+                    workingDir: submission.options.workingDir,
+                    channelId: selectedChannelId,
+                    omitWorkspaceResources: submission.omitWorkspaceResources,
+                    installedSkillIds: launch.skillCapabilityId
+                      ? [launch.skillCapabilityId]
+                      : undefined,
+                    startMode: "realtime",
+                    expectedNewSessionDraftRevision: flushed.revision,
+                    newSessionDraftToolPolicy: persistedToolPolicy,
+                    agentLearning: draft.agentLearning,
+                    visibility: newSessionCreateVisibility(
+                      personalWorkspace,
+                      submission.options.visibility ?? "workspace",
+                      tenancyCapabilities?.canCreatePrivate === true,
+                    ),
+                    onFailure: ({ error, request }) => {
+                      draftConflict = newSessionDraft.captureConflict(error);
+                      recoverPersonalResourceAttachment(error, request);
+                      return draftConflict;
+                    },
+                  },
+                );
+                if (!created) {
+                  if (draftConflict) continue;
+                  return null;
+                }
+                return {
+                  sessionId: created.id,
+                  settleDraft: async () => true,
+                };
+              }
+              toast.error("Couldn't start voice", { description: "Try again." });
+              return null;
+            }
+
+            const submittedResources = persistedValue.resources;
+            for (let attempt = 0; attempt < 3; attempt += 1) {
+              const flushed = await newSessionDraft.flushForSend();
               if (!flushed) {
                 toast.error("Couldn't save the draft", {
                   description:
-                    newSessionDraft.error?.message ??
-                    newSessionDraft.conflict?.message ??
-                    "Resolve the draft conflict, then try again.",
+                    (newSessionDraft.conflict ? null : newSessionDraft.error?.message) ??
+                    "Your message is still here. Try again.",
                 });
                 return null;
               }
@@ -1119,16 +1181,18 @@ function SessionsIndexRouteContent({
                 defaultFirstPartyMcpTools,
                 personalResourceAttachment.intent,
               );
+              let draftConflict = false;
               const created = await context.startSession(
                 workspaceId,
                 {
-                  text: "",
-                  resources: [],
+                  text,
+                  resources: submittedResources,
                   tools: persistedValue.tools,
                   model,
                   reasoningEffort,
                   latencyMode,
                   ...submission.extras,
+                  connectionAccounts: connectionAccounts.selections,
                 },
                 {
                   targetSandboxId: submission.options.targetSandboxId,
@@ -1138,7 +1202,6 @@ function SessionsIndexRouteContent({
                   installedSkillIds: launch.skillCapabilityId
                     ? [launch.skillCapabilityId]
                     : undefined,
-                  startMode: "realtime",
                   expectedNewSessionDraftRevision: flushed.revision,
                   newSessionDraftToolPolicy: persistedToolPolicy,
                   agentLearning: draft.agentLearning,
@@ -1148,93 +1211,45 @@ function SessionsIndexRouteContent({
                     tenancyCapabilities?.canCreatePrivate === true,
                   ),
                   onFailure: ({ error, request }) => {
-                    newSessionDraft.captureConflict(error);
+                    draftConflict = newSessionDraft.captureConflict(error);
                     recoverPersonalResourceAttachment(error, request);
+                    return draftConflict;
                   },
                 },
               );
-              if (!created) return null;
+              if (!created) {
+                if (draftConflict) continue;
+                return null;
+              }
               return {
                 sessionId: created.id,
-                settleDraft: async () => true,
+                settleDraft: async () => {
+                  const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
+                  if (acknowledged?.kind === "consumed") {
+                    setMessage("");
+                    setDraft(emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend));
+                    attachments.removeReadyFiles(
+                      submittedResources.flatMap((resource) =>
+                        resource.kind === "file" ? [resource.fileId] : [],
+                      ),
+                    );
+                  } else if (
+                    !acknowledged ||
+                    !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
+                  ) {
+                    const preserved = await newSessionDraft.flushForSend();
+                    if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
+                      return false;
+                    }
+                  }
+                  return true;
+                },
               };
             }
-
-            const submittedResources = persistedValue.resources;
-            const flushed = await newSessionDraft.flush();
-            if (!flushed) {
-              toast.error("Couldn't save the draft", {
-                description:
-                  newSessionDraft.error?.message ??
-                  newSessionDraft.conflict?.message ??
-                  "Resolve the draft conflict, then try again.",
-              });
-              return null;
-            }
-            const submission = submissionFromSessionDraft(
-              draft,
-              defaultFirstPartyMcpTools,
-              personalResourceAttachment.intent,
-            );
-            const created = await context.startSession(
-              workspaceId,
-              {
-                text,
-                resources: submittedResources,
-                tools: persistedValue.tools,
-                model,
-                reasoningEffort,
-                latencyMode,
-                ...submission.extras,
-                connectionAccounts: connectionAccounts.selections,
-              },
-              {
-                targetSandboxId: submission.options.targetSandboxId,
-                workingDir: submission.options.workingDir,
-                channelId: selectedChannelId,
-                omitWorkspaceResources: submission.omitWorkspaceResources,
-                installedSkillIds: launch.skillCapabilityId
-                  ? [launch.skillCapabilityId]
-                  : undefined,
-                expectedNewSessionDraftRevision: flushed.revision,
-                newSessionDraftToolPolicy: persistedToolPolicy,
-                agentLearning: draft.agentLearning,
-                visibility: newSessionCreateVisibility(
-                  personalWorkspace,
-                  submission.options.visibility ?? "workspace",
-                  tenancyCapabilities?.canCreatePrivate === true,
-                ),
-                onFailure: ({ error, request }) => {
-                  newSessionDraft.captureConflict(error);
-                  recoverPersonalResourceAttachment(error, request);
-                },
-              },
-            );
-            if (!created) return null;
-            return {
-              sessionId: created.id,
-              settleDraft: async () => {
-                const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
-                if (acknowledged?.kind === "consumed") {
-                  setMessage("");
-                  setDraft(emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend));
-                  attachments.removeReadyFiles(
-                    submittedResources.flatMap((resource) =>
-                      resource.kind === "file" ? [resource.fileId] : [],
-                    ),
-                  );
-                } else if (
-                  !acknowledged ||
-                  !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
-                ) {
-                  const preserved = await newSessionDraft.flush();
-                  if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
-                    return false;
-                  }
-                }
-                return true;
-              },
-            };
+            toast.error("Couldn't send", {
+              description: "Your message is still here. Try again.",
+            });
+            return null;
           },
           navigate: async (sessionId) => {
             await navigate({
@@ -1263,7 +1278,7 @@ function SessionsIndexRouteContent({
   const handledLaunchKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (!launchKey || handledLaunchKeyRef.current === launchKey) return;
-    if (newSessionDraft.loading || newSessionDraft.conflict !== null) return;
+    if (newSessionDraft.loading) return;
     if (launchModel) setModel(launchModel);
     if (launchEffort) setReasoningEffort(launchEffort);
     if (launchLatency) setLatencyMode(launchLatency);
@@ -1310,7 +1325,6 @@ function SessionsIndexRouteContent({
     launchKey,
     launch.channelId,
     navigate,
-    newSessionDraft.conflict,
     newSessionDraft.loading,
     newSessionPolicyValid,
     setLatencyMode,
@@ -1337,7 +1351,6 @@ function SessionsIndexRouteContent({
         attachments.readyResources.length > 0) &&
       !busy &&
       !newSessionDraft.loading &&
-      !newSessionDraft.conflict &&
       newSessionPolicyValid &&
       !personalResourceCatalogRefreshPending &&
       (createdSessionAuthority !== null ||
@@ -1355,7 +1368,8 @@ function SessionsIndexRouteContent({
     draftRevision: newSessionDraft.revision,
     draftLoading: newSessionDraft.loading,
     draftSaving: newSessionDraft.saving,
-    draftConflict: newSessionDraft.conflict,
+    // A stale autosaved draft must not block or distract from explicit Send.
+    draftConflict: null,
     policy: {
       model: context.model,
       reasoningEffort: context.reasoningEffort,
@@ -1370,7 +1384,7 @@ function SessionsIndexRouteContent({
     resolveDraftConflict: newSessionDraft.resolveConflict,
     restoredResources: [],
     removeRestoredResource: () => {},
-    error: newSessionDraft.error,
+    error: newSessionDraft.conflict ? null : newSessionDraft.error,
     clearError: newSessionDraft.clearError,
     send: async () => await submitNewSession(null),
     steer: async () => {
@@ -1570,7 +1584,6 @@ function SessionsIndexRouteContent({
                   disabled={
                     busy ||
                     newSessionDraft.loading ||
-                    newSessionDraft.conflict !== null ||
                     attachments.hasUnresolved ||
                     !newSessionPolicyValid ||
                     !computeReady ||
@@ -1578,19 +1591,17 @@ function SessionsIndexRouteContent({
                     !context.workspaceMcpCatalogReady
                   }
                   disabledReason={
-                    newSessionDraft.conflict
-                      ? "Resolve the draft conflict before starting voice."
-                      : attachments.hasUnresolved
-                        ? "Wait for attachments to finish before starting voice."
-                        : !newSessionPolicyValid
-                          ? "Choose supported model settings before starting voice."
-                          : !computeReady
-                            ? "Choose where this session should run first."
-                            : personalMachineSelected
-                              ? "Start with a message so personal machine access can attach to an accepted turn."
-                              : !context.workspaceMcpCatalogReady
-                                ? "Wait for session tools to finish loading."
-                                : null
+                    attachments.hasUnresolved
+                      ? "Wait for attachments to finish before starting voice."
+                      : !newSessionPolicyValid
+                        ? "Choose supported model settings before starting voice."
+                        : !computeReady
+                          ? "Choose where this session should run first."
+                          : personalMachineSelected
+                            ? "Start with a message so personal machine access can attach to an accepted turn."
+                            : !context.workspaceMcpCatalogReady
+                              ? "Wait for session tools to finish loading."
+                              : null
                   }
                   onStart={async (model) => await submitNewSession(model)}
                 />
