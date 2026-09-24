@@ -12,7 +12,7 @@ import {
   type TurnToolCancellationFence,
 } from "@opengeni/runtime";
 import type { Settings } from "@opengeni/config";
-import type { RetainedArtifactMetadata } from "@opengeni/contracts";
+import type { RetainedArtifactMetadata, RetainedSessionScreenshotKind } from "@opengeni/contracts";
 import type { ResumedTurnSandbox } from "../../sandbox-resume";
 import type { SharedActivityServices } from "../types";
 import {
@@ -79,6 +79,7 @@ export class TurnMediaArtifacts {
   sandboxFileDownloadBackend: Settings["sandboxBackend"];
   nativeImageGenerationRetention: NativeImageGenerationRetention | null = null;
   readonly retainedSessionImageCallIds = new Set<string>();
+  readonly retainedSessionImageKindsByCallId = new Map<string, RetainedSessionScreenshotKind>();
 
   constructor(private readonly deps: TurnMediaArtifactDeps) {
     this.sandboxFileDownloadBackend = deps.getModelRunSettings().sandboxBackend;

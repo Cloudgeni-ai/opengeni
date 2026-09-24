@@ -1,6 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import * as contracts from "@opengeni/contracts";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
+import * as core from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { currentSessionRlsActorIdentityKey, withSessionRlsActorContext } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -9,8 +12,10 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 
 import {
+  createInFlightCoalescer,
   normalizeWorkspaceInsightsQueryFilter,
   registerInsightsRoutes,
+  workspaceInsightsCoalesceKey,
 } from "../src/routes/insights";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -22,14 +27,17 @@ describe("insights route discipline", () => {
     const grantCall = 'requireAccessGrant(c, deps, workspaceId, "workspace:admin")';
     const grantAt = routesSrc.indexOf(grantCall);
     expect(grantAt).toBeGreaterThanOrEqual(0);
-    const getAt = routesSrc.indexOf("await getWorkspaceInsights(", grantAt);
     const validationAt = routesSrc.indexOf(
       'normalizeWorkspaceInsightsQueryFilter(providerRaw, "provider")',
       grantAt,
     );
-    expect(getAt).toBeGreaterThan(grantAt);
+    const runAt = routesSrc.indexOf("const response = await coalesce.run(", grantAt);
+    const getAt = routesSrc.indexOf("getWorkspaceInsights(", runAt);
+    const actorAt = routesSrc.indexOf("rlsActor: currentSessionRlsActorIdentityKey()", runAt);
     expect(validationAt).toBeGreaterThan(grantAt);
-    expect(validationAt).toBeLessThan(getAt);
+    expect(runAt).toBeGreaterThan(validationAt);
+    expect(actorAt).toBeGreaterThan(runAt);
+    expect(getAt).toBeGreaterThan(actorAt);
   });
 
   test("normalizes empty filters and accepts exact ASCII and multibyte byte boundaries", () => {
@@ -189,5 +197,141 @@ describe("insights route discipline", () => {
     expect(observeAt).toBeGreaterThan(finallyAt);
     expect(routesSrc).toContain("providerFiltered: provider !== null");
     expect(routesSrc).toContain("modelFiltered: model !== null");
+  });
+  test("identical concurrent reads share one in-flight rollup and settle independently", async () => {
+    const coalescer = createInFlightCoalescer<number>();
+    let started = 0;
+    let release!: (value: number) => void;
+    const work = () => {
+      started += 1;
+      return new Promise<number>((settle) => {
+        release = settle;
+      });
+    };
+    const key = workspaceInsightsCoalesceKey({
+      workspaceId: "ws",
+      range: "week",
+      provider: null,
+      model: null,
+      rlsActor: null,
+    });
+    const first = coalescer.run(key, work);
+    const second = coalescer.run(key, work);
+    expect(started).toBe(1);
+    expect(coalescer.size).toBe(1);
+    release(7);
+    expect(await first).toBe(7);
+    expect(await second).toBe(7);
+    expect(coalescer.size).toBe(0);
+
+    const third = coalescer.run(key, work);
+    expect(started).toBe(2);
+    release(9);
+    expect(await third).toBe(9);
+  });
+
+  test("distinct workspace, range, filter, or RLS actor keys never share work and failures clear the slot", async () => {
+    const coalescer = createInFlightCoalescer<string>();
+    const keys = [
+      { workspaceId: "a", range: "week", provider: null, model: null, rlsActor: null },
+      { workspaceId: "b", range: "week", provider: null, model: null, rlsActor: null },
+      { workspaceId: "a", range: "today", provider: null, model: null, rlsActor: null },
+      { workspaceId: "a", range: "week", provider: "openai", model: null, rlsActor: null },
+      { workspaceId: "a", range: "week", provider: null, model: "openai", rlsActor: null },
+      { workspaceId: "a", range: "week", provider: "", model: null, rlsActor: null },
+      { workspaceId: "a", range: "week", provider: null, model: null, rlsActor: "admin-a" },
+      { workspaceId: "a", range: "week", provider: null, model: null, rlsActor: "admin-b" },
+    ].map(workspaceInsightsCoalesceKey);
+    expect(new Set(keys).size).toBe(keys.length);
+
+    const failing = coalescer.run(keys[0]!, () => Promise.reject(new Error("rollup failed")));
+    await expect(failing).rejects.toThrow("rollup failed");
+    expect(coalescer.size).toBe(0);
+    expect(await coalescer.run(keys[0]!, () => Promise.resolve("fresh"))).toBe("fresh");
+  });
+
+  describe("coalescing never crosses RLS actors", () => {
+    const restores: Array<() => void> = [];
+    afterEach(() => {
+      for (const restore of restores.splice(0)) restore();
+    });
+
+    async function harness() {
+      const workspaceId = "22222222-2222-4222-8222-222222222222";
+      const accountId = "11111111-1111-4111-8111-111111111111";
+      const delegationSecret = "insights-coalescing-actor-secret";
+      const authorization = `Bearer ${await signDelegatedAccessToken(delegationSecret, {
+        accountId,
+        workspaceId,
+        subjectId: "user:insights-coalescing",
+        permissions: ["workspace:admin"],
+        principalKind: "human_session",
+        exp: Math.floor(Date.now() / 1_000) + 3_600,
+      })}`;
+      // Each rollup sees only its caller's private session, like the real
+      // RLS-filtered fact authorities do.
+      const observedActors: Array<string | null> = [];
+      let releaseAll!: () => void;
+      const gate = new Promise<void>((settle) => {
+        releaseAll = settle;
+      });
+      const insights = spyOn(core, "getWorkspaceInsights").mockImplementation(async () => {
+        const actor = currentSessionRlsActorIdentityKey();
+        observedActors.push(actor);
+        await gate;
+        return { snapshot: { privateSessionsVisibleTo: actor } } as never;
+      });
+      const parse = spyOn(contracts.WorkspaceInsightsResponse, "parse").mockImplementation(
+        (value: unknown) => value as never,
+      );
+      restores.push(
+        () => insights.mockRestore(),
+        () => parse.mockRestore(),
+      );
+      const app = new Hono();
+      registerInsightsRoutes(app, {
+        settings: testSettings({ productAccessMode: "managed", delegationSecret }),
+        observability: undefined,
+        db: {},
+      } as unknown as ApiRouteDeps);
+      const request = (subjectId: string) =>
+        withSessionRlsActorContext({ subjectId }, async () => {
+          const response = await app.request(
+            `http://x/v1/workspaces/${workspaceId}/insights?range=week`,
+            { headers: { authorization } },
+          );
+          expect(response.status).toBe(200);
+          return (await response.json()) as { snapshot: { privateSessionsVisibleTo: string } };
+        });
+      return { request, releaseAll, observedActors, insights };
+    }
+
+    test("two admins requesting concurrently each receive their own visibility", async () => {
+      const { request, releaseAll, observedActors, insights } = await harness();
+      const adminA = request("user:admin-a");
+      const adminB = request("user:admin-b");
+      await Promise.resolve();
+      await new Promise((settle) => setTimeout(settle, 10));
+      releaseAll();
+      const [a, b] = await Promise.all([adminA, adminB]);
+      expect(insights).toHaveBeenCalledTimes(2);
+      expect(new Set(observedActors).size).toBe(2);
+      expect(a.snapshot.privateSessionsVisibleTo).toContain("user:admin-a");
+      expect(a.snapshot.privateSessionsVisibleTo).not.toContain("user:admin-b");
+      expect(b.snapshot.privateSessionsVisibleTo).toContain("user:admin-b");
+      expect(b.snapshot.privateSessionsVisibleTo).not.toContain("user:admin-a");
+    });
+
+    test("the same admin reloading concurrently joins the running rollup", async () => {
+      const { request, releaseAll, insights } = await harness();
+      const first = request("user:admin-a");
+      const second = request("user:admin-a");
+      await new Promise((settle) => setTimeout(settle, 10));
+      releaseAll();
+      const [one, two] = await Promise.all([first, second]);
+      expect(insights).toHaveBeenCalledTimes(1);
+      expect(one).toEqual(two);
+      expect(one.snapshot.privateSessionsVisibleTo).toContain("user:admin-a");
+    });
   });
 });

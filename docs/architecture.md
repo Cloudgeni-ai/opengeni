@@ -1325,17 +1325,15 @@ Postgres state under workspace RLS, then check the existing one-use nonce.
 
 ### 7.5 Artifacts, browser control, and managed computer sessions
 
-Editable artifacts use `@opengeni/artifact-tool` plus durable collaboration
-services. Browser and computer control use attempt-scoped managed
-`ComputerSession` tools from `@opengeni/interaction` and `@opengeni/browserd`,
-with the selected sandbox or machine providing placement. Agents do not receive
-the retired model-bound shared-desktop capability; human viewer control remains
-a separate consented surface. Computer screenshot bytes and their bounded frame
-metadata remain one evidence unit: the placement runtime verifies their digest
-and controller/session/target binding, the API repeats that validation against
-its durable `ComputerSession` binding before forwarding the exact bytes, and the
-SDK retains its independent verification. The browser extension is an attachment
-client, not an authorization service.
+Editable artifacts use `@opengeni/artifact-tool` and durable collaboration.
+Attempt-scoped `BrowserSession` and `ComputerSession` tools run through
+`@opengeni/interaction` and `@opengeni/browserd` on the selected sandbox or
+machine. Agent browser views are bounded; focused reads and stills use
+authenticated session/controller/target routing. SDK/viewer retain full
+observations. Code Mode receives a local image handle. Human computer control
+requires consent. Computer frames bind screenshot digest to
+controller/session/target at runtime and API; SDK verifies independently. The
+browser extension only attaches.
 
 Native macOS operations drain Cocoa pools and clean up pending capture starts.
 Desktop discovery proceeds independently of semantic inspection.

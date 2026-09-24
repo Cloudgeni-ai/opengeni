@@ -247,7 +247,7 @@ pub struct CodemodeArgs {
 pub enum CodemodeAction {
     /// List all callable paths and short descriptions from the frozen catalog.
     List(CodemodeListArgs),
-    /// Show one tool's details and schemas (at most 64 KiB).
+    /// Show one tool's complete details and schemas.
     Show(CodemodeShowArgs),
     /// Call one tool by generated path, model name, or `server.tool` identity.
     Call(CodemodeCallArgs),

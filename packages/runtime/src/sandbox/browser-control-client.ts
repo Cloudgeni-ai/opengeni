@@ -15,6 +15,8 @@ import {
   BrowserDownloadExportReceipt,
   BrowserDownloadExportRequest,
   BrowserDownloadListResponse,
+  BrowserDomReadRequest,
+  BrowserDomReadResponse,
   BrowserExternalAuthCommand,
   BrowserExternalAuthResult,
   BrowserObservation,
@@ -22,6 +24,7 @@ import {
   BrowserProtectedAuthFillReceipt,
   BrowserRevisionMaterialization,
   BrowserTarget,
+  BrowserTargetState,
   BrowserWorkspaceFileStageRequest,
   BrowserWorkspaceFileStageResponse,
   ComputerActionCommand,
@@ -41,6 +44,8 @@ import {
   type BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
   type BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
   type BrowserDownloadListResponse as BrowserDownloadListResponseValue,
+  type BrowserDomReadRequest as BrowserDomReadRequestValue,
+  type BrowserDomReadResponse as BrowserDomReadResponseValue,
   type BrowserExternalAuthCommand as BrowserExternalAuthCommandValue,
   type BrowserExternalAuthResult as BrowserExternalAuthResultValue,
   type BrowserDiagnosticKind,
@@ -49,6 +54,7 @@ import {
   type BrowserProtectedAuthFillReceipt as BrowserProtectedAuthFillReceiptValue,
   type BrowserRevisionMaterialization as BrowserRevisionMaterializationValue,
   type BrowserTarget as BrowserTargetValue,
+  type BrowserTargetState as BrowserTargetStateValue,
   type BrowserWorkspaceFileStageRequest as BrowserWorkspaceFileStageRequestValue,
   type BrowserWorkspaceFileStageResponse as BrowserWorkspaceFileStageResponseValue,
   type ComputerActionCommand as ComputerActionCommandValue,
@@ -171,6 +177,12 @@ export type BrowserControlFrame = {
   mediaType: "image/jpeg" | "image/png";
   metadataHeader: string;
   metadata: BrowserFrameMetadata;
+};
+
+export type BrowserControlScreenshotOptions = {
+  fullPage?: boolean;
+  format?: "jpeg" | "png";
+  quality?: number;
 };
 
 type ExpectedBrowserFrameEvidence = {
@@ -1460,10 +1472,95 @@ export class BrowserControlSessionClient {
     );
   }
 
-  async capture(targetId: string): Promise<BrowserControlFrame> {
+  async targetState(targetId: string): Promise<BrowserTargetStateValue> {
+    let state: BrowserTargetStateValue;
+    try {
+      state = BrowserTargetState.parse(
+        await this.parent.requestForSession({
+          method: "GET",
+          path: this.targetPath(targetId, "state"),
+          token: this.viewToken,
+        }),
+      );
+    } catch (error) {
+      // Active Connected Machines can run an older browserd during an API rollout.
+      // Only its exact unknown-route response permits the existing observation path.
+      // A missing session or target must keep its original error.
+      if (
+        !(error instanceof BrowserControlRequestError) ||
+        error.status !== 404 ||
+        error.error.code !== "resource_not_found" ||
+        error.error.message !== "route not found"
+      ) {
+        throw error;
+      }
+      const observation = await this.observe(targetId);
+      state = BrowserTargetState.parse({
+        browserSessionId: observation.browserSessionId,
+        controllerGeneration: observation.target.controllerGeneration,
+        targetId: observation.target.id,
+        targetGeneration: observation.target.targetGeneration,
+        documentGeneration: observation.target.documentGeneration,
+        frameId: observation.frameId,
+      });
+    }
+    if (
+      state.browserSessionId !== this.reference.browserSessionId ||
+      state.controllerGeneration !== this.reference.controllerGeneration ||
+      state.targetId !== targetId
+    ) {
+      throw new BrowserControlProtocolError("browser target state belongs to another binding");
+    }
+    return state;
+  }
+
+  async readDom(
+    targetId: string,
+    requestInput: BrowserDomReadRequestValue,
+  ): Promise<BrowserDomReadResponseValue> {
+    const request = BrowserDomReadRequest.parse(requestInput);
+    const result = BrowserDomReadResponse.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.targetPath(targetId, "dom-read"),
+        token: this.viewToken,
+        body: request,
+      }),
+    );
+    if (
+      result.browserSessionId !== this.reference.browserSessionId ||
+      result.controllerGeneration !== this.reference.controllerGeneration ||
+      result.targetId !== targetId ||
+      result.targetGeneration !== request.expectedTargetGeneration ||
+      result.documentGeneration !== request.expectedDocumentGeneration ||
+      result.frameId !== request.expectedFrameId ||
+      result.kind !== request.kind
+    ) {
+      throw new BrowserControlProtocolError("browser DOM read belongs to another binding");
+    }
+    return result;
+  }
+
+  async capture(
+    targetId: string,
+    options: BrowserControlScreenshotOptions = {},
+  ): Promise<BrowserControlFrame> {
+    const query = new URLSearchParams({
+      format: options.format ?? "jpeg",
+      quality: String(boundedInteger(options.quality ?? 55, 1, 100, "browser screenshot quality")),
+    });
+    if (options.format !== undefined && options.format !== "jpeg" && options.format !== "png") {
+      throw new RangeError("browser screenshot format is invalid");
+    }
+    if (options.fullPage !== undefined) {
+      if (typeof options.fullPage !== "boolean") {
+        throw new RangeError("browser screenshot fullPage is invalid");
+      }
+      query.set("fullPage", String(options.fullPage));
+    }
     return await this.parent.requestBrowserBytesForSession({
       method: "GET",
-      path: this.targetPath(targetId, "screenshot?format=jpeg&quality=55"),
+      path: this.targetPath(targetId, `screenshot?${query}`),
       token: this.viewToken,
       expectedFrameEvidence: {
         browserSessionId: this.reference.browserSessionId,
@@ -1912,8 +2009,36 @@ async function requestExposedControllerBytes(
     await response.body?.cancel("frame exceeds its byte bound").catch(() => undefined);
     throw new RangeError("frame exceeds its byte bound");
   }
-  const data = new Uint8Array(await response.arrayBuffer());
+  const data = await readBoundedFrameResponse(response, maxBytes);
   return controllerImageFrame(data, response.headers, input);
+}
+
+async function readBoundedFrameResponse(response: Response, maxBytes: number): Promise<Uint8Array> {
+  if (!response.body) throw new BrowserControlProtocolError("browser controller image is empty");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel("frame exceeds its byte bound").catch(() => undefined);
+        throw new RangeError("frame exceeds its byte bound");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const data = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    data.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return data;
 }
 
 function controllerImageFrame(
@@ -2850,7 +2975,11 @@ async function readBytes(
   timeoutMs: number,
 ): Promise<Uint8Array> {
   const privatePath = absolutePrivatePath(path, "browser private binary response path");
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > COMPUTER_SCREENSHOT_MAX_BYTES) {
+  if (
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes < 1 ||
+    maxBytes > Math.max(24 * 1024 * 1024, COMPUTER_SCREENSHOT_MAX_BYTES)
+  ) {
     throw new RangeError("browser private binary response limit is invalid");
   }
   const sizeMarker = `OPENGENI_BROWSER_PRIVATE_SIZE_${randomUUID()}`;
@@ -2869,7 +2998,7 @@ async function readBytes(
     "browser private binary response size",
   );
   if (size < 1 || size > maxBytes) {
-    throw new RangeError("computer frame exceeds its byte bound");
+    throw new RangeError("frame exceeds its byte bound");
   }
   const chunks: Buffer[] = [];
   for (let offset = 0; offset < size; offset += PRIVATE_READ_CHUNK_BYTES) {

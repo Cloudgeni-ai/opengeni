@@ -155,6 +155,9 @@ describe("release schema contract", () => {
     const knowledgeVisibleIndexStatus = completeSourceContract.migrations.some(
       (migration) => migration.path === "0511_knowledge_visible_index_status.sql",
     );
+    const insightsFactReadsHashJoin = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0512_insights_fact_reads_hash_join.sql",
+    );
     const controlRevisionFrontier = completeSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -388,6 +391,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
         (knowledgeIndexFundingWait ? 1 : 0) +
         (verifiedSignupTrialCredits ? 1 : 0) +
@@ -667,6 +671,9 @@ describe("release schema contract", () => {
       ...(knowledgeVisibleIndexStatus
         ? { latestMigration: "0511_knowledge_visible_index_status.sql" }
         : {}),
+      ...(insightsFactReadsHashJoin
+        ? { latestMigration: "0512_insights_fact_reads_hash_join.sql" }
+        : {}),
     });
     expect(
       completeSourceContract.migrations.at(
@@ -675,7 +682,8 @@ describe("release schema contract", () => {
           Number(deadlineCommandWorkspaceCapture) -
           Number(verifiedSignupTrialCredits) -
           Number(knowledgeIndexFundingWait) -
-          Number(knowledgeVisibleIndexStatus),
+          Number(knowledgeVisibleIndexStatus) -
+          Number(insightsFactReadsHashJoin),
       ),
     ).toMatchObject({
       path: backgroundCommandText
@@ -793,7 +801,8 @@ describe("release schema contract", () => {
             Number(deadlineCommandWorkspaceCapture) -
             Number(verifiedSignupTrialCredits) -
             Number(knowledgeIndexFundingWait) -
-            Number(knowledgeVisibleIndexStatus),
+            Number(knowledgeVisibleIndexStatus) -
+            Number(insightsFactReadsHashJoin),
         ),
       ).toMatchObject({
         path: "0507_integration_oauth_pending_states.sql",
@@ -806,7 +815,8 @@ describe("release schema contract", () => {
           -1 -
             Number(verifiedSignupTrialCredits) -
             Number(knowledgeIndexFundingWait) -
-            Number(knowledgeVisibleIndexStatus),
+            Number(knowledgeVisibleIndexStatus) -
+            Number(insightsFactReadsHashJoin),
         ),
       ).toMatchObject({
         path: "0508_deadline_command_workspace_capture.sql",
@@ -816,7 +826,10 @@ describe("release schema contract", () => {
     if (verifiedSignupTrialCredits) {
       expect(
         completeSourceContract.migrations.at(
-          -1 - Number(knowledgeIndexFundingWait) - Number(knowledgeVisibleIndexStatus),
+          -1 -
+            Number(knowledgeIndexFundingWait) -
+            Number(knowledgeVisibleIndexStatus) -
+            Number(insightsFactReadsHashJoin),
         ),
       ).toMatchObject({
         path: "0509_verified_signup_trial_credits.sql",
@@ -825,15 +838,25 @@ describe("release schema contract", () => {
     }
     if (knowledgeIndexFundingWait) {
       expect(
-        completeSourceContract.migrations.at(-1 - Number(knowledgeVisibleIndexStatus)),
+        completeSourceContract.migrations.at(
+          -1 - Number(knowledgeVisibleIndexStatus) - Number(insightsFactReadsHashJoin),
+        ),
       ).toMatchObject({
         path: "0510_knowledge_index_funding_wait.sql",
         deploymentMode: "rolling",
       });
     }
     if (knowledgeVisibleIndexStatus) {
-      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+      expect(
+        completeSourceContract.migrations.at(-1 - Number(insightsFactReadsHashJoin)),
+      ).toMatchObject({
         path: "0511_knowledge_visible_index_status.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (insightsFactReadsHashJoin) {
+      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+        path: "0512_insights_fact_reads_hash_join.sql",
         deploymentMode: "rolling",
       });
     }
@@ -1948,6 +1971,9 @@ describe("release schema contract", () => {
     const knowledgeVisibleIndexStatus = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0511_knowledge_visible_index_status.sql",
     );
+    const insightsFactReadsHashJoin = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0512_insights_fact_reads_hash_join.sql",
+    );
     const controlRevisionFrontier = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -2570,6 +2596,7 @@ describe("release schema contract", () => {
       "0509_verified_signup_trial_credits.sql",
       "0510_knowledge_index_funding_wait.sql",
       "0511_knowledge_visible_index_status.sql",
+      "0512_insights_fact_reads_hash_join.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -3148,8 +3175,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0511_knowledge_visible_index_status.sql",
       };
+    if (insightsFactReadsHashJoin)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0512_insights_fact_reads_hash_join.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
         (knowledgeIndexFundingWait ? 1 : 0) +
         (verifiedSignupTrialCredits ? 1 : 0) +
@@ -3630,6 +3663,9 @@ describe("release schema contract", () => {
         : {}),
       ...(knowledgeVisibleIndexStatus
         ? { latestMigration: "0511_knowledge_visible_index_status.sql" }
+        : {}),
+      ...(insightsFactReadsHashJoin
+        ? { latestMigration: "0512_insights_fact_reads_hash_join.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(

@@ -78,8 +78,11 @@ import {
   type AttachedBrowserDeviceListResponse,
   type BrowserActionReceipt,
   type BrowserActionRequest,
+  type BrowserScreenshotOptions,
   type BrowserClipboard,
   type BrowserDiagnosticBatch,
+  type BrowserDomReadRequest,
+  type BrowserDomReadResponse,
   type BrowserDiagnosticsOptions,
   type BrowserDownload,
   type BrowserDownloadListResponse,
@@ -100,6 +103,7 @@ import {
   type BrowserSessionLifecycleRequest,
   type BrowserSessionListResponse,
   type BrowserSessionMutationResponse,
+  type BrowserTargetState,
   type BrowserTargetListResponse,
   type BrowserRevisionListResponse,
   type ComputerActionReceipt,
@@ -3934,10 +3938,35 @@ export class OpenGeniClient {
     browserSessionId: string,
     targetId: string,
     options: OpenGeniRequestOptions = {},
+    captureOptions: BrowserScreenshotOptions = {},
   ): Promise<BrowserFrame> {
+    const query = new URLSearchParams();
+    if (captureOptions.fullPage !== undefined) {
+      if (typeof captureOptions.fullPage !== "boolean") {
+        throw new TypeError("browser screenshot fullPage must be a boolean");
+      }
+      query.set("fullPage", String(captureOptions.fullPage));
+    }
+    if (captureOptions.format !== undefined) {
+      if (captureOptions.format !== "jpeg" && captureOptions.format !== "png") {
+        throw new TypeError("browser screenshot format must be jpeg or png");
+      }
+      query.set("format", captureOptions.format);
+    }
+    if (captureOptions.quality !== undefined) {
+      if (
+        !Number.isSafeInteger(captureOptions.quality) ||
+        captureOptions.quality < 1 ||
+        captureOptions.quality > 100
+      ) {
+        throw new RangeError("browser screenshot quality must be an integer from 1 to 100");
+      }
+      query.set("quality", String(captureOptions.quality));
+    }
+    const suffix = query.size > 0 ? `?${query}` : "";
     const response = await this.requestResponse(
       "GET",
-      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/${encodeURIComponent(targetId)}/screenshot`,
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/${encodeURIComponent(targetId)}/screenshot${suffix}`,
       {},
       options,
     );
@@ -3999,6 +4028,52 @@ export class OpenGeniClient {
       {},
       options,
     );
+  }
+
+  async getBrowserTargetState(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserTargetState> {
+    const state = await this.requestJson<BrowserTargetState>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/${encodeURIComponent(targetId)}/state`,
+      undefined,
+      {},
+      options,
+    );
+    if (state.browserSessionId !== browserSessionId || state.targetId !== targetId) {
+      throw new OpenGeniApiError(502, "browser target state belongs to another binding");
+    }
+    return state;
+  }
+
+  async readBrowserDom(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    request: BrowserDomReadRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserDomReadResponse> {
+    const result = await this.requestJson<BrowserDomReadResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/${encodeURIComponent(targetId)}/dom-read`,
+      request,
+      {},
+      options,
+    );
+    if (
+      result.browserSessionId !== browserSessionId ||
+      result.targetId !== targetId ||
+      result.kind !== request.kind ||
+      result.targetGeneration !== request.expectedTargetGeneration ||
+      result.documentGeneration !== request.expectedDocumentGeneration ||
+      result.frameId !== request.expectedFrameId
+    ) {
+      throw new OpenGeniApiError(502, "browser DOM read belongs to another binding");
+    }
+    return result;
   }
 
   async actInBrowser(

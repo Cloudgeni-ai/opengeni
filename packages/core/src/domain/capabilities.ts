@@ -1314,6 +1314,7 @@ function fikenCatalogItem(fikenConnections: ConnectionMetadata[]): CapabilityCat
     metadata: {
       connectorMode: "first_party_fiken",
       ownership: "workspace",
+      connectionStatus: fikenConnection?.status ?? null,
       // Derived from the contracts catalog so a new fiken_* tool cannot be
       // registered without also appearing on the capability tile.
       firstPartyMcpTools: FIRST_PARTY_MCP_TOOL_NAMES.filter((name) => name.startsWith("fiken_")),
@@ -1563,6 +1564,11 @@ export function applyCapabilityEnablement(
   item: CapabilityCatalogItem,
   installation: CapabilityInstallation | undefined,
 ): CapabilityCatalogItem {
+  if (item.surfaceType === "first_party_fiken") {
+    // Fiken is an API item with connection-derived state, not a generic API
+    // installation. Preserve that state before the non-MCP fallback below.
+    return { ...item, connectionRef: null };
+  }
   if (item.kind === "skill" || item.kind === "api" || item.kind === "plugin") {
     return { ...item, enabled: false, enabledReason: null, connectionRef: null };
   }
@@ -1570,12 +1576,6 @@ export function applyCapabilityEnablement(
     // Provider-integration state is derived from every authoritative visible
     // social Connection while the catalog is built. The catalog summary never
     // publishes a personal connection UUID or collapses many accounts to one.
-    return { ...item, connectionRef: null };
-  }
-  if (item.surfaceType === "first_party_fiken") {
-    // Fiken connector state is derived from the authoritative workspace
-    // connection row while the catalog is built; browseable never means an
-    // account is already connected.
     return { ...item, connectionRef: null };
   }
   if (item.surfaceType === "codex_apps") {

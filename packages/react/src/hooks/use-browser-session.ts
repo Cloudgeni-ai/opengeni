@@ -23,6 +23,9 @@ export type UseBrowserSessionOptions = EmbeddedBrowserInteractionClientOverride 
   browserSessionId: string | null;
   enabled?: boolean | undefined;
   pollIntervalMs?: number | undefined;
+  /** Keep session/tab inventory current without repeatedly fetching the full
+   * accessibility tree while a live frame is available or the viewer is hidden. */
+  semanticObservationEnabled?: boolean | undefined;
 };
 
 export type UseBrowserSessionResult = {
@@ -58,6 +61,13 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
   const { client, workspaceId } = useEmbeddedBrowserInteraction(options);
   const browserSessionId = options.browserSessionId;
   const enabled = (options.enabled ?? true) && browserSessionId !== null;
+  const semanticObservationEnabled = options.semanticObservationEnabled ?? true;
+  const semanticObservationEnabledRef = useRef(semanticObservationEnabled);
+  semanticObservationEnabledRef.current = semanticObservationEnabled;
+  const previousSemanticObservationRef = useRef({
+    browserSessionId,
+    enabled: semanticObservationEnabled,
+  });
   const pageLive = usePageLiveActivity();
   const pollIntervalMs = Math.max(750, options.pollIntervalMs ?? 2_000);
   const [state, setState] = useState<{
@@ -75,10 +85,16 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
   const refreshBlocked = isNonRetryableInteractionError(visible.error);
   const selectedTargetIdRef = useRef<string | null>(visible.selectedTargetId);
   selectedTargetIdRef.current = visible.selectedTargetId;
+  const selectedTargetRef = useRef<BrowserTarget | null>(
+    visible.targets.find((target) => target.id === visible.selectedTargetId) ?? null,
+  );
+  selectedTargetRef.current =
+    visible.targets.find((target) => target.id === visible.selectedTargetId) ?? null;
   const observationRef = useRef<{
     browserSessionId: string | null;
     observation: BrowserObservation | null;
   }>({ browserSessionId, observation: visible.observation });
+  const lastObservationAtRef = useRef(0);
   if (observationRef.current.browserSessionId !== browserSessionId) {
     observationRef.current = {
       browserSessionId,
@@ -124,7 +140,15 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
       if (!mountedRef.current || requestRef.current.id !== id) return;
       const selected = chooseTarget(targetResponse.targets, selectedTargetIdRef.current);
       selectedTargetIdRef.current = selected?.id ?? null;
-      observationRef.current = { browserSessionId, observation: null };
+      const previousObservation =
+        observationRef.current.browserSessionId === browserSessionId
+          ? observationRef.current.observation
+          : null;
+      const retainedObservation =
+        selected && previousObservation && sameObservationTarget(previousObservation, selected)
+          ? previousObservation
+          : null;
+      observationRef.current = { browserSessionId, observation: retainedObservation };
       setState((current) =>
         current.browserSessionId === browserSessionId
           ? {
@@ -132,13 +156,13 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
               session,
               targets: targetResponse.targets,
               selectedTargetId: selected?.id ?? null,
-              observation: null,
+              observation: retainedObservation,
               loading: false,
               error: null,
             }
           : current,
       );
-      if (!selected) return;
+      if (!selected || !semanticObservationEnabledRef.current) return;
       try {
         const observation = await client.observeBrowserTarget(
           workspaceId,
@@ -148,6 +172,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         );
         if (!mountedRef.current || requestRef.current.id !== id) return;
         observationRef.current = { browserSessionId, observation };
+        lastObservationAtRef.current = Date.now();
         setState((current) =>
           current.browserSessionId === browserSessionId &&
           current.selectedTargetId === observation.target.id
@@ -180,6 +205,37 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     }
   }, [browserSessionId, client, enabled, workspaceId]);
 
+  const refreshSemantic = useCallback(async (): Promise<void> => {
+    if (!enabled || !browserSessionId) return;
+    const target = selectedTargetRef.current;
+    if (!target) return;
+    const id = requestRef.current.id + 1;
+    requestRef.current.controller?.abort();
+    const controller = new AbortController();
+    requestRef.current = { id, controller };
+    try {
+      const observation = await client.observeBrowserTarget(
+        workspaceId,
+        browserSessionId,
+        target.id,
+        { signal: controller.signal },
+      );
+      if (!mountedRef.current || requestRef.current.id !== id) return;
+      if (!sameObservationTarget(observation, selectedTargetRef.current)) return;
+      observationRef.current = { browserSessionId, observation };
+      lastObservationAtRef.current = Date.now();
+      setState((current) =>
+        current.browserSessionId === browserSessionId && current.selectedTargetId === target.id
+          ? { ...current, observation }
+          : current,
+      );
+    } catch {
+      // A failed semantic fallback cannot disable an otherwise live browser.
+    } finally {
+      if (requestRef.current.id === id) requestRef.current = { id, controller: null };
+    }
+  }, [browserSessionId, client, enabled, workspaceId]);
+
   useEffect(() => {
     mountedRef.current = true;
     if (!enabled) {
@@ -198,6 +254,37 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
       invalidateRefresh();
     };
   }, [browserSessionId, enabled, invalidateRefresh, refresh]);
+
+  useEffect(() => {
+    const previous = previousSemanticObservationRef.current;
+    previousSemanticObservationRef.current = {
+      browserSessionId,
+      enabled: semanticObservationEnabled,
+    };
+    if (
+      enabled &&
+      semanticObservationEnabled &&
+      previous.browserSessionId === browserSessionId &&
+      !previous.enabled
+    ) {
+      // The media stream disappeared or the user returned to the Browser tab.
+      // A just-returned action/tab observation is already a fresh fallback.
+      // Otherwise drop the old tree/fence until a new read settles.
+      const currentObservation = observationRef.current.observation;
+      if (
+        currentObservation &&
+        sameObservationTarget(currentObservation, selectedTargetRef.current) &&
+        Date.now() - lastObservationAtRef.current < pollIntervalMs
+      ) {
+        return;
+      }
+      observationRef.current = { browserSessionId, observation: null };
+      setState((current) =>
+        current.browserSessionId === browserSessionId ? { ...current, observation: null } : current,
+      );
+      void refreshSemantic();
+    }
+  }, [browserSessionId, enabled, pollIntervalMs, refreshSemantic, semanticObservationEnabled]);
 
   useEffect(() => {
     if (!enabled || !pageLive || visible.mutating || refreshBlocked) return;
@@ -301,6 +388,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         }
         selectedTargetIdRef.current = target.id;
         observationRef.current = { browserSessionId, observation };
+        lastObservationAtRef.current = Date.now();
         setState((current) =>
           current.browserSessionId === browserSessionId
             ? {
@@ -332,6 +420,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         const target = observation.target;
         selectedTargetIdRef.current = target.id;
         observationRef.current = { browserSessionId, observation };
+        lastObservationAtRef.current = Date.now();
         setState((current) =>
           current.browserSessionId === browserSessionId
             ? {
@@ -365,6 +454,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
           : null;
         selectedTargetIdRef.current = selected?.id ?? null;
         observationRef.current = { browserSessionId, observation };
+        if (observation) lastObservationAtRef.current = Date.now();
         setState((current) =>
           current.browserSessionId === browserSessionId
             ? {
@@ -424,6 +514,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
             browserSessionId,
             observation: receipt.observation,
           };
+          lastObservationAtRef.current = Date.now();
           setState((current) =>
             current.browserSessionId === browserSessionId
               ? {
@@ -538,6 +629,19 @@ function replaceTarget(targets: readonly BrowserTarget[], target: BrowserTarget)
   const next = targets.filter((candidate) => candidate.id !== target.id);
   next.push(target);
   return next.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+}
+
+function sameObservationTarget(
+  observation: BrowserObservation,
+  target: BrowserTarget | null,
+): boolean {
+  return (
+    target !== null &&
+    observation.target.id === target.id &&
+    observation.target.controllerGeneration === target.controllerGeneration &&
+    observation.target.targetGeneration === target.targetGeneration &&
+    observation.target.documentGeneration === target.documentGeneration
+  );
 }
 
 function isMissingBrowserTarget(error: unknown): boolean {

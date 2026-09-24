@@ -123,7 +123,11 @@ describe("Computer frame evidence pipeline", () => {
       expect(result.content).toEqual([
         {
           type: "text",
-          text: JSON.stringify({ ...observation, frameId: frame.metadata.frameId }),
+          text: JSON.stringify({
+            ...observation,
+            frameId: frame.metadata.frameId,
+            capturedFrame: { width: sdkFrame.width, height: sdkFrame.height },
+          }),
         },
         {
           type: "image",

@@ -67,7 +67,10 @@ describe("Codemode declarations", () => {
     expect(declaration).toContain(
       "argumentsValue: { readonly limit?: number; readonly query: string }",
     );
-    expect(declaration).toContain("Promise<{ readonly hits: readonly (string)[] }>;");
+    expect(declaration).toContain(
+      "Promise<{ readonly hits: readonly (string)[] } | CodemodeMultimodalValue<{ readonly hits: readonly (string)[] }>>;",
+    );
+    expect(declaration).toContain("Typed calls normally return their structured output");
     expect(declaration).toContain("argumentsValue?: Record<string, never>");
     expect(declaration).toContain("Promise<CodemodeToolResult>;");
   });

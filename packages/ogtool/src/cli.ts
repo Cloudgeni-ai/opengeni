@@ -153,17 +153,10 @@ export function listProjection(catalog: AttemptToolCatalog): Record<string, unkn
   };
 }
 
-const SHOW_MAX_BYTES = 64 * 1024;
-
 export function showOutput(catalog: AttemptToolCatalog, name: string): string {
   const entry = resolveTool(catalog, name);
   const projection = listProjection({ ...catalog, entries: [entry] });
   const output = JSON.stringify((projection.tools as unknown[])[0], null, 2);
-  if (Buffer.byteLength(output, "utf8") + 1 > SHOW_MAX_BYTES) {
-    throw new Error(
-      "Tool details exceed 65536 bytes; use list --full or declarations <output-file>",
-    );
-  }
   return `${output}\n`;
 }
 

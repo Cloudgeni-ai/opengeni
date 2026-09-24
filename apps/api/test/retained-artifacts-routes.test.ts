@@ -226,7 +226,7 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
 
 async function createScreenshotArtifact(
   workspace: Awaited<ReturnType<typeof workspaceFixture>>,
-  input: { bytes: Uint8Array; expiresAt?: Date; ready?: boolean },
+  input: { bytes: Uint8Array; expiresAt?: Date; ready?: boolean; kind?: "browser_screenshot" },
 ) {
   const session = await createSession(client.db, {
     accountId: workspace.accountId,
@@ -261,7 +261,9 @@ async function createScreenshotArtifact(
 
   const artifactId = crypto.randomUUID();
   const settlementKey = `api:${crypto.randomUUID()}`;
-  const objectKey = `workspaces/${workspace.workspaceId}/files/${artifactId}/retained/computer-screenshot.png`;
+  const objectName =
+    input.kind === "browser_screenshot" ? "browser-screenshot" : "computer-screenshot";
+  const objectKey = `workspaces/${workspace.workspaceId}/files/${artifactId}/retained/${objectName}.png`;
   await prepareRetainedScreenshotArtifact(client.db, {
     artifactId,
     accountId: workspace.accountId,
@@ -1030,6 +1032,37 @@ describe("retained artifact metadata and bounded content", () => {
     const previewBlob = await full.blob();
     expect(previewBlob.type).toBe("image/png");
     expect(new Uint8Array(await previewBlob.arrayBuffer())).toEqual(previewBytes);
+  });
+
+  test("serves browser screenshots with their own kind through the same session authorization", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const fixture = storageFixture();
+    const bytes = Uint8Array.of(1, 2, 3, 4);
+    const artifact = await createScreenshotArtifact(workspace, {
+      bytes,
+      kind: "browser_screenshot",
+    });
+    fixture.objects.set(artifact.objectKey, bytes);
+    const app = routeApp(fixture.storage);
+    const authorized = await app.request(
+      sessionArtifactUrl(workspace.workspaceId, artifact.sessionId, artifact.artifactId),
+      { headers: { authorization: workspace.authorization } },
+    );
+    expect(authorized.status).toBe(200);
+    const metadata = (await authorized.json()) as Record<string, unknown>;
+    expect(metadata).toMatchObject({
+      available: true,
+      kind: "browser_screenshot",
+      retention: { policy: "session_screenshot" },
+    });
+    expect(JSON.stringify(metadata)).not.toContain(artifact.objectKey);
+    const wrongSession = await app.request(
+      sessionArtifactUrl(workspace.workspaceId, crypto.randomUUID(), artifact.artifactId, true),
+      { headers: { authorization: workspace.authorization } },
+    );
+    expect(wrongSession.status).toBe(404);
+    expect(fixture.calls).toHaveLength(0);
   });
 
   test("session screenshot lookups deny wrong-session and cross-workspace IDs before storage", async () => {

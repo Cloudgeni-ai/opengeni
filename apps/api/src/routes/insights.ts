@@ -9,6 +9,7 @@ import {
   type ApiRouteDeps,
   type WorkspaceInsightsFilterField,
 } from "@opengeni/core";
+import { currentSessionRlsActorIdentityKey } from "@opengeni/db";
 import { workspaceInsightsMetricObserver } from "@opengeni/observability";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -27,9 +28,62 @@ export function normalizeWorkspaceInsightsQueryFilter(
   }
 }
 
+/**
+ * Share one in-flight computation between identical concurrent callers.
+ *
+ * A reload, a second tab, or a retried fetch joins the rollup already running
+ * instead of starting another multi-second aggregate on the database.
+ * Authorization and filter validation still run per request before a caller
+ * may join; the map only ever holds running work. The caller supplies the
+ * complete sharing key, which must identify everything the result depends on.
+ */
+export function createInFlightCoalescer<T>(): {
+  run: (key: string, work: () => Promise<T>) => Promise<T>;
+  readonly size: number;
+} {
+  const inFlight = new Map<string, Promise<T>>();
+  return {
+    run(key, work) {
+      const pending = inFlight.get(key);
+      if (pending) return pending;
+      const started: Promise<T> = work().finally(() => {
+        if (inFlight.get(key) === started) inFlight.delete(key);
+      });
+      inFlight.set(key, started);
+      return started;
+    },
+    get size() {
+      return inFlight.size;
+    },
+  };
+}
+
+/**
+ * Insights rows are filtered by the database RLS actor (private sessions are
+ * visible only to their owner), so two administrators of one workspace can
+ * legitimately receive different responses. The actor identity is part of
+ * the key; requests share work only when every visibility input is equal.
+ */
+export function workspaceInsightsCoalesceKey(input: {
+  workspaceId: string;
+  range: string;
+  provider: string | null;
+  model: string | null;
+  rlsActor: string | null;
+}): string {
+  return JSON.stringify([
+    input.workspaceId,
+    input.range,
+    input.provider,
+    input.model,
+    input.rlsActor,
+  ]);
+}
+
 export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
   const observeRequest = workspaceInsightsMetricObserver(deps.observability);
   const observePhase = workspaceInsightsPhaseMetricObserver(deps.observability);
+  const coalesce = createInFlightCoalescer<Awaited<ReturnType<typeof getWorkspaceInsights>>>();
   app.get("/v1/workspaces/:workspaceId/insights", async (c) => {
     const startedAtMs = performance.now();
     const rangeRaw = c.req.query("range") ?? "week";
@@ -54,16 +108,26 @@ export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
       provider = normalizeWorkspaceInsightsQueryFilter(providerRaw, "provider");
       model = normalizeWorkspaceInsightsQueryFilter(modelRaw, "model");
 
-      const response = await getWorkspaceInsights(
-        deps.db,
-        deps.settings,
-        {
+      const response = await coalesce.run(
+        workspaceInsightsCoalesceKey({
           workspaceId,
           range: rangeParsed.data,
           provider,
           model,
-        },
-        observePhase,
+          rlsActor: currentSessionRlsActorIdentityKey(),
+        }),
+        () =>
+          getWorkspaceInsights(
+            deps.db,
+            deps.settings,
+            {
+              workspaceId,
+              range: rangeParsed.data,
+              provider,
+              model,
+            },
+            observePhase,
+          ),
       );
       c.header("cache-control", "private, no-store");
       const result = c.json(WorkspaceInsightsResponse.parse(response));

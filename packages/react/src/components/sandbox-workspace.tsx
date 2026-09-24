@@ -843,6 +843,7 @@ export function useSandboxWorkspaceTabs(
               // start BrowserViewer—the lazy panel is still unmounted until the
               // user/agent first visits it.
               enabled={workspaceVisible}
+              active={resolvedActiveTab === WORKBENCH_TAB_BROWSER}
               onNotify={onNotify}
               initialBrowserSessionId={initialBrowserSessionId}
               onBrowserSessionIdChange={onBrowserSessionIdChange}

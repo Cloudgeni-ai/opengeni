@@ -15,6 +15,7 @@ import {
   retainedGeneratedImageReferenceFromFile,
   retainedGeneratedVideoReferenceFromFile,
   retainedScreenshotReferenceFromFile,
+  retainedSessionScreenshotKindFromObjectKey,
   VideoArtifactPlaybackSource,
   resolveRetainedOutputRange,
   type RetainedArtifactMetadata,
@@ -892,12 +893,15 @@ function retainedScreenshotMetadata(
     artifact.sessionId &&
     artifact.retentionExpiresAt.getTime() > Date.now()
   ) {
+    const kind = retainedSessionScreenshotKindFromObjectKey(artifact.file.objectKey);
+    if (!kind) return retainedArtifactUnavailable(artifact.artifactId, "invalid_content");
     const reference = retainedScreenshotReferenceFromFile({
       ...artifact.file,
       sessionId: artifact.sessionId,
       width: artifact.width,
       height: artifact.height,
       expiresAt: artifact.retentionExpiresAt.toISOString(),
+      kind,
     });
     if (reference) return reference;
   }

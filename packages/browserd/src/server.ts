@@ -6,6 +6,7 @@ import {
   BrowserActionCommand,
   BrowserDownloadExportRequest,
   BrowserDownloadListResponse,
+  BrowserDomReadRequest,
   BrowserExternalAuthCommand,
   BrowserRevisionMaterialization,
   type BrowserActionCommand as BrowserActionCommandValue,
@@ -19,7 +20,7 @@ import {
   NetworkRouteConsistency,
   type InteractionError,
 } from "@opengeni/contracts";
-import { InteractionControllerError } from "@opengeni/interaction";
+import { InteractionControllerError, InteractionDefiniteDriverError } from "@opengeni/interaction";
 import type { ComputerFrameSubscription, ComputerFrameStreamOptions } from "./computer-media";
 import {
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
@@ -522,6 +523,16 @@ export class BrowserControlServer {
     }
     if (operation === "observation" && request.method === "GET") {
       return success(await this.supervisor.observe(reference, targetId));
+    }
+    if (operation === "state" && request.method === "GET") {
+      return success(await this.supervisor.targetState(reference, targetId));
+    }
+    if (operation === "dom-read" && request.method === "POST") {
+      const parsed = BrowserDomReadRequest.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new ProtocolError("invalid_action", "browser DOM read request is invalid", 400);
+      }
+      return success(await this.supervisor.readDom(reference, targetId, parsed.data));
     }
     if (operation === "diagnostics" && request.method === "GET") {
       return success(
@@ -1639,6 +1650,9 @@ function protocolResponse(error: unknown): Response {
       error.retryable,
       interactionStatus(error.code),
     );
+  }
+  if (error instanceof InteractionDefiniteDriverError) {
+    return failure(error.code, error.message, false, interactionStatus(error.code));
   }
   return failure("driver_failed", "interaction controller request failed", false, 500);
 }
