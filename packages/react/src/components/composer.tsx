@@ -457,9 +457,9 @@ export function useChatComposerController({
     (event: DragEvent<HTMLDivElement>) => {
       if (!attachments || !dragCarriesFiles(event)) return;
       event.preventDefault();
-      setDragging(true);
+      if (!disabled) setDragging(true);
     },
-    [attachments],
+    [attachments, disabled],
   );
   const handleDragLeave = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
@@ -474,10 +474,15 @@ export function useChatComposerController({
       if (!attachments || !dragCarriesFiles(event)) return;
       event.preventDefault();
       setDragging(false);
-      if (event.dataTransfer.files.length > 0) attachments.addFiles(event.dataTransfer.files);
+      if (!disabled && event.dataTransfer.files.length > 0)
+        attachments.addFiles(event.dataTransfer.files);
     },
-    [attachments],
+    [attachments, disabled],
   );
+
+  useEffect(() => {
+    if (disabled) setDragging(false);
+  }, [disabled]);
 
   const [notice, setNotice] = useState<Notice | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -624,17 +629,18 @@ export function useChatComposerController({
   );
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>) => {
+      if (disabled) return;
       onPaste?.(event);
       attachments?.addFromPaste(event);
     },
-    [attachments, onPaste],
+    [attachments, disabled, onPaste],
   );
   const handleFileChange = useCallback(
     (event: ChangeEvent<HTMLInputElement>) => {
-      if (event.target.files) attachments?.addFiles(event.target.files);
+      if (!disabled && event.target.files) attachments?.addFiles(event.target.files);
       event.target.value = "";
     },
-    [attachments],
+    [attachments, disabled],
   );
 
   const helpCommands = useMemo(

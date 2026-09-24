@@ -17,6 +17,7 @@ import {
 import "../src/styles.css";
 
 const newSession = new URLSearchParams(location.search).has("new-session");
+const sendingPreview = new URLSearchParams(location.search).has("sending");
 
 function PickerFixture({ leading, label }: { leading?: ReactNode; label: string }) {
   return (
@@ -63,7 +64,8 @@ function Fixture() {
             value: message,
             setValue: setMessage,
             hasDraftContent: () => message.length > 0,
-            canSend: newSession && message.trim().length > 0,
+            sending: sendingPreview,
+            canSend: newSession && !sendingPreview && message.trim().length > 0,
             // Preview-only delivery: exercise the production composer affordance
             // without creating a session in the fixture.
             send: async () => {
@@ -71,6 +73,7 @@ function Fixture() {
               return true;
             },
           })}
+          disabled={sendingPreview}
           attachments={emptyAttachments()}
           attachButtonClassName="hidden"
           controlsLeading={

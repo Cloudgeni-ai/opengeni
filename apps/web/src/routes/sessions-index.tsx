@@ -1503,7 +1503,7 @@ function SessionsIndexRouteContent({
             composer={createComposer}
             attachments={attachments}
             autoFocus
-            disabled={newSessionDraft.loading}
+            disabled={newSessionDraft.loading || submitting}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             placeholder="Describe a task for the agent…"
             controlsLeading={
