@@ -62,8 +62,8 @@ export const T = {
   rowLag: 0.3,
 
   // Act 5 — inside the agent panel: the code that put it there
-  zoomIn: [18.5, 19.3] as const,
-  clearPanel: [18.42, 18.6] as const,
+  zoomIn: [18.8, 19.56] as const,
+  clearPanel: [18.52, 18.76] as const,
   codeUI: b(37),
   codeServer: b(39),
   chipReplay: b(39) + 2.0,

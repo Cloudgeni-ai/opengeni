@@ -185,7 +185,16 @@ export function Widget({ t }: { t: number }) {
         ) : null}
 
         {bubbleIn ? (
-          <div style={{ flexShrink: 0, alignSelf: "flex-start", opacity: ease.outCubic(progress(t, T.dotsStart, T.dotsStart + 0.16)) }}>
+          <div
+            style={{
+              flexShrink: 0,
+              alignSelf: "flex-start",
+              // grows from nothing so the thread glides up instead of jumping
+              maxHeight: 640 * ease.inOutCubic(progress(t, T.dotsStart, T.dotsStart + 0.5)),
+              overflow: "hidden",
+              opacity: ease.outCubic(progress(t, T.dotsStart + 0.04, T.dotsStart + 0.2)),
+            }}
+          >
             <Bubble side="ai" wide>
               <div style={{ position: "relative", height: lerp(DOTS_H, INTRO_H, intro), overflow: "hidden" }}>
                 <div style={{ position: "absolute", left: 0, top: 0, opacity: 1 - clamp(intro * 3) }}>
@@ -261,7 +270,7 @@ export function Widget({ t }: { t: number }) {
         <div
           style={{
             flex: 1,
-            minHeight: 58,
+            minHeight: 86,
             borderRadius: 18,
             border: "1.5px solid #e4e0ee",
             background: C.white,

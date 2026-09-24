@@ -80,6 +80,22 @@ def bp(x: np.ndarray, lo: float, hi: float, order: int = 2) -> np.ndarray:
     return signal.sosfilt(sos, x, axis=0)
 
 
+def shelf(x: np.ndarray, f0: float, gain_db: float, kind: str) -> np.ndarray:
+    """RBJ-cookbook shelving filter (slope 0.9)."""
+    a_ = 10 ** (gain_db / 40)
+    w0 = 2 * np.pi * f0 / SR
+    alpha = np.sin(w0) / 2 * np.sqrt((a_ + 1 / a_) * (1 / 0.9 - 1) + 2)
+    c = np.cos(w0)
+    r = 2 * np.sqrt(a_) * alpha
+    if kind == "high":
+        b = [a_ * ((a_ + 1) + (a_ - 1) * c + r), -2 * a_ * ((a_ - 1) + (a_ + 1) * c), a_ * ((a_ + 1) + (a_ - 1) * c - r)]
+        a = [(a_ + 1) - (a_ - 1) * c + r, 2 * ((a_ - 1) - (a_ + 1) * c), (a_ + 1) - (a_ - 1) * c - r]
+    else:
+        b = [a_ * ((a_ + 1) - (a_ - 1) * c + r), 2 * a_ * ((a_ - 1) - (a_ + 1) * c), a_ * ((a_ + 1) - (a_ - 1) * c - r)]
+        a = [(a_ + 1) + (a_ - 1) * c + r, -2 * ((a_ - 1) + (a_ + 1) * c), (a_ + 1) + (a_ - 1) * c - r]
+    return signal.lfilter(np.array(b) / a[0], np.array(a) / a[0], x, axis=0)
+
+
 def pan(x: np.ndarray, p: float) -> np.ndarray:
     """Equal-power pan, p in [-1, 1] → (n, 2)."""
     a = (p + 1) * np.pi / 4
@@ -112,7 +128,7 @@ def celesta(freq: float, dur: float = 1.6, bright: float = 1.0) -> np.ndarray:
     car = np.sin(2 * np.pi * freq * t + idx * mod)
     over = 0.18 * np.sin(2 * np.pi * freq * 4.0 * t) * np.exp(-t / 0.12)
     body = (car + over) * exp_decay(len(t), 0.55, 0.0015)
-    return lp(body, 9000)
+    return lp(body, 12000)
 
 
 def epiano(freq: float, dur: float, vel: float = 1.0) -> np.ndarray:
@@ -120,10 +136,10 @@ def epiano(freq: float, dur: float, vel: float = 1.0) -> np.ndarray:
     t = t_axis(dur)
     idx = (1.1 + 0.9 * vel) * np.exp(-t / 0.35)
     car = np.sin(2 * np.pi * freq * t + idx * np.sin(2 * np.pi * freq * t))
-    tine = 0.12 * vel * np.sin(2 * np.pi * freq * 7.02 * t) * np.exp(-t / 0.05)
+    tine = 0.2 * vel * np.sin(2 * np.pi * freq * 7.02 * t) * np.exp(-t / 0.06)
     trem = 1 + 0.03 * np.sin(2 * np.pi * 4.6 * t)
     e = env_adsr(len(t), 0.004, 0.9, 0.35, 0.35)
-    return lp((car + tine) * e * trem, 6500)
+    return lp((car + tine) * e * trem, 9500)
 
 
 def pad(freqs: list[float], dur: float, cutoff: float = 1800) -> np.ndarray:
@@ -164,8 +180,8 @@ def kick(dur: float = 0.5) -> np.ndarray:
     t = t_axis(dur)
     f = 44 + 90 * np.exp(-t / 0.035)
     phase = 2 * np.pi * np.cumsum(f) / SR
-    body = np.sin(phase) * np.exp(-t / 0.14)
-    click = hp(rng.standard_normal(len(t)), 2500) * np.exp(-t / 0.003) * 0.25
+    body = np.sin(phase) * np.exp(-t / 0.11)
+    click = hp(rng.standard_normal(len(t)), 2500) * np.exp(-t / 0.0035) * 0.38
     return np.tanh(1.6 * (body + click)) / np.tanh(1.6)
 
 
@@ -402,9 +418,9 @@ def compose(cues: dict) -> dict[str, np.ndarray]:
             vel = 0.85 if off == 0 else 0.55
             for k, n in enumerate(chord):
                 keys.add(at + off * beat + 0.006 * k, epiano(note(n), 0.9 if off else 1.3, vel), 0.07 * energy, p=-0.25 + 0.17 * k)
-        bass.add(at, sub_bass(note(root), min(span, 1.1)), 0.4 * energy)
+        bass.add(at, sub_bass(note(root), min(span, 1.1)), 0.24 * energy)
         if length >= 3:
-            bass.add(at + 2.5 * beat, pluck_bass(note(root) * 2, 0.26), 0.16 * energy)
+            bass.add(at + 2.5 * beat, pluck_bass(note(root) * 2, 0.26), 0.15 * energy)
 
     # the phrase, completed, as the agent gets going; and once more as the evening is saved
     for at, name in [(B(24), "A4"), (B(25), "B4"), (B(26), "C#5"), (B(27), "D5"),
@@ -418,11 +434,11 @@ def compose(cues: dict) -> dict[str, np.ndarray]:
         inside = t >= code_start
         pos = i % 4
         if pos in (0, 2):
-            drums.add(t, kick(), 0.52 if not inside else 0.32)
+            drums.add(t, kick(), 0.44 if not inside else 0.28)
         if pos in (1, 3):
             drums.add(t, rim(), 0.19 if not inside else 0.12, p=0.1)
-        drums.add(t, shaker(level=1.0), 0.15 if not inside else 0.1, p=0.35)
-        drums.add(t + beat / 2, shaker(level=0.7), 0.12 if not inside else 0.08, p=0.35)
+        drums.add(t, shaker(level=1.0), 0.2 if not inside else 0.13, p=0.35)
+        drums.add(t + beat / 2, shaker(level=0.7), 0.16 if not inside else 0.1, p=0.35)
         t += beat
         i += 1
     drums.add(float(cues["tap"]), clap(), 0.17, p=-0.1)
@@ -438,7 +454,7 @@ def compose(cues: dict) -> dict[str, np.ndarray]:
         padt.add(at, pad([note(n) for n in chord[1:]], length + 1.0, cutoff=1500), 0.19)
         for k, n in enumerate(chord):
             keys.add(at + 0.008 * k, epiano(note(n), length + 0.6, 0.75), 0.075, p=-0.25 + 0.17 * k)
-        bass.add(at, sub_bass(note(root) * (2 if root == "A1" else 1), length + 0.3), 0.33)
+        bass.add(at, sub_bass(note(root) * (2 if root == "A1" else 1), length + 0.3), 0.2)
     for at, name in [(wordmark - B(3), "A4"), (wordmark - B(2), "B4"), (wordmark - B(1), "C#5"), (wordmark, "D5")]:
         final = name == "D5"
         motif.add(at, celesta(note(name), 2.6 if final else 1.3, bright=0.7), 0.4 if final else 0.28, p=0.1)
@@ -498,6 +514,9 @@ def mix(stems: dict[str, np.ndarray]) -> np.ndarray:
     music = music + lp(stems["bass"], 900) + reverb(stems["drums"], ir_small, 0.16)
     sfx = reverb(stems["sfx"], ir_small, 0.2)
     music = hp(music, 38)
+    # voice the mix for phones and laptops: less sub, more presence and air
+    music = shelf(music, 110, -3.0, "low")
+    music = shelf(music, 3200, 4.0, "high")
     total = music + sfx
     # gentle bus compression (RMS detector, 2:1 above threshold)
     level = np.sqrt(lp(np.mean(total**2, axis=1), 12, order=1) + 1e-12)

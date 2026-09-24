@@ -31,7 +31,7 @@ export function MessageBlock({ style }: { style?: CSSProperties }) {
 export function AgentPanel({ t }: { t: number }) {
   // The piece appears lifted above its socket, then presses home exactly on the dock beat.
   if (t < T.dock - 0.62) return null;
-  const appear = ease.emphasized(progress(t, T.dock - 0.62, T.dock - 0.4));
+  const appear = ease.inOutCubic(progress(t, T.dock - 0.64, T.dock - 0.34));
   const press = ease.inCubic(progress(t, T.dock - 0.22, T.dock));
   const hover = Math.sin((t - (T.dock - 0.62)) * 7) * 2 * (1 - press);
   const raise = (18 + hover) * (1 - press);
@@ -194,7 +194,8 @@ function Step({ t, at, tool, children }: { t: number; at: number; tool: string; 
 
 function Question({ t }: { t: number }) {
   if (t < T.question) return null;
-  const p = ease.emphasized(progress(t, T.question, T.question + 0.45));
+  const p = ease.outCubic(progress(t, T.question, T.question + 0.5));
+  const fade = ease.inOutSine(progress(t, T.question, T.question + 0.3));
   const tapped = t >= T.tap;
   const press = t >= T.tap - 0.02 && t < T.tap + 0.12 ? 0.96 : 1;
   const answered = ease.outCubic(progress(t, T.tap + 0.05, T.tap + 0.35));
@@ -204,8 +205,8 @@ function Question({ t }: { t: number }) {
         margin: "14px 0 14px",
         background: C.ink,
         padding: "22px 24px 24px",
-        opacity: clamp(p * 1.8),
-        transform: `translateY(${(1 - p) * 20}px)`,
+        opacity: fade,
+        transform: `translateY(${(1 - p) * 22}px)`,
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 12, fontFamily: F.mono, fontSize: 16, letterSpacing: "0.1em", color: "rgba(255,255,255,0.62)" }}>

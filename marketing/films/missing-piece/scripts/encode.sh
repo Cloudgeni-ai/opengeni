@@ -14,7 +14,7 @@ ffmpeg -hide_banner -loglevel error -y \
   -i out/audio/mix.wav \
   -map 0:v:0 -map 1:a:0 \
   -vf "scale=in_range=full:out_range=tv:out_color_matrix=bt709:flags=lanczos+accurate_rnd+full_chroma_int,format=yuv420p" \
-  -c:v libx264 -preset slow -crf 15 -profile:v high -level 4.2 -g 120 -bf 3 \
+  -c:v libx264 -preset slow -tune animation -crf 11 -profile:v high -level 4.2 -g 120 -bf 3 \
   -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv \
   -c:a aac -b:a 256k -ar 48000 \
   -movflags +faststart -shortest \

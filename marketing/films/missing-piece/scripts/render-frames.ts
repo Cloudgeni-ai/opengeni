@@ -43,13 +43,14 @@ async function main() {
       "--disable-lcd-text",
       "--disable-background-timer-throttling",
       "--disable-renderer-backgrounding",
+      "--disable-dev-shm-usage",
     ],
   });
 
   const probe = await browser.newPage();
   await probe.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 1 });
-  await probe.goto(url, { waitUntil: "networkidle0" });
-  await probe.waitForFunction(() => window.__ready === true, { timeout: 60_000 });
+  await probe.goto(url, { waitUntil: "load", timeout: 30_000 });
+  await probe.waitForFunction(() => window.__ready === true, { timeout: 30_000 });
   const meta = (await probe.evaluate(() => window.__meta))!;
   const cues = await probe.evaluate(() => window.__cues);
   await mkdir(join(ROOT, "out"), { recursive: true });
@@ -66,12 +67,30 @@ async function main() {
     frames.filter((_, i) => i % Math.min(workers, frames.length) === lane),
   );
 
-  await Promise.all(
-    lanes.map(async (lane) => {
+  /** Open a page and wait until fonts and images are ready; retry a tab that stalls. */
+  async function readyPage() {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
       const page = await browser.newPage();
-      await page.setViewport({ width: meta.width, height: meta.height, deviceScaleFactor: scale });
-      await page.goto(url, { waitUntil: "networkidle0" });
-      await page.waitForFunction(() => window.__ready === true, { timeout: 60_000 });
+      try {
+        await page.setViewport({ width: meta.width, height: meta.height, deviceScaleFactor: scale });
+        await page.goto(url, { waitUntil: "load", timeout: 30_000 });
+        await page.waitForFunction(() => window.__ready === true, { timeout: 30_000 });
+        return page;
+      } catch (error) {
+        await page.close().catch(() => undefined);
+        if (attempt === 3) throw error;
+        console.warn(`page not ready (attempt ${attempt}), retrying`);
+      }
+    }
+    throw new Error("unreachable");
+  }
+
+  const pages = [];
+  for (let i = 0; i < lanes.length; i += 1) pages.push(await readyPage());
+
+  await Promise.all(
+    lanes.map(async (lane, index) => {
+      const page = pages[index]!;
       for (const frame of lane) {
         await page.evaluate((f) => window.__setFrame!(f), frame);
         const buffer = await page.screenshot({
@@ -91,6 +110,7 @@ async function main() {
     }),
   );
 
+  if (done !== frames.length) throw new Error(`rendered ${done} of ${frames.length} frames`);
   process.stdout.write("\n");
   await browser.close();
   server.stop(true);

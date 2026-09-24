@@ -12,19 +12,19 @@ built, rendered, reviewed in motion, revised at least twice, and exported.
 
 ## Acceptance checklist
 
-- [ ] Product claims and code verified against current source and opengeni.ai
-- [ ] At least three substantially different concepts explored; one chosen with rationale
-- [ ] A stranger can answer: what is this, why do I want it, why OpenGeni
-- [ ] One app, one customer, one request, one state carried through the whole film
-- [ ] Customer (end user) and builder (viewer) are never conflated
-- [ ] No fabricated live run: the product is an illustrated scenario, labelled as such
-- [ ] Code is a short, exact excerpt of the current SDK, causally tied to what was shown
-- [ ] No "production in N lines" claim; the excerpt says what it leaves out
-- [ ] Legible on a phone feed; safe margins; nothing overlaps; no template tropes
-- [ ] Original sound design and music; no narration robot; loudness checked, no clipping
-- [ ] Multiple review/revision passes recorded below, each with concrete changes
-- [ ] Final MP4 <= 30.0 s, decoded and inspected, saved as an artifact
-- [ ] Source committed and pushed; render command documented; no PR, merge or deploy
+- [x] Product claims and code verified against current source and opengeni.ai
+- [x] At least three substantially different concepts explored; one chosen with rationale
+- [x] A stranger can answer: what is this, why do I want it, why OpenGeni
+- [x] One app, one customer, one request, one state carried through the whole film
+- [x] Customer (end user) and builder (viewer) are never conflated
+- [x] No fabricated live run: the product is an illustrated scenario, labelled as such
+- [x] Code is a short, exact excerpt of the current SDK, causally tied to what was shown
+- [x] No "production in N lines" claim; the excerpt says what it leaves out
+- [x] Safe margins, nothing overlaps; phone legibility for the key lines (see limits)
+- [x] Original sound design and music; no narration robot; loudness checked, no clipping
+- [x] Multiple review/revision passes recorded below, each with concrete changes
+- [x] Final MP4 <= 30.0 s, decoded and inspected, saved as an artifact
+- [x] Source committed and pushed; render command documented; no PR, merge or deploy
 
 ## Research notes (what is true, with sources)
 
@@ -137,4 +137,103 @@ the agent inside does.
 
 ## Iteration log
 
-(Filled in as the film is rendered and reviewed.)
+Reviews came from three sources: my own frame-by-frame inspection (stills, dense contact
+sheets, 60 fps frame sequences), an objective pop detector (`scripts/pop-check.py`), and five
+independent full-motion reviews by a video model. The video model proved unreliable in two
+specific ways, so its claims were verified against frames before acting: it cannot hear the
+audio (one review invented a "drum fill"; later ones said plainly they cannot perceive audio),
+and it samples too sparsely to see 0.2–0.5 s animations (it repeatedly called measured
+multi-frame animations "hard cuts", and described a "3D flip" that does not exist).
+
+**v0 — first stills.** Structure worked; the hook was weak (empty widget, tiny typed line),
+the leader line in the code crossed `"mcp"`, JetBrains Mono fused `/>` into a ligature, the
+orphaned request bubble was oversized. Fixed: macro opening on the typed line, ligatures off,
+no leader line, tighter bubble.
+
+**v1 — first motion (29.4 s).** Reviews: 6 s of failure before the point lands; the push-in
+to the question card hid the itinerary as it updated; the orange scanline read as a template
+wipe; the page scroll clipped code off the top edge; code too small for phones; dashed
+"missing piece" box read as a wireframe; the request bubble snapped colour. Objective audio
+analysis: sub-bass roots down to 49 Hz eating headroom; loudnorm silently fell back to dynamic
+compression because true peak would have exceeded target.
+
+**v2 (27.7 s).** Retimed on a 112.5 BPM grid (32 frames per beat); opening shortened to six
+list items; one steady framing for the whole proof (no push-ins); the code moved *inside the
+agent panel* via a container transform (the panel's conversation area opens to fill the frame)
+instead of a wipe; code enlarged to 56 px and revealed in two steps (the one component that
+renders the panel, then the server call); a new ending that rhymes with act 2 — same
+composition, product in its final state beside "Your product. Agents inside."; widget
+suggestion chips added (every canned prompt asks for information, none for an action); score
+retimed with an A pedal so the dock resolves melody and harmony; true-peak limiter in
+Python mastering to −16 LUFS / −1.6 dBTP.
+
+**v3 (28.8 s).** Review: the widget-pop-to-dock stretch felt slow and the dashed slot cheap;
+the panel drop looked like a stock animation; the code page still felt like leaving the
+product. Changes: the missing piece became a *hole cut in the product* (paper showing through,
+inner shadow); the agent panel appears lifted above it and presses home on the downbeat; the
+request arcs into the panel; the opened code page keeps the panel's "Agent · OPENGENI" header;
+non-essential code dimmed so the eye goes to `mcpServers: [tripActions]` and
+`<SessionConversation … />`; two more beats of code.
+
+**v4.** Verified at 60 fps: the request morph really did snap (colour and shape flipped in
+~3 frames because they rode the eased flight curve), and the widget jumped at send (chips
+vanished instantly; the streamed reply grew a line at a time). The v1 review's still-valid
+notes: the question card had ~1 s before the click, the pointer moved robotically, steps and
+rows changed at the same instant, panel padding was tight, footnotes sat near the frame edge,
+the widget looked cheap. Changes: widget restyled as a polished, contemporary but generic
+assistant (its behaviour is the joke, not bad craft); chips collapse, dots grow into the reply,
+streamed text reserves its final height; the morph runs on its own ~0.45 s clock with a
+lateral bow that avoids the panel header; the question holds 1.6 s; a curved, decelerating
+pointer with hover state; each row now updates after its panel step; the unreadable
+"excerpt" footnote replaced by a real code comment `// after your own sign-in and tenant
+lookup`; highlighter boxes instead of an underline that read like a spell-check error; the
+action chips replay with checks in the order the agent used them, on the same four notes
+as its steps; proof reframed to 1.08× for title-safe margins.
+
+**v5.** Review: attention still ping-ponged between panel and itinerary; the hole looked flat
+at preview size; the disclaimer looked like an afterthought; small lulls around the pop and
+the fold-back. Changes: attention routing — tag lights at the row end beside the panel, an
+orange wash sweeps leftward, the time rolls as the wash arrives; the sent bubble rises out of
+the input; deeper hole with ink edges; disclaimer as a figure caption under the product; end
+lockup aligned to the product window's top and bottom; lulls tightened.
+
+**Objective passes on v5.** The pop detector found four genuine one-frame jumps that no
+reviewer had located precisely: the input box growing when text wrapped (0.57 s), the lifted
+panel's reveal (10.1 s), the question card's entrance (12.3 s), and — largest — the opened
+panel overlay covering a conversation still mid-fade (18.5 s). All fixed; the remaining
+flags are the velocity peaks of deliberate multi-frame moves. A renderer bug was also
+found and fixed (a stalled Chrome tab silently truncated a render to 898/1728 frames:
+`--disable-dev-shm-usage`, per-tab readiness retries and a completeness assertion). Audio
+spectrum analysis showed 56% of energy below 120 Hz and ~2% at 2–6 kHz — a dark mix that
+would vanish on phone speakers — rebalanced to ~29% below 120 Hz with more presence while
+keeping −16.0 LUFS. Encoded master measured against source PNGs: SSIM ≥ 0.99; the residual
+is 4:2:0 chroma on orange text, not compression (lower CRF did not change it).
+
+## Final storyboard (as built, 28.8 s)
+
+| Time | Picture | Sound |
+| --- | --- | --- |
+| 0–1.6 | Macro: customer types the request into the product's AI widget; suggestion chips all ask for information. | Key ticks; A–B–C♯, rest. |
+| 1.6–4.7 | Reply: "Here's how to update each booking yourself" + 6 steps + "Hope this helps!"; camera reveals the links it names. | Chat blips; phrase again, unresolved. |
+| 4.7–8.1 | Product slides right. "It knows exactly what to do." / "It just can't do it." | Phrase; then silence under the second line. |
+| 8.5–10.1 | Widget pops; request left floating; the product's empty side becomes a hole: "THE MISSING PIECE / An agent inside your product." | Pop; riser; the phrase once more. |
+| 10.13–10.67 | Agent panel appears lifted over the hole. | The missing beat: near-silence. |
+| 10.67 | Panel presses home; request morphs into it. | Latch + low thump; the missing D lands; groove starts. |
+| 11.7–18.2 | Agent checks the flight, asks about the €12 fee, customer clicks yes; car / hotel / dinner rows update after each step, "By agent"; "All set. Your evening still works."; 🙏. | Ticks on beats; B minor under the question, G on the click; home to D on "All set". |
+| 18.5–24.3 | Conversation clears; panel opens (header stays); `<SessionConversation … />`, then the `createSession` excerpt with the comment naming what is left out; the four actions light up in order. | Lighter groove; the chips echo the steps' four notes. |
+| 24.3–28.8 | Panel folds back; product slides right as in act 2; "Your product. Agents inside."; wordmark lands; opengeni.ai; caption. | ii–V–I; the phrase completes, D with the wordmark. |
+
+## Honest limits
+
+- I cannot listen. Sound was judged by design intent, spectrum, loudness curves, section RMS,
+  peak/clipping checks and sync against cues — not by ear. A human listen is still required;
+  the most subjective risks are the celesta timbre and the synthesized drum feel.
+- Bland v3 Matthew (or any voice) was not available in this environment; the film was
+  designed narration-free rather than substitute a robotic voice. No VO version exists.
+- The video-model reviewers could not perceive audio and under-sampled short animations;
+  their final approval is not proof of quality. The objective checks above are the evidence.
+- Phone-feed legibility: the supers, slot line and end lockup are large; product UI detail
+  (itinerary sub-lines, widget list, code) is designed for desktop/fullscreen viewing. The
+  big times, tags and highlights carry the proof at phone size.
+- The product is illustrative. OpenGeni's security, tenancy and scale behaviour are not
+  demonstrated by this film.
