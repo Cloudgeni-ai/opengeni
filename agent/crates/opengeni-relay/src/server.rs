@@ -604,47 +604,50 @@ pub(crate) mod conn {
         #[test]
         fn forwarding_respects_port_role_and_input_control() {
             let channel_id = "channel-a";
-            let frame = RelayMessage::Frame(v1::StreamFrame {
-                channel_id: channel_id.to_string(),
-                ..Default::default()
-            });
-            let wrong_channel_frame = RelayMessage::Frame(v1::StreamFrame {
-                channel_id: "channel-b".to_string(),
-                ..Default::default()
-            });
-            let desktop_input = RelayMessage::DesktopInput(v1::DesktopInput {
-                channel_id: channel_id.to_string(),
-                ..Default::default()
-            });
-            let wrong_channel_desktop_input = RelayMessage::DesktopInput(v1::DesktopInput {
-                channel_id: "channel-b".to_string(),
-                ..Default::default()
-            });
-            let lifecycle = [
-                RelayMessage::Close(v1::StreamClose {
-                    channel_id: channel_id.to_string(),
+            let channel_frame = |channel: &str| {
+                RelayMessage::Frame(v1::StreamFrame {
+                    channel_id: channel.to_string(),
                     ..Default::default()
-                }),
+                })
+            };
+            let channel_input = |channel: &str| {
+                RelayMessage::DesktopInput(v1::DesktopInput {
+                    channel_id: channel.to_string(),
+                    ..Default::default()
+                })
+            };
+            let channel_close = |channel: &str| {
+                RelayMessage::Close(v1::StreamClose {
+                    channel_id: channel.to_string(),
+                    ..Default::default()
+                })
+            };
+            let frame = channel_frame(channel_id);
+            let wrong_channel_frame = channel_frame("channel-b");
+            let desktop_input = channel_input(channel_id);
+            let wrong_channel_desktop_input = channel_input("channel-b");
+            let lifecycle = [
+                channel_close(channel_id),
                 RelayMessage::Open(v1::StreamOpen::default()),
                 RelayMessage::OpenAck(v1::StreamOpenAck::default()),
             ];
-            let wrong_channel_close = RelayMessage::Close(v1::StreamClose {
-                channel_id: "channel-b".to_string(),
-                ..Default::default()
-            });
+            let wrong_channel_close = channel_close("channel-b");
             for port in [PTY_STREAM_PORT, DESKTOP_STREAM_PORT, 9999] {
                 for role in [Role::Client, Role::Agent] {
                     for control_claim in [false, true] {
                         for stream_control_enabled in [false, true] {
-                            assert_eq!(
+                            let forward = |message: &RelayMessage| {
                                 may_forward_message(
                                     channel_id,
                                     port,
                                     role,
                                     control_claim,
                                     stream_control_enabled,
-                                    &frame
-                                ),
+                                    message,
+                                )
+                            };
+                            assert_eq!(
+                                forward(&frame),
                                 role == Role::Agent
                                     || (role == Role::Client
                                         && port == PTY_STREAM_PORT
@@ -652,54 +655,19 @@ pub(crate) mod conn {
                                 "Frame on port {port}, role {role:?}, claim {control_claim}, flag {stream_control_enabled}"
                             );
                             assert_eq!(
-                                may_forward_message(
-                                    channel_id,
-                                    port,
-                                    role,
-                                    control_claim,
-                                    stream_control_enabled,
-                                    &desktop_input
-                                ),
+                                forward(&desktop_input),
                                 role == Role::Client
                                     && port == DESKTOP_STREAM_PORT
                                     && control_claim
                                     && stream_control_enabled,
                                 "DesktopInput on port {port}, role {role:?}, claim {control_claim}, flag {stream_control_enabled}"
                             );
-                            assert!(!may_forward_message(
-                                channel_id,
-                                port,
-                                role,
-                                control_claim,
-                                stream_control_enabled,
-                                &wrong_channel_frame
-                            ));
-                            assert!(!may_forward_message(
-                                channel_id,
-                                port,
-                                role,
-                                control_claim,
-                                stream_control_enabled,
-                                &wrong_channel_desktop_input
-                            ));
+                            assert!(!forward(&wrong_channel_frame));
+                            assert!(!forward(&wrong_channel_desktop_input));
                             for message in &lifecycle {
-                                assert!(may_forward_message(
-                                    channel_id,
-                                    port,
-                                    role,
-                                    control_claim,
-                                    stream_control_enabled,
-                                    message
-                                ));
+                                assert!(forward(message));
                             }
-                            assert!(!may_forward_message(
-                                channel_id,
-                                port,
-                                role,
-                                control_claim,
-                                stream_control_enabled,
-                                &wrong_channel_close
-                            ));
+                            assert!(!forward(&wrong_channel_close));
                         }
                     }
                 }
