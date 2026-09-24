@@ -5,7 +5,8 @@ instructions instead. The film shows that moment inside one travel product — "
 exactly what to do. It just can't do it." — then names the missing piece: *an agent inside
 your product*. An OpenGeni agent presses into the gap in the product's layout, the same
 request flies into it, and this time the product's own actions change the customer's day
-(car, hotel, dinner), asking before it spends money. The panel then opens to show the code
+(car, hotel, dinner), asking before it spends money, until the product itself reads
+"Replanned around your delay". The panel then opens to show the code
 behind what we watched, and the film ends where act 2 was, with the opposite truth:
 **Your product. Agents inside.**
 

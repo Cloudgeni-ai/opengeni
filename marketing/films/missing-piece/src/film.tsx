@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { PANEL } from "./components/agent-panel";
 import { CodeScene } from "./components/code";
 import { EndTagline } from "./components/end-card";
@@ -14,8 +15,8 @@ const PROOF = { x: 960, y: 540, s: 1.08 };
 
 /** One continuous take. Each entry is a held framing; moves ease between them. */
 const SHOTS: Shot[] = [
-  { t: 0, x: 1532, y: 900, s: 2.2 }, // macro: the request being typed
-  { t: 1.32, x: 1532, y: 900, s: 2.2 },
+  { t: 0, x: 1512, y: 850, s: 2.9 }, // macro: the request, at headline size, being typed
+  { t: 1.32, x: 1512, y: 850, s: 2.9 },
   { t: 2.25, x: 1540, y: 640, s: 1.45 }, // the assistant's reply
   { t: 3.72, x: 1540, y: 636, s: 1.48, e: ease.inOutSine },
   { t: 4.45, x: 1262, y: 596, s: 1.12 }, // …and the links it names, right there
@@ -50,7 +51,7 @@ export const OPEN_HEADER = 80 * PROOF.s;
  * Container transform: the agent panel opens to fill the frame (keeping its header, so we
  * are visibly still inside it) and its surface becomes the page that shows its source.
  */
-function PanelOpen({ t }: { t: number }) {
+function PanelOpen({ t, children }: { t: number; children?: ReactNode }) {
   if (t < T.zoomIn[0] || t > T.zoomOut[1] + 0.16) return null;
   const open = ease.inOutQuint(progress(t, T.zoomIn[0], T.zoomIn[1]));
   const close = ease.inOutQuint(progress(t, T.zoomOut[0], T.zoomOut[1]));
@@ -59,19 +60,24 @@ function PanelOpen({ t }: { t: number }) {
   const composer = 1 - Math.min(1, p * 4);
   const r = PANEL_ON_SCREEN;
   const k = PROOF.s;
+  const left = lerp(r.x, 0, p);
+  const top = lerp(r.y, 0, p);
   return (
     <div
       style={{
         position: "absolute",
-        left: lerp(r.x, 0, p),
-        top: lerp(r.y, 0, p),
+        left,
+        top,
         width: lerp(r.w, W, p),
         height: lerp(r.h, H, p),
         background: C.surface,
         opacity: 1 - vanish,
+        overflow: "hidden",
         boxShadow: `inset ${2 * k}px 0 0 rgba(36,36,35,${1 - p})`,
       }}
     >
+      {/* Frame-space layer, clipped by the panel as it opens and folds back. */}
+      <div style={{ position: "absolute", left: -left, top: -top, width: W, height: H }}>{children}</div>
       <div
         style={{
           height: OPEN_HEADER,
@@ -133,8 +139,9 @@ export function Film({ frame }: { frame: number }) {
         <Supers t={t} />
         <EndTagline t={t} />
       </div>
-      <PanelOpen t={t} />
-      <CodeScene t={t} />
+      <PanelOpen t={t}>
+        <CodeScene t={t} />
+      </PanelOpen>
     </div>
   );
 }

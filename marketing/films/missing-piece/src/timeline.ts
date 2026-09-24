@@ -64,11 +64,11 @@ export const T = {
   // Act 5 — inside the agent panel: the code that put it there
   zoomIn: [18.8, 19.56] as const,
   clearPanel: [18.52, 18.76] as const,
-  codeUI: b(37),
+  codeUI: b(36),
   codeServer: b(39),
   chipReplay: b(39) + 2.0,
   chipGap: 0.24,
-  zoomOut: [24.3, 24.9] as const,
+  zoomOut: [24.1, 24.72] as const,
 
   // Act 6 — the same composition as act 2, opposite truth
   endShrink: [24.95, 25.85] as const,

@@ -138,8 +138,8 @@ the agent inside does.
 ## Iteration log
 
 Reviews came from three sources: my own frame-by-frame inspection (stills, dense contact
-sheets, 60 fps frame sequences), an objective pop detector (`scripts/pop-check.py`), and five
-independent full-motion reviews by a video model. The video model proved unreliable in two
+sheets, 60 fps frame sequences, frames extracted from the delivered file), an objective pop
+detector (`scripts/pop-check.py`), and seven independent full-motion reviews by a video model. The video model proved unreliable in two
 specific ways, so its claims were verified against frames before acting: it cannot hear the
 audio (one review invented a "drum fill"; later ones said plainly they cannot perceive audio),
 and it samples too sparsely to see 0.2–0.5 s animations (it repeatedly called measured
@@ -209,19 +209,36 @@ would vanish on phone speakers — rebalanced to ~29% below 120 Hz with more pre
 keeping −16.0 LUFS. Encoded master measured against source PNGs: SSIM ≥ 0.99; the residual
 is 4:2:0 chroma on orange text, not compression (lower CRF did not change it).
 
+**v6 — recovery pass (fresh eyes on the finished v5 master).** Three things still weakened it:
+(1) the first frame was not a feed-stopping hook — the typed request was ~44 px; (2) about
+0.6 s of near-empty frame at 19.2–19.8 s while the opened panel waited for its first code
+line, and a similar gap as the code left; (3) the payoff lived only in the agent's panel —
+the product itself never said the day was fixed. Changes: a 2.9× macro so the request reads
+at headline size (~58 px) in frame one, framed so the whole greeting bubble stays inside;
+the code page now renders *inside* the opening panel, clipped by it, so the panel's moving
+edge reveals the first line and later carries the code away while the itinerary is
+uncovered (near-empty time: from ~0.3–0.6 s to 3 frames mid-reveal, measured); and the
+product's own header rolls to an orange "✓ Replanned around your delay" on "All set",
+so the final frame shows the outcome in the product next to "Your product. Agents inside."
+The v6 video review claimed a 0.4 s blank at 18.9 s, a hard cut at 24.3 s and a cropped
+greeting bubble; frames extracted from the delivered MP4 contradict all three (the panel
+edge is visibly sweeping at 19.05–19.3 s and 24.25–24.55 s; the bubble's top edge sits
+47 px inside the frame), so they were not acted on. Its fourth note describes the
+deliberate masked line reveal of the supers.
+
 ## Final storyboard (as built, 28.8 s)
 
 | Time | Picture | Sound |
 | --- | --- | --- |
-| 0–1.6 | Macro: customer types the request into the product's AI widget; suggestion chips all ask for information. | Key ticks; A–B–C♯, rest. |
+| 0–1.6 | Macro (2.9×): the request, at headline size, typed into the product's AI widget; suggestion chips all ask for information. | Key ticks; A–B–C♯, rest. |
 | 1.6–4.7 | Reply: "Here's how to update each booking yourself" + 6 steps + "Hope this helps!"; camera reveals the links it names. | Chat blips; phrase again, unresolved. |
 | 4.7–8.1 | Product slides right. "It knows exactly what to do." / "It just can't do it." | Phrase; then silence under the second line. |
 | 8.5–10.1 | Widget pops; request left floating; the product's empty side becomes a hole: "THE MISSING PIECE / An agent inside your product." | Pop; riser; the phrase once more. |
 | 10.13–10.67 | Agent panel appears lifted over the hole. | The missing beat: near-silence. |
 | 10.67 | Panel presses home; request morphs into it. | Latch + low thump; the missing D lands; groove starts. |
-| 11.7–18.2 | Agent checks the flight, asks about the €12 fee, customer clicks yes; car / hotel / dinner rows update after each step, "By agent"; "All set. Your evening still works."; 🙏. | Ticks on beats; B minor under the question, G on the click; home to D on "All set". |
-| 18.5–24.3 | Conversation clears; panel opens (header stays); `<SessionConversation … />`, then the `createSession` excerpt with the comment naming what is left out; the four actions light up in order. | Lighter groove; the chips echo the steps' four notes. |
-| 24.3–28.8 | Panel folds back; product slides right as in act 2; "Your product. Agents inside."; wordmark lands; opengeni.ai; caption. | ii–V–I; the phrase completes, D with the wordmark. |
+| 11.7–18.4 | Agent checks the flight, asks about the €12 fee, customer clicks yes; car / hotel / dinner rows update after each step, "By agent"; "All set. Your evening still works." and the product's own header: "✓ Replanned around your delay"; 🙏. | Ticks on beats; B minor under the question, G on the click; home to D on "All set". |
+| 18.5–24.7 | Conversation clears; the panel opens (header stays) and the first line rises as it opens: `<SessionConversation … />`, then the `createSession` excerpt with the comment naming what is left out; the four actions light up in order; the panel folds back carrying the code away. | Lighter groove; the chips echo the steps' four notes. |
+| 24.7–28.8 | Product slides right as in act 2; "Your product. Agents inside."; wordmark lands; opengeni.ai; caption. | ii–V–I; the phrase completes, D with the wordmark. |
 
 ## Honest limits
 

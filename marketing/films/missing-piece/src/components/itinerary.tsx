@@ -79,10 +79,38 @@ export function Itinerary({ t }: { t: number }) {
           Lisbon
         </div>
       </Abs>
-      <Abs x={78} y={180}>
-        <div style={{ fontFamily: F.body, fontSize: 25, color: C.muted, letterSpacing: "-0.005em" }}>
-          Friday, 14 March · Day 1 of 4
-        </div>
+      <Abs x={78} y={180} h={34}>
+        {/* The product itself confirms the outcome, not just the agent's panel. */}
+        <Roll
+          t={t}
+          at={T.allSet + 0.12}
+          dur={0.6}
+          style={{ height: 34 }}
+          from={
+            <div style={{ fontFamily: F.body, fontSize: 25, color: C.muted, letterSpacing: "-0.005em", lineHeight: "34px", whiteSpace: "nowrap" }}>
+              Friday, 14 March · Day 1 of 4
+            </div>
+          }
+          to={
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 9,
+                fontFamily: F.body,
+                fontSize: 25,
+                fontWeight: 600,
+                color: C.orange,
+                letterSpacing: "-0.005em",
+                lineHeight: "34px",
+                whiteSpace: "nowrap",
+              }}
+            >
+              <Check size={24} strokeWidth={2.6} />
+              Replanned around your delay
+            </div>
+          }
+        />
       </Abs>
       {ROWS.map((row, i) => (
         <Row key={row.title} t={t} row={row} top={ROWS_TOP + i * ROW_H} last={i === ROWS.length - 1} />

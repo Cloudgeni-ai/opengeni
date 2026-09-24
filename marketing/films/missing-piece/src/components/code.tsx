@@ -78,8 +78,10 @@ function Line({ toks, mark = 0 }: { toks: Tok[]; mark?: number }) {
 
 /** Shown inside the opened agent panel, on the panel's own surface. */
 export function CodeScene({ t }: { t: number }) {
-  if (t < T.zoomIn[1] || t >= T.zoomOut[0]) return null;
-  const exit = T.zoomOut[0] - 0.36;
+  // Rendered inside the opening panel and clipped by it, so the panel's moving edge reveals
+  // the first line and later carries the code away: no empty frame at either end.
+  if (t < T.codeUI || t >= T.zoomOut[0] + 0.5) return null;
+  const exit = T.zoomOut[0] + 0.12;
 
   const settle = ease.emphasized(progress(t, T.codeServer, T.codeServer + 0.62));
   const uiTop = lerp(UI_EYEBROW_SOLO, UI_EYEBROW_FINAL, settle);
