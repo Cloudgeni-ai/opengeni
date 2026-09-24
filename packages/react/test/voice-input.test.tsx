@@ -1043,11 +1043,15 @@ describe("useVoiceInput", () => {
 
     mounted = await renderComponent(<Harness />);
     await act(async () => {
-      mounted?.container.querySelector<HTMLButtonElement>("[aria-label='Start voice input']")?.click();
+      mounted?.container
+        .querySelector<HTMLButtonElement>("[aria-label='Start voice input']")
+        ?.click();
       await Promise.resolve();
     });
     await act(async () => {
-      mounted?.container.querySelector<HTMLButtonElement>("[aria-label='Stop and transcribe']")?.click();
+      mounted?.container
+        .querySelector<HTMLButtonElement>("[aria-label='Stop and transcribe']")
+        ?.click();
       await settle();
     });
     await act(async () => {
