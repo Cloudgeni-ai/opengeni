@@ -1741,13 +1741,15 @@ function ScheduledTaskForm(props: {
           <Notice
             tone="failed"
             action={
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => void connectionAccounts.refresh()}
-              >
-                Retry
-              </Button>
+              connectionAccounts.accessDenied ? undefined : (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => void connectionAccounts.refresh()}
+                >
+                  Retry
+                </Button>
+              )
             }
           >
             {connectionAccounts.error}

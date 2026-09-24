@@ -1525,6 +1525,7 @@ function SessionsIndexRouteContent({
                     onChoose: connectionAccounts.selectAccount,
                     loading: connectionAccounts.loading,
                     error: connectionAccounts.error,
+                    accessDenied: connectionAccounts.accessDenied,
                     onRefresh: () => void connectionAccounts.refresh(),
                     disabled: busy || newSessionDraft.loading,
                   },
@@ -1674,7 +1675,7 @@ function SessionsIndexRouteContent({
               <Notice
                 tone={connectionAccounts.loading ? "muted" : "waiting"}
                 action={
-                  connectionAccounts.error ? (
+                  connectionAccounts.error && !connectionAccounts.accessDenied ? (
                     <Button
                       variant="secondary"
                       size="sm"
@@ -1688,7 +1689,9 @@ function SessionsIndexRouteContent({
                 {connectionAccounts.loading
                   ? "Checking connected accounts…"
                   : connectionAccounts.error
-                    ? "Couldn't check connected accounts. Retry to send your message."
+                    ? connectionAccounts.accessDenied
+                      ? connectionAccounts.error
+                      : "Couldn't check connected accounts. Retry to send your message."
                     : connectionAccounts.accountChoiceMessage}
               </Notice>
             </div>
