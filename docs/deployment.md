@@ -1266,6 +1266,35 @@ After the activation migration commits, rollback to an earlier application image
 is forbidden, and setting the switch back to `false` is not a rollback - it
 cannot restore the legacy authority. Remain in maintenance and fix forward.
 
+### Production all-organization Only me availability cutover
+
+Migration `0515_private_sessions_fleet_activation.sql` is a maintenance-classified
+release marker, not an activation shortcut. The protected production release
+parks application database clients, applies the candidate migrations, then runs
+`db:activate-session-tenancy -- --all-organizations --activated-by
+production-release:<source-sha>` in its migration Job. The command takes a
+fixed snapshot of `managed_accounts`, checks the required migration, inventory,
+parity and six backfill receipt families for every not-yet-activated account,
+and calls the existing guarded SQL activation for each. All receipts commit in
+**one transaction**, including final coverage verification. An unready
+organization fails the entire Job without activating any new organization; do
+not bypass this gate or insert activation rows by hand. The maintenance lease
+owns forward recovery once the migration Job is authorized.
+An empty fleet also fails: without an initial activation receipt, migration
+0349 has no witness to auto-activate the first future signup.
+
+Before admitting that release, prepare and retain per-organization evidence
+using the fresh-key membership, resource, connection and final session
+backfills and the parity/RLS/revocation checks in
+[`organization-tenancy.md`](organization-tenancy.md#preconditions-for-permitting-an-activation).
+Fix unresolved cases first. The migration Job's 40-minute deadline is not a
+substitute for this preflight; a large fleet may require a deliberately budgeted
+maintenance window. The protected Helm reconciliation enables
+`OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` on the new runtime
+and preserves it for later releases. Existing organizations' independent
+`organization_private_session_settings` remain disabled until their owner or
+admin opts in; this cutover makes that toggle available, not automatically on.
+
 For Azure managed Blob storage, the artifact generator can consume the
 sensitive Terraform output `object_storage_azure_connection_string` into the
 private `runtime.env` file. Keep the Terraform output JSON under `.agent/` or
