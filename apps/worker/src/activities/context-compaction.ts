@@ -58,7 +58,13 @@ export type MaybeCompactResult =
  * Codex, call Codex `/codex/responses` with `compaction_trigger` and persist the
  * opaque compaction item. Fail closed — never silently fall back to portable.
  */
-export type CompactionSummarizer = (settings: Settings, input: CompactionItem[]) => Promise<string>;
+export type CompactionSummarizer = ((
+  settings: Settings,
+  input: CompactionItem[],
+) => Promise<string>) & {
+  /** Model-visible instructions and tool schemas outside the history estimate. */
+  estimatePrefixTokens?: () => number;
+};
 
 /** Returns the opaque Codex remote compaction v2 item. */
 export type RemoteCompactionV2Requester = (
@@ -520,7 +526,7 @@ async function compactContextPortable(
   };
 }
 
-async function summarizeWithCodexOverflowTrimming(
+export async function summarizeWithCodexOverflowTrimming(
   summarize: CompactionSummarizer,
   settings: Settings,
   activeHistory: CompactionItem[],
@@ -540,8 +546,20 @@ async function summarizeWithCodexOverflowTrimming(
     configuredInputBudget > 0 ? configuredInputBudget : summaryAwareBudget,
     summaryAwareBudget,
   );
-  const initialBudget = structuralBudget;
+  const prefixTokens = Math.max(0, Math.ceil(summarize.estimatePrefixTokens?.() ?? 0));
+  const initialBudget = Math.max(0, structuralBudget - prefixTokens);
   let preparation = prepareCompactionPromptInput(activeHistory, initialBudget);
+  // A checkpoint prompt without source history cannot summarize that history.
+  // Do not let a plausible-sounding reply replace durable active context.
+  const requireHistory = () => {
+    if (activeHistory.length > 0 && preparation.input.length === 1) {
+      throw new EmptyCompactionSummaryError({
+        stage: "portable_input_budget",
+        reason: "no_history_fit",
+      });
+    }
+  };
+  requireHistory();
   try {
     return {
       summaryBody: await summarize(settings, preparation.input),
@@ -551,15 +569,16 @@ async function summarizeWithCodexOverflowTrimming(
   } catch (error) {
     if (!isContextWindowExceeded(error)) throw error;
     // The provider is more authoritative than the byte/4 estimate. Refit once
-    // to half of both the configured target and the actual prepared estimate;
+    // to 40% of both the available target and the actual prepared estimate;
     // then fail terminally with prior history intact. Never issue one failing
     // request per oldest item. The retry is bounded, not a guarantee: the
-    // provider can count more than twice the byte/4 estimate, and the prepared
-    // tool/instruction prefix is outside this history estimate.
+    // provider can count slightly more than twice the byte/4 estimate. The
+    // prepared prefix has already been reserved from the available budget.
     const retryBudget = Math.floor(
-      Math.min(initialBudget * 0.5, preparation.estimatedInputTokens * 0.5),
+      Math.min(initialBudget * 0.4, preparation.estimatedInputTokens * 0.4),
     );
     preparation = prepareCompactionPromptInput(activeHistory, retryBudget);
+    requireHistory();
     return {
       summaryBody: await summarize(settings, preparation.input),
       preparation,

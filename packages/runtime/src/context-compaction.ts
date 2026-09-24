@@ -1243,7 +1243,7 @@ export class EmptyCompactionSummaryError extends Error {
   constructor(diagnostics: Record<string, unknown> = {}) {
     const compact = JSON.stringify(diagnostics).slice(0, 2_000);
     super(
-      `Compaction summarizer returned no assistant text; active history was preserved${compact ? ` (${compact})` : ""}`,
+      `Compaction could not produce a usable checkpoint; active history was preserved${compact ? ` (${compact})` : ""}`,
     );
     this.name = "EmptyCompactionSummaryError";
     this.diagnostics = diagnostics;
@@ -1520,8 +1520,16 @@ export function omitOpaqueArtifactsFromPortableCompactionHistory(
     }
     if (type === "reasoning" && hasOpaqueProviderArtifact(item)) {
       const projected = projectRejectedReasoningArtifact(item);
+      if (Object.keys(projected).length === 1) {
+        changed = true;
+        continue;
+      }
       changed ||= projected !== item;
       out.push(projected as CompactionItem);
+      continue;
+    }
+    if (type === "reasoning" && Object.keys(item).length === 1) {
+      changed = true;
       continue;
     }
     out.push(item);

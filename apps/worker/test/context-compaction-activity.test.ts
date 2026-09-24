@@ -699,7 +699,7 @@ describe("standalone context compaction execution", () => {
 
     const outcome = await maybeCompactContext(
       client.db,
-      testSettings({ contextWindowTokens: 10_000 }),
+      testSettings({ contextWindowTokens: 100_000 }),
       {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
@@ -789,7 +789,7 @@ describe("standalone context compaction execution", () => {
 
     const outcome = await maybeCompactContext(
       client.db,
-      testSettings({ contextWindowTokens: 10_000 }),
+      testSettings({ contextWindowTokens: 100_000 }),
       {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
@@ -2758,7 +2758,7 @@ describe("standalone context compaction execution", () => {
     ).toEqual(originalItems);
   });
 
-  test("matches Codex's overflow floor by trying the checkpoint prompt alone once", async () => {
+  test("preserves history instead of summarizing a checkpoint prompt alone", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
@@ -2827,11 +2827,12 @@ describe("standalone context compaction execution", () => {
         },
         { force: true, clearRequestedCompaction: true, trigger: "operator" },
       ),
-    ).rejects.toBe(overflow);
+    ).rejects.toMatchObject({
+      name: "EmptyCompactionSummaryError",
+      diagnostics: { stage: "portable_input_budget", reason: "no_history_fit" },
+    });
 
-    // Codex counts the synthesized checkpoint prompt in its input length. Our
-    // active-history lengths 1 -> 0 therefore equal Codex input lengths 2 -> 1.
-    expect(inputLengths).toEqual([2, 1]);
+    expect(inputLengths).toEqual([2]);
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       true,
     );
