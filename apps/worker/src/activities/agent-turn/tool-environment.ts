@@ -999,6 +999,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         subjectId: "worker:first-party-mcp",
         subjectLabel: "OpenGeni worker",
         ...(credentialSubjectId ? { credentialSubjectId } : {}),
+        initiatingHumanSubjectId: deps.fileAuthoritySubjectId,
         ...(codexAppsAuth ? { codexAppsAuth } : {}),
         resolveCredential,
         ...(operationPersistence ? { mcpOperationPersistence: operationPersistence } : {}),
