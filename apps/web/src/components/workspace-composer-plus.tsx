@@ -12,11 +12,10 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
   const context = useAppContext();
   const { client } = context;
   const { workspaceId } = props;
-  const canReadConnections = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "connections:read",
-  );
+  const canReadConnections =
+    context.accessContext === null
+      ? null
+      : hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
   const [catalog, setCatalog] = useState<{
     workspaceId: string;
     client: typeof client;
@@ -33,20 +32,25 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
     successfulConnectionsRevision: 0,
     deniedConnectionsRevision: 0,
   }).current;
-  const scope = useRef({ client, workspaceId });
+  const scope = useRef({ client, workspaceId, canReadConnections });
   // Fence cached rows on the first render of a new identity, including A -> B -> A.
   // Effect cleanup runs after that render and cannot protect it on its own.
-  if (scope.current.client !== client || scope.current.workspaceId !== workspaceId) {
+  if (
+    scope.current.client !== client ||
+    scope.current.workspaceId !== workspaceId ||
+    scope.current.canReadConnections !== canReadConnections
+  ) {
     lifecycle.generation++;
     lifecycle.successfulConnectionsRevision = 0;
     lifecycle.deniedConnectionsRevision = 0;
-    scope.current = { client, workspaceId };
+    scope.current = { client, workspaceId, canReadConnections };
   }
   const refreshRuntime = useRef(context.refreshWorkspaceMcpServers);
   refreshRuntime.current = context.refreshWorkspaceMcpServers;
   const current =
     catalog?.workspaceId === workspaceId &&
     catalog.client === client &&
+    canReadConnections === true &&
     catalog.epoch === lifecycle.generation
       ? catalog
       : null;
@@ -64,7 +68,7 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
     let denied = false;
     try {
       const connectionLoad = (
-        canReadConnections
+        canReadConnections === true
           ? client.listConnections(workspaceId).then(
               (connections) => ({ connections, denied: false }),
               (failure: unknown) => ({
@@ -72,7 +76,7 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
                 denied: isWorkspacePermissionDenied(failure),
               }),
             )
-          : Promise.resolve({ connections: null, denied: true })
+          : Promise.resolve({ connections: null, denied: canReadConnections === false })
       ).then((result) => {
         if (
           liveScope() &&
@@ -133,9 +137,11 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
       setError(
         accessDenied
           ? deniedMessage
-          : connectionResult.connections === null
-            ? "Connection status couldn't be checked. Open Capabilities to check the connection."
-            : null,
+          : canReadConnections === null
+            ? null
+            : connectionResult.connections === null
+              ? "Connection status couldn't be checked. Open Capabilities to check the connection."
+              : null,
       );
     } catch (failure) {
       if (live())
@@ -201,6 +207,7 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
     );
   };
   const reconnect = async (serverId: string) => {
+    const generation = lifecycle.generation;
     const item = current?.items.find((candidate) => candidate.runtime.mcpServerId === serverId);
     const health = item
       ? connectionHealth(item, current?.connections ?? [], current?.connections !== null)
@@ -229,15 +236,31 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
           : {}),
         returnPath: returnUrl.pathname + returnUrl.search,
       });
-      if (scope.current.client !== client || scope.current.workspaceId !== workspaceId) return;
+      if (
+        scope.current.client !== client ||
+        scope.current.workspaceId !== workspaceId ||
+        scope.current.canReadConnections !== true ||
+        lifecycle.generation !== generation
+      )
+        return;
       if (!response.authorizationUrl)
         throw new Error("The provider did not return an authorization link.");
       window.location.assign(response.authorizationUrl);
     } catch (failure) {
-      if (scope.current.client === client && scope.current.workspaceId === workspaceId)
+      if (
+        scope.current.client === client &&
+        scope.current.workspaceId === workspaceId &&
+        scope.current.canReadConnections === true &&
+        lifecycle.generation === generation
+      )
         setError(failure instanceof Error ? failure.message : "Couldn't reconnect.");
     } finally {
-      if (scope.current.client === client && scope.current.workspaceId === workspaceId)
+      if (
+        scope.current.client === client &&
+        scope.current.workspaceId === workspaceId &&
+        scope.current.canReadConnections === true &&
+        lifecycle.generation === generation
+      )
         setBusyId(null);
     }
   };
@@ -245,7 +268,12 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
     <ComposerMobilePlus
       {...props}
       servers={composerConnectorOptions(
-        props.servers,
+        current
+          ? props.servers
+          : props.servers.map(({ connectionStatus, detail: _detail, ...server }) => ({
+              ...server,
+              ...(connectionStatus ? { connectionStatus: "unknown" as const } : {}),
+            })),
         current?.items ?? [],
         current?.connections ?? null,
         (path) => client.catalogAssetUrl(path),
@@ -254,8 +282,8 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
         ...props.connectorActions,
         onReconnect: (id) => void reconnect(id),
         loading,
-        error,
-        busyId,
+        error: canReadConnections === false ? deniedMessage : current ? error : null,
+        busyId: current ? busyId : null,
       }}
       onOpenConnectors={() => {
         props.connectorActions?.accountControls?.onRefresh?.();

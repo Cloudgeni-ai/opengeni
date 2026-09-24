@@ -170,6 +170,18 @@ test("403 refresh hides prior accounts and gives scoped permission guidance unti
   expect(state.selections).toHaveLength(2);
 });
 
+test("a member without selected native connectors retains the normal Send gate after a 403", async () => {
+  const client = clientFor(async () => {
+    throw { status: 403 };
+  });
+  await act(async () => root.render(<Harness client={client} selectedIds={[]} />));
+  expect(state.loading).toBe(false);
+  expect(state.error).toBeNull();
+  expect(state.accessDenied).toBe(false);
+  expect(state.requiresAccountChoice).toBe(false);
+  expect(state.selections).toEqual([]);
+});
+
 test("returning to connector defaults restores emptied accounts but preserves nonempty narrowing", async () => {
   const client = clientFor(async () => accounts);
   await act(async () => root.render(<Harness client={client} />));

@@ -86,7 +86,9 @@ const context = {
   githubStatus: null as { status: string } | null,
   refreshGitHub,
   refreshWorkspaceMcpServers: async () => {},
-  accessContext: { workspaceGrants: [] },
+  accessContext: {
+    workspaceGrants: [{ workspaceId: "workspace", permissions: ["connections:read"] }],
+  },
 };
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({ toast: { success: () => {}, error: () => {} } }));

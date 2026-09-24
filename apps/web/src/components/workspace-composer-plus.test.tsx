@@ -10,7 +10,7 @@ import type { ComposerPlusProps } from "@/components/composer-mobile-plus";
 let composer: ComposerPlusProps | null = null;
 const context: {
   client: OpenGeniBrowserClient;
-  accessContext: AccessContext;
+  accessContext: AccessContext | null;
   refreshWorkspaceMcpServers: (workspaceId: string) => Promise<void>;
 } = {
   client: {} as OpenGeniBrowserClient,
@@ -63,6 +63,134 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+test("same-client grant loss masks composer status before old responses; restoration needs a fresh read", async () => {
+  const entry = {
+    id: "mcp:slack",
+    name: "Slack",
+    kind: "mcp",
+    enabled: true,
+    runtime: { available: true, mcpServerId: "slack" },
+    lifecycle: { readiness: "ready" },
+    connectionRef: { connectionId: "connection-1", providerDomain: "slack.com", kind: "oauth2" },
+  } as CapabilityCatalogItem;
+  const cached = {
+    id: "connection-1",
+    providerDomain: "slack.com",
+    subjectId: null,
+    status: "active",
+  } as ConnectionMetadata;
+  const fresh = { ...cached, status: "needs_reauth" } as ConnectionMetadata;
+  const allowed = context.accessContext!;
+  const withoutRead = {
+    ...allowed,
+    workspaceGrants: [{ ...allowed.workspaceGrants[0]!, permissions: ["sessions:create"] }],
+  } as AccessContext;
+  for (const oldResult of ["success", "403", "503"] as const) {
+    const stale = deferred<ConnectionMetadata[]>();
+    const restored = deferred<ConnectionMetadata[]>();
+    let reads = 0;
+    context.accessContext = allowed;
+    context.client = {
+      listCapabilities: async () => ({ items: [entry] }),
+      listConnections: () => {
+        reads++;
+        return reads === 1
+          ? Promise.resolve([cached])
+          : reads === 2
+            ? stale.promise
+            : restored.promise;
+      },
+      catalogAssetUrl: () => null,
+    } as unknown as OpenGeniBrowserClient;
+    let sendCalls = 0;
+    const props = {
+      workspaceId: "workspace-a",
+      servers: [
+        { id: "slack", name: "Slack", detail: "Workspace connection", connectionStatus: "ready" },
+      ],
+      firstPartyTools: [],
+      fileUploadsEnabled: false,
+      onToolSelectionChange: () => {
+        sendCalls++;
+      },
+    } as unknown as ComponentProps<typeof WorkspaceComposerPlus>;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+    expect(composer!.servers[0]?.connectionStatus).toBe("ready");
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(reads).toBe(2);
+
+    context.accessContext = withoutRead;
+    await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+    expect(reads).toBe(2);
+    expect(composer!.servers[0]?.connectionStatus).toBe("unknown");
+    expect(composer!.servers[0]?.detail).toBeUndefined();
+    expect(composer!.connectorActions?.error).toContain("doesn't allow connection discovery");
+    // Connection discovery denial does not disable normal member composition.
+    expect(composer!.disabled).not.toBe(true);
+    composer!.onToolSelectionChange({} as ComposerPlusProps["selection"]);
+    expect(sendCalls).toBe(1);
+
+    context.accessContext = allowed;
+    await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+    expect(reads).toBe(3);
+    expect(composer!.servers[0]?.connectionStatus).toBe("unknown");
+    await act(async () => {
+      if (oldResult === "success") stale.resolve([cached]);
+      else stale.reject({ status: Number(oldResult) });
+      await Bun.sleep(0);
+    });
+    expect(composer!.servers[0]?.connectionStatus).not.toBe("ready");
+    await act(async () => {
+      restored.resolve([fresh]);
+      await Bun.sleep(0);
+    });
+    expect(composer!.servers[0]?.connectionStatus).toBe("reconnect");
+    await act(async () => root.unmount());
+    container.remove();
+  }
+  context.accessContext = allowed;
+});
+
+test("composer treats bootstrapping as unknown and accepts an admin read grant", async () => {
+  const allowed = context.accessContext!;
+  let reads = 0;
+  context.accessContext = null;
+  context.client = {
+    listCapabilities: async () => ({ items: [] }),
+    listConnections: async () => {
+      reads++;
+      return [];
+    },
+    catalogAssetUrl: () => null,
+  } as unknown as OpenGeniBrowserClient;
+  const props = {
+    workspaceId: "workspace-a",
+    servers: [],
+    firstPartyTools: [],
+    fileUploadsEnabled: false,
+    onToolSelectionChange: () => {},
+  } as unknown as ComponentProps<typeof WorkspaceComposerPlus>;
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+  expect(reads).toBe(0);
+  expect(composer!.connectorActions?.error).toBeNull();
+  context.accessContext = {
+    ...allowed,
+    workspaceGrants: [{ ...allowed.workspaceGrants[0]!, permissions: ["workspace:admin"] }],
+  };
+  await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+  expect(reads).toBe(1);
+  expect(composer!.connectorActions?.error).toBeNull();
+  await act(async () => root.unmount());
+  container.remove();
+  context.accessContext = allowed;
+});
 
 test("a catalog failure and connection 403 mask cached composer account status", async () => {
   const entry = {

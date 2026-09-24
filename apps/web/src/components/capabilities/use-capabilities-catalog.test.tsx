@@ -5,12 +5,35 @@ import { act, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 
 import type {
+  AccessContext,
   CapabilityCatalogItem,
   ConnectionMetadata,
   IntegrationDefinitionSummary,
 } from "@/types";
 
-const context: { client: OpenGeniBrowserClient } = { client: {} as OpenGeniBrowserClient };
+const readGrant: AccessContext = {
+  mode: "managed",
+  subjectId: "member",
+  accountGrants: [],
+  workspaceGrants: [
+    {
+      workspaceId: "workspace-a",
+      accountId: "account-a",
+      subjectId: "member",
+      permissions: ["connections:read"],
+    },
+  ],
+  defaultAccountId: "account-a",
+  defaultWorkspaceId: "workspace-a",
+};
+const noReadGrant: AccessContext = {
+  ...readGrant,
+  workspaceGrants: [{ ...readGrant.workspaceGrants[0]!, permissions: ["sessions:create"] }],
+};
+const context: { client: OpenGeniBrowserClient; accessContext: AccessContext | null } = {
+  client: {} as OpenGeniBrowserClient,
+  accessContext: readGrant,
+};
 
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({ toast: { error: () => {}, success: () => {} } }));
@@ -68,6 +91,129 @@ function fakeClient(definitions: Promise<{ definitions: IntegrationDefinitionSum
 }
 
 describe("useCapabilitiesCatalog", () => {
+  test("same-client grant loss masks rows immediately and restores only after a new read", async () => {
+    const cached = { id: "cached" } as ConnectionMetadata;
+    const fresh = { id: "fresh" } as ConnectionMetadata;
+    for (const oldResult of ["success", "403", "503"] as const) {
+      const oldRead = deferred<ConnectionMetadata[]>();
+      const restoredRead = deferred<ConnectionMetadata[]>();
+      let reads = 0;
+      const client = {
+        ...fakeClient(Promise.resolve({ definitions: [] })),
+        listConnections: () => {
+          reads++;
+          return reads === 1
+            ? Promise.resolve([cached])
+            : reads === 2
+              ? oldRead.promise
+              : restoredRead.promise;
+        },
+      } as unknown as OpenGeniBrowserClient;
+      context.client = client;
+      context.accessContext = readGrant;
+      let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+      function Harness() {
+        latest = useCapabilitiesCatalog("workspace-a");
+        const readAccess =
+          context.accessContext?.workspaceGrants[0]?.permissions.includes("connections:read") ??
+          null;
+        useEffect(() => {
+          void latest!.refresh();
+        }, [readAccess]);
+        return null;
+      }
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      await act(async () => root.render(<Harness />));
+      expect(latest!.connections).toEqual([cached]);
+      const beforeRevoke = latest!;
+      await act(async () => {
+        void latest!.fetchConnections();
+      });
+      context.accessContext = noReadGrant;
+      await act(async () => root.render(<Harness />));
+      expect(reads).toBe(2);
+      expect(latest!.connections).toBeNull();
+      expect(latest!.connectionsAccessDenied).toBe(true);
+      expect(latest!.items).toEqual([]);
+      await act(async () => {
+        beforeRevoke.replaceConnection(cached);
+        if (oldResult === "success") oldRead.resolve([cached]);
+        else oldRead.reject({ status: Number(oldResult) });
+        await Bun.sleep(0);
+      });
+      expect(latest!.connections).toBeNull();
+      expect(latest!.connectionsAccessDenied).toBe(true);
+
+      const deniedCallback = latest!.replaceConnection;
+      context.accessContext = readGrant;
+      await act(async () => root.render(<Harness />));
+      expect(reads).toBe(3);
+      expect(latest!.connections).toBeNull();
+      await act(async () => {
+        beforeRevoke.replaceConnection(cached);
+        deniedCallback(cached);
+      });
+      expect(latest!.connections).toBeNull();
+      await act(async () => {
+        restoredRead.resolve([fresh]);
+        await Bun.sleep(0);
+      });
+      expect(latest!.connections).toEqual([fresh]);
+      expect(latest!.connectionsAccessDenied).toBe(false);
+      await act(async () => {
+        beforeRevoke.replaceConnection(cached);
+        deniedCallback(cached);
+      });
+      expect(latest!.connections).toEqual([fresh]);
+      await act(async () => root.unmount());
+      container.remove();
+    }
+    context.accessContext = readGrant;
+  });
+
+  test("bootstrap context masks rows without declaring denial; admin may read", async () => {
+    const cached = { id: "admin-row" } as ConnectionMetadata;
+    let reads = 0;
+    context.client = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async () => {
+        reads++;
+        return [cached];
+      },
+    } as unknown as OpenGeniBrowserClient;
+    context.accessContext = {
+      ...noReadGrant,
+      workspaceGrants: [{ ...noReadGrant.workspaceGrants[0]!, permissions: ["workspace:admin"] }],
+    };
+    let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+    function Harness() {
+      latest = useCapabilitiesCatalog("workspace-a");
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Harness />));
+    await act(async () => await latest!.refresh());
+    expect(latest!.connections).toEqual([cached]);
+    context.accessContext = null;
+    await act(async () => root.render(<Harness />));
+    expect(latest!.connections).toBeNull();
+    expect(latest!.connectionsAccessDenied).toBe(false);
+    await act(async () => await latest!.refresh());
+    expect(reads).toBe(1);
+    context.accessContext = readGrant;
+    await act(async () => root.render(<Harness />));
+    expect(latest!.connections).toBeNull();
+    await act(async () => await latest!.refresh());
+    expect(reads).toBe(2);
+    expect(latest!.connections).toEqual([cached]);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   for (const outcome of ["transient", "denied", "no read"] as const) {
     test(`client switch masks all prior catalog rows before and after ${outcome}`, async () => {
       const oldConnection = { id: "personal-a" } as ConnectionMetadata;
@@ -148,6 +294,13 @@ describe("useCapabilitiesCatalog", () => {
   }
 
   test("same client refreshes on workspace change without retaining personal rows", async () => {
+    context.accessContext = {
+      ...readGrant,
+      workspaceGrants: [
+        ...readGrant.workspaceGrants,
+        { ...readGrant.workspaceGrants[0]!, workspaceId: "workspace-b" },
+      ],
+    };
     const pending = deferred<ConnectionMetadata[]>();
     const personal = { id: "personal-a" } as ConnectionMetadata;
     const client = {
@@ -185,6 +338,7 @@ describe("useCapabilitiesCatalog", () => {
     expect(latest!.connectionsLoadFailed).toBe(true);
     await act(async () => root.unmount());
     container.remove();
+    context.accessContext = readGrant;
   });
 
   test("same workspace refreshes on client change", async () => {

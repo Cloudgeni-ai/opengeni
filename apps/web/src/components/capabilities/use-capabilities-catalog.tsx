@@ -3,7 +3,7 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { toast } from "sonner";
 
 import { useAppContext } from "@/context";
-import { isWorkspacePermissionDenied } from "@/lib/permissions";
+import { hasWorkspacePermission, isWorkspacePermissionDenied } from "@/lib/permissions";
 import type {
   ApiIntegrationInstallationSummary,
   CapabilityCatalogItem,
@@ -66,10 +66,13 @@ type CatalogState = {
   revision: number;
 };
 
+type ConnectionReadAccess = boolean | null;
+
 function emptyCatalogState(
   client: OpenGeniBrowserClient,
   workspaceId: string,
   epoch: number,
+  readAccess: ConnectionReadAccess,
 ): CatalogState {
   return {
     client,
@@ -77,8 +80,8 @@ function emptyCatalogState(
     epoch,
     items: [],
     connections: null,
-    connectionsLoadFailed: false,
-    connectionsAccessDenied: false,
+    connectionsLoadFailed: readAccess === false,
+    connectionsAccessDenied: readAccess === false,
     apiIntegrationDefinitions: [],
     apiIntegrationInstances: [],
     socialConnections: [],
@@ -99,15 +102,27 @@ function emptyCatalogState(
 export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog {
   const context = useAppContext();
   const client = context.client;
+  // A missing bootstrap context is not a confirmed denial. Neither state may
+  // expose rows from the previous grant, but only a known grant can read them.
+  const readAccess =
+    context.accessContext === null
+      ? null
+      : hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
 
-  const scopeRef = useRef({ client, workspaceId, epoch: 0 });
+  const scopeRef = useRef({ client, workspaceId, readAccess, epoch: 0 });
   // Distinguish A -> B -> A from uninterrupted A: an old A request or cached
   // row cannot regain authority merely because its client/workspace match again.
-  if (scopeRef.current.client !== client || scopeRef.current.workspaceId !== workspaceId) {
-    scopeRef.current = { client, workspaceId, epoch: scopeRef.current.epoch + 1 };
+  if (
+    scopeRef.current.client !== client ||
+    scopeRef.current.workspaceId !== workspaceId ||
+    scopeRef.current.readAccess !== readAccess
+  ) {
+    scopeRef.current = { client, workspaceId, readAccess, epoch: scopeRef.current.epoch + 1 };
   }
   const epoch = scopeRef.current.epoch;
-  const [state, setState] = useState(() => emptyCatalogState(client, workspaceId, epoch));
+  const [state, setState] = useState(() =>
+    emptyCatalogState(client, workspaceId, epoch, readAccess),
+  );
   const refreshRevision = useRef(0);
   const connectionRevision = useRef(0);
   const successfulConnectionRevision = useRef(0);
@@ -120,18 +135,19 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
   const visible =
     state.client === client && state.workspaceId === workspaceId && state.epoch === epoch
       ? state
-      : emptyCatalogState(client, workspaceId, epoch);
+      : emptyCatalogState(client, workspaceId, epoch, readAccess);
   const update = (change: (current: CatalogState) => CatalogState) =>
     setState((current) => {
       if (!isCurrentScope()) return current;
       const scoped =
         current.client === client && current.workspaceId === workspaceId && current.epoch === epoch
           ? current
-          : emptyCatalogState(client, workspaceId, epoch);
+          : emptyCatalogState(client, workspaceId, epoch, readAccess);
       return change(scoped);
     });
 
   async function fetchConnections(): Promise<ConnectionMetadata[] | null> {
+    if (readAccess !== true) return null;
     const request = ++connectionRevision.current;
     const live = () => isCurrentScope();
     try {

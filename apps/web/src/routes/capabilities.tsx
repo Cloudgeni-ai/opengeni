@@ -548,11 +548,15 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       })()
     : [];
   const canManageSocial = canManageSlackReactionSummon(context.accessContext, workspaceId);
+  const canReadConnections =
+    context.accessContext === null
+      ? null
+      : hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
 
   useEffect(() => {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, workspaceId]);
+  }, [client, workspaceId, canReadConnections]);
 
   const fikenOAuthHandled = useRef(false);
   useEffect(() => {
