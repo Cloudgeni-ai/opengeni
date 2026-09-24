@@ -136,7 +136,26 @@ describe("release schema contract", () => {
   });
 
   test("registers forward migrations in order after published history", async () => {
-    const completeSourceContract = await buildCompleteSchemaContract();
+    const sourceContract = await buildCompleteSchemaContract();
+    const failedSessionVariableSetAttach = sourceContract.migrations.find(
+      (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
+    );
+    if (failedSessionVariableSetAttach) {
+      expect(sourceContract.latestMigration).toBe("0514_failed_session_variable_set_attach.sql");
+      expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
+    }
+    // Keep the published-history assertions below scoped to their existing
+    // migration range; the new forward migration is checked explicitly above.
+    const completeSourceContract = failedSessionVariableSetAttach
+      ? {
+          ...sourceContract,
+          fileCount: sourceContract.fileCount - 1,
+          latestMigration: "0513_message_fork_prefix_compaction.sql",
+          migrations: sourceContract.migrations.filter(
+            (migration) => migration.path !== "0514_failed_session_variable_set_attach.sql",
+          ),
+        }
+      : sourceContract;
     const backgroundCommandText = completeSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
     );
@@ -2001,6 +2020,9 @@ describe("release schema contract", () => {
     const messageForkPrefixCompaction = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0513_message_fork_prefix_compaction.sql",
     );
+    const failedSessionVariableSetAttach = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
+    );
     const controlRevisionFrontier = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -2625,6 +2647,7 @@ describe("release schema contract", () => {
       "0511_knowledge_visible_index_status.sql",
       "0512_insights_fact_reads_hash_join.sql",
       "0513_message_fork_prefix_compaction.sql",
+      "0514_failed_session_variable_set_attach.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -3213,8 +3236,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0513_message_fork_prefix_compaction.sql",
       };
+    if (failedSessionVariableSetAttach)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0514_failed_session_variable_set_attach.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (failedSessionVariableSetAttach ? 1 : 0) +
         (messageForkPrefixCompaction ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
@@ -3703,6 +3732,9 @@ describe("release schema contract", () => {
         : {}),
       ...(messageForkPrefixCompaction
         ? { latestMigration: "0513_message_fork_prefix_compaction.sql" }
+        : {}),
+      ...(failedSessionVariableSetAttach
+        ? { latestMigration: "0514_failed_session_variable_set_attach.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
