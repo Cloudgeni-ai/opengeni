@@ -141,7 +141,6 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
     );
     if (failedSessionVariableSetAttach) {
-      expect(sourceContract.latestMigration).toBe("0514_failed_session_variable_set_attach.sql");
       expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
     }
     // Keep the published-history assertions below scoped to their existing
@@ -150,7 +149,10 @@ describe("release schema contract", () => {
       ? {
           ...sourceContract,
           fileCount: sourceContract.fileCount - 1,
-          latestMigration: "0513_message_fork_prefix_compaction.sql",
+          latestMigration:
+            sourceContract.latestMigration === "0514_failed_session_variable_set_attach.sql"
+              ? "0513_message_fork_prefix_compaction.sql"
+              : sourceContract.latestMigration,
           migrations: sourceContract.migrations.filter(
             (migration) => migration.path !== "0514_failed_session_variable_set_attach.sql",
           ),
@@ -179,6 +181,9 @@ describe("release schema contract", () => {
     );
     const messageForkPrefixCompaction = completeSourceContract.migrations.some(
       (migration) => migration.path === "0513_message_fork_prefix_compaction.sql",
+    );
+    const workspaceIntegrationPrimitives = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0515_workspace_integration_primitives.sql",
     );
     const controlRevisionFrontier = completeSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
@@ -413,6 +418,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (workspaceIntegrationPrimitives ? 1 : 0) +
         (messageForkPrefixCompaction ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
@@ -700,6 +706,9 @@ describe("release schema contract", () => {
       ...(messageForkPrefixCompaction
         ? { latestMigration: "0513_message_fork_prefix_compaction.sql" }
         : {}),
+      ...(workspaceIntegrationPrimitives
+        ? { latestMigration: "0515_workspace_integration_primitives.sql" }
+        : {}),
     });
     expect(
       completeSourceContract.migrations.at(
@@ -710,7 +719,8 @@ describe("release schema contract", () => {
           Number(knowledgeIndexFundingWait) -
           Number(knowledgeVisibleIndexStatus) -
           Number(insightsFactReadsHashJoin) -
-          Number(messageForkPrefixCompaction),
+          Number(messageForkPrefixCompaction) -
+          Number(workspaceIntegrationPrimitives),
       ),
     ).toMatchObject({
       path: backgroundCommandText
@@ -830,7 +840,8 @@ describe("release schema contract", () => {
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
-            Number(messageForkPrefixCompaction),
+            Number(messageForkPrefixCompaction) -
+            Number(workspaceIntegrationPrimitives),
         ),
       ).toMatchObject({
         path: "0507_integration_oauth_pending_states.sql",
@@ -845,7 +856,8 @@ describe("release schema contract", () => {
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
-            Number(messageForkPrefixCompaction),
+            Number(messageForkPrefixCompaction) -
+            Number(workspaceIntegrationPrimitives),
         ),
       ).toMatchObject({
         path: "0508_deadline_command_workspace_capture.sql",
@@ -859,7 +871,8 @@ describe("release schema contract", () => {
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
-            Number(messageForkPrefixCompaction),
+            Number(messageForkPrefixCompaction) -
+            Number(workspaceIntegrationPrimitives),
         ),
       ).toMatchObject({
         path: "0509_verified_signup_trial_credits.sql",
@@ -872,7 +885,8 @@ describe("release schema contract", () => {
           -1 -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
-            Number(messageForkPrefixCompaction),
+            Number(messageForkPrefixCompaction) -
+            Number(workspaceIntegrationPrimitives),
         ),
       ).toMatchObject({
         path: "0510_knowledge_index_funding_wait.sql",
@@ -882,7 +896,10 @@ describe("release schema contract", () => {
     if (knowledgeVisibleIndexStatus) {
       expect(
         completeSourceContract.migrations.at(
-          -1 - Number(insightsFactReadsHashJoin) - Number(messageForkPrefixCompaction),
+          -1 -
+            Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction) -
+            Number(workspaceIntegrationPrimitives),
         ),
       ).toMatchObject({
         path: "0511_knowledge_visible_index_status.sql",
@@ -891,15 +908,25 @@ describe("release schema contract", () => {
     }
     if (insightsFactReadsHashJoin) {
       expect(
-        completeSourceContract.migrations.at(-1 - Number(messageForkPrefixCompaction)),
+        completeSourceContract.migrations.at(
+          -1 - Number(messageForkPrefixCompaction) - Number(workspaceIntegrationPrimitives),
+        ),
       ).toMatchObject({
         path: "0512_insights_fact_reads_hash_join.sql",
         deploymentMode: "rolling",
       });
     }
     if (messageForkPrefixCompaction) {
-      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+      expect(
+        completeSourceContract.migrations.at(-1 - Number(workspaceIntegrationPrimitives)),
+      ).toMatchObject({
         path: "0513_message_fork_prefix_compaction.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (workspaceIntegrationPrimitives) {
+      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+        path: "0515_workspace_integration_primitives.sql",
         deploymentMode: "rolling",
       });
     }
@@ -2023,6 +2050,9 @@ describe("release schema contract", () => {
     const failedSessionVariableSetAttach = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
     );
+    const workspaceIntegrationPrimitives = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0515_workspace_integration_primitives.sql",
+    );
     const controlRevisionFrontier = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -2648,6 +2678,7 @@ describe("release schema contract", () => {
       "0512_insights_fact_reads_hash_join.sql",
       "0513_message_fork_prefix_compaction.sql",
       "0514_failed_session_variable_set_attach.sql",
+      "0515_workspace_integration_primitives.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -3241,8 +3272,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0514_failed_session_variable_set_attach.sql",
       };
+    if (workspaceIntegrationPrimitives)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0515_workspace_integration_primitives.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (workspaceIntegrationPrimitives ? 1 : 0) +
         (failedSessionVariableSetAttach ? 1 : 0) +
         (messageForkPrefixCompaction ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
@@ -3735,6 +3772,9 @@ describe("release schema contract", () => {
         : {}),
       ...(failedSessionVariableSetAttach
         ? { latestMigration: "0514_failed_session_variable_set_attach.sql" }
+        : {}),
+      ...(workspaceIntegrationPrimitives
+        ? { latestMigration: "0515_workspace_integration_primitives.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
