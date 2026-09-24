@@ -171,11 +171,11 @@ export function Widget({ t }: { t: number }) {
         ) : null}
 
         {sent ? (
-          <div style={{ height: grow(t, T.send, 108), display: "flex", justifyContent: "flex-end", flexShrink: 0 }}>
+          <div style={{ height: grow(t, T.send, 108, 0.3), display: "flex", justifyContent: "flex-end", flexShrink: 0, overflow: "visible" }}>
             <div
               style={{
-                transform: `translateY(${(1 - ease.emphasized(progress(t, T.send, T.send + 0.32))) * 22}px)`,
-                opacity: ease.outCubic(progress(t, T.send, T.send + 0.16)),
+                // the bubble rises out of the input it was typed into
+                transform: `translateY(${(1 - ease.emphasized(progress(t, T.send, T.send + 0.4))) * 112}px)`,
                 alignSelf: "flex-end",
               }}
             >
@@ -269,9 +269,21 @@ export function Widget({ t }: { t: number }) {
             fontSize: 20,
             lineHeight: 1.36,
             color: typed && !sent ? V.ink : "#aaa6b8",
+            position: "relative",
           }}
         >
-          {sent || !typed ? "Message Acme Assistant…" : typed}
+          {sent ? (
+            <>
+              <span style={{ opacity: ease.outCubic(progress(t, T.send + 0.18, T.send + 0.4)) }}>Message Acme Assistant…</span>
+              <span style={{ position: "absolute", left: 17, top: 15, right: 17, color: V.ink, opacity: 1 - ease.outCubic(progress(t, T.send, T.send + 0.1)) }}>
+                {typed}
+              </span>
+            </>
+          ) : typed ? (
+            typed
+          ) : (
+            "Message Acme Assistant…"
+          )}
           {caretOn && typed ? (
             <span style={{ display: "inline-block", width: 2, height: 24, background: V.accent, verticalAlign: "-4px", marginLeft: 2 }} />
           ) : null}

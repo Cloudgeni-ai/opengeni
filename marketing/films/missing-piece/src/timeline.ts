@@ -38,11 +38,11 @@ export const T = {
   shrink: [4.72, 5.55] as const,
   super1: b(10),
   super2: b(12),
-  supersOut: 7.95,
+  supersOut: 8.1,
 
   // Act 3 — the missing piece
   pop: b(16),
-  unshrink: [8.55, 9.45] as const,
+  unshrink: [8.36, 9.3] as const,
   slotDraw: [8.72, 9.2] as const,
   slotText: 8.95,
   dock: b(20),
@@ -59,19 +59,19 @@ export const T = {
   step4: b(31),
   allSet: b(33),
   pray: b(34),
-  rowLag: 0.22,
+  rowLag: 0.3,
 
   // Act 5 — inside the agent panel: the code that put it there
   zoomIn: [18.5, 19.3] as const,
   clearPanel: [18.42, 18.6] as const,
   codeUI: b(37),
   codeServer: b(39),
-  chipReplay: b(39) + 1.72,
-  chipGap: 0.27,
-  zoomOut: [24.42, 25.05] as const,
+  chipReplay: b(39) + 2.0,
+  chipGap: 0.24,
+  zoomOut: [24.3, 24.9] as const,
 
   // Act 6 — the same composition as act 2, opposite truth
-  endShrink: [25.28, 26.12] as const,
+  endShrink: [24.95, 25.85] as const,
   end: b(48),
   wordmark: b(50),
   fin: b(54),

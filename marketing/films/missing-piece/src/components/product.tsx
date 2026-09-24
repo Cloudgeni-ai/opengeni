@@ -10,7 +10,7 @@ import { Widget, widgetUserColour } from "./widget";
 export const WINDOW = { x: 100, y: 70, w: 1720, h: 940 } as const;
 
 /** Scale factor of the product during the "truth" supers, and back. */
-const settleEase = bezier(0.62, 0, 0.12, 1);
+const settleEase = bezier(0.6, 0, 0.2, 1);
 
 export function productGroupTransform(t: number) {
   const out = settleEase(progress(t, T.shrink[0], T.shrink[1]));
@@ -119,7 +119,7 @@ function Slot({ t }: { t: number }) {
   if (t < T.slotDraw[0] || t > T.dock + 0.05) return null;
   const sink = ease.emphasized(progress(t, T.slotDraw[0], T.slotDraw[1]));
   const cx = SOCKET.x + SOCKET.w / 2;
-  const depth = 14 * sink;
+  const depth = 20 * sink;
   return (
     <>
       <Abs
@@ -128,8 +128,8 @@ function Slot({ t }: { t: number }) {
         w={SOCKET.w}
         h={SOCKET.h}
         style={{
-          background: `color-mix(in srgb, ${C.paper} ${sink * 100}%, ${C.surface})`,
-          boxShadow: `inset ${depth}px ${depth}px 0 ${C.paperShadow}, inset 2px 0 0 ${C.ink}`,
+          background: `color-mix(in srgb, #ecebe2 ${sink * 100}%, ${C.surface})`,
+          boxShadow: `inset ${depth}px ${depth}px 0 rgba(170, 166, 150, ${0.42 * sink}), inset 2px 0 0 ${C.ink}, inset 0 ${2 * sink}px 0 ${C.ink}`,
         }}
       />
       <div style={{ position: "absolute", left: cx + depth / 2, top: 330, transform: "translateX(-50%)" }}>

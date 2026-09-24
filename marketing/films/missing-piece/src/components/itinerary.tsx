@@ -19,8 +19,9 @@ type RowSpec = {
   action?: string;
   result?: string;
   chip?: string;
-  touchedAt?: number;
-  updatedAt?: number;
+  /** The panel step that acts on this row. */
+  stepAt?: number;
+  updates?: boolean;
 };
 
 const iconProps = { size: 34, strokeWidth: 1.7, color: C.ink } as const;
@@ -32,7 +33,7 @@ const ROWS: RowSpec[] = [
     title: "Land in Lisbon",
     detail: "TP 1353 from London · was 14:10",
     chip: "Delayed 3h",
-    touchedAt: T.step1 + T.rowLag,
+    stepAt: T.step1,
   },
   {
     icon: <Car {...iconProps} />,
@@ -42,8 +43,8 @@ const ROWS: RowSpec[] = [
     detail: "Lisbon Airport · Desk 3",
     action: "Modify pickup",
     result: "Pickup moved",
-    touchedAt: T.step2 + T.rowLag - 0.03,
-    updatedAt: T.step2 + T.rowLag,
+    stepAt: T.step2,
+    updates: true,
   },
   {
     icon: <BedDouble {...iconProps} />,
@@ -54,8 +55,8 @@ const ROWS: RowSpec[] = [
     detail: "Casa Alfama",
     action: "Add note",
     result: "Hotel told",
-    touchedAt: T.step3 + T.rowLag - 0.03,
-    updatedAt: T.step3 + T.rowLag,
+    stepAt: T.step3,
+    updates: true,
   },
   {
     icon: <Utensils {...iconProps} />,
@@ -65,8 +66,8 @@ const ROWS: RowSpec[] = [
     detail: "Tasca do Chico",
     action: "Change time",
     result: "Table moved",
-    touchedAt: T.step4 + T.rowLag - 0.03,
-    updatedAt: T.step4 + T.rowLag,
+    stepAt: T.step4,
+    updates: true,
   },
 ];
 
@@ -91,15 +92,15 @@ export function Itinerary({ t }: { t: number }) {
 }
 
 function Row({ t, row, top, last }: { t: number; row: RowSpec; top: number; last: boolean }) {
-  const touched = row.touchedAt ?? Infinity;
-  const updated = row.updatedAt ?? Infinity;
-  const bar = ease.emphasized(progress(t, touched, touched + 0.3));
-  const washIn = ease.outCubic(progress(t, touched, touched + 0.18));
-  const washOut = ease.inOutCubic(progress(t, touched + 0.75, touched + 1.6));
-  const wash = washIn * (1 - washOut);
-  const tag = ease.emphasized(progress(t, updated + 0.2, updated + 0.6));
-  const barOpacity = row.updatedAt ? 1 : 1 - washOut * 0.85;
-
+  // Attention routing: the tag lights beside the panel first, a wash sweeps leftward across
+  // the row, and the time rolls as the wash reaches it — the eye follows cause to effect.
+  const step = row.stepAt ?? Infinity;
+  const updated = row.updates ? step + T.rowLag : Infinity;
+  const sweep = ease.inOutCubic(progress(t, step + 0.06, step + 0.44));
+  const washOut = ease.inOutCubic(progress(t, step + 0.95, step + 1.8));
+  const bar = ease.emphasized(progress(t, step + 0.34, step + 0.62));
+  const tag = ease.emphasized(progress(t, step + 0.02, step + 0.36));
+  const barOpacity = row.updates ? 1 : 1 - washOut * 0.85;
   const timeStyle = {
     fontFamily: F.display,
     fontSize: 50,
@@ -113,7 +114,13 @@ function Row({ t, row, top, last }: { t: number; row: RowSpec; top: number; last
 
   return (
     <>
-      <Abs x={40} y={top + 1} w={COLUMN_RIGHT - 40 + 36} h={ROW_H - 2} style={{ background: C.orangeWash, opacity: wash * 0.7 }} />
+      <Abs
+        x={40}
+        y={top + 1}
+        w={COLUMN_RIGHT - 40 + 36}
+        h={ROW_H - 2}
+        style={{ background: C.orangeWash, opacity: 0.7 * (1 - washOut), clipPath: `inset(0 0 0 ${(1 - sweep) * 100}%)` }}
+      />
       <Abs x={40} y={top + 18} w={6} h={(ROW_H - 36) * bar} style={{ background: C.orange, opacity: barOpacity }} />
       <Abs x={76} y={top + 42} h={60}>
         {row.newTime ? (
@@ -199,7 +206,7 @@ function Row({ t, row, top, last }: { t: number; row: RowSpec; top: number; last
           </div>
         </Abs>
       ) : null}
-      {row.updatedAt ? (
+      {row.updates ? (
         <Abs x={COLUMN_RIGHT} y={top + 44} style={{ transform: "translateX(-100%)" }}>
           <div style={{ overflow: "hidden" }}>
             <div

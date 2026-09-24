@@ -25,12 +25,12 @@ export function EndTagline({ t }: { t: number }) {
   const note = ease.outCubic(progress(t, T.wordmark + 0.45, T.wordmark + 0.85));
   return (
     <>
-      <Abs x={118} y={292}>
+      <Abs x={118} y={280}>
         <Rise t={t} at={T.end} dur={0.5}>
           <Eyebrow size={21}>Open source · Embeddable · Self-hostable</Eyebrow>
         </Rise>
       </Abs>
-      <Abs x={112} y={344}>
+      <Abs x={112} y={332}>
         <Rise t={t} at={T.end + 0.1} dur={0.66} style={line}>
           Your product.
         </Rise>
@@ -38,15 +38,15 @@ export function EndTagline({ t }: { t: number }) {
           Agents inside.
         </Rise>
       </Abs>
-      <Abs x={120} y={620} style={{ overflow: "hidden" }}>
+      <Abs x={120} y={738} style={{ overflow: "hidden" }}>
         <div style={{ transform: `translateY(${(1 - mark) * 102}%)` }}>
           <Wordmark height={44} color={C.ink} />
         </div>
       </Abs>
-      <Abs x={120} y={690} style={{ opacity: url }}>
+      <Abs x={120} y={794} style={{ opacity: url }}>
         <div style={{ fontFamily: F.mono, fontSize: 27, color: C.ink, letterSpacing: "0.02em" }}>opengeni.ai</div>
       </Abs>
-      <Abs x={1846} y={850} style={{ opacity: note, transform: "translateX(-100%)" }}>
+      <Abs x={852} y={850} style={{ opacity: note }}>
         <div style={{ fontFamily: F.mono, fontSize: 17, color: C.muted2, letterSpacing: "0.06em", textTransform: "uppercase", whiteSpace: "nowrap" }}>
           Illustrative product scenario
         </div>
