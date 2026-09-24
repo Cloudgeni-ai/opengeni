@@ -1,0 +1,24 @@
+{
+  "name": "opengeni-film-reveal",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "studio": "remotion studio src/index.ts",
+    "cues": "bun scripts/export-cues.ts",
+    "score": "bun run cues && python3 audio/score.py",
+    "render": "remotion render src/index.ts Reveal out/reveal.mp4",
+    "build": "bash scripts/build.sh",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.527",
+    "@remotion/google-fonts": "4.0.527",
+    "react": "19.2.5",
+    "react-dom": "19.2.5",
+    "remotion": "4.0.527"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.14",
+    "typescript": "5.9.3"
+  }
+}
