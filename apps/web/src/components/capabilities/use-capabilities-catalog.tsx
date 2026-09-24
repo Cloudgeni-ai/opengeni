@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { useAppContext } from "@/context";
+import { isWorkspacePermissionDenied } from "@/lib/permissions";
 import type {
   ApiIntegrationInstallationSummary,
   CapabilityCatalogItem,
@@ -26,6 +27,7 @@ export type CapabilitiesCatalog = {
    * retry instead of pinning their tiles at Loading forever.
    */
   connectionsLoadFailed: boolean;
+  connectionsAccessDenied: boolean;
   /** Merge one freshly returned connection row into the loaded list. */
   replaceConnection: (connection: ConnectionMetadata) => void;
   /** Adopt a fresh connection list from a targeted fetch (an OAuth return). */
@@ -62,6 +64,10 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
   const [items, setItems] = useState<CapabilityCatalogItem[]>([]);
   const [connections, setConnections] = useState<ConnectionMetadata[] | null>(null);
   const [connectionsLoadFailed, setConnectionsLoadFailed] = useState(false);
+  const [connectionDenialScope, setConnectionDenialScope] = useState<{
+    client: typeof client;
+    workspaceId: string;
+  } | null>(null);
   const [apiIntegrationDefinitions, setApiIntegrationDefinitions] = useState<
     IntegrationDefinitionSummary[]
   >([]);
@@ -87,17 +93,21 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
       scopeRef.current.workspaceId === scope.workspaceId;
     setLoading(true);
     try {
-      const [catalog, conns, socials, slackBindings, apiDefinitions, apiInstances] =
+      const [catalog, connectionResult, socials, slackBindings, apiDefinitions, apiInstances] =
         await Promise.all([
           client.listCapabilities(workspaceId),
           // null (not []) on failure so health can tell "didn't load" from "loaded empty".
-          client.listConnections(workspaceId).catch(() => null),
+          client.listConnections(workspaceId).then(
+            (connections) => ({ connections, denied: false }),
+            (error: unknown) => ({ connections: null, denied: isWorkspacePermissionDenied(error) }),
+          ),
           client.listSocialConnections(workspaceId).catch(() => null),
           client.listSlackInstallationBindings(workspaceId).catch(() => null),
           client.listIntegrationDefinitions(workspaceId).catch(() => null),
           client.listApiIntegrations(workspaceId).catch(() => null),
         ]);
       if (!isCurrentScope()) return;
+      const conns = connectionResult.connections;
       setItems(catalog.items);
       // Don't clobber previously-loaded connections with null on a failed refetch
       // (that would flip healthy items to "unverified" until the next reload); a
@@ -105,6 +115,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
       // The failure itself is tracked so the integrations can say so and retry.
       if (conns !== null) setConnections(conns);
       setConnectionsLoadFailed(conns === null);
+      setConnectionDenialScope(connectionResult.denied ? scope : null);
       if (socials !== null) setSocialConnections(socials);
       if (slackBindings !== null) setSlackInstallationBindings(slackBindings);
       if (apiDefinitions !== null) setApiIntegrationDefinitions(apiDefinitions.definitions);
@@ -127,6 +138,8 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
     setItems,
     connections,
     connectionsLoadFailed,
+    connectionsAccessDenied:
+      connectionDenialScope?.client === client && connectionDenialScope.workspaceId === workspaceId,
     replaceConnection: (updated) =>
       setConnections((current) =>
         current
@@ -138,6 +151,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
     adoptConnections: (next) => {
       setConnections(next);
       setConnectionsLoadFailed(false);
+      setConnectionDenialScope(null);
     },
     apiIntegrationDefinitions,
     apiIntegrationInstances,

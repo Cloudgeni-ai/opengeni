@@ -58,6 +58,35 @@ function fakeClient(definitions: Promise<{ definitions: IntegrationDefinitionSum
 }
 
 describe("useCapabilitiesCatalog", () => {
+  test("identifies connection authorization failures without hiding the readable catalog", async () => {
+    context.client = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async () => {
+        throw { status: 403 };
+      },
+    } as unknown as OpenGeniBrowserClient;
+
+    let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+    function Harness() {
+      latest = useCapabilitiesCatalog("workspace-a");
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Harness />));
+    await act(async () => await latest!.refresh());
+
+    expect(latest!.items).toEqual([]);
+    expect(latest!.loadError).toBeNull();
+    expect(latest!.connectionsLoadFailed).toBe(true);
+    expect(latest!.connectionsAccessDenied).toBe(true);
+    expect(latest!.connections).toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("a stale workspace response never populates the current workspace", async () => {
     const workspaceA = deferred<{ definitions: IntegrationDefinitionSummary[] }>();
     const workspaceB = deferred<{ definitions: IntegrationDefinitionSummary[] }>();

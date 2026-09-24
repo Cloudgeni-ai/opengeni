@@ -3,6 +3,7 @@ import { sortConnectorsForPresentation } from "@/components/capabilities/catalog
 import { ConnectionCatalog, McpConnectionCard } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
 import { ConnectionLogo } from "@opengeni/react/connect";
+import { ConnectionAccessNotice } from "@/components/capabilities/connection-access-notice";
 import {
   catalogServiceIdentity,
   mergeConnectionServices,
@@ -168,6 +169,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     setItems,
     connections,
     connectionsLoadFailed,
+    connectionsAccessDenied,
     replaceConnection,
     adoptConnections,
     apiIntegrationDefinitions,
@@ -299,6 +301,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     [client],
   );
   const connectionsLoaded = connections !== null;
+  const connectionsRetryable = connectionsLoadFailed && !connectionsAccessDenied;
   const canManageApiIntegrationInstances = canManageApiIntegrations(
     context.accessContext,
     workspaceId,
@@ -326,7 +329,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     workspaceId,
     connections,
     connectionsLoaded,
-    connectionsLoadFailed,
+    connectionsLoadFailed: connectionsRetryable,
     refresh,
     replaceConnection,
     definitions: apiIntegrationDefinitions,
@@ -338,7 +341,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     workspaceId,
     connections,
     connectionsLoaded,
-    connectionsLoadFailed,
+    connectionsLoadFailed: connectionsRetryable,
     refresh,
     replaceConnection,
   });
@@ -1252,6 +1255,14 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           title="Capabilities"
           description="Connect your favorite tools and extend OpenGeni's capabilities."
         />
+
+        {(connectionsAccessDenied ||
+          (context.accessContext?.workspaceGrants.some(
+            (grant) => grant.workspaceId === workspaceId,
+          ) &&
+            !hasWorkspacePermission(context.accessContext, workspaceId, "connections:read"))) && (
+          <ConnectionAccessNotice />
+        )}
 
         <PluginSearch query={query} onQueryChange={setQuery} scope={activeTab} />
         <CatalogActionContext.Provider value={catalogToolbar}>

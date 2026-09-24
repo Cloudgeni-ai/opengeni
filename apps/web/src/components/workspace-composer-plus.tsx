@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ComposerMobilePlus, type ComposerPlusProps } from "@/components/composer-mobile-plus";
 import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasWorkspacePermission, isWorkspacePermissionDenied } from "@/lib/permissions";
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
 import { composerConnectorOptions } from "@/lib/composer-connectors";
 import { capabilityReconnectPlan, connectionHealth } from "@/lib/capabilities";
@@ -41,18 +41,27 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
       lifecycle.revision === request;
     setLoading(true);
     try {
-      const [result, connections] = await Promise.all([
+      const [result, connectionResult] = await Promise.all([
         client.listCapabilities(workspaceId),
         canReadConnections
-          ? client.listConnections(workspaceId).catch(() => null)
-          : Promise.resolve(null),
+          ? client.listConnections(workspaceId).then(
+              (connections) => ({ connections, denied: false }),
+              (failure: unknown) => ({
+                connections: null,
+                denied: isWorkspacePermissionDenied(failure),
+              }),
+            )
+          : Promise.resolve({ connections: null, denied: true }),
       ]);
       if (!live()) return;
+      const connections = connectionResult.connections;
       setCatalog({ client, workspaceId, items: result.items, connections });
       setError(
-        canReadConnections && connections === null
-          ? "Connection status couldn't be checked. Open Capabilities to check the connection."
-          : null,
+        connectionResult.denied
+          ? "Your workspace access doesn't allow connection discovery. Ask a workspace admin for connection access."
+          : connections === null
+            ? "Connection status couldn't be checked. Open Capabilities to check the connection."
+            : null,
       );
     } catch (failure) {
       if (live())
