@@ -552,7 +552,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   useEffect(() => {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId]);
+  }, [client, workspaceId]);
 
   const fikenOAuthHandled = useRef(false);
   useEffect(() => {

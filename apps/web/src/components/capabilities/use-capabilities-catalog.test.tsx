@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
+import { act, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 
 import type {
@@ -68,6 +68,209 @@ function fakeClient(definitions: Promise<{ definitions: IntegrationDefinitionSum
 }
 
 describe("useCapabilitiesCatalog", () => {
+  for (const outcome of ["transient", "denied", "no read"] as const) {
+    test(`client switch masks all prior catalog rows before and after ${outcome}`, async () => {
+      const oldConnection = { id: "personal-a" } as ConnectionMetadata;
+      const oldItem = { id: "item-a" } as CapabilityCatalogItem;
+      const pending = deferred<ConnectionMetadata[]>();
+      const definitions = { definitions: [definition("definition-a", "Personal A")] };
+      const clientA = {
+        ...fakeClient(Promise.resolve(definitions)),
+        listCapabilities: async () => ({ items: [oldItem] }),
+        listConnections: async () => [oldConnection],
+        listSocialConnections: async () => [{ id: "social-a" }],
+        listSlackInstallationBindings: async () => [{ id: "slack-a" }],
+        listApiIntegrations: async () => ({ integrations: [{ id: "instance-a" }] }),
+      } as unknown as OpenGeniBrowserClient;
+      let readsB = 0;
+      const clientB = {
+        ...fakeClient(Promise.resolve({ definitions: [] })),
+        listCapabilities: async () => {
+          throw new Error("B catalog unavailable");
+        },
+        listConnections: async () => {
+          readsB++;
+          if (outcome === "no read") return pending.promise;
+          throw { status: outcome === "denied" ? 403 : 503 };
+        },
+      } as unknown as OpenGeniBrowserClient;
+
+      let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+      function Harness() {
+        latest = useCapabilitiesCatalog("workspace-a");
+        return null;
+      }
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      context.client = clientA;
+      await act(async () => root.render(<Harness />));
+      await act(async () => await latest!.refresh());
+      expect(latest!.connections).toEqual([oldConnection]);
+      expect(latest!.items).toEqual([oldItem]);
+      const oldCallbacks = latest!;
+
+      context.client = clientB;
+      await act(async () => root.render(<Harness />));
+      // Render-time protection, before B has issued (let alone settled) a read.
+      expect(readsB).toBe(0);
+      expect(latest!.connections).toBeNull();
+      expect(latest!.items).toEqual([]);
+      expect(latest!.apiIntegrationDefinitions).toEqual([]);
+      expect(latest!.apiIntegrationInstances).toEqual([]);
+      expect(latest!.socialConnections).toEqual([]);
+      expect(latest!.slackInstallationBindings).toEqual([]);
+      expect(latest!.revision).toBe(0);
+      expect(latest!.loading).toBe(true);
+      await act(async () => {
+        void latest!.refresh();
+        await Bun.sleep(0);
+      });
+      expect(readsB).toBe(1);
+      expect(latest!.loadError?.message).toBe("B catalog unavailable");
+      expect(latest!.connections).toBeNull();
+      expect(latest!.connectionsLoadFailed).toBe(outcome !== "no read");
+      expect(latest!.connectionsAccessDenied).toBe(outcome === "denied");
+      // Callbacks captured under A cannot write into B after its failed refresh.
+      await act(async () => {
+        oldCallbacks.setItems([oldItem]);
+        oldCallbacks.replaceConnection(oldConnection);
+        if (outcome === "no read") {
+          pending.reject({ status: 503 });
+          await Bun.sleep(0);
+        }
+      });
+      expect(latest!.connections).toBeNull();
+      expect(latest!.items).toEqual([]);
+      await act(async () => root.unmount());
+      container.remove();
+    });
+  }
+
+  test("same client refreshes on workspace change without retaining personal rows", async () => {
+    const pending = deferred<ConnectionMetadata[]>();
+    const personal = { id: "personal-a" } as ConnectionMetadata;
+    const client = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async (workspaceId: string) => {
+        if (workspaceId === "workspace-a") return [personal];
+        return pending.promise;
+      },
+    } as unknown as OpenGeniBrowserClient;
+    context.client = client;
+    let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+    const reads: string[] = [];
+    function Harness({ workspaceId }: { workspaceId: string }) {
+      latest = useCapabilitiesCatalog(workspaceId);
+      useEffect(() => {
+        reads.push(workspaceId);
+        void latest!.refresh();
+      }, [workspaceId]);
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Harness workspaceId="workspace-a" />));
+    expect(latest!.connections).toEqual([personal]);
+    await act(async () => root.render(<Harness workspaceId="workspace-b" />));
+    expect(reads).toEqual(["workspace-a", "workspace-b"]);
+    expect(latest!.connections).toBeNull();
+    expect(latest!.loading).toBe(true);
+    await act(async () => {
+      pending.reject({ status: 503 });
+      await Bun.sleep(0);
+    });
+    expect(latest!.connections).toBeNull();
+    expect(latest!.connectionsLoadFailed).toBe(true);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("same workspace refreshes on client change", async () => {
+    const personal = { id: "personal-a" } as ConnectionMetadata;
+    let bReads = 0;
+    const clientA = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async () => [personal],
+    } as unknown as OpenGeniBrowserClient;
+    const clientB = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async () => {
+        bReads++;
+        throw { status: 503 };
+      },
+    } as unknown as OpenGeniBrowserClient;
+    let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+    function Harness() {
+      const currentClient = context.client;
+      latest = useCapabilitiesCatalog("workspace-a");
+      useEffect(() => {
+        void latest!.refresh();
+      }, [currentClient]);
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    context.client = clientA;
+    await act(async () => root.render(<Harness />));
+    expect(latest!.connections).toEqual([personal]);
+    context.client = clientB;
+    await act(async () => root.render(<Harness />));
+    expect(bReads).toBe(1);
+    expect(latest!.connections).toBeNull();
+    expect(latest!.connectionsLoadFailed).toBe(true);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("A -> B -> A cannot reuse A's cached rows or accept A's pre-switch request", async () => {
+    const stale = deferred<ConnectionMetadata[]>();
+    const personal = { id: "personal-a" } as ConnectionMetadata;
+    let aReads = 0;
+    const clientA = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async () => {
+        aReads++;
+        if (aReads === 1) return [personal];
+        if (aReads === 2) return stale.promise;
+        throw { status: 503 };
+      },
+    } as unknown as OpenGeniBrowserClient;
+    const clientB = fakeClient(Promise.resolve({ definitions: [] }));
+    let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+    function Harness() {
+      latest = useCapabilitiesCatalog("workspace-a");
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    context.client = clientA;
+    await act(async () => root.render(<Harness />));
+    await act(async () => await latest!.refresh());
+    await act(async () => {
+      void latest!.fetchConnections();
+    });
+    context.client = clientB;
+    await act(async () => root.render(<Harness />));
+    expect(latest!.connections).toBeNull();
+    context.client = clientA;
+    await act(async () => root.render(<Harness />));
+    expect(latest!.connections).toBeNull();
+    await act(async () => {
+      stale.resolve([personal]);
+      await Bun.sleep(0);
+    });
+    expect(latest!.connections).toBeNull();
+    await act(async () => await latest!.fetchConnections());
+    expect(latest!.connections).toBeNull();
+    expect(latest!.connectionsLoadFailed).toBe(true);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("revoked connection access clears previously loaded rows without hiding the catalog", async () => {
     const connection = { id: "previously-visible" } as ConnectionMetadata;
     let denied = false;

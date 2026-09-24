@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { toast } from "sonner";
 
 import { useAppContext } from "@/context";
@@ -48,48 +49,85 @@ export type CapabilitiesCatalog = {
   refresh: () => Promise<void>;
 };
 
+type CatalogState = {
+  client: OpenGeniBrowserClient;
+  workspaceId: string;
+  epoch: number;
+  items: CapabilityCatalogItem[];
+  connections: ConnectionMetadata[] | null;
+  connectionsLoadFailed: boolean;
+  connectionsAccessDenied: boolean;
+  apiIntegrationDefinitions: IntegrationDefinitionSummary[];
+  apiIntegrationInstances: ApiIntegrationInstallationSummary[];
+  socialConnections: SocialConnection[];
+  slackInstallationBindings: SlackInstallationBinding[];
+  loading: boolean;
+  loadError: Error | null;
+  revision: number;
+};
+
+function emptyCatalogState(
+  client: OpenGeniBrowserClient,
+  workspaceId: string,
+  epoch: number,
+): CatalogState {
+  return {
+    client,
+    workspaceId,
+    epoch,
+    items: [],
+    connections: null,
+    connectionsLoadFailed: false,
+    connectionsAccessDenied: false,
+    apiIntegrationDefinitions: [],
+    apiIntegrationInstances: [],
+    socialConnections: [],
+    slackInstallationBindings: [],
+    loading: true,
+    loadError: null,
+    revision: 0,
+  };
+}
+
 /**
  * The Capabilities page's whole workspace-scoped data load.
  *
- * Every response is fenced on the exact client + workspace it was requested
- * for. Switching workspaces mid-flight must never populate the new workspace's
- * catalog, connections, integration definitions, or installed instances with
- * the previous workspace's rows - the late response is dropped entirely, and
- * it can no longer clear the new workspace's loading state or raise its error.
+ * Both rendered state and responses are fenced on the exact client + workspace.
+ * A new read identity sees no previous rows even before its first request settles;
+ * within one identity a transient connection failure still retains cached rows.
  */
 export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog {
   const context = useAppContext();
   const client = context.client;
 
-  const [items, setItems] = useState<CapabilityCatalogItem[]>([]);
-  const [connections, setConnections] = useState<ConnectionMetadata[] | null>(null);
-  const [connectionsLoadFailed, setConnectionsLoadFailed] = useState(false);
-  const [connectionDenialScope, setConnectionDenialScope] = useState<{
-    client: typeof client;
-    workspaceId: string;
-  } | null>(null);
-  const [apiIntegrationDefinitions, setApiIntegrationDefinitions] = useState<
-    IntegrationDefinitionSummary[]
-  >([]);
-  const [apiIntegrationInstances, setApiIntegrationInstances] = useState<
-    ApiIntegrationInstallationSummary[]
-  >([]);
-  const [socialConnections, setSocialConnections] = useState<SocialConnection[]>([]);
-  const [slackInstallationBindings, setSlackInstallationBindings] = useState<
-    SlackInstallationBinding[]
-  >([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<Error | null>(null);
-  const [revision, setRevision] = useState(0);
-
-  const scopeRef = useRef({ client, workspaceId });
-  scopeRef.current = { client, workspaceId };
+  const scopeRef = useRef({ client, workspaceId, epoch: 0 });
+  // Distinguish A -> B -> A from uninterrupted A: an old A request or cached
+  // row cannot regain authority merely because its client/workspace match again.
+  if (scopeRef.current.client !== client || scopeRef.current.workspaceId !== workspaceId) {
+    scopeRef.current = { client, workspaceId, epoch: scopeRef.current.epoch + 1 };
+  }
+  const epoch = scopeRef.current.epoch;
+  const [state, setState] = useState(() => emptyCatalogState(client, workspaceId, epoch));
   const refreshRevision = useRef(0);
   const connectionRevision = useRef(0);
   const successfulConnectionRevision = useRef(0);
   const deniedConnectionRevision = useRef(0);
-  const isCurrentScope = () =>
-    scopeRef.current.client === client && scopeRef.current.workspaceId === workspaceId;
+  const isCurrentScope = () => scopeRef.current.epoch === epoch;
+  // No effect-time reset: the first render under a different principal must
+  // already be safe, and an old request must not clear freshly loaded rows.
+  const visible =
+    state.client === client && state.workspaceId === workspaceId && state.epoch === epoch
+      ? state
+      : emptyCatalogState(client, workspaceId, epoch);
+  const update = (change: (current: CatalogState) => CatalogState) =>
+    setState((current) => {
+      if (!isCurrentScope()) return current;
+      const scoped =
+        current.client === client && current.workspaceId === workspaceId && current.epoch === epoch
+          ? current
+          : emptyCatalogState(client, workspaceId, epoch);
+      return change(scoped);
+    });
 
   async function fetchConnections(): Promise<ConnectionMetadata[] | null> {
     const request = ++connectionRevision.current;
@@ -104,9 +142,12 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
         request > successfulConnectionRevision.current
       ) {
         successfulConnectionRevision.current = request;
-        setConnections(loaded);
-        setConnectionsLoadFailed(false);
-        setConnectionDenialScope(null);
+        update((current) => ({
+          ...current,
+          connections: loaded,
+          connectionsLoadFailed: false,
+          connectionsAccessDenied: false,
+        }));
       }
       return live() && request > deniedConnectionRevision.current ? loaded : null;
     } catch (error) {
@@ -118,9 +159,12 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
         request > deniedConnectionRevision.current
       ) {
         deniedConnectionRevision.current = request;
-        setConnections(null);
-        setConnectionsLoadFailed(true);
-        setConnectionDenialScope({ client, workspaceId });
+        update((current) => ({
+          ...current,
+          connections: null,
+          connectionsLoadFailed: true,
+          connectionsAccessDenied: true,
+        }));
       } else if (
         live() &&
         !denied &&
@@ -128,7 +172,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
         deniedConnectionRevision.current <= successfulConnectionRevision.current
       ) {
         // Transient errors retain cached rows and any confirmed denial.
-        setConnectionsLoadFailed(true);
+        update((current) => ({ ...current, connectionsLoadFailed: true }));
       }
       return null;
     }
@@ -138,7 +182,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
     if (!workspaceId) return;
     const request = ++refreshRevision.current;
     const live = () => isCurrentScope() && refreshRevision.current === request;
-    setLoading(true);
+    update((current) => ({ ...current, loading: true }));
     try {
       const [catalog, , socials, slackBindings, apiDefinitions, apiInstances] = await Promise.all([
         client.listCapabilities(workspaceId),
@@ -150,47 +194,53 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
         client.listApiIntegrations(workspaceId).catch(() => null),
       ]);
       if (!live()) return;
-      setItems(catalog.items);
-      if (socials !== null) setSocialConnections(socials);
-      if (slackBindings !== null) setSlackInstallationBindings(slackBindings);
-      if (apiDefinitions !== null) setApiIntegrationDefinitions(apiDefinitions.definitions);
-      if (apiInstances !== null) setApiIntegrationInstances(apiInstances.integrations);
-      setLoadError(null);
-      setRevision((current) => current + 1);
+      update((current) => ({
+        ...current,
+        items: catalog.items,
+        socialConnections: socials ?? current.socialConnections,
+        slackInstallationBindings: slackBindings ?? current.slackInstallationBindings,
+        apiIntegrationDefinitions: apiDefinitions?.definitions ?? current.apiIntegrationDefinitions,
+        apiIntegrationInstances: apiInstances?.integrations ?? current.apiIntegrationInstances,
+        loadError: null,
+        revision: current.revision + 1,
+      }));
     } catch (error) {
       if (!live()) return;
-      setLoadError(error instanceof Error ? error : new Error(String(error)));
+      update((current) => ({
+        ...current,
+        loadError: error instanceof Error ? error : new Error(String(error)),
+      }));
       toast.error("Failed to load plugins", {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      if (live()) setLoading(false);
+      if (live()) update((current) => ({ ...current, loading: false }));
     }
   }
 
   return {
-    items,
-    setItems,
-    connections,
-    connectionsLoadFailed,
-    connectionsAccessDenied:
-      connectionDenialScope?.client === client && connectionDenialScope.workspaceId === workspaceId,
+    items: visible.items,
+    setItems: (items) => update((current) => ({ ...current, items })),
+    connections: visible.connections,
+    connectionsLoadFailed: visible.connectionsLoadFailed,
+    connectionsAccessDenied: visible.connectionsAccessDenied,
     replaceConnection: (updated) =>
-      setConnections((current) =>
-        current
-          ? current.some((entry) => entry.id === updated.id)
-            ? current.map((entry) => (entry.id === updated.id ? updated : entry))
-            : [...current, updated]
+      update((current) => ({
+        ...current,
+        connections: current.connections
+          ? current.connections.some((entry) => entry.id === updated.id)
+            ? current.connections.map((entry) => (entry.id === updated.id ? updated : entry))
+            : [...current.connections, updated]
           : [updated],
-      ),
+      })),
     fetchConnections,
-    apiIntegrationDefinitions,
-    apiIntegrationInstances,
-    socialConnections,
-    slackInstallationBindings,
-    loading,
-    loadError,
-    revision,
+    apiIntegrationDefinitions: visible.apiIntegrationDefinitions,
+    apiIntegrationInstances: visible.apiIntegrationInstances,
+    socialConnections: visible.socialConnections,
+    slackInstallationBindings: visible.slackInstallationBindings,
+    loading: visible.loading,
+    loadError: visible.loadError,
+    revision: visible.revision,
     refresh,
   };
 }
