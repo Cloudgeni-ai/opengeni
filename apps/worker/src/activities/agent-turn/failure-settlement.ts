@@ -5,7 +5,6 @@ import {
   reconcileXaiCapacityWait,
   listCodexAccountStatuses,
   quarantineCodexCredentialForLease,
-  recordUsageEvent,
   getActiveSessionHistoryItemsPaged,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
@@ -40,7 +39,7 @@ import type {
 import { CodexCredentialLeaseLostError, createTurnCredentialLeases } from "./credential-leases";
 import { createTurnHistorySink } from "./history-sink";
 
-import { BudgetExhaustedError } from "./admission";
+import { findBudgetExhaustedError } from "./admission";
 import {
   providerRecoveryExhaustedFailure,
   postClaimDatabaseRecoveryFailure,
@@ -571,24 +570,21 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,
+        usageEvents: [
+          {
+            eventType: "agent_run.completed",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: "session_turn",
+            sourceResourceId: attempt.turnId,
+            idempotencyKey: `usage:agent_run.completed:${attempt.turnId}`,
+          },
+        ],
       }))
     ) {
       return claimedResult({ status: "cancelled" });
     }
     control.turnMetricOutcome = "completed";
-    await recordUsageEvent(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      eventType: "agent_run.completed",
-      quantity: 1,
-      unit: "run",
-      sourceResourceType: "session_turn",
-      sourceResourceId: attempt.turnId,
-      sessionId: input.sessionId,
-      turnId: attempt.turnId,
-      turnAttemptId: input.attemptId,
-      idempotencyKey: `usage:agent_run.completed:${attempt.turnId}`,
-    });
     control.activityStatus = "idle";
     return claimedResult({ status: "idle" });
   }
@@ -1379,12 +1375,10 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // alike (a failed session would reject the user's next message after a
   // top-up). An active goal pauses visibly with reason "limits" at the
   // next continuation evaluation, without consuming continuation budget.
-  if (
-    error instanceof BudgetExhaustedError &&
-    eventing.publish &&
-    attempt.turnId &&
-    eventing.turnStartedPublished
-  ) {
+  // The veto is thrown inside the SDK's per-call filter, so the runner may
+  // have wrapped it — unwrap before the instanceof-style check.
+  const budgetExhausted = findBudgetExhaustedError(error);
+  if (budgetExhausted && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
     await flushRuntimeBatcher();
     await historySink.reconcileConversationTruth();
     if (
@@ -1395,7 +1389,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
             payload: {
               output: "",
               segmentLimit: "budget_exhausted",
-              detail: error.message,
+              detail: budgetExhausted.message,
             },
           },
           { type: "session.status.changed", payload: { status: "idle" } },
@@ -1403,24 +1397,21 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,
+        usageEvents: [
+          {
+            eventType: "agent_run.completed",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: "session_turn",
+            sourceResourceId: attempt.turnId,
+            idempotencyKey: `usage:agent_run.completed:${attempt.turnId}`,
+          },
+        ],
       }))
     ) {
       return claimedResult({ status: "cancelled" });
     }
     control.turnMetricOutcome = "completed";
-    await recordUsageEvent(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      eventType: "agent_run.completed",
-      quantity: 1,
-      unit: "run",
-      sourceResourceType: "session_turn",
-      sourceResourceId: attempt.turnId,
-      sessionId: input.sessionId,
-      turnId: attempt.turnId,
-      turnAttemptId: input.attemptId,
-      idempotencyKey: `usage:agent_run.completed:${attempt.turnId}`,
-    });
     control.activityStatus = "idle";
     return claimedResult({ status: "idle" });
   }

@@ -7421,6 +7421,10 @@ export const KNOWN_USAGE_EVENT_TYPES = [
   // sandbox warm-time metering (P2.1) — mirrors contracts UsageEventType.
   "sandbox.warm_seconds",
   "sandbox.warm_cost",
+  // Internal budget-reservation holds/releases — never returned by usage APIs
+  // or host export, kept here for contract parity.
+  "model.tokens.reserved",
+  "model.cost.reserved",
 ] as const;
 
 export type KnownUsageEventType = (typeof KNOWN_USAGE_EVENT_TYPES)[number];

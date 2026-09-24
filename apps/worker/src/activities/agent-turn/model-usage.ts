@@ -1,9 +1,9 @@
 import {
-  applyCreditDebitUpToBalance,
-  recordUsageEvent,
+  recordUsageEventsAndApplyCreditDebit,
   recordModelCallFact,
   type AppendEventInput,
   type CanonicalTurnStartupMilestoneReceipt,
+  type UsageEventWriteInput,
 } from "@opengeni/db";
 import {
   modelResponseServiceTierFromSdkEvent,
@@ -214,6 +214,8 @@ export async function processModelResponseTerminalEvent(input: {
   leaseLostMessage: string;
   setLastInputTokens: (tokens: number | null) => Promise<void>;
   contextContributions?: readonly ModelContextContributionSummary[] | null;
+  /** Release rows for the budget hold that admitted this response's call. */
+  reservationReleases?: UsageEventWriteInput[];
 }): Promise<
   | { status: "not_response" }
   | { status: "duplicate"; sourceKey: string }
@@ -257,7 +259,17 @@ export async function processModelResponseTerminalEvent(input: {
     leaseLost: input.leaseLost,
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
-      if (!responseUsage) return;
+      if (!responseUsage) {
+        // A usage-less response still ends this call's budget hold.
+        if (input.reservationReleases?.length) {
+          await recordUsageEventsAndApplyCreditDebit(input.db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            usageEvents: input.reservationReleases,
+          });
+        }
+        return;
+      }
       const billing = await recordModelUsageAndDebitCredits(input.settings, input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -278,6 +290,9 @@ export async function processModelResponseTerminalEvent(input: {
         sourceKey,
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
         observability: input.observability,
+        ...(input.reservationReleases !== undefined
+          ? { reservationReleases: input.reservationReleases }
+          : {}),
       });
       authoritative = await emitModelCallUsage({
         observability: input.observability,
@@ -629,6 +644,12 @@ export async function recordModelUsageAndDebitCredits(
     sourceKey: string;
     latencyMode?: LatencyMode;
     observability?: ActivityServices["observability"];
+    /**
+     * Reservation-release rows for the hold that admitted this call. They
+     * commit inside the same transaction as the usage facts and credit debit,
+     * so a hold cannot outlive its reconcile nor survive a double-write.
+     */
+    reservationReleases?: UsageEventWriteInput[];
   },
 ): Promise<ModelUsageBillingRecord | null> {
   if (!input.usage) {
@@ -717,35 +738,37 @@ export async function recordModelUsageAndDebitCredits(
   // metered subscription/workspace turns remain exempt from the OpenGeni token
   // cap, while a deployment-funded free model still records model.tokens. Every
   // non-credit path records a zero-cost marker and never consults pricing for a
-  // debit.
+  // debit. Reservation releases, the usage facts, and the credit debit commit
+  // as one transaction so a crash cannot split the billing record.
+  const usageEvents: UsageEventWriteInput[] = [...(input.reservationReleases ?? [])];
+  const modelUsageContext = {
+    sourceResourceType: "model_response",
+    sourceResourceId: `${input.turnId}:${input.sourceKey}`,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    turnAttemptId: input.turnAttemptId,
+  };
   if (countsTowardTokenCap && totalTokens > 0) {
-    await recordUsageEvent(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
+    usageEvents.push({
       eventType: "model.tokens",
       quantity: totalTokens,
       unit: "tokens",
-      sourceResourceType: "model_response",
-      sourceResourceId: `${input.turnId}:${input.sourceKey}`,
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      turnAttemptId: input.turnAttemptId,
+      ...modelUsageContext,
       idempotencyKey: `usage:model.tokens:${input.turnId}:${input.sourceKey}`,
     });
   }
   if (!chargesOpenGeniCredits) {
-    await recordUsageEvent(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
+    usageEvents.push({
       eventType: "model.cost",
       quantity: 0,
       unit: "usd_micros",
-      sourceResourceType: "model_response",
-      sourceResourceId: `${input.turnId}:${input.sourceKey}`,
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      turnAttemptId: input.turnAttemptId,
+      ...modelUsageContext,
       idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
+    });
+    await recordUsageEventsAndApplyCreditDebit(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      usageEvents,
     });
     return {
       billingPath: "external",
@@ -758,10 +781,44 @@ export async function recordModelUsageAndDebitCredits(
     };
   }
   const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
-  if (!shouldDebit || (totalTokens === 0 && !gatewayBilling)) {
+  if (totalTokens === 0 && !gatewayBilling) {
+    if (usageEvents.length > 0) {
+      await recordUsageEventsAndApplyCreditDebit(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        usageEvents,
+      });
+    }
     return {
       billingPath: "opengeni_credits",
       pricedCostMicros: 0,
+      estimatedProviderCostMicros,
+      equivalentCreditCostMicros,
+      pricingSource,
+      normalizedUsage,
+    };
+  }
+  if (!shouldDebit) {
+    // Cost accounting is independent of credit debiting: a static-mode turn
+    // still owes the monthly cost cap its actual priced usage fact, or every
+    // call's cost hold would release with no replacement spend. An unpriceable
+    // model records the zero marker and stays check-only at admission.
+    const accountedCostMicros = pricingBreakdown?.creditCostMicros ?? 0;
+    usageEvents.push({
+      eventType: "model.cost",
+      quantity: accountedCostMicros,
+      unit: "usd_micros",
+      ...modelUsageContext,
+      idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
+    });
+    await recordUsageEventsAndApplyCreditDebit(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      usageEvents,
+    });
+    return {
+      billingPath: "opengeni_credits",
+      pricedCostMicros: accountedCostMicros,
       estimatedProviderCostMicros,
       equivalentCreditCostMicros,
       pricingSource,
@@ -773,45 +830,45 @@ export async function recordModelUsageAndDebitCredits(
     throw new Error(`Missing model pricing for ${input.model}`);
   }
   const costMicros = pricingBreakdown.creditCostMicros;
-  await recordUsageEvent(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
+  usageEvents.push({
     eventType: "model.cost",
     quantity: costMicros,
     unit: "usd_micros",
-    sourceResourceType: "model_response",
-    sourceResourceId: `${input.turnId}:${input.sourceKey}`,
-    sessionId: input.sessionId,
-    turnId: input.turnId,
-    turnAttemptId: input.turnAttemptId,
+    ...modelUsageContext,
     idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
   });
-  if (costMicros > 0) {
-    const result = await applyCreditDebitUpToBalance(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      type: "model_usage_debit",
-      requestedAmountMicros: costMicros,
-      sourceType: "model_response",
-      sourceId: `${input.turnId}:${input.sourceKey}`,
-      idempotencyKey: `credit:model_usage_debit:${input.turnId}:${input.sourceKey}`,
-      metadata: {
-        model: input.model,
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        sourceKey: input.sourceKey,
-        latencyMode: input.latencyMode ?? "standard",
-        inputTokens,
-        outputTokens,
-        totalTokens,
-        // Additive: the prompt-cache slice of this call's input tokens, so the
-        // per-call debit record carries cache efficiency alongside the token
-        // counts. 0 when the provider did not report cached tokens.
-        cachedTokens: normalizedUsage.telemetry.cachedTokens ?? 0,
-        ...(gatewayBilling ? { gatewayProvider: gatewayBilling.finalProvider } : {}),
-      },
-    });
-    recordCreditMicros(input.observability, "usage", result.debitedMicros);
+  const { debit } = await recordUsageEventsAndApplyCreditDebit(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    usageEvents,
+    creditDebit:
+      costMicros > 0
+        ? {
+            type: "model_usage_debit",
+            requestedAmountMicros: costMicros,
+            sourceType: "model_response",
+            sourceId: `${input.turnId}:${input.sourceKey}`,
+            idempotencyKey: `credit:model_usage_debit:${input.turnId}:${input.sourceKey}`,
+            metadata: {
+              model: input.model,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              sourceKey: input.sourceKey,
+              latencyMode: input.latencyMode ?? "standard",
+              inputTokens,
+              outputTokens,
+              totalTokens,
+              // Additive: the prompt-cache slice of this call's input tokens, so the
+              // per-call debit record carries cache efficiency alongside the token
+              // counts. 0 when the provider did not report cached tokens.
+              cachedTokens: normalizedUsage.telemetry.cachedTokens ?? 0,
+              ...(gatewayBilling ? { gatewayProvider: gatewayBilling.finalProvider } : {}),
+            },
+          }
+        : null,
+  });
+  if (debit) {
+    recordCreditMicros(input.observability, "usage", debit.debitedMicros);
   }
   return {
     billingPath: "opengeni_credits",

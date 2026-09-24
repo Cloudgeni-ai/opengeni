@@ -210,6 +210,7 @@ import {
   type MCPServer,
   type MCPToolErrorFunction,
   type Model,
+  type ModelInputData,
   type ModelRequest,
   type ModelResponse,
   type SerializedTool,
@@ -351,6 +352,7 @@ import {
   ModelRequestCaptureModel,
   ModelRequestCaptureProvider,
   notifyModelRequestCapture,
+  withModelCallOutputBound,
   withModelRequestCapture,
   type ModelRequestCapture,
   nextModelContextCaptureIndex,
@@ -518,6 +520,7 @@ export {
   boundModelToolOutputsFilterForSettings,
   callModelInputFilterForSettings,
   contextRobustnessFilterForSettings,
+  estimateAgentToolSchemaTokens,
   incrementalModelInputProjectionFilter,
   normalizeComputerCallsFilter,
   projectModelInputForCapabilities,
@@ -7544,6 +7547,28 @@ export type RunAgentStreamOptions = {
   // reconcile dual-write never sees it.
   callModelInputFilter?: CallModelInputFilter;
   /**
+   * Producer-side admission gate invoked at the exact per-call boundary: it
+   * runs as the LAST callModelInputFilter, after every input projection and
+   * the dispatch seal, immediately before the provider request is prepared.
+   * The SDK's model loop can run ahead of the consumer's per-response
+   * accounting, so admission that must veto a provider call has to live here —
+   * a consumer-side check can only observe a call that already started. Throw
+   * to veto the call; the error surfaces through the stream like any other
+   * filter failure. Receives the exact payload about to reach the provider so
+   * the gate can size itself on the real request, not a heuristic.
+   *
+   * The gate may return `maxOutputTokens`: the output headroom it granted
+   * this call. The runtime clamps the dispatched ModelRequest's
+   * `modelSettings.maxTokens` to it at the model seam (the SDK merges
+   * modelSettings before filters run, so this is the only seam that still
+   * mutates the request), making the granted hold an actual provider bound —
+   * a permitted call cannot emit beyond its reservation.
+   */
+  onModelCallAdmission?: (call: {
+    modelData: ModelInputData;
+    agent: Agent<any, any>;
+  }) => void | { maxOutputTokens?: number } | Promise<void | { maxOutputTokens?: number }>;
+  /**
    * Observes the exact model-visible prefix after every input filter. Must not
    * throw; capture failures are swallowed so they cannot change inference.
    */
@@ -7615,6 +7640,30 @@ function modelModalityProjectionFilterForAgent(
     },
     initialInputAlreadyProjected,
   );
+}
+
+/**
+ * Producer-side billing/budget admission gate. Installed as the LAST
+ * callModelInputFilter — after every input projection and the dispatch seal —
+ * so it sees the exact payload that will reach the provider and its veto
+ * (throw) runs before any provider request preparation or transport await.
+ * The filter itself never mutates the payload; it only adjudicates. A granted
+ * output bound is written into the per-run cell that the model wrappers read
+ * when the actual ModelRequest is dispatched — each call's admission replaces
+ * the previous grant, so an unbounded call never inherits an earlier bound.
+ */
+function modelCallAdmissionFilter(
+  onAdmission: RunAgentStreamOptions["onModelCallAdmission"],
+  outputBoundCell?: { maxTokens: number | undefined },
+): CallModelInputFilter | undefined {
+  if (!onAdmission) return undefined;
+  return async ({ modelData, agent }) => {
+    const grant = await onAdmission({ modelData, agent });
+    if (outputBoundCell) {
+      outputBoundCell.maxTokens = grant?.maxOutputTokens;
+    }
+    return modelData;
+  };
 }
 
 function measuredModelInputFilter(
@@ -7747,6 +7796,13 @@ async function runAgentStreamInternal(
     agent,
     overrides.onModelVisibleContext,
   );
+  // Per-run output-bound cell: the producer-side admission gate writes the
+  // headroom it granted for each call; the model wrappers clamp the
+  // dispatched request's maxTokens to it so a permitted call cannot emit
+  // beyond its reservation.
+  const modelCallOutputBoundCell: { maxTokens: number | undefined } = {
+    maxTokens: undefined,
+  };
   installNonLazyModelRequestCapture(agent);
   if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {
     throw new Error("runCredentialSessionId is required when run credential setup is enabled");
@@ -7929,6 +7985,12 @@ async function runAgentStreamInternal(
         ),
         // Seal admission before any provider preparation/transport awaits.
         inputWaitYield?.modelDispatchFilter,
+        // Billing admission is the literal last gate: it sizes the hold from
+        // the exact provider-bound payload and can veto the call by throwing.
+        measuredModelInputFilter(
+          "input_filter_admission",
+          modelCallAdmissionFilter(overrides.onModelCallAdmission, modelCallOutputBoundCell),
+        ),
       ].filter((f): f is CallModelInputFilter => Boolean(f)),
     );
     const ownedRunOptions: Parameters<typeof run>[2] = {
@@ -7947,23 +8009,25 @@ async function runAgentStreamInternal(
       session: withModelPreparationSessionDiagnostics(agentSession),
       ...(sessionState ? { sessionState } : {}),
     } as SandboxRunConfig;
-    return await withModelRequestCapture(modelRequestCapture, () =>
-      withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
-        withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
-          recordModelPreparationManifestInventory(
-            "sandbox_agent_manifest_inventory",
-            (agent as { defaultManifest?: Manifest }).defaultManifest,
-          );
-          recordModelPreparationManifestInventory(
-            "sandbox_session_manifest_inventory",
-            (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
-          );
-          return runScopedRunner(settings, agent, inputWaitYield).run(
-            agent,
-            prepared.input,
-            ownedRunOptions,
-          );
-        }),
+    return await withModelCallOutputBound(modelCallOutputBoundCell, () =>
+      withModelRequestCapture(modelRequestCapture, () =>
+        withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
+          withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
+            recordModelPreparationManifestInventory(
+              "sandbox_agent_manifest_inventory",
+              (agent as { defaultManifest?: Manifest }).defaultManifest,
+            );
+            recordModelPreparationManifestInventory(
+              "sandbox_session_manifest_inventory",
+              (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
+            );
+            return runScopedRunner(settings, agent, inputWaitYield).run(
+              agent,
+              prepared.input,
+              ownedRunOptions,
+            );
+          }),
+        ),
       ),
     );
   }
@@ -8086,6 +8150,12 @@ async function runAgentStreamInternal(
         ),
       ),
       inputWaitYield?.modelDispatchFilter,
+      // Billing admission is the literal last gate: it sizes the hold from
+      // the exact provider-bound payload and can veto the call by throwing.
+      measuredModelInputFilter(
+        "input_filter_admission",
+        modelCallAdmissionFilter(overrides.onModelCallAdmission, modelCallOutputBoundCell),
+      ),
     ].filter((f): f is CallModelInputFilter => Boolean(f)),
   );
   const runOptions: Parameters<typeof run>[2] = {
@@ -8109,19 +8179,21 @@ async function runAgentStreamInternal(
       ...(sandboxSessionState ? { sessionState: sandboxSessionState } : {}),
     } as SandboxRunConfig;
   }
-  return await withModelRequestCapture(modelRequestCapture, () =>
-    withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
-      withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
-        recordModelPreparationManifestInventory(
-          "sandbox_agent_manifest_inventory",
-          (agent as { defaultManifest?: Manifest }).defaultManifest,
-        );
-        return runScopedRunner(settings, agent, inputWaitYield).run(
-          agent,
-          prepared.input,
-          runOptions,
-        );
-      }),
+  return await withModelCallOutputBound(modelCallOutputBoundCell, () =>
+    withModelRequestCapture(modelRequestCapture, () =>
+      withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
+        withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
+          recordModelPreparationManifestInventory(
+            "sandbox_agent_manifest_inventory",
+            (agent as { defaultManifest?: Manifest }).defaultManifest,
+          );
+          return runScopedRunner(settings, agent, inputWaitYield).run(
+            agent,
+            prepared.input,
+            runOptions,
+          );
+        }),
+      ),
     ),
   );
 }

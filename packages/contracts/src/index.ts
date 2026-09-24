@@ -3460,6 +3460,12 @@ export const UsageEventType = z.enum([
   "agent_run.completed",
   "model.tokens",
   "model.cost",
+  // --- in-flight budget holds (bounded admission reservations) ---
+  // Positive rows reserve monthly-cap budget before a provider call; negative
+  // rows release the hold after actuals record or the turn settles. They net
+  // to zero over a call's lifetime and never count as billable usage.
+  "model.tokens.reserved",
+  "model.cost.reserved",
   "file.uploaded",
   "file.deleted",
   "document.indexed",

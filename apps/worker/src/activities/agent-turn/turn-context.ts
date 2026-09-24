@@ -50,6 +50,7 @@ export type TurnSettleFn = (input: {
   suppressGoalContinuation?: boolean;
   consumeRequestedCompactionFailure?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
+  usageEvents?: ApplySessionTurnSettlementInput["usageEvents"];
 }) => Promise<boolean>;
 
 export type TurnControlState = {
@@ -79,6 +80,17 @@ export type BillingState = {
   isExternallyBilledTurn: boolean;
   chargesOpenGeniCredits: boolean;
   countsTowardTokenCap: boolean;
+  /**
+   * Bounded monthly-cap holds admitted for upcoming model calls, keyed by the
+   * producer-side admission ordinal (the runtime's onModelCallAdmission gate
+   * reserves each call immediately before the provider sees it). Ordinals are
+   * matched to responses through the admission FIFO — a rejected call's
+   * ordinal is retired, never released by a later call's response. Quantities
+   * are the committed hold — admission is all-or-nothing, never clamped.
+   * Releases ride the atomic usage write or the terminal settlement/attempt
+   * close; a crash leaves the hold to age out by TTL.
+   */
+  pendingUsageReservations: Map<number, { tokens?: number; costMicros?: number }>;
 };
 
 export type SandboxRuntimeState = {
@@ -221,6 +233,7 @@ export function createTurnContext(input: {
       isExternallyBilledTurn: false,
       chargesOpenGeniCredits: true,
       countsTowardTokenCap: true,
+      pendingUsageReservations: new Map(),
     },
     sandboxState: {
       resolvedSandbox: null,

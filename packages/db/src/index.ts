@@ -443,6 +443,7 @@ import {
   lte,
   ne,
   notInArray,
+  notLike,
   or,
   sql,
   type SQL,
@@ -500,6 +501,7 @@ import {
   TOOL_RESULT_TYPE_BY_CALL_TYPE,
 } from "./session-tool-call-settlement";
 import {
+  acquireUsageBudgetReservationLock,
   assertAgentCommandAuthorityInTransaction,
   canonicalSessionCommandHash,
   closeSessionTurnAttemptInTransaction,
@@ -4782,36 +4784,33 @@ export async function deleteGitHubInstallationBinding(
   );
 }
 
-export async function recordUsageEvent(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId?: string | null;
-    eventType: string;
-    quantity: number;
-    unit: string;
-    sourceResourceType?: string | null;
-    sourceResourceId?: string | null;
-    sessionId?: string | null;
-    turnId?: string | null;
-    turnAttemptId?: string | null;
-    initiator?: TurnInitiator | null;
-    initiatorContext?: TurnInitiatorContext;
-    origin?: SessionTurnSource | null;
-    idempotencyKey: string;
-    occurredAt?: Date;
-  },
+export type UsageEventWriteInput = {
+  subjectId?: string | null;
+  eventType: string;
+  quantity: number;
+  unit: string;
+  sourceResourceType?: string | null;
+  sourceResourceId?: string | null;
+  sessionId?: string | null;
+  turnId?: string | null;
+  turnAttemptId?: string | null;
+  initiator?: TurnInitiator | null;
+  initiatorContext?: TurnInitiatorContext;
+  origin?: SessionTurnSource | null;
+  idempotencyKey: string;
+  occurredAt?: Date;
+};
+
+/**
+ * Idempotency-keyed usage-event insert inside an already-scoped transaction.
+ * Shared by recordUsageEvent, the atomic usage+credit batch writer, reservation
+ * holds/releases, and terminal turn settlement — every durable usage fact must
+ * flow through this one conflict/attribution contract.
+ */
+async function insertUsageEventInScope(
+  scopedDb: Database,
+  input: UsageEventWriteInput & { accountId: string; workspaceId: string },
 ): Promise<UsageEvent> {
-  if (input.turnId && !input.sessionId) {
-    throw new Error("recordUsageEvent: turnId requires sessionId");
-  }
-  if (input.turnAttemptId && !input.turnId) {
-    throw new Error("recordUsageEvent: turnAttemptId requires turnId");
-  }
-  if (input.initiatorContext && !input.initiator) {
-    throw new Error("recordUsageEvent: initiatorContext requires initiator");
-  }
   const attribution = input.initiator
     ? initiatorColumns({
         initiator: input.initiator,
@@ -4822,70 +4821,84 @@ export async function recordUsageEvent(
         initiatorSubjectId: null,
         initiatorContext: {},
       };
+  const [row] = await scopedDb
+    .insert(schema.usageEvents)
+    .values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId ?? null,
+      eventType: input.eventType,
+      quantity: input.quantity,
+      unit: input.unit,
+      sourceResourceType: input.sourceResourceType ?? null,
+      sourceResourceId: input.sourceResourceId ?? null,
+      sessionId: input.sessionId ?? null,
+      turnId: input.turnId ?? null,
+      turnAttemptId: input.turnAttemptId ?? null,
+      ...attribution,
+      origin: input.origin ?? null,
+      idempotencyKey: input.idempotencyKey,
+      occurredAt: input.occurredAt ?? new Date(),
+    })
+    .onConflictDoUpdate({
+      target: schema.usageEvents.idempotencyKey,
+      set: {
+        sessionId: sql`coalesce(${schema.usageEvents.sessionId}, excluded.session_id)`,
+        turnId: sql`coalesce(${schema.usageEvents.turnId}, excluded.turn_id)`,
+        turnAttemptId: sql`coalesce(${schema.usageEvents.turnAttemptId}, excluded.turn_attempt_id)`,
+        initiatorKind: sql`coalesce(${schema.usageEvents.initiatorKind}, excluded.initiator_kind)`,
+        initiatorSubjectId: sql`coalesce(${schema.usageEvents.initiatorSubjectId}, excluded.initiator_subject_id)`,
+        initiatorContext: sql`case
+          when ${schema.usageEvents.initiatorKind} is null then excluded.initiator_context
+          else ${schema.usageEvents.initiatorContext}
+        end`,
+        origin: sql`coalesce(${schema.usageEvents.origin}, excluded.origin)`,
+      },
+    })
+    .returning();
+  if (row) {
+    const expectedContext = [
+      ["sessionId", input.sessionId, row.sessionId],
+      ["turnId", input.turnId, row.turnId],
+      ["turnAttemptId", input.turnAttemptId, row.turnAttemptId],
+    ] as const;
+    for (const [field, expected, actual] of expectedContext) {
+      if (expected && actual !== expected) {
+        throw new Error(`recordUsageEvent: idempotency key resolved to a different ${field}`);
+      }
+    }
+    if (
+      input.initiator &&
+      (row.initiatorKind !== input.initiator.kind ||
+        row.initiatorSubjectId !== input.initiator.subjectId)
+    ) {
+      throw new Error("recordUsageEvent: idempotency key resolved to a different initiator");
+    }
+    if (input.origin && row.origin !== input.origin) {
+      throw new Error("recordUsageEvent: idempotency key resolved to a different origin");
+    }
+    return mapUsageEvent(row);
+  }
+  throw new Error("Failed to record usage event");
+}
+
+export async function recordUsageEvent(
+  db: Database,
+  input: UsageEventWriteInput & { accountId: string; workspaceId: string },
+): Promise<UsageEvent> {
+  if (input.turnId && !input.sessionId) {
+    throw new Error("recordUsageEvent: turnId requires sessionId");
+  }
+  if (input.turnAttemptId && !input.turnId) {
+    throw new Error("recordUsageEvent: turnAttemptId requires turnId");
+  }
+  if (input.initiatorContext && !input.initiator) {
+    throw new Error("recordUsageEvent: initiatorContext requires initiator");
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.usageEvents)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: input.subjectId ?? null,
-          eventType: input.eventType,
-          quantity: input.quantity,
-          unit: input.unit,
-          sourceResourceType: input.sourceResourceType ?? null,
-          sourceResourceId: input.sourceResourceId ?? null,
-          sessionId: input.sessionId ?? null,
-          turnId: input.turnId ?? null,
-          turnAttemptId: input.turnAttemptId ?? null,
-          ...attribution,
-          origin: input.origin ?? null,
-          idempotencyKey: input.idempotencyKey,
-          occurredAt: input.occurredAt ?? new Date(),
-        })
-        .onConflictDoUpdate({
-          target: schema.usageEvents.idempotencyKey,
-          set: {
-            sessionId: sql`coalesce(${schema.usageEvents.sessionId}, excluded.session_id)`,
-            turnId: sql`coalesce(${schema.usageEvents.turnId}, excluded.turn_id)`,
-            turnAttemptId: sql`coalesce(${schema.usageEvents.turnAttemptId}, excluded.turn_attempt_id)`,
-            initiatorKind: sql`coalesce(${schema.usageEvents.initiatorKind}, excluded.initiator_kind)`,
-            initiatorSubjectId: sql`coalesce(${schema.usageEvents.initiatorSubjectId}, excluded.initiator_subject_id)`,
-            initiatorContext: sql`case
-              when ${schema.usageEvents.initiatorKind} is null then excluded.initiator_context
-              else ${schema.usageEvents.initiatorContext}
-            end`,
-            origin: sql`coalesce(${schema.usageEvents.origin}, excluded.origin)`,
-          },
-        })
-        .returning();
-      if (row) {
-        const expectedContext = [
-          ["sessionId", input.sessionId, row.sessionId],
-          ["turnId", input.turnId, row.turnId],
-          ["turnAttemptId", input.turnAttemptId, row.turnAttemptId],
-        ] as const;
-        for (const [field, expected, actual] of expectedContext) {
-          if (expected && actual !== expected) {
-            throw new Error(`recordUsageEvent: idempotency key resolved to a different ${field}`);
-          }
-        }
-        if (
-          input.initiator &&
-          (row.initiatorKind !== input.initiator.kind ||
-            row.initiatorSubjectId !== input.initiator.subjectId)
-        ) {
-          throw new Error("recordUsageEvent: idempotency key resolved to a different initiator");
-        }
-        if (input.origin && row.origin !== input.origin) {
-          throw new Error("recordUsageEvent: idempotency key resolved to a different origin");
-        }
-        return mapUsageEvent(row);
-      }
-      throw new Error("Failed to record usage event");
-    },
+    async (scopedDb) => await insertUsageEventInScope(scopedDb, input),
   );
 }
 
@@ -5171,12 +5184,17 @@ export async function listUsageEvents(
         .select()
         .from(schema.usageEvents)
         .where(
-          input.workspaceId
-            ? and(
-                eq(schema.usageEvents.accountId, input.accountId),
-                eq(schema.usageEvents.workspaceId, input.workspaceId),
-              )
-            : eq(schema.usageEvents.accountId, input.accountId),
+          and(
+            input.workspaceId
+              ? and(
+                  eq(schema.usageEvents.accountId, input.accountId),
+                  eq(schema.usageEvents.workspaceId, input.workspaceId),
+                )
+              : eq(schema.usageEvents.accountId, input.accountId),
+            // `.reserved` rows are internal budget holds/releases, never
+            // customer-billable usage facts.
+            notLike(schema.usageEvents.eventType, "%.reserved"),
+          ),
         )
         .orderBy(desc(schema.usageEvents.occurredAt), desc(schema.usageEvents.recordedAt))
         .limit(input.limit ?? 100);
@@ -5194,6 +5212,31 @@ export async function sumUsageQuantity(
     since?: Date;
   },
 ): Promise<number> {
+  if (input.accountId && !input.workspaceId) {
+    // An account-wide sum includes session-bound facts from every workspace.
+    // No plain RLS context can read them: the restrictive
+    // session_visibility_isolation policy resolves session-bound rows through
+    // session_reference_visible -> sessions, whose strict workspace isolation
+    // hides them outside a workspace scope. Route through the owner-capability
+    // aggregate instead (opengeni_private.account_usage_quantity), which
+    // verifies this exact account-only context before minting its read
+    // capability.
+    return await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: null },
+      async (scopedDb) => {
+        const [row] = await rawRows<{ total: string | number | bigint }>(
+          scopedDb,
+          sql`select opengeni_private.account_usage_quantity(
+            ${input.accountId}::uuid,
+            ${input.eventType},
+            ${input.since ? input.since.toISOString() : "-infinity"}::timestamptz
+          ) as total`,
+        );
+        return Number(row?.total ?? 0);
+      },
+    );
+  }
   const context = input.workspaceId
     ? await rlsContextForWorkspace(db, input.workspaceId)
     : input.accountId
@@ -5207,7 +5250,9 @@ export async function sumUsageQuantity(
       eq(schema.usageEvents.eventType, input.eventType),
       ...(input.accountId ? [eq(schema.usageEvents.accountId, input.accountId)] : []),
       ...(input.workspaceId ? [eq(schema.usageEvents.workspaceId, input.workspaceId)] : []),
-      ...(input.since ? [gt(schema.usageEvents.occurredAt, input.since)] : []),
+      // Callers pass exact window boundaries (UTC month start); an event
+      // recorded at the boundary instant belongs to the window.
+      ...(input.since ? [gte(schema.usageEvents.occurredAt, input.since)] : []),
     ];
     const [{ total } = { total: 0 }] = await scopedDb
       .select({
@@ -5217,6 +5262,439 @@ export async function sumUsageQuantity(
       .where(and(...clauses));
     return Number(total);
   });
+}
+
+/**
+ * Net open budget holds for one reserved event type, evaluated PER RESERVATION
+ * rather than as a flat sum. Each hold/release group shares one
+ * sourceResourceId (`model_call_reservation:<turn>:<attempt>:<n>`); a group
+ * contributes only when its positive hold row is newer than `holdSince` (the
+ * TTL cutoff) AND still nets positive after its own releases. This pairing is
+ * load-bearing: filtering holds and releases independently by timestamp lets
+ * an expired hold's later release net against unrelated live holds — a
+ * double-spend — so expiry must discard the whole group before summing.
+ */
+async function openUsageReservationNetInScope(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    eventType: string;
+    /** Inclusive lower bound for the rows considered (cap window start). */
+    since: Date;
+    /** Inclusive lower bound for a live hold; stale-hold groups are ignored. */
+    holdSince: Date;
+  },
+): Promise<number> {
+  const [row] = await rawRows<{ total: string | number | bigint }>(
+    scopedDb,
+    sql`select coalesce(sum(
+          case when g.hold_at >= ${input.holdSince.toISOString()}::timestamptz
+            then greatest(g.net, 0)
+            else 0
+          end), 0) as total
+        from (
+          select sum(usage_row.quantity) as net,
+            max(usage_row.occurred_at) filter (where usage_row.quantity > 0) as hold_at
+          from ${schema.usageEvents} usage_row
+          where usage_row.account_id = ${input.accountId}
+            and usage_row.workspace_id = ${input.workspaceId}
+            and usage_row.event_type = ${input.eventType}
+            and usage_row.occurred_at >= ${input.since.toISOString()}::timestamptz
+          group by usage_row.source_resource_id
+        ) g`,
+  );
+  return Number(row?.total ?? 0);
+}
+
+/**
+ * Net open budget holds against one monthly cap, with the same per-reservation
+ * expiry/reconcile pairing as tryReserveUsageBudget. Account-only sums route
+ * through the owner-capability aggregate for the same reason as
+ * sumUsageQuantity: the restrictive session_visibility_isolation policy hides
+ * session-bound rows from every plain RLS context.
+ */
+export async function openUsageReservationQuantity(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    eventType: string;
+    since: Date;
+    holdSince: Date;
+  },
+): Promise<number> {
+  if (input.workspaceId) {
+    const workspaceId = input.workspaceId;
+    return await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId },
+      async (scopedDb) =>
+        await openUsageReservationNetInScope(scopedDb, {
+          accountId: input.accountId,
+          workspaceId,
+          eventType: input.eventType,
+          since: input.since,
+          holdSince: input.holdSince,
+        }),
+    );
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: null },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ total: string | number | bigint }>(
+        scopedDb,
+        sql`select opengeni_private.account_open_usage_reservations(
+          ${input.accountId}::uuid,
+          ${input.eventType},
+          ${input.since.toISOString()}::timestamptz,
+          ${input.holdSince.toISOString()}::timestamptz
+        ) as total`,
+      );
+      return Number(row?.total ?? 0);
+    },
+  );
+}
+
+/**
+ * One bounded admission decision for the monthly usage caps. Inside a single
+ * account-serialized transaction this reads the committed usage plus the still-
+ * open reservation holds, refuses when the request cannot fit entirely inside
+ * the remaining window, and otherwise commits an idempotency-keyed hold for
+ * the full request so concurrent turns cannot spend the same remaining
+ * balance. Holds are ordinary usage_events rows under `<eventType>.reserved`;
+ * releases append the negated quantity under the same key family and are
+ * netted PER RESERVATION (sourceResourceId) before summing, so an expired
+ * hold's release can never net against another call's live hold. A crashed
+ * turn's stale hold ages out of `openReservationSince`; reconcile/settle
+ * releases keep the window accurate.
+ */
+export async function tryReserveUsageBudget(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    turnAttemptId: string;
+    /** Inclusive lower bound for committed usage (the cap window start). */
+    since: Date;
+    /** Inclusive lower bound for open holds; stale holds older than this are ignored. */
+    openReservationSince: Date;
+    reservations: Array<{
+      /** Committed-usage event type summed against the cap, e.g. "model.tokens". */
+      eventType: string;
+      /** Hold event type, e.g. "model.tokens.reserved". */
+      reservedEventType: string;
+      scope: "account" | "workspace";
+      cap: number;
+      /** Requested hold; admitted only when it fits entirely inside the remaining budget. */
+      quantity: number;
+      unit: string;
+      idempotencyKey: string;
+      sourceResourceId: string;
+    }>;
+  },
+): Promise<
+  | { allowed: true; holds: Array<{ idempotencyKey: string; quantity: number }> }
+  | {
+      allowed: false;
+      eventType: string;
+      cap: number;
+      used: number;
+      openReservations: number;
+    }
+  | { allowed: false; attemptClosed: true }
+> {
+  if (input.reservations.length === 0) {
+    return { allowed: true, holds: [] };
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await acquireUsageBudgetReservationLock(scopedDb, input.accountId);
+      // Attempt-close fence: closeSessionTurnAttemptInTransaction takes this
+      // same advisory lock before releasing an attempt's holds, so under the
+      // lock a hold can never be committed for an attempt that already
+      // closed (the read below sees the closed row) and a hold committed
+      // before close acquired the lock is still inside close's release scan.
+      const [liveAttempt] = await scopedDb
+        .select({ state: schema.sessionTurnAttempts.state })
+        .from(schema.sessionTurnAttempts)
+        .where(
+          and(
+            eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+            eq(schema.sessionTurnAttempts.id, input.turnAttemptId),
+          ),
+        )
+        .limit(1);
+      if (!liveAttempt || (liveAttempt.state !== "claimed" && liveAttempt.state !== "running")) {
+        return { allowed: false as const, attemptClosed: true as const };
+      }
+      const idempotencyKeys = input.reservations.map((r) => r.idempotencyKey);
+      const existing = await scopedDb
+        .select({
+          idempotencyKey: schema.usageEvents.idempotencyKey,
+          quantity: schema.usageEvents.quantity,
+          sessionId: schema.usageEvents.sessionId,
+          turnId: schema.usageEvents.turnId,
+          turnAttemptId: schema.usageEvents.turnAttemptId,
+        })
+        .from(schema.usageEvents)
+        .where(inArray(schema.usageEvents.idempotencyKey, idempotencyKeys));
+      const existingByKey = new Map(existing.map((row) => [row.idempotencyKey, row]));
+      const holds: Array<{ idempotencyKey: string; quantity: number }> = [];
+      const pendingHolds: Array<{
+        reservation: (typeof input.reservations)[number];
+        quantity: number;
+      }> = [];
+      for (const reservation of input.reservations) {
+        // Committed usage counts from the window start; open holds net PER
+        // RESERVATION so a crashed turn's stale hold ages out without its
+        // release subtracting from another call's live hold.
+        const [used, openReserved] =
+          reservation.scope === "workspace"
+            ? await (async () => {
+                const [sums] = await scopedDb
+                  .select({
+                    used: sql<number>`coalesce(sum(${schema.usageEvents.quantity}), 0)`,
+                  })
+                  .from(schema.usageEvents)
+                  .where(
+                    and(
+                      eq(schema.usageEvents.accountId, input.accountId),
+                      eq(schema.usageEvents.workspaceId, input.workspaceId),
+                      eq(schema.usageEvents.eventType, reservation.eventType),
+                      gte(schema.usageEvents.occurredAt, input.since),
+                    ),
+                  );
+                const open = await openUsageReservationNetInScope(scopedDb, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  eventType: reservation.reservedEventType,
+                  since: input.since,
+                  holdSince: input.openReservationSince,
+                });
+                return [Number(sums?.used ?? 0), open];
+              })()
+            : // Account-wide sums must see session-bound facts from every
+              // workspace; plain RLS contexts cannot (see sumUsageQuantity).
+              // Nest the exact account-only scope the capability aggregate
+              // requires inside this serialized reservation transaction.
+              await withRlsContext(
+                scopedDb,
+                { accountId: input.accountId, workspaceId: null },
+                async (accountDb) => {
+                  const [sums] = await rawRows<{
+                    used: string | number | bigint;
+                    open_reserved: string | number | bigint;
+                  }>(
+                    accountDb,
+                    sql`select
+                      opengeni_private.account_usage_quantity(
+                        ${input.accountId}::uuid,
+                        ${reservation.eventType},
+                        ${input.since.toISOString()}::timestamptz) as used,
+                      opengeni_private.account_open_usage_reservations(
+                        ${input.accountId}::uuid,
+                        ${reservation.reservedEventType},
+                        ${input.since.toISOString()}::timestamptz,
+                        ${input.openReservationSince.toISOString()}::timestamptz
+                      ) as open_reserved`,
+                  );
+                  return [Number(sums?.used ?? 0), Number(sums?.open_reserved ?? 0)];
+                },
+                undefined,
+                "none",
+              );
+        const openReservations = Math.max(0, Number(openReserved ?? 0));
+        const held = existingByKey.get(reservation.idempotencyKey);
+        if (held) {
+          // A retry of an already-admitted reservation: its quantity is already
+          // inside `openReservations`, so it must not be charged twice. Verify
+          // the hold belongs to this exact execution context.
+          if (
+            held.sessionId !== input.sessionId ||
+            held.turnId !== input.turnId ||
+            held.turnAttemptId !== input.turnAttemptId
+          ) {
+            throw new Error(
+              "tryReserveUsageBudget: idempotency key resolved to a different execution context",
+            );
+          }
+          holds.push({ idempotencyKey: reservation.idempotencyKey, quantity: held.quantity });
+          continue;
+        }
+        const remaining = reservation.cap - used - openReservations;
+        // Strict admission: the request must fit entirely inside the remaining
+        // window. A clamped hold would let the unbounded provider call spend
+        // past the cap, which is the overshoot this reservation exists to
+        // prevent — the caller refuses the call instead.
+        if (remaining < reservation.quantity) {
+          return {
+            allowed: false as const,
+            eventType: reservation.eventType,
+            cap: reservation.cap,
+            used,
+            openReservations,
+          };
+        }
+        pendingHolds.push({ reservation, quantity: reservation.quantity });
+        holds.push({
+          idempotencyKey: reservation.idempotencyKey,
+          quantity: reservation.quantity,
+        });
+      }
+      for (const { reservation, quantity } of pendingHolds) {
+        await insertUsageEventInScope(scopedDb, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          eventType: reservation.reservedEventType,
+          quantity,
+          unit: reservation.unit,
+          sourceResourceType: "model_call_reservation",
+          sourceResourceId: reservation.sourceResourceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnAttemptId: input.turnAttemptId,
+          idempotencyKey: reservation.idempotencyKey,
+        });
+      }
+      return { allowed: true as const, holds };
+    },
+  );
+}
+
+/**
+ * Net open budget holds for one turn attempt, keyed by the call ordinal the
+ * hold's `sourceResourceId` (`model_call_reservation:<turn>:<attempt>:<n>`)
+ * was written under. A restarted claim rebuilds its in-memory release ledger
+ * from this: holds written before a crash stay releaseable through the same
+ * idempotency-keyed release rows instead of waiting out the TTL.
+ */
+export async function listOpenUsageReservations(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    turnId: string;
+    turnAttemptId: string;
+    /** TTL cutoff; holds older than this no longer count against the cap. */
+    since: Date;
+  },
+): Promise<Map<number, { tokens?: number; costMicros?: number }>> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .select({
+          eventType: schema.usageEvents.eventType,
+          sourceResourceId: schema.usageEvents.sourceResourceId,
+          quantity: sql<number>`coalesce(sum(${schema.usageEvents.quantity}), 0)`,
+        })
+        .from(schema.usageEvents)
+        .where(
+          and(
+            eq(schema.usageEvents.accountId, input.accountId),
+            eq(schema.usageEvents.workspaceId, input.workspaceId),
+            eq(schema.usageEvents.turnId, input.turnId),
+            eq(schema.usageEvents.turnAttemptId, input.turnAttemptId),
+            inArray(schema.usageEvents.eventType, ["model.tokens.reserved", "model.cost.reserved"]),
+            gte(schema.usageEvents.occurredAt, input.since),
+          ),
+        )
+        .groupBy(schema.usageEvents.eventType, schema.usageEvents.sourceResourceId);
+      const result = new Map<number, { tokens?: number; costMicros?: number }>();
+      for (const row of rows) {
+        const net = Number(row.quantity);
+        if (net <= 0 || !row.sourceResourceId) continue;
+        const ordinal = /:(\d+)$/.exec(row.sourceResourceId)?.[1];
+        if (!ordinal) continue;
+        const entry = result.get(Number(ordinal)) ?? {};
+        if (row.eventType === "model.tokens.reserved") {
+          entry.tokens = net;
+        } else {
+          entry.costMicros = net;
+        }
+        result.set(Number(ordinal), entry);
+      }
+      return result;
+    },
+  );
+}
+
+export type ApplyCreditDebitInput = {
+  type: string;
+  requestedAmountMicros: number;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  idempotencyKey: string;
+  metadata?: Record<string, unknown>;
+  occurredAt?: Date;
+};
+
+/**
+ * Commit a batch of usage facts and the bounded credit debit for one model
+ * call in a single transaction. The usage events and the debit share the
+ * caller's existing idempotency keys, so a worker retry replays the whole
+ * atomic unit instead of converging two independently losable writes.
+ */
+export async function recordUsageEventsAndApplyCreditDebit(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    usageEvents: UsageEventWriteInput[];
+    creditDebit?: ApplyCreditDebitInput | null;
+  },
+): Promise<{
+  events: UsageEvent[];
+  debit: { balance: BillingBalance; debitedMicros: number } | null;
+}> {
+  for (const event of input.usageEvents) {
+    if (event.turnId && !(event.sessionId ?? null)) {
+      throw new Error("recordUsageEventsAndApplyCreditDebit: turnId requires sessionId");
+    }
+    if (event.turnAttemptId && !event.turnId) {
+      throw new Error("recordUsageEventsAndApplyCreditDebit: turnAttemptId requires turnId");
+    }
+    if (event.initiatorContext && !event.initiator) {
+      throw new Error("recordUsageEventsAndApplyCreditDebit: initiatorContext requires initiator");
+    }
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      // Serialize hold→usage conversions with admission decisions: this commit
+      // (usage facts + hold releases) must land either entirely before or
+      // entirely after tryReserveUsageBudget's used+open-holds read pair, or a
+      // conversion landing between the two reads is invisible to BOTH sums
+      // and the next call double-admits. The lock is held through commit.
+      await acquireUsageBudgetReservationLock(scopedDb, input.accountId);
+      const events: UsageEvent[] = [];
+      for (const event of input.usageEvents) {
+        events.push(
+          await insertUsageEventInScope(scopedDb, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            ...event,
+          }),
+        );
+      }
+      const debit = input.creditDebit
+        ? await applyCreditDebitUpToBalanceInScope(scopedDb, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            ...input.creditDebit,
+          })
+        : null;
+      return { events, debit };
+    },
+  );
 }
 
 export async function applyCreditLedgerEntry(
@@ -5258,6 +5736,63 @@ export async function applyCreditLedgerEntry(
   );
 }
 
+async function applyCreditDebitUpToBalanceInScope(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    type: string;
+    requestedAmountMicros: number;
+    sourceType?: string | null;
+    sourceId?: string | null;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+    occurredAt?: Date;
+  },
+): Promise<{ balance: BillingBalance; debitedMicros: number }> {
+  if (input.requestedAmountMicros <= 0) {
+    return {
+      balance: await getBillingBalance(scopedDb, input.accountId),
+      debitedMicros: 0,
+    };
+  }
+  await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
+  const before = await getBillingBalance(scopedDb, input.accountId);
+  const candidateDebitMicros = Math.min(
+    input.requestedAmountMicros,
+    Math.max(0, before.balanceMicros),
+  );
+  let debitedMicros = 0;
+  if (candidateDebitMicros > 0) {
+    const inserted = await scopedDb
+      .insert(schema.creditLedgerEntries)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId ?? null,
+        type: input.type,
+        amountMicros: -candidateDebitMicros,
+        sourceType: input.sourceType ?? null,
+        sourceId: input.sourceId ?? null,
+        idempotencyKey: input.idempotencyKey,
+        metadata: {
+          ...input.metadata,
+          requestedAmountMicros: input.requestedAmountMicros,
+          debitedMicros: candidateDebitMicros,
+        },
+        occurredAt: input.occurredAt ?? new Date(),
+      })
+      .onConflictDoNothing({
+        target: schema.creditLedgerEntries.idempotencyKey,
+      })
+      .returning({ id: schema.creditLedgerEntries.id });
+    debitedMicros = inserted.length === 1 ? candidateDebitMicros : 0;
+  }
+  return {
+    balance: await getBillingBalance(scopedDb, input.accountId),
+    debitedMicros,
+  };
+}
+
 export async function applyCreditDebitUpToBalance(
   db: Database,
   input: {
@@ -5281,43 +5816,7 @@ export async function applyCreditDebitUpToBalance(
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
-    async (scopedDb) => {
-      await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
-      const before = await getBillingBalance(scopedDb, input.accountId);
-      const candidateDebitMicros = Math.min(
-        input.requestedAmountMicros,
-        Math.max(0, before.balanceMicros),
-      );
-      let debitedMicros = 0;
-      if (candidateDebitMicros > 0) {
-        const inserted = await scopedDb
-          .insert(schema.creditLedgerEntries)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId ?? null,
-            type: input.type,
-            amountMicros: -candidateDebitMicros,
-            sourceType: input.sourceType ?? null,
-            sourceId: input.sourceId ?? null,
-            idempotencyKey: input.idempotencyKey,
-            metadata: {
-              ...input.metadata,
-              requestedAmountMicros: input.requestedAmountMicros,
-              debitedMicros: candidateDebitMicros,
-            },
-            occurredAt: input.occurredAt ?? new Date(),
-          })
-          .onConflictDoNothing({
-            target: schema.creditLedgerEntries.idempotencyKey,
-          })
-          .returning({ id: schema.creditLedgerEntries.id });
-        debitedMicros = inserted.length === 1 ? candidateDebitMicros : 0;
-      }
-      return {
-        balance: await getBillingBalance(scopedDb, input.accountId),
-        debitedMicros,
-      };
-    },
+    async (scopedDb) => await applyCreditDebitUpToBalanceInScope(scopedDb, input),
   );
 }
 
@@ -25617,6 +26116,10 @@ export async function armCodexCapacityWait(
     },
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {
+        // Advisory-then-row: this txn can close the attempt, and close +
+        // usage inserts must never hold a session/turn/attempt row lock
+        // while waiting on the reservation advisory an admission holds.
+        await acquireUsageBudgetReservationLock(tx, input.accountId);
         const rotation = await lockExistingCodexRotationSettingsForCapacity(
           tx,
           input.workspaceId,
@@ -27109,6 +27612,10 @@ export async function armXaiCapacityWait(
     input.subjectId,
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {
+        // Advisory-then-row: this txn can close the attempt, and close +
+        // usage inserts must never hold a session/turn/attempt row lock
+        // while waiting on the reservation advisory an admission holds.
+        await acquireUsageBudgetReservationLock(tx, input.accountId);
         const ownerOrganizationMembershipId = await resolveXaiPoolMembershipInTransaction(tx, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -70192,6 +70699,21 @@ export async function settleSessionAttemptInterruptions(
 ): Promise<SessionAttemptInterruptionSettlement> {
   return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
     scopedDb.transaction(async (tx) => {
+      // Advisory-then-row: this txn can close the attempt, and close + usage
+      // inserts must never hold a session/turn/attempt row lock while waiting
+      // on the reservation advisory an admission holds. The unlocked read
+      // only resolves the account the advisory keys on.
+      const [interruptionScope] = await tx
+        .select({ accountId: schema.sessions.accountId })
+        .from(schema.sessions)
+        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+        .limit(1);
+      if (interruptionScope) {
+        await acquireUsageBudgetReservationLock(
+          tx as unknown as Database,
+          interruptionScope.accountId,
+        );
+      }
       const prefix = await lockSessionEventWriteRows(tx as unknown as Database, {
         workspaceId,
         controlLock: "share",
@@ -73435,6 +73957,14 @@ export type ApplySessionTurnSettlementInput = {
     producerSeq?: number | null;
     occurredAt?: Date;
   };
+  /**
+   * Durable usage facts that must commit with this settlement — e.g.
+   * agent_run.completed and in-flight budget-reservation releases. Written
+   * through the same idempotency-keyed usage-event machinery after the turn
+   * CAS passes, so a crash can never lose the completion fact while the
+   * terminal turn truth survives. sessionId/turnId default to the settlement's.
+   */
+  usageEvents?: UsageEventWriteInput[];
 };
 
 export type ApplySessionTurnSettlementResult =
@@ -73814,6 +74344,28 @@ export async function applySessionTurnSettlement(
           .limit(1)
       ).length > 0;
     return await scopedDb.transaction(async (tx) => {
+      // Advisory-then-row, the reservation protocol's one lock order: this
+      // settlement closes the attempt and may write hold→usage conversions,
+      // and every usage_events insert takes FOR KEY SHARE on the
+      // session/turn/attempt rows via the execution-context trigger. The
+      // account reservation advisory must be held BEFORE the first row lock
+      // below — otherwise this transaction (row locks held, waiting on the
+      // advisory) deadlocks against an admission holding the advisory and
+      // waiting on this session's rows. Reentrant: closeSessionTurnAttempt-
+      // InTransaction re-acquires the same key.
+      const [settleScope] = await tx
+        .select({ accountId: schema.sessions.accountId })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .limit(1);
+      if (settleScope) {
+        await acquireUsageBudgetReservationLock(tx as unknown as Database, settleScope.accountId);
+      }
       const locks =
         input.turnStatus === "failed" ||
         input.turnStatus === "requires_action" ||
@@ -74603,6 +75155,21 @@ export async function applySessionTurnSettlement(
           });
         }
       }
+      // Hold releases and settlement usage facts are a hold→usage conversion:
+      // they commit under the account reservation advisory taken at the top of
+      // this transaction (before any row lock), so a settle can never land
+      // between an admission's used+open-holds reads and cannot deadlock with
+      // one either.
+      for (const usageEvent of input.usageEvents ?? []) {
+        await insertUsageEventInScope(tx as unknown as Database, {
+          ...usageEvent,
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: usageEvent.sessionId ?? input.sessionId,
+          turnId: usageEvent.turnId ?? input.turnId,
+          turnAttemptId: usageEvent.turnAttemptId ?? input.attemptId,
+        });
+      }
       return {
         action: "settled" as const,
         events: [...closedTools.events, ...inserted.map(mapEvent)],
@@ -74662,6 +75229,10 @@ export async function settleCodexCredentialLeaseLoss(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        // Advisory-then-row: this txn can close the attempt, and close +
+        // usage inserts must never hold a session/turn/attempt row lock
+        // while waiting on the reservation advisory an admission holds.
+        await acquireUsageBudgetReservationLock(tx as unknown as Database, input.accountId);
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
           workspaceId: input.workspaceId,
           controlLock: "share",
@@ -74941,6 +75512,10 @@ export async function settleCodexCredentialFailover(
     },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        // Advisory-then-row: this txn can close the attempt, and close +
+        // usage inserts must never hold a session/turn/attempt row lock
+        // while waiting on the reservation advisory an admission holds.
+        await acquireUsageBudgetReservationLock(tx as unknown as Database, input.accountId);
         const locks = await lockChildLifecycleOutboxWriteRowsTx(
           tx as unknown as Database,
           input.workspaceId,
@@ -75374,6 +75949,23 @@ export async function requestSessionTurnRecovery(
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
   return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
+      // Advisory-then-row: this txn can close the attempt, and close + usage
+      // inserts must never hold a session/turn/attempt row lock while waiting
+      // on the reservation advisory an admission holds. The unlocked read
+      // only resolves the account the advisory keys on.
+      const [recoveryScope] = await tx
+        .select({ accountId: schema.sessions.accountId })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .limit(1);
+      if (recoveryScope) {
+        await acquireUsageBudgetReservationLock(tx as unknown as Database, recoveryScope.accountId);
+      }
       const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
         workspaceId,
         controlLock: "share",
@@ -75710,6 +76302,23 @@ export async function recoverSessionDispatch(
   };
   return await retrySessionActivityRls(db, workspaceId, persistence, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
+      // Advisory-then-row: this txn can close the attempt, and close + usage
+      // inserts must never hold a session/turn/attempt row lock while waiting
+      // on the reservation advisory an admission holds. The unlocked read
+      // only resolves the account the advisory keys on.
+      const [dispatchScope] = await tx
+        .select({ accountId: schema.sessions.accountId })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .limit(1);
+      if (dispatchScope) {
+        await acquireUsageBudgetReservationLock(tx as unknown as Database, dispatchScope.accountId);
+      }
       const locks = await lockChildLifecycleOutboxWriteRowsTx(
         tx as unknown as Database,
         workspaceId,

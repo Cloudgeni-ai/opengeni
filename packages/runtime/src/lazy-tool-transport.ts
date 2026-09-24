@@ -12,7 +12,7 @@ import {
 } from "@openai/agents";
 import { isSearchableMcpFunctionTool, searchToolPool } from "./codex-tool-search";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "./mcp-network";
-import { notifyModelRequestCapture } from "./model-request-capture";
+import { applyModelCallOutputBound, notifyModelRequestCapture } from "./model-request-capture";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
 export type LazyToolTransport = "codex_native" | "openai_native" | "generic_dispatch";
@@ -825,7 +825,7 @@ class LazyToolModel implements Model {
   ) {}
 
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    const prepared = prepareLazyToolRequest(request, this.runtime);
+    const prepared = prepareLazyToolRequest(applyModelCallOutputBound(request), this.runtime);
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     const response = await this.inner.getResponse(prepared);
@@ -838,7 +838,7 @@ class LazyToolModel implements Model {
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
-    const prepared = prepareLazyToolRequest(request, this.runtime);
+    const prepared = prepareLazyToolRequest(applyModelCallOutputBound(request), this.runtime);
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     for await (const event of this.inner.getStreamedResponse(prepared)) {
