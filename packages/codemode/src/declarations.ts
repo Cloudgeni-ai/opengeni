@@ -23,6 +23,7 @@ export function generateCodemodeDeclarations(
       interfaceName: "CodemodeGeneratedTools",
       callOptionsType: "CodemodeCallOptions",
       fallbackResultType: "CodemodeToolResult",
+      typedResultWrapperType: "CodemodeMultimodalValue",
       generatedBy: "@opengeni/codemode via @opengeni/tool-gateway",
       catalogDigestLabel: "Attempt catalog digest",
     },

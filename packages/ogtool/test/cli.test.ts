@@ -497,7 +497,7 @@ describe("ogtool CLI", () => {
     }
   }, 30_000);
 
-  test("show fails closed for unknown, ambiguous, or oversized details", async () => {
+  test("show rejects unknown or ambiguous names and preserves large schemas", async () => {
     const mock = codemodeServer();
     const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
     try {
@@ -519,20 +519,12 @@ describe("ogtool CLI", () => {
       entry.inputSchema = { type: "object", description: "" };
       const baseline = await run(["show", "docs.search"], environment);
       expect(baseline.exitCode).toBe(0);
-      const remaining = 65_536 - Buffer.byteLength(baseline.stdout, "utf8");
-      entry.inputSchema.description = "x".repeat(remaining);
-      const exact = await run(["show", "docs.search"], environment);
-      expect(exact.exitCode).toBe(0);
-      expect(Buffer.byteLength(exact.stdout, "utf8")).toBe(65_536);
-      entry.inputSchema.description += "x";
-      const over = await run(["show", "docs.search"], environment);
-      expect(over.exitCode).toBe(1);
-      expect(over.stdout).toBe("");
       entry.inputSchema = { type: "object", description: "😀".repeat(17_000) };
       const oversized = await run(["show", "docs.search"], environment);
-      expect(oversized.exitCode).toBe(1);
-      expect(oversized.stdout).toBe("");
-      expect(oversized.stderr).toContain("exceed 65536 bytes");
+      expect(oversized.exitCode).toBe(0);
+      expect(oversized.stderr).toBe("");
+      expect(Buffer.byteLength(oversized.stdout, "utf8")).toBeGreaterThan(65_536);
+      expect(JSON.parse(oversized.stdout).inputSchema).toEqual(entry.inputSchema);
       expect((await run(["list", "--full"], environment)).exitCode).toBe(0);
     } finally {
       mock.server.stop(true);

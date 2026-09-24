@@ -46,4 +46,9 @@ export const embeddingMigrationTail = [
   "0501_session_sharing_execution.sql",
   // Reads the cursor table from 0374, withheld by these historical fixtures.
   "0503_session_meaningful_attention.sql",
+  // New trial/Knowledge cutovers depend on the 0299 lifecycle and 0461 tables
+  // withheld above. Keep historical replay fixtures on their original side.
+  "0509_verified_signup_trial_credits.sql",
+  "0510_knowledge_index_funding_wait.sql",
+  "0511_knowledge_visible_index_status.sql",
 ];

@@ -26,6 +26,7 @@ import {
 import {
   materializeRetainedScreenshotHistory,
   retainComputerScreenshot,
+  retainSessionScreenshot,
   validateComputerScreenshot,
 } from "../src/activities/retained-screenshots";
 import type { ActivityServices } from "../src/activities/types";
@@ -712,6 +713,37 @@ describe("retained screenshot lifecycle fences", () => {
     });
   }, 180_000);
 
+  test("browser screenshot uses the existing quota and replays a distinct session receipt", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const input = {
+      db,
+      objectStorage: memory.storage,
+      ...fixture,
+      kind: "browser_screenshot" as const,
+      output: {
+        callId: "call-browser-screenshot",
+        toolOutputId: "output-browser-screenshot",
+        bytes: PNG,
+        mediaType: "image/png",
+      },
+      retentionMs: 60_000,
+      workspaceQuotaBytes: 1024 * 1024,
+    };
+    const first = await retainSessionScreenshot(input);
+    const replay = await retainSessionScreenshot(input);
+    expect(first).toMatchObject({ available: true, kind: "browser_screenshot" });
+    expect(replay).toEqual(first);
+    expect([...memory.objects.keys()]).toEqual([
+      `workspaces/${fixture.workspaceId}/files/${first.artifactId}/retained/browser-screenshot.png`,
+    ]);
+    expect(await getWorkspaceScreenshotQuota(db, fixture.workspaceId)).toEqual({
+      reservedBytes: 0,
+      readyBytes: PNG.byteLength,
+    });
+  }, 180_000);
+
   test("materialize re-resolves a sticky unavailable receipt from a ready artifact", async () => {
     if (!available) return;
     const fixture = await freshTurn();
@@ -755,6 +787,68 @@ describe("retained screenshot lifecycle fences", () => {
     const output = history[0]?.output;
     expect(typeof output).toBe("string");
     expect(String(output).startsWith("data:image/png;base64,")).toBeTrue();
+  }, 180_000);
+
+  test("recovers a truncated screenshot receipt by exact session and tool call", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const other = await freshTurn();
+    const memory = storageFixture();
+    const result = await retainComputerScreenshot({
+      db,
+      objectStorage: memory.storage,
+      ...fixture,
+      output: {
+        callId: "call-truncated-receipt",
+        toolOutputId: "call-truncated-receipt",
+        bytes: PNG,
+        mediaType: "image/png",
+      },
+      retentionMs: 60_000,
+      workspaceQuotaBytes: 1024 * 1024,
+    });
+    expect(result.available).toBe(true);
+    const corruptedHistory = [
+      {
+        type: "function_call_result",
+        callId: "call-truncated-receipt",
+        output: [
+          { type: "input_text", text: "Screen capture" },
+          {
+            type: "input_image",
+            image: {
+              type: "retained_artifact",
+              artifact: {
+                available: false,
+                artifactId: "[omitted text field 1 ...]",
+                reason: "[omitted text field 2 ...]",
+              },
+            },
+          },
+        ],
+      },
+    ];
+    const recovered = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: memory.storage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history: corruptedHistory,
+    });
+    const recoveredOutput = recovered[0]?.output;
+    if (!Array.isArray(recoveredOutput)) throw new Error("expected content array");
+    expect(
+      String((recoveredOutput[1] as { image?: string }).image).startsWith("data:image/png;base64,"),
+    ).toBeTrue();
+    await expect(
+      materializeRetainedScreenshotHistory({
+        db,
+        objectStorage: memory.storage,
+        workspaceId: other.workspaceId,
+        sessionId: other.sessionId,
+        history: corruptedHistory,
+      }),
+    ).rejects.toThrow("cannot be recovered");
   }, 180_000);
 
   test("FORCE-RLS denies cross-workspace rows while the fixed SECURITY DEFINER claim sees both", async () => {

@@ -113,6 +113,13 @@ config:
   # web replicas all understand the host authority discriminator.
   OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "false"
   OPENGENI_BILLING_MODE: disabled
+  # The offer and both new resource charges require separate operator activation.
+  OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED: "false"
+  OPENGENI_SANDBOX_WARM_BILLING_MODE: usage_only
+  OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON: '{}'
+  OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE: usage_only
+  OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT: ""
+  OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES: "0"
   OPENGENI_ENTITLEMENTS_MODE: none
   OPENGENI_USAGE_LIMITS_MODE: none
   # Reviewed code/env catalog by default. Before changing this to "database",
@@ -959,9 +966,10 @@ garage:
     tag: v2.3.0
     digest: sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690
     pullPolicy: IfNotPresent
-  mcImage:
-    repository: minio/mc
-    tag: RELEASE.2025-08-13T08-35-41Z
+  corsImage:
+    repository: curlimages/curl
+    tag: "8.16.0"
+    digest: sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6
     pullPolicy: IfNotPresent
   auth:
     accessKey: GK0123456789abcdef0123456789abcdef

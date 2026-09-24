@@ -840,6 +840,18 @@ BEGIN
     IF to_regprocedure(format('%I.knowledge_entry_apply(uuid,uuid,jsonb,jsonb)', ${literal(schema)})) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_index_claim(text,integer,integer) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_index_work(uuid,uuid,uuid,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      IF to_regprocedure(format('%I.knowledge_index_billing_policy(uuid,uuid,uuid,text,timestamptz,bigint)', ${literal(schema)})) IS NOT NULL THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_index_billing_policy(uuid,uuid,uuid,text,timestamptz,bigint) TO %I', ${literal(schema)}, ${literal(role)});
+      END IF;
+      IF to_regprocedure(format('%I.knowledge_index_wait_for_funding(uuid,uuid,uuid)', ${literal(schema)})) IS NOT NULL THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_index_wait_for_funding(uuid,uuid,uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      END IF;
+      IF to_regprocedure(format('%I.knowledge_index_paid_publication_guard(uuid,uuid,uuid)', ${literal(schema)})) IS NOT NULL THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_index_paid_publication_guard(uuid,uuid,uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      END IF;
+      IF to_regprocedure(format('%I.knowledge_visible_index_status(uuid,uuid,jsonb,jsonb,text)', ${literal(schema)})) IS NOT NULL THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_visible_index_status(uuid,uuid,jsonb,jsonb,text) TO %I', ${literal(schema)}, ${literal(role)});
+      END IF;
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.agent_instruction_apply(uuid,uuid,jsonb,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_entry_apply(uuid,uuid,jsonb,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_entry_confirm_legacy(uuid,uuid,jsonb,jsonb) TO %I', ${literal(schema)}, ${literal(role)});

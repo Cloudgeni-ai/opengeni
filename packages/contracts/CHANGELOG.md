@@ -1,5 +1,13 @@
 # @opengeni/contracts
 
+## 5.1.1
+
+### Patch Changes
+
+- 23f4717: Accept canonical host-native source paths in retained file-publication receipts.
+  Connected Machine publication now resolves and confines paths using the active
+  filesystem root instead of assuming a managed `/workspace` root.
+
 ## 5.1.0
 
 ### Minor Changes

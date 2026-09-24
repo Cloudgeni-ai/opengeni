@@ -8,6 +8,7 @@ import { capabilityLogoFallback } from "@opengeni/react/connect";
  */
 export const FIRST_PARTY_CAPABILITY_LOGOS: Readonly<Record<string, string>> = {
   "api:fiken": "/capability-logos/fiken.svg",
+  "api:github-app": "/capability-logos/github.svg",
   "api:reddit": "/capability-logos/reddit.svg",
   "api:x": "/capability-logos/x.svg",
 };

@@ -20,6 +20,7 @@ import {
 } from "./modal-legacy-command-control";
 import {
   ModalCommandRouterWire,
+  ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartRejectedError,
 } from "./modal-command-router-wire";
 
@@ -236,7 +237,12 @@ export class ModalCommandControl {
       // A client-chosen router id remains the only possible invocation. The
       // supervisor is idle, so an ambiguous launch never ran user code. Retain
       // the descriptor and reconcile that id; do not replay the start.
-      if (!supervision || error instanceof ModalCommandStartRejectedError) throw error;
+      if (
+        !supervision ||
+        error instanceof ModalCommandStartRejectedError ||
+        error instanceof ModalCommandStartPreDispatchUnavailableError
+      )
+        throw error;
     }
     return command;
   }

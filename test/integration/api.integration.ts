@@ -1841,7 +1841,7 @@ describe("API component integration", () => {
     });
   });
 
-  test("managed credit gate blocks document indexing before enqueueing work", async () => {
+  test("managed credit gate accepts a document before embedding funds are available", async () => {
     const delegationSecret = "test-managed-document-credit-secret";
     const app = createApp({
       settings: {
@@ -1856,11 +1856,7 @@ describe("API component integration", () => {
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
-      documentIndexer: {
-        indexDocument: async () => {
-          throw new Error("document indexer should not run without credits");
-        },
-      },
+      documentIndexer: { indexDocument: async () => undefined },
     });
     const access = await bootstrapWorkspace(dbClient.db, {
       accountExternalSource: "test:managed-document-credit",
@@ -1891,16 +1887,45 @@ describe("API component integration", () => {
     expect(baseResponse.status).toBe(201);
     const base = (await baseResponse.json()) as { id: string };
 
-    const blocked = await app.request(
+    const content = "document awaiting embedding funds";
+    const begin = await app.request(workspacePath(workspaceId, "/files/uploads"), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({
+        filename: "pending-funds.txt",
+        contentType: "text/plain",
+        sizeBytes: new TextEncoder().encode(content).byteLength,
+      }),
+    });
+    expect(begin.status).toBe(201);
+    const upload = (await begin.json()) as {
+      fileId: string;
+      uploadId: string;
+      putUrl: string;
+      requiredHeaders: Record<string, string>;
+    };
+    const put = await fetch(upload.putUrl, {
+      method: "PUT",
+      body: content,
+      headers: upload.requiredHeaders,
+    });
+    expect(put.ok).toBe(true);
+    const complete = await app.request(
+      workspacePath(workspaceId, `/files/uploads/${upload.uploadId}/complete`),
+      { method: "POST", headers },
+    );
+    expect(complete.status).toBe(200);
+
+    const accepted = await app.request(
       workspacePath(workspaceId, `/document-bases/${base.id}/documents`),
       {
         method: "POST",
         headers: { "content-type": "application/json", ...headers },
-        body: JSON.stringify({ fileId: crypto.randomUUID() }),
+        body: JSON.stringify({ fileId: upload.fileId }),
       },
     );
-    expect(blocked.status).toBe(402);
-    expect(await blocked.text()).toContain("insufficient OpenGeni credits");
+    expect(accepted.status).toBe(201);
+    expect((await accepted.json()) as { status: string }).toMatchObject({ status: "queued" });
   });
 
   test("managed credit gate allows schedule creation but blocks manual trigger without credits", async () => {
@@ -5004,7 +5029,7 @@ describe("API component integration", () => {
       { headers: { cookie: oauthCookie } },
     );
     expect(callback.status).toBe(200);
-    expect(await callback.text()).toContain("GitHub App connected");
+    expect(await callback.text()).toContain("GitHub connected");
 
     const replay = await app.request(
       `/v1/github/oauth/callback?code=replayed-owner-code&state=${encodeURIComponent(oauthState)}`,

@@ -10,6 +10,54 @@ import {
 } from "../src/model-output-truncation";
 
 describe("Codex-parity model tool-output truncation", () => {
+  test("persistence preserves provider-hosted call status across JSON restart", () => {
+    for (const type of [
+      "web_search_call",
+      "file_search_call",
+      "code_interpreter_call",
+      "image_generation_call",
+    ] as const) {
+      for (const status of ["completed", "in_progress", "failed"]) {
+        const item = Object.freeze({
+          type: "hosted_tool_call" as const,
+          name: type,
+          status,
+          providerData: Object.freeze({ type, id: "provider-item", status }),
+        });
+        const persisted = canonicalizePersistedHistoryItem(item);
+        expect(JSON.parse(JSON.stringify(persisted))).toEqual(item);
+        expect(canonicalizePersistedHistoryItem(persisted)).toEqual(item);
+        expect(item.status).toBe(status);
+        expect(canonicalizePersistedHistoryItem({ type, status })).toEqual({ type, status });
+      }
+    }
+  });
+
+  test("keeps a schema-valid screenshot receipt intact after text budget exhaustion", () => {
+    const marker = {
+      type: "retained_artifact",
+      artifact: {
+        available: false,
+        artifactId: "123e4567-e89b-42d3-a456-426614174000",
+        reason: "pending",
+      },
+    };
+    const item = {
+      type: "function_call_result",
+      callId: "call-screenshot",
+      output: [
+        { type: "input_text", text: "long explanation".repeat(100) },
+        { type: "input_image", image: marker },
+      ],
+    };
+    const bounded = boundModelToolOutputItem(item, 1);
+    expect((bounded.output as typeof item.output)[1]).toEqual({
+      type: "input_image",
+      image: marker,
+    });
+    expect(boundModelToolOutputItem(bounded, 1)).toEqual(bounded);
+  });
+
   test("uses the live 10k policy with Codex's 1.2x serialization allowance", () => {
     expect(modelToolOutputSerializationBudgetTokens()).toBe(12_000);
   });

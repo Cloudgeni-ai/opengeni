@@ -11,21 +11,23 @@ Use this to develop against OpenGeni or to evaluate it before self-hosting. For 
 - macOS or Linux (use WSL2 on Windows).
 - [Bun](https://bun.com/docs/installation) at the exact version in the checkout's `.bun-version`.
 - Git and curl.
-- [rustup](https://rustup.rs); startup installs and uses the checked-in Rust toolchain without changing your default toolchain.
-- A C build toolchain: Xcode Command Line Tools on macOS (`xcode-select --install`), or `build-essential` on Debian/Ubuntu.
-- Docker with a running daemon. The default sandbox backend and the local infrastructure use it.
-- Model credentials: an OpenAI API key, or another provider configured through the model provider settings.
+- For source-build fallback only: [rustup](https://rustup.rs) and a C build toolchain (Xcode Command Line Tools on macOS, or `build-essential` on Debian/Ubuntu). Startup prefers a source-matched verified runtime; if it must compile, it uses the checked-in Rust toolchain without changing your default.
+- Docker with a running daemon, or the native service prerequisites described in [Local development](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/local-development.md). A Docker client without a working daemon is not sufficient. The default agent sandbox is `local` (this machine).
+- Model credentials are needed for agent execution, not application startup. Connect a model in Settings → Models after opening the app, or configure a deployment key.
 
 ## Start the stack
+
+Use Docker infrastructure on macOS. Linux and Windows/WSL2 can use Docker or native services. Run `bun run dev:check` from the checkout for read-only prerequisite diagnostics. `bun run dev:tools` prints a project-local native tool installation plan; add `-- --install` to opt in. OS package installation remains explicit.
 
 ```bash
 git clone https://github.com/Cloudgeni-ai/opengeni.git
 cd opengeni
-cp .env.example .env
 bun run dev
 ```
 
-`bun run dev` installs dependencies, starts Postgres, NATS, Temporal, and object storage in Docker, runs migrations, builds the local sandbox image, and starts the API, both workers, and the web app.
+`bun run dev` checks prerequisites, creates `.env` if absent, installs pinned dependencies, prepares the artifact runtime, starts Postgres, NATS, Temporal and object storage, runs migrations, and starts the API, both workers, artifact services and web app. It uses Docker infrastructure when the daemon is available and native processes otherwise. A sandbox image is built only when the sandbox backend is explicitly `docker`.
+
+Connected Machines is off for fresh checkouts. Set `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true` in `.env` to enable it; the launcher prepares its relay before starting application services. Existing explicit settings are preserved. Disabling this optional relay does not remove the separate editable-artifact kernel requirement.
 
 | Service    | URL                           |
 | ---------- | ----------------------------- |
@@ -58,7 +60,7 @@ Wait for `OpenGeni dev stack ready` before opening the printed web URL. Infrastr
 | `OPENGENI_OPENAI_API_KEY`               | OpenAI credentials for the default provider                                               |
 | `OPENGENI_OPENAI_MODEL`                 | Default model for new sessions                                                            |
 | `OPENGENI_MODEL_PROVIDERS_JSON`         | Additional OpenAI-compatible providers and their model catalogs                           |
-| `OPENGENI_SANDBOX_BACKEND`              | Where sessions run: `docker` (default), `modal`, `local`, `none`, or a cloud provider     |
+| `OPENGENI_SANDBOX_BACKEND`              | Where sessions run: `local` (default), `docker`, `modal`, `none`, or a cloud provider     |
 | `OPENGENI_SANDBOX_PREPARATION_PROFILES` | Opt-in profiles such as `azure` or `github` that pre-authenticate CLIs inside the sandbox |
 
 Model provider credentials never reach the agent sandbox unless you allow them explicitly. The repository's [model providers guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/model-providers.md) covers inference configuration in depth.
@@ -69,7 +71,7 @@ Model provider credentials never reach the agent sandbox unless you allow them e
 bun run dev:down
 ```
 
-`dev:down` stops this checkout's infrastructure. `bun run dev:clean -- --yes` also removes its data and generated runtime environment.
+Stop the exact foreground launcher first (Ctrl-C), then use `dev:down` to stop this checkout's infrastructure. Do not kill processes by name. `bun run dev:clean -- --yes` also removes this project's data and generated runtime environment; it is not a normal restart step.
 
 ## Verify a checkout
 
@@ -77,7 +79,7 @@ Unit tests and typechecks need no running infrastructure:
 
 ```bash
 bun run typecheck
-bun test
+bun run test:unit
 ```
 
 See [Local development](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/local-development.md) for manual startup, configuration, and the native (no Docker) path, [CONTRIBUTING.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/CONTRIBUTING.md) for the full development workflow and [AGENTS.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/AGENTS.md) for operating notes.

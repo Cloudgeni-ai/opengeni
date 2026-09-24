@@ -15,7 +15,9 @@ use thiserror::Error;
 use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 
-use crate::cli::{CodemodeAction, CodemodeArgs, CodemodeCallArgs, CodemodeListArgs};
+use crate::cli::{
+    CodemodeAction, CodemodeArgs, CodemodeCallArgs, CodemodeListArgs, DocumentIdKind,
+};
 use opengeni_agent_proto::v1::{self, ControlRequest, ExecRequest};
 
 const URL_ENV: &str = "OPENGENI_CODEMODE_URL";
@@ -160,6 +162,10 @@ impl CodemodeError {
 /// Run one native Codemode command. Discovery is compact text by default;
 /// `list --json`, `list --full`, and `show` provide explicit JSON output.
 pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
+    if let CodemodeAction::DocumentId { kind, namespace } = &args.action {
+        println!("{}", json!({ "id": document_id(*kind, *namespace) }));
+        return Ok(());
+    }
     if matches!(args.action, CodemodeAction::Doctor) {
         let report = doctor_report();
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -209,8 +215,26 @@ pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
             );
         }
         CodemodeAction::Doctor => unreachable!("doctor returned before client construction"),
+        CodemodeAction::DocumentId { .. } => {
+            unreachable!("ID helper returned before client construction")
+        }
     }
     Ok(())
+}
+
+/// Mirrors openGeni.artifacts.ids.document: uint64 namespace, nonzero random
+/// JS-safe counter, and the modality's canonical object prefix. IDs are names,
+/// not authority; the normal artifact edit fence still applies.
+fn document_id(kind: DocumentIdKind, namespace: u64) -> String {
+    const MAX_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
+    loop {
+        let bytes = *Uuid::new_v4().as_bytes();
+        let counter = u64::from_be_bytes(bytes[8..16].try_into().expect("eight UUID bytes"))
+            & MAX_SAFE_INTEGER;
+        if counter > 0 && counter < MAX_SAFE_INTEGER {
+            return format!("{}/{namespace:016x}{counter:016x}", kind.prefix());
+        }
+    }
 }
 
 impl From<serde_json::Error> for CodemodeError {
@@ -572,11 +596,6 @@ impl Catalog {
             entries: vec![entry.clone()],
         };
         let output = serde_json::to_string_pretty(&single.list_projection()["tools"][0])?;
-        if output.len() + 1 > 64 * 1024 {
-            return Err(CodemodeError::InvalidArguments(
-                "Tool details exceed 65536 bytes; use list --full".to_string(),
-            ));
-        }
         Ok(format!("{output}\n"))
     }
 
@@ -767,6 +786,47 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
+
+    #[test]
+    fn document_ids_preserve_namespace_and_sdk_counter_contract() {
+        for (kind, prefix) in [
+            (DocumentIdKind::Paragraph, "p"),
+            (DocumentIdKind::Table, "dt"),
+            (DocumentIdKind::PageBreak, "pb"),
+            (DocumentIdKind::Section, "sec"),
+            (DocumentIdKind::Header, "hdr"),
+            (DocumentIdKind::Footer, "ftr"),
+            (DocumentIdKind::Comment, "dc"),
+            (DocumentIdKind::TrackedChange, "chg"),
+        ] {
+            for namespace in [0, 1, 9_007_199_254_740_993, u64::MAX] {
+                let mut ids = std::collections::HashSet::new();
+                for _ in 0..100 {
+                    let id = document_id(kind, namespace);
+                    let (actual_prefix, payload) = id.split_once('/').unwrap();
+                    assert_eq!(actual_prefix, prefix);
+                    assert_eq!(payload.len(), 32);
+                    assert_eq!(u64::from_str_radix(&payload[..16], 16).unwrap(), namespace);
+                    let counter = u64::from_str_radix(&payload[16..], 16).unwrap();
+                    assert!((1..((1_u64 << 53) - 1)).contains(&counter));
+                    assert!(ids.insert(id));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn document_id_is_an_offline_operation() {
+        // No client construction, catalog fetch, enrollment or mutation.
+        run(CodemodeArgs {
+            action: CodemodeAction::DocumentId {
+                kind: DocumentIdKind::Paragraph,
+                namespace: u64::MAX,
+            },
+        })
+        .await
+        .unwrap();
+    }
 
     fn catalog(entries: Vec<CatalogEntry>) -> Catalog {
         Catalog {
@@ -1135,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn show_is_single_tool_bounded_and_fails_closed() {
+    fn show_is_single_tool_lossless_and_fails_closed_for_names() {
         let tool = entry("server", "tool", "server__tool", &["server", "tool"]);
         let mut catalog = catalog(vec![
             tool,
@@ -1156,18 +1216,12 @@ mod tests {
             .contains("Ambiguous"));
         catalog.entries.pop();
         catalog.entries[0].input_schema = json!({"type": "object", "description": ""});
-        let remaining = 65_536 - catalog.show_output("server.tool").unwrap().len();
-        catalog.entries[0].input_schema["description"] = json!("x".repeat(remaining));
-        assert_eq!(catalog.show_output("server.tool").unwrap().len(), 65_536);
-        catalog.entries[0].input_schema["description"] = json!("x".repeat(remaining + 1));
-        assert!(catalog.show_output("server.tool").is_err());
         catalog.entries[0].input_schema =
             json!({"type": "object", "description": "😀".repeat(17_000)});
-        assert!(catalog
-            .show_output("server.tool")
-            .unwrap_err()
-            .to_string()
-            .contains("exceed 65536 bytes"));
+        let output = catalog.show_output("server.tool").unwrap();
+        assert!(output.len() > 65_536);
+        let shown: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(shown["inputSchema"], catalog.entries[0].input_schema);
     }
 
     #[test]

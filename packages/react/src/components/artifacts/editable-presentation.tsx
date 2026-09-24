@@ -89,6 +89,7 @@ type PresentationProjectionState = {
 export function EditablePresentationArtifactSurface({
   session,
   title = "Presentation",
+  showHeader,
   subtitle,
   readOnly = false,
   onCommit,
@@ -266,6 +267,7 @@ export function EditablePresentationArtifactSurface({
     <PresentationProjectionArtifactSurface
       {...surfaceProps}
       title={title}
+      showHeader={showHeader}
       subtitle={
         subtitle ??
         `${projection.slides.length} slide${projection.slides.length === 1 ? "" : "s"}${writable ? "" : " · Read only"}`
@@ -280,6 +282,7 @@ export function EditablePresentationArtifactSurface({
     <ArtifactSurface
       modality="presentation"
       title={title}
+      showHeader={showHeader}
       subtitle={subtitle ?? status}
       actions={surfaceProps.actions}
       busy={!accessRevoked && !state.error}

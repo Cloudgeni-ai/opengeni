@@ -67,6 +67,24 @@ export function currentSessionAttachmentReadAccess(): SessionAttachmentReadAcces
   return sessionRlsActorContext.getStore()?.sessionAttachmentReadAccess;
 }
 
+/**
+ * Stable identity of the ambient session RLS actor: every field that
+ * `setRlsContext` turns into database-visible GUCs or that scoped reads
+ * consult. Two callers with equal keys see exactly the same rows, so the key
+ * is safe for sharing a read result between them; `null` means no actor, in
+ * which case the subject GUC stays empty for every such caller.
+ */
+export function currentSessionRlsActorIdentityKey(): string | null {
+  const actor = sessionRlsActorContext.getStore();
+  if (!actor) return null;
+  return JSON.stringify([
+    actor.subjectId,
+    actor.initiatingHumanSubjectId ?? null,
+    actor.privateFileOwnerSubjectId ?? null,
+    actor.sessionAttachmentReadAccess ?? null,
+  ]);
+}
+
 export async function withSessionRlsActorContext<T>(
   actor: SessionRlsActorContext,
   fn: () => Promise<T>,

@@ -21,9 +21,11 @@ import {
   applyPatchOpsFromToolItem,
   isApplyPatch,
   mediaPreviewFact,
+  retainedScreenshotMetadata,
   screenshotDataUrl,
 } from "./parsers";
 import { rawTypeOf } from "./registry";
+import { mcpToolLeaf } from "./tool-display-name";
 import type { ActivityItem, ToolCallItem, TurnOutcome } from "./types";
 export type { TurnOutcome } from "./types";
 
@@ -626,11 +628,17 @@ const BUILT_IN_TURN_SUMMARY_FACETS: readonly TurnSummaryFacet[] = Object.freeze(
     summarize: ({ toolCalls }) => {
       let screenshots = 0;
       for (const item of toolCalls) {
+        const leaf = mcpToolLeaf(item.name);
         if (
           (rawTypeOf(item) === "computer_call" ||
             item.name === "computer_call" ||
-            item.name === "computer_screenshot") &&
-          (screenshotDataUrl(item.output) !== null || mediaPreviewFact(item.output) !== null)
+            item.name === "computer_screenshot" ||
+            leaf === "browser_screenshot" ||
+            leaf === "browser_observe" ||
+            leaf === "browser_act") &&
+          (retainedScreenshotMetadata(item.output) !== null ||
+            screenshotDataUrl(item.output) !== null ||
+            mediaPreviewFact(item.output) !== null)
         ) {
           screenshots += 1;
         }

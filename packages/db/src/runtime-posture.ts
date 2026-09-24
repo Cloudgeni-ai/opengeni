@@ -586,6 +586,10 @@ const XAI_AUTHORITY_TABLES = [
 const UNIFIED_KNOWLEDGE_ROUTINES = [
   "knowledge_index_claim(text, integer, integer)",
   "knowledge_index_work(uuid, uuid, uuid, jsonb)",
+  "knowledge_index_billing_policy(uuid, uuid, uuid, text, timestamp with time zone, bigint)",
+  "knowledge_index_wait_for_funding(uuid, uuid, uuid)",
+  "knowledge_index_paid_publication_guard(uuid, uuid, uuid)",
+  "knowledge_visible_index_status(uuid, uuid, jsonb, jsonb, text)",
   "knowledge_entry_apply(uuid, uuid, jsonb, jsonb)",
   "knowledge_entry_confirm_legacy(uuid, uuid, jsonb, jsonb)",
   "agent_instruction_apply(uuid, uuid, jsonb, jsonb)",

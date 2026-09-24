@@ -247,15 +247,64 @@ pub struct CodemodeArgs {
 pub enum CodemodeAction {
     /// List all callable paths and short descriptions from the frozen catalog.
     List(CodemodeListArgs),
-    /// Show one tool's details and schemas (at most 64 KiB).
+    /// Show one tool's complete details and schemas.
     Show(CodemodeShowArgs),
     /// Call one tool by generated path, model name, or `server.tool` identity.
     Call(CodemodeCallArgs),
     /// Read an existing operation without executing or resubmitting its tool.
     Read { operation_id: uuid::Uuid },
+    /// Generate one canonical document object ID offline. Copy the namespace
+    /// from the document summary; this neither reads nor edits an artifact.
+    DocumentId {
+        #[arg(value_enum)]
+        kind: DocumentIdKind,
+        #[arg(value_parser = parse_document_namespace)]
+        namespace: u64,
+    },
     /// Report whether the attempt-scoped client environment is usable. Secret
     /// values are never printed.
     Doctor,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum DocumentIdKind {
+    Paragraph,
+    Table,
+    PageBreak,
+    Section,
+    Header,
+    Footer,
+    Comment,
+    TrackedChange,
+}
+
+impl DocumentIdKind {
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Self::Paragraph => "p",
+            Self::Table => "dt",
+            Self::PageBreak => "pb",
+            Self::Section => "sec",
+            Self::Header => "hdr",
+            Self::Footer => "ftr",
+            Self::Comment => "dc",
+            Self::TrackedChange => "chg",
+        }
+    }
+}
+
+fn parse_document_namespace(value: &str) -> Result<u64, String> {
+    if value.is_empty()
+        || (value.len() > 1 && value.starts_with('0'))
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(
+            "document namespace must be an unsigned decimal integer from the summary".into(),
+        );
+    }
+    value
+        .parse()
+        .map_err(|_| "document namespace exceeds uint64".into())
 }
 
 /// Output selection for `codemode list`.
@@ -509,6 +558,48 @@ mod tests {
             Some(Command::Update(args)) => assert!(args.check),
             other => panic!("expected update, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn codemode_document_id_accepts_kinds_and_exact_uint64_namespaces() {
+        for kind in [
+            "paragraph",
+            "table",
+            "page-break",
+            "section",
+            "header",
+            "footer",
+            "comment",
+            "tracked-change",
+        ] {
+            for namespace in ["0", "1", "9007199254740993", "18446744073709551615"] {
+                assert!(
+                    Cli::try_parse_from([
+                        "opengeni-agent",
+                        "codemode",
+                        "document-id",
+                        kind,
+                        namespace
+                    ])
+                    .is_ok(),
+                    "{kind} {namespace}"
+                );
+            }
+        }
+        for namespace in ["-1", "01", "0x10", "1e2", "1.5", "18446744073709551616"] {
+            assert!(Cli::try_parse_from([
+                "opengeni-agent",
+                "codemode",
+                "document-id",
+                "paragraph",
+                namespace
+            ])
+            .is_err());
+        }
+        assert!(
+            Cli::try_parse_from(["opengeni-agent", "codemode", "document-id", "unknown", "1"])
+                .is_err()
+        );
     }
 
     #[test]

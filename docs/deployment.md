@@ -659,6 +659,29 @@ continuity while that machine is down.
 
 ### Database identities and runtime posture
 
+On managed PostgreSQL where only a provider administrator can install pgvector,
+install it in the target database's `public` schema before the first migration.
+Set `OPENGENI_MIGRATIONS_PREINSTALLED_VECTOR=true` for the migration Job (or
+`MigrationRuntimeOptions.preinstalledVector` for a programmatic invocation).
+The runner verifies the extension-owned `public.vector` type and omits only the
+exact vector-installation statement in `0000_initial.sql`. A missing extension
+or changed initial preamble fails before initial migration DDL; other migrations
+and the default path remain unchanged. Do not set this flag merely to hide an
+extension permission error without independently confirming installation.
+
+The ordinary SQL migration runner applies a transaction-local 5-second
+`lock_timeout` before each migration body. This bounds lock acquisition in
+migrations without a later timeout override, including 0510. Migration-specific
+`SET LOCAL` and historical `SET`/`RESET lock_timeout` statements still control
+subsequent statements; a historical migration that resets the setting before
+more DDL does not retain this default bound. Review those files separately.
+A lock-wait timeout fails the Job without recording that migration in
+`schema_migrations`; the implicit transaction rolls back its DDL, so resolve
+the blocker and retry the forward migration Job. This is a lock-acquisition
+limit, not a statement-duration limit or permission to roll back an already-
+applied migration. Concurrent-index and batched-backfill migrations retain
+their separately governed lock-wait settings.
+
 Standalone deployments using the default `OPENGENI_RLS_STRATEGY=force` require
 two distinct secret paths:
 
@@ -1440,14 +1463,21 @@ Current profiles:
 
 `bun run dev` is the primary full local path. `OPENGENI_DEV_BACKEND=auto`
 prefers Docker only when its daemon answers a bounded server probe, then falls
-back to native PostgreSQL, NATS, Temporal, and pinned MinIO processes. Set
+back to native PostgreSQL, NATS, Temporal, and Garage processes. Set
 `OPENGENI_DEV_BACKEND=docker` or `native` to require one path. The native path
-is Linux-only, changes a copied Docker sandbox default to the credentials-free
+is Linux/WSL2-only (macOS uses Docker), changes a copied Docker sandbox default to the credentials-free
 in-process local provider, and preserves explicit remote sandbox providers.
+Fresh native storage defaults to Garage, while recorded or legacy MinIO state
+retains MinIO. Incompatible provider changes fail before startup; there is no
+automatic data migration. `bun run dev:check` checks the selected prerequisites
+without starting services. `bun run dev:tools` prints the opt-in, project-local
+pinned tool installation plan.
 
 Both infrastructure paths run migrations, import the fingerprinted reviewed
-integrations catalog, and start the API, control and turn workers, Connected
-Machines relay, artifact materializer, artifact outbox dispatcher, and web.
+integrations catalog, and start the API, control and turn workers, artifact
+materializer, artifact outbox dispatcher, and web. Connected Machines is opt-in
+for fresh local configuration; its relay is prepared before application startup
+only when `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true`.
 Docker additionally builds the local sandbox image when that sandbox backend is
 selected. The two artifact roles receive distinct generated least-privilege
 database logins and independently selected health ports (defaults `9465` and
@@ -2402,6 +2432,8 @@ The runtime secret must provide values such as:
 - `OPENGENI_OBJECT_STORAGE_BACKEND=gcs` plus `OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID`; prefer GKE Workload Identity over service-account JSON
 - `OPENGENI_PRODUCT_ACCESS_MODE=local|configured|managed`, independent of cloud/infrastructure profile
 - `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
+- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. The grant is account-wide and may pay any OpenGeni-credit resource; no payment card is required. A completed in-flight resource can leave a negative balance, and future top-ups clear that balance first; no card is automatically charged.
+- `OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only|shadow|credits` and `OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE=usage_only|shadow|credits` are independent of Stripe and default to `usage_only`. `shadow` is operator-only comparison, never a customer debit. Paid sandbox mode additionally needs a reviewed backend warm rate in `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON`; paid deployment-funded embeddings need `OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES` (integer USD micros per million input UTF-8 bytes) and `OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT` (ISO UTC timestamp; earlier queued jobs stay unpriced). This PR leaves commercial rates and production activation unset.
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
 - optional paired `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET` and `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET` for managed social sign-in
@@ -3123,7 +3155,7 @@ Minimum production dashboards should cover:
 
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
 - Advisory work discovery: request/outcome rate, p50/p95/p99 duration, result count, response bytes, overlap count, stable match-class distribution, and observer errors from the `opengeni_work_discovery_*` family. Keep only its fixed surface/mode/outcome/scope/match labels; never add workspace, session, query, subject, title, goal, claim, version, or provenance labels. See [`work-discovery.md`](work-discovery.md).
-- Workspace Insights: `opengeni_workspace_insights_request_duration_seconds{range,provider_filter,model_filter,outcome}` measures the complete route handler, including access resolution, aggregation, contract projection, and response construction. Its exact `le="2"` bucket verifies the default unfiltered weekly view's two-second target. Labels carry only closed range/outcome values and filter-presence flags, never workspace, subject, provider, or model values.
+- Workspace Insights: `opengeni_workspace_insights_request_duration_seconds{range,provider_filter,model_filter,outcome}` measures the complete route handler, including access resolution, aggregation, contract projection, and response construction. Its exact `le="2"` bucket verifies the default unfiltered weekly view's two-second target. Labels carry only closed range/outcome values and filter-presence flags, never workspace, subject, provider, or model values. If the `usage_bundle` or `model_bundle` phase dominates `opengeni_workspace_insights_phase_duration_seconds`, check the fact authority functions still carry `enable_nestloop=off` (migration 0512): a time window newer than the last `ANALYZE` is estimated at about one row, and a nested-loop plan rescans every workspace session per fact. The route shares one in-flight rollup only between concurrent requests with the same workspace, range, filters, and database RLS actor.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Google Drive sync: run outcome and failure ratio, reconnect-required events, p95 terminal activity-batch duration, logical provider requests, physical provider attempts/retries, explicit limit hits, and bounded terminal failure reasons, scoped by namespace, environment, release, and provider where applicable.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`. In-flight and progress gauges are worker-local and exact-attempt-qualified: recoverable replacement attempts coexist without overwriting one another, and physical activity finalization always removes its own attempt even when durable outcome classification is unavailable.

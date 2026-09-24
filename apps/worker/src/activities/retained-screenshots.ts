@@ -6,13 +6,16 @@ import {
   COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES,
   RetainedArtifactMetadataSchema,
   retainedScreenshotReferenceFromFile,
+  retainedSessionScreenshotKindFromObjectKey,
   type RetainedArtifactMetadata,
   type RetainedArtifactReference,
   type RetainedOutputUnavailableReason,
+  type RetainedSessionScreenshotKind,
 } from "@opengeni/contracts";
 import {
   RetainedScreenshotQuotaExceededError,
   getRetainedScreenshotArtifact,
+  getRetainedScreenshotArtifactForToolCall,
   isDatabasePersistenceFailure,
   isSessionEventPersistenceError,
   prepareRetainedScreenshotArtifact,
@@ -209,14 +212,26 @@ export function toolOutputContainsInlineImage(output: unknown): boolean {
       return (
         (record.type === "input_image" &&
           sdkImageSourceContainsInlineImage(record.image ?? record.image_url ?? record.imageUrl)) ||
-        (record.type === "image" && decodeInlineMcpImage(record.data, record.mimeType) !== null)
+        (record.type === "image" && isDeclaredInlineMcpImage(record))
       );
     });
   }
   if (!output || typeof output !== "object") return false;
   const record = output as Record<string, unknown>;
   if (Array.isArray(record.content)) return toolOutputContainsInlineImage(record.content);
-  return record.type === "image" && sdkImageSourceContainsInlineImage(record.image);
+  return (
+    record.type === "image" &&
+    (sdkImageSourceContainsInlineImage(record.image) || isDeclaredInlineMcpImage(record))
+  );
+}
+
+/** Detect image-bearing MCP blocks even when decoding rejects oversized or malformed bytes. */
+function isDeclaredInlineMcpImage(record: Record<string, unknown>): boolean {
+  return (
+    typeof record.data === "string" &&
+    typeof record.mimeType === "string" &&
+    record.mimeType.toLowerCase().startsWith("image/")
+  );
 }
 
 function decodeInlineMcpImage(
@@ -520,9 +535,14 @@ export function retainedScreenshotIdentity(input: {
   attemptId: string;
   toolCallId: string;
   toolOutputId: string;
+  kind?: RetainedSessionScreenshotKind | undefined;
 }): { artifactId: string; settlementKey: string } {
   const settlementKey = createHash("sha256")
-    .update("opengeni:computer-screenshot:v1\0")
+    .update(
+      input.kind === "browser_screenshot"
+        ? "opengeni:browser-screenshot:v1\0"
+        : "opengeni:computer-screenshot:v1\0",
+    )
     .update(input.sessionId)
     .update("\0")
     .update(input.turnId)
@@ -551,12 +571,13 @@ export function unavailableRetainedSessionImage(input: {
   toolCallId: string;
   toolOutputId: string;
   reason: RetainedOutputUnavailableReason;
+  kind?: RetainedSessionScreenshotKind | undefined;
 }): RetainedArtifactMetadata {
   const identity = retainedScreenshotIdentity(input);
   return unavailable(identity.artifactId, input.reason);
 }
 
-export async function retainComputerScreenshot(input: {
+export async function retainSessionScreenshot(input: {
   db: Database;
   objectStorage: ObjectStorage | null;
   accountId: string;
@@ -565,6 +586,7 @@ export async function retainComputerScreenshot(input: {
   turnId: string;
   attemptId: string;
   output: TypedScreenshotToolOutput;
+  kind?: RetainedSessionScreenshotKind | undefined;
   now?: Date;
   retentionMs?: number;
   workspaceQuotaBytes?: number;
@@ -575,6 +597,7 @@ export async function retainComputerScreenshot(input: {
     attemptId: input.attemptId,
     toolCallId: input.output.callId,
     toolOutputId: input.output.toolOutputId,
+    kind: input.kind,
   });
   let screenshot: ValidatedSessionImage;
   try {
@@ -594,7 +617,8 @@ export async function retainComputerScreenshot(input: {
   const retentionExpiresAt = new Date(
     now.getTime() + (input.retentionMs ?? COMPUTER_SCREENSHOT_RETENTION_MS),
   );
-  const objectKey = `workspaces/${input.workspaceId}/files/${identity.artifactId}/retained/session-image.${screenshot.extension}`;
+  const objectName = input.kind === "browser_screenshot" ? "browser-screenshot" : "session-image";
+  const objectKey = `workspaces/${input.workspaceId}/files/${identity.artifactId}/retained/${objectName}.${screenshot.extension}`;
   let prepared: RetainedScreenshotArtifact;
   try {
     prepared = (
@@ -696,6 +720,9 @@ export async function retainComputerScreenshot(input: {
     return unavailable(identity.artifactId, "pending");
   }
 }
+
+/** Existing computer callers keep their stable entry point. */
+export const retainComputerScreenshot = retainSessionScreenshot;
 
 /** Replace only new screenshot bytes with a compact receipt before first persistence. */
 export function compactRetainedScreenshotHistory(
@@ -874,6 +901,26 @@ async function materializeRetainedScreenshotHistoryWithCache(
   cache: Map<string, string>,
 ): Promise<Array<Record<string, unknown>>> {
   const now = input.now ?? new Date();
+  const receiptForMarker = async (
+    marker: unknown,
+    callId: string | null,
+  ): Promise<RetainedArtifactMetadata | null> => {
+    if (!isRetainedImageMarker(marker)) return null;
+    const receipt = retainedReceipt(marker.artifact);
+    if (receipt) return receipt;
+    // Older canonical history could truncate the artifact UUID and reason as
+    // ordinary text. Recover only from this exact session and an unambiguous
+    // tool call; otherwise fail before constructing a malformed model image.
+    if (!callId) throw new Error("Retained screenshot receipt has no tool call identity");
+    const artifact = await getRetainedScreenshotArtifactForToolCall(
+      input.db,
+      input.workspaceId,
+      input.sessionId,
+      callId,
+    );
+    if (!artifact) throw new Error("Retained screenshot receipt cannot be recovered");
+    return reference(artifact);
+  };
   const dataUrlForReceipt = async (receipt: RetainedArtifactMetadata): Promise<string> => {
     let dataUrl = cache.get(receipt.artifactId);
     if (!dataUrl) {
@@ -921,8 +968,12 @@ async function materializeRetainedScreenshotHistoryWithCache(
     }
     return dataUrl;
   };
-  const materializeEntry = async (entry: unknown): Promise<unknown> => {
-    const receipt = retainedReceiptFromImageContent(entry);
+  const materializeEntry = async (entry: unknown, callId: string | null): Promise<unknown> => {
+    const image =
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? (entry as Record<string, unknown>).image
+        : null;
+    const receipt = await receiptForMarker(image, callId);
     if (!receipt) return entry;
     const dataUrl = await dataUrlForReceipt(receipt);
     return { ...(entry as Record<string, unknown>), image: dataUrl };
@@ -930,7 +981,8 @@ async function materializeRetainedScreenshotHistoryWithCache(
 
   const materialized: Array<Record<string, unknown>> = [];
   for (const item of input.history) {
-    const directReceipt = retainedReceiptFromDirectOutput(item.output);
+    const callId = historyCallId(item);
+    const directReceipt = await receiptForMarker(item.output, callId);
     if (directReceipt) {
       materialized.push({
         ...item,
@@ -954,7 +1006,7 @@ async function materializeRetainedScreenshotHistoryWithCache(
     let changed = false;
     const output: unknown[] = [];
     for (const entry of outputEntries) {
-      const next = await materializeEntry(entry);
+      const next = await materializeEntry(entry, callId);
       changed ||= next !== entry;
       output.push(next);
     }
@@ -1059,12 +1111,15 @@ function reference(artifact: RetainedScreenshotArtifact): RetainedArtifactRefere
   if (!artifact.sessionId) {
     throw new Error(`Ready retained screenshot is detached: ${artifact.artifactId}`);
   }
+  const kind = retainedSessionScreenshotKindFromObjectKey(artifact.file.objectKey);
+  if (!kind) throw new Error(`Ready retained screenshot has unknown key: ${artifact.artifactId}`);
   const value = retainedScreenshotReferenceFromFile({
     ...artifact.file,
     sessionId: artifact.sessionId,
     width: artifact.width,
     height: artifact.height,
     expiresAt: artifact.retentionExpiresAt.toISOString(),
+    kind,
   });
   if (!value)
     throw new Error(`Ready retained screenshot receipt is invalid: ${artifact.artifactId}`);
@@ -1110,6 +1165,18 @@ function retainedReceiptFromImageContent(entry: unknown): RetainedArtifactMetada
   return retainedReceipt(marker.artifact);
 }
 
+function isRetainedImageMarker(value: unknown): value is {
+  type: "retained_artifact";
+  artifact: unknown;
+} {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>).type === RETAINED_IMAGE_MARKER,
+  );
+}
+
 function retainedReceiptFromDirectOutput(output: unknown): RetainedArtifactMetadata | null {
   if (!output || typeof output !== "object" || Array.isArray(output)) return null;
   const marker = output as Record<string, unknown>;
@@ -1120,7 +1187,11 @@ function retainedReceiptFromDirectOutput(output: unknown): RetainedArtifactMetad
 function retainedReceipt(value: unknown): RetainedArtifactMetadata | null {
   const parsed = RetainedArtifactMetadataSchema.safeParse(value);
   if (!parsed.success) return null;
-  return parsed.data.available && parsed.data.kind !== "computer_screenshot" ? null : parsed.data;
+  return parsed.data.available &&
+    parsed.data.kind !== "computer_screenshot" &&
+    parsed.data.kind !== "browser_screenshot"
+    ? null
+    : parsed.data;
 }
 
 function isInlineImageContent(entry: unknown): boolean {
@@ -1130,7 +1201,7 @@ function isInlineImageContent(entry: unknown): boolean {
     (record.type === "input_image" &&
       typeof record.image === "string" &&
       record.image.startsWith("data:image/")) ||
-    (record.type === "image" && decodeInlineMcpImage(record.data, record.mimeType) !== null)
+    (record.type === "image" && isDeclaredInlineMcpImage(record))
   );
 }
 

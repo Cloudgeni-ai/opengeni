@@ -63,6 +63,9 @@ export const DEFAULT_MODEL_COST_POLICY_JSON = JSON.stringify({
 // a configured request timeout may never consume the entire durable claim.
 export const SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS = 60 * 60_000;
 export const SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS = 10_000;
+// Deadline rotation gives retained legacy commands a bounded stop window
+// before capturing the still-running sandbox's current files.
+export const SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS = 120_000;
 export const SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS =
   SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS - SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS;
 export const GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MAX_MS = 60_000;
@@ -353,6 +356,9 @@ const SettingsSchema = z.object({
   // variable out to disable it).
   organizationTenancyCanonicalActivationEnabled: EnvBoolean.default(false),
   billingMode: BillingMode.default("disabled"),
+  // Explicit launch gate for the one-time $10 verified self-service signup grant.
+  // A migration or deployment alone must not start issuing live credits.
+  verifiedSignupTrialCreditsEnabled: EnvBoolean.default(false),
   entitlementsMode: EntitlementsMode.default("none"),
   usageLimitsMode: UsageLimitsMode.default("none"),
   staticEntitlementsJson: z.string().default("{}"),
@@ -1216,6 +1222,7 @@ const SettingsSchema = z.object({
   // Shape: { "modal": 5, "runloop": 4, ... }. Backends absent here meter
   // warm-seconds but accrue NO warm_cost / debit (rate 0).
   sandboxWarmRateMicrosPerSecondJson: z.string().default("{}"),
+  sandboxWarmBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
   // Per-workspace warm cap (cumulative warm-seconds since the start of the UTC
   // month, summed over sandbox.warm_seconds). 0 = unbounded. A workspace over the
   // cap force-drains its VIEWER-ONLY boxes (guarded AND turn_holders=0 — a paying
@@ -1251,6 +1258,13 @@ const SettingsSchema = z.object({
   documentEmbeddingDimensions: z.coerce.number().int().positive().default(3072),
   documentEmbeddingApiKey: z.string().optional(),
   documentEmbeddingBaseUrl: z.string().url().optional(),
+  documentEmbeddingBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
+  // Explicit commercial cutover. Existing queued revisions remain unpriced;
+  // only jobs created at or after this instant may enter the paid rail.
+  documentEmbeddingCreditsActivatedAt: z.iso.datetime().optional(),
+  // Customer tariff for the exact UTF-8 bytes sent to the embedder. Zero leaves
+  // the paid mode unavailable; no commercial rate is selected by this PR.
+  documentEmbeddingRateMicrosPerMillionBytes: z.coerce.number().int().nonnegative().default(0),
   documentCurationProvider: z.enum(["openai", "heuristic", "none"]).default("openai"),
   documentCurationModel: z.string().min(1).default("gpt-4o-mini"),
   documentCurationApiKey: z.string().optional(),
@@ -3074,6 +3088,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED",
     ),
     billingMode: optional("OPENGENI_BILLING_MODE"),
+    verifiedSignupTrialCreditsEnabled: optional("OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED"),
     entitlementsMode: optional("OPENGENI_ENTITLEMENTS_MODE"),
     usageLimitsMode: optional("OPENGENI_USAGE_LIMITS_MODE"),
     staticEntitlementsJson: optional("OPENGENI_STATIC_ENTITLEMENTS_JSON"),
@@ -3360,6 +3375,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxWarmRateMicrosPerSecondJson: optional(
       "OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON",
     ),
+    sandboxWarmBillingMode: optional("OPENGENI_SANDBOX_WARM_BILLING_MODE"),
     sandboxMaxWarmSecondsPerWorkspace: optional("OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE"),
     sandboxPreparationProfiles: optional("OPENGENI_SANDBOX_PREPARATION_PROFILES"),
     sandboxEnvAllowlist: optional("OPENGENI_SANDBOX_ENV_ALLOWLIST"),
@@ -3389,6 +3405,13 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     documentEmbeddingDimensions: optional("OPENGENI_DOCUMENT_EMBEDDING_DIMENSIONS"),
     documentEmbeddingApiKey: optional("OPENGENI_DOCUMENT_EMBEDDING_API_KEY"),
     documentEmbeddingBaseUrl: optional("OPENGENI_DOCUMENT_EMBEDDING_BASE_URL"),
+    documentEmbeddingBillingMode: optional("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE"),
+    documentEmbeddingCreditsActivatedAt: optional(
+      "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT",
+    ),
+    documentEmbeddingRateMicrosPerMillionBytes: optional(
+      "OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES",
+    ),
     documentCurationProvider: optional("OPENGENI_DOCUMENT_CURATION_PROVIDER"),
     documentCurationModel: optional("OPENGENI_DOCUMENT_CURATION_MODEL"),
     documentCurationApiKey: optional("OPENGENI_DOCUMENT_CURATION_API_KEY"),
@@ -3447,7 +3470,21 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         : parsed.sandboxIdleGraceMs,
     sandboxRotationLeadMs:
       raw.sandboxRotationLeadMs === undefined && parsed.sandboxBackend === "modal"
-        ? Math.min(3_600_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
+        ? Math.min(
+            3_600_000,
+            Math.max(
+              Math.floor((parsed.modalTimeoutSeconds * 1000) / 2),
+              SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS +
+                sandboxArchiveCaptureTimeoutMs({
+                  sandboxSnapshotTimeoutMs: Math.max(
+                    parsed.sandboxSnapshotTimeoutMs,
+                    parsed.sandboxDrainSnapshotTimeoutMs ?? parsed.sandboxSnapshotTimeoutMs,
+                  ),
+                }) +
+                2 * parsed.sandboxLeaseReaperPeriodMs +
+                1,
+            ),
+          )
         : parsed.sandboxRotationLeadMs,
     mcpServers: ensureBuiltInMcpServers(parsed),
   };
@@ -4729,6 +4766,33 @@ function legacyImplicitOpenAiDefinitionVersionFor(
   });
 }
 
+function legacyCodexAstraImplicitCachingDefinitionVersionFor(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+): string | null {
+  // The GPT-6 rollout only made the already-implicit Codex cache discoverable.
+  // Bound this compatibility to that product/transport and exact declaration;
+  // never normalize explicit caching, another capability, or another model.
+  if (
+    model.id !== "codex/gpt-6-astra" ||
+    model.upstreamModelId !== "gpt-6-astra" ||
+    provider.id !== CODEX_PROVIDER_ID ||
+    provider.kind !== "codex-subscription" ||
+    provider.api !== "responses" ||
+    provider.wireProfile !== "openai" ||
+    canonicalJson(model.capabilities.promptCaching) !==
+      canonicalJson({ upstream: "supported", runnable: true, mode: "implicit" })
+  ) {
+    return null;
+  }
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  const { promptCaching: _promptCaching, ...capabilities } = model.capabilities;
+  // Recompute, rather than allowlisting an incident hash: all other current
+  // fields must still reproduce the accepted digest. Do not compose this with
+  // the older wire-profile compatibility or rewrite the accepted policy.
+  return definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider);
+}
+
 /**
  * The built-in provider's stable id: "openai" on the OpenAI platform, "azure"
  * on Azure. Exported because the workspace model-policy gate must attribute
@@ -5421,6 +5485,16 @@ export function resolveTurnExecutionPolicyV1(
   });
 }
 
+/** Explicit accepted execution identity matches, but its definition digest differs. */
+export class TurnExecutionPolicyDefinitionMismatchError extends Error {
+  readonly code = "turn_execution_policy_definition_mismatch";
+
+  constructor() {
+    super("Turn execution policy does not match the current provider definition");
+    this.name = "TurnExecutionPolicyDefinitionMismatchError";
+  }
+}
+
 /**
  * Parse-time validation lives in @opengeni/contracts; this verifier binds a
  * present snapshot to the current executable definition and exact turn row.
@@ -5474,16 +5548,22 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   );
   const definitionVersionMatches =
     parsed.definitionVersion === resolved.model.definitionVersion ||
-    parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion;
-  const mismatched =
+    parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion ||
+    parsed.definitionVersion ===
+      legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider);
+  const identityMismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
     parsed.wireApi !== resolved.model.api ||
-    !definitionVersionMatches ||
     canonicalJson(parsed.credentialSource) !== canonicalJson(resolved.model.credentialSource) ||
     canonicalJson(parsed.billing) !== canonicalJson(resolved.model.billing);
-  if (mismatched) {
+  // Identity/source changes must never enter a rollout-retry classification,
+  // even when their definition digest also differs.
+  if (identityMismatched) {
     throw new Error("Turn execution policy does not match the current provider definition");
+  }
+  if (!definitionVersionMatches) {
+    throw new TurnExecutionPolicyDefinitionMismatchError();
   }
   return { policy: parsed, provider: resolved.provider, model: resolved.model };
 }
@@ -7038,7 +7118,36 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   sandboxEnvironmentVariableNames(settings);
   sandboxLifecycleHookIds(settings);
   // Fail fast on a malformed warm-rate table (P2.1).
-  parseSandboxWarmRateJson(settings.sandboxWarmRateMicrosPerSecondJson);
+  const warmRates = parseSandboxWarmRateJson(settings.sandboxWarmRateMicrosPerSecondJson);
+  // The meter rounds each settled interval to whole USD micros. Fractional
+  // micros/second would make the total depend on heartbeat frequency; only
+  // integer rates have interval-independent settlement at the same elapsed time.
+  if (
+    settings.sandboxWarmBillingMode === "credits" &&
+    Object.values(warmRates).some((rate) => !Number.isSafeInteger(rate))
+  ) {
+    throw new Error(
+      "OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON paid rates must be safe integers",
+    );
+  }
+  if (
+    settings.documentEmbeddingBillingMode === "credits" &&
+    settings.documentEmbeddingProvider === "openai" &&
+    settings.documentEmbeddingRateMicrosPerMillionBytes <= 0
+  ) {
+    throw new Error(
+      "OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES must be positive when paid OpenAI embedding billing is enabled",
+    );
+  }
+  if (
+    settings.documentEmbeddingBillingMode === "credits" &&
+    settings.documentEmbeddingProvider === "openai" &&
+    !settings.documentEmbeddingCreditsActivatedAt
+  ) {
+    throw new Error(
+      "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT is required for paid OpenAI embeddings",
+    );
+  }
   if (settings.sandboxBackend === "opensandbox") {
     if (!/@sha256:[0-9a-f]{64}$/i.test(settings.openSandboxImage ?? "")) {
       throw new Error(
@@ -7113,11 +7222,13 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       ordinaryCaptureTimeoutMs,
       drainCaptureTimeoutMs,
     );
-    if (!(rotationLeadMs > providerDeadlineCaptureTimeoutMs + reaperPeriod)) {
+    const requiredRotationLeadMs =
+      SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS + providerDeadlineCaptureTimeoutMs + 2 * reaperPeriod;
+    if (!(rotationLeadMs > requiredRotationLeadMs)) {
       throw new Error(
         `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must exceed the ` +
-          `largest durable snapshot or drain capture timeout plus one reaper period ` +
-          `(${providerDeadlineCaptureTimeoutMs + reaperPeriod}), including for persisted Modal ` +
+          `legacy command stop grace, largest durable snapshot or drain capture timeout, and two reaper periods ` +
+          `(${requiredRotationLeadMs}), including for persisted Modal ` +
           `leases after a default-backend rollout.`,
       );
     }

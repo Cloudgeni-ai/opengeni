@@ -8,6 +8,8 @@ import {
   browserFileAuthoritySubjectId,
   interactionActorForGrant,
   requireAuthorizedBrowserUploadFiles,
+  parseBrowserScreenshotOptions,
+  browserScreenshotResponse,
 } from "../src/routes/browser-sessions";
 
 const routeUrl = new URL("../src/routes/browser-sessions.ts", import.meta.url);
@@ -43,6 +45,36 @@ function httpStatus(operation: () => unknown): number | "resolved" {
 }
 
 describe("BrowserSession route discipline", () => {
+  test("browser screenshot query validates capture options", () => {
+    expect(parseBrowserScreenshotOptions(new URLSearchParams())).toEqual({});
+    expect(
+      parseBrowserScreenshotOptions(new URLSearchParams("fullPage=true&format=png&quality=75")),
+    ).toEqual({ fullPage: true, format: "png", quality: 75 });
+    for (const query of [
+      "fullPage=1",
+      "format=gif",
+      "quality=0",
+      "quality=101",
+      "quality=",
+      "fullPage=true&fullPage=false",
+    ]) {
+      expect(httpStatus(() => parseBrowserScreenshotOptions(new URLSearchParams(query)))).toBe(400);
+    }
+  });
+
+  test("browser screenshot response sends only Buffer view bytes", async () => {
+    const image = Buffer.from([99, 0xff, 0xd8, 0xff, 0xd9, 88]).subarray(1, 5);
+    const response = browserScreenshotResponse({
+      data: image,
+      mediaType: "image/jpeg",
+      metadataHeader: "frame-metadata",
+    });
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(
+      Uint8Array.of(0xff, 0xd8, 0xff, 0xd9),
+    );
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+
   test("registers the complete lifecycle, semantic control, diagnostics, and frame surface", async () => {
     const source = await readFile(routeUrl, "utf8");
     for (const route of [
@@ -53,6 +85,9 @@ describe("BrowserSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/select"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/observation"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/state"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/dom-read"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/screenshot"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId/save"',

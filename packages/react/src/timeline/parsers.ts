@@ -566,8 +566,8 @@ export function retainedScreenshotMetadata(out: unknown): RetainedArtifactMetada
   if (!value.available) {
     return typeof value.reason === "string" ? (value as unknown as RetainedArtifactMetadata) : null;
   }
-  return value.kind === "computer_screenshot" &&
-    value.contentType === "image/png" &&
+  return (value.kind === "computer_screenshot" || value.kind === "browser_screenshot") &&
+    ["image/png", "image/jpeg", "image/webp"].includes(String(value.contentType)) &&
     typeof value.originalBytes === "number" &&
     typeof value.sha256 === "string" &&
     value.dimensions !== null &&

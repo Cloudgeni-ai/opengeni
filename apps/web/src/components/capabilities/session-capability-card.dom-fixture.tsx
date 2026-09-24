@@ -36,6 +36,12 @@ const updateConnection = mock(async () => row);
 const enableCapability = mock(async () => {
   enabled = true;
 });
+const getGitHubApp = mock(async () => ({
+  status: "unbound",
+  configured: true,
+  linkUrl: "https://api.example.test/github/connect",
+}));
+const refreshGitHub = mock(async () => {});
 const context = {
   client: {
     connectTransport: () => ({}),
@@ -62,6 +68,7 @@ const context = {
     listIntegrationDefinitions: async () => ({ definitions: [] }),
     listApiIntegrations: async () => ({ integrations: [] }),
     catalogAssetUrl: (path: string) => path,
+    getGitHubApp,
     createConnection,
     updateConnection,
     enableCapability,
@@ -76,6 +83,8 @@ const context = {
     }),
   },
   workspaceCapabilityCatalog: [catalogItem],
+  githubStatus: null as { status: string } | null,
+  refreshGitHub,
   refreshWorkspaceMcpServers: async () => {},
   accessContext: { workspaceGrants: [] },
 };
@@ -114,6 +123,7 @@ async function render(
   cachedCatalogItem = catalogItem,
   missingGrant = false,
   visibility: "private" | "workspace" = "workspace",
+  noticeOverride: AuthNeededItem = item,
 ) {
   personal = personalAccount;
   liveCatalogItem = currentCatalogItem;
@@ -126,7 +136,7 @@ async function render(
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  let notice = item;
+  let notice = noticeOverride;
   if (missingGrant) {
     const startupEvents = [
       {
@@ -215,6 +225,138 @@ function button(container: HTMLElement, label: string) {
 }
 
 describe("conversation connection card", () => {
+  const githubItem = {
+    ...catalogItem,
+    id: "api:github-app",
+    kind: "api" as const,
+    name: "GitHub App",
+    providerDomain: "github.com",
+  };
+  const githubNotice = {
+    ...item,
+    capability: {
+      ...item.capability!,
+      id: "api:github-app",
+      kind: "api" as const,
+      name: "GitHub App",
+    },
+  } as AuthNeededItem;
+
+  test("GitHub's bundled logo and verified binding persist in the conversation card", async () => {
+    context.githubStatus = { status: "bound" };
+    const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
+    try {
+      // Happy DOM cannot serve static assets; the source path is checked in
+      // capability-logo-source.test.ts, while this verifies the live card state.
+      expect(h.container.querySelector('[data-state="complete"]')).not.toBeNull();
+      expect(h.container.textContent).toContain("Connected to this workspace");
+      expect(h.container.textContent).not.toContain("Available in this conversation");
+      expect(h.container.textContent).not.toContain("Connect GitHub App");
+    } finally {
+      await h.close();
+      context.githubStatus = null;
+    }
+  });
+
+  test("a returning GitHub binding refreshes the existing card, including later disconnection", async () => {
+    context.githubStatus = { status: "unbound" };
+    const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
+    try {
+      expect(h.container.querySelector('[data-state="suggested"]')).not.toBeNull();
+      context.githubStatus = { status: "bound" };
+      await h.rerender("workspace");
+      expect(h.container.querySelector('[data-state="complete"]')).not.toBeNull();
+      context.githubStatus = { status: "unbound" };
+      await h.rerender("workspace");
+      expect(h.container.querySelector('[data-state="suggested"]')).not.toBeNull();
+    } finally {
+      await h.close();
+      context.githubStatus = null;
+    }
+  });
+
+  test("GitHub starts on one click, visibly waits, ignores a second click, and confirms a binding", async () => {
+    context.githubStatus = null;
+    getGitHubApp.mockClear();
+    refreshGitHub.mockClear();
+    let resolveStatus!: (value: Awaited<ReturnType<typeof getGitHubApp>>) => void;
+    getGitHubApp.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveStatus = resolve;
+        }),
+    );
+    const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
+    try {
+      await act(async () => button(h.container, "Connect GitHub App").click());
+      const waiting = button(h.container, "Opening GitHub…");
+      expect(waiting.disabled).toBe(true);
+      expect(getGitHubApp).toHaveBeenCalledTimes(1);
+      await act(async () => waiting.click());
+      expect(getGitHubApp).toHaveBeenCalledTimes(1);
+      expect(getGitHubApp).toHaveBeenCalledWith("workspace", {
+        returnPath: "/workspaces/workspace/sessions/session",
+      });
+      await act(async () => {
+        resolveStatus({ status: "bound", configured: true, linkUrl: "" });
+      });
+      expect(h.container.querySelector('[data-state="complete"]')).not.toBeNull();
+      expect(h.container.textContent).toContain("Connected to this workspace");
+      expect(refreshGitHub).toHaveBeenCalledTimes(1);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a BFCache return unlocks GitHub and ignores an old pending status response", async () => {
+    context.githubStatus = null;
+    refreshGitHub.mockClear();
+    let resolveOldStatus!: (value: Awaited<ReturnType<typeof getGitHubApp>>) => void;
+    getGitHubApp.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOldStatus = resolve;
+        }),
+    );
+    const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
+    try {
+      await act(async () => button(h.container, "Connect GitHub App").click());
+      expect(button(h.container, "Opening GitHub…").disabled).toBe(true);
+      await act(async () => {
+        const restored = new Event("pageshow") as PageTransitionEvent;
+        Object.defineProperty(restored, "persisted", { value: true });
+        window.dispatchEvent(restored);
+      });
+      expect(button(h.container, "Connect GitHub App").disabled).toBe(false);
+      expect(refreshGitHub).toHaveBeenCalledWith("workspace");
+      await act(async () => resolveOldStatus({ status: "bound", configured: true, linkUrl: "" }));
+      expect(h.container.querySelector('[data-state="suggested"]')).not.toBeNull();
+      getGitHubApp.mockImplementationOnce(async () => ({
+        status: "bound",
+        configured: true,
+        linkUrl: "",
+      }));
+      await act(async () => button(h.container, "Connect GitHub App").click());
+      expect(h.container.querySelector('[data-state="complete"]')).not.toBeNull();
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("GitHub's failed start offers a retry in the existing dialog", async () => {
+    getGitHubApp.mockImplementationOnce(async () => {
+      throw new Error("Temporary status failure");
+    });
+    const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
+    try {
+      await act(async () => button(h.container, "Connect GitHub App").click());
+      expect(h.container.textContent).toContain("Temporary status failure");
+      expect(button(h.container, "Try again")).toBeDefined();
+    } finally {
+      await h.close();
+    }
+  });
+
   test("OAuth CTA retains the live provider name after renamed setup is opened and cancelled", async () => {
     const cached = { ...catalogItem, authKind: "oauth2" as const };
     const h = await render(false, { ...cached, name: "Current Example" }, cached);

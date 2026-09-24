@@ -675,12 +675,19 @@ facts. A session frozen to `remote_v2` compaction admits only Codex models;
 portable sessions may use any supported route whose request adapter can express
 their canonical history. Responses output items may carry `status`
 (`completed` / `in_progress` / `incomplete`); that field is not conversation
-meaning — pairing is `call_id` — and Codex's input schema rejects it
+meaning for function/message annotations — pairing is `call_id` — and Codex's input schema rejects it
 (`400 Unknown parameter: 'input[N].status'`). New `session_history_items` rows
 omit it at persist (`canonicalizePersistedHistoryItem`). The Codex request
 normalizer still strips leftover item `id` and `status` on the wire for
 already-stored SuperGrok rows and mid-turn SDK items — ordinary inference and
 portable compaction share that seam — and never rewrites stored rows.
+Hosted web/file search, code interpreter and image-generation calls are an
+exception: their Responses replay schema requires `status`. Both persistence
+and wire normalization preserve the original value, including failed or
+in-progress outcomes; neither synthesizes completion. SDK `hosted_tool_call`
+records retain their status and provider data as well. This preservation does
+not reconstruct status already lost from historical rows or alter the SDK's
+legacy missing-status conversion behavior.
 
 SuperGrok models use the `supergrok/` product namespace and the curated
 `supergrok-subscription` provider. The catalog advertises image input, which is

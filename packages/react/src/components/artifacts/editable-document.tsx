@@ -70,6 +70,7 @@ type DocumentCommandState = {
 export function EditableDocumentArtifactSurface({
   session,
   title,
+  showHeader,
   subtitle,
   readOnly = false,
   onCommit,
@@ -260,6 +261,7 @@ export function EditableDocumentArtifactSurface({
     <DocumentProjectionArtifactSurface
       {...surfaceProps}
       title={title}
+      showHeader={showHeader}
       subtitle={
         subtitle ??
         `${projection.blocks.length} block${projection.blocks.length === 1 ? "" : "s"}${writable ? "" : " · Read only"}`
@@ -274,6 +276,7 @@ export function EditableDocumentArtifactSurface({
     <ArtifactSurface
       modality="document"
       title={title}
+      showHeader={showHeader}
       subtitle={subtitle ?? status}
       busy={!accessRevoked && !state.error}
       className={surfaceProps.className}

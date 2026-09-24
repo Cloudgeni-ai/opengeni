@@ -3,6 +3,7 @@ import {
   environmentsEncryptionKeyBytes,
   resolveFirstPartyDelegationSecret,
   resolveStreamTokenSecret,
+  sandboxWarmRateMicrosPerSecond,
 } from "@opengeni/config";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
@@ -20,6 +21,8 @@ import {
   BrowserDownloadSaveRequest,
   BrowserDownloadSaveResponse,
   BrowserDownloadListResponse,
+  BrowserDomReadRequest,
+  BrowserDomReadResponse,
   BrowserExternalAuthCommand,
   BrowserOpenTargetRequest,
   BrowserObservation,
@@ -31,6 +34,7 @@ import {
   BrowserSessionListResponse,
   BrowserSessionMutationResponse,
   BrowserTargetListResponse,
+  BrowserTargetState,
   CreateBrowserSessionRequest,
   ExternalAuthInteractiveRequest,
   ExternalAuthInteractiveResponse,
@@ -75,6 +79,7 @@ import {
   BrowserSessionNotFoundError,
   BrowserSessionOperationConflictError,
   BrowserSessionStateError,
+  SandboxPaidComputeAdmissionError,
   completeBrowserSessionEnd,
   completeExternalAuth,
   completeBrowserDownloadSave,
@@ -169,6 +174,8 @@ import {
   provisionBrowserControlClient,
   renewSandboxProviderExpiration,
   type BrowserControlPlacementSession,
+  type BrowserControlScreenshotOptions,
+  type BrowserControlFrame,
   type PlacementBrowserStateCaptureReceipt,
   type PlacementBrowserNetworkRoute,
   type PlacementBrowserTransport,
@@ -949,6 +956,71 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         async ({ sessionClient }) => await sessionClient.observe(targetId),
       );
       return context.json(result);
+    },
+  );
+
+  app.get(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/state",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:read",
+      );
+      const targetId = requireOpaqueParam(context, "targetId");
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.read",
+        "browser.read",
+        async ({ sessionClient }) => await sessionClient.targetState(targetId),
+      );
+      return context.json(BrowserTargetState.parse(result));
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/dom-read",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:read",
+      );
+      const targetId = requireOpaqueParam(context, "targetId");
+      const request = await parseJsonBody(context, BrowserDomReadRequest);
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.read",
+        "browser.read",
+        async ({ sessionClient }) => await sessionClient.readDom(targetId, request),
+      );
+      return context.json(BrowserDomReadResponse.parse(result));
+    },
+  );
+
+  app.get(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/screenshot",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:read",
+      );
+      const targetId = requireOpaqueParam(context, "targetId");
+      const captureOptions = parseBrowserScreenshotOptions(new URL(context.req.url).searchParams);
+      const frame = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.read",
+        "browser.read",
+        async ({ sessionClient }) => await sessionClient.capture(targetId, captureOptions),
+      );
+      return browserScreenshotResponse(frame);
     },
   );
 
@@ -3754,6 +3826,10 @@ async function ensureInteractionHolder(
     holderId: interactionHolderId(browserSessionId),
     subjectId: sourceSession.id,
     backend: placement.lease.backend,
+    warmBilling: {
+      mode: deps.settings.sandboxWarmBillingMode,
+      rateMicrosPerSecond: sandboxWarmRateMicrosPerSecond(deps.settings, placement.lease.backend),
+    },
     os: placement.lease.os,
     image: sandboxRuntime.image,
     rigVersionId: sourceSession.rigVersionId,
@@ -4164,6 +4240,49 @@ function optionalBoundedInteger(
     throw new HTTPException(400, { message: "integer query is out of range" });
   }
   return parsed;
+}
+
+export function parseBrowserScreenshotOptions(
+  query: URLSearchParams,
+): BrowserControlScreenshotOptions {
+  for (const key of ["fullPage", "format", "quality"]) {
+    if (query.getAll(key).length > 1) {
+      throw new HTTPException(400, { message: `duplicate browser screenshot ${key}` });
+    }
+  }
+  const fullPage = query.get("fullPage");
+  if (fullPage !== null && fullPage !== "true" && fullPage !== "false") {
+    throw new HTTPException(400, { message: "invalid browser screenshot fullPage" });
+  }
+  const format = query.get("format");
+  if (format !== null && format !== "jpeg" && format !== "png") {
+    throw new HTTPException(400, { message: "invalid browser screenshot format" });
+  }
+  const quality = query.get("quality");
+  const parsedQuality = quality === null ? null : optionalBoundedInteger(quality, 1, 100);
+  if (quality !== null && parsedQuality === null) {
+    throw new HTTPException(400, { message: "invalid browser screenshot quality" });
+  }
+  return {
+    ...(fullPage === null ? {} : { fullPage: fullPage === "true" }),
+    ...(format === null ? {} : { format }),
+    ...(parsedQuality === null ? {} : { quality: parsedQuality }),
+  };
+}
+
+export function browserScreenshotResponse(
+  frame: Pick<BrowserControlFrame, "data" | "mediaType" | "metadataHeader">,
+): Response {
+  // Node Buffers can be views into a larger backing allocation. Copy exactly
+  // the image bytes before constructing the Response.
+  return new Response(Uint8Array.from(frame.data).buffer, {
+    status: 200,
+    headers: {
+      "cache-control": "no-store",
+      "content-type": frame.mediaType,
+      "x-opengeni-browser-frame": frame.metadataHeader,
+    },
+  });
 }
 
 function isUuid(value: unknown): value is string {
@@ -4722,6 +4841,8 @@ function browserRouteError(error: unknown): HTTPException {
   const connectedMachineError = interactionControlApiError(error, "browser");
   if (connectedMachineError) return connectedMachineError;
   if (error instanceof HTTPException) return error;
+  if (error instanceof SandboxPaidComputeAdmissionError)
+    return new HTTPException(402, { message: error.message, cause: error });
   if (error instanceof BrowserSessionNotFoundError) {
     return new HTTPException(404, { message: error.message, cause: error });
   }

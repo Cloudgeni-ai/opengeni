@@ -61,6 +61,13 @@ const MAX_ENRICH_CONCURRENCY: usize = 32;
 const MAX_DETAILED_ENRICHMENT_NODES: usize = 64;
 const MAX_APPLICATION_SNAPSHOTS: usize = 128;
 const MAX_WINDOW_FRAME_FENCES: usize = 512;
+const WINDOW_CAPTURE_RESIZE_ERROR: &str = "X11 window resized during capture";
+const WINDOW_CAPTURE_RETRY_DELAYS: [Duration; 4] = [
+    Duration::ZERO,
+    Duration::from_millis(16),
+    Duration::from_millis(32),
+    Duration::from_millis(64),
+];
 const MUTATION_SETTLE_DELAYS: [Duration; 4] = [
     Duration::ZERO,
     Duration::from_millis(16),
@@ -76,6 +83,30 @@ const FOCUS_SETTLE_DELAYS: [Duration; 7] = [
     Duration::from_millis(256),
     Duration::from_millis(256),
 ];
+
+async fn retry_window_capture<T, F, Fut>(mut capture: F) -> NativeAdapterResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = NativeAdapterResult<T>>,
+{
+    for (index, delay) in WINDOW_CAPTURE_RETRY_DELAYS.into_iter().enumerate() {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        match capture().await {
+            Err(error)
+                if index + 1 < WINDOW_CAPTURE_RETRY_DELAYS.len()
+                    && error.code == NativeAdapterErrorCode::FrameStale
+                    && error.message.starts_with(WINDOW_CAPTURE_RESIZE_ERROR) =>
+            {
+                // No frame fence was stored. Recapture after a bounded settle
+                // instead of forcing the caller to rediscover the window.
+            }
+            result => return result,
+        }
+    }
+    unreachable!("the final capture attempt returns its result")
+}
 
 async fn register_semantic_events(connection: &AccessibilityConnection) -> bool {
     // A reused application snapshot is safe only while every event family that
@@ -140,6 +171,14 @@ struct WindowFrameFence {
     frame_id: String,
     target_generation: String,
     window: LinuxWindow,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone)]
+struct ScreenFrameFence {
+    frame_id: String,
+    target_generation: String,
     width: u32,
     height: u32,
 }
@@ -216,7 +255,7 @@ pub(crate) struct AtspiComputerAdapter {
     desktop: Option<LinuxDesktop>,
     application_launcher: Option<LinuxApplicationLauncher>,
     clipboard: Option<NativeClipboardController>,
-    latest_screen_frame: RwLock<Option<String>>,
+    latest_screen_frame: RwLock<Option<ScreenFrameFence>>,
     latest_window_frames: RwLock<BTreeMap<String, WindowFrameFence>>,
     semantic_generation: Arc<AtomicU64>,
     application_snapshots: RwLock<BTreeMap<String, CachedApplicationSnapshot>>,
@@ -299,7 +338,12 @@ impl AtspiComputerAdapter {
         NativeObservation {
             observation_id: format!("o_{}_{}", self.incarnation.simple(), sequence),
             target,
-            frame_id: self.latest_screen_frame.read().await.clone(),
+            frame_id: self
+                .latest_screen_frame
+                .read()
+                .await
+                .as_ref()
+                .map(|frame| frame.frame_id.clone()),
             roots: Vec::new(),
             node_count: 0,
             focused_ref: None,
@@ -1235,8 +1279,16 @@ impl AtspiComputerAdapter {
                 ..
             } => {
                 let latest = self.latest_screen_frame.read().await;
+                let frame = latest.as_ref().ok_or_else(|| {
+                    NativeAdapterError::definite(
+                        NativeAdapterErrorCode::FrameStale,
+                        "Linux pointer coordinates target a stale captured frame",
+                        true,
+                    )
+                })?;
                 if command.expected_frame_id.as_deref() != Some(frame_id)
-                    || latest.as_deref() != Some(frame_id)
+                    || frame.frame_id != *frame_id
+                    || frame.target_generation != target.target_generation
                 {
                     return Err(NativeAdapterError::definite(
                         NativeAdapterErrorCode::FrameStale,
@@ -1244,17 +1296,10 @@ impl AtspiComputerAdapter {
                         true,
                     ));
                 }
-                let bounds = target.bounds.ok_or_else(|| {
-                    NativeAdapterError::definite(
-                        NativeAdapterErrorCode::DriverFailed,
-                        "Linux X11 screen has no geometry",
-                        true,
-                    )
-                })?;
-                validate_screen_point(*x, *y, bounds)?;
+                validate_screen_frame_point(*x, *y, frame.width, frame.height)?;
                 match (end_x, end_y) {
                     (Some(end_x), Some(end_y)) => {
-                        validate_screen_point(*end_x, *end_y, bounds)?;
+                        validate_screen_frame_point(*end_x, *end_y, frame.width, frame.height)?;
                     }
                     (None, None) => {}
                     _ => {
@@ -1300,11 +1345,13 @@ impl AtspiComputerAdapter {
     async fn dispatch_screen_action(
         &self,
         command: &NativeActionCommand,
+        target: &NativeTarget,
+        frame: Option<&ScreenFrameFence>,
     ) -> NativeAdapterResult<()> {
         let desktop = self.desktop.as_ref().ok_or_else(|| {
             NativeAdapterError::unavailable("Linux X11 input is unavailable", true)
         })?;
-        let inputs = screen_inputs(&command.action)?;
+        let inputs = screen_inputs(&command.action, target, frame)?;
         for input in inputs {
             desktop.inject(&input).await.map_err(|error| {
                 NativeAdapterError::outcome_unknown(format!(
@@ -1329,21 +1376,28 @@ impl AtspiComputerAdapter {
                 true,
             )
         })?;
-        let captured = desktop.capture_window(window.id).await.map_err(|error| {
-            NativeAdapterError::definite(
-                NativeAdapterErrorCode::DriverFailed,
-                format!("capture Linux X11 window: {error}"),
-                true,
-            )
-        })?;
-        self.finish_window_capture(
-            record,
-            window,
-            captured.width,
-            captured.height,
-            "image/png",
-            captured.png,
-        )
+        retry_window_capture(|| {
+            let record = record.clone();
+            let window = window.clone();
+            async move {
+                let captured = desktop.capture_window(window.id).await.map_err(|error| {
+                    NativeAdapterError::definite(
+                        NativeAdapterErrorCode::DriverFailed,
+                        format!("capture Linux X11 window: {error}"),
+                        true,
+                    )
+                })?;
+                self.finish_window_capture(
+                    record,
+                    window,
+                    (captured.width, captured.height),
+                    (captured.width, captured.height),
+                    "image/png",
+                    captured.png,
+                )
+                .await
+            }
+        })
         .await
     }
 
@@ -1362,27 +1416,41 @@ impl AtspiComputerAdapter {
                 true,
             )
         })?;
-        let captured = desktop
-            .capture_window_rgba(window.id)
-            .await
-            .map_err(|error| {
-                NativeAdapterError::definite(
-                    NativeAdapterErrorCode::DriverFailed,
-                    format!("capture Linux X11 live window: {error}"),
-                    true,
+        retry_window_capture(|| {
+            let record = record.clone();
+            let window = window.clone();
+            async move {
+                let captured = desktop
+                    .capture_window_rgba(window.id)
+                    .await
+                    .map_err(|error| {
+                        NativeAdapterError::definite(
+                            NativeAdapterErrorCode::DriverFailed,
+                            format!("capture Linux X11 live window: {error}"),
+                            true,
+                        )
+                    })?;
+                let (width, height, mime_type, bytes) = encode_live_frame(&captured, options)?;
+                self.finish_window_capture(
+                    record,
+                    window,
+                    (captured.width, captured.height),
+                    (width, height),
+                    mime_type,
+                    bytes,
                 )
-            })?;
-        let (width, height, mime_type, bytes) = encode_live_frame(&captured, options)?;
-        self.finish_window_capture(record, window, width, height, mime_type, bytes)
-            .await
+                .await
+            }
+        })
+        .await
     }
 
     async fn finish_window_capture(
         &self,
         record: TargetRecord,
         window: LinuxWindow,
-        width: u32,
-        height: u32,
+        source_size: (u32, u32),
+        frame_size: (u32, u32),
         mime_type: &str,
         bytes: Vec<u8>,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
@@ -1415,10 +1483,13 @@ impl AtspiComputerAdapter {
                 true,
             ));
         }
-        if width != current.bounds.width || height != current.bounds.height {
+        if source_size != (current.bounds.width, current.bounds.height) {
             return Err(NativeAdapterError::definite(
                 NativeAdapterErrorCode::FrameStale,
-                "X11 window resized during capture",
+                format!(
+                    "{WINDOW_CAPTURE_RESIZE_ERROR}: captured {}x{}, current {}x{}",
+                    source_size.0, source_size.1, current.bounds.width, current.bounds.height
+                ),
                 true,
             ));
         }
@@ -1433,8 +1504,8 @@ impl AtspiComputerAdapter {
                 frame_id: frame_id.clone(),
                 target_generation: record.target.target_generation.clone(),
                 window: current,
-                width,
-                height,
+                width: frame_size.0,
+                height: frame_size.1,
             },
         );
         while frames.len() > MAX_WINDOW_FRAME_FENCES {
@@ -1452,8 +1523,8 @@ impl AtspiComputerAdapter {
             frame_id,
             target_id: record.target.id,
             target_generation: record.target.target_generation,
-            width,
-            height,
+            width: frame_size.0,
+            height: frame_size.1,
             mime_type: mime_type.to_string(),
             sha256: hex::encode(Sha256::digest(&bytes)),
             bytes,
@@ -1550,6 +1621,8 @@ impl AtspiComputerAdapter {
             &command.action,
             f64::from(frame.window.bounds.x),
             f64::from(frame.window.bounds.y),
+            f64::from(frame.window.bounds.width) / f64::from(frame.width),
+            f64::from(frame.window.bounds.height) / f64::from(frame.height),
         )?;
         self.latest_window_frames
             .write()
@@ -1685,7 +1758,12 @@ impl ComputerAdapter for AtspiComputerAdapter {
                 })?;
                 let sequence = self.frame_sequence.fetch_add(1, Ordering::Relaxed) + 1;
                 let frame_id = format!("f_{}_{}", self.incarnation.simple(), sequence);
-                *self.latest_screen_frame.write().await = Some(frame_id.clone());
+                *self.latest_screen_frame.write().await = Some(ScreenFrameFence {
+                    frame_id: frame_id.clone(),
+                    target_generation: target.target_generation.clone(),
+                    width: captured.width,
+                    height: captured.height,
+                });
                 return Ok(NativeCapturedFrame {
                     frame_id,
                     target_id: target.id,
@@ -1731,7 +1809,12 @@ impl ComputerAdapter for AtspiComputerAdapter {
                 let (width, height, mime_type, bytes) = encode_live_frame(&captured, options)?;
                 let sequence = self.frame_sequence.fetch_add(1, Ordering::Relaxed) + 1;
                 let frame_id = format!("f_{}_{}", self.incarnation.simple(), sequence);
-                *self.latest_screen_frame.write().await = Some(frame_id.clone());
+                *self.latest_screen_frame.write().await = Some(ScreenFrameFence {
+                    frame_id: frame_id.clone(),
+                    target_generation: target.target_generation.clone(),
+                    width,
+                    height,
+                });
                 return Ok(NativeCapturedFrame {
                     frame_id,
                     target_id: target.id,
@@ -1853,6 +1936,7 @@ impl ComputerAdapter for AtspiComputerAdapter {
         if let Some(screen) = self.screen_target() {
             if screen.id == command.target_id {
                 self.validate_screen(command, &screen).await?;
+                let frame = self.latest_screen_frame.read().await.clone();
                 *self.latest_screen_frame.write().await = None;
                 if let NativeAction::Launch { application_id } = &command.action {
                     self.application_launcher
@@ -1865,7 +1949,8 @@ impl ComputerAdapter for AtspiComputerAdapter {
                         .launch(application_id)
                         .await?;
                 } else {
-                    self.dispatch_screen_action(command).await?;
+                    self.dispatch_screen_action(command, &screen, frame.as_ref())
+                        .await?;
                 }
                 return Ok(Some(self.screen_observation(screen).await));
             }
@@ -2328,31 +2413,62 @@ fn validate_local_point(x: f64, y: f64, width: u32, height: u32) -> NativeAdapte
     Ok(())
 }
 
-fn validate_screen_point(x: f64, y: f64, bounds: NativeRect) -> NativeAdapterResult<()> {
+fn validate_screen_frame_point(x: f64, y: f64, width: u32, height: u32) -> NativeAdapterResult<()> {
     if !x.is_finite()
         || !y.is_finite()
-        || x < bounds.x
-        || y < bounds.y
-        || x >= bounds.x + bounds.width
-        || y >= bounds.y + bounds.height
+        || x < 0.0
+        || y < 0.0
+        || x >= f64::from(width)
+        || y >= f64::from(height)
     {
         return Err(NativeAdapterError::definite(
             NativeAdapterErrorCode::InvalidAction,
-            "pointer coordinates are outside the captured X11 screen",
+            "pointer coordinates are outside the captured X11 screen frame",
             false,
         ));
     }
     Ok(())
 }
 
-fn screen_inputs(action: &NativeAction) -> NativeAdapterResult<Vec<v1::DesktopInput>> {
-    pixel_inputs(action, 0.0, 0.0)
+fn screen_inputs(
+    action: &NativeAction,
+    target: &NativeTarget,
+    frame: Option<&ScreenFrameFence>,
+) -> NativeAdapterResult<Vec<v1::DesktopInput>> {
+    if let NativeAction::Pointer { frame_id, .. } = action {
+        let frame = frame
+            .filter(|frame| frame.frame_id == *frame_id)
+            .ok_or_else(|| {
+                NativeAdapterError::definite(
+                    NativeAdapterErrorCode::FrameStale,
+                    "Linux pointer coordinates target a stale captured frame",
+                    true,
+                )
+            })?;
+        let bounds = target.bounds.ok_or_else(|| {
+            NativeAdapterError::definite(
+                NativeAdapterErrorCode::DriverFailed,
+                "Linux X11 screen has no geometry",
+                true,
+            )
+        })?;
+        return pixel_inputs(
+            action,
+            bounds.x,
+            bounds.y,
+            bounds.width / f64::from(frame.width),
+            bounds.height / f64::from(frame.height),
+        );
+    }
+    pixel_inputs(action, 0.0, 0.0, 1.0, 1.0)
 }
 
 fn pixel_inputs(
     action: &NativeAction,
     offset_x: f64,
     offset_y: f64,
+    scale_x: f64,
+    scale_y: f64,
 ) -> NativeAdapterResult<Vec<v1::DesktopInput>> {
     match action {
         NativeAction::Pointer {
@@ -2366,8 +2482,8 @@ fn pixel_inputs(
             button,
             ..
         } => {
-            let x = checked_i32(*x + offset_x, "pointer x")?;
-            let y = checked_i32(*y + offset_y, "pointer y")?;
+            let x = checked_i32(*x * scale_x + offset_x, "pointer x")?;
+            let y = checked_i32(*y * scale_y + offset_y, "pointer y")?;
             let button = match button.unwrap_or(NativePointerButton::Left) {
                 NativePointerButton::Left => v1::PointerButton::Left,
                 NativePointerButton::Right => v1::PointerButton::Right,
@@ -2378,17 +2494,25 @@ fn pixel_inputs(
                     v1::desktop_input::Event::Scroll(v1::ScrollEvent {
                         x,
                         y,
-                        delta_x: checked_i32(delta_x.unwrap_or(0.0), "horizontal scroll delta")?,
-                        delta_y: checked_i32(delta_y.unwrap_or(0.0), "vertical scroll delta")?,
+                        delta_x: checked_i32(
+                            delta_x.unwrap_or(0.0) * scale_x,
+                            "horizontal scroll delta",
+                        )?,
+                        delta_y: checked_i32(
+                            delta_y.unwrap_or(0.0) * scale_y,
+                            "vertical scroll delta",
+                        )?,
                     }),
                 )]),
                 NativePointerAction::Drag => {
                     let end_x = checked_i32(
-                        end_x.ok_or_else(|| invalid_action("drag requires endX"))? + offset_x,
+                        end_x.ok_or_else(|| invalid_action("drag requires endX"))? * scale_x
+                            + offset_x,
                         "drag end x",
                     )?;
                     let end_y = checked_i32(
-                        end_y.ok_or_else(|| invalid_action("drag requires endY"))? + offset_y,
+                        end_y.ok_or_else(|| invalid_action("drag requires endY"))? * scale_y
+                            + offset_y,
                         "drag end y",
                     )?;
                     Ok(vec![
@@ -2604,6 +2728,46 @@ mod live_tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn window_capture_retries_only_a_resize_before_recording_a_frame() {
+        let mut attempts = 0;
+        let frame = retry_window_capture(|| {
+            attempts += 1;
+            let attempt = attempts;
+            async move {
+                if attempt == 1 {
+                    Err(NativeAdapterError::definite(
+                        NativeAdapterErrorCode::FrameStale,
+                        "X11 window resized during capture: captured 420x180, current 430x180",
+                        true,
+                    ))
+                } else {
+                    Ok(attempt)
+                }
+            }
+        })
+        .await
+        .expect("the new frame is returned after a resize");
+        assert_eq!(frame, 2);
+        assert_eq!(attempts, 2);
+
+        let mut attempts = 0;
+        let error = retry_window_capture(|| {
+            attempts += 1;
+            async {
+                Err::<(), _>(NativeAdapterError::definite(
+                    NativeAdapterErrorCode::FrameStale,
+                    "X11 window frame, placement, or target generation changed",
+                    true,
+                ))
+            }
+        })
+        .await
+        .expect_err("other stale-frame errors must not be replayed");
+        assert_eq!(error.code, NativeAdapterErrorCode::FrameStale);
+        assert_eq!(attempts, 1);
+    }
+
     #[test]
     fn validates_linux_desktop_application_ids_without_shell_metacharacters() {
         for valid in [
@@ -2720,6 +2884,75 @@ mod live_tests {
         assert_eq!(mime_type, "image/jpeg");
         let decoded = image::load_from_memory(&bytes).expect("decode JPEG");
         assert_eq!((decoded.width(), decoded.height()), (720, 450));
+    }
+
+    #[test]
+    fn scaled_window_frame_coordinates_map_to_the_native_window() {
+        let click = NativeAction::Pointer {
+            frame_id: "frame:test".to_string(),
+            action: NativePointerAction::Click,
+            x: 105.0,
+            y: 45.0,
+            end_x: None,
+            end_y: None,
+            delta_x: None,
+            delta_y: None,
+            button: Some(NativePointerButton::Left),
+        };
+        let inputs = pixel_inputs(&click, 510.0, 20.0, 2.0, 2.0).expect("mapped click");
+        let Some(v1::desktop_input::Event::Pointer(pointer)) = &inputs[0].event else {
+            panic!("expected pointer input");
+        };
+        assert_eq!((pointer.x, pointer.y), (720, 110));
+    }
+
+    #[test]
+    fn scaled_screen_frame_coordinates_map_to_the_native_desktop() {
+        let click = NativeAction::Pointer {
+            frame_id: "frame:screen".to_string(),
+            action: NativePointerAction::Click,
+            x: 202.0,
+            y: 272.0,
+            end_x: None,
+            end_y: None,
+            delta_x: None,
+            delta_y: None,
+            button: Some(NativePointerButton::Left),
+        };
+        let screen = NativeTarget {
+            id: "screen:test".to_string(),
+            target_generation: "g_screen".to_string(),
+            kind: NativeTargetKind::Screen,
+            application_id: None,
+            process_id: None,
+            title: "Desktop".to_string(),
+            bounds: Some(NativeRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1440.0,
+                height: 900.0,
+            }),
+            focused: true,
+        };
+        let frame = ScreenFrameFence {
+            frame_id: "frame:screen".to_string(),
+            target_generation: "g_screen".to_string(),
+            width: 1024,
+            height: 640,
+        };
+        validate_screen_frame_point(202.0, 272.0, frame.width, frame.height)
+            .expect("visible link is inside the captured frame");
+        assert!(validate_screen_frame_point(1024.0, 272.0, frame.width, frame.height).is_err());
+        let inputs = screen_inputs(&click, &screen, Some(&frame)).expect("mapped screen click");
+        let Some(v1::desktop_input::Event::Pointer(pointer)) = &inputs[0].event else {
+            panic!("expected pointer input");
+        };
+        assert_eq!((pointer.x, pointer.y), (284, 383));
+        let stale_frame = ScreenFrameFence {
+            frame_id: "frame:stale".to_string(),
+            ..frame
+        };
+        assert!(screen_inputs(&click, &screen, Some(&stale_frame)).is_err());
     }
 
     #[test]
@@ -2975,6 +3208,58 @@ Gtk.main()
             .await
             .expect("observe XTEST result");
         assert!(has_text(&after_pixel.roots, "Applied: hello from XTEST"));
+
+        let entry_ref = find_ref(&after_pixel.roots, "Fixture input").expect("fresh entry ref");
+        let set_scaled_value = command(
+            &after_pixel,
+            entry_ref,
+            NativeSemanticAction::SetValue,
+            Some(NativeActionValue::String(
+                "hello from scaled XTEST".to_string(),
+            )),
+        );
+        let before_scaled_click = adapter
+            .dispatch(&set_scaled_value)
+            .await
+            .expect("set value before scaled click")
+            .expect("semantic set-value returns an observation");
+        let scaled_button =
+            find_bounds(&before_scaled_click.roots, "Apply").expect("scaled button bounds");
+        let scaled_window = before_scaled_click
+            .target
+            .bounds
+            .expect("scaled fixture window bounds");
+        let scaled_frame = adapter
+            .capture_still(
+                &target.id,
+                crate::NativeCaptureOptions {
+                    format: crate::NativeFrameFormat::Jpeg,
+                    quality: 72,
+                    max_width: 210,
+                    max_height: 90,
+                },
+            )
+            .await
+            .expect("capture a scaled X11 window still");
+        assert_eq!((scaled_frame.width, scaled_frame.height), (210, 90));
+        let scaled_click = pointer_command(
+            &target,
+            &scaled_frame,
+            (scaled_button.x - scaled_window.x + scaled_button.width / 2.0) / 2.0,
+            (scaled_button.y - scaled_window.y + scaled_button.height / 2.0) / 2.0,
+        );
+        adapter
+            .dispatch(&scaled_click)
+            .await
+            .expect("click GTK button through a scaled window frame");
+        let after_scaled_click = adapter
+            .observe(&target.id)
+            .await
+            .expect("observe scaled XTEST result");
+        assert!(has_text(
+            &after_scaled_click.roots,
+            "Applied: hello from scaled XTEST"
+        ));
 
         let newer_frame = adapter
             .capture(&target.id)

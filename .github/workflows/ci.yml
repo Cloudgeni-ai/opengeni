@@ -150,6 +150,7 @@ jobs:
       integration_count: ${{ steps.plan.outputs.integration_count }}
       e2e_count: ${{ steps.plan.outputs.e2e_count }}
       browser_lane_count: ${{ steps.plan.outputs.browser_lane_count }}
+      browserd_real_e2e: ${{ steps.plan.outputs.browserd_real_e2e }}
       artifact_runtime_required: ${{ steps.plan.outputs.artifact_runtime_required }}
       bake_images: ${{ steps.plan.outputs.bake_images }}
       build_count: ${{ steps.plan.outputs.build_count }}
@@ -210,6 +211,7 @@ jobs:
           echo "integration_count=$(jq '.integrationTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
           echo "e2e_count=$(jq '.e2eTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
           echo "browser_lane_count=$(jq '.browserAcceptanceLanes | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "browserd_real_e2e=$(jq -r '(.mode == "full") or any(.changedFiles[]; test("^(packages/(browserd|interaction)/|packages/contracts/src/interaction\\.ts$|packages/runtime/src/(interaction-tools|browser-action-json-schema)\\.ts$|packages/runtime/src/sandbox/browser-control-client\\.ts$|apps/api/src/routes/browser-sessions\\.ts$|packages/sdk/src/(interaction|client)\\.ts$)"))' impact-plan.json)" >> "$GITHUB_OUTPUT"
           artifact_runtime_required="$(jq -r .artifactRuntimeRequired impact-plan.json)"
           bake_images=false
           if [ "$EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
@@ -1141,9 +1143,46 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  browserd-real-e2e:
+    name: Real Chromium browser controller
+    needs: [automation-admission, plan]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browserd_real_e2e == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install pinned Chromium
+        uses: ./.github/actions/playwright-browsers
+        timeout-minutes: 17
+        with:
+          browsers: chromium
+
+      - name: Run actual browserd end-to-end suite
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          chromium_binary="$(bun -e 'import { chromium } from "playwright"; process.stdout.write(chromium.executablePath())')"
+          printf '#!/usr/bin/env bash\nexec %q --no-sandbox "$@"\n' "$chromium_binary" > "$RUNNER_TEMP/opengeni-test-chromium"
+          chmod 700 "$RUNNER_TEMP/opengeni-test-chromium"
+          export OPENGENI_BROWSER_EXECUTABLE="$RUNNER_TEMP/opengeni-test-chromium"
+          bun run --cwd packages/browserd test:e2e
+
   test:
     name: Typecheck and unit tests
-    needs: [plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, package-contracts, deployment, artifact-runtime, images]
+    needs: [plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, browserd-real-e2e, package-contracts, deployment, artifact-runtime, images]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1168,6 +1207,7 @@ jobs:
           INTEGRATION_COUNT: ${{ needs.plan.outputs.integration_count }}
           E2E_COUNT: ${{ needs.plan.outputs.e2e_count }}
           BROWSER_LANE_COUNT: ${{ needs.plan.outputs.browser_lane_count }}
+          BROWSERD_REAL_E2E: ${{ needs.plan.outputs.browserd_real_e2e }}
           ARTIFACT_RUNTIME_REQUIRED: ${{ needs.plan.outputs.artifact_runtime_required }}
           BAKE_IMAGES: ${{ needs.plan.outputs.bake_images }}
           BUILD_COUNT: ${{ needs.plan.outputs.build_count }}
@@ -1185,6 +1225,7 @@ jobs:
             --argjson integration "$INTEGRATION_COUNT" \
             --argjson e2e "$E2E_COUNT" \
             --argjson browser "$BROWSER_LANE_COUNT" \
+            --argjson browserdRealE2e "$BROWSERD_REAL_E2E" \
             --argjson artifactRuntime "$ARTIFACT_RUNTIME_REQUIRED" \
             --argjson bakeImages "$BAKE_IMAGES" \
             --argjson build "$BUILD_COUNT" \
@@ -1751,7 +1792,7 @@ jobs:
     needs: [automation-admission, plan, artifact-runtime]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only

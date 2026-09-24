@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "72c905337d781b266af140df72380f67071cfccbf73ba84da25f2be006defee5"
+      "sha256": "f0f8def1e225efb37e50e7b6890905e9004590ce2d12c2b0e321a30cc788fdc7"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/local-startup.yml",
-      "sha256": "b75412b0ac66ef80f3e822cd52e8846d7b7b77f2a3cb530f14cf38c06f1c1761"
+      "sha256": "32c9092f1a6262dfe73e6a53ea5a1f8c8a11657e55c1a318ab5b59b058a44dce"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -35,6 +35,10 @@
     {
       "path": ".github/workflows/production-pr-heads.yml",
       "sha256": "48a8726756c75dc74b33e4824adcd0fdad9bc50fa1f55da1e410375e7dd2db3a"
+    },
+    {
+      "path": ".github/workflows/publish-artifact-runtime.yml",
+      "sha256": "92543a710cd808d8d930c827c8f877953406993e8965e1c01d1097afef7f9a47"
     },
     {
       "path": ".github/workflows/publish-canary-chart.yml",
@@ -569,6 +573,12 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "job": "browserd-real-e2e",
+      "step": "Install dependencies",
+      "sha256": "5b7c890b92c03a02da6550332b1e341e8d26251a802f091b7d2cb767eaaf3459"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "job": "deployment",
       "step": "Install dependencies",
       "sha256": "c002a6d527c30937cac224d77e729583974d8a4fba6e2e515a2b56231aa499a4"
@@ -715,7 +725,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "plan",
       "step": "Build fail-closed impact plan",
-      "sha256": "40a40a3d2887f9dbb80f0e32ef0d045e3c4e2299c00f6e58cc5d454c6b795b1f"
+      "sha256": "f1c68f7a528153f5653d6c8a5dd87410c1eab524214fc452a24989dca6fea75b"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -757,7 +767,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "test",
       "step": "Require every split CI lane",
-      "sha256": "149f04b6ac3d2b425a1852edb335b3cabb9b3d86f642393efc3fe25129aeae5c"
+      "sha256": "57b1ee66e433bb459fd19beb94265ac60ee30a007a2f588fc08413615f87739c"
     },
     {
       "workflow": ".github/workflows/ci.yml",

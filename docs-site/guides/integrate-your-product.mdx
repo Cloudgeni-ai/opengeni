@@ -12,7 +12,8 @@ The browser talks to your backend. The organization API key stays on that backen
   Verify that your installed `@opengeni/sdk` exports `/chat` and that the target deployment supports
   the corresponding contract. Check the package exports/types and `/v1/config/client`; older
   releases may not include the facade. Set the API URL explicitly. A feature in source or
-  documentation is not proof that your deployment includes it.
+  documentation is not proof that your deployment includes it. A successful config response alone
+  does not verify chat compatibility; test the authenticated chat flow on your target deployment.
 </Note>
 
 ## Connect your backend

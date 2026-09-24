@@ -1,4 +1,5 @@
 import { expect, mock, test } from "bun:test";
+import { CapabilityCatalogItem as CapabilityCatalogItemSchema } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { CapabilityCatalogItem } from "@/types";
 import {
@@ -104,21 +105,25 @@ test("native OAuth return attaches freshly enabled tools and first-party names",
     ({
       installations: [],
       items: [
-        {
-          ...item,
-          id: "fiken",
+        CapabilityCatalogItemSchema.parse({
+          kind: "api",
+          id: "api:fiken",
+          name: "Fiken",
+          source: "built_in",
+          surfaceType: "first_party_fiken",
+          tools: [{ kind: "mcp", id: "opengeni" }],
           enabled: true,
-          metadata: { firstPartyMcpTools: ["fiken_list_companies"] },
-        },
+          metadata: { firstPartyMcpTools: ["fiken_companies_list", "fiken_invoices_list"] },
+        }),
       ],
     }) as Awaited<ReturnType<OpenGeniBrowserClient["listCapabilities"]>>;
-  await completeSessionCapabilityOAuth(h.client, "w", "s", "fiken");
+  await completeSessionCapabilityOAuth(h.client, "w", "s", "api:fiken");
   expect(h.updateSessionToolPolicy.mock.calls[0]?.[2]).toMatchObject({
     tools: [
       { kind: "mcp", id: "old" },
-      { kind: "mcp", id: "new" },
+      { kind: "mcp", id: "opengeni" },
     ],
-    firstPartyMcpTools: ["session_pause", "fiken_list_companies"],
+    firstPartyMcpTools: ["session_pause", "fiken_companies_list", "fiken_invoices_list"],
     expectedVersion: 7,
   });
 });

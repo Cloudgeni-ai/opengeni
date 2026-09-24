@@ -337,6 +337,41 @@ describe("deployment contract", () => {
     expect(missingOrigin.missingEnvVars).toContain("OPENGENI_PUBLIC_BASE_URL");
   });
 
+  test("carries the admitted sandbox warm tariff through runtime and Helm generation", () => {
+    const contract = deploymentProfiles["local-kubernetes"];
+    const rate = '{"modal":45,"opensandbox":12}';
+    const defaults = generateRuntimeArtifacts(contract, {}, {});
+    expect(defaults.runtimeEnv).toContain("OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only");
+    expect(defaults.runtimeEnv).toContain("OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON={}");
+    expect(defaults.helmValuesYaml).toContain(
+      'OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON: "{}"',
+    );
+    const priced = generateRuntimeArtifacts(
+      contract,
+      {},
+      {
+        OPENGENI_SANDBOX_WARM_BILLING_MODE: "credits",
+        OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON: rate,
+      },
+    );
+    expect(priced.runtimeEnv).toContain(
+      `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON=${rate}`,
+    );
+    expect(priced.helmValuesYaml).toContain('OPENGENI_SANDBOX_WARM_BILLING_MODE: "credits"');
+    expect(priced.helmValuesYaml).toContain(
+      `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON: ${JSON.stringify(rate)}`,
+    );
+    expect(() =>
+      stackPlanFor(contract, "none", {
+        OPENGENI_SANDBOX_WARM_BILLING_MODE: "credits",
+        OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON: rate,
+      }),
+    ).toThrow("Non-Terraform Kubernetes stack plans do not render sandbox warm billing");
+    expect(stackPlanFor(contract, "none", {}).deployCommands.join("\n")).toContain(
+      "values.local-kubernetes.example.yaml",
+    );
+  });
+
   test("rejects MCP OAuth artifacts for configured product-access deployments", () => {
     const env = { OPENGENI_MCP_OAUTH_ENABLED: "true" };
     expect(() => requiredRuntimeEnvVars(deploymentProfiles["azure-managed"], env)).toThrow(
@@ -1034,6 +1069,12 @@ describe("deployment contract", () => {
       "OPENGENI_PUBLIC_BASE_URL=https://staging.app.opengeni.ai",
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_BILLING_MODE=stripe");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE=usage_only");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES=0",
+    );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_CLIENT_ID=slack-staging-client");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_CLIENT_SECRET=slack-staging-secret");
     expect(artifacts.runtimeEnv).toContain(

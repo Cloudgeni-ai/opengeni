@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
@@ -34,6 +34,286 @@ afterEach(async () => {
 });
 
 describe("BrowserControlClient", () => {
+  test("uses the old observation route only when an active controller lacks target state", async () => {
+    const browserSessionId = randomUUID();
+    const controllerGeneration = "controller-1";
+    const target = browserTarget(browserSessionId, controllerGeneration);
+    const observation = browserObservation(target);
+    const routes: string[] = [];
+    let stateFailure = { code: "resource_not_found", message: "route not found" };
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const path = new URL(request.url).pathname;
+        routes.push(path);
+        expect(request.headers.get("authorization")).toBe(`Bearer ${viewToken}`);
+        if (path.endsWith("/state")) {
+          return failure(404, stateFailure.code, stateFailure.message);
+        }
+        if (path.endsWith("/observation")) return success(observation);
+        return failure(404, "resource_not_found", "route not found");
+      },
+    });
+    try {
+      const placement: BrowserControlPlacementSession = {
+        resolveExposedPort: async () => ({
+          host: "127.0.0.1",
+          port: server.port,
+          tls: false,
+          path: "/",
+          query: "",
+        }),
+      };
+      const browser = new BrowserControlClient(placement, { adminToken }).sessionClient({
+        reference: { browserSessionId, controllerGeneration },
+        controlToken,
+        viewToken,
+      });
+      expect(await browser.targetState(target.id)).toEqual({
+        browserSessionId,
+        controllerGeneration,
+        targetId: target.id,
+        targetGeneration: target.targetGeneration,
+        documentGeneration: target.documentGeneration,
+        frameId: observation.frameId,
+      });
+      expect(routes).toEqual([
+        `/v1/browser-sessions/${browserSessionId}/targets/${target.id}/state`,
+        `/v1/browser-sessions/${browserSessionId}/targets/${target.id}/observation`,
+      ]);
+      for (const failureCase of [
+        { code: "target_not_found", message: "browser target not found" },
+        { code: "resource_not_found", message: "browser session not found" },
+      ]) {
+        stateFailure = failureCase;
+        const priorRouteCount = routes.length;
+        await expect(browser.targetState(target.id)).rejects.toMatchObject({
+          name: "BrowserControlRequestError",
+          status: 404,
+          error: failureCase,
+        });
+        expect(routes.slice(priorRouteCount)).toEqual([
+          `/v1/browser-sessions/${browserSessionId}/targets/${target.id}/state`,
+        ]);
+      }
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("focused reads use view authority and reject foreign or stale responses", async () => {
+    const browserSessionId = randomUUID();
+    const targetId = "tab-1";
+    const state = {
+      browserSessionId,
+      controllerGeneration: "controller-1",
+      targetId,
+      targetGeneration: "target-1",
+      documentGeneration: "document-1",
+      frameId: "frame-1",
+    };
+    const request = {
+      kind: "element" as const,
+      locator: { kind: "css" as const, selector: "#secret" },
+      attributes: ["type" as const],
+      expectedTargetGeneration: state.targetGeneration,
+      expectedDocumentGeneration: state.documentGeneration,
+      expectedFrameId: state.frameId,
+    };
+    let responseState = state;
+    let denyRead = false;
+    const routes: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(httpRequest) {
+        expect(httpRequest.headers.get("authorization")).toBe(`Bearer ${viewToken}`);
+        const url = new URL(httpRequest.url);
+        routes.push(`${httpRequest.method} ${url.pathname}`);
+        if (url.pathname.endsWith("/state")) return success(responseState);
+        expect(await httpRequest.json()).toEqual(request);
+        if (denyRead)
+          return failure(403, "permission_denied", "protected authentication is active");
+        return success({
+          ...responseState,
+          kind: "element",
+          count: 1,
+          text: null,
+          value: null,
+          attributes: {},
+          redacted: "private",
+          truncated: false,
+        });
+      },
+    });
+    try {
+      const placement: BrowserControlPlacementSession = {
+        resolveExposedPort: async () => ({
+          host: "127.0.0.1",
+          port: server.port,
+          tls: false,
+          path: "/",
+          query: "",
+        }),
+      };
+      const browser = new BrowserControlClient(placement, { adminToken }).sessionClient({
+        reference: { browserSessionId, controllerGeneration: state.controllerGeneration },
+        controlToken,
+        viewToken,
+      });
+      expect(await browser.targetState(targetId)).toEqual(state);
+      const result = await browser.readDom(targetId, request);
+      expect(result).toMatchObject({
+        redacted: "private",
+        text: null,
+        value: null,
+        attributes: {},
+      });
+      expect(routes).toEqual([
+        `GET /v1/browser-sessions/${browserSessionId}/targets/${targetId}/state`,
+        `POST /v1/browser-sessions/${browserSessionId}/targets/${targetId}/dom-read`,
+      ]);
+      responseState = { ...state, browserSessionId: randomUUID() };
+      await expect(browser.targetState(targetId)).rejects.toBeInstanceOf(
+        BrowserControlProtocolError,
+      );
+      await expect(browser.readDom(targetId, request)).rejects.toBeInstanceOf(
+        BrowserControlProtocolError,
+      );
+      responseState = { ...state, targetGeneration: "target-2" };
+      await expect(browser.readDom(targetId, request)).rejects.toBeInstanceOf(
+        BrowserControlProtocolError,
+      );
+      denyRead = true;
+      await expect(browser.readDom(targetId, request)).rejects.toBeInstanceOf(
+        BrowserControlRequestError,
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("forwards browser screenshot options through the authenticated image route", async () => {
+    const browserSessionId = randomUUID();
+    const targetId = "tab-1";
+    const routes: string[] = [];
+    const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+    const metadata = {
+      frameId: "frame-1",
+      browserSessionId,
+      controllerGeneration: "controller-1",
+      targetId,
+      targetGeneration: "target-1",
+      documentGeneration: "document-1",
+      sequence: 0,
+      mediaType: "image/jpeg",
+      width: 1,
+      height: 1,
+      deviceScaleFactor: 1,
+      scrollX: 0,
+      scrollY: 0,
+      capturedAt: "2026-09-23T12:00:00.000Z",
+    };
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        expect(request.headers.get("authorization")).toBe(`Bearer ${viewToken}`);
+        routes.push(request.url);
+        return new Response(image.slice().buffer, {
+          headers: {
+            "content-type": "image/jpeg",
+            "x-opengeni-browser-frame": Buffer.from(JSON.stringify(metadata)).toString("base64url"),
+          },
+        });
+      },
+    });
+    try {
+      const session: BrowserControlPlacementSession = {
+        resolveExposedPort: async () => ({
+          host: "127.0.0.1",
+          port: server.port,
+          tls: false,
+          path: "/",
+          query: "",
+        }),
+      };
+      const browser = new BrowserControlClient(session, { adminToken }).sessionClient({
+        reference: { browserSessionId, controllerGeneration: "controller-1" },
+        controlToken,
+        viewToken,
+      });
+      expect((await browser.capture(targetId)).data).toEqual(image);
+      expect((await browser.capture(targetId, { fullPage: true, quality: 80 })).data).toEqual(
+        image,
+      );
+      expect(new URL(routes[0]!).searchParams.toString()).toBe("format=jpeg&quality=55");
+      expect(new URL(routes[1]!).searchParams.toString()).toBe(
+        "format=jpeg&quality=80&fullPage=true",
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("reads a Computer screenshot through the private transport with its 32 MiB bound", async () => {
+    const computerSessionId = randomUUID();
+    const controllerGeneration = "controller-1";
+    const targetId = "screen-1";
+    const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+    const metadata = {
+      frameId: "frame-1",
+      computerSessionId,
+      controllerGeneration,
+      targetId,
+      targetGeneration: "target-1",
+      sequence: 1,
+      mediaType: "image/jpeg",
+      width: 1024,
+      height: 640,
+      capturedAt: "2026-09-23T12:00:00.000Z",
+      sha256: createHash("sha256").update(image).digest("hex"),
+    };
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        expect(request.headers.get("authorization")).toBe(`Bearer ${viewToken}`);
+        expect(new URL(request.url).searchParams.toString()).toBe(
+          "format=jpeg&quality=55&maxWidth=1024&maxHeight=768",
+        );
+        return new Response(image.slice().buffer, {
+          headers: {
+            "content-type": "image/jpeg",
+            "x-opengeni-computer-frame": Buffer.from(JSON.stringify(metadata)).toString(
+              "base64url",
+            ),
+          },
+        });
+      },
+    });
+    const placement = await localPlacement();
+    delete placement.session.resolveExposedPort;
+    try {
+      const session = new BrowserControlClient(placement.session, {
+        adminToken,
+        port: server.port,
+      }).computerSessionClient({
+        reference: { computerSessionId, controllerGeneration },
+        controlToken,
+        viewToken,
+      });
+      const frame = await session.capture(targetId, {
+        format: "jpeg",
+        quality: 55,
+        maxWidth: 1024,
+        maxHeight: 768,
+      });
+      expect(frame.data).toEqual(image);
+      expect(frame.metadata).toEqual(metadata);
+      expect(placement.commands.some((command) => command.includes("curl --disable"))).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("uses a cached controller endpoint without requiring provider exec", async () => {
     const server = Bun.serve({
       port: 0,

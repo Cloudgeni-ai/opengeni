@@ -204,6 +204,7 @@ export type DocumentProjectionArtifactSurfaceProps = Omit<
   "ariaLabel" | "className"
 > & {
   title: string;
+  showHeader?: boolean | undefined;
   subtitle?: ReactNode | undefined;
   busy?: boolean | undefined;
   className?: string | undefined;
@@ -212,6 +213,7 @@ export type DocumentProjectionArtifactSurfaceProps = Omit<
 
 export type DocumentArtifactSurfaceProps = Omit<DocumentEditorProps, "ariaLabel" | "className"> & {
   title: string;
+  showHeader?: boolean | undefined;
   subtitle?: ReactNode | undefined;
   busy?: boolean | undefined;
   className?: string | undefined;
@@ -907,10 +909,27 @@ function DocumentEditorCore({
             </div>
           </div>
         ) : (
-          <div className="relative min-w-full" style={{ height: axis.total }}>
+          <div
+            className="relative min-w-full"
+            style={{
+              height: axis.total,
+              minWidth:
+                layout === "paginated"
+                  ? pages.reduce(
+                      (width, page) =>
+                        Math.max(
+                          width,
+                          page.page.widthPt * POINT_TO_CSS_PIXEL * page.renderScale + 32,
+                        ),
+                      0,
+                    )
+                  : undefined,
+            }}
+          >
             {mountedIndexes.map((pageIndex) => {
               const page = pages[pageIndex]!;
               const top = axis.offsets[pageIndex]!;
+              const pageWidth = page.page.widthPt * POINT_TO_CSS_PIXEL * page.renderScale;
               return (
                 <article
                   key={page.key}
@@ -923,19 +942,23 @@ function DocumentEditorCore({
                   className={cn(
                     "absolute overflow-hidden",
                     layout === "paginated"
-                      ? "left-1/2 -translate-x-1/2 border shadow-og-sm"
+                      ? "border shadow-og-sm"
                       : "left-0 right-0 border-b border-og-border bg-og-surface-1 text-og-fg",
                   )}
                   style={{
                     top,
+                    // Center against the visible viewport, not the shared width
+                    // reserved for the widest section in this document.
+                    left:
+                      layout === "paginated"
+                        ? Math.max(16, (measuredViewport.width - pageWidth) / 2)
+                        : undefined,
                     color: layout === "paginated" ? "#171717" : undefined,
                     backgroundColor: layout === "paginated" ? "#fff" : undefined,
                     borderColor: layout === "paginated" ? "#0000001a" : undefined,
-                    width:
-                      layout === "paginated"
-                        ? page.page.widthPt * POINT_TO_CSS_PIXEL * page.renderScale
-                        : undefined,
+                    width: layout === "paginated" ? pageWidth : undefined,
                     height: page.height,
+                    containerType: layout === "continuous" ? "inline-size" : undefined,
                   }}
                 >
                   <MeasuredPageBody
@@ -998,6 +1021,7 @@ function DocumentEditorCore({
 export function DocumentArtifactSurface({
   document,
   title,
+  showHeader,
   subtitle,
   busy,
   className,
@@ -1008,6 +1032,7 @@ export function DocumentArtifactSurface({
     <ArtifactSurface
       modality="document"
       title={title}
+      showHeader={showHeader}
       subtitle={subtitle}
       busy={busy}
       className={className}
@@ -1026,6 +1051,7 @@ export function DocumentArtifactSurface({
 export function DocumentProjectionArtifactSurface({
   projection,
   title,
+  showHeader,
   subtitle,
   busy,
   className,
@@ -1036,6 +1062,7 @@ export function DocumentProjectionArtifactSurface({
     <ArtifactSurface
       modality="document"
       title={title}
+      showHeader={showHeader}
       subtitle={subtitle}
       busy={busy}
       className={className}
@@ -1382,11 +1409,12 @@ function DocumentTableView({
   viewBlockId: string;
 }) {
   const columnWidths = table.style.columnWidthsPt;
+  const headerColor = tableHeaderTextColor(table.style.headerFill);
   return (
     <div
       data-og-document-block={viewBlockId}
       data-og-block-kind="table"
-      className="overflow-x-auto py-2"
+      className="w-full max-w-full overflow-x-auto py-2"
     >
       <table
         className="w-full border-collapse text-left"
@@ -1422,6 +1450,8 @@ function DocumentTableView({
                     style={{
                       borderColor: table.style.borderColor ?? "#d1d5db",
                       background: header ? (table.style.headerFill ?? "#f3f4f6") : undefined,
+                      // An explicitly colored run still owns its authored text style.
+                      color: header ? headerColor : undefined,
                       padding: `${table.style.cellPaddingPt ?? 6}pt`,
                     }}
                   >
@@ -1441,6 +1471,42 @@ function DocumentTableView({
       </table>
     </div>
   );
+}
+
+/** Choose a theme-independent header color only when both light and dark backdrops allow one. */
+function tableHeaderTextColor(fill: string | undefined): string | undefined {
+  if (!fill) return "#171717";
+  const hex = /^#([\da-f]{3}|[\da-f]{6}|[\da-f]{8})$/i.exec(fill)?.[1];
+  if (!hex) return undefined;
+  const channels =
+    hex.length === 3
+      ? [...hex].map((digit) => Number.parseInt(digit + digit, 16))
+      : [0, 2, 4].map((index) => Number.parseInt(hex.slice(index, index + 2), 16));
+  const alpha = hex.length === 8 ? Number.parseInt(hex.slice(6), 16) / 255 : 1;
+  const luminanceOn = (backdrop: number) => {
+    const linear = channels.map((channel) => {
+      const normalized = (channel * alpha + backdrop * (1 - alpha)) / 255;
+      return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+    });
+    return linear[0]! * 0.2126 + linear[1]! * 0.7152 + linear[2]! * 0.0722;
+  };
+  // A paginated page is white; a continuous page follows its theme. For alpha
+  // fills, choose a fixed foreground only if it contrasts on both extremes.
+  const backdrops = alpha < 1 ? [luminanceOn(0), luminanceOn(255)] : [luminanceOn(255)];
+  const darkTextLuminance = ((23 / 255 + 0.055) / 1.055) ** 2.4;
+  const whiteContrast = Math.min(...backdrops.map((value) => 1.05 / (value + 0.05)));
+  const darkContrast = Math.min(
+    ...backdrops.map(
+      (value) =>
+        (Math.max(value, darkTextLuminance) + 0.05) / (Math.min(value, darkTextLuminance) + 0.05),
+    ),
+  );
+  if (Math.max(whiteContrast, darkContrast) < 4.5) {
+    // Opaque midtones need pure black where the softer #171717 cannot meet
+    // normal-text contrast. Translucent fills inherit the theme's text color.
+    return alpha < 1 ? undefined : "#000";
+  }
+  return whiteContrast > darkContrast ? "#fff" : "#171717";
 }
 
 function ToolbarButton({
@@ -1633,7 +1699,9 @@ function responsiveDocumentPageScale(
 ): number {
   if (viewportWidth <= 0) return 1;
   const naturalWidth = page.widthPt * POINT_TO_CSS_PIXEL;
-  return Math.min(1, Math.max(0.1, (viewportWidth - 32) / naturalWidth));
+  // Below this scale the page text becomes too small to read in a narrow dock.
+  // The viewport can pan horizontally without changing the chosen layout.
+  return Math.min(1, Math.max(0.75, (viewportWidth - 32) / naturalWidth));
 }
 
 function pageContentStyle(
@@ -1642,7 +1710,7 @@ function pageContentStyle(
 ): CSSProperties {
   if (layout === "continuous") {
     return {
-      padding: "24px clamp(24px, 8vw, 96px)",
+      padding: "24px clamp(12px, 4cqw, 72px)",
     };
   }
   return {

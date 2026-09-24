@@ -1604,6 +1604,22 @@ export function stackPlanFor(
 ): DeploymentStackPlan {
   const terraformRoot = terraformRootFor(contract);
   const helmValuesFile = helmValuesFileFor(contract);
+  // Only Terraform-backed stacks generate runtime.env and Helm config from
+  // these inputs. Other Kubernetes profiles intentionally deploy reviewed
+  // values files. Refuse an apparent paid activation that their plan would
+  // otherwise silently drop and leave at the free chart defaults.
+  if (
+    !terraformRoot &&
+    contract.runtime.platform === "kubernetes" &&
+    ((env.OPENGENI_SANDBOX_WARM_BILLING_MODE !== undefined &&
+      env.OPENGENI_SANDBOX_WARM_BILLING_MODE !== "usage_only") ||
+      (env.OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON !== undefined &&
+        env.OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON !== "{}"))
+  ) {
+    throw new Error(
+      "Non-Terraform Kubernetes stack plans do not render sandbox warm billing environment settings; set and review both config.OPENGENI_SANDBOX_WARM_BILLING_MODE and config.OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON in the Helm values file",
+    );
+  }
   const platformDependencies = platformDependencyPlans(contract);
   const requiredSecretKeys = [
     ...requiredRuntimeEnvVars(contract, env).filter((name) => secretLikeRuntimeEnv(name)),
@@ -2527,6 +2543,30 @@ function runtimeEnvValues(
     ),
     valueEnv("OPENGENI_PRODUCT_ACCESS_MODE", contract.product.accessMode),
     valueEnv("OPENGENI_BILLING_MODE", contract.product.billingMode),
+    valueEnv(
+      "OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED",
+      env.OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED ?? "false",
+    ),
+    valueEnv(
+      "OPENGENI_SANDBOX_WARM_BILLING_MODE",
+      env.OPENGENI_SANDBOX_WARM_BILLING_MODE ?? "usage_only",
+    ),
+    valueEnv(
+      "OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON",
+      env.OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON ?? "{}",
+    ),
+    valueEnv(
+      "OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE",
+      env.OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE ?? "usage_only",
+    ),
+    valueEnv(
+      "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT",
+      env.OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT,
+    ),
+    valueEnv(
+      "OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES",
+      env.OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES ?? "0",
+    ),
     valueEnv("OPENGENI_ENTITLEMENTS_MODE", contract.product.entitlementsMode),
     valueEnv("OPENGENI_USAGE_LIMITS_MODE", contract.product.usageLimitsMode),
     valueEnv("OPENGENI_ANALYTICS_ENABLED", env.OPENGENI_ANALYTICS_ENABLED),
@@ -3037,6 +3077,18 @@ function addRuntimeConfigHelmValues(
     env.OPENGENI_DEPLOYMENT_REVISION ?? env.OPENGENI_IMAGE_TAG ?? "latest";
   values["config.OPENGENI_PRODUCT_ACCESS_MODE"] = contract.product.accessMode;
   values["config.OPENGENI_BILLING_MODE"] = contract.product.billingMode;
+  values["config.OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED"] =
+    env.OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED ?? "false";
+  values["config.OPENGENI_SANDBOX_WARM_BILLING_MODE"] =
+    env.OPENGENI_SANDBOX_WARM_BILLING_MODE ?? "usage_only";
+  values["config.OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON"] =
+    env.OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON ?? "{}";
+  values["config.OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE"] =
+    env.OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE ?? "usage_only";
+  values["config.OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT"] =
+    env.OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT ?? "";
+  values["config.OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES"] =
+    env.OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES ?? "0";
   values["config.OPENGENI_ENTITLEMENTS_MODE"] = contract.product.entitlementsMode;
   values["config.OPENGENI_USAGE_LIMITS_MODE"] = contract.product.usageLimitsMode;
   values["config.OPENGENI_API_HOST"] = "0.0.0.0";

@@ -589,13 +589,14 @@ duration-based caps on legitimate run length; fix the pathology instead.
 Recoverable conditions preserve context instead of failing the session, so a
 long run survives them. Retryable provider connectivity, 5xx failures, and typed
 required-MCP connectivity failures resume the same accepted turn after a pacing
-delay. The exact Modal `TaskExecStart` `ClientError` for DNS resolution of a
-`task-*.w.modal.host` command router (with or without `:443`) is also
-recovery-safe after Modal's own ten `UNAVAILABLE` retries: DNS failed before
-the command transport connected, so OpenGeni resumes the same accepted turn
-through the connectivity backoff.
-Generic `TaskExecStart` `UNAVAILABLE`, mixed failure batches, message-only
-lookalikes, any attached HTTP status metadata, and the exact
+delay. Native Modal `TaskExecStart` recovery is safe only when the client-side
+channel-readiness gate fails before issuing the RPC. This also covers resolver
+failure for no-port `task-*.w.modal.host` URLs without trusting DNS-shaped
+server replies. After exact never-started reservation settlement, OpenGeni
+resumes the same accepted turn through bounded connectivity backoff. Retained
+or outcome-unknown routing errors veto recovery even if their causes look safe.
+Generic `TaskExecStart` `UNAVAILABLE`, server-supplied DNS text, mixed failure
+batches, message-only lookalikes, HTTP status metadata, and the exact
 `FAILED_PRECONDITION: Modal Sandbox is shutting down` condition remain
 non-retryable because pre-command safety is not proven. Required first-party
 connect/tools-list also treats a rolling API
@@ -695,6 +696,16 @@ turn identity, classified provider cause, and exact next recovery count into the
 DB-only control lane. That lane accepts the checkpoint only when the identity
 still owns the attempt and the count is exactly one beyond durable turn metadata;
 ambiguous commits and stale replays therefore cannot reset the retry budget.
+An accepted-model definition mismatch during mixed-version rollout uses that
+same finite budget and backoff only for the typed configuration mismatch before
+`turn.started` and before any model request. It reclaims the exact accepted turn
+without refreshing its policy, model, billing source, or credentials. Malformed
+policies, explicit provider/credential/billing identity changes, and other setup
+failures are not admitted to this retry lane. No model
+or tool history is replayed; normal control fencing and physical-attempt
+quiescence still gate successors. Exhaustion reports the fixed definition
+mismatch and configuration-recovery exhaustion, not a transient network failure
+or Temporal's generic activity wrapper.
 Every Steer commits a control wake revision, including when
 the recovering turn has no live attempt. A later coalesced Send cannot downgrade
 it to an ordinary queue signal, so the workflow interrupts the hold and processes
@@ -871,6 +882,20 @@ properties with JavaScript `undefined` values are omitted as wire-absent
 without mutating the SDK object, while undefined array entries and every other
 non-JSON graph fail with the exact offending path. The lossless database codec
 stays strict rather than silently changing arbitrary input.
+
+Pending-call registration retries only PostgreSQL-confirmed deadlock (`40P01`)
+or serialization (`40001`) rollback, with three total attempts and 25/50 ms
+backoff. The worker supplies the root database handle: each attempt re-enters a
+fresh RLS transaction and checks the current turn attempt fence. Passing a
+caller-owned transaction would use savepoints instead and is not this contract.
+A duplicate must match the same tenant/session/turn/call identity, call type,
+and decoded JSON structure with exact keys (no locale collation or Unicode
+normalization); its originating attempt is retained. The duplicate acknowledgement
+is not permission to replay an effect. Known transport failure evidence wins over
+even a nested rollback SQLSTATE and stops retries. No transport/ambiguous-commit
+recovery is supported, and inference/tool execution stays outside this
+database-only boundary. Exhaustion uses the canonical sanitized persistence-error
+projection; the original cause remains internal diagnostic evidence.
 
 A completed pending tool receipt retains two deliberately separate lossless
 projections: the bounded SDK result item that may become model-visible history,
@@ -1606,8 +1631,9 @@ instance is not yet known; inventory read errors skip provider termination.
 The append-only migration is rolling and atomic with an unchanged SQL signature.
 Provision roles after migrating; never weaken RLS or use a broad owner bypass as
 a fallback for an incomplete inventory.
-Boot validation requires the larger configured capture budget and one reaper
-period to fit strictly inside provider-deadline rotation headroom even when the
+Boot validation requires the larger configured capture budget, the legacy
+command stop grace, and two reaper periods to fit strictly inside
+provider-deadline rotation headroom even when the
 default backend is no longer Modal, because historical Modal leases remain
 durable across that rollout. The explicit drain budget is independently
 rejected unless reaper dispatch, the full durable capture, and retry handoff fit
@@ -1868,6 +1894,18 @@ durable wake remain owned by the existing lifecycle. Unknown commands settle
 lost, never successful; a real exit arriving during drain retains its exit code.
 Failed checkpoints retain the provider and command holders for retry. Filesystem
 snapshots preserve neither running processes nor application transaction state.
+
+For scheduled provider-deadline rotation, legacy commands have a separate
+two-minute cancellation grace. A PTY receives one Ctrl-C; non-PTY stdin is not
+a signal, so the worker records cancellation intent without writing Ctrl-C
+bytes. After that grace, exact process holders may be enrolled even without
+exit proof if the owner is closed and quiesced (or its direct request returned),
+and no unrelated holder or mutation admission remains. An outstanding
+reconciliation claim does not grant writer authority or block this deadline
+capture. The provider is terminated only after the current workspace generation
+is captured; remaining commands settle lost. Supervised commands keep their
+separate proof gate. A prior explicit stop remains immutable; deadline intent
+starts its own grace. This path does not apply to idle or operator rotation.
 
 The same containment path covers an explicitly stopping managed command after
 at least five provider-error observations. Its cancellation request and owner
@@ -2494,7 +2532,11 @@ New history rows omit Responses output-only item `status` at persist
 subscription fetch still strips leftover item `status` on the wire for
 already-stored SuperGrok rows and mid-turn SDK items because the
 ChatGPT/Codex input schema 400s `Unknown parameter: 'input[N].status'`. That
-strip is request-local and does not rewrite stored history.
+strip is request-local and does not rewrite stored history. Hosted tool calls
+(web/file search, code interpreter and image generation) retain their actual
+`status` at both boundaries because it is required replay data, not an
+output-only annotation. Missing historical evidence is not invented or
+backfilled by normalization.
 If Codex nevertheless rejects that exact opaque artifact with its recognized
 HTTP-400 encrypted-content family, the current attempt atomically marks only
 the exact active reasoning/compaction row IDs and the current turn's latest

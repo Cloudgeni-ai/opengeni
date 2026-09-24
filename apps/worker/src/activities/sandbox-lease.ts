@@ -39,10 +39,10 @@ import {
   countSandboxLeasesByLiveness,
   deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
-  getBillingBalance,
   listCreditBalancesByAccount,
   listLegacyModalCheckpointSlots,
   listLiveModalSandboxLeaseAttributions,
+  markWarmBillingStopCutoff,
   listMeterableWarmLeases,
   listSandboxViewerForceDrainWorkspaceIds,
   markSandboxCheckpointArtifactDeletePending,
@@ -186,8 +186,7 @@ export type ReapSandboxLeasesResult = {
   skipped: number;
   /** Warm viewer-only leases that accrued warm-seconds this tick (P2.1). */
   metered: number;
-  /** Viewer-only boxes force-drained because their workspace is over a limit
-   *  (0 balance / over the warm cap) — turn-held boxes are never drained (P2.1). */
+  /** Holderless boxes accelerated to draining by the optional warm cap. */
   forceDrained: number;
   /** Provider-side Modal orphan sandboxes terminated by the defensive sweep. */
   modalOrphansTerminated: number;
@@ -256,6 +255,7 @@ export type TerminateBoxFn = (
   diskBackedArchives?: boolean,
   releaseFailedCapture?: () => Promise<void>,
   workspaceId?: string,
+  beforeProviderStop?: () => Promise<void>,
 ) => Promise<boolean | ProviderTerminationOutcome>;
 
 export type SweepModalOrphansFn = (
@@ -482,7 +482,14 @@ export function createSandboxLeaseActivities(
   options: SandboxLeaseActivityOptions = {},
 ) {
   const terminateBox: TerminateBoxFn =
-    options.terminateBox ??
+    (options.terminateBox
+      ? async (...args: Parameters<TerminateBoxFn>) => {
+          // The injected test seam represents the stop itself; the real
+          // implementation invokes this only after capture has succeeded.
+          await args[10]?.();
+          return options.terminateBox!(...args);
+        }
+      : null) ??
     (async (
       settings,
       lease,
@@ -494,6 +501,7 @@ export function createSandboxLeaseActivities(
       diskBackedArchives,
       releaseFailedCapture,
       workspaceId,
+      beforeProviderStop,
     ) =>
       await terminateProviderBox(
         settings,
@@ -508,6 +516,7 @@ export function createSandboxLeaseActivities(
         diskBackedArchives,
         releaseFailedCapture,
         workspaceId,
+        beforeProviderStop,
       ));
   const sweepModalOrphans: SweepModalOrphansFn =
     options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
@@ -735,8 +744,7 @@ export function createSandboxLeaseActivities(
       metered = meterResult.accrued;
       const forceDrainWorkspaceIds = new Set<string>();
       if (
-        settings.billingMode === "stripe" ||
-        settings.usageLimitsMode === "managed" ||
+        settings.sandboxWarmBillingMode === "credits" ||
         settings.sandboxMaxWarmSecondsPerWorkspace > 0
       ) {
         for (const workspaceId of meterResult.workspaceIds) {
@@ -1507,6 +1515,25 @@ async function reconcileTerminalRetainedProcesses(
         }
       }
 
+      if (
+        observation?.status === "deferred" &&
+        process.providerBackend === "modal" &&
+        !process.providerBindingKey &&
+        !process.deadlineCancellationRequestedAt
+      ) {
+        // An unbound historical command cannot be signalled safely. Still
+        // record deadline intent when its lease matches: a failed observer
+        // must not block capture until the provider expires.
+        try {
+          await requestRetainedProcessDeadlineCancellation(db, processScope);
+        } catch (error) {
+          observability.warn("sandbox reaper: legacy deadline cancellation intent failed", {
+            processId: process.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
       if (observation === null) {
         const lease = await readLease(db, process.workspaceId, process.sandboxGroupId).catch(
           () => null,
@@ -1583,11 +1610,19 @@ async function reconcileTerminalRetainedProcesses(
               );
               supervisionMetric("cancellation_intent");
             }
-            observation = await probe(
+            const legacyDeadlineStop =
+              lease!.rotationReason === "provider_deadline" &&
+              !supervised &&
+              !process.deadlineCancellationRequestedAt;
+            const probeOutcome = await probe(
               settings,
               lease!,
               process,
-              claim.ownerState === "background_stopping" ? "cancel" : "observe",
+              (claim.ownerState === "background_stopping" &&
+                !process.deadlineCancellationRequestedAt) ||
+                legacyDeadlineStop
+                ? "cancel"
+                : "observe",
               async (result, chunkId, stream, streamFidelity) => {
                 if (
                   typeof result !== "string" ||
@@ -1610,7 +1645,20 @@ async function reconcileTerminalRetainedProcesses(
                     .catch(() => undefined);
               },
               commandPersistence,
+            ).then(
+              (value) => ({ ok: true as const, value }),
+              (error: unknown) => ({ ok: false as const, error }),
             );
+            // Legacy PTY input reserves Ctrl-C before the cancellation fence.
+            // Non-PTY has no command signal in the Modal SDK: probe it without
+            // injecting Ctrl-C as data, then fence and save after the grace.
+            if (
+              legacyDeadlineStop &&
+              !(await requestRetainedProcessDeadlineCancellation(db, processScope))
+            )
+              throw new Error("Deadline cancellation no longer owns its rotating lease");
+            if (!probeOutcome.ok) throw probeOutcome.error;
+            observation = probeOutcome.value;
             if (supervised) {
               supervisionMetric(
                 (await commandPersistence.loadSupervisionReceipt())
@@ -1899,7 +1947,13 @@ export async function probeRetainedProcessAtProvider(
   if (pending) {
     if (!captureOutput) throw new Error("Pending command output requires its persistence callback");
     await captureRetainedProbeOutput(process.id, pending.result, captureOutput);
-    return classifyRetainedProcessPollResult(pending.result, process.providerSessionId);
+    const pendingObservation = classifyRetainedProcessPollResult(
+      pending.result,
+      process.providerSessionId,
+    );
+    // Capture of a previous page must not consume the only deadline stop
+    // attempt. Terminal proof needs no further provider call.
+    if (mode !== "cancel" || pendingObservation.status === "proved") return pendingObservation;
   }
   const envelopeBackend = (lease.resumeState as { backendId?: unknown }).backendId;
   if (
@@ -1996,6 +2050,7 @@ export async function probeRetainedProcessAtProvider(
   if (typeof session.writeStdin !== "function") {
     return { status: "deferred", reason: "backend_unsupported" };
   }
+  let legacyPty = false;
   if (process.providerBackend === "modal") {
     let liveBinding: Awaited<ReturnType<typeof resolveModalCheckpointProviderBindingForSession>>;
     try {
@@ -2027,6 +2082,7 @@ export async function probeRetainedProcessAtProvider(
     if (!command || !providerPersistence || !session.bindProviderCommand)
       return { status: "deferred", reason: "process_observation_unavailable" };
     session.bindProviderCommand(process.providerSessionId, command, providerPersistence);
+    legacyPty = command.pty === true;
   }
   const capturePage = async (value: unknown): Promise<void> => {
     if (!captureOutput) {
@@ -2062,7 +2118,14 @@ export async function probeRetainedProcessAtProvider(
     result = await withRetainedProcessProbeTimeout(
       session.writeStdin({
         sessionId: process.providerSessionId,
-        chars: mode === "cancel" && !supervisedCancelled ? "\u0003" : "",
+        // Ctrl-C is a signal only through a PTY. For a non-PTY command it is
+        // ordinary stdin data and can corrupt the command's input.
+        chars:
+          mode === "cancel" &&
+          !supervisedCancelled &&
+          (process.providerBackend !== "modal" || legacyPty)
+            ? "\u0003"
+            : "",
         yieldTimeMs: 1_000,
         maxOutputTokens: 2_000,
       }),
@@ -2092,6 +2155,9 @@ export async function probeRetainedProcessAtProvider(
     observation.status === "deferred" &&
     observation.reason === "provider_running" &&
     lease.rotationRequestedAt !== null &&
+    mode !== "cancel" &&
+    !process.cancellationRequestedAt &&
+    legacyPty &&
     !(await providerPersistence
       ?.load()
       .then((command) => command?.kind === "modal-router-v1" && command.supervision))
@@ -2197,19 +2263,25 @@ async function accrueWarmTick(
   }
   await forEachWithConcurrency(leases, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (lease) => {
     try {
-      const rate = sandboxWarmRateMicrosPerSecond(settings, lease.backend);
+      const rate =
+        settings.sandboxWarmBillingMode === "usage_only"
+          ? 0
+          : sandboxWarmRateMicrosPerSecond(settings, lease.backend);
       const result = await accrueWarmSeconds(db, {
         accountId: lease.accountId,
         workspaceId: lease.workspaceId,
         sandboxGroupId: lease.sandboxGroupId,
         expectedEpoch: lease.leaseEpoch,
         warmRateMicrosPerSecond: rate,
+        billingMode: settings.sandboxWarmBillingMode,
         subjectId: lease.sandboxGroupId,
       });
       if (result.accrued) {
         accrued += 1;
       }
-      recordCreditMicros(observability, "usage", result.costMicros);
+      if (result.costMicros > 0 && settings.sandboxWarmBillingMode === "credits") {
+        recordCreditMicros(observability, "usage", result.costMicros);
+      }
     } catch (error) {
       observability.warn("sandbox reaper: warm-seconds accrual failed for lease", {
         workspaceId: lease.workspaceId,
@@ -2325,8 +2397,8 @@ async function refreshSandboxInventoryGauge(
 
 /**
  * The per-workspace warm-cap + force-drain pass (P2.1). For each workspace with a
- * live warm box, under the usage lock: if it is at 0 balance (when a billing /
- * managed mode is on) or over its warm cap, force-drain its VIEWER-ONLY boxes
+ * live warm box, under the usage lock: if it is over its optional warm cap,
+ * accelerate only holderless boxes to draining
  * (guarded turn_holders=0 — a paying turn is never killed). Returns the count of
  * viewer-only boxes force-drained. Per-workspace best-effort.
  */
@@ -2336,8 +2408,7 @@ async function forceDrainOverLimitWorkspaces(
   workspaceIds: Set<string>,
   observability: ActivityServices["observability"],
 ): Promise<number> {
-  const enforceBalance =
-    settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
+  const enforceBalance = false;
   const cap = settings.sandboxMaxWarmSecondsPerWorkspace;
   let forceDrained = 0;
   await forEachWithConcurrency(
@@ -2345,13 +2416,8 @@ async function forceDrainOverLimitWorkspaces(
     SANDBOX_MAINTENANCE_ITEM_CONCURRENCY,
     async (workspaceId) => {
       try {
-        const { accountId } = await rlsContextForWorkspace(db, workspaceId);
-        const balance = enforceBalance
-          ? await getBillingBalance(db, accountId)
-          : ({ balanceMicros: 1 } as { balanceMicros: number });
         const result = await forceDrainOverLimitViewerOnlyBoxes(db, {
           workspaceId,
-          balanceMicros: balance.balanceMicros,
           enforceBalance,
           maxWarmSecondsPerWorkspace: cap,
           idleGraceMs: settings.sandboxIdleGraceMs,
@@ -2939,6 +3005,20 @@ async function terminateDrainableBox(
   ) {
     return false;
   }
+  // Stamp the charge horizon after verified capture and immediately before
+  // provider stop. Capture can fail and release its claim, allowing re-arm.
+  // A retry after stop success cannot charge post-termination wall time.
+  let stopCutoffMarked = false;
+  const beforeProviderStop = async (): Promise<void> => {
+    const cutoff = await markWarmBillingStopCutoff(db, {
+      accountId,
+      workspaceId: row.workspaceId,
+      sandboxGroupId: row.sandboxGroupId,
+      expectedEpoch: row.leaseEpoch,
+    });
+    if (!cutoff) throw new Error("sandbox stop cutoff was fenced before provider termination");
+    stopCutoffMarked = true;
+  };
   const termination: ProviderTerminationOutcome | boolean = providerMissingBeforeCapture
     ? { terminated: true, providerMissingBeforeCapture: true }
     : await terminateBox(
@@ -2962,10 +3042,47 @@ async function terminateDrainableBox(
           });
         },
         row.workspaceId,
+        beforeProviderStop,
       );
   const terminated = typeof termination === "boolean" ? termination : termination.terminated;
   if (!terminated) {
     return false;
+  }
+
+  // Self-hosted/none and an unassigned lease have no provider stop callback;
+  // finish their usage at logical detach without touching customer compute.
+  // A managed instance that was stopped without its callback must fail closed.
+  const providerMissingDuringStop =
+    providerMissingBeforeCapture ||
+    (typeof termination !== "boolean" && termination.providerMissingBeforeCapture);
+  if (!stopCutoffMarked && !providerMissingDuringStop) {
+    if (managedProvider && lease.instanceId) {
+      throw new Error("managed sandbox stopped without a warm usage cutoff");
+    }
+    await beforeProviderStop();
+  }
+
+  // Stop was confirmed but the lease is not cold yet. This final epoch-fenced
+  // tick settles the interval since the last heartbeat/reaper sweep, including
+  // a box drained before its first periodic tick. If settlement fails, keep
+  // the draining receipt for retry instead of silently losing the charge.
+  const finalRate =
+    settings.sandboxWarmBillingMode === "usage_only"
+      ? 0
+      : sandboxWarmRateMicrosPerSecond(settings, backend);
+  if (!providerMissingDuringStop) {
+    const finalTick = await accrueWarmSeconds(db, {
+      accountId,
+      workspaceId: row.workspaceId,
+      sandboxGroupId: row.sandboxGroupId,
+      expectedEpoch: row.leaseEpoch,
+      warmRateMicrosPerSecond: finalRate,
+      billingMode: settings.sandboxWarmBillingMode,
+      finalDrain: true,
+    });
+    if (finalTick.costMicros > 0 && settings.sandboxWarmBillingMode === "credits") {
+      recordCreditMicros(observability, "usage", finalTick.costMicros);
+    }
   }
 
   const providerMissing =
@@ -3097,6 +3214,7 @@ export async function terminateProviderBox(
   diskBackedArchives = false,
   releaseFailedCapture?: () => Promise<void>,
   workspaceId?: string,
+  beforeProviderStop?: () => Promise<void>,
 ): Promise<ProviderTerminationOutcome> {
   const durableBackendId = (lease.resumeBackendId ?? lease.backend) as string;
   const backend = sandboxBackendForSdkBackendId(durableBackendId) ?? durableBackendId;
@@ -3196,6 +3314,7 @@ export async function terminateProviderBox(
       return { terminated: false, providerMissingBeforeCapture: false };
     }
     try {
+      await beforeProviderStop?.();
       await terminateModalById(settings, lease.instanceId);
     } catch (error) {
       if (!isProviderSandboxNotFoundError("modal", error)) {
@@ -3439,6 +3558,7 @@ export async function terminateProviderBox(
       throw new Error(`sandbox backend ${backend} returned no terminable session state`);
     }
     prepareProviderForTeardownAfterCapture(backend, session);
+    await beforeProviderStop?.();
     await terminateManagedSandboxSession(client, sessionState, session);
     return { terminated: true, providerMissingBeforeCapture: false };
   } catch (error) {

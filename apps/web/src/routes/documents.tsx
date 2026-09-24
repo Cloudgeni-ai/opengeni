@@ -151,6 +151,12 @@ export function KnowledgeFilesPanel({ workspaceId, authorityKind }: KnowledgeFil
           data: file,
           scope: destination === "personal" ? "personal" : "workspace",
         });
+        // The original is durable now, even if text preparation is slow or
+        // refuses this file. Show it while later files are still uploading.
+        if (active.current && destination !== "organization")
+          setFiles((prior) =>
+            prior.some((item) => item.id === asset.id) ? prior : [asset, ...prior],
+          );
         const document = await context.client.createKnowledgeDrop(workspaceId, {
           fileId: asset.id,
           authorityKind: destination,
@@ -163,7 +169,8 @@ export function KnowledgeFilesPanel({ workspaceId, authorityKind }: KnowledgeFil
       }
       if (active.current)
         toast.success("Files uploaded", {
-          description: "The files are saved and their text is being prepared for agents to read.",
+          description:
+            "Original files are saved. Text preparation and search indexing may continue in the background.",
         });
     } catch (reason) {
       if (active.current) setError(String(reason));
@@ -264,6 +271,7 @@ export function KnowledgeFilesPanel({ workspaceId, authorityKind }: KnowledgeFil
                     <>
                       <span>{formatBytes(file.sizeBytes)}</span>
                       <span>{file.scope === "personal" ? "Only me" : "Workspace"}</span>
+                      <span>Original saved</span>
                     </>
                   }
                   onClick={() => setSelectedFile(file)}

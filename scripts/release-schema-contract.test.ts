@@ -143,6 +143,24 @@ describe("release schema contract", () => {
     const oauthPendingStates = completeSourceContract.migrations.some(
       (migration) => migration.path === "0507_integration_oauth_pending_states.sql",
     );
+    const deadlineCommandWorkspaceCapture = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0508_deadline_command_workspace_capture.sql",
+    );
+    const verifiedSignupTrialCredits = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0509_verified_signup_trial_credits.sql",
+    );
+    const knowledgeIndexFundingWait = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0510_knowledge_index_funding_wait.sql",
+    );
+    const knowledgeVisibleIndexStatus = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0511_knowledge_visible_index_status.sql",
+    );
+    const insightsFactReadsHashJoin = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0512_insights_fact_reads_hash_join.sql",
+    );
+    const messageForkPrefixCompaction = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0513_message_fork_prefix_compaction.sql",
+    );
     const controlRevisionFrontier = completeSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -376,6 +394,12 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (messageForkPrefixCompaction ? 1 : 0) +
+        (insightsFactReadsHashJoin ? 1 : 0) +
+        (knowledgeVisibleIndexStatus ? 1 : 0) +
+        (knowledgeIndexFundingWait ? 1 : 0) +
+        (verifiedSignupTrialCredits ? 1 : 0) +
+        (deadlineCommandWorkspaceCapture ? 1 : 0) +
         (oauthPendingStates ? 1 : 0) +
         (backgroundCommandText ? 1 : 0) +
         (controlRevisionFrontier ? 1 : 0) +
@@ -639,8 +663,37 @@ describe("release schema contract", () => {
       ...(oauthPendingStates
         ? { latestMigration: "0507_integration_oauth_pending_states.sql" }
         : {}),
+      ...(deadlineCommandWorkspaceCapture
+        ? { latestMigration: "0508_deadline_command_workspace_capture.sql" }
+        : {}),
+      ...(verifiedSignupTrialCredits
+        ? { latestMigration: "0509_verified_signup_trial_credits.sql" }
+        : {}),
+      ...(knowledgeIndexFundingWait
+        ? { latestMigration: "0510_knowledge_index_funding_wait.sql" }
+        : {}),
+      ...(knowledgeVisibleIndexStatus
+        ? { latestMigration: "0511_knowledge_visible_index_status.sql" }
+        : {}),
+      ...(insightsFactReadsHashJoin
+        ? { latestMigration: "0512_insights_fact_reads_hash_join.sql" }
+        : {}),
+      ...(messageForkPrefixCompaction
+        ? { latestMigration: "0513_message_fork_prefix_compaction.sql" }
+        : {}),
     });
-    expect(completeSourceContract.migrations.at(oauthPendingStates ? -2 : -1)).toMatchObject({
+    expect(
+      completeSourceContract.migrations.at(
+        -1 -
+          Number(oauthPendingStates) -
+          Number(deadlineCommandWorkspaceCapture) -
+          Number(verifiedSignupTrialCredits) -
+          Number(knowledgeIndexFundingWait) -
+          Number(knowledgeVisibleIndexStatus) -
+          Number(insightsFactReadsHashJoin) -
+          Number(messageForkPrefixCompaction),
+      ),
+    ).toMatchObject({
       path: backgroundCommandText
         ? "0506_background_command_text.sql"
         : controlRevisionFrontier
@@ -750,8 +803,84 @@ describe("release schema contract", () => {
                                     : "rolling",
     });
     if (oauthPendingStates) {
-      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+      expect(
+        completeSourceContract.migrations.at(
+          -1 -
+            Number(deadlineCommandWorkspaceCapture) -
+            Number(verifiedSignupTrialCredits) -
+            Number(knowledgeIndexFundingWait) -
+            Number(knowledgeVisibleIndexStatus) -
+            Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction),
+        ),
+      ).toMatchObject({
         path: "0507_integration_oauth_pending_states.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (deadlineCommandWorkspaceCapture) {
+      expect(
+        completeSourceContract.migrations.at(
+          -1 -
+            Number(verifiedSignupTrialCredits) -
+            Number(knowledgeIndexFundingWait) -
+            Number(knowledgeVisibleIndexStatus) -
+            Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction),
+        ),
+      ).toMatchObject({
+        path: "0508_deadline_command_workspace_capture.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (verifiedSignupTrialCredits) {
+      expect(
+        completeSourceContract.migrations.at(
+          -1 -
+            Number(knowledgeIndexFundingWait) -
+            Number(knowledgeVisibleIndexStatus) -
+            Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction),
+        ),
+      ).toMatchObject({
+        path: "0509_verified_signup_trial_credits.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (knowledgeIndexFundingWait) {
+      expect(
+        completeSourceContract.migrations.at(
+          -1 -
+            Number(knowledgeVisibleIndexStatus) -
+            Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction),
+        ),
+      ).toMatchObject({
+        path: "0510_knowledge_index_funding_wait.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (knowledgeVisibleIndexStatus) {
+      expect(
+        completeSourceContract.migrations.at(
+          -1 - Number(insightsFactReadsHashJoin) - Number(messageForkPrefixCompaction),
+        ),
+      ).toMatchObject({
+        path: "0511_knowledge_visible_index_status.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (insightsFactReadsHashJoin) {
+      expect(
+        completeSourceContract.migrations.at(-1 - Number(messageForkPrefixCompaction)),
+      ).toMatchObject({
+        path: "0512_insights_fact_reads_hash_join.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (messageForkPrefixCompaction) {
+      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+        path: "0513_message_fork_prefix_compaction.sql",
         deploymentMode: "rolling",
       });
     }
@@ -1854,6 +1983,24 @@ describe("release schema contract", () => {
     const oauthPendingStates = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0507_integration_oauth_pending_states.sql",
     );
+    const deadlineCommandWorkspaceCapture = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0508_deadline_command_workspace_capture.sql",
+    );
+    const verifiedSignupTrialCredits = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0509_verified_signup_trial_credits.sql",
+    );
+    const knowledgeIndexFundingWait = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0510_knowledge_index_funding_wait.sql",
+    );
+    const knowledgeVisibleIndexStatus = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0511_knowledge_visible_index_status.sql",
+    );
+    const insightsFactReadsHashJoin = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0512_insights_fact_reads_hash_join.sql",
+    );
+    const messageForkPrefixCompaction = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0513_message_fork_prefix_compaction.sql",
+    );
     const controlRevisionFrontier = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -2472,6 +2619,12 @@ describe("release schema contract", () => {
       "0505_workspace_control_revision_frontier.sql",
       "0506_background_command_text.sql",
       "0507_integration_oauth_pending_states.sql",
+      "0508_deadline_command_workspace_capture.sql",
+      "0509_verified_signup_trial_credits.sql",
+      "0510_knowledge_index_funding_wait.sql",
+      "0511_knowledge_visible_index_status.sql",
+      "0512_insights_fact_reads_hash_join.sql",
+      "0513_message_fork_prefix_compaction.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -3030,8 +3183,44 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0507_integration_oauth_pending_states.sql",
       };
+    if (deadlineCommandWorkspaceCapture)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0508_deadline_command_workspace_capture.sql",
+      };
+    if (verifiedSignupTrialCredits)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0509_verified_signup_trial_credits.sql",
+      };
+    if (knowledgeIndexFundingWait)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0510_knowledge_index_funding_wait.sql",
+      };
+    if (knowledgeVisibleIndexStatus)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0511_knowledge_visible_index_status.sql",
+      };
+    if (insightsFactReadsHashJoin)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0512_insights_fact_reads_hash_join.sql",
+      };
+    if (messageForkPrefixCompaction)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0513_message_fork_prefix_compaction.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (messageForkPrefixCompaction ? 1 : 0) +
+        (insightsFactReadsHashJoin ? 1 : 0) +
+        (knowledgeVisibleIndexStatus ? 1 : 0) +
+        (knowledgeIndexFundingWait ? 1 : 0) +
+        (verifiedSignupTrialCredits ? 1 : 0) +
+        (deadlineCommandWorkspaceCapture ? 1 : 0) +
         (oauthPendingStates ? 1 : 0) +
         (backgroundCommandText ? 1 : 0) +
         (controlRevisionFrontier ? 1 : 0) +
@@ -3496,6 +3685,24 @@ describe("release schema contract", () => {
       ...(backgroundCommandText ? { latestMigration: "0506_background_command_text.sql" } : {}),
       ...(oauthPendingStates
         ? { latestMigration: "0507_integration_oauth_pending_states.sql" }
+        : {}),
+      ...(deadlineCommandWorkspaceCapture
+        ? { latestMigration: "0508_deadline_command_workspace_capture.sql" }
+        : {}),
+      ...(verifiedSignupTrialCredits
+        ? { latestMigration: "0509_verified_signup_trial_credits.sql" }
+        : {}),
+      ...(knowledgeIndexFundingWait
+        ? { latestMigration: "0510_knowledge_index_funding_wait.sql" }
+        : {}),
+      ...(knowledgeVisibleIndexStatus
+        ? { latestMigration: "0511_knowledge_visible_index_status.sql" }
+        : {}),
+      ...(insightsFactReadsHashJoin
+        ? { latestMigration: "0512_insights_fact_reads_hash_join.sql" }
+        : {}),
+      ...(messageForkPrefixCompaction
+        ? { latestMigration: "0513_message_fork_prefix_compaction.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(

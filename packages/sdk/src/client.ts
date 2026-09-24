@@ -68,6 +68,7 @@ import {
 import {
   OpenGeniInteractionClient,
   decodeComputerFrameMetadataHeader,
+  parseBrowserFrameMetadata,
   type AuthRun,
   type AuthRunListOptions,
   type AuthRunListResponse,
@@ -77,8 +78,11 @@ import {
   type AttachedBrowserDeviceListResponse,
   type BrowserActionReceipt,
   type BrowserActionRequest,
+  type BrowserScreenshotOptions,
   type BrowserClipboard,
   type BrowserDiagnosticBatch,
+  type BrowserDomReadRequest,
+  type BrowserDomReadResponse,
   type BrowserDiagnosticsOptions,
   type BrowserDownload,
   type BrowserDownloadListResponse,
@@ -89,6 +93,8 @@ import {
   type BrowserIdentityListResponse,
   type BrowserIdentityMutationResponse,
   type BrowserObservation,
+  type BrowserFrame,
+  type BrowserFrameMetadata,
   type BrowserOpenTargetRequest,
   type BrowserSession,
   type BrowserSessionAttachment,
@@ -97,6 +103,7 @@ import {
   type BrowserSessionLifecycleRequest,
   type BrowserSessionListResponse,
   type BrowserSessionMutationResponse,
+  type BrowserTargetState,
   type BrowserTargetListResponse,
   type BrowserRevisionListResponse,
   type ComputerActionReceipt,
@@ -3926,6 +3933,73 @@ export class OpenGeniClient {
     );
   }
 
+  async captureBrowserTarget(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+    captureOptions: BrowserScreenshotOptions = {},
+  ): Promise<BrowserFrame> {
+    const query = new URLSearchParams();
+    if (captureOptions.fullPage !== undefined) {
+      if (typeof captureOptions.fullPage !== "boolean") {
+        throw new TypeError("browser screenshot fullPage must be a boolean");
+      }
+      query.set("fullPage", String(captureOptions.fullPage));
+    }
+    if (captureOptions.format !== undefined) {
+      if (captureOptions.format !== "jpeg" && captureOptions.format !== "png") {
+        throw new TypeError("browser screenshot format must be jpeg or png");
+      }
+      query.set("format", captureOptions.format);
+    }
+    if (captureOptions.quality !== undefined) {
+      if (
+        !Number.isSafeInteger(captureOptions.quality) ||
+        captureOptions.quality < 1 ||
+        captureOptions.quality > 100
+      ) {
+        throw new RangeError("browser screenshot quality must be an integer from 1 to 100");
+      }
+      query.set("quality", String(captureOptions.quality));
+    }
+    const suffix = query.size > 0 ? `?${query}` : "";
+    const response = await this.requestResponse(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/${encodeURIComponent(targetId)}/screenshot${suffix}`,
+      {},
+      options,
+    );
+    const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+    const header = response.headers.get("x-opengeni-browser-frame");
+    if (
+      (mediaType !== "image/jpeg" && mediaType !== "image/png") ||
+      !header ||
+      header.length > 64 * 1024
+    ) {
+      await cancelResponseBody(response, "browser frame metadata is invalid");
+      throw new OpenGeniApiError(502, "browser frame metadata is invalid");
+    }
+    let metadata: BrowserFrameMetadata;
+    try {
+      metadata = parseBrowserFrameMetadata(
+        JSON.parse(atob(header.replace(/-/gu, "+").replace(/_/gu, "/"))),
+      );
+    } catch {
+      await cancelResponseBody(response, "browser frame metadata is invalid");
+      throw new OpenGeniApiError(502, "browser frame metadata is invalid");
+    }
+    const data = await readBoundedResponseBytes(response, 24 * 1024 * 1024, null);
+    if (
+      metadata.browserSessionId !== browserSessionId ||
+      metadata.targetId !== targetId ||
+      metadata.mediaType !== mediaType
+    ) {
+      throw new OpenGeniApiError(502, "browser frame evidence does not match its request");
+    }
+    return { ...metadata, data };
+  }
+
   async closeBrowserTarget(
     workspaceId: string,
     browserSessionId: string,
@@ -3954,6 +4028,52 @@ export class OpenGeniClient {
       {},
       options,
     );
+  }
+
+  async getBrowserTargetState(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserTargetState> {
+    const state = await this.requestJson<BrowserTargetState>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/${encodeURIComponent(targetId)}/state`,
+      undefined,
+      {},
+      options,
+    );
+    if (state.browserSessionId !== browserSessionId || state.targetId !== targetId) {
+      throw new OpenGeniApiError(502, "browser target state belongs to another binding");
+    }
+    return state;
+  }
+
+  async readBrowserDom(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    request: BrowserDomReadRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserDomReadResponse> {
+    const result = await this.requestJson<BrowserDomReadResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/${encodeURIComponent(targetId)}/dom-read`,
+      request,
+      {},
+      options,
+    );
+    if (
+      result.browserSessionId !== browserSessionId ||
+      result.targetId !== targetId ||
+      result.kind !== request.kind ||
+      result.targetGeneration !== request.expectedTargetGeneration ||
+      result.documentGeneration !== request.expectedDocumentGeneration ||
+      result.frameId !== request.expectedFrameId
+    ) {
+      throw new OpenGeniApiError(502, "browser DOM read belongs to another binding");
+    }
+    return result;
   }
 
   async actInBrowser(
@@ -6247,9 +6367,12 @@ export class OpenGeniClient {
   ): Promise<RetainedScreenshotDownload> {
     const metadata = await this.getSessionRetainedArtifact(workspaceId, sessionId, artifactId);
     if (!metadata.available) return { metadata, bytes: null };
+    const supportedScreenshot =
+      (metadata.kind === "computer_screenshot" && metadata.contentType === "image/png") ||
+      (metadata.kind === "browser_screenshot" &&
+        ["image/png", "image/jpeg", "image/webp"].includes(metadata.contentType));
     if (
-      metadata.kind !== "computer_screenshot" ||
-      metadata.contentType !== "image/png" ||
+      !supportedScreenshot ||
       !metadata.dimensions ||
       metadata.originalBytes <= 0 ||
       metadata.originalBytes > COMPUTER_SCREENSHOT_MAX_BYTES

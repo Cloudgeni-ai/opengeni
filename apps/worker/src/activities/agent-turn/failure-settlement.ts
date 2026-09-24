@@ -16,14 +16,14 @@ import {
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { maxTurnsExceededRunState } from "@opengeni/runtime";
-import { CancelledFailure } from "@temporalio/activity";
+import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import {
   authoritativeCodexCapacityResetAt,
   classifyCodexPin,
   selectCodexCredentialLeaseForTurn,
   type CodexRotationStrategy,
 } from "../codex-rotation";
-import type { Settings } from "@opengeni/config";
+import { TurnExecutionPolicyDefinitionMismatchError, type Settings } from "@opengeni/config";
 import {
   classifyCodexEncryptedArtifactRejection,
   classifyCodexUsageLimitError,
@@ -1499,10 +1499,28 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // truth, recover this SAME accepted turn, then let the workflow re-claim
   // it after a pacing delay. This is independent of goal state and never
   // relies on a synthetic continuation prompt.
-  let failure = agentRunFailurePayload(error, {
-    isCodexTurn: billingState.isCodexTurn,
-  }) as ReturnType<typeof agentRunFailurePayload>;
-  if (failure.retryable && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
+  // A rolling-deployment definition mismatch is a separate configuration
+  // class: only the exact typed setup error can use this checkpoint before
+  // eventing exists. No generic setup/credential failure gains retry authority.
+  const earlyDefinitionMismatch =
+    error instanceof TurnExecutionPolicyDefinitionMismatchError &&
+    !attempt.modelRequestStarted &&
+    !eventing.turnStartedPublished &&
+    !!attempt.turnId &&
+    !!attempt.triggerEventId &&
+    attempt.executionGeneration > 0;
+  let failure = (
+    earlyDefinitionMismatch
+      ? { error: error.message, code: error.code, retryable: true }
+      : agentRunFailurePayload(error, {
+          isCodexTurn: billingState.isCodexTurn,
+        })
+  ) as ReturnType<typeof agentRunFailurePayload>;
+  if (
+    attempt.turnId &&
+    (earlyDefinitionMismatch ||
+      (failure.retryable && eventing.publish && eventing.turnStartedPublished))
+  ) {
     const nextProviderRecoveryCount = attempt.providerRecoveryCount + 1;
     const recoveryResult = providerRecoveryResult({
       failureCode: failure.code,
@@ -1511,8 +1529,10 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     });
     try {
       if (recoveryResult.status === "recovering") {
-        await flushRuntimeBatcher();
-        await historySink.reconcileConversationTruth({ requireDurable: true });
+        if (!earlyDefinitionMismatch) {
+          await flushRuntimeBatcher();
+          await historySink.reconcileConversationTruth({ requireDurable: true });
+        }
         const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
           sessionId: input.sessionId,
           turnId: attempt.turnId,
@@ -1540,6 +1560,18 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         return claimedResult(recoveryResult);
       }
       failure = providerRecoveryExhaustedFailure(failure, recoveryResult);
+      if (earlyDefinitionMismatch) {
+        // Setup has no eventing sink yet. Carry only the fixed, safe diagnostic
+        // through Temporal into exact-attempt workflow failure settlement.
+        control.activityStatus = "failed";
+        control.turnMetricOutcome = "failed";
+        control.activityError = error;
+        throw ApplicationFailure.create({
+          message: `${error.message}. Automatic same-turn configuration recovery exhausted after ${recoveryResult.providerRecoveryCount} retries.`,
+          type: "TurnExecutionPolicyDefinitionMismatchError",
+          nonRetryable: true,
+        });
+      }
     } catch (recoveryError) {
       const escaped =
         recoveryResult.status === "recovering"

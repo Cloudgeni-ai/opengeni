@@ -22,6 +22,7 @@ import {
   hasGitCredentialRepositorySelection,
   hasGitHubRepositorySelection,
   sandboxLifecycleTransitionWaitMs,
+  sandboxWarmRateMicrosPerSecond,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
@@ -42,6 +43,7 @@ import {
   SandboxImageConflictError,
   SandboxProviderReadLockUnavailableError,
   SandboxRigConflictError,
+  SandboxPaidComputeAdmissionError,
   withSandboxProviderReadLock,
   type Database,
   type LeaseSnapshot,
@@ -823,6 +825,10 @@ async function withChannelAOperation<T>(
       holderId,
       subjectId: session.id,
       backend: session.sandboxBackend,
+      warmBilling: {
+        mode: settings.sandboxWarmBillingMode,
+        rateMicrosPerSecond: sandboxWarmRateMicrosPerSecond(settings, session.sandboxBackend),
+      },
       os: session.sandboxOs,
       image: sandboxRuntime.image,
       rigVersionId: session.rigVersionId,
@@ -1210,6 +1216,8 @@ async function withChannelAOperation<T>(
  *  already-HTTPException unchanged. */
 export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unknown {
   if (error instanceof HTTPException) return error;
+  if (error instanceof SandboxPaidComputeAdmissionError)
+    return new HTTPException(402, { message: error.message, cause: error });
   if (isChannelARequestCancellation(error, waitSignal))
     return new HTTPException(499 as never, {
       message: "request cancelled",

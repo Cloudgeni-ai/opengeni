@@ -18,6 +18,8 @@ import {
   prepareKnowledgeFile,
   prepareKnowledgeSave,
   searchKnowledgeEntries,
+  KnowledgeVectorFundingError,
+  KnowledgeVectorQueryRejectedError,
   hasPermission,
   knowledgeContextForAccess,
   requireAccessGrantAuthorization,
@@ -47,6 +49,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
+import { ApiHttpError } from "../http/api-error";
 
 const ReadSettings = z
   .object({
@@ -63,6 +66,18 @@ const WriteSettings = ReadSettings.extend({
 const Id = z.uuid();
 function knowledgeHttpError(error: unknown): never {
   if (error instanceof HTTPException) throw error;
+  if (error instanceof KnowledgeVectorFundingError)
+    throw new ApiHttpError(402, {
+      code: "payment_required",
+      message: error.message,
+      details: { code: error.code, keywordAvailable: true },
+    });
+  if (error instanceof KnowledgeVectorQueryRejectedError)
+    throw new ApiHttpError(error.code === "quota" ? 429 : 422, {
+      code: error.code === "quota" ? "limit_exceeded" : "validation_failed",
+      message: error.message,
+      details: { code: error.code, keywordAvailable: true },
+    });
   if (error instanceof z.ZodError)
     throw new HTTPException(422, {
       message: error.issues[0]?.message ?? "Invalid Knowledge request",
@@ -216,6 +231,8 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
           context,
           KnowledgeSavePreparationRequest.parse(await c.req.json()),
           () => deps.getDocumentServices().embedder,
+          undefined,
+          deps.settings,
         ),
       );
     }),
@@ -228,6 +245,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
           context,
           KnowledgeEntryListRequest.parse(await c.req.json()),
           () => deps.getDocumentServices().embedder,
+          deps.settings,
         ),
       ),
     ),
@@ -270,6 +288,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
             ...(query.limit ? { limit: Number(query.limit) } : {}),
           }),
           () => deps.getDocumentServices().embedder,
+          deps.settings,
         ),
       );
     }),

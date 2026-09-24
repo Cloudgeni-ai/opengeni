@@ -51,7 +51,7 @@ export function EditableArtifactRoute({
   fromSession?: string | undefined;
   embedded?: boolean;
 }>) {
-  if (embedded) return <EditableArtifactContent {...params} />;
+  if (embedded) return <EditableArtifactContent {...params} embedded />;
   return (
     <ArtifactSessionPage
       workspaceId={params.workspaceId}
@@ -66,7 +66,8 @@ export function EditableArtifactRoute({
 function EditableArtifactContent({
   workspaceId,
   artifactId,
-}: Readonly<{ workspaceId: string; artifactId: string }>) {
+  embedded = false,
+}: Readonly<{ workspaceId: string; artifactId: string; embedded?: boolean }>) {
   const context = useAppContext();
   const [loadEpoch, setLoadEpoch] = useState(0);
   const [state, setState] = useState<LoadState>({ kind: "loading" });
@@ -152,9 +153,9 @@ function EditableArtifactContent({
             ...(insecureLoopback ? { allowInsecureDevelopmentTransport: true } : {}),
           },
         }}
-        document={{ title: artifact.title }}
-        spreadsheet={{ title: artifact.title }}
-        presentation={{ title: artifact.title }}
+        document={{ title: artifact.title, showHeader: !embedded }}
+        spreadsheet={{ title: artifact.title, showHeader: !embedded }}
+        presentation={{ title: artifact.title, showHeader: !embedded }}
       />
     </div>
   );

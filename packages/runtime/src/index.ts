@@ -262,6 +262,7 @@ import {
 } from "./context-compaction";
 import {
   createSandboxClient,
+  isModalTaskExecStartPreDispatchUnavailableError,
   isRoutingMutationOutcomeUnknownError,
   repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
@@ -3630,6 +3631,14 @@ function buildAgentCapabilitiesFromComposition(
   const caps: ReturnType<typeof Capabilities.default> = [
     filesystemCapability,
     shell({
+      // The SDK normally renders every shell error into model-facing text.
+      // Preserve that behavior except for client-side, pre-dispatch Modal
+      // readiness proof, which reaches bounded same-turn recovery.
+      execCommandErrorFunction: (_context, error) => {
+        if (isModalTaskExecStartPreDispatchUnavailableError(error)) throw error;
+        const details = error instanceof Error ? error.toString() : String(error);
+        return `An error occurred while running the tool. Please try again. Error: ${details}`;
+      },
       ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }),
     }),
   ];

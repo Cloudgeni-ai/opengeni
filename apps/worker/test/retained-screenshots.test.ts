@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { RetainedArtifactMetadata } from "@opengeni/contracts";
 import {
   collectRetainedScreenshotRunStateReceipts,
+  compactRetainedScreenshotHistory,
   compactRetainedScreenshotRunState,
   retainedScreenshotIdentity,
   sdkEventContainsInlineImage,
@@ -300,5 +301,104 @@ describe("retained computer screenshots", () => {
     expect(compacted).not.toContain("objectKey");
     expect(collectRetainedScreenshotRunStateReceipts(compacted).get("call-1")).toEqual(artifact);
     expect(collectRetainedScreenshotRunStateReceipts(compacted).get("call-2")).toEqual(artifact);
+  });
+
+  test("browser screenshot identity is distinct and its MCP image is replaced before history persistence", () => {
+    const identityInput = {
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      turnId: "22222222-2222-4222-8222-222222222222",
+      attemptId: "33333333-3333-4333-8333-333333333333",
+      toolCallId: "browser-call",
+      toolOutputId: "browser-output",
+    };
+    const browserIdentity = retainedScreenshotIdentity({
+      ...identityInput,
+      kind: "browser_screenshot",
+    });
+    expect(browserIdentity.artifactId).not.toBe(
+      retainedScreenshotIdentity(identityInput).artifactId,
+    );
+    expect(
+      unavailableRetainedSessionImage({
+        ...identityInput,
+        kind: "browser_screenshot",
+        reason: "pending",
+      }).artifactId,
+    ).toBe(browserIdentity.artifactId);
+
+    const artifact = {
+      available: true,
+      artifactId: browserIdentity.artifactId,
+      kind: "browser_screenshot",
+      contentType: "image/png",
+      originalBytes: PNG.byteLength,
+      sha256: "a".repeat(64),
+      retainedAt: "2026-07-31T00:00:00.000Z",
+      dimensions: { width: 1, height: 1 },
+      retention: {
+        policy: "session_screenshot",
+        expiresAt: "2026-08-30T00:00:00.000Z",
+      },
+      retrieval: {
+        method: "GET",
+        path: `/v1/workspaces/${identityInput.sessionId}/sessions/${identityInput.sessionId}/artifacts/${browserIdentity.artifactId}/content`,
+        acceptRanges: "bytes",
+        maxRangeBytes: 1024 * 1024,
+      },
+    } as const satisfies RetainedArtifactMetadata;
+    const history = [
+      {
+        callId: identityInput.toolCallId,
+        output: {
+          structuredContent: { kind: "browser_screenshot", frameId: "frame-1" },
+          content: [
+            { type: "text", text: "Browser screenshot" },
+            { type: "image", data: Buffer.from(PNG).toString("base64"), mimeType: "image/png" },
+          ],
+        },
+      },
+    ];
+    const compacted = compactRetainedScreenshotHistory(
+      history,
+      new Map([[identityInput.toolCallId, artifact]]),
+    );
+    expect(JSON.stringify(compacted)).not.toContain(Buffer.from(PNG).toString("base64"));
+    expect(JSON.stringify(compacted)).toContain("browser_screenshot");
+    expect(
+      collectRetainedScreenshotRunStateReceipts(JSON.stringify({ originalInput: compacted })).get(
+        identityInput.toolCallId,
+      ),
+    ).toEqual(artifact);
+  });
+
+  test("an undecodable browser image block is still stripped from durable history", () => {
+    const event = {
+      type: "run_item_stream_event",
+      item: {
+        id: "bad-browser-output",
+        type: "tool_call_output_item",
+        rawItem: { callId: "bad-browser-call" },
+        output: {
+          content: [{ type: "image", data: "unsafe-inline-data", mimeType: "image/png" }],
+        },
+      },
+    };
+    expect(sdkEventContainsInlineImage(event)).toBe(true);
+    expect(typedScreenshotFromSdkEvent(event)).toBeNull();
+    const receipt = unavailableRetainedSessionImage({
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      turnId: "22222222-2222-4222-8222-222222222222",
+      attemptId: "33333333-3333-4333-8333-333333333333",
+      toolCallId: "bad-browser-call",
+      toolOutputId: "bad-browser-output",
+      kind: "browser_screenshot",
+      reason: "unsupported",
+    });
+    const compacted = compactRetainedScreenshotHistory(
+      [{ callId: "bad-browser-call", output: event.item.output }],
+      new Map([["bad-browser-call", receipt]]),
+    );
+    expect(JSON.stringify(compacted)).not.toContain("unsafe-inline-data");
+    expect(JSON.stringify(compacted)).toContain("unsupported");
   });
 });

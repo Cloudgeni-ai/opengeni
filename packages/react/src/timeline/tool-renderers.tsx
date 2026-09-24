@@ -772,21 +772,73 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
   );
 }
 
-function RetainedSessionImageDisclosure({
-  artifact,
-  load,
-  title,
-  caption,
-  noun,
-  icon,
-  lightboxLabel,
-  batched,
-  failed,
-  cancelled,
-  filename,
-  defaultOpen,
-  children,
-}: {
+/** Browser tool images share authenticated screenshot loading, with their own media kind. */
+function BrowserScreenshotRenderer(props: ToolRendererProps) {
+  const { item, loadRetainedScreenshot } = props;
+  const leaf = mcpToolLeaf(item.name);
+  const title =
+    leaf === "browser_observe"
+      ? "Observed browser"
+      : leaf === "browser_act"
+        ? "Used browser"
+        : "Browser screenshot";
+  const retained = retainedScreenshotMetadata(item.output);
+  const isFailed = item.status === "failed";
+  const isCancelled = item.status === "cancelled";
+
+  if (item.status === "running" && leaf === "browser_screenshot") {
+    return (
+      <ActivityDisclosure
+        icon={<CameraIcon className={ICON_SIZE} />}
+        iconTone="running"
+        title={title}
+        running
+        media={<MediaSkeleton />}
+      >
+        <BodyNote>capturing frame…</BodyNote>
+      </ActivityDisclosure>
+    );
+  }
+
+  if (!retained) return <GenericRenderer {...props} />;
+  if (!retained.available) {
+    const state =
+      retained.reason === "expired" || retained.reason === "deleted"
+        ? retained.reason
+        : "unavailable";
+    return (
+      <ActivityDisclosure
+        icon={<CameraOffIcon className={ICON_SIZE} />}
+        iconTone={isFailed ? "failed" : "muted"}
+        title={`${title} · ${state}`}
+        failed={isFailed}
+        cancelled={isCancelled}
+        preview={`screenshot ${state}`}
+        media={<MediaEmpty />}
+      >
+        <BodyNote tone={isFailed ? "error" : undefined}>
+          Screenshot {state}: {retained.reason.replaceAll("_", " ")}.
+        </BodyNote>
+      </ActivityDisclosure>
+    );
+  }
+  return (
+    <RetainedSessionImageDisclosure
+      artifact={retained}
+      load={loadRetainedScreenshot}
+      title={title}
+      caption={title}
+      noun="screenshot"
+      icon={<CameraIcon className={ICON_SIZE} />}
+      lightboxLabel="Browser screenshot"
+      batched={null}
+      failed={isFailed}
+      cancelled={isCancelled}
+    />
+  );
+}
+
+type RetainedSessionImageDisclosureProps = {
   artifact: RetainedArtifactReference;
   load: ToolRendererProps["loadRetainedArtifact"];
   title: string;
@@ -800,7 +852,41 @@ function RetainedSessionImageDisclosure({
   filename?: string;
   defaultOpen?: boolean;
   children?: ReactNode;
-}) {
+};
+
+function RetainedSessionImageDisclosure(props: RetainedSessionImageDisclosureProps) {
+  const compact = useContext(CompactActivityContext);
+  // The rolling progress label has no screenshot loader by design. Do not run
+  // the full image hook there: it would report the missing loader as an error.
+  if (compact) {
+    return (
+      <ActivityDisclosure
+        icon={props.icon}
+        title={props.title}
+        compactPreview={null}
+        failed={props.failed}
+        cancelled={props.cancelled}
+      />
+    );
+  }
+  return <LoadedRetainedSessionImageDisclosure {...props} />;
+}
+
+function LoadedRetainedSessionImageDisclosure({
+  artifact,
+  load,
+  title,
+  caption,
+  noun,
+  icon,
+  lightboxLabel,
+  batched,
+  failed,
+  cancelled,
+  filename,
+  defaultOpen,
+  children,
+}: RetainedSessionImageDisclosureProps) {
   const state = useRetainedImageObjectUrl(artifact, load);
   const downloadFilename = filename ?? retainedImageFilename(artifact);
 
@@ -2401,6 +2487,9 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "name", name: "apply_patch_call", render: ApplyPatchRenderer },
   { match: "name", name: "apply_patch", render: ApplyPatchRenderer },
   { match: "name", name: "computer_call", render: ComputerCallRenderer },
+  { match: "name", name: "browser_screenshot", render: BrowserScreenshotRenderer },
+  { match: "name", name: "browser_observe", render: BrowserScreenshotRenderer },
+  { match: "name", name: "browser_act", render: BrowserScreenshotRenderer },
   // Function-mode computer tools (codex / chat-wire transports).
   { match: "name", name: "computer_screenshot", render: ComputerCallRenderer },
   { match: "name", name: "computer_click", render: ComputerCallRenderer },
