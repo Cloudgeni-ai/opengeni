@@ -181,9 +181,7 @@ describe("public editable-artifact browser composition", () => {
           describe: () => observed.diagnostics.join("\n"),
         },
       );
-      await recordSpreadsheetCausality(page, spreadsheetArtifact.id, "before-first-reload");
       await page.reload();
-      await recordSpreadsheetCausality(page, spreadsheetArtifact.id, "after-first-reload");
       await page.getByRole("grid", { name: /spreadsheet$/u }).waitFor({ timeout: 30_000 });
       await waitFor(
         async () =>
@@ -205,9 +203,7 @@ describe("public editable-artifact browser composition", () => {
           describe: () => observed.diagnostics.join("\n"),
         },
       );
-      await recordSpreadsheetCausality(page, spreadsheetArtifact.id, "before-second-reload");
       await page.reload();
-      await recordSpreadsheetCausality(page, spreadsheetArtifact.id, "after-second-reload");
       await waitFor(
         async () =>
           (await page.locator('[data-og-cell="A1"]').getAttribute("aria-label")) ===
@@ -426,37 +422,43 @@ describe("public editable-artifact browser composition", () => {
   ): Promise<void> {
     // Metadata only, from this test's disposable Postgres and browser storage.
     // Diagnostic failures must never change the browser acceptance result.
-    const sample = Promise.allSettled([
-      (async () => {
-        if (!evidenceSql) throw new Error("diagnostic database unavailable");
-        const rows = await evidenceSql<
-          { headSequence: string | number; causalFrontier: unknown; stateHash: string }[]
-        >`
+    const authorityProbe = (async () => {
+      if (!evidenceSql) throw new Error("diagnostic database unavailable");
+      const rows = await evidenceSql<
+        { headSequence: string | number; causalFrontier: unknown; stateHash: string }[]
+      >`
           select head_sequence as "headSequence", causal_frontier as "causalFrontier",
             state_hash as "stateHash"
           from editable_artifacts
           where workspace_id = ${workspaceId}::uuid and id = ${artifactId}
         `;
-        const head = rows[0];
-        return head
-          ? {
-              sequence: Number(head.headSequence),
-              frontier: head.causalFrontier,
-              stateHash: head.stateHash,
-            }
-          : null;
-      })(),
-      readRetainedSpreadsheetCausality(page, artifactId),
-    ]);
+      const head = rows[0];
+      return head
+        ? {
+            sequence: Number(head.headSequence),
+            frontier: head.causalFrontier,
+            stateHash: head.stateHash,
+          }
+        : null;
+    })();
+    const retainedProbe = readRetainedSpreadsheetCausality(page, artifactId);
     let deadline: ReturnType<typeof setTimeout> | undefined;
-    const bounded = await Promise.race([
-      sample,
-      new Promise<null>((resolve) => {
-        deadline = setTimeout(() => resolve(null), 1_500);
-      }),
+    const timeout = new Promise<null>((resolve) => {
+      deadline = setTimeout(() => resolve(null), 1_500);
+    });
+    const withinDeadline = async <T>(probe: Promise<T>): Promise<PromiseSettledResult<T> | null> =>
+      await Promise.race([
+        probe.then(
+          (value): PromiseFulfilledResult<T> => ({ status: "fulfilled", value }),
+          (reason): PromiseRejectedResult => ({ status: "rejected", reason }),
+        ),
+        timeout,
+      ]);
+    const [authority, retained] = await Promise.all([
+      withinDeadline(authorityProbe),
+      withinDeadline(retainedProbe),
     ]);
     if (deadline) clearTimeout(deadline);
-    const [authority, retained] = bounded ?? [];
     console.info(
       `[editable-artifact-causality] ${JSON.stringify({
         stage,
@@ -493,12 +495,12 @@ async function readRetainedSpreadsheetCausality(page: Page, artifactId: string) 
         });
       const keyTransaction = database.transaction(["replicas", "pendingTransactions"], "readonly");
       const [headKeys, pendingKeys] = await Promise.all([
-        read(keyTransaction.objectStore("replicas").getAllKeys(undefined, 32)),
-        read(keyTransaction.objectStore("pendingTransactions").getAllKeys(undefined, 32)),
+        read(keyTransaction.objectStore("replicas").getAllKeys(undefined, 33)),
+        read(keyTransaction.objectStore("pendingTransactions").getAllKeys(undefined, 33)),
       ]);
       const namespaces = [
         ...new Set(
-          [...headKeys, ...pendingKeys].flatMap((key) =>
+          [...headKeys.slice(0, 32), ...pendingKeys.slice(0, 32)].flatMap((key) =>
             Array.isArray(key) && key[1] === id && typeof key[0] === "string" ? [key[0]] : [],
           ),
         ),
@@ -522,6 +524,7 @@ async function readRetainedSpreadsheetCausality(page: Page, artifactId: string) 
         intentBytes?: Uint8Array;
       };
       return {
+        scopeDiscoveryTruncated: headKeys.length > 32 || pendingKeys.length > 32,
         scopes: await Promise.all(
           namespaces.map(async (namespace) => {
             const key = [namespace, id];
