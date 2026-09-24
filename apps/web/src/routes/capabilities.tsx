@@ -1,4 +1,5 @@
 import type { SkillSummary } from "@opengeni/sdk";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
 import { ConnectionCatalog, McpConnectionCard } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
@@ -132,6 +133,15 @@ import type {
 
 const PAGE_SIZE = 48;
 
+/** Keep the OAuth-return connection read alive even when the catalog read fails. */
+export function fetchOAuthReturnRows(
+  client: Pick<OpenGeniBrowserClient, "listCapabilities">,
+  workspaceId: string,
+  fetchConnections: () => Promise<ConnectionMetadata[] | null>,
+) {
+  return Promise.all([client.listCapabilities(workspaceId), fetchConnections()]);
+}
+
 export function canManageApiIntegrations(
   accessContext: AccessContext | null,
   workspaceId: string,
@@ -173,7 +183,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     connectionsLoadFailed,
     connectionsAccessDenied,
     replaceConnection,
-    adoptConnections,
+    fetchConnections,
     apiIntegrationDefinitions,
     apiIntegrationInstances,
     socialConnections,
@@ -1090,15 +1100,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     try {
       // Resolve the item from a FRESH catalog fetch: a registry item persisted
       // moments before the redirect won't be in the pre-redirect snapshot.
-      const [catalog, conns] = await Promise.all([
-        client.listCapabilities(workspaceId),
-        client.listConnections(workspaceId).catch(() => null),
-      ]);
+      const [catalog, conns] = await fetchOAuthReturnRows(client, workspaceId, fetchConnections);
       freshItems = catalog.items;
       setItems(catalog.items);
-      // Don't clobber previously-loaded connections with null on a failed refetch
-      // (that would flip healthy items to "unverified" until the next reload).
-      if (conns !== null) adoptConnections(conns);
       const item =
         (itemId ? catalog.items.find((candidate) => candidate.id === itemId) : undefined) ?? null;
       const action = oauthResumeAction(item, connectionId);

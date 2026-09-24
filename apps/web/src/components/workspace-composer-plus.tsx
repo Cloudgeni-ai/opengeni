@@ -33,6 +33,8 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
   refreshRuntime.current = context.refreshWorkspaceMcpServers;
   const current =
     catalog?.workspaceId === workspaceId && catalog.client === client ? catalog : null;
+  const deniedMessage =
+    "Your workspace access doesn't allow connection discovery. Ask a workspace admin for connection access.";
   const reload = useCallback(async () => {
     const request = ++lifecycle.revision;
     const live = () =>
@@ -40,9 +42,9 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
       scope.current.workspaceId === workspaceId &&
       lifecycle.revision === request;
     setLoading(true);
+    let denied = false;
     try {
-      const [result, connectionResult] = await Promise.all([
-        client.listCapabilities(workspaceId),
+      const connectionLoad = (
         canReadConnections
           ? client.listConnections(workspaceId).then(
               (connections) => ({ connections, denied: false }),
@@ -51,21 +53,43 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
                 denied: isWorkspacePermissionDenied(failure),
               }),
             )
-          : Promise.resolve({ connections: null, denied: true }),
+          : Promise.resolve({ connections: null, denied: true })
+      ).then((result) => {
+        if (live() && result.denied) {
+          denied = true;
+          // A failed catalog refresh must not leave the prior account rows visible.
+          setCatalog((previous) =>
+            previous?.client === client && previous.workspaceId === workspaceId
+              ? { ...previous, connections: null }
+              : previous,
+          );
+          setError(deniedMessage);
+        }
+        return result;
+      });
+      const [result, connectionResult] = await Promise.all([
+        client.listCapabilities(workspaceId),
+        connectionLoad,
       ]);
       if (!live()) return;
       const connections = connectionResult.connections;
       setCatalog({ client, workspaceId, items: result.items, connections });
       setError(
         connectionResult.denied
-          ? "Your workspace access doesn't allow connection discovery. Ask a workspace admin for connection access."
+          ? deniedMessage
           : connections === null
             ? "Connection status couldn't be checked. Open Capabilities to check the connection."
             : null,
       );
     } catch (failure) {
       if (live())
-        setError(failure instanceof Error ? failure.message : "Couldn't load connectors.");
+        setError(
+          denied
+            ? deniedMessage
+            : failure instanceof Error
+              ? failure.message
+              : "Couldn't load connectors.",
+        );
     } finally {
       if (live()) setLoading(false);
     }

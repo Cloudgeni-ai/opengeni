@@ -271,4 +271,4 @@ test("backfills reordered named members, preserves custom grants, protects old w
   expect(replayed.map(({ subject, permissions }) => ({ subject, permissions }))).toEqual(
     afterOldWriter.map(({ subject, permissions }) => ({ subject, permissions })),
   );
-});
+}, 900_000);

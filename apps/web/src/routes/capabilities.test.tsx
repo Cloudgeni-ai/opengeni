@@ -23,9 +23,27 @@ import {
 import { capabilityStateChip } from "@/lib/capabilities";
 import {
   canManageApiIntegrations,
+  fetchOAuthReturnRows,
   integrationQuickConnect,
   integrationRowBusy,
 } from "./capabilities";
+
+test("OAuth return still completes its connection read when catalog lookup fails", async () => {
+  let reads = 0;
+  const client = {
+    listCapabilities: async () => {
+      throw new Error("Catalog unavailable");
+    },
+  } as unknown as Parameters<typeof fetchOAuthReturnRows>[0];
+
+  await expect(
+    fetchOAuthReturnRows(client, "workspace-a", async () => {
+      reads++;
+      return null; // A denied fetch has already retired the hook's cached rows.
+    }),
+  ).rejects.toThrow("Catalog unavailable");
+  expect(reads).toBe(1);
+});
 
 function accessContext(
   permissions: AccessContext["workspaceGrants"][number]["permissions"],

@@ -30,8 +30,8 @@ export type CapabilitiesCatalog = {
   connectionsAccessDenied: boolean;
   /** Merge one freshly returned connection row into the loaded list. */
   replaceConnection: (connection: ConnectionMetadata) => void;
-  /** Adopt a fresh connection list from a targeted fetch (an OAuth return). */
-  adoptConnections: (connections: ConnectionMetadata[]) => void;
+  /** Fetch connection rows independently of the catalog (also used on OAuth return). */
+  fetchConnections: () => Promise<ConnectionMetadata[] | null>;
   /**
    * The curated multi-account ApiIntegration catalog (Outlook Mail/Calendar/
    * Contacts, OneDrive, extra Drive accounts).
@@ -84,36 +84,51 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
 
   const scopeRef = useRef({ client, workspaceId });
   scopeRef.current = { client, workspaceId };
+  const refreshRevision = useRef(0);
+  const connectionRevision = useRef(0);
+  const isCurrentScope = () =>
+    scopeRef.current.client === client && scopeRef.current.workspaceId === workspaceId;
+
+  async function fetchConnections(): Promise<ConnectionMetadata[] | null> {
+    const request = ++connectionRevision.current;
+    const live = () => isCurrentScope() && connectionRevision.current === request;
+    try {
+      const loaded = await client.listConnections(workspaceId);
+      if (live()) {
+        setConnections(loaded);
+        setConnectionsLoadFailed(false);
+        setConnectionDenialScope(null);
+      }
+      return live() ? loaded : null;
+    } catch (error) {
+      if (live()) {
+        // Transient errors retain cached rows; confirmed denial revokes them.
+        const denied = isWorkspacePermissionDenied(error);
+        if (denied) setConnections(null);
+        setConnectionsLoadFailed(true);
+        setConnectionDenialScope(denied ? { client, workspaceId } : null);
+      }
+      return null;
+    }
+  }
 
   async function refresh(): Promise<void> {
     if (!workspaceId) return;
-    const scope = { client, workspaceId };
-    const isCurrentScope = () =>
-      scopeRef.current.client === scope.client &&
-      scopeRef.current.workspaceId === scope.workspaceId;
+    const request = ++refreshRevision.current;
+    const live = () => isCurrentScope() && refreshRevision.current === request;
     setLoading(true);
     try {
-      const [catalog, connectionResult, socials, slackBindings, apiDefinitions, apiInstances] =
-        await Promise.all([
-          client.listCapabilities(workspaceId),
-          // null (not []) on failure so health can tell "didn't load" from "loaded empty".
-          client.listConnections(workspaceId).then(
-            (loadedConnections) => ({ connections: loadedConnections, denied: false }),
-            (error: unknown) => ({ connections: null, denied: isWorkspacePermissionDenied(error) }),
-          ),
-          client.listSocialConnections(workspaceId).catch(() => null),
-          client.listSlackInstallationBindings(workspaceId).catch(() => null),
-          client.listIntegrationDefinitions(workspaceId).catch(() => null),
-          client.listApiIntegrations(workspaceId).catch(() => null),
-        ]);
-      if (!isCurrentScope()) return;
-      const conns = connectionResult.connections;
+      const [catalog, , socials, slackBindings, apiDefinitions, apiInstances] = await Promise.all([
+        client.listCapabilities(workspaceId),
+        // Settles access independently even when the catalog request rejects.
+        fetchConnections(),
+        client.listSocialConnections(workspaceId).catch(() => null),
+        client.listSlackInstallationBindings(workspaceId).catch(() => null),
+        client.listIntegrationDefinitions(workspaceId).catch(() => null),
+        client.listApiIntegrations(workspaceId).catch(() => null),
+      ]);
+      if (!live()) return;
       setItems(catalog.items);
-      // Keep cached connections on a transient failure, but a revoked grant
-      // must not leave previously visible connection data in the catalog.
-      if (conns !== null || connectionResult.denied) setConnections(conns);
-      setConnectionsLoadFailed(conns === null);
-      setConnectionDenialScope(connectionResult.denied ? scope : null);
       if (socials !== null) setSocialConnections(socials);
       if (slackBindings !== null) setSlackInstallationBindings(slackBindings);
       if (apiDefinitions !== null) setApiIntegrationDefinitions(apiDefinitions.definitions);
@@ -121,13 +136,13 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
       setLoadError(null);
       setRevision((current) => current + 1);
     } catch (error) {
-      if (!isCurrentScope()) return;
+      if (!live()) return;
       setLoadError(error instanceof Error ? error : new Error(String(error)));
       toast.error("Failed to load plugins", {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      if (isCurrentScope()) setLoading(false);
+      if (live()) setLoading(false);
     }
   }
 
@@ -146,11 +161,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
             : [...current, updated]
           : [updated],
       ),
-    adoptConnections: (next) => {
-      setConnections(next);
-      setConnectionsLoadFailed(false);
-      setConnectionDenialScope(null);
-    },
+    fetchConnections,
     apiIntegrationDefinitions,
     apiIntegrationInstances,
     socialConnections,
