@@ -2931,8 +2931,8 @@ function mcpToolRequiresApproval(
 }
 
 /** Stable, secret-free execution identity for an MCP server without a connection row. */
-function sessionMcpApprovalConnectionId(serverId: string, url: string): string {
-  const targetHash = createHash("sha256").update(url, "utf8").digest("hex");
+function sessionMcpApprovalConnectionId(serverId: string, target: string): string {
+  const targetHash = createHash("sha256").update(target, "utf8").digest("hex");
   return `session-mcp:${serverId}:${targetHash}`;
 }
 
@@ -3389,9 +3389,14 @@ function applyMcpApprovalPolicy(
     )
     .map((server) => {
       const connectionId = (): string | null => {
-        return (
-          resolvedMcpConnectionId(server, resolvedMcpConnectionIds) ??
-          (server.connectionRef ? null : sessionMcpApprovalConnectionId(server.id, server.url))
+        if (server.connectionRef) {
+          return resolvedMcpConnectionId(server, resolvedMcpConnectionIds);
+        }
+        // Local registrations may supply an immutable connection identity, but
+        // session-MCP approvals require a synthetic, secret-free store identity.
+        return sessionMcpApprovalConnectionId(
+          server.id,
+          resolvedMcpConnectionIds?.get(server.id) ?? server.url,
         );
       };
       return {
@@ -4800,7 +4805,10 @@ function installAttemptConnectorActionGatewayLifecycle(
           }
         : (approvalId: string, arguments_: unknown): ConnectorActionToolCall => ({
             approvalId,
-            connectionId: sessionMcpApprovalConnectionId(config!.id, config!.url),
+            connectionId: sessionMcpApprovalConnectionId(
+              config!.id,
+              resolvedMcpConnectionIds.get(config!.id) ?? config!.url,
+            ),
             serverId: definition.identity.serverId,
             toolName: definition.identity.toolName,
             arguments: arguments_,
