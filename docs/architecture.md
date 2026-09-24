@@ -83,6 +83,11 @@ Commands acknowledge durable commits, independent of replayable NATS/Temporal no
 
 Control revisions increase.
 
+Operational goal edits apply directly under the default policy; refinement,
+adaptation and replacement are audit classifications, not approval gates.
+Explicit review policy, human-owned root constraints, exact-attempt authority
+and optimistic-concurrency fences remain separate. See [goals](goals.md).
+
 Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 `packages/sdk/src/stream.ts`, and [`run-lifecycle.md`](run-lifecycle.md).
 
