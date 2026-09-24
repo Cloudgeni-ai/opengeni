@@ -222,6 +222,18 @@ describe("artifact document surface", () => {
         },
         {
           kind: "table",
+          id: "nearly-opaque-header",
+          style: { headerRows: 1, headerFill: "#000000e0" },
+          rows: [[[{ text: "Light on dark" }]]],
+        },
+        {
+          kind: "table",
+          id: "translucent-light-header",
+          style: { headerRows: 1, headerFill: "#ffffff80" },
+          rows: [[[{ text: "Dark on light" }]]],
+        },
+        {
+          kind: "table",
           id: "opaque-header",
           style: { headerRows: 1, headerFill: "#000000ff" },
           rows: [[[{ text: "Contrasted" }]]],
@@ -233,10 +245,12 @@ describe("artifact document surface", () => {
     );
     await flush();
     const headers = rendered.container.querySelectorAll<HTMLElement>("th");
-    expect(headers.length).toBe(4);
+    expect(headers.length).toBe(6);
     expect(headers[0]!.style.color).toBe("");
     expect(headers[2]!.style.color).toBe("");
     expect(headers[3]!.style.color).toBe("#fff");
+    expect(headers[4]!.style.color).toBe("#171717");
+    expect(headers[5]!.style.color).toBe("#fff");
     expect(headers[0]!.querySelectorAll("span")[0]!.style.color).toBe("");
     expect(headers[1]!.querySelector("span")!.style.color).toBe("#ffffff");
     expect(headers[0]!.closest("[data-og-document-page]")?.getAttribute("style")).toContain(

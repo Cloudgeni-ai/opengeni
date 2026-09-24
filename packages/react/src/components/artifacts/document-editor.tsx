@@ -1409,6 +1409,7 @@ function DocumentTableView({
   viewBlockId: string;
 }) {
   const columnWidths = table.style.columnWidthsPt;
+  const headerColor = tableHeaderTextColor(table.style.headerFill);
   return (
     <div
       data-og-document-block={viewBlockId}
@@ -1450,7 +1451,7 @@ function DocumentTableView({
                       borderColor: table.style.borderColor ?? "#d1d5db",
                       background: header ? (table.style.headerFill ?? "#f3f4f6") : undefined,
                       // An explicitly colored run still owns its authored text style.
-                      color: header ? tableHeaderTextColor(table.style.headerFill) : undefined,
+                      color: header ? headerColor : undefined,
                       padding: `${table.style.cellPaddingPt ?? 6}pt`,
                     }}
                   >
@@ -1472,22 +1473,39 @@ function DocumentTableView({
   );
 }
 
-/** Opaque fills have a theme-independent contrast color; translucent fills do not. */
+/** Choose a theme-independent header color only when both light and dark backdrops allow one. */
 function tableHeaderTextColor(fill: string | undefined): string | undefined {
   if (!fill) return "#171717";
   const hex = /^#([\da-f]{3}|[\da-f]{6}|[\da-f]{8})$/i.exec(fill)?.[1];
-  // Transparent colors reveal the backing paper or theme surface. Inherit its
-  // text color instead of choosing white from a dark but invisible RGB value.
-  if (!hex || (hex.length === 8 && hex.slice(6).toLowerCase() !== "ff")) return undefined;
+  if (!hex) return undefined;
   const channels =
     hex.length === 3
       ? [...hex].map((digit) => Number.parseInt(digit + digit, 16))
       : [0, 2, 4].map((index) => Number.parseInt(hex.slice(index, index + 2), 16));
-  const linear = channels.map((channel) => {
-    const normalized = channel / 255;
-    return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
-  });
-  const luminance = linear[0]! * 0.2126 + linear[1]! * 0.7152 + linear[2]! * 0.0722;
+  const alpha = hex.length === 8 ? Number.parseInt(hex.slice(6), 16) / 255 : 1;
+  const luminanceOn = (backdrop: number) => {
+    const linear = channels.map((channel) => {
+      const normalized = (channel * alpha + backdrop * (1 - alpha)) / 255;
+      return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+    });
+    return linear[0]! * 0.2126 + linear[1]! * 0.7152 + linear[2]! * 0.0722;
+  };
+  if (alpha < 1) {
+    // A paginated page is white; a continuous page follows its theme. Choose
+    // a fixed foreground only if it contrasts on both extreme backdrops.
+    const backdrops = [luminanceOn(0), luminanceOn(255)];
+    const darkTextLuminance = ((23 / 255 + 0.055) / 1.055) ** 2.4;
+    const whiteContrast = Math.min(...backdrops.map((value) => 1.05 / (value + 0.05)));
+    const darkContrast = Math.min(
+      ...backdrops.map(
+        (value) =>
+          (Math.max(value, darkTextLuminance) + 0.05) / (Math.min(value, darkTextLuminance) + 0.05),
+      ),
+    );
+    if (Math.max(whiteContrast, darkContrast) < 4.5) return undefined;
+    return whiteContrast > darkContrast ? "#fff" : "#171717";
+  }
+  const luminance = luminanceOn(255);
   return luminance < 0.18 ? "#fff" : "#171717";
 }
 
