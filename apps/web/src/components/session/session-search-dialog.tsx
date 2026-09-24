@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { SearchIcon } from "lucide-react";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import { useAppContext } from "@/context";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -12,6 +13,7 @@ import {
 } from "@/lib/use-conversation-search";
 import { useSessionSearchResource } from "@/lib/use-session-search-resource";
 import { cn } from "@/lib/utils";
+import { selectedFormattedMessage } from "./search-markdown-highlight";
 import {
   SearchPreviewView,
   SearchResultsView,
@@ -103,9 +105,10 @@ export default function SessionSearchDialog(props: {
   }, [titles.value, search.page, accessDenied, committedQuery]);
   // Keep the selected session while closed/revalidating so its cursor and preview
   // survive the dialog → conversation → dialog round trip.
-  const retainedSelection = useRef<{ identity: string; selected: SearchResultSummary } | null>(
-    null,
-  );
+  const retainedSelection = useRef<{
+    identity: string;
+    selected: SearchResultSummary;
+  } | null>(null);
   if (accessDenied || !committedQuery.trim()) retainedSelection.current = null;
   const selected =
     results.find((result) => result.sessionId === selectedId) ??
@@ -165,7 +168,10 @@ export default function SessionSearchDialog(props: {
       onOpenChange(false);
       void navigate({
         to: "/workspaces/$workspaceId/sessions/$sessionId",
-        params: { workspaceId: props.workspaceId, sessionId: previewSelection.sessionId },
+        params: {
+          workspaceId: props.workspaceId,
+          sessionId: previewSelection.sessionId,
+        },
         search: match
           ? {
               find: committedQuery,
@@ -230,7 +236,7 @@ export default function SessionSearchDialog(props: {
             </label>
           </div>
         </div>
-        <div className="grid min-h-0 flex-1 md:grid-cols-[minmax(250px,0.8fr)_minmax(0,1.2fr)]">
+        <div className="grid min-h-0 min-w-0 flex-1 grid-cols-[minmax(0,1fr)] md:grid-cols-[minmax(250px,0.8fr)_minmax(0,1.2fr)]">
           <div
             className={cn(
               "flex min-h-0 flex-col md:border-r md:border-border",
@@ -293,7 +299,7 @@ export default function SessionSearchDialog(props: {
           </div>
           <div
             className={cn(
-              "min-h-0 md:flex md:flex-col",
+              "min-h-0 min-w-0 md:flex md:flex-col",
               mobilePreview && selected ? "flex flex-col" : "hidden",
             )}
           >
@@ -355,13 +361,14 @@ export function SessionSearchPreview(props: SessionSearchPreviewProps) {
       const options = {
         signal,
         mode: "forensic" as const,
-        payloadMode: "full" as const,
+        // Bound transfer even for legacy events whose retained payload is enormous.
+        payloadMode: "summary" as const,
         includeTypes: ["user.message", "agent.message.completed"] as Array<
           "user.message" | "agent.message.completed"
         >,
         limit: 2,
       };
-      const [before, after] = await Promise.all([
+      const [before, after, selectedPreview] = await Promise.all([
         props.client.listEvents(props.workspaceId, props.sessionId, {
           ...options,
           before: match.sequence,
@@ -372,40 +379,82 @@ export function SessionSearchPreview(props: SessionSearchPreviewProps) {
           after: match.sequence,
           direction: "after",
         }),
-      ]);
-      const context = (events: typeof before): SearchPreviewMessage[] =>
-        events.flatMap((event) => {
-          if (event.type !== "user.message" && event.type !== "agent.message.completed") return [];
-          const payload = event.payload as Record<string, unknown>;
-          if (typeof payload.text !== "string") return [];
-          if (
-            match.messageId &&
-            event.type === "agent.message.completed" &&
-            payload.messageId === match.messageId &&
-            event.turnId === match.turnId
+        props.client
+          .getSessionMessagePreview(
+            props.workspaceId,
+            props.sessionId,
+            { eventId: match.eventId, sequence: match.sequence },
+            { signal },
           )
-            return [];
-          let text = payload.text;
-          if (text.length > 1800) {
-            const end = /[\uD800-\uDBFF]/.test(text[1799]!) ? 1799 : 1800;
-            text = `${text.slice(0, end)}…`;
-          }
-          return [
-            {
+          .catch((error: unknown) => {
+            // A stale result can disappear after the search read. Keep its
+            // authoritative excerpt; do not swallow access or transport errors.
+            if (error instanceof OpenGeniApiError && error.status === 404)
+              return { status: "unavailable" as const };
+            throw error;
+          }),
+      ]);
+      const selectedText = selectedFormattedMessage(selectedPreview, match, props.query);
+      const context = async (events: typeof before): Promise<SearchPreviewMessage[]> => {
+        const messages = await Promise.all(
+          events.map(async (event): Promise<SearchPreviewMessage | null> => {
+            if (event.type !== "user.message" && event.type !== "agent.message.completed")
+              return null;
+            const payload = event.payload as Record<string, unknown>;
+            if (
+              match.messageId &&
+              event.type === "agent.message.completed" &&
+              payload.messageId === match.messageId &&
+              event.turnId === match.turnId
+            )
+              return null;
+            // Summary projections do not carry the payload codec version. Even
+            // short context text may be an undecoded lossless storage marker.
+            const preview = await props.client
+              .getSessionMessagePreview(
+                props.workspaceId,
+                props.sessionId,
+                { eventId: event.id, sequence: event.sequence },
+                { signal },
+              )
+              .catch((error: unknown) => {
+                if (error instanceof OpenGeniApiError && error.status === 404)
+                  return { status: "unavailable" as const };
+                throw error;
+              });
+            if (preview.status !== "available") return null;
+            let text = preview.text;
+            if (text.length > 1800) {
+              const end = /[\uD800-\uDBFF]/.test(text[1799]!) ? 1799 : 1800;
+              text = `${text.slice(0, end)}…`;
+            }
+            return {
               key: event.id,
-              role: event.type === "user.message" ? ("user" as const) : ("assistant" as const),
+              role: event.type === "user.message" ? "user" : "assistant",
               text,
               selected: false,
-            },
-          ];
-        });
+              formatted: preview.text.length <= 1800,
+            };
+          }),
+        );
+        return messages.filter((message): message is SearchPreviewMessage => message !== null);
+      };
+      const [preceding, following] = await Promise.all([context(before), context(after)]);
       return [
-        ...context(before),
-        { key: match.eventId, role: match.role, text: match.snippet.text, selected: true },
-        ...context(after),
+        ...preceding,
+        {
+          key: match.eventId,
+          role: match.role,
+          text: selectedText ?? match.snippet.text,
+          selected: true,
+          formatted: selectedText !== null,
+          snippet: match.snippet.text,
+          offset: match.messageMatchOffset,
+        },
+        ...following,
       ];
     },
-    [props.client, props.workspaceId, props.sessionId, match],
+    [props.client, props.workspaceId, props.sessionId, props.query, match],
   );
   const preview = useSessionSearchResource(
     `${props.authority}:${props.workspaceId}:${props.sessionId}:${props.query}:${match?.eventId}:${match?.messageMatchOffset}`,

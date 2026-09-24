@@ -8,6 +8,8 @@ export type {
   SessionMessageSearchRequest,
   SessionMessageSearchMatch,
   SessionMessageSearchResponse,
+  SessionMessagePreview,
+  SessionMessagePreviewReference,
 } from "./session-message-search";
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
 export { pluginMcpUnavailableReason } from "@opengeni/contracts/plugin-discovery";
