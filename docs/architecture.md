@@ -118,9 +118,8 @@ Provider work stays outside retries; retry only idempotent settlement.
 Accepted-policy [compatibility/recovery](run-lifecycle.md).
 Replay: [notices/catalogs](run-lifecycle.md),
 [compaction](context-compaction.md). `packages/runtime/src/prepared-compaction-request.ts`
-shares sandbox/lazy-tool-prepared requests with remote and portable Responses
-compaction, including before first inference. Chat portable compaction retains
-its transcript adapter; see the focused compaction contract.
+shares prepared prefixes with both Responses compaction modes; Chat retains
+its transcript adapter.
 
 Failed-session retry differs from Pause/Resume and prompt admission.
 `packages/db/src/session-retry.ts` fences failure identity, reserves actor-scoped
