@@ -41,6 +41,13 @@ export interface ConcurrentIndexMigration {
 export type MigrationRuntimeOptions = {
   maxNestedAgentDepth?: number;
   /**
+   * For managed Postgres where an administrator preinstalls pgvector but the
+   * migration owner cannot execute CREATE EXTENSION, verify the public vector
+   * type and omit only 0000's exact vector installation statement. The default
+   * continues to execute the shipped migration verbatim.
+   */
+  preinstalledVector?: boolean;
+  /**
    * Exact database login roles that may run an OpenGeni API or worker against
    * this target. Maintenance cutovers use this list to reject a live mixed-
    * version fleet, and rolling ACL migrations use it to preserve old-binary
@@ -173,7 +180,11 @@ export async function executeMigrationFile(
   sql: postgres.Sql,
   file: string,
   sqlText: string,
+  options?: Pick<MigrationRuntimeOptions, "preinstalledVector">,
 ): Promise<void> {
+  if (file === "0000_initial.sql" && options?.preinstalledVector) {
+    sqlText = await initialMigrationWithPreinstalledVector(sql, sqlText);
+  }
   if (sqlText.includes(SKILL_METADATA_MIGRATION_MARKER)) {
     if (file !== "0433_unified_skill_lifecycle.sql")
       throw new Error("Skill metadata stage is restricted to migration 0433");
@@ -280,6 +291,46 @@ export async function executeMigrationFile(
   } finally {
     await sql`select set_config('lock_timeout', '0', false)`;
   }
+}
+
+const initialExtensionPreamble =
+  "CREATE EXTENSION IF NOT EXISTS pgcrypto;\nCREATE EXTENSION IF NOT EXISTS vector;\n";
+
+/** Never rewrite arbitrary migrations or trust a same-named type in another schema. */
+export async function initialMigrationWithPreinstalledVector(
+  sql: postgres.Sql,
+  sqlText: string,
+): Promise<string> {
+  if (!sqlText.startsWith(initialExtensionPreamble)) {
+    throw new Error("0000 initial extension preamble changed; review managed Postgres admission");
+  }
+  const [installed] = await sql<Array<{ present: boolean }>>`
+    SELECT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_extension extension
+      JOIN pg_catalog.pg_namespace namespace ON namespace.oid = extension.extnamespace
+      JOIN pg_catalog.pg_type type ON type.typnamespace = namespace.oid AND type.typname = 'vector'
+      JOIN pg_catalog.pg_depend dependency
+        ON dependency.classid = 'pg_catalog.pg_type'::regclass
+       AND dependency.objid = type.oid
+       AND dependency.refclassid = 'pg_catalog.pg_extension'::regclass
+       AND dependency.refobjid = extension.oid AND dependency.deptype = 'e'
+      WHERE extension.extname = 'vector' AND namespace.nspname = 'public'
+    ) AS present
+  `;
+  if (!installed?.present) {
+    throw new Error("Preinstalled public pgvector extension and type are required");
+  }
+  return (
+    "CREATE EXTENSION IF NOT EXISTS pgcrypto;\n" + sqlText.slice(initialExtensionPreamble.length)
+  );
+}
+
+function preinstalledVectorPolicy(options: MigrationRuntimeOptions | undefined): boolean {
+  if (options !== undefined) return options.preinstalledVector === true;
+  const configured = process.env.OPENGENI_MIGRATIONS_PREINSTALLED_VECTOR;
+  if (configured === undefined || configured === "false") return false;
+  if (configured === "true") return true;
+  throw new Error("OPENGENI_MIGRATIONS_PREINSTALLED_VECTOR must be true or false");
 }
 
 function deploymentDepthPolicy(
@@ -425,6 +476,7 @@ export async function migrate(
   const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
   const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
   const depthPolicy = deploymentDepthPolicy(runtimeOptions);
+  const preinstalledVector = preinstalledVectorPolicy(runtimeOptions);
   const sql = postgres(databaseUrl, { max: 1 });
   try {
     // Serialize concurrent migrate() runs; the session-level lock is released
@@ -477,7 +529,7 @@ export async function migrate(
       if (sqlText === undefined) {
         throw new Error(`Pending migration source was not loaded: ${file}`);
       }
-      await executeMigrationFile(sql, file, sqlText);
+      await executeMigrationFile(sql, file, sqlText, { preinstalledVector });
       await sql`INSERT INTO "schema_migrations" ("name") VALUES (${file}) ON CONFLICT DO NOTHING`;
     }
     // Reconcile even when all migration names were already recorded. This is
