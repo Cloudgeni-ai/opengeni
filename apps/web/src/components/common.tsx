@@ -114,9 +114,13 @@ export function CopyableMono({ value }: { value: string }) {
   return (
     <button
       type="button"
-      onClick={() => {
-        void navigator.clipboard.writeText(value);
-        toast.success("Copied");
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(value);
+          toast.success("Copied");
+        } catch {
+          toast.error("Couldn't copy. Select the text and copy it manually.");
+        }
       }}
       className="flex w-full min-w-0 max-w-full items-center justify-end gap-1 rounded px-1 py-0.5 font-mono text-2xs text-fg-muted hover:bg-surface-2 hover:text-fg"
       title={value}
