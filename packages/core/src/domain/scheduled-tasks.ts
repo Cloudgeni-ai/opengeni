@@ -62,6 +62,7 @@ import {
   type ScheduledTaskCreatorPolicy,
   type TemporalScheduleCleanupClaim,
   type UpdateScheduledTaskInput,
+  getWorkspaceDefaultRigId,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { knowledgeContextForAccess } from "./knowledge";
@@ -256,6 +257,14 @@ export async function createValidatedScheduledTask(input: {
     throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
   const id = crypto.randomUUID();
   validateScheduledTaskSchedule(input.payload.schedule);
+  // Like an interactive session create, an omitted rigId freezes the
+  // workspace's default Sandbox Environment; an explicit null opts out.
+  const rigId =
+    input.payload.rigId !== undefined ||
+    knowledgeAction ||
+    input.payload.runMode === "existing_session"
+      ? input.payload.rigId
+      : ((await getWorkspaceDefaultRigId(input.db, input.grant.workspaceId)) ?? undefined);
   const target = await validateScheduledTaskTarget({
     db: input.db,
     sessionAuthorization: input.sessionAuthorization,
@@ -264,7 +273,7 @@ export async function createValidatedScheduledTask(input: {
     targetSessionId: input.payload.targetSessionId,
     runMode: input.payload.runMode,
     variableSetId: input.payload.variableSetId,
-    rigId: input.payload.rigId,
+    rigId,
     agentConfig,
   });
   if (
@@ -310,7 +319,7 @@ export async function createValidatedScheduledTask(input: {
   // (at dispatch), so validate only that the id names a rig in the workspace —
   // NOT that it has an active version now (that is a fire-time concern). RLS
   // makes a cross-workspace id indistinguishable from missing → both 422.
-  if (!knowledgeAction && input.payload.rigId) {
+  if (!knowledgeAction && rigId) {
     await requireScheduledTaskRig(
       input.db,
       {
@@ -318,7 +327,7 @@ export async function createValidatedScheduledTask(input: {
         workspaceId: input.grant.workspaceId,
         subjectId: input.grant.subjectId,
       },
-      input.payload.rigId,
+      rigId,
     );
   }
   const runtimeSettings = knowledgeAction
@@ -432,7 +441,7 @@ export async function createValidatedScheduledTask(input: {
         creatorPolicy,
         targetSessionId: target?.id ?? null,
         variableSetId: input.payload.variableSetId ?? null,
-        rigId: input.payload.rigId ?? null,
+        rigId: rigId ?? null,
         metadata: input.payload.metadata,
         ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
       });
