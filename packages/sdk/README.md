@@ -371,6 +371,33 @@ General personal-resource grants for documents, variable sets and other resource
 kinds remain available through the root/core SDK. They do not authorize native
 connected accounts.
 
+## Workspace credentials, webhooks, and sandbox image
+
+Configure these with an organization key or workspace admin session. Secrets are
+returned once; store them when you create the resource. Protocol and payloads:
+[`docs/workspace-integrations.md`](../../docs/workspace-integrations.md).
+
+```ts
+const { secret: providerSecret } = await client.putWorkspaceCredentialProvider(workspaceId, {
+  url: "https://product.example/opengeni/credentials",
+});
+const { secret: webhookSecret } = await client.createWorkspaceWebhook(workspaceId, {
+  url: "https://product.example/opengeni/events",
+  eventTypes: ["turn.completed", "turn.failed"],
+});
+
+// In your HTTP handlers, verify the raw body before parsing it:
+const { event } = await verifyWebhookEvent({ body: rawBody, headers, secret: webhookSecret });
+const request = await verifyCredentialProviderRequest({
+  body: rawBody,
+  headers,
+  secret: providerSecret,
+});
+```
+
+`listWorkspaceSandboxImages` returns the deployment's allowlisted images; set one
+with `updateWorkspaceSettings(workspaceId, { defaultSandboxImage })`.
+
 ## Personal schedules
 
 A schedule created by an authenticated human or their active agent records that

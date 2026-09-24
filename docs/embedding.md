@@ -604,6 +604,11 @@ revalidate the exact admitted personal-resource grant. The provider returns
 plaintext values plus exact scope/resource/attempt echoes, which the worker
 checks before applying any value.
 
+A standalone product can supply the same material without embedding: a
+workspace credential provider ([`workspace-integrations.md`](workspace-integrations.md))
+is a signed HTTP endpoint that OpenGeni uses as that workspace's `runCredentials`
+resolver, in place of the injected port.
+
 `runCredentials` is the session-aware seam for credentials that programs inside
 the sandbox need: cloud CLI variables, kubeconfigs, provider configuration files,
 or equivalent host-owned material. It is independent of `variableSetId`; the
