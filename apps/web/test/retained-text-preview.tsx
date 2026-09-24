@@ -16,7 +16,7 @@ const root = createRootRoute({
   component: () => (
     <main className="min-h-dvh bg-bg text-fg">
       <div className="border-b border-border px-6 py-3 text-xs text-fg-muted">
-        OPE-557 · Actual component verification · Sample patch, fixture API · Not production
+        Actual component verification · Sample patch, fixture API · Not production
       </div>
       <section className="mx-auto max-w-5xl py-5">
         {params.has("workbench") ? (
@@ -24,7 +24,7 @@ const root = createRootRoute({
             <SessionEditableArtifactsWorkspace
               workspaceId={workspaceId}
               artifacts={[
-                { id: artifactId, modality: "file", title: "ope551-integration-docs.patch" },
+                { id: artifactId, modality: "file", title: "sample-integration-docs.patch" },
               ]}
               status="ready"
               onRetry={() => {}}

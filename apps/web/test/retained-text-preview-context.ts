@@ -25,7 +25,7 @@ export const filename =
     ? "example.html"
     : state === "unsupported"
       ? "archive.zip"
-      : "ope551-integration-docs.patch";
+      : "sample-integration-docs.patch";
 export const artifact: RetainedArtifactReference = {
   available: true,
   artifactId,

@@ -1,7 +1,7 @@
 import { chromium } from "playwright";
 import { mkdir } from "node:fs/promises";
 import assert from "node:assert/strict";
-const output = process.env.PREVIEW_OUTPUT ?? "/workspace/ope557-evidence";
+const output = process.env.PREVIEW_OUTPUT ?? "/workspace/text-preview-evidence";
 await mkdir(output, { recursive: true });
 const browser = await chromium.launch({
   executablePath: "/usr/local/bin/chromium",
@@ -43,7 +43,7 @@ try {
     const downloaded = page.waitForEvent("download");
     await page.getByRole("button", { name: "Download", exact: true }).click();
     const download = await downloaded;
-    assert.equal(download.suggestedFilename(), "ope551-integration-docs.patch");
+    assert.equal(download.suggestedFilename(), "sample-integration-docs.patch");
     assert.equal(await download.failure(), null);
   });
   await check("390px responsive plain text without page overflow", async () => {
@@ -118,7 +118,7 @@ try {
     await page.emulateMedia({ forcedColors: "none" });
     await page.goto(`${base}?workbench`);
     await page
-      .getByRole("link", { name: "Open ope551-integration-docs.patch full-page" })
+      .getByRole("link", { name: "Open sample-integration-docs.patch full-page" })
       .waitFor();
     await page.waitForFunction(() =>
       document
