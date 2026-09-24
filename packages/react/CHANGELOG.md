@@ -1,5 +1,12 @@
 # @opengeni/react
 
+## 7.1.1
+
+### Patch Changes
+
+- Updated dependencies [3d33f17]
+  - @opengeni/sdk@7.1.1
+
 ## 7.1.0
 
 ### Minor Changes

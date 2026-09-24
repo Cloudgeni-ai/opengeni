@@ -1,5 +1,19 @@
 # @opengeni/config
 
+## 2.1.1
+
+### Patch Changes
+
+- 31cf6ac: Preserve accepted Codex Astra turns across the implicit prompt-caching metadata
+  rollout. Recover typed model-definition setup mismatches with bounded same-turn
+  retries and truthful failure diagnostics, without changing accepted model authority
+  or replaying completed external work.
+- c41aecd: Use the Codex subscription's 272K context limits for GPT-6 models instead of the direct API limits.
+- Updated dependencies [23f4717]
+- Updated dependencies [d0b5efd]
+  - @opengeni/contracts@5.1.1
+  - @opengeni/codex@0.2.26
+
 ## 2.1.0
 
 ### Minor Changes
