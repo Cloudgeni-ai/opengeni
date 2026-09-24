@@ -28,7 +28,12 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
   const [busyId, setBusyId] = useState<string | null>(null);
   const scope = useRef({ client, workspaceId });
   scope.current = { client, workspaceId };
-  const lifecycle = useRef({ revision: 0 }).current;
+  const lifecycle = useRef({
+    revision: 0,
+    generation: 0,
+    successfulConnectionsRevision: 0,
+    deniedConnectionsRevision: 0,
+  }).current;
   const refreshRuntime = useRef(context.refreshWorkspaceMcpServers);
   refreshRuntime.current = context.refreshWorkspaceMcpServers;
   const current =
@@ -37,10 +42,12 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
     "Your workspace access doesn't allow connection discovery. Ask a workspace admin for connection access.";
   const reload = useCallback(async () => {
     const request = ++lifecycle.revision;
-    const live = () =>
+    const generation = lifecycle.generation;
+    const liveScope = () =>
       scope.current.client === client &&
       scope.current.workspaceId === workspaceId &&
-      lifecycle.revision === request;
+      lifecycle.generation === generation;
+    const live = () => liveScope() && lifecycle.revision === request;
     setLoading(true);
     let denied = false;
     try {
@@ -55,7 +62,13 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
             )
           : Promise.resolve({ connections: null, denied: true })
       ).then((result) => {
-        if (live() && result.denied) {
+        if (
+          liveScope() &&
+          result.denied &&
+          request > lifecycle.successfulConnectionsRevision &&
+          request > lifecycle.deniedConnectionsRevision
+        ) {
+          lifecycle.deniedConnectionsRevision = request;
           denied = true;
           // A failed catalog refresh must not leave the prior account rows visible.
           setCatalog((previous) =>
@@ -64,6 +77,19 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
               : previous,
           );
           setError(deniedMessage);
+        } else if (
+          liveScope() &&
+          result.connections !== null &&
+          request > lifecycle.deniedConnectionsRevision &&
+          request > lifecycle.successfulConnectionsRevision
+        ) {
+          lifecycle.successfulConnectionsRevision = request;
+          setCatalog((previous) =>
+            previous?.client === client && previous.workspaceId === workspaceId
+              ? { ...previous, connections: result.connections }
+              : previous,
+          );
+          setError((previous) => (previous === deniedMessage ? null : previous));
         }
         return result;
       });
@@ -72,19 +98,30 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
         connectionLoad,
       ]);
       if (!live()) return;
-      const connections = connectionResult.connections;
-      setCatalog({ client, workspaceId, items: result.items, connections });
+      const accessDenied =
+        lifecycle.deniedConnectionsRevision > lifecycle.successfulConnectionsRevision;
+      setCatalog((previous) => ({
+        client,
+        workspaceId,
+        items: result.items,
+        connections: accessDenied
+          ? null
+          : (connectionResult.connections ??
+            (previous?.client === client && previous.workspaceId === workspaceId
+              ? previous.connections
+              : null)),
+      }));
       setError(
-        connectionResult.denied
+        accessDenied
           ? deniedMessage
-          : connections === null
+          : connectionResult.connections === null
             ? "Connection status couldn't be checked. Open Capabilities to check the connection."
             : null,
       );
     } catch (failure) {
       if (live())
         setError(
-          denied
+          denied || lifecycle.deniedConnectionsRevision > lifecycle.successfulConnectionsRevision
             ? deniedMessage
             : failure instanceof Error
               ? failure.message
@@ -105,6 +142,7 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
     window.addEventListener("focus", onFocus);
     return () => {
       lifecycle.revision++;
+      lifecycle.generation++;
       window.removeEventListener("focus", onFocus);
     };
   }, [reload, workspaceId, lifecycle]);

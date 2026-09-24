@@ -144,6 +144,134 @@ describe("useCapabilitiesCatalog", () => {
     container.remove();
   });
 
+  test("an older 403 arriving after a newer 503 retires cached rows until a successful read", async () => {
+    const older = deferred<ConnectionMetadata[]>();
+    const newer = deferred<ConnectionMetadata[]>();
+    const cached = { id: "cached" } as ConnectionMetadata;
+    const restored = { id: "restored" } as ConnectionMetadata;
+    let calls = 0;
+    context.client = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async () => {
+        calls++;
+        return calls === 1
+          ? [cached]
+          : calls === 2
+            ? older.promise
+            : calls === 3
+              ? newer.promise
+              : [restored];
+      },
+    } as unknown as OpenGeniBrowserClient;
+
+    let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+    function Harness() {
+      latest = useCapabilitiesCatalog("workspace-a");
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Harness />));
+    await act(async () => await latest!.refresh());
+    await act(async () => {
+      void latest!.fetchConnections();
+      void latest!.fetchConnections();
+    });
+    await act(async () => {
+      newer.reject({ status: 503 });
+      await Bun.sleep(0);
+    });
+    expect(latest!.connections).toEqual([cached]);
+    await act(async () => {
+      older.reject({ status: 403 });
+      await Bun.sleep(0);
+    });
+    expect(latest!.connections).toBeNull();
+    expect(latest!.connectionsAccessDenied).toBe(true);
+    expect(latest!.connectionsLoadFailed).toBe(true);
+    await act(async () => await latest!.fetchConnections());
+    expect(latest!.connections).toEqual([restored]);
+    expect(latest!.connectionsAccessDenied).toBe(false);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("a newer successful connection read restores access after an older 403", async () => {
+    const older = deferred<ConnectionMetadata[]>();
+    const newer = deferred<ConnectionMetadata[]>();
+    const restored = { id: "restored" } as ConnectionMetadata;
+    let calls = 0;
+    context.client = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async () => (++calls === 1 ? older.promise : newer.promise),
+    } as unknown as OpenGeniBrowserClient;
+    let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+    function Harness() {
+      latest = useCapabilitiesCatalog("workspace-a");
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Harness />));
+    await act(async () => {
+      void latest!.fetchConnections();
+      void latest!.fetchConnections();
+    });
+    await act(async () => {
+      older.reject({ status: 403 });
+      await Bun.sleep(0);
+    });
+    expect(latest!.connectionsAccessDenied).toBe(true);
+    await act(async () => {
+      newer.resolve([restored]);
+      await Bun.sleep(0);
+    });
+    expect(latest!.connections).toEqual([restored]);
+    expect(latest!.connectionsAccessDenied).toBe(false);
+    expect(latest!.connectionsLoadFailed).toBe(false);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("an old client's late 403 cannot revoke the new client's connection rows", async () => {
+    const stale = deferred<ConnectionMetadata[]>();
+    const current = { id: "current" } as ConnectionMetadata;
+    const clientA = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async () => stale.promise,
+    } as unknown as OpenGeniBrowserClient;
+    const clientB = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async () => [current],
+    } as unknown as OpenGeniBrowserClient;
+    let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+    function Harness() {
+      latest = useCapabilitiesCatalog("workspace-a");
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    context.client = clientA;
+    await act(async () => root.render(<Harness />));
+    await act(async () => {
+      void latest!.fetchConnections();
+    });
+    context.client = clientB;
+    await act(async () => root.render(<Harness />));
+    await act(async () => await latest!.fetchConnections());
+    await act(async () => {
+      stale.reject({ status: 403 });
+      await Bun.sleep(0);
+    });
+    expect(latest!.connections).toEqual([current]);
+    expect(latest!.connectionsAccessDenied).toBe(false);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("confirmed 403 retires cached rows even if the catalog concurrently fails", async () => {
     const catalogFailure = deferred<{ items: CapabilityCatalogItem[] }>();
     const connectionFailure = deferred<ConnectionMetadata[]>();

@@ -86,27 +86,49 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
   scopeRef.current = { client, workspaceId };
   const refreshRevision = useRef(0);
   const connectionRevision = useRef(0);
+  const successfulConnectionRevision = useRef(0);
+  const deniedConnectionRevision = useRef(0);
   const isCurrentScope = () =>
     scopeRef.current.client === client && scopeRef.current.workspaceId === workspaceId;
 
   async function fetchConnections(): Promise<ConnectionMetadata[] | null> {
     const request = ++connectionRevision.current;
-    const live = () => isCurrentScope() && connectionRevision.current === request;
+    const live = () => isCurrentScope();
     try {
       const loaded = await client.listConnections(workspaceId);
-      if (live()) {
+      // A later successful read restores access; an earlier success cannot undo
+      // a confirmed denial, even if it settles after that denial.
+      if (
+        live() &&
+        request > deniedConnectionRevision.current &&
+        request > successfulConnectionRevision.current
+      ) {
+        successfulConnectionRevision.current = request;
         setConnections(loaded);
         setConnectionsLoadFailed(false);
         setConnectionDenialScope(null);
       }
-      return live() ? loaded : null;
+      return live() && request > deniedConnectionRevision.current ? loaded : null;
     } catch (error) {
-      if (live()) {
-        // Transient errors retain cached rows; confirmed denial revokes them.
-        const denied = isWorkspacePermissionDenied(error);
-        if (denied) setConnections(null);
+      const denied = isWorkspacePermissionDenied(error);
+      if (
+        live() &&
+        denied &&
+        request > successfulConnectionRevision.current &&
+        request > deniedConnectionRevision.current
+      ) {
+        deniedConnectionRevision.current = request;
+        setConnections(null);
         setConnectionsLoadFailed(true);
-        setConnectionDenialScope(denied ? { client, workspaceId } : null);
+        setConnectionDenialScope({ client, workspaceId });
+      } else if (
+        live() &&
+        !denied &&
+        request === connectionRevision.current &&
+        deniedConnectionRevision.current <= successfulConnectionRevision.current
+      ) {
+        // Transient errors retain cached rows and any confirmed denial.
+        setConnectionsLoadFailed(true);
       }
       return null;
     }
