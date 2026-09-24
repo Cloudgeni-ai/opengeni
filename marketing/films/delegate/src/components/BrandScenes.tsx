@@ -69,7 +69,8 @@ export const BrandScenes: React.FC<{ t: number }> = ({ t }) => {
   const landed = prog(t, T.yourFly + 0.78, T.yourFly + 0.92, (x) => x);
 
   const codeOn = prog(t, T.code, T.code + 0.45, ease.out);
-  const out = prog(t, T.codeOut, T.codeOut + 0.38, ease.in);
+  // Hard cut on the downbeat from the code to the end line: no ghosted overlap.
+  const out = t >= T.line1 ? 1 : 0;
 
   const word = (color: string) => (
     <div style={{ position: "absolute", left: wx, top: wy, opacity: 1 - landed }}>

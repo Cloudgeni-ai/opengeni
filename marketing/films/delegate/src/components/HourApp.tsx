@@ -11,7 +11,8 @@ import { HourFlipWordmark } from "./Flip";
 
 /** The whole product, in app pixels. Everything the camera sees lives here. */
 export const HourApp: React.FC<{ t: number }> = ({ t }) => {
-  const dim = prog(t, T.dim, T.dim + 0.7);
+  // Lights out, then only the product's name stays lit while the camera finds it.
+  const darkness = Math.min(1, 0.38 * prog(t, T.dim, T.dim + 0.7) + 0.62 * prog(t, T.toMark + 0.05, T.toMark + 0.5));
   const chromeFade = 1 - prog(t, T.toMark + 0.1, T.toMark + 0.7);
   const handoff = t >= T.wipe;
   const focusScrim = prog(t, T.askClick, T.askClick + 0.3) * (1 - prog(t, T.enter + 0.05, T.enter + 0.45));
@@ -46,7 +47,7 @@ export const HourApp: React.FC<{ t: number }> = ({ t }) => {
           top: -600,
           width: 3120,
           height: 2280,
-          background: `rgba(3,4,6,${0.38 * dim})`,
+          background: `rgba(11,12,15,${darkness})`,
           zIndex: 45,
           pointerEvents: "none",
         }}

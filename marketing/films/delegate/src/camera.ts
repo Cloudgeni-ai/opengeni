@@ -1,4 +1,4 @@
-import { Key, track, trackScale } from "./anim";
+import { Key, clamp01, ease, lerp, track, trackScale } from "./anim";
 import { T } from "./timeline";
 import { G } from "./data";
 import { APPROVAL_H } from "./components/AgentPanel";
@@ -28,6 +28,16 @@ export const CAM: Key[] = [
 ];
 
 export function cameraAt(t: number) {
+  if (t > T.toMark && t <= T.markArrive) {
+    // Zoom-to-point: the wordmark's on-screen position glides to centre while
+    // scale grows in log space, so the target never leaves the frame.
+    const k = clamp01((t - T.toMark) / (T.markArrive - T.toMark));
+    const s = Math.exp(lerp(0, Math.log(MARK_SCALE), ease.camera(k)));
+    const p = ease.inOut(k);
+    const px = lerp(960 + (MARK.x - 960), 960, p);
+    const py = lerp(540 + (MARK.y - 540), 540, p);
+    return { cx: MARK.x - (px - 960) / s, cy: MARK.y - (py - 540) / s, s };
+  }
   return { cx: track(CAM, t, "cx"), cy: track(CAM, t, "cy"), s: trackScale(CAM, t) };
 }
 

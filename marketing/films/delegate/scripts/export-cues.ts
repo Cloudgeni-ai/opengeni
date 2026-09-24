@@ -1,12 +1,13 @@
 /** Writes audio/cues.json from the picture timeline so sound is frame-locked. */
 import { writeFileSync } from "node:fs";
-import { BAR, BEAT, CLICKS, T, TYPE_TIMES, flightEnd, flightStart, sentAt } from "../src/timeline";
+import { BAR, BEAT, CLICKS, DOWNBEAT0, T, TYPE_TIMES, flightEnd, flightStart, sentAt } from "../src/timeline";
 import { REQUEST } from "../src/data";
 
 const cues = {
   bpm: 60 / BEAT,
   beat: BEAT,
   bar: BAR,
+  downbeat0: DOWNBEAT0,
   duration: T.end,
   T,
   clicks: CLICKS,

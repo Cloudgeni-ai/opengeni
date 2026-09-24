@@ -10,31 +10,33 @@ type P = { t: number; x: number; y: number; e?: (x: number) => number };
 const ben = cardRect(0);
 const cx = (r: { x: number; w: number }) => r.x + r.w / 2;
 const cy = (r: { y: number; h: number }) => r.y + r.h / 2;
-/** Where the pointer lies down: just right of the Tomorrow column, on screen
- * in both the wide shots and the approval close-up. */
-const REST = { x: 716, y: 1058 };
+/** Where the pointer lies down: on the calendar just right of the Tomorrow
+ * list — inside the list shot while it flops, and inside the approval
+ * close-up when it wakes. After approving it settles by the status strip. */
+const REST = { x: 704, y: 716 };
+const REST2 = { x: 668, y: 1040 };
 
 /** Pointer path in app pixels. Segments decelerate like a hand on a trackpad. */
 const PATH: P[] = [
   { t: 0, x: 520, y: 430 },
   { t: T.benClick - 0.06, x: ben.x + 300, y: cy(ben) + 2 },
   { t: T.benClick + 0.08, x: ben.x + 300, y: cy(ben) + 2 },
-  { t: 1.28, x: cx(DATE_FIELD) + 18, y: cy(DATE_FIELD) + 8 },
-  { t: 1.55, x: cx(DATE_FIELD) + 26, y: cy(DATE_FIELD) + 12 },
-  { t: 1.8, x: cx(TIME_FIELD) - 30, y: cy(TIME_FIELD) + 6 },
-  { t: 2.02, x: cx(TIME_FIELD) - 40, y: cy(TIME_FIELD) + 14 },
+  { t: T.dialogOpen + 0.42, x: cx(DATE_FIELD) + 18, y: cy(DATE_FIELD) + 8 },
+  { t: T.dialogOpen + 0.62, x: cx(DATE_FIELD) + 26, y: cy(DATE_FIELD) + 12 },
+  { t: T.dialogOpen + 0.82, x: cx(TIME_FIELD) - 30, y: cy(TIME_FIELD) + 6 },
+  { t: T.dialogOpen + 0.96, x: cx(TIME_FIELD) - 40, y: cy(TIME_FIELD) + 14 },
   { t: T.cancelClick - 0.07, x: cx(CANCEL_BTN) + 6, y: cy(CANCEL_BTN) + 4 },
   { t: T.cancelClick + 0.1, x: cx(CANCEL_BTN) + 6, y: cy(CANCEL_BTN) + 4 },
   { t: T.askClick - 0.06, x: G.askX + 360, y: G.askY + 36 },
   { t: T.askClick + 0.12, x: G.askX + 360, y: G.askY + 36 },
-  { t: 3.95, x: G.askX + G.askW + 22, y: G.askY + 50 },
+  { t: T.askClick + 0.75, x: G.askX + G.askW + 22, y: G.askY + 50 },
   { t: T.enter + 0.1, x: G.askX + G.askW + 26, y: G.askY + 52 },
   { t: T.lieEnd - 0.1, x: REST.x, y: REST.y },
   { t: T.sitUp + 0.05, x: REST.x, y: REST.y },
   { t: T.approve - 0.08, x: cx(APPROVE_BTN) + 8, y: cy(APPROVE_BTN) + 4 },
   { t: T.approve + 0.2, x: cx(APPROVE_BTN) + 8, y: cy(APPROVE_BTN) + 4 },
-  { t: T.lieAgain - 0.1, x: REST.x - 20, y: REST.y - 4 },
-  { t: T.lieAgain + 0.5, x: REST.x - 16, y: REST.y },
+  { t: T.lieAgain - 0.1, x: REST2.x - 6, y: REST2.y - 6 },
+  { t: T.lieAgain + 0.5, x: REST2.x, y: REST2.y },
 ];
 
 function pointerAt(t: number) {

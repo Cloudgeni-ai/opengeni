@@ -48,9 +48,10 @@ export const EditDialog: React.FC<{ t: number }> = ({ t }) => {
   const close = prog(t, T.cancelClick + 0.05, T.cancelClick + 0.22);
   const vis = clamp01(open * 1.6) * (1 - close);
   const scale = (0.94 + 0.06 * open) * (1 - 0.03 * close);
-  const hotDate = prog(t, 1.2, 1.35) - prog(t, 1.6, 1.75);
-  const hotTime = prog(t, 1.7, 1.85) - prog(t, 2.05, 2.2);
-  const hotCancel = prog(t, 2.2, 2.3);
+  const d0 = T.dialogOpen;
+  const hotDate = prog(t, d0 + 0.34, d0 + 0.44) - prog(t, d0 + 0.66, d0 + 0.76);
+  const hotTime = prog(t, d0 + 0.76, d0 + 0.86) - prog(t, d0 + 1.0, d0 + 1.08);
+  const hotCancel = prog(t, T.cancelClick - 0.14, T.cancelClick - 0.04);
   const r1 = FIELD_Y + 96;
   const r2 = r1 + 96;
   return (

@@ -103,34 +103,40 @@ def roll(lst, t, names, dur, vel, spread=0.028, dv=0):
         lst.append((t + k * spread, n, dur - k * spread, max(1, vel - dv * k)))
 
 
-# Night: a low dyad under the fade-in, then a sparse, patient motif.
-roll(piano, 0.02, ["B1", "F#2"], 3.4, 44, spread=0.0)
-piano += [(3.2, "F#4", 1.0, 40), (4.0, "A4", 0.9, 36), (4.8, "B4", 1.1, 42), (5.6, "A4", 1.0, 34)]
-roll(piano, 3.2, ["G2", "D3"], 3.0, 30, spread=0.0)
+def B(k: int, beat: float = 0.0) -> float:
+    """Time of bar k (0 = the ask, 1 = Enter, 3 = the question, 4 = THE LAST
+    CLICK, 5 = "hour", 7 = the end line), plus beats. Mirrors src/timeline.ts."""
+    return cues["downbeat0"] + cues["bar"] * k + BEAT * beat
+
+
+# Night (pickup): a low dyad under the first frame; then a sparse, patient motif.
+roll(piano, 0.02, ["B1", "F#2"], 2.8, 44, spread=0.0)
+piano += [(B(0), "F#4", 1.0, 40), (B(0, 1), "A4", 0.9, 36), (B(0, 2), "B4", 1.1, 42), (B(0, 3), "A4", 1.0, 34)]
+roll(piano, B(0), ["G2", "D3"], 3.0, 30, spread=0.0)
 # Enter: the exhale.
-roll(piano, T["enter"], ["E3", "B3", "D4", "F#4", "G4"], 1.9, 46, spread=0.035, dv=2)
-roll(piano, 8.0, ["A2", "D4", "E4"], 1.6, 34, spread=0.03)
+roll(piano, B(1), ["E3", "B3", "D4", "F#4", "G4"], 1.9, 46, spread=0.035, dv=2)
+roll(piano, B(1, 2), ["A2", "D4", "E4"], 1.6, 34, spread=0.03)
 # The work.
-roll(piano, 9.6, ["D2", "A2"], 1.7, 38, spread=0.0)
-roll(piano, 11.2, ["C#3", "A3"], 1.6, 34, spread=0.0)
+roll(piano, B(2), ["D2", "A2"], 1.7, 38, spread=0.0)
+roll(piano, B(2, 2), ["C#3", "A3"], 1.6, 34, spread=0.0)
 # The question.
-roll(piano, T["approvalIn"], ["B2", "F#3", "A3", "D4"], 1.8, 40, spread=0.04)
-roll(piano, 14.4, ["A2", "E3", "D4"], 1.7, 34, spread=0.03)
-piano += [(15.2, "E5", 0.8, 28), (15.6, "E5", 0.4, 30)]
+roll(piano, B(3), ["B2", "F#3", "A3", "D4"], 1.8, 40, spread=0.04)
+roll(piano, B(3, 2), ["A2", "E3", "D4"], 1.7, 34, spread=0.03)
+piano += [(B(3, 3), "E5", 0.8, 28), (B(3, 3.5), "E5", 0.4, 30)]
 # THE LAST CLICK — resolution.
-roll(piano, T["approve"], ["D2", "A2", "D3", "F#3", "A3", "E4", "F#4", "A4"], 3.0, 64, spread=0.022, dv=2)
-roll(piano, 17.6, ["G3", "B3", "D4"], 1.4, 30, spread=0.03)
+roll(piano, B(4), ["D2", "A2", "D3", "F#3", "A3", "E4", "F#4", "A4"], 3.0, 64, spread=0.022, dv=2)
+roll(piano, B(4, 2), ["G3", "B3", "D4"], 1.4, 30, spread=0.03)
 # "hour" found in the dark; the flip; morning.
-roll(piano, T["markArrive"], ["D1", "D2"], 2.6, 50, spread=0.0)
+roll(piano, B(5), ["D1", "D2"], 2.6, 50, spread=0.0)
 piano.append((T["flip"] + 0.02, "D6", 0.9, 40))
 roll(piano, T["wipe"], ["G3", "D4", "A4", "B4", "D5"], 2.2, 50, spread=0.03, dv=2)
-roll(piano, 22.4, ["E3", "B3", "D4", "G4"], 0.8, 40, spread=0.025)
-roll(piano, 23.2, ["A2", "E3", "C#4", "E4"], 0.8, 40, spread=0.025)
-roll(piano, 24.0, ["B2", "F#3", "A3", "D4"], 0.8, 38, spread=0.025)
-roll(piano, 24.8, ["A2", "E3", "A3", "C#4"], 0.8, 38, spread=0.025)
-roll(piano, T["line1"], ["G2", "D3", "B3", "D4", "G4"], 0.85, 48, spread=0.025, dv=1)
-roll(piano, T["line2"], ["A2", "E3", "C#4", "E4", "A4"], 0.85, 50, spread=0.025, dv=1)
-roll(piano, T["mark"], ["D2", "A2", "F#3", "A3", "D4", "F#4", "A4", "D5"], 2.4, 56, spread=0.024, dv=2)
+roll(piano, B(6), ["E3", "B3", "D4", "G4"], 0.8, 40, spread=0.025)
+roll(piano, B(6, 1), ["A2", "E3", "C#4", "E4"], 0.8, 40, spread=0.025)
+roll(piano, B(6, 2), ["B2", "F#3", "A3", "D4"], 0.8, 38, spread=0.025)
+roll(piano, B(6, 3), ["A2", "E3", "A3", "C#4"], 0.8, 38, spread=0.025)
+roll(piano, B(7), ["G2", "D3", "B3", "D4", "G4"], 0.85, 48, spread=0.025, dv=1)
+roll(piano, B(7, 1), ["A2", "E3", "C#4", "E4", "A4"], 0.85, 50, spread=0.025, dv=1)
+roll(piano, B(7, 2), ["D2", "A2", "F#3", "A3", "D4", "F#4", "A4", "D5"], 2.4, 56, spread=0.024, dv=2)
 
 # Checking history: glassy steps up the D pentatonic, one per client.
 for t, n in zip(cues["chips"], ["D5", "E5", "F#5", "A5", "B5", "D6", "E6"]):
@@ -149,32 +155,32 @@ for t, n in [(T["ann1"], "A4"), (T["ann2"], "B4"), (T["ann3"], "D5")]:
 marimba.append((T["mark"] + 0.024 * 8, "A5", 1.2, 40))
 
 PAD_CHORDS = [
-    (0.0, 3.2, ["B2", "F#3", "A3", "D4"]),
-    (3.2, 6.4, ["G2", "D3", "F#3", "B3"]),
-    (6.4, 8.0, ["E2", "B2", "G3", "D4", "F#4"]),
-    (8.0, 8.8, ["A2", "E3", "A3", "D4"]),
-    (8.8, 9.6, ["A2", "E3", "A3", "C#4"]),
-    (9.6, 11.2, ["D3", "A3", "D4", "F#4"]),
-    (11.2, 12.8, ["C#3", "E3", "A3", "E4"]),
-    (12.8, 14.4, ["B2", "F#3", "A3", "D4"]),
-    (14.4, 15.6, ["A2", "E3", "A3", "D4"]),
-    (15.6, 16.0, ["A2", "E3", "A3", "C#4"]),
-    (16.0, 19.2, ["D3", "A3", "E4", "F#4"]),
-    (19.2, 20.4, ["D3", "A3"]),
-    (20.4, 22.4, ["G3", "D4", "A4", "B4"]),
-    (22.4, 23.2, ["E3", "G3", "B3", "D4"]),
-    (23.2, 24.0, ["A2", "E3", "A3", "C#4"]),
-    (24.0, 24.8, ["B2", "F#3", "A3", "D4"]),
-    (24.8, 25.6, ["A2", "E3", "A3", "C#4"]),
-    (25.6, 26.4, ["G2", "D3", "G3", "B3"]),
-    (26.4, 27.2, ["A2", "E3", "A3", "C#4"]),
-    (27.2, DUR + 0.6, ["D3", "A3", "D4", "F#4"]),
+    (0.0, B(0), ["B2", "F#3", "A3", "D4"]),
+    (B(0), B(1), ["G2", "D3", "F#3", "B3"]),
+    (B(1), B(1, 2), ["E2", "B2", "G3", "D4", "F#4"]),
+    (B(1, 2), B(1, 3), ["A2", "E3", "A3", "D4"]),
+    (B(1, 3), B(2), ["A2", "E3", "A3", "C#4"]),
+    (B(2), B(2, 2), ["D3", "A3", "D4", "F#4"]),
+    (B(2, 2), B(3), ["C#3", "E3", "A3", "E4"]),
+    (B(3), B(3, 2), ["B2", "F#3", "A3", "D4"]),
+    (B(3, 2), B(3, 3.5), ["A2", "E3", "A3", "D4"]),
+    (B(3, 3.5), B(4), ["A2", "E3", "A3", "C#4"]),
+    (B(4), B(5), ["D3", "A3", "E4", "F#4"]),
+    (B(5), T["wipe"], ["D3", "A3"]),
+    (T["wipe"], B(6), ["G3", "D4", "A4", "B4"]),
+    (B(6), B(6, 1), ["E3", "G3", "B3", "D4"]),
+    (B(6, 1), B(6, 2), ["A2", "E3", "A3", "C#4"]),
+    (B(6, 2), B(6, 3), ["B2", "F#3", "A3", "D4"]),
+    (B(6, 3), B(7), ["A2", "E3", "A3", "C#4"]),
+    (B(7), B(7, 1), ["G2", "D3", "G3", "B3"]),
+    (B(7, 1), B(7, 2), ["A2", "E3", "A3", "C#4"]),
+    (B(7, 2), DUR + 0.6, ["D3", "A3", "D4", "F#4"]),
 ]
 BASS = [
-    (6.4, 8.0, "E2"), (8.0, 9.6, "A1"), (9.6, 11.2, "D2"), (11.2, 12.8, "C#2"),
-    (12.8, 14.4, "B1"), (14.4, 16.0, "A1"), (16.0, 19.0, "D2"), (19.2, 20.3, "D1"),
-    (20.4, 22.4, "G1"), (22.4, 23.2, "E2"), (23.2, 24.0, "A1"), (24.0, 24.8, "B1"),
-    (24.8, 25.6, "A1"), (25.6, 26.4, "G1"), (26.4, 27.2, "A1"), (27.2, DUR + 0.4, "D2"),
+    (B(1), B(1, 2), "E2"), (B(1, 2), B(2), "A1"), (B(2), B(2, 2), "D2"), (B(2, 2), B(3), "C#2"),
+    (B(3), B(3, 2), "B1"), (B(3, 2), B(4), "A1"), (B(4), B(5) - 0.2, "D2"), (B(5), B(5, 1.4), "D1"),
+    (T["wipe"], B(6), "G1"), (B(6), B(6, 1), "E2"), (B(6, 1), B(6, 2), "A1"), (B(6, 2), B(6, 3), "B1"),
+    (B(6, 3), B(7), "A1"), (B(7), B(7, 1), "G1"), (B(7, 1), B(7, 2), "A1"), (B(7, 2), DUR + 0.4, "D2"),
 ]
 
 
@@ -398,15 +404,18 @@ def automation(points: list[tuple[float, float]]) -> np.ndarray:
 
 
 PAD_LEVELS = [
-    (0.0, -30), (1.2, -12), (6.3, -12), (7.0, -2), (12.8, -3), (13.4, -9), (14.4, -8),
-    (15.95, -2), (16.05, 2), (17.6, -3), (18.4, -9), (20.3, -12), (20.9, -1), (25.6, -2),
-    (27.2, 1), (29.6, 0),
+    (0.0, -26), (0.8, -12), (B(1) - 0.1, -12), (B(1) + 0.6, -2), (B(3), -3), (B(3) + 0.6, -9), (B(3, 2), -8),
+    (B(4) - 0.05, -2), (B(4) + 0.05, 2), (B(4, 2), -3), (B(4, 3), -9), (T["wipe"] - 0.1, -12), (T["wipe"] + 0.5, -1),
+    (B(7), -2), (B(7, 2), 1), (DUR, 0),
 ]
-BASS_LEVELS = [(0.0, -40), (6.35, -40), (6.6, -3), (12.8, -3), (13.3, -8), (15.9, -2), (16.05, 2), (18.2, -4), (19.2, -2), (29.6, -2)]
+BASS_LEVELS = [
+    (0.0, -40), (B(1) - 0.05, -40), (B(1) + 0.2, -3), (B(3), -3), (B(3) + 0.5, -8), (B(4) - 0.1, -2),
+    (B(4) + 0.05, 2), (B(4, 3) - 0.4, -4), (B(5), -2), (DUR, -2),
+]
 MUSIC_LEVELS = [
-    (0.0, -6), (3.2, -6), (6.3, -4), (7.2, 0), (12.6, 0), (13.3, -4), (14.4, -4.5),
-    (15.9, -1.5), (16.02, 1.0), (17.4, 0), (17.9, -1), (18.8, -5), (20.3, -5.5), (20.9, 0),
-    (25.6, 0), (27.2, 1), (29.6, 0),
+    (0.0, -3.5), (B(0), -4.5), (B(1) - 0.1, -3), (B(1) + 0.8, 0), (B(3) - 0.2, 0), (B(3) + 0.5, -4), (B(3, 2), -4.5),
+    (B(4) - 0.1, -1.5), (B(4) + 0.02, 1.0), (B(4, 1.8), 0), (T["dim"], -1), (T["dim"] + 0.9, -5), (T["wipe"] - 0.1, -5.5),
+    (T["wipe"] + 0.5, 0), (B(7), 0), (B(7, 2), 1), (DUR, 0),
 ]
 
 
@@ -483,14 +492,14 @@ def main() -> None:
         place(sfx, key_tap(300 + i, deep), k["t"] - 0.003, gain=db(-25.0 + rng.uniform(-2, 1.5)), pan=-0.3 + rng.uniform(-0.08, 0.08))
     place(sfx, key_tap(999, 0.8), T["enter"] - 0.004, gain=db(-18.0), pan=-0.25)
     # The clock: the night's pressure. It stops the moment she delegates.
-    ticks = [b * BEAT for b in range(8)]
+    ticks = [b * BEAT for b in range(int(round(T["enter"] / BEAT)))]
     for j, t in enumerate(ticks):
         if any(abs(t - c) < 0.05 for c in cues["clicks"]):
             continue
-        fade = 1.0 if t < 4.5 else 0.7
+        fade = 1.0 if t < T["enter"] - 1.7 else 0.7
         place(sfx, clock_tick(j % 2 == 0), t, gain=db(-30.0) * fade, pan=0.45)
-    place(sfx, flop(), T["lieStart"] + 0.5, gain=db(-21.0), pan=0.2)
-    place(sfx, flop(), T["lieAgain"] + 0.2, gain=db(-24.0), pan=0.2)
+    place(sfx, flop(), T["lieStart"] + 0.62, gain=db(-21.0), pan=0.2)
+    place(sfx, flop(), T["lieAgain"] + 0.33, gain=db(-24.0), pan=0.1)
     for i, t in enumerate(cues["liftoffs"]):
         place(sfx, swell(0.42, 500, 2600, peak_at=0.55, seed=40 + i), t, gain=db(-33.0), pan=-0.4 + 0.12 * i)
     place(sfx, swell(0.9, 300, 3500, peak_at=0.9, seed=7), T["toMark"] + 0.05, gain=db(-30.0))

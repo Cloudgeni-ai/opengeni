@@ -2,56 +2,57 @@ import { CLIENTS, REQUEST } from "./data";
 
 /** Story cues in seconds. Picture (Remotion) and sound (audio/compose.py via
  * scripts/export-cues.ts) both read these, so sync is exact by construction. */
-/** Music runs at 75 BPM in 4/4: one beat = 0.8 s, one bar = 3.2 s.
- * Structural moments sit on the grid: Enter (bar 2), the landings (eighths),
- * the approval card (bar 4), THE LAST CLICK (bar 5), "hour" (bar 6),
- * the end line (bar 8). */
+/** Music runs at 75 BPM in 4/4: one beat = 0.8 s, one bar = 3.2 s. The film
+ * opens on a short pickup; downbeats fall at 2.4 + 3.2k s. Structural moments
+ * sit on the grid: the ask (bar 1), Enter (bar 2), landings (eighths), the
+ * question (bar 4), THE LAST CLICK (bar 5), "hour" (bar 6), end line (bar 8). */
 export const BEAT = 0.8;
 export const BAR = BEAT * 4;
+export const DOWNBEAT0 = 2.4;
+export const bar = (k: number, beat = 0) => DOWNBEAT0 + BAR * k + BEAT * beat;
 
 export const T = {
   // Act 1 — operating the software
-  benClick: 0.4,
-  dialogOpen: 0.45,
-  cancelClick: 2.4,
-  askClick: 3.2,
-  typeStart: 3.42,
-  typeEnd: 5.95,
-  enter: 6.4,
+  benClick: 0.3,
+  dialogOpen: 0.35,
+  cancelClick: 1.6,
+  askClick: bar(0),
+  typeStart: bar(0) + 0.22,
+  typeEnd: bar(0, 3) + 0.35,
+  enter: bar(1),
 
   // Act 2 — delegating inside it
-  lieStart: 6.75,
-  lieEnd: 7.6,
-  check: 7.2,
+  lieStart: bar(1) + 0.5,
+  lieEnd: bar(1) + 1.22,
+  check: bar(1, 1),
   checkGap: 0.15,
-  flights: 8.95,
+  flights: bar(2, 0.5) - 1.05,
   flightGap: 0.4,
   flightDur: 1.05,
-  draft: 12.5,
-  approvalIn: 12.8,
-  sitUp: 14.4,
-  approve: 16.0,
-  sent: 16.25,
+  draft: bar(3) - 0.3,
+  approvalIn: bar(3),
+  sitUp: bar(3, 2),
+  approve: bar(4),
+  sent: bar(4) + 0.25,
   sentGap: 0.11,
-  clear: 17.2,
-  lieAgain: 17.6,
-  dim: 17.9,
+  clear: bar(4, 1.5),
+  lieAgain: bar(4, 2),
+  dim: bar(4, 2) + 0.3,
 
   // Act 3 — it could be yours
-  toMark: 18.3,
-  markArrive: 19.2,
-  flip: 19.6,
-  wipe: 20.4,
-  yourFly: 20.6,
-  code: 20.9,
-  ann1: 21.6,
-  ann2: 22.4,
-  ann3: 23.2,
-  codeOut: 25.2,
-  line1: 25.6,
-  line2: 26.4,
-  mark: 27.2,
-  end: 29.6,
+  toMark: bar(5) - 0.9,
+  markArrive: bar(5),
+  flip: bar(5, 0.5),
+  wipe: bar(5, 1.5),
+  yourFly: bar(5, 1.5) + 0.2,
+  code: bar(5, 1.5) + 0.5,
+  ann1: bar(5, 3),
+  ann2: bar(6),
+  ann3: bar(6, 1),
+  line1: bar(7),
+  line2: bar(7, 1),
+  mark: bar(7, 2),
+  end: bar(7, 2) + 2.4,
 } as const;
 
 export const DURATION_S = T.end;
