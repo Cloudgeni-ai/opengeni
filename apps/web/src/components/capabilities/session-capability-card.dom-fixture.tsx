@@ -102,7 +102,9 @@ const context = {
   githubStatus: null as { status: string } | null,
   refreshGitHub,
   refreshWorkspaceMcpServers: async () => {},
-  accessContext: { workspaceGrants: [] as Array<{ workspaceId: string; permissions: string[] }> },
+  accessContext: {
+    workspaceGrants: [{ workspaceId: "workspace", permissions: ["connections:read"] }],
+  },
 };
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({ toast: { success: () => {}, error: () => {} } }));
@@ -269,7 +271,7 @@ describe("conversation connection card", () => {
       expect(button(h.container, "Add MCP server").disabled).toBe(true);
       expect(h.container.textContent).toContain("A workspace admin needs to add this server");
       context.accessContext.workspaceGrants = [
-        { workspaceId: "workspace", permissions: ["capabilities:manage"] },
+        { workspaceId: "workspace", permissions: ["capabilities:manage", "connections:read"] },
       ];
       await h.rerender("workspace");
       expect(button(h.container, "Add MCP server").disabled).toBe(false);
@@ -287,7 +289,9 @@ describe("conversation connection card", () => {
       await act(async () => button(h.container, "Connect Internal Tools").click());
       expect(h.container.textContent).toContain("Add to workspace");
     } finally {
-      context.accessContext.workspaceGrants = [];
+      context.accessContext.workspaceGrants = [
+        { workspaceId: "workspace", permissions: ["connections:read"] },
+      ];
       createdCatalogItem = null;
       await h.close();
     }
@@ -302,7 +306,9 @@ describe("conversation connection card", () => {
       endpointUrl: "https://mcp.example.test/mcp",
       runtime: { available: true, mcpServerId: "reviewed" },
     });
-    context.accessContext.workspaceGrants = [];
+    context.accessContext.workspaceGrants = [
+      { workspaceId: "workspace", permissions: ["connections:read"] },
+    ];
     context.client.createCapability.mockClear();
     const suggested = {
       ...item,
@@ -515,6 +521,30 @@ describe("conversation connection card", () => {
     expect(createConnection).not.toHaveBeenCalled();
     expect(enableCapability).not.toHaveBeenCalled();
     await h.close();
+  });
+  test("an open connection card masks its connected account when read access is revoked", async () => {
+    const h = await render(true);
+    try {
+      await act(async () => button(h.container, "Add API key").click());
+      expect(button(h.container, "Add tools").disabled).toBe(false);
+      context.accessContext.workspaceGrants = [];
+      await h.rerender("workspace");
+      expect(
+        [...h.container.querySelectorAll("button")].some((node) =>
+          node.textContent?.includes("Add tools"),
+        ),
+      ).toBe(false);
+      context.accessContext.workspaceGrants = [
+        { workspaceId: "workspace", permissions: ["connections:read"] },
+      ];
+      await h.rerender("workspace");
+      expect(button(h.container, "Add tools").disabled).toBe(false);
+    } finally {
+      context.accessContext.workspaceGrants = [
+        { workspaceId: "workspace", permissions: ["connections:read"] },
+      ];
+      await h.close();
+    }
   });
   test("switching workspace discards the open dialog and its credential draft", async () => {
     const h = await render();

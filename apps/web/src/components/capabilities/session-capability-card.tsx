@@ -293,6 +293,10 @@ function SessionCapabilitySetup({
 }) {
   const context = useAppContext();
   const catalog = useCapabilitiesCatalog(workspaceId);
+  const canReadConnections =
+    context.accessContext === null
+      ? null
+      : hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
   const [error, setError] = useState<string | null>(null);
   const [authInspection, setAuthInspection] = useState<{
     id: string;
@@ -300,16 +304,36 @@ function SessionCapabilitySetup({
     kind: "oauth2" | "none" | "unknown";
   } | null>(null);
   const inFlight = useRef(false);
-  const scope = useRef({ client: context.client, workspaceId, sessionId, alive: true });
-  scope.current = { client: context.client, workspaceId, sessionId, alive: true };
+  const scope = useRef({
+    client: context.client,
+    workspaceId,
+    sessionId,
+    canReadConnections,
+    alive: true,
+  });
+  if (
+    scope.current.client !== context.client ||
+    scope.current.workspaceId !== workspaceId ||
+    scope.current.sessionId !== sessionId ||
+    scope.current.canReadConnections !== canReadConnections
+  ) {
+    scope.current = {
+      client: context.client,
+      workspaceId,
+      sessionId,
+      canReadConnections,
+      alive: true,
+    };
+  }
   useEffect(() => {
+    const activeScope = scope.current;
     void catalog.refresh();
     return () => {
-      scope.current.alive = false;
+      activeScope.alive = false;
     };
-    // Catalog refresh is intentionally invoked once per mounted scope.
+    // Refetch on a live read-grant change; the hook masks prior rows during render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context.client, workspaceId, sessionId]);
+  }, [context.client, workspaceId, sessionId, canReadConnections]);
   const rawItem = catalog.items.find((entry) => entry.id === capabilityId);
   const rawItemId = rawItem?.id;
   const inspectUrl = rawItem?.mcpUrl ?? rawItem?.endpointUrl;
@@ -363,11 +387,7 @@ function SessionCapabilitySetup({
     setBusy(true);
     setError(null);
     const invocation = scope.current;
-    const current = () =>
-      scope.current.alive &&
-      scope.current.client === invocation.client &&
-      scope.current.workspaceId === invocation.workspaceId &&
-      scope.current.sessionId === invocation.sessionId;
+    const current = () => scope.current === invocation && invocation.alive;
     try {
       await performCapabilityAction(
         {
@@ -425,11 +445,7 @@ function SessionCapabilitySetup({
     setBusy(true);
     setError(null);
     const invocation = scope.current;
-    const current = () =>
-      scope.current.alive &&
-      scope.current.client === invocation.client &&
-      scope.current.workspaceId === invocation.workspaceId &&
-      scope.current.sessionId === invocation.sessionId;
+    const current = () => scope.current === invocation && invocation.alive;
     try {
       await attachSessionCapability(context.client, workspaceId, sessionId, item, current);
       if (current()) await onConfigured?.();

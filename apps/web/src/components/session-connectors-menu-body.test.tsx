@@ -61,6 +61,7 @@ for (const status of ["connect", "reconnect", "unavailable"] as const) {
           selectedIds: [...selection.mcpServerIds],
         },
         catalog,
+        true,
       );
       current = selection;
       blocked = getComposerSendBlocker({
@@ -222,6 +223,202 @@ test("connector settings attach multiple readable personal/workspace accounts wi
   expect(container.querySelectorAll("button")).toHaveLength(3);
   expect(container.querySelectorAll('[role="switch"]')).toHaveLength(2);
   expect(reconnect).not.toHaveBeenCalled();
+});
+
+test("revoked account access shows ask-admin guidance without Retry in both composer menu views", async () => {
+  let denied = false;
+  const client = {
+    listOwnConnectionAccounts: async () => {
+      if (denied) throw { status: 403 };
+      return [
+        {
+          id: "personal-id",
+          subjectId: "me",
+          authorityId: "authority",
+          status: "active",
+          providerDomain: "example.com",
+          metadata: { email: "alex@example.com" },
+        },
+      ] as unknown as ConnectionMetadata[];
+    },
+  } as unknown as OpenGeniBrowserClient;
+  const catalog = [
+    {
+      enabled: true,
+      name: "Mail",
+      runtime: { mcpServerId: "mail" },
+      connectionRef: { providerDomain: "example.com", subjectScope: "subject" },
+    },
+  ] as CapabilityCatalogItem[];
+  let refreshAccounts!: () => Promise<void>;
+  function Preview() {
+    const accountState = useConnectionAccounts(
+      client,
+      { id: "session", workspaceId: "workspace", selectedIds: ["mail"] },
+      catalog,
+      true,
+    );
+    refreshAccounts = accountState.refresh;
+    return (
+      <SessionConnectorsMenuBody
+        presentation="dialog"
+        servers={[{ id: "mail", name: "Mail" }]}
+        firstPartyTools={[]}
+        selection={{ mcpServerIds: new Set(["mail"]), firstPartyToolIds: new Set() }}
+        onChange={() => {}}
+        accountControls={{
+          groups: accountState.availableAccountGroups,
+          choices: accountState.accountChoices,
+          onChoose: accountState.selectAccount,
+          error: accountState.error,
+          accessDenied: accountState.accessDenied,
+          onRefresh: () => void accountState.refresh(),
+        }}
+      />
+    );
+  }
+  await act(async () => root.render(<Preview />));
+  expect(container.querySelector('[aria-label="Mail account settings"]')).not.toBeNull();
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('[aria-label="Mail account settings"]')!.click(),
+  );
+  denied = true;
+  await act(async () => refreshAccounts());
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+    "Ask a workspace admin for connection access",
+  );
+  expect(container.textContent).not.toContain("alex@example.com");
+  expect(container.textContent).not.toContain("Retry accounts");
+
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('[aria-label="Back to connectors"]')!.click(),
+  );
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+    "Ask a workspace admin for connection access",
+  );
+  expect(container.textContent).not.toContain("Retry accounts");
+});
+
+test("live grant removal hides open account labels and choices; Send remains available without a native connector", async () => {
+  const client = {
+    listOwnConnectionAccounts: async () => [
+      {
+        id: "personal-id",
+        subjectId: "me",
+        authorityId: "authority",
+        status: "active",
+        providerDomain: "example.com",
+        metadata: { email: "alex@example.com" },
+      },
+    ],
+  } as unknown as OpenGeniBrowserClient;
+  const catalog = [
+    {
+      enabled: true,
+      name: "Mail",
+      runtime: { mcpServerId: "mail" },
+      connectionRef: { providerDomain: "example.com", subjectScope: "subject" },
+    },
+  ] as CapabilityCatalogItem[];
+  let canRead = true;
+  let choose!: (serverId: string, ids: string[]) => void;
+  function Preview() {
+    const [customizing, setCustomizing] = useState(false);
+    const [selection, setSelection] = useState<SessionToolSelection>({
+      mcpServerIds: new Set(["mail"]),
+      firstPartyToolIds: new Set(),
+    });
+    const accountState = useConnectionAccounts(
+      client,
+      { id: "session", workspaceId: "workspace", selectedIds: [...selection.mcpServerIds] },
+      catalog,
+      canRead,
+    );
+    choose = accountState.selectAccount;
+    const blocked = getComposerSendBlocker({
+      uploadPending: false,
+      repositoryError: null,
+      policyValid: true,
+      variableSetBlocked: false,
+      personalDecision: accountState.requiresAccountChoice,
+      personalLoading: accountState.loading || accountState.error !== null,
+    });
+    return (
+      <>
+        <SessionConnectorsMenuBody
+          presentation="dialog"
+          servers={[{ id: "mail", name: "Mail" }]}
+          firstPartyTools={[]}
+          selection={selection}
+          onChange={setSelection}
+          customizing={customizing}
+          onCustomizingChange={setCustomizing}
+          accountControls={{
+            groups: accountState.availableAccountGroups,
+            choices: accountState.accountChoices,
+            onChoose: accountState.selectAccount,
+            error: accountState.error,
+            accessDenied: accountState.accessDenied,
+          }}
+        />
+        <button type="button" disabled={blocked !== null}>
+          Send
+        </button>
+      </>
+    );
+  }
+  await act(async () => root.render(<Preview />));
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('[aria-label="Mail account settings"]')!.click(),
+  );
+  expect(container.textContent).toContain("alex@example.com");
+  await act(async () => choose("mail", ["personal-id"]));
+  canRead = false;
+  await act(async () => root.render(<Preview />));
+  expect(container.textContent).not.toContain("alex@example.com");
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain("Ask a workspace admin");
+  const send = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+    (button) => button.textContent === "Send",
+  )!;
+  expect(send.disabled).toBe(true);
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('[aria-label="Back to connectors"]')!.click(),
+  );
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('[aria-label="Customize connectors"]')!.click(),
+  );
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Mail"]')!.click(),
+  );
+  expect(send.disabled).toBe(false);
+});
+
+test("transient account failure still offers Retry in the composer menu", async () => {
+  const retry = mock();
+  await act(async () =>
+    root.render(
+      <SessionConnectorsMenuBody
+        presentation="dialog"
+        servers={[{ id: "mail", name: "Mail" }]}
+        firstPartyTools={[]}
+        selection={{ mcpServerIds: new Set(["mail"]), firstPartyToolIds: new Set() }}
+        onChange={() => {}}
+        accountControls={{
+          groups: [],
+          choices: {},
+          onChoose: () => {},
+          error: "Connection accounts could not be checked.",
+          onRefresh: retry,
+        }}
+      />,
+    ),
+  );
+  await act(async () =>
+    [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Retry accounts")!
+      .click(),
+  );
+  expect(retry).toHaveBeenCalledTimes(1);
 });
 
 test("account labels use readable metadata and never fall back to a raw connection ID", () => {

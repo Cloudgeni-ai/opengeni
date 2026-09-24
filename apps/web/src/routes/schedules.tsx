@@ -1361,6 +1361,9 @@ function ScheduledTaskForm(props: {
       selectedIds,
     },
     context.workspaceCapabilityCatalog,
+    context.accessContext === null
+      ? null
+      : hasWorkspacePermission(context.accessContext, props.workspaceId, "connections:read"),
     connectionAccountChoices(props.initialState.connectionAccounts ?? []),
   );
   const [learningOpen, setLearningOpen] = useState(false);
@@ -1738,13 +1741,15 @@ function ScheduledTaskForm(props: {
           <Notice
             tone="failed"
             action={
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => void connectionAccounts.refresh()}
-              >
-                Retry
-              </Button>
+              connectionAccounts.accessDenied ? undefined : (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => void connectionAccounts.refresh()}
+                >
+                  Retry
+                </Button>
+              )
             }
           >
             {connectionAccounts.error}

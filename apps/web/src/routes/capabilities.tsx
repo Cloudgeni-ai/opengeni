@@ -1,8 +1,10 @@
 import type { SkillSummary } from "@opengeni/sdk";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
 import { ConnectionCatalog, McpConnectionCard } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
 import { ConnectionLogo } from "@opengeni/react/connect";
+import { ConnectionAccessNotice } from "@/components/capabilities/connection-access-notice";
 import {
   catalogServiceIdentity,
   mergeConnectionServices,
@@ -115,6 +117,8 @@ const CustomApiSetupDialog = lazy(async () => {
 
 import {
   catalogStatusForChip,
+  connectionAccessChip,
+  connectionAccessModel,
   type IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
 
@@ -128,6 +132,15 @@ import type {
 } from "@/types";
 
 const PAGE_SIZE = 48;
+
+/** Keep the OAuth-return connection read alive even when the catalog read fails. */
+export function fetchOAuthReturnRows(
+  client: Pick<OpenGeniBrowserClient, "listCapabilities">,
+  workspaceId: string,
+  fetchConnections: () => Promise<ConnectionMetadata[] | null>,
+) {
+  return Promise.all([client.listCapabilities(workspaceId), fetchConnections()]);
+}
 
 export function canManageApiIntegrations(
   accessContext: AccessContext | null,
@@ -168,8 +181,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     setItems,
     connections,
     connectionsLoadFailed,
+    connectionsAccessDenied,
     replaceConnection,
-    adoptConnections,
+    fetchConnections,
     apiIntegrationDefinitions,
     apiIntegrationInstances,
     socialConnections,
@@ -299,6 +313,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     [client],
   );
   const connectionsLoaded = connections !== null;
+  const connectionsRetryable = connectionsLoadFailed && !connectionsAccessDenied;
   const canManageApiIntegrationInstances = canManageApiIntegrations(
     context.accessContext,
     workspaceId,
@@ -326,7 +341,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     workspaceId,
     connections,
     connectionsLoaded,
-    connectionsLoadFailed,
+    connectionsLoadFailed: connectionsRetryable,
     refresh,
     replaceConnection,
     definitions: apiIntegrationDefinitions,
@@ -338,7 +353,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     workspaceId,
     connections,
     connectionsLoaded,
-    connectionsLoadFailed,
+    connectionsLoadFailed: connectionsRetryable,
     refresh,
     replaceConnection,
   });
@@ -380,15 +395,20 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     refreshRevision: catalogData.revision,
   });
   const integrations = [
-    slack,
+    { ...slack, model: connectionAccessModel(slack.model, connectionsAccessDenied) },
     github,
-    googleDrive,
-    atlassian,
+    { ...googleDrive, model: connectionAccessModel(googleDrive.model, connectionsAccessDenied) },
+    { ...atlassian, model: connectionAccessModel(atlassian.model, connectionsAccessDenied) },
     outlookMail,
     outlookCalendar,
     outlookContacts,
     oneDrive,
   ];
+  const connectorChip = (item: CapabilityCatalogItem) =>
+    connectionAccessChip(
+      capabilityStateChip(item, connectionHealth(item, connections ?? [], connectionsLoaded)),
+      connectionsAccessDenied,
+    );
   const connectionServices = mergeConnectionServices([
     ...integrations.map(({ model }) => ({
       id: model.id,
@@ -445,13 +465,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             catalogServiceIdentity(item.id, item.name, item.providerDomain).id === "slack"
               ? "Let OpenGeni read and send Slack messages as you."
               : (item.description ?? undefined),
-          status: capabilityStateChip(
-            item,
-            connectionHealth(item, connections ?? [], connectionsLoaded),
-          ).label,
-          state: catalogStatusForChip(
-            capabilityStateChip(item, connectionHealth(item, connections ?? [], connectionsLoaded)),
-          ),
+          status: connectorChip(item).label,
+          state: catalogStatusForChip(connectorChip(item)),
           connected: item.enabled,
           onOpen: () => openItem(item),
         },
@@ -533,11 +548,15 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       })()
     : [];
   const canManageSocial = canManageSlackReactionSummon(context.accessContext, workspaceId);
+  const canReadConnections =
+    context.accessContext === null
+      ? null
+      : hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
 
   useEffect(() => {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId]);
+  }, [client, workspaceId, canReadConnections]);
 
   const fikenOAuthHandled = useRef(false);
   useEffect(() => {
@@ -1085,15 +1104,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     try {
       // Resolve the item from a FRESH catalog fetch: a registry item persisted
       // moments before the redirect won't be in the pre-redirect snapshot.
-      const [catalog, conns] = await Promise.all([
-        client.listCapabilities(workspaceId),
-        client.listConnections(workspaceId).catch(() => null),
-      ]);
+      const [catalog, conns] = await fetchOAuthReturnRows(client, workspaceId, fetchConnections);
       freshItems = catalog.items;
       setItems(catalog.items);
-      // Don't clobber previously-loaded connections with null on a failed refetch
-      // (that would flip healthy items to "unverified" until the next reload).
-      if (conns !== null) adoptConnections(conns);
       const item =
         (itemId ? catalog.items.find((candidate) => candidate.id === itemId) : undefined) ?? null;
       const action = oauthResumeAction(item, connectionId);
@@ -1253,6 +1266,14 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           description="Connect your favorite tools and extend OpenGeni's capabilities."
         />
 
+        {(connectionsAccessDenied ||
+          (context.accessContext?.workspaceGrants.some(
+            (grant) => grant.workspaceId === workspaceId,
+          ) &&
+            !hasWorkspacePermission(context.accessContext, workspaceId, "connections:read"))) && (
+          <ConnectionAccessNotice />
+        )}
+
         <PluginSearch query={query} onQueryChange={setQuery} scope={activeTab} />
         <CatalogActionContext.Provider value={catalogToolbar}>
           <Tabs
@@ -1316,10 +1337,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                             .map((item) => ({
                               id: item.id,
                               name: item.name,
-                              status: capabilityStateChip(
-                                item,
-                                connectionHealth(item, connections ?? [], connectionsLoaded),
-                              ).label,
+                              status: connectorChip(item).label,
                               logoSrc: logoUrl(item),
                               onOpen: () => openItem(item),
                             })),

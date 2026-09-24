@@ -102,7 +102,7 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
               {accounts.error}
             </p>
           ) : null}
-          {accounts.error && accounts.onRefresh ? (
+          {accounts.error && !accounts.accessDenied && accounts.onRefresh ? (
             <ConnectorAction
               presentation={props.presentation}
               keepOpen
@@ -268,7 +268,7 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
           {props.error}
         </p>
       ) : null}
-      {accounts?.error && accounts.onRefresh ? (
+      {accounts?.error && !accounts.accessDenied && accounts.onRefresh ? (
         <ConnectorAction presentation={props.presentation} keepOpen onAction={accounts.onRefresh}>
           Retry accounts
         </ConnectorAction>

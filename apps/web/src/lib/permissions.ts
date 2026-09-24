@@ -239,6 +239,7 @@ export const defaultWorkspaceMemberPermissions = new Set<string>([
   "scheduled_tasks:manage",
   "scheduled_tasks:run",
   "github:use",
+  "connections:read",
   "variable-sets:list",
   "variable-sets:read",
   "variable-sets:write",
@@ -338,6 +339,11 @@ export function hasWorkspacePermission(
     (grant.permissions.includes(permission) ||
       (permission !== "secrets:read" && grant.permissions.includes("workspace:admin"))),
   );
+}
+
+/** An authorization failure needs an access explanation, not a retry prompt. */
+export function isWorkspacePermissionDenied(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "status" in error && error.status === 403);
 }
 
 export function hasAccountPermission(
