@@ -23,5 +23,7 @@ test("SQL fallback replacements agree with contracts and do not rewrite saved po
   expect(migration).toContain(
     "RAISE EXCEPTION 'autonomous learning defaults source contract changed",
   );
+  expect(migration).toContain("cutover timestamptz := clock_timestamp()");
+  expect(migration).toContain("CASE WHEN p_at < %L::timestamptz THEN %L::jsonb ELSE %L::jsonb END");
   expect(migration).not.toMatch(/\b(?:UPDATE|INSERT|DELETE|ALTER TABLE|GRANT|REVOKE)\b/);
 });
