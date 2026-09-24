@@ -47,7 +47,6 @@ import {
   recordLeaseTerminalDataPlaneUrl,
   releaseLeaseHolder,
   SandboxLeaseSupersededError,
-  SandboxViewerAdmissionBlockedError,
   SandboxPaidComputeAdmissionError,
   type Database,
   type LeaseSnapshot,
@@ -57,6 +56,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
+import { httpExceptionForSandboxViewerAdmission } from "../http/sandbox-viewer-admission-error";
 import type { ObjectStorage } from "@opengeni/storage";
 
 // The leaf — agent-loop-free. apps/api imports sandbox symbols ONLY from here
@@ -315,18 +315,12 @@ export async function attachViewer(
       ...(input.waitSignal ? { waitSignal: input.waitSignal } : {}),
     });
   } catch (error) {
+    const admission = httpExceptionForSandboxViewerAdmission(error);
+    if (admission) throw admission;
     if (error instanceof SandboxPaidComputeAdmissionError) {
       throw new HTTPException(402, { message: error.message, cause: error });
     }
-    if (error instanceof SandboxViewerAdmissionBlockedError) {
-      throw new HTTPException(error.reason === "balance" ? 402 : 429, {
-        message:
-          error.reason === "balance"
-            ? "insufficient OpenGeni credits for an idle sandbox viewer"
-            : "workspace sandbox warm allowance exhausted",
-        cause: error,
-      });
-    }
+
     throw error;
   }
 

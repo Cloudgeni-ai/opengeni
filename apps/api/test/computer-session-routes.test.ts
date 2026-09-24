@@ -79,6 +79,20 @@ describe("ComputerSession route discipline", () => {
     }
   });
 
+  test("settles a prepared admission failure before returning the shared HTTP error", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf('app.post("/v1/workspaces/:workspaceId/computer-sessions"');
+    const end = source.indexOf("app.get(", start);
+    const create = source.slice(start, end);
+    expect(create).toContain("error instanceof SandboxViewerAdmissionBlockedError");
+    expect(create.indexOf("ensureInteractionHolder")).toBeLessThan(
+      create.indexOf("failComputerSessionOperation"),
+    );
+
+    const routeError = source.slice(source.indexOf("function computerRouteError"));
+    expect(routeError).toContain("httpExceptionForSandboxViewerAdmission(error)");
+  });
+
   test("admits every active operation through the exact durable controller and lease fence", async () => {
     const source = await readFile(routeUrl, "utf8");
     const active = source.slice(source.indexOf("async function withActiveComputerController"));
