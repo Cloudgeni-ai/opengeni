@@ -1719,6 +1719,12 @@ describe("buildTimeline", () => {
     ]);
   });
 
+  test("explains a checkpoint that cannot fit the selected model", () => {
+    expect(compactionSkipSubtitle("replacement_exceeds_model_budget")).toContain(
+      "Chat history is unchanged",
+    );
+  });
+
   test("shows a terminal compaction-summary failure without claiming history changed", () => {
     reset();
     const items = buildTimeline([

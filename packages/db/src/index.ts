@@ -42787,6 +42787,7 @@ export async function recordSkippedContextCompaction(
     reason:
       | "no_history"
       | "replacement_not_smaller"
+      | "replacement_exceeds_model_budget"
       | "replacement_unchanged"
       | "summarization_failed";
     /**

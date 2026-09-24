@@ -253,7 +253,7 @@ import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
-  SUMMARY_BUFFER_TOKENS,
+  compactionSummaryOutputTokens,
   buildRemoteCompactionV2PromptInput,
   extractRemoteCompactionV2OutputItem,
   estimateSerializedValueTokens,
@@ -656,6 +656,7 @@ export {
   MIN_COMPACTION_THRESHOLD_RATIO,
   MAX_COMPACTION_THRESHOLD_RATIO,
   SUMMARY_BUFFER_TOKENS,
+  compactionSummaryOutputTokens,
   SUMMARY_PREFIX,
   USER_MESSAGE_TRUNCATION_MARKER,
   REMOTE_COMPACTION_TOOL_RESULT_OMISSION,
@@ -1039,7 +1040,8 @@ export async function summarizeForCompaction(
   const provider = options.provider ?? configuredProviders(settings)[0];
   if (!provider) throw new Error("Built-in model provider is unavailable");
   const azureResponses = provider.wireProfile === "azure-openai";
-  const maxTokens = options.maxOutputTokens ?? SUMMARY_BUFFER_TOKENS;
+  const maxTokens =
+    options.maxOutputTokens ?? compactionSummaryOutputTokens(settings.contextWindowTokens);
   if (api === "chat") {
     const transcript = renderCompactionPromptInputForChat(input);
     let completion: unknown;
@@ -1048,7 +1050,12 @@ export async function summarizeForCompaction(
         {
           model,
           max_tokens: maxTokens,
-          messages: [{ role: "user", content: transcript }],
+          messages: [
+            ...(options.systemInstructions
+              ? [{ role: "system" as const, content: options.systemInstructions }]
+              : []),
+            { role: "user", content: transcript },
+          ],
           ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
         } as any,
         options.signal ? { signal: options.signal } : undefined,
@@ -1060,8 +1067,23 @@ export async function summarizeForCompaction(
     if (usage) {
       await options.onUsage?.(usage);
     }
-    const text = (completion as { choices?: Array<{ message?: { content?: unknown } }> })
-      .choices?.[0]?.message?.content;
+    const choice = (
+      completion as {
+        choices?: Array<{ finish_reason?: unknown; message?: { content?: unknown } }>;
+      }
+    ).choices?.[0];
+    if (choice?.finish_reason !== "stop") {
+      throw new EmptyCompactionSummaryError({
+        stage: "chat_completion",
+        reason: "non_stop_finish",
+        finishReason: ["length", "content_filter", "tool_calls", "function_call"].includes(
+          String(choice?.finish_reason),
+        )
+          ? choice?.finish_reason
+          : "unknown",
+      });
+    }
+    const text = choice.message?.content;
     const summary = typeof text === "string" ? text.trim() : "";
     if (!summary) {
       throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(completion, summary));
