@@ -296,9 +296,12 @@ function ScopedCard({
     }
   }
 
-  async function begin() {
+  async function begin(fresh = false) {
     await run(async () => {
-      if (view.attempt && ["failed", "expired", "cancelled"].includes(view.attempt.state)) {
+      if (
+        fresh ||
+        (view.attempt && ["failed", "expired", "cancelled"].includes(view.attempt.state))
+      ) {
         startKey.current = crypto.randomUUID();
         advanceKey.current = crypto.randomUUID();
       }
@@ -371,25 +374,14 @@ function ScopedCard({
         signal: pending.signal,
       });
       if (!current() || !result) return;
-      const latest = await controller.refresh();
-      await reconcile(latest);
-      if (latest.state === "cancelled") {
+      setWaiting(false);
+      await reconcile(result);
+      if (result.state === "cancelled") {
         setNotice("Sign-in was cancelled. You can try connecting again.");
         return;
       }
-      if (latest.state !== "complete")
+      if (result.state !== "complete")
         throw new Error("Sign-in did not finish. You can try connecting again.");
-    } catch (failure) {
-      if (failure instanceof ConnectPopupClosedError && current()) {
-        // Refresh the attempt so Retry starts a new flow if the backend has
-        // already recorded cancellation, and accept a late successful callback.
-        const latest = await controller.refresh().catch(() => null);
-        if (latest?.state === "complete" && current()) {
-          await reconcile(latest);
-          return;
-        }
-      }
-      throw failure;
     } finally {
       lifetime.current?.signal.removeEventListener("abort", abortOnUnmount);
       if (authorization.current === pending) authorization.current = null;
@@ -542,7 +534,9 @@ function ScopedCard({
                 <button
                   className="og-session-capability-primary"
                   onClick={() => {
-                    if (view.attempt?.nextAction.type === "authorize") void authorize(view.attempt);
+                    if (notice) void begin(true);
+                    else if (view.attempt?.nextAction.type === "authorize")
+                      void authorize(view.attempt);
                     else void begin();
                   }}
                 >

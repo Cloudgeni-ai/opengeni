@@ -134,7 +134,9 @@ test("stopping sign-in restores the dialog's close control without a refresh", a
         nextAction: { type: "credentials" as const, fields: [] },
       }),
       advance: async () => authorize,
-      get: async () => authorize,
+      // Simulate a backend read that ignores abort and never responds. The
+      // poller's abort wrapper must still return the dialog to a usable state.
+      get: async () => await new Promise<never>(() => {}),
     }),
   } as unknown as OpenGeniClient;
   const previousOpen = window.open;
