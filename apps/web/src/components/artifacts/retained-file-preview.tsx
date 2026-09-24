@@ -5,6 +5,8 @@ import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
 import { InlineChatImage } from "./inline-chat-image";
 import { DeferredChatMedia } from "./deferred-chat-media";
+import { isRetainedTextPreview } from "./retained-text-preview-policy";
+const RetainedTextPreview = lazy(() => import("./retained-text-preview"));
 const PdfFilePreview = lazy(() => import("./pdf-file-preview"));
 
 export function retainedPreviewKind(contentType: string, filename?: string) {
@@ -33,11 +35,28 @@ type PreviewProps = {
   artifact: RetainedArtifactReference;
   title: string;
   filename?: string;
+  /** Explicit opt-in for the workbench; chat and other viewers stay unchanged. */
+  workbenchTextPreview?: boolean;
 };
 
 export function RetainedFilePreview(props: PreviewProps) {
   const { accessKeyVersion } = useAppContext();
   if (!props.artifact.available) return <p role="status">Artifact unavailable.</p>;
+  if (
+    props.workbenchTextPreview &&
+    props.artifact.kind === "file" &&
+    isRetainedTextPreview(props.artifact.contentType, props.filename)
+  )
+    return (
+      <Suspense fallback={<p role="status">Loading preview…</p>}>
+        <RetainedTextPreview
+          key={JSON.stringify([props.workspaceId, accessKeyVersion, props.artifact])}
+          workspaceId={props.workspaceId}
+          artifact={props.artifact}
+          filename={props.filename}
+        />
+      </Suspense>
+    );
   return (
     <RetainedFilePreviewBody
       key={JSON.stringify([props.workspaceId, accessKeyVersion, props.artifact])}
