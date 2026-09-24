@@ -156,16 +156,17 @@ Historical `tool_search` calls and outputs are not rerun, compared with the
 current catalog, or reclassified. There is no switch-time rewrite and no second
 durable history form.
 
-Before the provider call, OpenGeni estimates the complete checkpoint input. It
+Before the provider call, OpenGeni estimates the history and checkpoint prompt. It
 replaces aggregate oversized tool results oldest-first only in the temporary
 copy, preserving recent detail. If that remains too large, it removes whole
 oldest user-delimited work units and re-sanitizes the suffix so no tool result,
-call, or reasoning fragment is orphaned. The first request is kept beneath the
-effective input ceiling, raw window minus requested summary, and estimator
-headroom. If the provider still reports context overflow, OpenGeni performs one
-half-size refit and one final request. The 50% retry covers the greater-than-2×
-provider/byte-estimator skew measured in the production incident. It never
-issues one failing provider call per history item.
+call, or reasoning fragment is orphaned. The temporary history copy is kept
+beneath the effective input ceiling and raw window minus requested summary.
+The estimate does not include the prepared tool/instruction prefix; if the
+provider reports context overflow, OpenGeni performs one half-size refit and
+one final request. That retry can still overflow when the provider's count
+diverges enough from the estimate. It never issues one failing provider call
+per history item.
 
 Remote v2 keeps its normal first request unchanged. Only an exact provider
 `context_length_exceeded` code permits one retry to the same remote-compaction

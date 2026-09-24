@@ -217,6 +217,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               api: resolvedModel.provider.api,
               model: turnExecutionPolicy.upstreamModelId,
               maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+              ...(cancellationSignal ? { signal: cancellationSignal } : {}),
               onUsage: recordCompactionUsage,
               ...(systemInstructions ? { systemInstructions } : {}),
               ...(promptCacheKey ? { promptCacheKey } : {}),
@@ -229,6 +230,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
           summarizeContextForCompaction(s, m, {
             model: turnExecutionPolicy.upstreamModelId,
             maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+            ...(cancellationSignal ? { signal: cancellationSignal } : {}),
             onUsage: recordCompactionUsage,
             ...(systemInstructions ? { systemInstructions } : {}),
             ...(promptCacheKey ? { promptCacheKey } : {}),

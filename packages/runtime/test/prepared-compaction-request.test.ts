@@ -152,6 +152,51 @@ test("portable Responses compaction keeps the prepared tool and instruction pref
   expect(model.calls).toBe(1);
 });
 
+test("portable compaction replaces the stopped inference signal with the turn signal", async () => {
+  const stale = new AbortController();
+  stale.abort();
+  const turn = new AbortController();
+  const seenSignals: Array<AbortSignal | undefined> = [];
+  const client = {
+    responses: {
+      create: async (_body: unknown, options: { signal?: AbortSignal }) => {
+        seenSignals.push(options.signal);
+        return {
+          id: "summary",
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: "summary" }],
+            },
+          ],
+        };
+      },
+    },
+  } as unknown as OpenAI;
+  const preparedRequest: Omit<ModelRequest, "input"> = {
+    systemInstructions: "Preserve the task",
+    modelSettings: {},
+    tools: [],
+    toolsExplicitlyProvided: true,
+    outputType: "text",
+    handoffs: [],
+    tracing: false,
+    signal: stale.signal,
+  };
+  const settings = testSettings();
+  const input = [{ type: "message", role: "user", content: "Create a checkpoint" }];
+  await summarizeForCompaction(settings, input, {
+    client,
+    preparedRequest,
+    signal: turn.signal,
+  });
+  await summarizeForCompaction(settings, input, { client, preparedRequest });
+  expect(seenSignals).toEqual([turn.signal, undefined]);
+});
+
 for (const queued of [false, true]) {
   test(`compaction prepares sandbox request but sends no ordinary inference (queued=${queued})`, async () => {
     const settings = testSettings({
