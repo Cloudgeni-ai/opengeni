@@ -1,9 +1,33 @@
 import { describe, expect, test } from "bun:test";
+import { FILE_ONLY_MESSAGE_TEXT } from "@opengeni/react";
 
 import {
+  newSessionCreateSnapshot,
   runNewSessionRouteSubmission,
   type CreatedSessionRouteAuthority,
 } from "./sessions-index-submission";
+
+test("file-only Send persists the same placeholder submitted to create without changing the editor", () => {
+  const visible = {
+    text: "",
+    resources: [{ kind: "file" as const, fileId: "ready-file" }],
+    tools: [],
+    toolsProvided: false,
+    model: "original-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
+    options: {},
+  };
+  const submitted = newSessionCreateSnapshot(visible, FILE_ONLY_MESSAGE_TEXT, {
+    model: "selected-model",
+    reasoningEffort: "high",
+    latencyMode: "standard",
+  });
+  expect(submitted.text).toBe(FILE_ONLY_MESSAGE_TEXT);
+  expect(submitted.resources).toEqual(visible.resources);
+  expect(submitted.model).toBe("selected-model");
+  expect(visible.text).toBe("");
+});
 
 describe("sessions-index post-create authority", () => {
   test("a sibling-tab draft conflict retries navigation without creating a second session", async () => {

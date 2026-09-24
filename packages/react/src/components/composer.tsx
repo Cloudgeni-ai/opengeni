@@ -457,9 +457,9 @@ export function useChatComposerController({
     (event: DragEvent<HTMLDivElement>) => {
       if (!attachments || !dragCarriesFiles(event)) return;
       event.preventDefault();
-      setDragging(true);
+      if (!disabled) setDragging(true);
     },
-    [attachments],
+    [attachments, disabled],
   );
   const handleDragLeave = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
@@ -474,10 +474,15 @@ export function useChatComposerController({
       if (!attachments || !dragCarriesFiles(event)) return;
       event.preventDefault();
       setDragging(false);
-      if (event.dataTransfer.files.length > 0) attachments.addFiles(event.dataTransfer.files);
+      if (!disabled && event.dataTransfer.files.length > 0)
+        attachments.addFiles(event.dataTransfer.files);
     },
-    [attachments],
+    [attachments, disabled],
   );
+
+  useEffect(() => {
+    if (disabled) setDragging(false);
+  }, [disabled]);
 
   const [notice, setNotice] = useState<Notice | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -624,17 +629,18 @@ export function useChatComposerController({
   );
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>) => {
+      if (disabled) return;
       onPaste?.(event);
       attachments?.addFromPaste(event);
     },
-    [attachments, onPaste],
+    [attachments, disabled, onPaste],
   );
   const handleFileChange = useCallback(
     (event: ChangeEvent<HTMLInputElement>) => {
-      if (event.target.files) attachments?.addFiles(event.target.files);
+      if (!disabled && event.target.files) attachments?.addFiles(event.target.files);
       event.target.value = "";
     },
-    [attachments],
+    [attachments, disabled],
   );
 
   const helpCommands = useMemo(
@@ -975,6 +981,7 @@ export function Attachments() {
     <AttachmentChips
       attachments={controller.attachments.attachments}
       messages={controller.messages}
+      disabled={controller.disabled}
       onRemove={controller.attachments.remove}
       onRetry={controller.attachments.retry}
       onRetainPreview={controller.attachments.retainPreview}
@@ -1679,6 +1686,7 @@ function ConfirmBar({
 function AttachmentChips({
   attachments,
   messages,
+  disabled,
   onRemove,
   onRetry,
   onRetainPreview,
@@ -1686,6 +1694,7 @@ function AttachmentChips({
 }: {
   attachments: UseFileAttachmentsResult["attachments"];
   messages: ChatComposerMessages;
+  disabled: boolean;
   onRemove: (id: string) => void;
   onRetry?: ((id: string) => void) | undefined;
   onRetainPreview: UseFileAttachmentsResult["retainPreview"];
@@ -1837,7 +1846,8 @@ function AttachmentChips({
                 <button
                   type="button"
                   onClick={() => onRetry(attachment.id)}
-                  className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg pointer-coarse:size-10"
+                  disabled={disabled}
+                  className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-10"
                   aria-label={messages.retryAttachment(attachment.name)}
                 >
                   <RotateCwIcon className="size-3.5" />
@@ -1847,7 +1857,8 @@ function AttachmentChips({
             <button
               type="button"
               onClick={() => onRemove(attachment.id)}
-              className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg pointer-coarse:size-10"
+              disabled={disabled}
+              className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-10"
               aria-label={messages.removeAttachment(attachment.name)}
             >
               <XIcon className="size-3.5" />

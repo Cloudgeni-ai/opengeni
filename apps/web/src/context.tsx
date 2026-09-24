@@ -408,7 +408,8 @@ export type AppContextValue = {
       /** Atomic create-time session visibility. */
       visibility?: "private" | "workspace";
       /** Exact attempted request and classified outcome for host reconciliation. */
-      onFailure?: (failure: StartSessionFailure) => void;
+      /** Return true when the caller handles this failure (including its user-facing error). */
+      onFailure?: (failure: StartSessionFailure) => boolean | void;
     },
   ) => Promise<Session | null>;
   resetSessionView: () => void;
@@ -1879,7 +1880,7 @@ export function RootRouteComponent() {
       agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
       startMode?: "realtime";
       visibility?: "private" | "workspace";
-      onFailure?: (failure: StartSessionFailure) => void;
+      onFailure?: (failure: StartSessionFailure) => boolean | void;
     },
   ): Promise<Session | null> {
     const startedOperation = beginWorkspaceOperation(
@@ -2013,20 +2014,20 @@ export function RootRouteComponent() {
           workspaceId,
         )
       ) {
-        if (attempted) {
-          options?.onFailure?.({
-            error: problem,
-            request: attempted.request,
-            outcomeUnknown,
-          });
-        }
+        const handled = attempted
+          ? options?.onFailure?.({
+              error: problem,
+              request: attempted.request,
+              outcomeUnknown,
+            })
+          : false;
         if (isPaymentRequiredError(problem)) {
           const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
           setCreditRequired({
             workspaceId,
             accountId: workspace?.accountId ?? null,
           });
-        } else {
+        } else if (handled !== true) {
           toast.error("Failed to start session", {
             description: composerSubmissionErrorMessage(problem),
           });
