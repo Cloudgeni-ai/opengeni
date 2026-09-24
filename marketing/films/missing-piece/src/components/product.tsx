@@ -13,7 +13,8 @@ export const WINDOW = { x: 100, y: 70, w: 1720, h: 940 } as const;
 export function productGroupTransform(t: number) {
   const out = ease.inOutQuint(progress(t, T.shrink[0], T.shrink[1]));
   const back = ease.inOutQuint(progress(t, T.unshrink[0], T.unshrink[1]));
-  const k = out * (1 - back);
+  const final = ease.inOutQuint(progress(t, T.endShrink[0], T.endShrink[1]));
+  const k = Math.max(out * (1 - back), final);
   const s = lerp(1, 0.575, k);
   // Anchor: window's right edge at x=1846, vertical centre at y=548.
   const rightEdge = WINDOW.x + WINDOW.w;

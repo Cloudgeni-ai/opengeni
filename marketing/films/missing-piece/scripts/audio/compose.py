@@ -8,7 +8,7 @@ Musical idea (100 BPM, D major): while the bolted-on assistant fails, a three-no
 A-B-C# keeps stopping one note short of home. The missing D arrives exactly when the agent
 docks inside the product, and the groove begins. Every agent action is a tick on the beat.
 
-    python3 scripts/audio/compose.py            # → out/audio/score.wav (pre-master)
+    python3 scripts/audio/compose.py            # → out/audio/mix.wav (mastered, -16 LUFS)
 """
 from __future__ import annotations
 
@@ -345,10 +345,10 @@ def reverb(x: np.ndarray, ir: np.ndarray, wet: float) -> np.ndarray:
 
 def compose(cues: dict) -> dict[str, np.ndarray]:
     dur = float(cues["duration"])
-    bpm = float(cues["bpm"])
-    beat = 60.0 / bpm
+    beat = 60.0 / float(cues["bpm"])
     bar = 4 * beat
     dock = float(cues["dock"])
+    B = lambda n: n * beat  # noqa: E731 - beat index to seconds
 
     motif = Track(dur)
     keys = Track(dur)
@@ -357,134 +357,127 @@ def compose(cues: dict) -> dict[str, np.ndarray]:
     drums = Track(dur)
     sfx = Track(dur)
 
-    # ---- Act 1-3: the phrase that never resolves -------------------------------
-    phrase = ["A4", "B4", "C#5"]
-    bars_before = int(round(dock / bar))  # bars before the dock downbeat
-    for b in range(bars_before):
+    # ---- before: a phrase over the dominant that never reaches home ----------
+    # A pedal (V) under A-B-C#; the tonic D is withheld until the agent docks.
+    dock_bar = int(round(dock / bar))
+    super2_bar = int(round(float(cues["super2"]) / bar))
+    for b in range(dock_bar):
+        if b == super2_bar:
+            continue  # "It just can't do it." gets silence, not music
         start = b * bar
-        stall = b == bars_before - 2  # the "truth" bar: the phrase stalls on B
-        for k, name in enumerate(phrase):
-            at = start + k * beat
-            if stall and k == 2:
-                continue
-            level = 0.34 if b < bars_before - 2 else (0.3 if stall else 0.4)
-            length = 2.6 if (stall and k == 1) else 1.4
-            motif.add(at, celesta(note(name), length), level, p=-0.15 + 0.15 * k)
-        # A barely-there drone under the supers and the turn, darker as tension builds.
-    padt.add(cues["super1"] - 0.2, pad([note("D3"), note("A3")], 5.2, cutoff=700), 0.22)
-    # anticipation: air rises into the silent beat before the dock
-    sfx.add(dock - bar + 0.2, riser(bar - beat - 0.25), 0.5)
+        last = b == dock_bar - 1
+        for k, name in enumerate(["A4", "B4", "C#5"]):
+            vel = (0.26, 0.24, 0.3)[k] * (1.18 if last else 1.0) * (0.92 if b == 1 else 1.0)
+            motif.add(start + k * beat, celesta(note(name), 1.5, bright=0.62), vel, p=-0.18 + 0.18 * k)
+    padt.add(0.0, pad([note("A2"), note("E3")], float(cues["super2"]) + 0.3, cutoff=620), 0.2)
+    padt.add(float(cues["pop"]) - 0.1, pad([note("A2"), note("E3"), note("A3")], dock - float(cues["pop"]) - beat + 0.2, cutoff=900), 0.22)
+    sfx.add(float(cues["pop"]) + 0.25, riser(dock - beat - float(cues["pop"]) - 0.3), 0.42)
 
-    # ---- The missing note ------------------------------------------------------
-    motif.add(dock, celesta(note("D5"), 2.4), 0.5, p=0.1)
-    motif.add(dock, celesta(note("D6"), 2.0, bright=0.6), 0.14, p=0.3)
+    # ---- the missing note ------------------------------------------------------
+    motif.add(dock, celesta(note("D5"), 2.6, bright=0.8), 0.5, p=0.1)
+    motif.add(dock, celesta(note("D6"), 2.0, bright=0.5), 0.13, p=0.3)
 
-    # ---- Act 4-5: groove inside the product -----------------------------------
+    # ---- inside the product: I - vi - IV V - I, then lighter under the code -----
+    code_start = float(cues["zoomIn"])
+    zoom_out = float(cues["zoomOut"])
     progression = [
-        (dock + 0 * bar, 1.0, ["D3", "F#3", "A3", "D4"], "D2"),
-        (dock + 1 * bar, 1.0, ["B2", "D3", "F#3", "B3"], "B1"),
-        (dock + 2 * bar, 0.5, ["G2", "B2", "D3", "G3"], "G2"),
-        (dock + 2.5 * bar, 0.5, ["A2", "C#3", "E3", "A3"], "A2"),
-        (dock + 3 * bar, 1.0, ["D3", "F#3", "A3", "D4"], "D2"),  # "All set."
-        (dock + 4 * bar, 1.0, ["D3", "F#3", "A3", "E4"], "D2"),  # code: lighter
-        (dock + 5 * bar, 1.0, ["G2", "B2", "D3", "F#3"], "G2"),
+        (dock + 0 * bar, 1.0, ["D3", "F#3", "A3", "D4"], "D2", 1.0),
+        (dock + 1 * bar, 1.0, ["B2", "D3", "F#3", "B3"], "B1", 1.0),
+        (dock + 2 * bar, 0.5, ["G2", "B2", "D3", "G3"], "G2", 1.0),
+        (dock + 2.5 * bar, 0.5, ["A2", "C#3", "E3", "A3"], "A2", 1.0),
+        (dock + 3 * bar, 1.0, ["D3", "F#3", "A3", "D4"], "D2", 1.0),  # "All set."
+        (dock + 4 * bar, 1.0, ["D3", "F#3", "A3", "E4"], "D2", 0.7),  # inside the panel
+        (dock + 5 * bar, 1.0, ["G2", "B2", "D3", "F#3"], "G2", 0.7),
     ]
-    code_bar = dock + 4 * bar
-    end_at = float(cues["end"])
-    for at, length, chord, root in progression:
+    for at, length, chord, root, energy in progression:
         span = length * bar
-        lighter = at >= code_bar
-        padt.add(at, pad([note(n) for n in chord[1:]], span + 0.6, cutoff=1500 if not lighter else 1100), 0.2 if not lighter else 0.15)
-        # electric piano stabs: 1, and-of-2, 4 (a gentle push)
+        padt.add(at, pad([note(n) for n in chord[1:]], span + 0.6, cutoff=1500 * energy + 300), 0.19 * energy)
         for off in (0.0, 1.5, 3.0):
             if off * beat >= span - 0.05:
                 continue
-            vel = 0.9 if off == 0 else 0.6
+            vel = 0.85 if off == 0 else 0.55
             for k, n in enumerate(chord):
-                keys.add(at + off * beat + 0.006 * k, epiano(note(n), 0.9 if off else 1.3, vel), 0.075 if not lighter else 0.055, p=-0.25 + 0.17 * k)
-        # bass: root on 1, octave pickup on and-of-3
-        bass.add(at, sub_bass(note(root), min(span, 1.1)), 0.42 if not lighter else 0.3)
+                keys.add(at + off * beat + 0.006 * k, epiano(note(n), 0.9 if off else 1.3, vel), 0.07 * energy, p=-0.25 + 0.17 * k)
+        bass.add(at, sub_bass(note(root), min(span, 1.1)), 0.4 * energy)
         if span > 2 * beat:
-            bass.add(at + 2.5 * beat, pluck_bass(note(root) * 2, 0.28), 0.18 if not lighter else 0.12)
+            bass.add(at + 2.5 * beat, pluck_bass(note(root) * 2, 0.26), 0.16 * energy)
 
-    # found melody: the phrase, completed, over the first bars inside
-    melody = [
-        (dock + 4 * beat, "A4"), (dock + 5 * beat, "B4"), (dock + 6 * beat, "C#5"), (dock + 7 * beat, "D5"),
-        (dock + 3 * bar + 0 * beat, "F#5"), (dock + 3 * bar + 1 * beat, "E5"), (dock + 3 * bar + 2 * beat, "D5"),
-    ]
-    for at, name in melody:
-        motif.add(at, celesta(note(name), 1.3), 0.26, p=0.2)
+    # the phrase, completed, as the agent gets going; and once more as the evening is saved
+    for at, name in [(dock + B(4), "A4"), (dock + B(5), "B4"), (dock + B(6), "C#5"), (dock + B(7), "D5"),
+                     (dock + 3 * bar, "F#5"), (dock + 3 * bar + B(1), "E5"), (dock + 3 * bar + B(2), "D5")]:
+        motif.add(at, celesta(note(name), 1.3, bright=0.7), 0.24, p=0.2)
 
-    # drums: soft kick on 1 and 3, rim on 2 and 4, shaker 8ths — only while the agent works
-    groove_end = code_bar + 2 * bar
+    # drums while the agent works; half as busy inside the panel; none on the final cadence
     t = dock
     i = 0
-    while t < groove_end - 0.01:
-        inside_code = t >= code_bar
-        beat_in_bar = i % 4
-        if beat_in_bar in (0, 2):
-            drums.add(t, kick(), 0.55 if not inside_code else 0.38)
-        if beat_in_bar in (1, 3):
-            drums.add(t, rim(), 0.2 if not inside_code else 0.14, p=0.1)
-        drums.add(t, shaker(level=1.0), 0.16, p=0.35)
-        drums.add(t + beat / 2, shaker(level=0.7), 0.13, p=0.35)
+    while t < zoom_out - 0.01:
+        inside = t >= code_start
+        pos = i % 4
+        if pos in (0, 2):
+            drums.add(t, kick(), 0.52 if not inside else 0.32)
+        if pos in (1, 3):
+            drums.add(t, rim(), 0.19 if not inside else 0.12, p=0.1)
+        drums.add(t, shaker(level=1.0), 0.15 if not inside else 0.1, p=0.35)
+        drums.add(t + beat / 2, shaker(level=0.7), 0.12 if not inside else 0.08, p=0.35)
         t += beat
         i += 1
-    # the question: the groove leans back into a held breath, the tap releases it
-    q = float(cues["question"])
-    tap = float(cues["tap"])
-    drums.add(tap, clap(), 0.18, p=-0.1)
+    drums.add(float(cues["tap"]), clap(), 0.17, p=-0.1)
 
-    # ---- Act 6: cadence onto the brand ----------------------------------------
+    # ---- the cadence onto the brand: ii - V - I, D lands with the wordmark ------
+    wordmark = float(cues["wordmark"])
     cadence = [
-        (end_at, ["G2", "B2", "D3", "G3"], "G2", 0.6),
-        (end_at + 0.6, ["A2", "C#3", "E3", "A3"], "A2", 0.6),
-        (end_at + 1.2, ["D3", "F#3", "A3", "D4"], "D2", 2.2),
+        (wordmark - B(4), ["E3", "G3", "B3", "D4"], "E2", 2 * beat),
+        (wordmark - B(2), ["A2", "C#3", "E3", "G3"], "A1", 2 * beat),
+        (wordmark, ["D3", "F#3", "A3", "D4"], "D2", 3.0),
     ]
     for at, chord, root, length in cadence:
-        padt.add(at, pad([note(n) for n in chord[1:]], length + 1.2, cutoff=1600), 0.2)
+        padt.add(at, pad([note(n) for n in chord[1:]], length + 1.0, cutoff=1500), 0.19)
         for k, n in enumerate(chord):
-            keys.add(at + 0.008 * k, epiano(note(n), length + 0.8, 0.8), 0.08, p=-0.25 + 0.17 * k)
-        bass.add(at, sub_bass(note(root), length + 0.4), 0.36)
-    final_phrase = [(end_at, "A4"), (end_at + 0.3, "B4"), (end_at + 0.6, "C#5"), (end_at + 1.2, "D5")]
-    for at, name in final_phrase:
-        motif.add(at, celesta(note(name), 2.2 if name == "D5" else 1.2), 0.36 if name == "D5" else 0.28, p=0.1)
-    motif.add(end_at + 1.2, celesta(note("A5"), 2.4, bright=0.5), 0.12, p=0.35)
+            keys.add(at + 0.008 * k, epiano(note(n), length + 0.6, 0.75), 0.075, p=-0.25 + 0.17 * k)
+        bass.add(at, sub_bass(note(root) * (2 if root == "A1" else 1), length + 0.3), 0.33)
+    for at, name in [(wordmark - B(3), "A4"), (wordmark - B(2), "B4"), (wordmark - B(1), "C#5"), (wordmark, "D5")]:
+        final = name == "D5"
+        motif.add(at, celesta(note(name), 2.6 if final else 1.3, bright=0.7), 0.4 if final else 0.28, p=0.1)
+    motif.add(wordmark, celesta(note("A5"), 2.6, bright=0.45), 0.12, p=0.35)
+    motif.add(wordmark, celesta(note("F#5"), 2.6, bright=0.45), 0.08, p=-0.3)
 
     # ---- sound design ----------------------------------------------------------
     for k in cues["keys"]:
-        sfx.add(k, key_tick(), 0.1, p=0.12)
+        sfx.add(k, key_tick(), 0.09, p=0.12)
     sfx.add(cues["send"], enter_key(), 0.2)
-    sfx.add(cues["send"] + 0.02, bubble_pop(740), 0.11, p=0.2)
-    sfx.add(cues["replyWords"][0], bubble_pop(990), 0.1, p=0.25)
+    sfx.add(cues["send"] + 0.02, bubble_pop(740), 0.1, p=0.2)
+    sfx.add(cues["replyWords"][0], bubble_pop(990), 0.09, p=0.25)
     for n, at in enumerate(cues["listItems"]):
-        sfx.add(at, soft_tick(2600 + 90 * n, 0.05), 0.07, p=0.25)
-    sfx.add(cues["signoff"], chime([note("E6"), note("A6")], 0.9), 0.05, p=0.3)
+        sfx.add(at, soft_tick(2500 + 90 * n, 0.05), 0.065, p=0.25)
+    sfx.add(cues["signoff"], chime([note("E6"), note("A6")], 0.9), 0.045, p=0.3)
 
-    sfx.add(cues["shrink"] - 0.05, whoosh(0.85, 250, 2200, rise=False), 0.22)
-    sfx.add(cues["pop"], pop_away(), 0.22, p=0.3)
-    sfx.add(cues["slotDraw"], lp(marker_draw(0.8), 5500), 0.34, p=0.2)
+    sfx.add(cues["shrink"] - 0.05, whoosh(0.85, 250, 2200, rise=False), 0.2)
+    sfx.add(cues["pop"], pop_away(), 0.2, p=0.3)
+    sfx.add(cues["slotDraw"], lp(marker_draw(0.78), 5500), 0.32, p=0.2)
     sfx.add(dock, dock_thunk(), 0.55)
-    sfx.add(cues["messageLand"], soft_tick(1800, 0.06), 0.12, p=0.2)
+    sfx.add(cues["messageLand"], soft_tick(1800, 0.06), 0.11, p=0.2)
 
-    step_notes = ["D6", "F#6", "A6", "D7"]
-    for at, name in zip(cues["steps"], step_notes):
-        sfx.add(at, soft_tick(4200, 0.04), 0.1, p=0.2)
-        sfx.add(at, celesta(note(name), 0.9, bright=0.5), 0.07, p=0.25)
+    for at, name in zip(cues["steps"], ["D6", "F#6", "A6", "D7"]):
+        sfx.add(at, soft_tick(4200, 0.04), 0.09, p=0.2)
+        sfx.add(at, celesta(note(name), 0.9, bright=0.5), 0.065, p=0.25)
     for at in cues["steps"][1:]:
-        sfx.add(at + 0.01, flap(), 0.35, p=-0.35)
-    sfx.add(q, chime([note("B5"), note("E6")], 1.0), 0.07, p=0.25)
-    sfx.add(tap, mouse_click(), 0.3, p=0.2)
-    sfx.add(cues["allSet"], chime([note("D6"), note("F#6"), note("A6")], 1.8), 0.08, p=0.2)
-    sfx.add(cues["pray"], bubble_pop(660, 0.12), 0.07, p=0.25)
+        sfx.add(at + 0.01, flap(), 0.32, p=-0.35)
+    sfx.add(cues["question"], chime([note("B5"), note("E6")], 1.0), 0.065, p=0.25)
+    sfx.add(cues["tap"], mouse_click(), 0.28, p=0.2)
+    sfx.add(cues["allSet"], chime([note("D6"), note("F#6"), note("A6")], 1.8), 0.075, p=0.2)
+    sfx.add(cues["pray"], bubble_pop(660, 0.12), 0.065, p=0.25)
 
-    sfx.add(cues["scan"], whoosh(0.75, 500, 6000, rise=True), 0.3)
+    # going inside the panel and back out: soft air, no sci-fi
+    sfx.add(cues["zoomIn"], lp(whoosh(0.95, 180, 1400, rise=True), 3000), 0.28)
+    sfx.add(cues["codeUI"], soft_tick(2200, 0.05), 0.07, p=-0.1)
+    sfx.add(cues["codeServer"], soft_tick(2000, 0.05), 0.06, p=-0.15)
     for k in range(4):
-        sfx.add(cues["code"] + 1.0 + 0.1 * k, soft_tick(3000 + 250 * k, 0.04), 0.06, p=-0.2 + 0.15 * k)
-    sfx.add(cues["pageScroll"], whoosh(0.7, 200, 1800, rise=False), 0.2)
+        sfx.add(cues["codeServer"] + 0.78 + 0.09 * k, soft_tick(3000 + 250 * k, 0.04), 0.05, p=-0.2 + 0.15 * k)
+    sfx.add(zoom_out, lp(whoosh(0.9, 180, 1400, rise=False), 3000), 0.24)
+    sfx.add(cues["endShrink"], whoosh(0.8, 250, 2000, rise=False), 0.14)
 
     stems = {"motif": motif.buf, "keys": keys.buf, "pad": padt.buf, "bass": bass.buf, "drums": drums.buf, "sfx": sfx.buf}
-    n = int(dur * SR)
+    n = int(round(dur * SR))
     for name in stems:
         stems[name] = stems[name][:n]
     return stems
@@ -493,9 +486,9 @@ def compose(cues: dict) -> dict[str, np.ndarray]:
 def mix(stems: dict[str, np.ndarray]) -> np.ndarray:
     ir_room = make_ir(1.8)
     ir_small = make_ir(0.7, 0.008)
-    music = reverb(stems["motif"], ir_room, 0.42) + reverb(stems["keys"], ir_room, 0.28) + reverb(stems["pad"], ir_room, 0.35)
-    music = music + lp(stems["bass"], 900) + reverb(stems["drums"], ir_small, 0.18)
-    sfx = reverb(stems["sfx"], ir_small, 0.22)
+    music = reverb(stems["motif"], ir_room, 0.4) + reverb(stems["keys"], ir_room, 0.26) + reverb(stems["pad"], ir_room, 0.34)
+    music = music + lp(stems["bass"], 900) + reverb(stems["drums"], ir_small, 0.16)
+    sfx = reverb(stems["sfx"], ir_small, 0.2)
     music = hp(music, 38)
     total = music + sfx
     # gentle bus compression (RMS detector, 2:1 above threshold)
@@ -503,10 +496,43 @@ def mix(stems: dict[str, np.ndarray]) -> np.ndarray:
     thresh = 0.18
     gain = np.where(level > thresh, (thresh / level) ** 0.5, 1.0)
     total *= gain[:, None]
-    # fade the very end to digital silence
-    fade = int(0.35 * SR)
+    fade = int(0.4 * SR)
     total[-fade:] *= np.linspace(1, 0, fade)[:, None] ** 2
     return total
+
+
+def true_peak_limit(x: np.ndarray, ceiling_db: float = -1.5, release: float = 0.08) -> np.ndarray:
+    """Look-ahead limiter on a 4x-oversampled peak detector (inter-sample peaks included)."""
+    ceiling = 10 ** (ceiling_db / 20)
+    over = signal.resample_poly(x, 4, 1, axis=0)
+    peak = np.max(np.abs(over), axis=1).reshape(-1, 4).max(axis=1)[: len(x)]
+    need = np.minimum(1.0, ceiling / np.maximum(peak, 1e-9))
+    look = int(0.003 * SR)
+    # hold the lowest gain over the look-ahead window, then release smoothly
+    padded = np.concatenate([need, np.ones(look)])
+    windowed = np.lib.stride_tricks.sliding_window_view(padded, look + 1).min(axis=1)[: len(x)]
+    gain = np.empty_like(windowed)
+    g = 1.0
+    coef = np.exp(-1 / (release * SR))
+    for i, target in enumerate(windowed):
+        g = target if target < g else target + (g - target) * coef
+        gain[i] = g
+    attack = np.exp(-1 / (0.0015 * SR))
+    smooth = signal.lfilter([1 - attack], [1, -attack], gain)
+    smooth = np.minimum(smooth, windowed)
+    return x * smooth[:, None]
+
+
+def master(total: np.ndarray, target_lufs: float = -16.0) -> np.ndarray:
+    import pyloudnorm as pyln
+
+    meter = pyln.Meter(SR)
+    loud = meter.integrated_loudness(total)
+    total = total * 10 ** ((target_lufs - loud) / 20)
+    total = true_peak_limit(total, -1.6)
+    loud2 = meter.integrated_loudness(total)
+    total = total * 10 ** ((target_lufs - loud2) / 20)
+    return true_peak_limit(total, -1.6)
 
 
 def main() -> None:
@@ -516,15 +542,16 @@ def main() -> None:
     os.makedirs(OUT, exist_ok=True)
     total = mix(stems)
     peak = np.max(np.abs(total))
-    total = total / peak * 0.5  # headroom; loudness is set in the encode step
+    mastered = master(total)
     import soundfile as sf
 
     sf.write(os.path.join(OUT, "score.wav"), total.astype(np.float32), SR, subtype="FLOAT")
+    sf.write(os.path.join(OUT, "mix.wav"), mastered.astype(np.float32), SR, subtype="FLOAT")
     if "--stems" in sys.argv:
         for name, x in stems.items():
             p = np.max(np.abs(x)) or 1
             sf.write(os.path.join(OUT, f"stem_{name}.wav"), (x / p * 0.5).astype(np.float32), SR, subtype="FLOAT")
-    print(f"score.wav  {len(total) / SR:.3f}s  pre-master peak {peak:.3f}")
+    print(f"score.wav + mix.wav  {len(total) / SR:.3f}s  pre-master peak {peak:.3f}")
 
 
 if __name__ == "__main__":

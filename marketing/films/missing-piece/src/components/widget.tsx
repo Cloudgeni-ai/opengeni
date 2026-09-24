@@ -9,6 +9,7 @@ import {
   WIDGET_GREETING,
   WIDGET_SIGNOFF,
   WIDGET_STEPS,
+  WIDGET_SUGGESTIONS,
   replyWordTime,
   typedCount,
 } from "../timeline";
@@ -115,6 +116,28 @@ export function Widget({ t }: { t: number }) {
         <Bubble side="ai">
           {WIDGET_GREETING} <Emoji name="sparkles" size={22} />
         </Bubble>
+
+        {sent ? null : (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 9, justifyContent: "flex-end", flexShrink: 0 }}>
+            {WIDGET_SUGGESTIONS.map((label) => (
+              <span
+                key={label}
+                style={{
+                  border: `1.5px solid #ddd6f3`,
+                  color: C.widgetA,
+                  borderRadius: 999,
+                  padding: "8px 15px",
+                  fontSize: 17,
+                  fontWeight: 550,
+                  background: "#fbfaff",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {label}
+              </span>
+            ))}
+          </div>
+        )}
 
         {sent ? (
           <div style={{ height: grow(t, T.send, 118), overflow: "visible", display: "flex", justifyContent: "flex-end" }}>

@@ -34,6 +34,11 @@ export function AgentPanel({ t }: { t: number }) {
   if (t < T.dock - 0.24) return null;
   const settle = t > T.dock ? Math.sin((t - T.dock) * 38) * Math.exp(-(t - T.dock) * 16) * 3 : 0;
   const y = (1 - drop) * -42 + settle;
+  // The camera goes inside the panel to show its source; the conversation steps aside.
+  const cleared = ease.inOutCubic(progress(t, T.clearPanel[0], T.clearPanel[1]));
+  const restored = ease.inOutCubic(progress(t, T.zoomOut[1] - 0.12, T.zoomOut[1] + 0.16));
+  const content = 1 - cleared + restored;
+  const drift = (cleared - restored) * -14;
 
   return (
     <div
@@ -66,7 +71,13 @@ export function AgentPanel({ t }: { t: number }) {
         <span style={{ fontFamily: F.mono, fontSize: 18, letterSpacing: "0.12em", color: C.muted }}>OPENGENI</span>
       </div>
 
-      <Abs x={PANEL_MESSAGE.x - PANEL.x} y={PANEL_MESSAGE.y - PANEL.y} w={PANEL_MESSAGE.w} h={PANEL_MESSAGE.h} style={{ visibility: t >= T.messageLand ? "visible" : "hidden" }}>
+      <Abs
+        x={PANEL_MESSAGE.x - PANEL.x}
+        y={PANEL_MESSAGE.y - PANEL.y}
+        w={PANEL_MESSAGE.w}
+        h={PANEL_MESSAGE.h}
+        style={{ visibility: t >= T.messageLand ? "visible" : "hidden", opacity: content }}
+      >
         <MessageBlock style={{ height: PANEL_MESSAGE.h }} />
       </Abs>
 
@@ -78,6 +89,8 @@ export function AgentPanel({ t }: { t: number }) {
           top: PANEL_MESSAGE.y - PANEL.y + PANEL_MESSAGE.h + 26,
           display: "flex",
           flexDirection: "column",
+          opacity: content,
+          transform: `translateY(${drift}px)`,
         }}
       >
         <Step t={t} at={T.step1} tool="get_flight">

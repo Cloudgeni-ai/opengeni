@@ -1,8 +1,10 @@
 import { rng } from "./lib/anim";
 
 export const FPS = 60;
-export const BPM = 100;
+/** 112.5 BPM: one beat is exactly 32 frames at 60 fps, so cuts land on the grid. */
+export const BPM = 112.5;
 export const BEAT = 60 / BPM;
+const b = (n: number) => n * BEAT;
 
 export const MESSAGE = "Our flight lands 3 hours late. Can you fix the rest of today?";
 
@@ -14,56 +16,61 @@ export const WIDGET_STEPS = [
   "Choose a new pickup time",
   "Go back to Itinerary → Hotel",
   "Tap “Add note”",
-  "Go back to Itinerary → Dinner",
-  "Tap “Change time”",
-  "Repeat for any other bookings",
+  "Repeat for dinner and the rest",
 ];
 export const WIDGET_SIGNOFF = "Hope this helps!";
+/** Typical canned prompts: every one of them asks for information, none for an action. */
+export const WIDGET_SUGGESTIONS = ["What’s the weather in Lisbon?", "Top things to do", "Packing tips"];
 
-/** All cue times in seconds. The film is one continuous shot. */
+/** All cue times in seconds. The film is one continuous camera take. */
 export const T = {
   // Act 1 — the bolted-on assistant
-  typeStart: -0.95,
-  send: 2.05,
-  dotsStart: 2.3,
-  replyStart: 2.8,
-  listStart: 3.4,
-  listGap: 0.235,
-  signoff: 5.45,
+  typeStart: -1.05,
+  typeEnd: 1.42,
+  send: b(3),
+  dotsStart: 1.8,
+  replyStart: 2.2,
+  listStart: 2.78,
+  listGap: 0.22,
+  signoff: 4.08,
 
   // Act 2 — the truth
-  shrink: [6.1, 6.95] as const,
-  super1: 6.6,
-  super2: 7.8,
-  supersOut: 9.35,
+  shrink: [4.72, 5.55] as const,
+  super1: b(10),
+  super2: b(12),
+  supersOut: 7.95,
 
   // Act 3 — the missing piece
-  pop: 9.6,
-  unshrink: [9.62, 10.55] as const,
-  slotDraw: [9.95, 10.75] as const,
-  slotText: 10.35,
-  dock: 12.0,
-  messageLand: 12.45,
+  pop: b(16),
+  unshrink: [8.55, 9.45] as const,
+  slotDraw: [8.78, 9.55] as const,
+  slotText: 9.05,
+  dock: b(20),
+  messageLand: b(20) + 0.43,
 
   // Act 4 — inside the product
-  step1: 13.2,
-  question: 13.8,
-  cursorIn: 14.25,
-  tap: 15.0,
-  step2: 15.6,
-  step3: 16.8,
-  step4: 18.0,
-  allSet: 19.2,
-  pray: 20.25,
+  step1: b(22),
+  question: b(23),
+  cursorIn: 12.5,
+  tap: b(25),
+  step2: b(26),
+  step3: b(28),
+  step4: b(30),
+  allSet: b(32),
+  pray: b(34),
 
-  // Act 5 — the source of what we just watched
-  scan: [21.15, 21.85] as const,
-  code: 21.6,
-  pageScroll: [26.05, 26.75] as const,
+  // Act 5 — inside the agent panel: the code that put it there
+  zoomIn: [18.72, 19.5] as const,
+  clearPanel: [18.6, 18.78] as const,
+  codeUI: b(37),
+  codeServer: b(39),
+  zoomOut: [23.35, 24.0] as const,
 
-  // Act 6 — payoff
-  end: 26.4,
-  fin: 29.4,
+  // Act 6 — the same composition as act 2, opposite truth
+  endShrink: [24.1, 24.95] as const,
+  end: b(46),
+  wordmark: b(48),
+  fin: b(52),
 };
 
 export const DURATION = T.fin;
@@ -84,7 +91,7 @@ export const TYPING: number[] = (() => {
     t += gap;
     times.push(t);
   }
-  const scale = (1.87 - T.typeStart) / (times[times.length - 1]! - T.typeStart);
+  const scale = (T.typeEnd - T.typeStart) / (times[times.length - 1]! - T.typeStart);
   return times.map((x) => T.typeStart + (x - T.typeStart) * scale);
 })();
 
@@ -96,7 +103,7 @@ export function typedCount(t: number): number {
 
 /** Word-by-word streaming schedule for the widget's reply intro. */
 export const REPLY_WORDS = WIDGET_REPLY_INTRO.split(" ");
-export const replyWordTime = (i: number) => T.replyStart + i * 0.052;
+export const replyWordTime = (i: number) => T.replyStart + i * 0.045;
 
 /** Cue sheet consumed by scripts/audio/compose.py. */
 export function audioCues() {
@@ -124,9 +131,12 @@ export function audioCues() {
     tap: T.tap,
     allSet: T.allSet,
     pray: T.pray,
-    scan: T.scan[0],
-    code: T.code,
-    pageScroll: T.pageScroll[0],
+    zoomIn: T.zoomIn[0],
+    codeUI: T.codeUI,
+    codeServer: T.codeServer,
+    zoomOut: T.zoomOut[0],
+    endShrink: T.endShrink[0],
     end: T.end,
+    wordmark: T.wordmark,
   };
 }
