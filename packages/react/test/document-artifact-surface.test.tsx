@@ -102,10 +102,43 @@ describe("artifact document surface", () => {
     ).toBe("paginated");
     const page = paginated.container.querySelector<HTMLElement>("[data-og-document-page]")!;
     expect(Number.parseFloat(page.style.width)).toBeGreaterThan(358);
-    expect(page.className).toContain("left-4");
+    expect(page.style.left).toBe("16px");
     expect(page.parentElement?.style.minWidth).toBeTruthy();
     expect(page.firstElementChild?.getAttribute("style")).toContain("scale(");
     await paginated.unmount();
+  });
+
+  test("centers a fitting page in the viewport even when a later section needs horizontal panning", async () => {
+    const document = Document.create();
+    document.blocks.addParagraph("Normal page");
+    document.sections.add({
+      page: {
+        widthPt: 1800,
+        heightPt: 792,
+        marginTopPt: 72,
+        marginRightPt: 72,
+        marginBottomPt: 72,
+        marginLeftPt: 72,
+      },
+    });
+    document.blocks.addParagraph("Wide page");
+    const rendered = await renderComponent(
+      <DocumentEditor document={document} layout="paginated" viewportHeight={4_000} />,
+    );
+    const viewport = rendered.container.querySelector<HTMLElement>('[role="document"]')!;
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 900 },
+      clientHeight: { configurable: true, value: 4_000 },
+    });
+    await actRun(() => window.dispatchEvent(new Event("resize")));
+    await flush();
+    const pages = rendered.container.querySelectorAll<HTMLElement>("[data-og-document-page]");
+    expect(pages.length).toBe(2);
+    expect(Number.parseFloat(pages[0]!.style.width)).toBe(816);
+    expect(pages[0]!.style.left).toBe("42px");
+    expect(pages[1]!.style.left).toBe("16px");
+    expect(Number.parseFloat(pages[0]!.parentElement!.style.minWidth)).toBeGreaterThan(900);
+    await rendered.unmount();
   });
 
   test("keeps table headers readable and wide columns scrollable in both layouts", async () => {
@@ -161,6 +194,55 @@ describe("artifact document surface", () => {
     await flush();
     expect(custom.container.querySelector("th")?.getAttribute("style")).toContain("#fff");
     await custom.unmount();
+  });
+
+  test("inherits paper text for translucent fills while retaining explicitly authored run colors", async () => {
+    const projection: DocumentEditorProjection = {
+      revision: 1,
+      page: {
+        widthPt: 612,
+        heightPt: 792,
+        marginTopPt: 72,
+        marginRightPt: 72,
+        marginBottomPt: 72,
+        marginLeftPt: 72,
+      },
+      blocks: [
+        {
+          kind: "table",
+          id: "transparent-header",
+          style: { headerRows: 1, headerFill: "#00000000" },
+          rows: [[[{ text: "Inherited" }], [{ text: "Authored", style: { color: "#ffffff" } }]]],
+        },
+        {
+          kind: "table",
+          id: "translucent-header",
+          style: { headerRows: 1, headerFill: "#00000080" },
+          rows: [[[{ text: "Inherited" }]]],
+        },
+        {
+          kind: "table",
+          id: "opaque-header",
+          style: { headerRows: 1, headerFill: "#000000ff" },
+          rows: [[[{ text: "Contrasted" }]]],
+        },
+      ],
+    };
+    const rendered = await renderComponent(
+      <DocumentProjectionEditor projection={projection} layout="paginated" />,
+    );
+    await flush();
+    const headers = rendered.container.querySelectorAll<HTMLElement>("th");
+    expect(headers.length).toBe(4);
+    expect(headers[0]!.style.color).toBe("");
+    expect(headers[2]!.style.color).toBe("");
+    expect(headers[3]!.style.color).toBe("#fff");
+    expect(headers[0]!.querySelectorAll("span")[0]!.style.color).toBe("");
+    expect(headers[1]!.querySelector("span")!.style.color).toBe("#ffffff");
+    expect(headers[0]!.closest("[data-og-document-page]")?.getAttribute("style")).toContain(
+      "color: #171717",
+    );
+    await rendered.unmount();
   });
 
   test("remeasures pages in both directions without moving the visible page", async () => {

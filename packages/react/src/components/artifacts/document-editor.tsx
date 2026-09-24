@@ -929,6 +929,7 @@ function DocumentEditorCore({
             {mountedIndexes.map((pageIndex) => {
               const page = pages[pageIndex]!;
               const top = axis.offsets[pageIndex]!;
+              const pageWidth = page.page.widthPt * POINT_TO_CSS_PIXEL * page.renderScale;
               return (
                 <article
                   key={page.key}
@@ -941,21 +942,21 @@ function DocumentEditorCore({
                   className={cn(
                     "absolute overflow-hidden",
                     layout === "paginated"
-                      ? page.page.widthPt * POINT_TO_CSS_PIXEL * page.renderScale >
-                        measuredViewport.width
-                        ? "left-4 border shadow-og-sm"
-                        : "left-1/2 -translate-x-1/2 border shadow-og-sm"
+                      ? "border shadow-og-sm"
                       : "left-0 right-0 border-b border-og-border bg-og-surface-1 text-og-fg",
                   )}
                   style={{
                     top,
+                    // Center against the visible viewport, not the shared width
+                    // reserved for the widest section in this document.
+                    left:
+                      layout === "paginated"
+                        ? Math.max(16, (measuredViewport.width - pageWidth) / 2)
+                        : undefined,
                     color: layout === "paginated" ? "#171717" : undefined,
                     backgroundColor: layout === "paginated" ? "#fff" : undefined,
                     borderColor: layout === "paginated" ? "#0000001a" : undefined,
-                    width:
-                      layout === "paginated"
-                        ? page.page.widthPt * POINT_TO_CSS_PIXEL * page.renderScale
-                        : undefined,
+                    width: layout === "paginated" ? pageWidth : undefined,
                     height: page.height,
                     containerType: layout === "continuous" ? "inline-size" : undefined,
                   }}
@@ -1448,6 +1449,7 @@ function DocumentTableView({
                     style={{
                       borderColor: table.style.borderColor ?? "#d1d5db",
                       background: header ? (table.style.headerFill ?? "#f3f4f6") : undefined,
+                      // An explicitly colored run still owns its authored text style.
                       color: header ? tableHeaderTextColor(table.style.headerFill) : undefined,
                       padding: `${table.style.cellPaddingPt ?? 6}pt`,
                     }}
@@ -1470,11 +1472,13 @@ function DocumentTableView({
   );
 }
 
-/** Keep authored header fills legible independently of the surrounding editor theme. */
-function tableHeaderTextColor(fill: string | undefined): string {
+/** Opaque fills have a theme-independent contrast color; translucent fills do not. */
+function tableHeaderTextColor(fill: string | undefined): string | undefined {
   if (!fill) return "#171717";
   const hex = /^#([\da-f]{3}|[\da-f]{6}|[\da-f]{8})$/i.exec(fill)?.[1];
-  if (!hex) return "#171717";
+  // Transparent colors reveal the backing paper or theme surface. Inherit its
+  // text color instead of choosing white from a dark but invisible RGB value.
+  if (!hex || (hex.length === 8 && hex.slice(6).toLowerCase() !== "ff")) return undefined;
   const channels =
     hex.length === 3
       ? [...hex].map((digit) => Number.parseInt(digit + digit, 16))

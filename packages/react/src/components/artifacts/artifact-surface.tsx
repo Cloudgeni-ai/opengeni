@@ -88,7 +88,20 @@ export function ArtifactSurface({
           ) : null}
           {actions ? <div className="flex shrink-0 items-center gap-1">{actions}</div> : null}
         </header>
-      ) : null}
+      ) : (
+        <>
+          {typeof subtitle === "string" || typeof subtitle === "number" ? (
+            <span role="status" className="sr-only">
+              {subtitle}
+            </span>
+          ) : null}
+          {actions ? (
+            <div className="flex shrink-0 items-center justify-end gap-1 border-b border-og-border px-3 py-1">
+              {actions}
+            </div>
+          ) : null}
+        </>
+      )}
 
       <div className="min-h-0 min-w-0 flex-1">{children}</div>
 
