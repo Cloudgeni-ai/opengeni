@@ -83,11 +83,6 @@ Commands acknowledge durable commits, independent of replayable NATS/Temporal no
 
 Control revisions increase.
 
-Operational goal edits apply directly under the default policy; refinement,
-adaptation and replacement are audit classifications, not approval gates.
-Explicit review policy, human-owned root constraints, exact-attempt authority
-and optimistic-concurrency fences remain separate. See [goals](goals.md).
-
 Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 `packages/sdk/src/stream.ts`, and [`run-lifecycle.md`](run-lifecycle.md).
 
@@ -179,12 +174,12 @@ External SDK history and append verification: [`run-lifecycle.md`](run-lifecycle
 
 ### 3.4 Long runs are bounded by policy and intent, not arbitrary loop caps
 
-Agents may work for days; call/continuation/duration counts cannot prove stalled
-progress. Budget admission, provider capacity, Pause/Cancel, goal state and host
-policy govern. Safe recovery preserves logical turns/sessions. Postgres owns
-continuation obligations; Temporal supplies replaceable nudges. Goals never live
+Run length does not prove stalled progress. Budget admission, provider capacity,
+Pause/Cancel, goal state and host policy govern. Recovery preserves logical work.
+Postgres owns continuation obligations, not Temporal. Goal edits apply directly
+unless review is configured; human-owned constraints remain. Goals never live
 in `Agent.instructions` or solely workflow memory.
-Generic caps cannot replace recovery, pacing, memory or tool-lifecycle fixes.
+Generic caps cannot replace lifecycle fixes.
 
 Non-transient preclaim rejection parks accepted work behind a durable admission
 block. Resume/Send/Steer rechecks without granting authority; operational outages
