@@ -330,11 +330,12 @@ test("selected preview rejects stale, duplicate, non-message, malformed and unau
     authorizeSession: async () => ({ allowed: false, reason: "forbidden" }),
     resolveListScope: async () => ({ kind: "all" }),
   });
+  // Target-session denials are deliberately non-enumerating on HTTP routes.
   expect(
     (
       await denied.request(`${base}/${original!.id}/message-preview?sequence=2`, {
         headers: { authorization: f.authorization },
       })
     ).status,
-  ).toBe(403);
+  ).toBe(404);
 }, 180_000);
