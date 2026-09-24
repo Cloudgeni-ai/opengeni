@@ -13,6 +13,7 @@ import type {
   ScheduledTask,
   ScheduledTaskOverlapPolicy,
   ScheduledTaskScheduleSpec,
+  SessionAuthorizationPort,
 } from "@opengeni/contracts";
 import {
   assertRuntimeDatabasePosture,
@@ -42,7 +43,12 @@ import {
   WorkflowExecutionAlreadyStartedError,
 } from "@temporalio/client";
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
-import { createAppComposition, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
+import {
+  createAppComposition,
+  type AppDependencies,
+  type DocumentIndexClient,
+  type SessionWorkflowClient,
+} from "./app";
 import { observabilityEventLogger } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
@@ -312,12 +318,33 @@ export async function createTemporalWorkflowClient(
   };
 }
 
-export async function startApi(
-  options: {
-    settings?: ReturnType<typeof getSettings>;
-    observability?: Observability;
-  } = {},
-) {
+export type StartApiOptions = {
+  settings?: ReturnType<typeof getSettings>;
+  observability?: Observability;
+  /**
+   * Embedding-host session ACL (`AppDependencies.sessionAuthorization`). A host
+   * that runs this entry rather than mounting `createApp(deps)` binds it here;
+   * once bound, every session-addressed surface fails closed on an
+   * unavailable or invalid host decision, exactly as through `createApp`.
+   */
+  sessionAuthorization?: SessionAuthorizationPort | null;
+};
+
+/**
+ * The composition override an embedding host's `sessionAuthorization` option
+ * contributes to `createAppComposition`. Unset forwards nothing, so a standalone
+ * start keeps today's dependencies exactly; `null` and a port are forwarded as
+ * given, so the composition sees the host's choice rather than a default.
+ */
+export function startApiSessionAuthorizationOverride(
+  options: Pick<StartApiOptions, "sessionAuthorization">,
+): Pick<AppDependencies, "sessionAuthorization"> | Record<string, never> {
+  return options.sessionAuthorization === undefined
+    ? {}
+    : { sessionAuthorization: options.sessionAuthorization };
+}
+
+export async function startApi(options: StartApiOptions = {}) {
   const settings = options.settings ?? getSettings();
   const observability =
     options.observability ?? createObservability(settings, { component: "api" });
@@ -420,6 +447,7 @@ export async function startApi(
     }
   }
   const { app, routeDeps } = createAppComposition({
+    ...startApiSessionAuthorizationOverride(options),
     settings,
     db: dbClient.db,
     bus,
