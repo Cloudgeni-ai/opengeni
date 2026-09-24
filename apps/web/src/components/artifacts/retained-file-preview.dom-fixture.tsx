@@ -30,8 +30,9 @@ const client = {
     artifact,
   })),
 };
+let activeClient = client;
 mock.module("@/context", () => ({
-  useAppContext: () => ({ client, accessKeyVersion }),
+  useAppContext: () => ({ client: activeClient, accessKeyVersion }),
 }));
 mock.module("./pdf-file-preview", () => ({
   default: ({ title }: { title: string }) => {
@@ -41,6 +42,11 @@ mock.module("./pdf-file-preview", () => ({
 }));
 const { InlineChatArtifact, RetainedFilePreview, retainedPreviewKind } =
   await import("./retained-file-preview");
+// Keep syntax-highlighting infrastructure out of these lifecycle tests.
+mock.module("@opengeni/react", () => ({
+  Markdown,
+  PierreFile: ({ contents }: { contents: string }) => <pre>{contents}</pre>,
+}));
 let root: Root;
 let container: HTMLDivElement;
 beforeEach(() => {
@@ -61,6 +67,7 @@ beforeEach(() => {
     },
   };
   accessKeyVersion = 1;
+  activeClient = client;
   for (const fn of Object.values(client)) fn.mockClear();
   container = document.createElement("div");
   document.body.append(container);
@@ -69,6 +76,168 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+});
+
+test("text stays download-only outside the explicit workbench opt-in", async () => {
+  artifact = { ...artifact, contentType: "text/x-patch" };
+  await act(async () =>
+    root.render(
+      <RetainedFilePreview
+        workspaceId={workspaceId}
+        artifact={artifact}
+        title="Patch"
+        filename="fix.patch"
+      />,
+    ),
+  );
+  expect(container.textContent).toContain("Preview is not available");
+  expect(client.downloadRetainedArtifact).not.toHaveBeenCalled();
+  await act(async () =>
+    root.render(<InlineChatArtifact workspaceId={workspaceId} artifactId={id} alt="Patch" />),
+  );
+  expect(container.textContent).not.toContain("Read-only source");
+  expect(client.downloadRetainedArtifact).not.toHaveBeenCalled();
+});
+
+test("workbench text uses authenticated SDK bytes and keeps HTML inert", async () => {
+  artifact = { ...artifact, contentType: "text/html" };
+  client.downloadRetainedArtifact.mockResolvedValueOnce({
+    artifact,
+    bytes: new TextEncoder().encode("<script>alert(1)</script>"),
+  });
+  await act(async () => {
+    root.render(
+      <RetainedFilePreview
+        workspaceId={workspaceId}
+        artifact={artifact}
+        title="HTML"
+        filename="file.html"
+        workbenchTextPreview
+      />,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  });
+  expect(client.downloadRetainedArtifact).toHaveBeenCalledWith(workspaceId, artifact, {
+    signal: expect.any(AbortSignal),
+  });
+  expect(container.textContent).toContain("<script>alert(1)</script>");
+  expect(container.querySelector("script")).toBeNull();
+});
+
+test("oversized workbench text is rejected before downloading", async () => {
+  artifact = { ...artifact, contentType: "text/plain", originalBytes: 262145 };
+  await act(async () =>
+    root.render(
+      <RetainedFilePreview
+        workspaceId={workspaceId}
+        artifact={artifact}
+        title="Large"
+        workbenchTextPreview
+      />,
+    ),
+  );
+  expect(container.textContent).toContain("256 KiB");
+  expect(client.downloadRetainedArtifact).not.toHaveBeenCalled();
+});
+
+test("workbench retry recovers and receipt changes abort stale text", async () => {
+  artifact = { ...artifact, contentType: "text/plain" };
+  client.downloadRetainedArtifact.mockRejectedValueOnce(new Error("checksum mismatch"));
+  const render = () => (
+    <RetainedFilePreview
+      workspaceId={workspaceId}
+      artifact={artifact}
+      title="Text"
+      workbenchTextPreview
+    />
+  );
+  await act(async () => root.render(render()));
+  expect(container.textContent).toContain("Preview could not be loaded");
+  client.downloadRetainedArtifact.mockResolvedValueOnce({
+    artifact,
+    bytes: new TextEncoder().encode("Verified retry"),
+  });
+  await act(async () => (container.querySelector("button") as HTMLButtonElement).click());
+  expect(container.textContent).toContain("Verified retry");
+  let resolveOld!: (value: {
+    artifact: RetainedArtifactReference;
+    bytes: Uint8Array<ArrayBuffer>;
+  }) => void;
+  client.downloadRetainedArtifact.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveOld = resolve;
+      }),
+  );
+  artifact = { ...artifact, sha256: "b".repeat(64) };
+  await act(async () => root.render(render()));
+  const oldSignal = (
+    client.downloadRetainedArtifact.mock.calls.at(-1) as unknown as [
+      string,
+      RetainedArtifactReference,
+      { signal: AbortSignal },
+    ]
+  )[2].signal;
+  client.downloadRetainedArtifact.mockResolvedValueOnce({
+    artifact,
+    bytes: new TextEncoder().encode("New identity"),
+  });
+  accessKeyVersion++;
+  await act(async () => root.render(render()));
+  expect(oldSignal.aborted).toBe(true);
+  await act(async () => resolveOld({ artifact, bytes: new TextEncoder().encode("STALE SECRET") }));
+  expect(container.textContent).toContain("New identity");
+  expect(container.textContent).not.toContain("STALE SECRET");
+});
+
+test("workbench hides stale content on client and workspace replacement", async () => {
+  artifact = { ...artifact, contentType: "text/plain" };
+  client.downloadRetainedArtifact.mockResolvedValueOnce({
+    artifact,
+    bytes: new TextEncoder().encode("Old client source"),
+  });
+  const render = (scope = workspaceId) => (
+    <RetainedFilePreview
+      workspaceId={scope}
+      artifact={artifact}
+      title="Text"
+      workbenchTextPreview
+    />
+  );
+  await act(async () => root.render(render()));
+  expect(container.textContent).toContain("Old client source");
+  let resolveNew!: (value: {
+    artifact: RetainedArtifactReference;
+    bytes: Uint8Array<ArrayBuffer>;
+  }) => void;
+  activeClient = {
+    ...client,
+    downloadRetainedArtifact: mock(
+      () =>
+        new Promise((resolve) => {
+          resolveNew = resolve;
+        }),
+    ),
+  };
+  await act(async () => root.render(render()));
+  expect(container.textContent).toContain("Loading preview");
+  expect(container.textContent).not.toContain("Old client source");
+  await act(async () =>
+    resolveNew({ artifact, bytes: new TextEncoder().encode("New client source") }),
+  );
+  expect(container.textContent).toContain("New client source");
+  await act(async () => root.render(render("44444444-4444-4444-8444-444444444444")));
+  expect(container.textContent).not.toContain("New client source");
+  expect(container.textContent).toContain("Loading preview");
+  const signal = (
+    activeClient.downloadRetainedArtifact.mock.calls.at(-1) as unknown as [
+      string,
+      RetainedArtifactReference,
+      { signal: AbortSignal },
+    ]
+  )[2].signal;
+  await act(async () => root.unmount());
+  expect(signal.aborted).toBe(true);
 });
 afterAll(() => GlobalRegistrator.unregister());
 
