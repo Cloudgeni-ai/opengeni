@@ -414,6 +414,49 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
+  test("realtime launch does not replace a sibling tab's newer unsent draft", async () => {
+    let stored = remote(1, { text: "shared draft" });
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const draftClient = client({
+      getNewSessionDraft: async () => stored,
+      saveNewSessionDraft: async (_workspaceId, request) => {
+        requests.push(request);
+        if (request.expectedRevision !== stored.revision) throw conflict();
+        const { expectedRevision, ...savedEditable } = request;
+        stored = remote(expectedRevision + 1, savedEditable);
+        return stored;
+      },
+    });
+    const voiceTab = await renderDraftHook(draftClient);
+    const sibling = await renderDraftHook(draftClient);
+    await flush();
+
+    await actRun(() =>
+      sibling.result.current.setValue({ ...sibling.result.current.value, text: "sibling unsent" }),
+    );
+    expect((await actRun(() => sibling.result.current.draft.flush()))?.revision).toBe(2);
+
+    // A voice launch keeps text for later. Unchanged local state needs no write,
+    // even if the sibling already saved a newer draft on the server.
+    expect((await actRun(() => voiceTab.result.current.draft.flush()))?.revision).toBe(1);
+    expect(requests).toHaveLength(1);
+    expect(stored.text).toBe("sibling unsent");
+
+    await actRun(() =>
+      voiceTab.result.current.setValue({
+        ...voiceTab.result.current.value,
+        text: "voice tab edit",
+      }),
+    );
+    // A local edit may encounter OCC, but voice must not rebase it over a
+    // sibling's unsent text without an explicit message Send.
+    expect(await actRun(() => voiceTab.result.current.draft.flush())).toBeNull();
+    expect(stored.text).toBe("sibling unsent");
+    expect(voiceTab.result.current.value.text).toBe("voice tab edit");
+    await voiceTab.unmount();
+    await sibling.unmount();
+  });
+
   test("treats an old-server response without toolsProvided as explicit", async () => {
     const { toolsProvided: _toolsProvided, ...legacy } = remote(4, {
       tools: [{ kind: "mcp", id: "docs" }],

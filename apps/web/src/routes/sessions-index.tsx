@@ -1110,7 +1110,7 @@ function SessionsIndexRouteContent({
         if (!newSessionDraft.isCurrentSignature(visibleSignature)) {
           // A definitive create failure must not leave text typed during the
           // attempt unsaved after a retry persisted the clicked snapshot.
-          await newSessionDraft.flushForSend();
+          await (realtimeModel ? newSessionDraft.flush() : newSessionDraft.flushForSend());
         }
       };
       setSubmitting(true);
@@ -1124,7 +1124,10 @@ function SessionsIndexRouteContent({
             // lost on navigate, but do not consume it — text stays for later.
             if (realtimeModel) {
               for (let attempt = 0; attempt < 3; attempt += 1) {
-                const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
+                // Voice launch does not consume the draft. Save local edits if
+                // possible, but never rebase an old voice draft over a sibling's
+                // newer unsent message merely to start a realtime session.
+                const flushed = await newSessionDraft.flush();
                 if (!flushed) {
                   toast.error("Couldn't save the draft", {
                     description:
