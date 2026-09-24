@@ -469,6 +469,10 @@ const effectiveBudgets = {
     // Artifact link resolution and host message-presentation plumbing: 2,445,478
     // raw / 691,865 gzip on Bun 1.4 macOS/arm64. Media/PDF viewers remain lazy.
     wholeKibEnvelope(2_445_478, 1.5 * kib),
+    // Session document embedding, Bun 1.4 Linux/x64 CI at a843f3c:
+    // 2,449,017 raw bytes (39 files). Preserve the existing 1.5 KiB
+    // platform/configuration headroom without relaxing other graph caps.
+    wholeKibEnvelope(2_449_017, 1.5 * kib),
     // Main d08dbb6029: 2,374,813 raw / 666,576 gzip, 34 files. The merged
     // Knowledge graph adds receipts, review navigation and learning controls:
     // 2,439,754 raw / 684,860 gzip, 39 files (Bun 1.4, macOS/arm64).
@@ -498,6 +502,9 @@ const effectiveBudgets = {
     // measures 2,434,041 raw / 689,945 gzip across 37 files. Raw and file count
     // remain below their existing caps; retain the standard gzip variance allowance.
     wholeKibEnvelope(689_945, 1.5 * kib),
+    // The same session document graph measures 693,828 gzip bytes; retain
+    // the established 1.5 KiB allowance, with initial/CSS/lazy caps unchanged.
+    wholeKibEnvelope(693_828, 1.5 * kib),
     wholeKibEnvelope(684_860, 1.5 * kib),
     // Same unified Knowledge measurement documented in the raw bound above.
     wholeKibEnvelope(663_198, 1.5 * kib),

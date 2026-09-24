@@ -5,7 +5,10 @@ import {
   withCommandSupervisionReady as withReady,
   withSupervisedLaunchReservation,
 } from "../src/sandbox/provider-command-session";
-import { ModalCommandStartRejectedError } from "../src/sandbox/providers/modal-command-router-wire";
+import {
+  ModalCommandStartPreDispatchUnavailableError,
+  ModalCommandStartRejectedError,
+} from "../src/sandbox/providers/modal-command-router-wire";
 
 function withCommandSupervisionReady<T>(ready: boolean, fn: () => T): T {
   return withSupervisedLaunchReservation({ reserve: async () => {} }, () => withReady(ready, fn));
@@ -126,6 +129,20 @@ test("authenticated definite start rejection is not converted into running", asy
   await expect(
     withCommandSupervisionReady(true, () => f.control.start({ cmd: "never" })),
   ).rejects.toBeInstanceOf(ModalCommandStartRejectedError);
+  expect(f.starts).toHaveLength(1);
+});
+
+test("pre-dispatch readiness failure escapes supervised start without a second launch", async () => {
+  const f = fixture();
+  const error = await ModalCommandStartPreDispatchUnavailableError.ensureReady({
+    waitForReady: (_deadline: number, callback: (error: Error) => void) =>
+      callback(new Error("not ready")),
+  } as never).catch((failure) => failure);
+  expect(error).toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
+  f.failStart(error);
+  await expect(
+    withCommandSupervisionReady(true, () => f.control.start({ cmd: "never" })),
+  ).rejects.toBe(error);
   expect(f.starts).toHaveLength(1);
 });
 

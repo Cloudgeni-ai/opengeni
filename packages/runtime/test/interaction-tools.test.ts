@@ -404,13 +404,15 @@ describe("interaction attempt tools", () => {
     });
   });
 
-  test("keeps semantic Computer actions observation-fenced but free of pixel frame authority", async () => {
+  test("preserves an explicit semantic Computer observation without refreshing it or forwarding its pixel frame", async () => {
     const target = computerTarget();
     const observation = computerObservation(target);
     let request: ComputerActionRequest | null = null;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
-        observeComputerTarget: async () => observation,
+        observeComputerTarget: async () => {
+          throw new Error("explicit Computer fences must not trigger a fresh observation");
+        },
         actInComputer: async (_workspaceId, _computerSessionId, value) => {
           request = value;
           return computerReceipt(value.operationId, observation);
@@ -426,6 +428,9 @@ describe("interaction attempt tools", () => {
       {
         computerSessionId,
         targetId: target.id,
+        expectedTargetGeneration: target.targetGeneration,
+        expectedObservationId: observation.observationId,
+        expectedFrameId: observation.frameId,
         action: {
           type: "semantic",
           locator: { kind: "role", role: "button", name: "Save" },
@@ -739,6 +744,43 @@ describe("interaction attempt tools", () => {
     );
 
     expect(request).toMatchObject({ expectedFrameId: "frame-user-saw" });
+  });
+
+  test("preserves an explicitly fenced pointer frame without refreshing the observation", async () => {
+    const target = computerTarget();
+    const observation = computerObservation(target);
+    let request: ComputerActionRequest | null = null;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => {
+          throw new Error("explicit Computer fences must not trigger a fresh observation");
+        },
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          request = value;
+          return computerReceipt(value.operationId, observation);
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      {
+        computerSessionId,
+        targetId: target.id,
+        expectedTargetGeneration: target.targetGeneration,
+        action: { type: "pointer", frameId: "frame-user-saw", action: "click", x: 10, y: 20 },
+      },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(request).toMatchObject({
+      expectedTargetGeneration: target.targetGeneration,
+      expectedObservationId: null,
+      expectedFrameId: "frame-user-saw",
+    });
+    expect(result.isError).not.toBe(true);
   });
 
   test("returns managed computer pixels as native image content", async () => {

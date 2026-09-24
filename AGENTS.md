@@ -29,7 +29,8 @@ Manual equivalent:
 2. Start infrastructure:
 
    ```bash
-   docker compose up -d postgres nats temporal garage garage-init
+   docker compose up -d postgres nats temporal garage
+   bun scripts/dev-native-storage.ts provision .
    bun run db:migrate
    bun run db:provision-roles
    ```

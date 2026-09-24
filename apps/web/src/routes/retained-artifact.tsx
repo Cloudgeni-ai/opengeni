@@ -186,6 +186,7 @@ function RetainedArtifactDetail({
               artifact={artifact}
               title={filename}
               filename={loaded?.filename}
+              workbenchTextPreview={embedded}
             />
           </div>
         </>

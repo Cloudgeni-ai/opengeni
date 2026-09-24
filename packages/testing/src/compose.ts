@@ -11,12 +11,12 @@ import { makeTempDir, removeTempDir, runCommand, waitFor } from "./process";
 import {
   GARAGE_FIXTURE_ACCESS_KEY_ID,
   GARAGE_FIXTURE_IMAGE,
-  GARAGE_FIXTURE_MC_IMAGE,
   GARAGE_FIXTURE_S3_PROVIDER,
   GARAGE_FIXTURE_SANDBOX_ENDPOINT,
   GARAGE_FIXTURE_SECRET_ACCESS_KEY,
   OBJECT_STORAGE_FIXTURE_BUCKET,
 } from "./object-storage-fixture";
+import { provisionGarage } from "../../../scripts/dev-native-storage";
 
 export type TestServices = {
   projectName: string;
@@ -78,10 +78,7 @@ async function startTestServicesAttempt(
   const composeFile = join(cwd, "compose.yml");
   if (options.objectStorage ?? false) {
     const fixturesDir = join(dirname(fileURLToPath(import.meta.url)), "../../../deploy/garage");
-    await Promise.all([
-      Bun.write(join(cwd, "garage.toml"), Bun.file(join(fixturesDir, "local.toml"))),
-      Bun.write(join(cwd, "cors.xml"), Bun.file(join(fixturesDir, "cors.xml"))),
-    ]);
+    await Bun.write(join(cwd, "garage.toml"), Bun.file(join(fixturesDir, "local.toml")));
   }
   await writeFile(
     composeFile,
@@ -160,7 +157,12 @@ async function startTestServicesAttempt(
     }
     if (options.objectStorage ?? false) {
       await waitForGarage(services.objectStorageEndpoint!);
-      await bootstrapGarageCors(projectName, composeFile);
+      await provisionGarage({
+        port: ports.minio,
+        bucket: OBJECT_STORAGE_FIXTURE_BUCKET,
+        accessKey: GARAGE_FIXTURE_ACCESS_KEY_ID,
+        secretKey: GARAGE_FIXTURE_SECRET_ACCESS_KEY,
+      });
     }
     return services;
   } catch (error) {
@@ -414,12 +416,7 @@ function testServiceImages(options: {
     postgres: "pgvector/pgvector:pg17",
     nats: "nats:2-alpine",
     ...((options.temporal ?? true) ? { temporal: "temporalio/auto-setup:1.28" } : {}),
-    ...((options.objectStorage ?? false)
-      ? {
-          garage: GARAGE_FIXTURE_IMAGE,
-          "garage-init": GARAGE_FIXTURE_MC_IMAGE,
-        }
-      : {}),
+    ...((options.objectStorage ?? false) ? { garage: GARAGE_FIXTURE_IMAGE } : {}),
   };
 }
 
@@ -600,24 +597,6 @@ async function waitForGarage(endpoint: string): Promise<void> {
   );
 }
 
-async function bootstrapGarageCors(projectName: string, composeFile: string): Promise<void> {
-  let lastResult: Awaited<ReturnType<typeof runCommand>> | null = null;
-  for (let attempt = 1; attempt <= 5; attempt += 1) {
-    const composeFiles = await composeFileArgs(composeFile);
-    lastResult = await runCommand(
-      ["docker", "compose", "-p", projectName, ...composeFiles, "run", "--rm", "garage-init"],
-      { timeoutMs: 60_000 },
-    );
-    if (lastResult.exitCode === 0) {
-      return;
-    }
-    await Bun.sleep(attempt * 1_000);
-  }
-  throw new Error(
-    `garage CORS bootstrap failed\n${lastResult?.stdout ?? ""}\n${lastResult?.stderr ?? ""}`,
-  );
-}
-
 async function composeFileArgs(composeFile: string): Promise<string[]> {
   const args = ["-f", composeFile];
   const imageOverrideFile = `${composeFile}.images.json`;
@@ -718,36 +697,6 @@ ${
       retries: 40
       start_period: 10s
 
-  garage-init:
-    image: ${GARAGE_FIXTURE_MC_IMAGE}
-    pull_policy: never
-    # Keep this one-shot bootstrap out of the initial compose-up. The harness
-    # runs it explicitly after Garage answers S3; including it here as well can
-    # race concurrent image pulls before the Docker daemon has committed the mc tag.
-    profiles: ["bootstrap"]
-    depends_on:
-      garage:
-        condition: service_healthy
-    environment:
-      HTTP_PROXY: ""
-      HTTPS_PROXY: ""
-      ALL_PROXY: ""
-      http_proxy: ""
-      https_proxy: ""
-      all_proxy: ""
-      NO_PROXY: "localhost,127.0.0.1,garage"
-      no_proxy: "localhost,127.0.0.1,garage"
-    volumes:
-      - ./cors.xml:/cors.xml:ro
-    entrypoint: ["/bin/sh", "-c"]
-    command: >
-      "for i in $$(seq 1 30); do
-         mc alias set local http://garage:3900 ${GARAGE_FIXTURE_ACCESS_KEY_ID} ${GARAGE_FIXTURE_SECRET_ACCESS_KEY} &&
-         mc cors set local/${OBJECT_STORAGE_FIXTURE_BUCKET} /cors.xml &&
-         exit 0;
-         sleep 2;
-       done;
-       exit 1"
 `
     : ""
 }

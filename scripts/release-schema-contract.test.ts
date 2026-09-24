@@ -158,14 +158,17 @@ describe("release schema contract", () => {
     const insightsFactReadsHashJoin = completeSourceContract.migrations.some(
       (migration) => migration.path === "0512_insights_fact_reads_hash_join.sql",
     );
+    const messageForkPrefixCompaction = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0513_message_fork_prefix_compaction.sql",
+    );
     const usageReservationExportExclusion = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0513_usage_reservation_export_exclusion.sql",
+      (migration) => migration.path === "0514_usage_reservation_export_exclusion.sql",
     );
     const accountUsageReadCapability = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0514_account_usage_read_capability.sql",
+      (migration) => migration.path === "0515_account_usage_read_capability.sql",
     );
     const organizationUsageReservedExclusion = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0515_organization_usage_reserved_exclusion.sql",
+      (migration) => migration.path === "0516_organization_usage_reserved_exclusion.sql",
     );
     const controlRevisionFrontier = completeSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
@@ -403,6 +406,7 @@ describe("release schema contract", () => {
         (organizationUsageReservedExclusion ? 1 : 0) +
         (accountUsageReadCapability ? 1 : 0) +
         (usageReservationExportExclusion ? 1 : 0) +
+        (messageForkPrefixCompaction ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
         (knowledgeIndexFundingWait ? 1 : 0) +
@@ -686,15 +690,18 @@ describe("release schema contract", () => {
       ...(insightsFactReadsHashJoin
         ? { latestMigration: "0512_insights_fact_reads_hash_join.sql" }
         : {}),
+      ...(messageForkPrefixCompaction
+        ? { latestMigration: "0513_message_fork_prefix_compaction.sql" }
+        : {}),
       ...(usageReservationExportExclusion
-        ? { latestMigration: "0513_usage_reservation_export_exclusion.sql" }
+        ? { latestMigration: "0514_usage_reservation_export_exclusion.sql" }
         : {}),
       ...(accountUsageReadCapability
-        ? { latestMigration: "0514_account_usage_read_capability.sql" }
+        ? { latestMigration: "0515_account_usage_read_capability.sql" }
         : {}),
       ...(organizationUsageReservedExclusion
         ? {
-            latestMigration: "0515_organization_usage_reserved_exclusion.sql",
+            latestMigration: "0516_organization_usage_reserved_exclusion.sql",
           }
         : {}),
     });
@@ -707,6 +714,7 @@ describe("release schema contract", () => {
           Number(knowledgeIndexFundingWait) -
           Number(knowledgeVisibleIndexStatus) -
           Number(insightsFactReadsHashJoin) -
+          Number(messageForkPrefixCompaction) -
           Number(usageReservationExportExclusion) -
           Number(accountUsageReadCapability) -
           Number(organizationUsageReservedExclusion),
@@ -829,6 +837,7 @@ describe("release schema contract", () => {
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction) -
             Number(usageReservationExportExclusion) -
             Number(accountUsageReadCapability) -
             Number(organizationUsageReservedExclusion),
@@ -846,6 +855,7 @@ describe("release schema contract", () => {
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction) -
             Number(usageReservationExportExclusion) -
             Number(accountUsageReadCapability) -
             Number(organizationUsageReservedExclusion),
@@ -862,6 +872,7 @@ describe("release schema contract", () => {
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction) -
             Number(usageReservationExportExclusion) -
             Number(accountUsageReadCapability) -
             Number(organizationUsageReservedExclusion),
@@ -877,6 +888,7 @@ describe("release schema contract", () => {
           -1 -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction) -
             Number(usageReservationExportExclusion) -
             Number(accountUsageReadCapability) -
             Number(organizationUsageReservedExclusion),
@@ -891,6 +903,7 @@ describe("release schema contract", () => {
         completeSourceContract.migrations.at(
           -1 -
             Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction) -
             Number(usageReservationExportExclusion) -
             Number(accountUsageReadCapability) -
             Number(organizationUsageReservedExclusion),
@@ -904,6 +917,7 @@ describe("release schema contract", () => {
       expect(
         completeSourceContract.migrations.at(
           -1 -
+            Number(messageForkPrefixCompaction) -
             Number(usageReservationExportExclusion) -
             Number(accountUsageReadCapability) -
             Number(organizationUsageReservedExclusion),
@@ -913,13 +927,26 @@ describe("release schema contract", () => {
         deploymentMode: "rolling",
       });
     }
+    if (messageForkPrefixCompaction) {
+      expect(
+        completeSourceContract.migrations.at(
+          -1 -
+            Number(usageReservationExportExclusion) -
+            Number(accountUsageReadCapability) -
+            Number(organizationUsageReservedExclusion),
+        ),
+      ).toMatchObject({
+        path: "0513_message_fork_prefix_compaction.sql",
+        deploymentMode: "rolling",
+      });
+    }
     if (usageReservationExportExclusion) {
       expect(
         completeSourceContract.migrations.at(
           -1 - Number(accountUsageReadCapability) - Number(organizationUsageReservedExclusion),
         ),
       ).toMatchObject({
-        path: "0513_usage_reservation_export_exclusion.sql",
+        path: "0514_usage_reservation_export_exclusion.sql",
         deploymentMode: "rolling",
       });
     }
@@ -927,13 +954,13 @@ describe("release schema contract", () => {
       expect(
         completeSourceContract.migrations.at(-1 - Number(organizationUsageReservedExclusion)),
       ).toMatchObject({
-        path: "0514_account_usage_read_capability.sql",
+        path: "0515_account_usage_read_capability.sql",
         deploymentMode: "rolling",
       });
     }
     if (organizationUsageReservedExclusion) {
       expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-        path: "0515_organization_usage_reserved_exclusion.sql",
+        path: "0516_organization_usage_reserved_exclusion.sql",
         deploymentMode: "rolling",
       });
     }
@@ -2051,14 +2078,17 @@ describe("release schema contract", () => {
     const insightsFactReadsHashJoin = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0512_insights_fact_reads_hash_join.sql",
     );
+    const messageForkPrefixCompaction = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0513_message_fork_prefix_compaction.sql",
+    );
     const usageReservationExportExclusion = unfilteredSourceContract.migrations.some(
-      (migration) => migration.path === "0513_usage_reservation_export_exclusion.sql",
+      (migration) => migration.path === "0514_usage_reservation_export_exclusion.sql",
     );
     const accountUsageReadCapability = unfilteredSourceContract.migrations.some(
-      (migration) => migration.path === "0514_account_usage_read_capability.sql",
+      (migration) => migration.path === "0515_account_usage_read_capability.sql",
     );
     const organizationUsageReservedExclusion = unfilteredSourceContract.migrations.some(
-      (migration) => migration.path === "0515_organization_usage_reserved_exclusion.sql",
+      (migration) => migration.path === "0516_organization_usage_reserved_exclusion.sql",
     );
     const controlRevisionFrontier = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
@@ -2683,9 +2713,10 @@ describe("release schema contract", () => {
       "0510_knowledge_index_funding_wait.sql",
       "0511_knowledge_visible_index_status.sql",
       "0512_insights_fact_reads_hash_join.sql",
-      "0513_usage_reservation_export_exclusion.sql",
-      "0514_account_usage_read_capability.sql",
-      "0515_organization_usage_reserved_exclusion.sql",
+      "0513_message_fork_prefix_compaction.sql",
+      "0514_usage_reservation_export_exclusion.sql",
+      "0515_account_usage_read_capability.sql",
+      "0516_organization_usage_reserved_exclusion.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -3269,26 +3300,32 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0512_insights_fact_reads_hash_join.sql",
       };
+    if (messageForkPrefixCompaction)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0513_message_fork_prefix_compaction.sql",
+      };
     if (usageReservationExportExclusion)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0513_usage_reservation_export_exclusion.sql",
+        latestMigration: "0514_usage_reservation_export_exclusion.sql",
       };
     if (accountUsageReadCapability)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0514_account_usage_read_capability.sql",
+        latestMigration: "0515_account_usage_read_capability.sql",
       };
     if (organizationUsageReservedExclusion)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0515_organization_usage_reserved_exclusion.sql",
+        latestMigration: "0516_organization_usage_reserved_exclusion.sql",
       };
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (organizationUsageReservedExclusion ? 1 : 0) +
         (accountUsageReadCapability ? 1 : 0) +
         (usageReservationExportExclusion ? 1 : 0) +
+        (messageForkPrefixCompaction ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
         (knowledgeIndexFundingWait ? 1 : 0) +
@@ -3774,15 +3811,18 @@ describe("release schema contract", () => {
       ...(insightsFactReadsHashJoin
         ? { latestMigration: "0512_insights_fact_reads_hash_join.sql" }
         : {}),
+      ...(messageForkPrefixCompaction
+        ? { latestMigration: "0513_message_fork_prefix_compaction.sql" }
+        : {}),
       ...(usageReservationExportExclusion
-        ? { latestMigration: "0513_usage_reservation_export_exclusion.sql" }
+        ? { latestMigration: "0514_usage_reservation_export_exclusion.sql" }
         : {}),
       ...(accountUsageReadCapability
-        ? { latestMigration: "0514_account_usage_read_capability.sql" }
+        ? { latestMigration: "0515_account_usage_read_capability.sql" }
         : {}),
       ...(organizationUsageReservedExclusion
         ? {
-            latestMigration: "0515_organization_usage_reserved_exclusion.sql",
+            latestMigration: "0516_organization_usage_reserved_exclusion.sql",
           }
         : {}),
     });
