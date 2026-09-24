@@ -51,4 +51,6 @@ export const embeddingMigrationTail = [
   "0509_verified_signup_trial_credits.sql",
   "0510_knowledge_index_funding_wait.sql",
   "0511_knowledge_visible_index_status.sql",
+  // Patches learning resolvers introduced by the withheld 0461 migration.
+  "0515_autonomous_learning_defaults.sql",
 ];

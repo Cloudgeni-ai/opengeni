@@ -110,6 +110,23 @@ test("compact settings show effective permission without a default badge or reso
     "Agents can still use these resources when updates are off.",
   );
 });
+test("missing category defaults use automatic without persisting a choice", async () => {
+  const empty = async () => ({
+    ownerKey: "workspace",
+    contextKey: "defaults",
+    version: 0,
+    settings: {},
+  });
+  getSettings.mockImplementationOnce(empty).mockImplementationOnce(empty);
+  await render();
+  for (const label of ["Knowledge", "Workspace instructions", "Skills"]) {
+    expect(field(label).value).toBe("inherit");
+    expect(field(label).parentElement?.querySelector("[aria-hidden]")?.textContent).toBe(
+      "Allow updates",
+    );
+  }
+  expect(saveSettings).not.toHaveBeenCalled();
+});
 test("compact override and reset keep the sparse API semantics", async () => {
   await render();
   await change(field("Knowledge"), "off");

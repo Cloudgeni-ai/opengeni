@@ -85,6 +85,8 @@ const withheldMigrationNames = [
   "0509_verified_signup_trial_credits.sql",
   "0510_knowledge_index_funding_wait.sql",
   "0511_knowledge_visible_index_status.sql",
+  // Patches learning resolvers introduced by withheld 0461; replay after it.
+  "0515_autonomous_learning_defaults.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

@@ -190,8 +190,12 @@ All finding types share retrieval, review, permissions and revision history.
 | Destination | New-workspace default | Storage authority |
 | --- | --- | --- |
 | Knowledge | Automatic | Knowledge entries and revisions |
-| Workspace instructions | Review first | Native instruction revisions and active heads |
-| Skills | Review first | Native Skill folders, revisions and lifecycle receipts |
+| Workspace instructions | Automatic | Native instruction revisions and active heads |
+| Skills | Automatic | Native Skill folders, revisions and lifecycle receipts |
+
+These defaults apply when no saved workspace or personal policy exists. Saved
+choices (including Review first and Off), context overrides, and accepted-turn
+snapshots are unchanged; no existing policy is migrated.
 
 Each destination supports **Automatic**, **Review first** and **Off**. These
 control agent authoring and publication. Off does not remove existing Knowledge,
