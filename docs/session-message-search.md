@@ -150,14 +150,15 @@ return 400. It reuses target-session read authorization and 8192-unit scalar
 slices, without projecting the event or other payload fields (including
 `modelContext`) into the response. The response is not a history/stream API.
 
-For **surrounding** context, the bounded `listEventPage` reader may still be
-used in two directions around the selected sequence with `includeTypes:
-["user.message", "agent.message.completed"]` and `payloadMode: "summary"`.
-That audit reader can retain `modelContext` and other fields on small events;
-render **only `payload.text`** and never stringify a whole event or payload.
-Its 4096-byte summary cutoff can truncate a message. Search snippets remain
-the precise hit excerpt even when the selected preview is unavailable; do not
-interpret a truncated context projection as a complete message.
+For **surrounding** context, the bounded `listEventPage` reader selects nearby
+event identities in two directions around the selected sequence with
+`includeTypes: ["user.message", "agent.message.completed"]` and
+`payloadMode: "summary"`. Read their visible text separately through the same
+text-only preview endpoint. Summary projections discard the payload codec
+version and can contain an encoded storage marker even when they fit under the
+4096-byte cutoff; never render their `payload.text` or stringify the event.
+Omit unavailable context messages. Search snippets remain the precise hit
+excerpt even when the selected preview is unavailable.
 
 Search authorization is list-shaped even with `sessionId`: the normal live
 grant plus complete host/agent list scope precedes SQL, and the subject RLS,

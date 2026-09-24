@@ -395,35 +395,53 @@ export function SessionSearchPreview(props: SessionSearchPreviewProps) {
           }),
       ]);
       const selectedText = selectedFormattedMessage(selectedPreview, match, props.query);
-      const context = (events: typeof before): SearchPreviewMessage[] =>
-        events.flatMap((event) => {
-          if (event.type !== "user.message" && event.type !== "agent.message.completed") return [];
-          const payload = event.payload as Record<string, unknown>;
-          if (typeof payload.text !== "string") return [];
-          if (
-            match.messageId &&
-            event.type === "agent.message.completed" &&
-            payload.messageId === match.messageId &&
-            event.turnId === match.turnId
-          )
-            return [];
-          let text = payload.text;
-          if (text.length > 1800) {
-            const end = /[\uD800-\uDBFF]/.test(text[1799]!) ? 1799 : 1800;
-            text = `${text.slice(0, end)}…`;
-          }
-          return [
-            {
+      const context = async (events: typeof before): Promise<SearchPreviewMessage[]> => {
+        const messages = await Promise.all(
+          events.map(async (event): Promise<SearchPreviewMessage | null> => {
+            if (event.type !== "user.message" && event.type !== "agent.message.completed")
+              return null;
+            const payload = event.payload as Record<string, unknown>;
+            if (
+              match.messageId &&
+              event.type === "agent.message.completed" &&
+              payload.messageId === match.messageId &&
+              event.turnId === match.turnId
+            )
+              return null;
+            // Summary projections do not carry the payload codec version. Even
+            // short context text may be an undecoded lossless storage marker.
+            const preview = await props.client
+              .getSessionMessagePreview(
+                props.workspaceId,
+                props.sessionId,
+                { eventId: event.id, sequence: event.sequence },
+                { signal },
+              )
+              .catch((error: unknown) => {
+                if (error instanceof OpenGeniApiError && error.status === 404)
+                  return { status: "unavailable" as const };
+                throw error;
+              });
+            if (preview.status !== "available") return null;
+            let text = preview.text;
+            if (text.length > 1800) {
+              const end = /[\uD800-\uDBFF]/.test(text[1799]!) ? 1799 : 1800;
+              text = `${text.slice(0, end)}…`;
+            }
+            return {
               key: event.id,
-              role: event.type === "user.message" ? ("user" as const) : ("assistant" as const),
+              role: event.type === "user.message" ? "user" : "assistant",
               text,
               selected: false,
-              formatted: payload.text.length <= 1800,
-            },
-          ];
-        });
+              formatted: preview.text.length <= 1800,
+            };
+          }),
+        );
+        return messages.filter((message): message is SearchPreviewMessage => message !== null);
+      };
+      const [preceding, following] = await Promise.all([context(before), context(after)]);
       return [
-        ...context(before),
+        ...preceding,
         {
           key: match.eventId,
           role: match.role,
@@ -433,7 +451,7 @@ export function SessionSearchPreview(props: SessionSearchPreviewProps) {
           snippet: match.snippet.text,
           offset: match.messageMatchOffset,
         },
-        ...context(after),
+        ...following,
       ];
     },
     [props.client, props.workspaceId, props.sessionId, props.query, match],

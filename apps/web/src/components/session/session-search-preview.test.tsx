@@ -205,3 +205,75 @@ test("stale selected event falls back to the indexed excerpt without blocking co
   expect(view.container.textContent).not.toContain("stale event");
   await view.unmount();
 });
+
+test("context reads decoded visible text instead of a lossless summary marker", async () => {
+  type Props = ComponentProps<typeof SessionSearchPreview>;
+  const decoded = "before\u0000after";
+  const marker = "opengeni_lossless_json_string_v2_YgBlAGYAbwByAGUA";
+  const references: Array<{ eventId: string; sequence: number }> = [];
+  const client = {
+    listEvents: async (
+      _workspace: string,
+      _session: string,
+      options: { direction: "before" | "after" },
+    ) =>
+      options.direction === "before"
+        ? [
+            {
+              id: "nearby",
+              sequence: 6,
+              type: "user.message",
+              payload: { text: marker },
+            },
+          ]
+        : [],
+    getSessionMessagePreview: async (
+      _workspace: string,
+      _session: string,
+      reference: { eventId: string; sequence: number },
+    ) => {
+      references.push(reference);
+      return { status: "available", text: reference.eventId === "nearby" ? decoded : "09:00" };
+    },
+  } as unknown as Props["client"];
+  const search = {
+    page: {
+      matches: [
+        {
+          eventId: "selected",
+          sequence: 7,
+          messageMatchOffset: 0,
+          role: "assistant",
+          snippet: { text: "09:00" },
+        },
+      ],
+      hasMore: false,
+    },
+    loading: false,
+    error: null,
+    pageIndex: 0,
+  } as unknown as Props["search"];
+  const view = await renderComponent(
+    <SessionSearchPreview
+      client={client}
+      authority="a"
+      workspaceId="w"
+      sessionId="s"
+      title="Session"
+      query="09:00"
+      enabled
+      search={search}
+      index={0}
+      setIndex={() => {}}
+      scrollPosition={{ current: 0 }}
+      onOpen={() => {}}
+      onBack={() => {}}
+    />,
+  );
+  await flush(150);
+  expect(references).toContainEqual({ eventId: "nearby", sequence: 6 });
+  expect(view.container.textContent).toContain("before");
+  expect(view.container.textContent).toContain("after");
+  expect(view.container.textContent).not.toContain(marker);
+  await view.unmount();
+});
