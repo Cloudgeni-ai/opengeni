@@ -30,6 +30,11 @@ function emptyModelBundle(): WorkspaceInsightsModelBundle {
       totalCalls: 0,
       sources: [],
     },
+    dataThrough: null,
+    driverGroups: 0,
+    driversTruncated: false,
+    facetsTruncated: false,
+    recentCallsTruncated: false,
   };
 }
 
@@ -209,6 +214,45 @@ describe("getWorkspaceInsights", () => {
         model: "m".repeat(513),
       }),
     ).rejects.toBeInstanceOf(WorkspaceInsightsFilterValidationError);
+    expect(requireWorkspace).not.toHaveBeenCalled();
+  });
+
+  test("passes session scope to the model bundle and marks the snapshot filtered", async () => {
+    const { modelBundle, usageBundle } = stubEmptyWorkspace();
+    const root = "44444444-4444-4444-8444-444444444444";
+    const { snapshot } = await getWorkspaceInsights(
+      db,
+      testSettings({ sandboxSelfhostedEnabled: false }),
+      {
+        workspaceId: WORKSPACE,
+        range: "week",
+        rootSessionId: ` ${root.toUpperCase()} `,
+        sessionId: "all",
+        now: new Date("2026-07-15T12:00:00.000Z"),
+      },
+    );
+    expect(modelBundle.mock.calls[0]?.[1]).toMatchObject({
+      rootSessionId: root,
+      sessionId: null,
+    });
+    expect(usageBundle.mock.calls[0]?.[1]).not.toHaveProperty("rootSessionId", root);
+    expect(snapshot.scope).toEqual({ rootSessionId: root, sessionId: null });
+    expect(snapshot.modelFilterActive).toBe(true);
+    expect(snapshot.cacheHitPct).toBeNull();
+    expect(snapshot.dataThrough).toBeNull();
+  });
+
+  test("rejects malformed session scope before storage", async () => {
+    const { requireWorkspace } = stubEmptyWorkspace();
+    for (const field of ["rootSessionId", "sessionId"] as const) {
+      await expect(
+        getWorkspaceInsights(db, testSettings({ sandboxSelfhostedEnabled: false }), {
+          workspaceId: WORKSPACE,
+          range: "week",
+          [field]: "not-a-uuid",
+        }),
+      ).rejects.toMatchObject({ field });
+    }
     expect(requireWorkspace).not.toHaveBeenCalled();
   });
 
