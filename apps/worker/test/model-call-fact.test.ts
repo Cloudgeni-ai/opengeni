@@ -37,6 +37,41 @@ describe("recordAuthoritativeModelCallFact", () => {
     while (restores.length > 0) restores.pop()?.();
   });
 
+  /**
+   * The atomic usage+debit writer (BILL-03) carries the whole batch in one
+   * call; capture its usageEvents and creditDebit the way the old per-write
+   * spies did.
+   */
+  function mockAtomicWrites(input?: { failOnDebit?: boolean }) {
+    const usageEvents: Array<Record<string, any>> = [];
+    const creditDebits: Array<Record<string, any>> = [];
+    const spy = spyOn(opengeniDb, "recordUsageEventsAndApplyCreditDebit").mockImplementation(
+      async (_db, batch) => {
+        if (input?.failOnDebit && batch.creditDebit) {
+          throw new Error("credits must NOT be debited for an externally billed turn");
+        }
+        usageEvents.push(...batch.usageEvents);
+        if (batch.creditDebit) creditDebits.push(batch.creditDebit);
+        return {
+          events: [],
+          debit: batch.creditDebit
+            ? {
+                balance: {
+                  accountId: ACCOUNT,
+                  balanceMicros: 1_000_000,
+                  currency: "usd",
+                  updatedAt: new Date().toISOString(),
+                },
+                debitedMicros: batch.creditDebit.requestedAmountMicros,
+              }
+            : null,
+        };
+      },
+    );
+    restores.push(() => spy.mockRestore());
+    return { usageEvents, creditDebits, spy };
+  }
+
   test("soft-fails fact persist without throwing", async () => {
     const sentinel = "SECRET_SENTINEL_123";
     const SecretSentinelError = class SECRET_SENTINEL_123 extends Error {};
@@ -159,14 +194,7 @@ describe("recordAuthoritativeModelCallFact", () => {
   });
 
   test("external billing returns pricedCostMicros 0 for facts", async () => {
-    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    restores.push(() => recordSpy.mockRestore());
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
-      async () => {
-        throw new Error("credits must NOT be debited for an externally billed turn");
-      },
-    );
-    restores.push(() => debitSpy.mockRestore());
+    const { creditDebits } = mockAtomicWrites({ failOnDebit: true });
     const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
       accountId: ACCOUNT,
       workspaceId: WORKSPACE,
@@ -183,18 +211,11 @@ describe("recordAuthoritativeModelCallFact", () => {
     expect(billing.estimatedProviderCostMicros).toBe(14_000);
     expect(billing.equivalentCreditCostMicros).toBe(14_700);
     expect(billing.pricingSource).toBe("configured_list_price");
-    expect(debitSpy).not.toHaveBeenCalled();
+    expect(creditDebits).toHaveLength(0);
   });
 
   test("external Codex ignores non-Gateway billing metadata and uses product list pricing", async () => {
-    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    restores.push(() => recordSpy.mockRestore());
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
-      async () => {
-        throw new Error("credits must NOT be debited for an externally billed turn");
-      },
-    );
-    restores.push(() => debitSpy.mockRestore());
+    const { creditDebits } = mockAtomicWrites({ failOnDebit: true });
 
     const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
       accountId: ACCOUNT,
@@ -217,12 +238,11 @@ describe("recordAuthoritativeModelCallFact", () => {
       pricingSource: "configured_list_price",
     });
     expect(billing).not.toHaveProperty("upstreamProvider");
-    expect(debitSpy).not.toHaveBeenCalled();
+    expect(creditDebits).toHaveLength(0);
   });
 
   test("persists free external billing authority before a soft fact-write failure", async () => {
-    const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    restores.push(() => usageSpy.mockRestore());
+    const { usageEvents } = mockAtomicWrites();
     const factSpy = spyOn(opengeniDb, "recordModelCallFact").mockImplementation(async () => {
       throw new Error("fact writer unavailable");
     });
@@ -302,7 +322,7 @@ describe("recordAuthoritativeModelCallFact", () => {
         outputTokens: 500,
       }),
     ]);
-    expect(usageSpy.mock.calls.map(([, input]) => input)).toEqual([
+    expect(usageEvents).toEqual([
       expect.objectContaining({ eventType: "model.tokens", quantity: 1500 }),
       expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
     ]);
@@ -320,8 +340,7 @@ describe("recordAuthoritativeModelCallFact", () => {
   });
 
   test("external estimates preserve per-request pricing tiers", async () => {
-    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    restores.push(() => recordSpy.mockRestore());
+    mockAtomicWrites();
     const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
       accountId: ACCOUNT,
       workspaceId: WORKSPACE,
@@ -351,14 +370,7 @@ describe("recordAuthoritativeModelCallFact", () => {
   });
 
   test("partial or malformed configured usage stays externally uncharged and unpriced", async () => {
-    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    restores.push(() => recordSpy.mockRestore());
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
-      async () => {
-        throw new Error("credits must NOT be debited for an externally billed turn");
-      },
-    );
-    restores.push(() => debitSpy.mockRestore());
+    const { usageEvents, creditDebits } = mockAtomicWrites({ failOnDebit: true });
 
     const usageCases = [
       { sourceKey: "response-partial", usage: { inputTokens: 100, totalTokens: 100 } },
@@ -388,27 +400,15 @@ describe("recordAuthoritativeModelCallFact", () => {
       });
     }
 
-    expect(recordSpy).toHaveBeenCalledTimes(2);
-    expect(recordSpy.mock.calls.map(([, input]) => input)).toEqual([
+    expect(usageEvents).toEqual([
       expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
       expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
     ]);
-    expect(debitSpy).not.toHaveBeenCalled();
+    expect(creditDebits).toHaveLength(0);
   });
 
   test("Gateway exact cost remains known with malformed core token telemetry", async () => {
-    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    restores.push(() => recordSpy.mockRestore());
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue({
-      balance: {
-        accountId: ACCOUNT,
-        balanceMicros: 1_000_000,
-        currency: "usd",
-        updatedAt: new Date().toISOString(),
-      },
-      debitedMicros: 5,
-    });
-    restores.push(() => debitSpy.mockRestore());
+    const { creditDebits } = mockAtomicWrites();
 
     const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
       accountId: ACCOUNT,
@@ -431,12 +431,11 @@ describe("recordAuthoritativeModelCallFact", () => {
       pricingSource: "gateway_reported",
       upstreamProvider: "baseten",
     });
-    expect(debitSpy).toHaveBeenCalledTimes(1);
+    expect(creditDebits).toHaveLength(1);
   });
 
   test("external usage stays uncharged and explicitly unpriced when no schedule exists", async () => {
-    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    restores.push(() => recordSpy.mockRestore());
+    mockAtomicWrites();
     const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
       accountId: ACCOUNT,
       workspaceId: WORKSPACE,

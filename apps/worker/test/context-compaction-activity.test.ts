@@ -24,10 +24,12 @@ import {
   listOutstandingSessionSystemUpdates,
   listSessionEvents,
   listSessionSystemUpdatesForTurn,
+  openUsageReservationQuantity,
   peekSessionWork,
   requestSessionCompaction,
   saveRunState,
   submitHumanPromptInTransaction,
+  sumUsageQuantity,
   withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls,
   type Database,
@@ -1863,6 +1865,208 @@ describe("standalone context compaction execution", () => {
     expect(
       events.some((event) => event.type === "turn.started" && event.turnId === queued.turnId),
     ).toBe(false);
+  });
+
+  test("a rejected call's hold is retired before the compaction retry is admitted", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Rejected-call hold retirement test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Rejected-call hold retirement test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "continue after compacting",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+      goal: null,
+    });
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        position: 0,
+        item: {
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "durable completed work ".repeat(1_000) }],
+        },
+      });
+    });
+    // Call 1 is admitted (its hold is written) then the provider rejects it
+    // with a context overflow — no terminal response is ever produced for that
+    // admission. The compaction retry is a DIFFERENT admission whose response
+    // must release its own hold, not the dead call's.
+    const scriptedModel = new ScriptedModel([
+      {
+        error: new CompactionNeededError({
+          signalTokens: 250_000,
+          thresholdTokens: 249_000,
+          signalSource: "provider",
+        }),
+      },
+      { outputText: "post-compaction answer" },
+    ]);
+    const summarizerClient = {
+      chat: {
+        completions: {
+          create: async () => ({
+            id: "chatcmpl-hold-retirement",
+            usage: { prompt_tokens: 100, completion_tokens: 12, total_tokens: 112 },
+            choices: [
+              {
+                message: { content: "The active task continues." },
+                finish_reason: "stop",
+              },
+            ],
+          }),
+        },
+      },
+    } as unknown as NonNullable<ReturnType<OpenGeniRuntime["resolveTurnModel"]>>["client"];
+    const productionRuntime = createProductionAgentRuntime({ model: scriptedModel });
+    const openReservedAtRetryAdmission: number[] = [];
+    const reservedOutputBound = 1_000;
+    const runtime: OpenGeniRuntime = {
+      ...productionRuntime,
+      configure: () => undefined,
+      resolveTurnModel: () => ({
+        provider: {
+          id: "test-chat",
+          label: "Test chat",
+          kind: "api-key",
+          api: "chat",
+          builtin: false,
+        },
+        client: summarizerClient,
+        model: scriptedModel,
+        configured: {
+          id: "scripted-model",
+          label: "Scripted model",
+          providerId: "test-chat",
+          providerLabel: "Test chat",
+          api: "chat",
+          contextWindowTokens: 250_000,
+          effectiveContextWindowTokens: 250_000,
+          autoCompactTokenLimit: 225_000,
+          reasoningEffort: false,
+          hostedWebSearch: false,
+        },
+      }),
+      runStream: async (agent, preparedInput, settings, options) => {
+        const workerAdmission = options.onModelCallAdmission;
+        return await productionRuntime.runStream(agent, preparedInput, settings, {
+          ...options,
+          onModelCallAdmission: async (admission) => {
+            if (openReservedAtRetryAdmission.length === 1) {
+              // The retry's admission: the rejected call's hold must already be
+              // released — under response-count matching it would still be open.
+              openReservedAtRetryAdmission.push(
+                await openUsageReservationQuantity(client.db, {
+                  accountId: grant.accountId,
+                  workspaceId: grant.workspaceId!,
+                  eventType: "model.tokens.reserved",
+                  since: new Date(0),
+                  holdSince: new Date(0),
+                }),
+              );
+            } else if (openReservedAtRetryAdmission.length === 0) {
+              openReservedAtRetryAdmission.push(-1);
+            }
+            return await workerAdmission?.(admission);
+          },
+        });
+      },
+    };
+    const activities = createActivityTestHarness({
+      settings: testSettings({
+        databaseUrl: shared.appUrl,
+        openaiModel: "scripted-model",
+        sandboxBackend: "none",
+        contextWindowTokens: 250_000,
+        contextReservedOutputTokens: reservedOutputBound,
+        billingMode: "disabled",
+        usageLimitsMode: "static",
+        staticUsageLimitsJson: JSON.stringify({
+          maxMonthlyTokensPerWorkspace: 100_000_000,
+        }),
+      }),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      runtime,
+    });
+
+    const attemptId = crypto.randomUUID();
+    const result = await activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    expect(result).toMatchObject({ status: "idle", attemptId });
+    if (result.status === "unclaimed") throw new Error("User turn was not claimed");
+
+    // Two model calls were admitted: the rejected one and the retry.
+    expect(scriptedModel.requests).toHaveLength(2);
+    // P1-a: the granted output headroom reached each provider request as
+    // maxTokens (the review probe observed `undefined`).
+    expect(scriptedModel.requests[0]?.modelSettings.maxTokens).toBe(reservedOutputBound);
+    expect(scriptedModel.requests[1]?.modelSettings.maxTokens).toBe(reservedOutputBound);
+
+    // At the retry's admission, the rejected call's hold was already retired.
+    expect(openReservedAtRetryAdmission).toEqual([-1, 0]);
+
+    // Both holds were released exactly once, each under its own admission
+    // ordinal's idempotency key — never cross-assigned.
+    const releases = await shared.admin<Array<{ idempotency_key: string; quantity: string }>>`
+      select idempotency_key, quantity from usage_events
+      where workspace_id = ${grant.workspaceId!}
+        and event_type = 'model.tokens.reserved'
+        and quantity < 0
+      order by idempotency_key`;
+    expect(releases.map((row) => row.idempotency_key)).toEqual([
+      `usage:model.tokens.reserved:${result.turnId}:${attemptId}:1:release`,
+      `usage:model.tokens.reserved:${result.turnId}:${attemptId}:2:release`,
+    ]);
+    // Net open reservations are zero and the retry's response recorded its
+    // own usage fact.
+    expect(
+      await sumUsageQuantity(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        eventType: "model.tokens.reserved",
+        since: new Date(0),
+      }),
+    ).toBe(0);
+    expect(
+      await sumUsageQuantity(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        eventType: "model.tokens",
+        since: new Date(0),
+      }),
+    ).toBeGreaterThan(0);
   });
 
   test("same-turn empty-summary recovery settles once and waits for actionable durable input", async () => {

@@ -158,6 +158,15 @@ describe("release schema contract", () => {
     const insightsFactReadsHashJoin = completeSourceContract.migrations.some(
       (migration) => migration.path === "0512_insights_fact_reads_hash_join.sql",
     );
+    const usageReservationExportExclusion = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0513_usage_reservation_export_exclusion.sql",
+    );
+    const accountUsageReadCapability = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0514_account_usage_read_capability.sql",
+    );
+    const organizationUsageReservedExclusion = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0515_organization_usage_reserved_exclusion.sql",
+    );
     const controlRevisionFrontier = completeSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -391,6 +400,9 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (organizationUsageReservedExclusion ? 1 : 0) +
+        (accountUsageReadCapability ? 1 : 0) +
+        (usageReservationExportExclusion ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
         (knowledgeIndexFundingWait ? 1 : 0) +
@@ -674,6 +686,17 @@ describe("release schema contract", () => {
       ...(insightsFactReadsHashJoin
         ? { latestMigration: "0512_insights_fact_reads_hash_join.sql" }
         : {}),
+      ...(usageReservationExportExclusion
+        ? { latestMigration: "0513_usage_reservation_export_exclusion.sql" }
+        : {}),
+      ...(accountUsageReadCapability
+        ? { latestMigration: "0514_account_usage_read_capability.sql" }
+        : {}),
+      ...(organizationUsageReservedExclusion
+        ? {
+            latestMigration: "0515_organization_usage_reserved_exclusion.sql",
+          }
+        : {}),
     });
     expect(
       completeSourceContract.migrations.at(
@@ -683,7 +706,10 @@ describe("release schema contract", () => {
           Number(verifiedSignupTrialCredits) -
           Number(knowledgeIndexFundingWait) -
           Number(knowledgeVisibleIndexStatus) -
-          Number(insightsFactReadsHashJoin),
+          Number(insightsFactReadsHashJoin) -
+          Number(usageReservationExportExclusion) -
+          Number(accountUsageReadCapability) -
+          Number(organizationUsageReservedExclusion),
       ),
     ).toMatchObject({
       path: backgroundCommandText
@@ -802,7 +828,10 @@ describe("release schema contract", () => {
             Number(verifiedSignupTrialCredits) -
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
-            Number(insightsFactReadsHashJoin),
+            Number(insightsFactReadsHashJoin) -
+            Number(usageReservationExportExclusion) -
+            Number(accountUsageReadCapability) -
+            Number(organizationUsageReservedExclusion),
         ),
       ).toMatchObject({
         path: "0507_integration_oauth_pending_states.sql",
@@ -816,7 +845,10 @@ describe("release schema contract", () => {
             Number(verifiedSignupTrialCredits) -
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
-            Number(insightsFactReadsHashJoin),
+            Number(insightsFactReadsHashJoin) -
+            Number(usageReservationExportExclusion) -
+            Number(accountUsageReadCapability) -
+            Number(organizationUsageReservedExclusion),
         ),
       ).toMatchObject({
         path: "0508_deadline_command_workspace_capture.sql",
@@ -829,7 +861,10 @@ describe("release schema contract", () => {
           -1 -
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
-            Number(insightsFactReadsHashJoin),
+            Number(insightsFactReadsHashJoin) -
+            Number(usageReservationExportExclusion) -
+            Number(accountUsageReadCapability) -
+            Number(organizationUsageReservedExclusion),
         ),
       ).toMatchObject({
         path: "0509_verified_signup_trial_credits.sql",
@@ -839,7 +874,12 @@ describe("release schema contract", () => {
     if (knowledgeIndexFundingWait) {
       expect(
         completeSourceContract.migrations.at(
-          -1 - Number(knowledgeVisibleIndexStatus) - Number(insightsFactReadsHashJoin),
+          -1 -
+            Number(knowledgeVisibleIndexStatus) -
+            Number(insightsFactReadsHashJoin) -
+            Number(usageReservationExportExclusion) -
+            Number(accountUsageReadCapability) -
+            Number(organizationUsageReservedExclusion),
         ),
       ).toMatchObject({
         path: "0510_knowledge_index_funding_wait.sql",
@@ -848,15 +888,52 @@ describe("release schema contract", () => {
     }
     if (knowledgeVisibleIndexStatus) {
       expect(
-        completeSourceContract.migrations.at(-1 - Number(insightsFactReadsHashJoin)),
+        completeSourceContract.migrations.at(
+          -1 -
+            Number(insightsFactReadsHashJoin) -
+            Number(usageReservationExportExclusion) -
+            Number(accountUsageReadCapability) -
+            Number(organizationUsageReservedExclusion),
+        ),
       ).toMatchObject({
         path: "0511_knowledge_visible_index_status.sql",
         deploymentMode: "rolling",
       });
     }
     if (insightsFactReadsHashJoin) {
-      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+      expect(
+        completeSourceContract.migrations.at(
+          -1 -
+            Number(usageReservationExportExclusion) -
+            Number(accountUsageReadCapability) -
+            Number(organizationUsageReservedExclusion),
+        ),
+      ).toMatchObject({
         path: "0512_insights_fact_reads_hash_join.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (usageReservationExportExclusion) {
+      expect(
+        completeSourceContract.migrations.at(
+          -1 - Number(accountUsageReadCapability) - Number(organizationUsageReservedExclusion),
+        ),
+      ).toMatchObject({
+        path: "0513_usage_reservation_export_exclusion.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (accountUsageReadCapability) {
+      expect(
+        completeSourceContract.migrations.at(-1 - Number(organizationUsageReservedExclusion)),
+      ).toMatchObject({
+        path: "0514_account_usage_read_capability.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (organizationUsageReservedExclusion) {
+      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+        path: "0515_organization_usage_reserved_exclusion.sql",
         deploymentMode: "rolling",
       });
     }
@@ -1974,6 +2051,15 @@ describe("release schema contract", () => {
     const insightsFactReadsHashJoin = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0512_insights_fact_reads_hash_join.sql",
     );
+    const usageReservationExportExclusion = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0513_usage_reservation_export_exclusion.sql",
+    );
+    const accountUsageReadCapability = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0514_account_usage_read_capability.sql",
+    );
+    const organizationUsageReservedExclusion = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0515_organization_usage_reserved_exclusion.sql",
+    );
     const controlRevisionFrontier = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -2597,6 +2683,9 @@ describe("release schema contract", () => {
       "0510_knowledge_index_funding_wait.sql",
       "0511_knowledge_visible_index_status.sql",
       "0512_insights_fact_reads_hash_join.sql",
+      "0513_usage_reservation_export_exclusion.sql",
+      "0514_account_usage_read_capability.sql",
+      "0515_organization_usage_reserved_exclusion.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -3180,8 +3269,26 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0512_insights_fact_reads_hash_join.sql",
       };
+    if (usageReservationExportExclusion)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0513_usage_reservation_export_exclusion.sql",
+      };
+    if (accountUsageReadCapability)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0514_account_usage_read_capability.sql",
+      };
+    if (organizationUsageReservedExclusion)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0515_organization_usage_reserved_exclusion.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (organizationUsageReservedExclusion ? 1 : 0) +
+        (accountUsageReadCapability ? 1 : 0) +
+        (usageReservationExportExclusion ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
         (knowledgeIndexFundingWait ? 1 : 0) +
@@ -3666,6 +3773,17 @@ describe("release schema contract", () => {
         : {}),
       ...(insightsFactReadsHashJoin
         ? { latestMigration: "0512_insights_fact_reads_hash_join.sql" }
+        : {}),
+      ...(usageReservationExportExclusion
+        ? { latestMigration: "0513_usage_reservation_export_exclusion.sql" }
+        : {}),
+      ...(accountUsageReadCapability
+        ? { latestMigration: "0514_account_usage_read_capability.sql" }
+        : {}),
+      ...(organizationUsageReservedExclusion
+        ? {
+            latestMigration: "0515_organization_usage_reserved_exclusion.sql",
+          }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(

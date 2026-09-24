@@ -6,6 +6,8 @@ import {
   getHumanInputResumeForEvent,
   getInteractionInterventionResumeForEvent,
   installOrReadTurnExecutionPolicyForAttempt,
+  listOpenUsageReservations,
+  recordUsageEventsAndApplyCreditDebit,
   workspaceCodexSubscriptionActive,
   requireSession,
   type AppendEventInput,
@@ -62,6 +64,8 @@ import {
   turnExecutionPolicyBillingIdentity,
   legacyTurnExecutionPolicyInput,
   ensureRunAllowed,
+  usageReservationReleaseEvents,
+  USAGE_RESERVATION_TTL_MS,
 } from "./admission";
 import { providerRecoveryCountFromMetadata, isWorkerShutdownCancellation } from "./errors";
 import { throwIfTurnOperationCancelled, waitForTurnOperation } from "./sandbox-provision";
@@ -368,6 +372,38 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // bypass OpenGeni credit/token gates)
   // AND the optional host `entitlements` port (when bound, its admitRun replaces
   // the local credit read). Unset port → today's local-ledger path.
+  // The monthly caps are enforced with a bounded hold at the producer-side
+  // provider-call boundary (runStream's onModelCallAdmission hook), which is
+  // the only point that sees the exact request payload before the call can
+  // start. This claim-time check is deliberately read-only: it fails fast on
+  // an already-exhausted budget but writes no hold — a consumer-side or
+  // claim-side hold can never bound a call the SDK producer starts on its
+  // own.
+  // A restarted claim (activity retry after a crash) finds this attempt's
+  // still-open holds: those calls died with the crash and can never produce
+  // usage, so their holds are released immediately through the same
+  // idempotency-keyed rows — never re-seeded into the live reservation map,
+  // where a re-admitted call could collide with a dead call's ordinal or a
+  // response could release the wrong hold.
+  const rebuiltHolds = await listOpenUsageReservations(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    turnId: turn.id,
+    turnAttemptId: input.attemptId,
+    since: new Date(Date.now() - USAGE_RESERVATION_TTL_MS),
+  });
+  if (rebuiltHolds.size > 0) {
+    await recordUsageEventsAndApplyCreditDebit(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      usageEvents: usageReservationReleaseEvents({
+        reservations: [...rebuiltHolds.entries()],
+        sessionId: input.sessionId,
+        turnId: turn.id,
+        turnAttemptId: input.attemptId,
+      }),
+    });
+  }
   await waitForTurnOperation(
     ensureRunAllowed(
       capabilitySettings,
@@ -503,6 +539,23 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
           ),
         }
       : undefined;
+    // A terminal settle drains every budget hold this attempt still has open
+    // (e.g. a turn that ends without a final response): the release rows ride
+    // the same transaction as the terminal state, so a crashed turn can at
+    // worst leave a hold that ages out by TTL, never a committed terminal turn
+    // with a live reservation. Caller-supplied usageEvents (completion facts)
+    // commit in the same transaction.
+    const usageEvents = [
+      ...(inputSettlement.turnStatus !== "running"
+        ? usageReservationReleaseEvents({
+            reservations: billingState.pendingUsageReservations,
+            sessionId: input.sessionId,
+            turnId: attempt.turnId!,
+            turnAttemptId: input.attemptId,
+          })
+        : []),
+      ...(inputSettlement.usageEvents ?? []),
+    ];
     const result = await applySessionTurnSettlement(db, input.workspaceId, {
       sessionId: input.sessionId,
       turnId: attempt.turnId!,
@@ -517,7 +570,11 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       events: inputs,
       ...(runState ? { runState } : {}),
       ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
+      ...(usageEvents.length > 0 ? { usageEvents } : {}),
     });
+    if (inputSettlement.turnStatus !== "running") {
+      billingState.pendingUsageReservations.clear();
+    }
     if (result.action === "stale") {
       // The terminal write can lose to a control transaction before the
       // workflow delivers Temporal cancellation. That control may settle

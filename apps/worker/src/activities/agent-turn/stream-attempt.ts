@@ -3,7 +3,6 @@ import {
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   getWorkspace,
-  recordUsageEvent,
   registerPendingSessionToolCall,
   recordPendingSessionToolCallResult,
   attachOpenSuffixToPendingToolCalls,
@@ -11,6 +10,7 @@ import {
   isSessionCompactionRequested,
   nextSessionHistoryPosition,
   persistModelContextSnapshot,
+  recordUsageEventsAndApplyCreditDebit,
   updateSessionTitleWithEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -23,7 +23,9 @@ import {
   interruptionKindForCallItem,
   releaseMcpResultCustomDataFromSdkEvent,
   findCompactionNeededError,
+  CompactionNeededError,
   compactionProviderRejection,
+  modelTerminalResponseFromSdkEvent,
   withRunCredentialsSession,
   runOwnedSandboxSetup,
   type SandboxFileDownload,
@@ -94,6 +96,9 @@ import {
   stableInteractionInterventionOperationId,
   BudgetExhaustedError,
   ensureRunAllowed,
+  estimateModelCallPromptTokens,
+  modelCallReservationQuantities,
+  usageReservationReleaseEvents,
 } from "./admission";
 import {
   compactionFailureReason,
@@ -565,6 +570,20 @@ export async function runTurnStreamAttempt(
   // calling runStreamAttempt again; resetting this state there would reuse
   // the first no-response-ID fallback key and suppress a real model call.
   const modelResponseState = createModelResponseEventState(claimedModelUsageSourceKeys);
+  // Provider calls admitted by the producer-side gate across every stream
+  // attempt in this activity. Holds are keyed by this admission ordinal —
+  // NOT the response ordinal: a provider call rejected before producing a
+  // response (context overflow, veto) still consumed an admission ordinal,
+  // so responses must be matched to calls through the FIFO queue below, and
+  // a conclusively rejected call's ordinal is retired at the catch boundary.
+  // A compaction retry keeps counting so a re-admitted call never collides
+  // with a released hold's idempotency key.
+  let admittedModelCallCount = 0;
+  // FIFO of admission ordinals whose calls have not yet been matched to a
+  // terminal response. Responses arrive in call order, so each terminal
+  // response releases the head's hold; the recovery catch retires the tail
+  // (the call that just died) before a re-admission.
+  const admittedCallOrdinals: number[] = [];
   let workerPreparationTotalRecorded = false;
   const runStreamAttempt = async (options: {
     requireTerminalModelResponse: boolean;
@@ -785,6 +804,103 @@ export async function runTurnStreamAttempt(
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
           signal: runtimeCancellationSignal,
           sandboxEnvironment,
+          // Producer-side budget admission: this hook is the LAST per-call
+          // filter inside the SDK model loop, so it adjudicates the exact
+          // payload about to reach the provider BEFORE the call can start —
+          // the SDK producer can run ahead of this consumer's per-response
+          // accounting, which is why a consumer-side check cannot bound the
+          // next call. The hold is sized from the real prompt plus the
+          // reserved output headroom and must fit the remaining cap in full;
+          // a veto throws BudgetExhaustedError out of the stream like any
+          // other filter failure.
+          onModelCallAdmission: async ({ modelData, agent: callAgent }) => {
+            const promptTokens = estimateModelCallPromptTokens({
+              modelData,
+              agent: callAgent,
+            });
+            const callEstimate = modelCallReservationQuantities({
+              settings,
+              model: turn.model,
+              promptTokens,
+              contextWindowTokens: settings.contextWindowTokens,
+              latencyMode: turnExecutionPolicy.latencyMode,
+            });
+            const callOrdinal = ++admittedModelCallCount;
+            try {
+              const callHold = await ensureRunAllowed(
+                settings,
+                db,
+                input.accountId,
+                input.workspaceId,
+                billingState.isExternallyBilledTurn,
+                entitlements,
+                billingState.chargesOpenGeniCredits,
+                billingState.countsTowardTokenCap,
+                {
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  turnAttemptId: input.attemptId,
+                  ordinal: callOrdinal,
+                  tokens: callEstimate.tokens,
+                  costMicros: callEstimate.costMicros,
+                },
+              );
+              // Only a successfully admitted call joins the response-matching
+              // queue; a vetoed call must never consume a later response.
+              admittedCallOrdinals.push(callOrdinal);
+              // No hold means no monthly cap applied (check-only admission):
+              // nothing was reserved, so nothing may bound this call — an
+              // uncapped deployment must not inherit an output clamp.
+              if (!callHold) {
+                return;
+              }
+              billingState.pendingUsageReservations.set(callOrdinal, callHold);
+              // The granted output leg of this call's hold. It is applied to
+              // the provider request as max_output_tokens by the runtime's
+              // model-seam clamp, so a permitted call can never emit beyond
+              // the headroom it reserved. When the prompt alone consumes the
+              // reservable window no positive bound exists — refuse through
+              // the compaction path (the catch retires this call's ordinal
+              // and releases the just-written hold) instead of dispatching
+              // an unbounded call.
+              const outputHeadroom = callEstimate.tokens - promptTokens;
+              if (outputHeadroom <= 0) {
+                throw new CompactionNeededError({
+                  signalTokens: promptTokens,
+                  thresholdTokens: Math.max(
+                    0,
+                    settings.contextWindowTokens - settings.contextReservedOutputTokens,
+                  ),
+                  signalSource: "provider",
+                });
+              }
+              return { maxOutputTokens: outputHeadroom };
+            } catch (limitError) {
+              // The zero-headroom refusal above is a compaction signal, not a
+              // budget denial — pass it through so the outer recovery catch
+              // compacts instead of ending the segment on the budget valve.
+              if (limitError instanceof CompactionNeededError) {
+                throw limitError;
+              }
+              // Capture the run state so the budget valve in the outer catch
+              // can end this segment gracefully with conversation context
+              // preserved for the post-top-up resume. Call 1 can fire before
+              // eventing.stream is assigned; its veto needs no snapshot.
+              let serializedRunState: string | null = null;
+              try {
+                const streamState = eventing.stream?.state;
+                serializedRunState = streamState
+                  ? media.compactMediaRunState(String(streamState.toString()))
+                  : null;
+              } catch {
+                serializedRunState = null;
+              }
+              throw new BudgetExhaustedError(
+                limitError instanceof Error ? limitError.message : String(limitError),
+                serializedRunState,
+              );
+            }
+          },
           onModelVisibleContext: async (snapshot) => {
             await persistModelContextSnapshot(db, {
               accountId: input.accountId,
@@ -993,6 +1109,17 @@ export async function runTurnStreamAttempt(
         const generatedImageReceipt = generatedImage
           ? await media.retainNativeGeneratedImage(generatedImage)
           : null;
+        // The hold admitted for THIS response's call: its release rides the
+        // same transaction as the usage facts and debit, so a call can never
+        // keep a stale hold once its actuals are recorded. The call is the
+        // head of the admission FIFO — NOT responseCount+1: a provider call
+        // rejected before producing a response still consumed an admission
+        // ordinal, so response and admission ordinals diverge after a
+        // rejection.
+        const isTerminalResponse = modelTerminalResponseFromSdkEvent(next.value) !== null;
+        const queuedCallOrdinal = isTerminalResponse ? admittedCallOrdinals.shift() : undefined;
+        const responseCallOrdinal = queuedCallOrdinal ?? modelResponseState.responseCount + 1;
+        const responseCallHold = billingState.pendingUsageReservations.get(responseCallOrdinal);
         const responseResult = await processModelResponseTerminalEvent({
           event: next.value,
           state: modelResponseState,
@@ -1020,8 +1147,20 @@ export async function runTurnStreamAttempt(
           renewLease: () => leases.renewServing("model_usage"),
           leaseLost: leases.servingLost,
           leaseLostMessage: "Provider credential lease expired during the active turn",
-          setLastInputTokens: setLastInputTokensFenced,
+          setLastInputTokens: async (tokens) => {
+            await setLastInputTokensFenced(tokens);
+          },
           contextContributions: eventing.companyBrainContextContributions,
+          ...(responseCallHold !== undefined
+            ? {
+                reservationReleases: usageReservationReleaseEvents({
+                  reservations: [[responseCallOrdinal, responseCallHold]],
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  turnAttemptId: input.attemptId,
+                }),
+              }
+            : {}),
         });
         assertModelResponseLatencyMode({
           event: next.value,
@@ -1030,6 +1169,10 @@ export async function runTurnStreamAttempt(
           ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
         });
         if (responseResult.status === "processed") {
+          // This call's hold reconciled inside the usage transaction (or rides
+          // the terminal settle if the response carried no usage); it is no
+          // longer pending either way.
+          billingState.pendingUsageReservations.delete(responseCallOrdinal);
           if (
             !providerPublishesNativeRequestEvents &&
             fallbackProviderRequestLifecycleStartedAt !== null
@@ -1071,6 +1214,11 @@ export async function runTurnStreamAttempt(
           await historySink.reconcileConversationTruth();
           turnLifecycleMetricsFor(observability).progress({ attemptId: input.attemptId });
           modelCheckpointMemoryCollector.schedule(observability);
+          // Check-only re-admission at the response boundary. The producer-side
+          // gate bounds the NEXT call, but a segment whose last call just spent
+          // the account's final credits must still end on the budget valve —
+          // no further admission will ever fire for it. No reservation here:
+          // the next call's hold is written by onModelCallAdmission, not here.
           try {
             await ensureRunAllowed(
               settings,
@@ -1083,9 +1231,6 @@ export async function runTurnStreamAttempt(
               billingState.countsTowardTokenCap,
             );
           } catch (limitError) {
-            // Capture the run state at the boundary so the budget valve in
-            // the outer catch can end this segment gracefully with full
-            // conversation context preserved for the post-top-up resume.
             let serializedRunState: string | null = null;
             try {
               serializedRunState = media.compactMediaRunState(
@@ -1099,6 +1244,11 @@ export async function runTurnStreamAttempt(
               serializedRunState,
             );
           }
+        } else if (responseResult.status === "duplicate" && queuedCallOrdinal !== undefined) {
+          // A replayed terminal response consumed no admission: its call was
+          // already reconciled, so restore the queue head for the response
+          // that actually belongs to it.
+          admittedCallOrdinals.unshift(queuedCallOrdinal);
         }
         const durableSdkEvent = generatedImageReceipt
           ? compactGeneratedImageSdkEvent(next.value, generatedImageReceipt)
@@ -1718,24 +1868,24 @@ export async function runTurnStreamAttempt(
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,
+        // The completion usage fact commits inside the terminal settlement
+        // transaction — a worker crash between the two can never leave a
+        // completed turn with its billing fact lost.
+        usageEvents: [
+          {
+            eventType: "agent_run.completed",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: "session_turn",
+            sourceResourceId: activeTurnId,
+            idempotencyKey: `usage:agent_run.completed:${activeTurnId}`,
+          },
+        ],
       }))
     ) {
       return claimedResult({ status: "cancelled" });
     }
     control.turnMetricOutcome = "completed";
-    await recordUsageEvent(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      eventType: "agent_run.completed",
-      quantity: 1,
-      unit: "run",
-      sourceResourceType: "session_turn",
-      sourceResourceId: activeTurnId,
-      sessionId: input.sessionId,
-      turnId: activeTurnId,
-      turnAttemptId: input.attemptId,
-      idempotencyKey: `usage:agent_run.completed:${activeTurnId}`,
-    });
     control.activityStatus = "idle";
     return claimedResult({ status: "idle" });
   };
@@ -1835,6 +1985,32 @@ export async function runTurnStreamAttempt(
             : null;
         if (!recoveryKind || !eventing.publish || !eventing.turnStartedPublished) {
           throw attemptError;
+        }
+        // The call that just died is the admission FIFO's tail — the model
+        // loop is sequential, so everything ahead of it already emitted its
+        // response and was consumed before this error surfaced. Retire its
+        // admission ordinal and release its hold NOW, before the re-admitted
+        // retry call queues behind it: otherwise the retry's response would
+        // release the dead call's hold and leave the live one pinned.
+        const rejectedCallOrdinal = admittedCallOrdinals.pop();
+        const rejectedCallHold =
+          rejectedCallOrdinal !== undefined
+            ? billingState.pendingUsageReservations.get(rejectedCallOrdinal)
+            : undefined;
+        if (rejectedCallOrdinal !== undefined) {
+          billingState.pendingUsageReservations.delete(rejectedCallOrdinal);
+        }
+        if (rejectedCallOrdinal !== undefined && rejectedCallHold) {
+          await recordUsageEventsAndApplyCreditDebit(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            usageEvents: usageReservationReleaseEvents({
+              reservations: [[rejectedCallOrdinal, rejectedCallHold]],
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              turnAttemptId: input.attemptId,
+            }),
+          });
         }
         await flushRuntimeBatcher();
         await historySink.reconcileConversationTruth({ skipInputOnlyRows: true });
@@ -1960,6 +2136,16 @@ export async function runTurnStreamAttempt(
             turnStatus: "completed",
             sessionStatus: "idle",
             activeTurnId: null,
+            usageEvents: [
+              {
+                eventType: "agent_run.completed",
+                quantity: 1,
+                unit: "run",
+                sourceResourceType: "session_turn",
+                sourceResourceId: activeTurnId,
+                idempotencyKey: `usage:agent_run.completed:${activeTurnId}`,
+              },
+            ],
           });
           if (!settled) return claimedResult({ status: "cancelled" });
           control.turnMetricOutcome = "completed";

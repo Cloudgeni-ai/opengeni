@@ -969,59 +969,65 @@ Canonical: [`knowledge.md`](knowledge.md),
 Blocked account switches: [Codex rotation](codex-subscription-rotation.md).
 
 Usage is normalized at the provider boundary and recorded per authoritative
-model call. Admission limits and entitlements are domain policy; provider
-telemetry, comparison pricing, and dashboards do not independently debit or
-grant capacity. The durable `agent.model.usage` event carries the accepted
-billing path and any validated Gateway endpoint provider so the additive
-Insights fact can be repaired exactly after a soft writer failure; repair
-prefers those authorities over the logical Gateway provider and legacy
-inference from `usage_events.model.tokens` and `usage_events.model.cost` rows.
-Each new fact also freezes provider cost and equivalent OpenGeni credit price as
-separate nullable comparisons, while `priced_cost_micros` remains the actual
-credits-path price and is zero for externally billed calls.
+model call; admission limits and entitlements are domain policy — provider
+telemetry, comparison pricing, and dashboards never debit or grant capacity.
+The durable `agent.model.usage` event carries the accepted billing path and
+validated Gateway endpoint provider so the additive Insights fact repairs
+exactly after a soft writer failure, preferring those authorities over legacy
+`usage_events` inference. Each fact also freezes provider cost and equivalent
+credit price as nullable comparisons; `priced_cost_micros` is the credits-path
+price (zero externally billed).
 
-Insights usage uses a four-column projection (0484), preserving full-row readers
-and tenant/actor/visibility checks. Transaction-capability writes still
-require a writable database.
+Monthly caps are enforced mid-stream by bounded pre-inference reservations: the
+producer-side `onModelCallAdmission` (last `callModelInputFilter`) writes an
+all-or-nothing, idempotency-keyed hold sized from the provider-bound prompt
+plus reserved output under the account advisory lock that also fences attempt
+liveness, and clamps `maxTokens` to the grant (zero headroom →
+compaction refusal). A check-only re-read at each terminal response ends a
+drained segment. Reservation, reconcile, and attempt-close paths take that
+advisory BEFORE row locks. `.reserved` rows net per `source_resource_id`,
+expire by TTL, stay out of customer-facing usage reads, and release by FIFO
+admission ordinal (rejected calls retire at recovery). Usage, release, debit,
+and `agent_run.completed` commit in `recordUsageEventsAndApplyCreditDebit`/
+`applySessionTurnSettlement`. Boundaries are inclusive (`>= since`); account
+sums route through `opengeni_private.account_usage_quantity`/
+`account_open_usage_reservations`.
+
+Insights usage uses a four-column projection (0484); transaction-capability
+writes require a writable database.
 Canonical: `packages/db/src/insights-usage-bundle.ts`.
 
 Codex and SuperGrok pools own credentials and capacity without changing logical
-turns. Shared and Personal workspaces inherit same-organization pools; each
-forms one allocator boundary and grants no workspace access. SuperGrok freezes
-scope on acceptance.
-Vercel AI Gateway and OpenRouter expose separate workspace- and
-organization-owned BYOK products. Organization products use dedicated encrypted
-FORCE-RLS storage, inherit only into same-organization shared workspaces, and
-retain organization payer identity through admission and execution; no rail
-implicitly falls back to another key.
-Provider-refusal cooldowns retain provenance and revisions: fresh usage repairs
-older quota refusals, never generic backpressure or newer refusals. All-capped
-admission and capacity waits reconcile through bounded refreshes.
+turns; workspaces inherit same-organization pools as one allocator boundary
+granting no workspace access (SuperGrok freezes scope on acceptance).
+AI Gateway and OpenRouter expose workspace/organization BYOK
+products (encrypted FORCE-RLS, same-organization inheritance, retained payer
+identity); no rail falls back to another key. Provider-refusal cooldowns keep
+provenance/revisions: fresh usage repairs older quota refusals only.
+All-capped admission/capacity waits reconcile via bounded refreshes.
 
-Codex turns require durable credential leases. `rotation_enabled` controls
-account switching: off waits on capped accounts; on allows same-turn recovery
-elsewhere. First allocation atomically freezes source, active-pointer, rotation,
-strategy, and pin in `codexCredentialPolicySnapshotV1`, before no-credential waits.
-Recovery reuses that policy with current health/cooldowns. Missing/expired confirmed
-deadlines fail closed; discard late heartbeats. Expiry SQL reads database time
-after locking.
+Codex turns require durable credential leases; `rotation_enabled` gates account
+switching (off waits on capped accounts; on allows same-turn recovery
+elsewhere). First allocation atomically freezes source, active-pointer,
+rotation, strategy, and pin in `codexCredentialPolicySnapshotV1` before
+no-credential waits; recovery reuses it with current health/cooldowns.
+Missing/expired deadlines fail closed, late heartbeats discarded; expiry SQL
+reads database time after locking.
 
-Source-advisory locks serialize changes without idle turns. Accepted pools govern
-allocation, recovery, capacity, tokens and wakes. Guarded content-free capture
-preserves immutable legacy pre-change sources in `codex_turn_source_bindings`,
-never rewriting history. New work uses new settings. Connecting preserves selected
-mode; Automatic prefers connected local accounts. Token loading/refresh requires
-exact live leases. Workspace lists use current pools; authorized session pickers use
-accepted pools for waits, current pools for new work. Membership, ownership, health,
-token-family CAS and live-lease disconnect fences remain enforced.
+Source-advisory locks serialize changes without idle turns; accepted pools
+govern allocation, recovery, capacity, tokens and wakes. Guarded capture
+preserves immutable legacy sources in `codex_turn_source_bindings`; new work
+uses new settings. Connecting preserves selected mode. Token loading/refresh
+requires exact live leases. Lists/pickers use current pools, accepted pools
+for waits. Membership, ownership, health, token-family CAS and live-lease
+disconnect fences remain enforced.
 
-Migration 0492 requires maintenance: drain API/control/turn processes, supply all
+Migration 0492 requires maintenance: drain API/control/turn processes, supply
 runtime logins, migrate, provision roles; start compatible binaries only.
-Before/after guards reject live runtime DB sessions. Preserve checkpoints and
+Before/after guards reject live runtime DB sessions; preserve checkpoints and
 recover—not cancel—accepted turns. Never restart pre-0492 binaries.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
-[`credit-boundaries-rollout.md`](credit-boundaries-rollout.md),
 [`model-providers.md`](model-providers.md),
 [`codex-subscription-rotation.md`](codex-subscription-rotation.md), and
 [`supergrok-subscription.md`](supergrok-subscription.md).

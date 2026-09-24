@@ -428,6 +428,16 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,
+        usageEvents: [
+          {
+            eventType: "agent_run.completed",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: "session_turn",
+            sourceResourceId: turn.id,
+            idempotencyKey: `usage:agent_run.completed:${turn.id}`,
+          },
+        ],
       }))
     ) {
       return { exit: claimedResult({ status: "cancelled" }) };
@@ -601,6 +611,16 @@ export async function runPostAgentCompaction(
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,
+        usageEvents: [
+          {
+            eventType: "agent_run.completed",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: "session_turn",
+            sourceResourceId: turn.id,
+            idempotencyKey: `usage:agent_run.completed:${turn.id}`,
+          },
+        ],
       }))
     ) {
       return { exit: claimedResult({ status: "cancelled" }) };

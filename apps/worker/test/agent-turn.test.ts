@@ -1688,13 +1688,17 @@ describe("production model-response usage callback authority", () => {
 
     const observability = createObservability(testSettings(), { component: "worker" });
     const billingRows = new Map<string, Record<string, unknown>>();
-    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
-      async (_db, input) => {
+    const recordUsageSpy = spyOn(
+      opengeniDb,
+      "recordUsageEventsAndApplyCreditDebit",
+    ).mockImplementation(async (_db, batch) => {
+      for (const input of batch.usageEvents) {
         if (!billingRows.has(input.idempotencyKey)) {
           billingRows.set(input.idempotencyKey, input as unknown as Record<string, unknown>);
         }
-      },
-    );
+      }
+      return { events: [], debit: null } as never;
+    });
     try {
       const durableUsageSourceKeys = new Set<string>();
       const publish = async (batch: any[]) => ({
@@ -1887,20 +1891,20 @@ describe("production model-response usage callback authority", () => {
     const usageRows: Array<Record<string, unknown>> = [];
     const eventPayloads: Array<Record<string, unknown>> = [];
     const facts: Array<Record<string, unknown>> = [];
-    const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
-      async (_db, input) => {
-        usageRows.push(input as unknown as Record<string, unknown>);
+    const creditDebits: Array<Record<string, unknown>> = [];
+    const usageSpy = spyOn(opengeniDb, "recordUsageEventsAndApplyCreditDebit").mockImplementation(
+      async (_db, batch) => {
+        usageRows.push(...(batch.usageEvents as Array<Record<string, unknown>>));
+        if (batch.creditDebit) {
+          throw new Error("workspace Gateway usage must not debit OpenGeni credits");
+        }
+        return { events: [], debit: null } as never;
       },
     );
     const factSpy = spyOn(opengeniDb, "recordModelCallFact").mockImplementation(
       async (_db, input) => {
         facts.push(input as unknown as Record<string, unknown>);
         throw new Error("fact writer unavailable");
-      },
-    );
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
-      async () => {
-        throw new Error("workspace Gateway usage must not debit OpenGeni credits");
       },
     );
     try {
@@ -1968,19 +1972,19 @@ describe("production model-response usage callback authority", () => {
           pricingSource: "gateway_reported",
         }),
       ]);
-      expect(debitSpy).not.toHaveBeenCalled();
+      expect(creditDebits).toHaveLength(0);
     } finally {
       usageSpy.mockRestore();
       factSpy.mockRestore();
-      debitSpy.mockRestore();
     }
   });
 
   test("clears missing usage and uses the same response ordinal when usage resumes", async () => {
     const observability = createObservability(testSettings(), { component: "worker" });
-    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
-      async () => undefined,
-    );
+    const recordUsageSpy = spyOn(
+      opengeniDb,
+      "recordUsageEventsAndApplyCreditDebit",
+    ).mockImplementation(async () => ({ events: [], debit: null }) as never);
     try {
       const state = createModelResponseEventState();
       const fencedInputs: Array<number | null> = [];
@@ -2216,13 +2220,17 @@ describe("production model-response usage callback authority", () => {
   test("keeps no-id response ordinals unique across an in-activity compaction retry", async () => {
     const observability = createObservability(testSettings(), { component: "worker" });
     const billingRows = new Map<string, Record<string, unknown>>();
-    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
-      async (_db, input) => {
+    const recordUsageSpy = spyOn(
+      opengeniDb,
+      "recordUsageEventsAndApplyCreditDebit",
+    ).mockImplementation(async (_db, batch) => {
+      for (const input of batch.usageEvents) {
         if (!billingRows.has(input.idempotencyKey)) {
           billingRows.set(input.idempotencyKey, input as unknown as Record<string, unknown>);
         }
-      },
-    );
+      }
+      return { events: [], debit: null } as never;
+    });
     try {
       const durableUsageSourceKeys = new Set<string>();
       const publish = async (batch: any[]) => ({
@@ -2320,13 +2328,17 @@ describe("production model-response usage callback authority", () => {
     const observability = createObservability(testSettings(), { component: "worker" });
     const billingRows = new Map<string, Record<string, unknown>>();
     const factRows: Array<Record<string, unknown>> = [];
-    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
-      async (_db, input) => {
+    const recordUsageSpy = spyOn(
+      opengeniDb,
+      "recordUsageEventsAndApplyCreditDebit",
+    ).mockImplementation(async (_db, batch) => {
+      for (const input of batch.usageEvents) {
         if (!billingRows.has(input.idempotencyKey)) {
           billingRows.set(input.idempotencyKey, input as unknown as Record<string, unknown>);
         }
-      },
-    );
+      }
+      return { events: [], debit: null } as never;
+    });
     const recordFactSpy = spyOn(opengeniDb, "recordModelCallFact").mockImplementation(
       async (_db, input) => {
         factRows.push(input as unknown as Record<string, unknown>);

@@ -11,6 +11,7 @@ import {
   ModelRequestCaptureModel,
   ModelRequestCaptureProvider,
   notifyModelRequestCapture,
+  withModelCallOutputBound,
   withModelRequestCapture,
 } from "../src/model-request-capture";
 
@@ -22,7 +23,8 @@ class InnerModel implements Model {
     return { usage: new Usage(), output: [] };
   }
 
-  async *getStreamedResponse(_request: ModelRequest): AsyncIterable<StreamEvent> {
+  async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    this.requests.push(request);
     yield {
       type: "response_done",
       response: {
@@ -254,4 +256,59 @@ test("media and encrypted state are unknown token costs, not base64 text estimat
   expect(input.estimatedTokens).toBeNull();
   expect(input.itemEstimatedTokens?.slice(0, 2)).toEqual([null, null]);
   expect(input.itemEstimatedTokens?.[2]).toBeGreaterThan(0);
+});
+
+describe("admission output bound", () => {
+  test("clamps the dispatched request's maxTokens to the granted headroom", async () => {
+    const inner = new InnerModel();
+    const model = new ModelRequestCaptureModel(inner);
+    const cell: { maxTokens: number | undefined } = { maxTokens: 4_096 };
+    const sent = requestWith("instructions", []);
+    await withModelCallOutputBound(cell, async () => {
+      await model.getResponse(sent);
+    });
+    expect(inner.requests).toHaveLength(1);
+    expect(inner.requests[0]?.modelSettings.maxTokens).toBe(4_096);
+    // The caller's request object is not mutated in place.
+    expect(sent.modelSettings.maxTokens).toBeUndefined();
+  });
+
+  test("a smaller explicit maxTokens wins over the granted headroom", async () => {
+    const inner = new InnerModel();
+    const model = new ModelRequestCaptureModel(inner);
+    const cell: { maxTokens: number | undefined } = { maxTokens: 4_096 };
+    const sent = requestWith("instructions", []);
+    sent.modelSettings = { ...sent.modelSettings, maxTokens: 1_024 };
+    await withModelCallOutputBound(cell, async () => {
+      await model.getResponse(sent);
+    });
+    expect(inner.requests[0]?.modelSettings.maxTokens).toBe(1_024);
+  });
+
+  test("the streamed path applies the same bound", async () => {
+    const inner = new InnerModel();
+    const model = new ModelRequestCaptureModel(inner);
+    const cell: { maxTokens: number | undefined } = { maxTokens: 2_048 };
+    let streamed: ModelRequest | undefined;
+    await withModelCallOutputBound(cell, async () => {
+      for await (const _event of model.getStreamedResponse(requestWith("instructions", []))) {
+        // drain
+      }
+    });
+    streamed = inner.requests[0];
+    expect(streamed?.modelSettings.maxTokens).toBe(2_048);
+  });
+
+  test("a call admitted without a bound dispatches unchanged", async () => {
+    const inner = new InnerModel();
+    const model = new ModelRequestCaptureModel(inner);
+    const cell: { maxTokens: number | undefined } = { maxTokens: undefined };
+    await withModelCallOutputBound(cell, async () => {
+      await model.getResponse(requestWith("instructions", []));
+    });
+    expect(inner.requests[0]?.modelSettings.maxTokens).toBeUndefined();
+    // No bound cell at all (gate never installed) also passes through.
+    await model.getResponse(requestWith("instructions", []));
+    expect(inner.requests[1]?.modelSettings.maxTokens).toBeUndefined();
+  });
 });

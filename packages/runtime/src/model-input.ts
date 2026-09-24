@@ -101,7 +101,7 @@ export function boundModelToolOutputsFilterForSettings(settings: Settings): Call
   );
 }
 
-function estimateAgentToolSchemaTokens(agent: Agent<any, any>): number {
+export function estimateAgentToolSchemaTokens(agent: Agent<any, any>): number {
   const localTools = Array.isArray((agent as { tools?: unknown }).tools)
     ? ((agent as { tools: unknown[] }).tools ?? [])
     : [];
