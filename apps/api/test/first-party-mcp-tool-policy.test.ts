@@ -1051,7 +1051,14 @@ describe("first-party MCP tool visibility policy", () => {
   test("capability discovery is default-visible but separates search from human authorization", async () => {
     const server = buildOpenGeniMcpServer(
       deps(),
-      grant(["workspace:read"], ["capability_catalog_search", "capability_authorization_request"]),
+      grant(
+        ["workspace:read"],
+        [
+          "capability_catalog_search",
+          "capability_authorization_request",
+          "custom_mcp_setup_request",
+        ],
+      ),
     );
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "capability-discovery-schema-test", version: "1" });
@@ -1061,6 +1068,7 @@ describe("first-party MCP tool visibility policy", () => {
       const tools = (await client.listTools()).tools;
       const search = tools.find((tool) => tool.name === "capability_catalog_search");
       const request = tools.find((tool) => tool.name === "capability_authorization_request");
+      const custom = tools.find((tool) => tool.name === "custom_mcp_setup_request");
       expect(search?.description).toContain("does not connect or authorize anything");
       expect(search?.inputSchema).toMatchObject({
         required: ["query"],
@@ -1069,6 +1077,10 @@ describe("first-party MCP tool visibility policy", () => {
       expect(request?.description).toContain("grants no access");
       expect(request?.inputSchema).toMatchObject({
         required: expect.arrayContaining(["capabilityId", "rationale"]),
+      });
+      expect(custom?.description).toContain("cannot add, enable, or contact");
+      expect(custom?.inputSchema).toMatchObject({
+        required: expect.arrayContaining(["name", "endpointUrl", "rationale"]),
       });
     } finally {
       await Promise.all([client.close(), server.close()]);

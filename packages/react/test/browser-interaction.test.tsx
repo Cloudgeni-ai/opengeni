@@ -1653,7 +1653,7 @@ describe("BrowserViewer", () => {
     await rendered.unmount();
   });
 
-  test("wakes a selected suspended browser before touching its controller", async () => {
+  test("keeps a selected suspended browser asleep until explicitly opened", async () => {
     const suspended: BrowserSession = {
       ...browserSession(),
       lifecycle: "suspended",
@@ -1698,6 +1698,15 @@ describe("BrowserViewer", () => {
     );
     await flush(40);
 
+    expect(sequence).toEqual([]);
+    expect(rendered.container.textContent).toContain("Browser is sleeping");
+    const open = [...rendered.container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Open browser",
+    );
+    expect(open).toBeDefined();
+    await actRun(() => open!.click());
+    await flush(40);
+
     expect(sequence[0]).toBe("resume");
     expect(sequence).toContain("targets");
     expect(sequence.indexOf("targets")).toBeGreaterThan(sequence.indexOf("resume"));
@@ -1736,6 +1745,14 @@ describe("BrowserViewer", () => {
         }
       />,
     );
+    await flush(30);
+
+    expect(operationIds).toEqual([]);
+    const open = [...rendered.container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Open browser",
+    );
+    expect(open).toBeDefined();
+    await actRun(() => open!.click());
     await flush(30);
 
     expect(rendered.container.textContent).toContain("Browser could not reopen");

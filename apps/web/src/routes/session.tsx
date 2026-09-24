@@ -1744,7 +1744,9 @@ function SessionChatPane(props: {
   }, [reloadSessionAfterSetup, refreshConnectionAccounts]);
   const renderAuthNeeded = useCallback(
     (item: AuthNeededItem) => {
-      const recommendation = sessionAuthRecommendation(item, context.workspaceCapabilityCatalog);
+      const recommendation = item.setupRequest
+        ? item
+        : sessionAuthRecommendation(item, context.workspaceCapabilityCatalog);
       return recommendation ? (
         <Suspense
           fallback={

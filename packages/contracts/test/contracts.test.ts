@@ -798,6 +798,48 @@ describe("contracts", () => {
     ).toBe(false);
   });
 
+  test("agent-suggested MCP endpoints reject embedded secrets and connection authority", () => {
+    const proposal = {
+      serverId: "opengeni",
+      toolName: "custom_mcp_setup_request",
+      providerDomain: "mcp.example.test",
+      reason: "missing_connection",
+      setupRequest: {
+        kind: "mcp",
+        name: "Records MCP",
+        endpointUrl: "https://mcp.example.test/mcp",
+        rationale: "Find the requested documents.",
+      },
+    } as const;
+    expect(ToolAuthNeededPayload.safeParse(proposal).success).toBe(true);
+    for (const endpointUrl of [
+      "http://mcp.example.test/mcp",
+      "https://user:password@mcp.example.test/mcp",
+      "https://mcp.example.test/mcp#token",
+      "https://mcp.example.test/mcp?token=secret",
+    ]) {
+      expect(
+        ToolAuthNeededPayload.safeParse({
+          ...proposal,
+          setupRequest: { ...proposal.setupRequest, endpointUrl },
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      ToolAuthNeededPayload.safeParse({
+        ...proposal,
+        capability: {
+          id: "mcp:fake",
+          name: "Fake",
+          kind: "mcp",
+          source: "manual",
+          action: "connect",
+          rationale: "Fake",
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   test("extracts approval identity from every serialized interruption shape", () => {
     expect(approvalIdentifier({ id: "approval-direct" })).toBe("approval-direct");
     expect(approvalIdentifier({ rawItem: { callId: "approval-call" } })).toBe("approval-call");
@@ -1569,6 +1611,17 @@ describe("contracts", () => {
       capturedAt: "2026-08-17T12:00:00.000Z",
     };
     const goalContext = renderSessionGoalContext(goalSnapshot)!;
+    expect(goalContext).toContain("You may update your operational goal directly");
+    expect(goalContext).not.toContain("adaptations and replacements are proposals");
+    expect(goalContext).toContain("Root constraints are user/API authority");
+    const reviewedGoalContext = renderSessionGoalContext({
+      ...goalSnapshot,
+      mutationPolicy: "review_changes",
+    })!;
+    expect(reviewedGoalContext).toContain(
+      "Semantic changes are proposals until a user applies them.",
+    );
+    expect(reviewedGoalContext).not.toContain("You may update your operational goal directly");
     expect(
       renderUserMessageContentForModel("Continue", [], "selected record 42", goalSnapshot),
     ).toEqual([

@@ -12,7 +12,7 @@ import {
   CompactionNeededError,
   compactionProviderRejection,
   estimateSerializedValueTokens,
-  SUMMARY_BUFFER_TOKENS,
+  compactionSummaryOutputTokens,
   type ModelResponseUsage,
 } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
@@ -217,7 +217,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               provider: resolvedModel.provider,
               api: resolvedModel.provider.api,
               model: turnExecutionPolicy.upstreamModelId,
-              maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+              maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
               ...(cancellationSignal ? { signal: cancellationSignal } : {}),
               onUsage: recordCompactionUsage,
               ...(systemInstructions ? { systemInstructions } : {}),
@@ -230,14 +230,16 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       : (s: Settings, m: Array<Record<string, unknown>>) =>
           summarizeContextForCompaction(s, m, {
             model: turnExecutionPolicy.upstreamModelId,
-            maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+            maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
             ...(cancellationSignal ? { signal: cancellationSignal } : {}),
             onUsage: recordCompactionUsage,
             ...(systemInstructions ? { systemInstructions } : {}),
             ...(promptCacheKey ? { promptCacheKey } : {}),
           });
     summarize.estimatePrefixTokens = () => {
-      if (resolvedModel?.provider.api === "chat") return 0;
+      if (resolvedModel?.provider.api === "chat") {
+        return estimateSerializedValueTokens(systemInstructions ?? "");
+      }
       const prepared = portableResponsesNeedsAgentPrefix ? preparedPortableRequest() : null;
       return (
         estimateSerializedValueTokens(prepared?.systemInstructions ?? systemInstructions ?? "") +

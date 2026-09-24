@@ -9,7 +9,8 @@ import {
 import {
   EmptyCompactionSummaryError,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
-  SUMMARY_BUFFER_TOKENS,
+  compactionSummaryOutputTokens,
+  buildSummaryItem,
   buildCompactionReplacementHistory,
   buildRemoteV2ReplacementHistory,
   compactionThresholdTokens,
@@ -87,7 +88,7 @@ export async function maybeCompactContext(
   // Injectable for tests; defaults to the real provider-aware model call.
   summarize: CompactionSummarizer = (s, m) =>
     summarizeForCompaction(s, m, {
-      maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+      maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
     }),
   // Operator-forced (the /compact command): bypass the budget trigger and
   // compact now if there is anything to summarize. Structural guards still hold.
@@ -306,6 +307,7 @@ async function settleSkippedAfterStart(
   reason:
     | "no_history"
     | "replacement_not_smaller"
+    | "replacement_exceeds_model_budget"
     | "replacement_unchanged"
     | "summarization_failed",
 ): Promise<Extract<MaybeCompactResult, { compacted: false }>> {
@@ -461,12 +463,23 @@ async function compactContextPortable(
   const summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
   const summaryBody = summarized.summaryBody;
   const retainedTokens = await retentionTokenCounts(canonicalItems, projectForWire);
+  const outputReserve = compactionSummaryOutputTokens(settings.contextWindowTokens);
+  const structuralBudget = Math.min(
+    contextInputBudgetTokens(settings) || settings.contextWindowTokens - outputReserve,
+    settings.contextWindowTokens - outputReserve,
+  );
+  const prefixTokens = Math.max(0, Math.ceil(summarize.estimatePrefixTokens?.() ?? 0));
+  const summaryTokens = estimateTokens([buildSummaryItem(summaryBody)]);
   const replacementHistory = buildCompactionReplacementHistory(
     canonicalItems,
     summaryBody,
     (item) => retainedTokens.get(item) ?? estimateTokens([item]),
+    Math.min(outputReserve, Math.max(0, structuralBudget - prefixTokens - summaryTokens)),
   );
   const estimatedTokensAfter = estimateTokens(await projectForWire(replacementHistory));
+  if (estimatedTokensAfter + prefixTokens > structuralBudget) {
+    return await settleSkippedAfterStart(db, scope, options, "replacement_exceeds_model_budget");
+  }
   const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
   const previousReplacementFingerprint = latestCompactionReplacementFingerprint(canonicalItems);
   const summaryIndex =
@@ -540,7 +553,10 @@ export async function summarizeWithCodexOverflowTrimming(
   // requested summary. Preserve the full portable history copy on the first
   // call whenever it fits; only trim further after an actual provider overflow.
   // Durable active history remains untouched until applyContextCompaction.
-  const summaryAwareBudget = Math.max(0, settings.contextWindowTokens - SUMMARY_BUFFER_TOKENS);
+  const summaryAwareBudget = Math.max(
+    0,
+    settings.contextWindowTokens - compactionSummaryOutputTokens(settings.contextWindowTokens),
+  );
   const configuredInputBudget = contextInputBudgetTokens(settings);
   const structuralBudget = Math.min(
     configuredInputBudget > 0 ? configuredInputBudget : summaryAwareBudget,

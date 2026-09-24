@@ -1327,6 +1327,32 @@ describe("API helpers", () => {
     });
   });
 
+  test("refuses a private MCP endpoint before an enablement probe can contact it", async () => {
+    const item = capabilityItem({
+      id: "mcp:private",
+      kind: "mcp",
+      name: "Private MCP",
+      endpointUrl: "https://127.0.0.1/mcp",
+      runtime: {
+        available: true,
+        mcpServerId: "cap-private",
+        transport: "streamable-http",
+        notes: null,
+      },
+    });
+    await expect(
+      validateMcpCapabilityConnection(
+        item,
+        undefined,
+        undefined,
+        testSettings({
+          environment: "production",
+          integrationsAllowPrivateNetworkTargets: false,
+        }),
+      ),
+    ).rejects.toThrow('MCP capability "Private MCP" could not be enabled');
+  });
+
   test("passes credential headers to the MCP enable probe", async () => {
     const metadata = await validateMcpCapabilityConnection(
       capabilityItem({

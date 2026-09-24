@@ -4,6 +4,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import { pinnedFetch } from "@opengeni/network";
 import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
@@ -344,7 +345,12 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       ...installationMetadata,
       ...(connectionRef && !headers
         ? authDeferredMcpConnectivity()
-        : await validateMcpCapabilityConnection(item, input.probeMcpServer, headers ?? undefined)),
+        : await validateMcpCapabilityConnection(
+            item,
+            input.probeMcpServer,
+            headers ?? undefined,
+            input.settings,
+          )),
     };
     if (connectionRef) {
       installationConfig.connectionRef = connectionRef;
@@ -669,6 +675,7 @@ export type McpCapabilityProbeInput = {
   url: string;
   timeoutMs: number;
   headers?: Record<string, string>;
+  settings?: Settings;
 };
 
 export type McpCapabilityProbeResult = {
@@ -683,6 +690,7 @@ export async function validateMcpCapabilityConnection(
   item: CapabilityCatalogItem,
   probe: McpCapabilityProbe = probeStreamableHttpMcpServer,
   headers?: Record<string, string>,
+  settings?: Settings,
 ): Promise<Record<string, unknown>> {
   if (item.kind !== "mcp") {
     return {};
@@ -699,6 +707,7 @@ export async function validateMcpCapabilityConnection(
       url: item.endpointUrl,
       timeoutMs: mcpCapabilityProbeTimeoutMs,
       ...(headers ? { headers } : {}),
+      ...(settings ? { settings } : {}),
     });
     return {
       mcpConnectivity: {
@@ -717,6 +726,8 @@ export async function validateMcpCapabilityConnection(
 async function probeStreamableHttpMcpServer(
   input: McpCapabilityProbeInput,
 ): Promise<McpCapabilityProbeResult> {
+  const settings = input.settings;
+  if (!settings) throw new Error("Network policy is unavailable for MCP validation");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
   const client = new Client(
@@ -729,6 +740,11 @@ async function probeStreamableHttpMcpServer(
         signal: controller.signal,
         ...(input.headers ? { headers: input.headers } : {}),
       },
+      fetch: (url, init) =>
+        pinnedFetch(url, init, settings, {
+          label: "MCP capability probe",
+          requireHttpsOutsideLocalTest: true,
+        }),
     });
     await client.connect(transport as unknown as Transport, {
       timeout: input.timeoutMs,

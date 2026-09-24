@@ -342,12 +342,8 @@ export function BrowserViewer({
       setResumeAttempt((visible) =>
         visible?.sessionId === selectedRegistrySession.id ? null : visible,
       );
-      return;
     }
-    if (selectedRegistrySession.lifecycle === "suspended") {
-      void wakeBrowser(selectedRegistrySession);
-    }
-  }, [selectedRegistrySession, wakeBrowser]);
+  }, [selectedRegistrySession]);
 
   const browser = useBrowserSession({
     ...override,

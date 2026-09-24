@@ -912,6 +912,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "environment_set_variable",
   "capability_catalog_search",
   "capability_authorization_request",
+  "custom_mcp_setup_request",
   "github_connect_link",
   "github_repositories_list",
   "social_connections_list",
@@ -7387,9 +7388,7 @@ export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string
   const policy =
     snapshot.mutationPolicy === "review_changes"
       ? "Semantic changes are proposals until a user applies them."
-      : snapshot.mutationPolicy === "preserve_intent"
-        ? "You may directly refine wording without changing intent; adaptations and replacements are proposals until a user applies them."
-        : "You may autonomously refine, adapt, or replace the goal when explicit user direction or material new evidence justifies it.";
+      : "You may update your operational goal directly when explicit user direction or material new evidence justifies it. Keep it faithful to the user's intended outcome; changing the goal grants no additional authority.";
   return `Standing session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status ${snapshot.state}): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints}${reports}\nMutation policy: ${snapshot.mutationPolicy}. ${policy} Treat later ordinary messages as additional context unless they explicitly redirect this objective. Root constraints are user/API authority and cannot be widened, removed, or rewritten by an agent. Semantic goal changes use opengeni__goal_update with the expected objective revision, change kind, and rationale.`;
 }
 
@@ -12927,8 +12926,37 @@ export const ToolAuthNeededPayload = z
         requiredVariables: z.array(VariableSetVariableName).max(64).default([]),
       })
       .optional(),
+    /** An agent suggestion, not a catalog entry or authority to contact this URL. */
+    setupRequest: z
+      .object({
+        kind: z.literal("mcp"),
+        name: z.string().trim().min(1).max(256),
+        endpointUrl: z
+          .string()
+          .url()
+          .max(2048)
+          .refine((url) => {
+            const parsed = new URL(url);
+            return (
+              parsed.protocol === "https:" &&
+              !parsed.username &&
+              !parsed.password &&
+              !parsed.hash &&
+              !parsed.search
+            );
+          }),
+        rationale: z.string().trim().min(1).max(2000),
+      })
+      .optional(),
   })
   .superRefine((payload, context) => {
+    if (payload.setupRequest && (payload.capability || payload.authoritySource === "host")) {
+      context.addIssue({
+        code: "custom",
+        message: "A setup proposal cannot carry connection authority",
+        path: ["setupRequest"],
+      });
+    }
     if (payload.authoritySource === "host") {
       if (payload.reason !== "unsupported_auth") {
         context.addIssue({

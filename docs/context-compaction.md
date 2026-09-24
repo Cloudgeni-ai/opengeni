@@ -139,6 +139,14 @@ The compaction model receives:
    instructions because their protocol differs;
 4. no provider-side context-management policy.
 
+Portable checkpoint output is capped at 20,000 tokens or one quarter of the
+model's configured context window, whichever is smaller. The input fitting
+budget reserves that same amount, and the retained real-user-message budget
+has the same cap. A Chat completion whose finish reason is
+not `stop` cannot replace active history, even if it contains partial text.
+Provider-specific output ceilings are not in the model catalog; a provider
+that rejects this cap fails compaction with the existing active history intact.
+
 Explicit compaction is a new accepted logical turn and therefore composes the
 same deterministic workspace instruction-policy and preference-descriptor
 governance as an ordinary agent turn. Its service initiator may inherit the
@@ -152,6 +160,10 @@ tool calls/results remain real protocol items on the wire. Chat providers use a
 request-local transcript adapter because Chat Completions has a different item
 protocol. It projects only record types the Chat converter cannot express,
 preserves their readable historical facts, and never mutates canonical history.
+The Chat transcript is text-only: historical image pixels are unavailable to
+that summarizer. Recent user images and references to omitted attachments are
+retained by the replacement-history policy, but their visual meaning is not
+inferred during the checkpoint.
 Historical `tool_search` calls and outputs are not rerun, compared with the
 current catalog, or reclassified. There is no switch-time rewrite and no second
 durable history form.
@@ -195,7 +207,8 @@ never installs a manufactured placeholder as conversation truth.
 
 The replacement history is:
 
-1. the newest real user messages that fit one cumulative 20,000-token budget,
+1. the newest real user messages that fit one cumulative budget of at most
+   20,000 tokens (one quarter of the context window on smaller models),
    in chronological order;
 2. one user-role summary item prefixed with Codex's `summary_prefix.md` text and
    marked `opengeni_context_summary: true`.

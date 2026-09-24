@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import {
   EmptyCompactionSummaryError,
+  buildCompactionReplacementHistory,
+  compactionSummaryOutputTokens,
   estimateTokens,
   type CompactionItem,
 } from "@opengeni/runtime";
@@ -25,7 +27,7 @@ test("portable compaction reserves the prepared prefix before fitting history", 
   };
 
   await summarizeWithCodexOverflowTrimming(summarize, settings, history);
-  summarize.estimatePrefixTokens = () => 3_000;
+  summarize.estimatePrefixTokens = () => 17_000;
   await summarizeWithCodexOverflowTrimming(summarize, settings, history);
 
   expect(seen[0]!.slice(0, -1)).toEqual(history);
@@ -63,7 +65,7 @@ test("a prefix that leaves no history room fails before asking for a summary", a
     calls += 1;
     return "unsupported checkpoint";
   };
-  summarize.estimatePrefixTokens = () => 6_000;
+  summarize.estimatePrefixTokens = () => 20_000;
 
   await expect(
     summarizeWithCodexOverflowTrimming(summarize, settings, history),
@@ -104,4 +106,32 @@ test("opaque-only history cannot be replaced by a checkpoint the model never saw
     summarizeWithCodexOverflowTrimming(summarize, settings, history),
   ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
   expect(calls).toBe(0);
+});
+
+test("a model with an 8k context still has room for source history", async () => {
+  const history = [user("Keep this task and its accepted result")];
+  let inputSeen: CompactionItem[] = [];
+  const result = await summarizeWithCodexOverflowTrimming(
+    async (_settings, input) => {
+      inputSeen = input;
+      return "checkpoint";
+    },
+    testSettings({ contextWindowTokens: 8_000 }),
+    history,
+  );
+  expect(result.summaryBody).toBe("checkpoint");
+  expect(inputSeen.slice(0, -1)).toEqual(history);
+});
+
+test("an 8k model cannot retain a 20k user message after compaction", () => {
+  const original = user("a".repeat(40_000));
+  const replacement = buildCompactionReplacementHistory(
+    [original],
+    "checkpoint",
+    (item) => estimateTokens([item]),
+    compactionSummaryOutputTokens(8_000),
+  );
+  expect(replacement).toHaveLength(2);
+  expect(estimateTokens([replacement[0]!])).toBeLessThanOrEqual(2_100);
+  expect(replacement[0]!.content).toContain("middle truncated");
 });
