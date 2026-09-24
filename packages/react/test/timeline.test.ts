@@ -2722,6 +2722,34 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("agent-proposed MCP setup stays distinct from an installed catalog capability", () => {
+    reset();
+    const items = buildTimeline([
+      event("tool.auth_needed", {
+        serverId: "opengeni",
+        toolName: "custom_mcp_setup_request",
+        providerDomain: "mcp.example.test",
+        reason: "missing_connection",
+        setupRequest: {
+          kind: "mcp",
+          name: "Records MCP",
+          endpointUrl: "https://mcp.example.test/mcp",
+          rationale: "Find the requested records.",
+        },
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "auth-needed",
+      source: "capability",
+      capability: null,
+      setupRequest: {
+        endpointUrl: "https://mcp.example.test/mcp",
+        rationale: "Find the requested records.",
+      },
+    });
+  });
+
   test("historical tool.auth_needed without a concrete tool call stays out of chat", () => {
     reset();
     const items = buildTimeline([

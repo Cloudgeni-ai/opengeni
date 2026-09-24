@@ -734,6 +734,13 @@ Ordinary new sessions include two first-party OpenGeni tools:
   the current session for an exact catalog result. Calling it does not install,
   enable, connect, or grant anything. The exact turn attempt fences the event,
   and the signed-in human must confirm the provider domain and complete setup.
+- `custom_mcp_setup_request` posts a human review card for a remote HTTPS MCP
+  endpoint not yet in the workspace catalog. The agent may propose a name and
+  exact URL, but cannot register or contact the server. The signed-in human
+  reviews/edits the address and creates a catalog entry with the ordinary
+  `capabilities:manage` permission; credential setup, enablement, and session
+  tool selection then use the existing protected flows. Search the catalog
+  first; API/GraphQL definition import remains its separate preview wizard.
 
 The recommendation card resolves the catalog again at click time. A removed or
 changed item is never authorized from stale event data. Compact cards keep the

@@ -1,5 +1,5 @@
 import { attachSessionCapability } from "./attach-session-capability";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SessionMcpCapabilityCard, type AuthNeededItem } from "@opengeni/react";
 import { CheckIcon, Loader2Icon } from "lucide-react";
 import { useAppContext } from "@/context";
@@ -10,6 +10,7 @@ import { capabilityLogoSource } from "./capability-logo-source";
 import { DetailBody, type ConnectAction } from "./capability-detail-sheet";
 import { performCapabilityAction } from "./perform-capability-action";
 import { useCapabilitiesCatalog } from "./use-capabilities-catalog";
+import { SessionCustomMcpCard } from "./session-custom-mcp-card";
 import { capabilityConnectPlan, capabilityErrorToast, connectionHealth } from "@/lib/capabilities";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import type { CapabilityCatalogItem } from "@/types";
@@ -30,7 +31,33 @@ type SessionCapabilityCardProps = {
 
 export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   const context = useAppContext();
-  const capability = props.item.capability;
+  const [registeredId, setRegisteredId] = useState<string | null>(null);
+  if (props.item.setupRequest && !registeredId) {
+    return (
+      <SessionCustomMcpCard
+        key={`${props.workspaceId}:${props.item.id}`}
+        item={props.item}
+        workspaceId={props.workspaceId}
+        onRegistered={setRegisteredId}
+      />
+    );
+  }
+  const item = registeredId
+    ? {
+        ...props.item,
+        setupRequest: null,
+        capability: {
+          id: registeredId,
+          name: props.item.setupRequest!.name,
+          kind: "mcp" as const,
+          source: "manual" as const,
+          action: "connect" as const,
+          rationale: props.item.setupRequest!.rationale,
+          requiredVariables: [],
+        },
+      }
+    : props.item;
+  const capability = item.capability;
   const resolved = context.workspaceCapabilityCatalog.find((entry) => entry.id === capability?.id);
   if (capability && resolved?.kind === "mcp" && resolved.authKind === "oauth2") {
     return (
@@ -48,8 +75,9 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   }
   return (
     <ScopedSessionCapabilityCard
-      key={`${props.workspaceId}:${props.sessionId}:${props.item.capability!.id}`}
+      key={`${props.workspaceId}:${props.sessionId}:${capability!.id}`}
       {...props}
+      item={item}
     />
   );
 }
@@ -253,6 +281,11 @@ function SessionCapabilitySetup({
   const context = useAppContext();
   const catalog = useCapabilitiesCatalog(workspaceId);
   const [error, setError] = useState<string | null>(null);
+  const [authInspection, setAuthInspection] = useState<{
+    id: string;
+    url: string;
+    kind: "oauth2" | "none" | "unknown";
+  } | null>(null);
   const inFlight = useRef(false);
   const scope = useRef({ client: context.client, workspaceId, sessionId, alive: true });
   scope.current = { client: context.client, workspaceId, sessionId, alive: true };
@@ -264,7 +297,47 @@ function SessionCapabilitySetup({
     // Catalog refresh is intentionally invoked once per mounted scope.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [context.client, workspaceId, sessionId]);
-  const item = catalog.items.find((entry) => entry.id === capabilityId);
+  const rawItem = catalog.items.find((entry) => entry.id === capabilityId);
+  const rawItemId = rawItem?.id;
+  const inspectUrl = rawItem?.mcpUrl ?? rawItem?.endpointUrl;
+  const needsAuthInspection =
+    rawItem?.kind === "mcp" &&
+    !rawItem.enabled &&
+    capabilityConnectPlan(rawItem).mode === "setup_required" &&
+    Boolean(inspectUrl);
+  useEffect(() => {
+    if (!needsAuthInspection || !rawItemId || !inspectUrl) return;
+    let active = true;
+    setAuthInspection(null);
+    void context.client.inspectMcpAuthentication(workspaceId, inspectUrl).then(
+      (result) => {
+        if (active) setAuthInspection({ id: rawItemId, url: inspectUrl, kind: result.kind });
+      },
+      () => {
+        if (active) setAuthInspection({ id: rawItemId, url: inspectUrl, kind: "unknown" });
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [context.client, workspaceId, rawItemId, inspectUrl, needsAuthInspection]);
+  const item = useMemo(() => {
+    if (!rawItem || !needsAuthInspection) return rawItem;
+    const inspection =
+      authInspection?.id === rawItem.id && authInspection.url === inspectUrl
+        ? authInspection.kind
+        : "checking";
+    return {
+      ...rawItem,
+      authKind:
+        inspection === "oauth2"
+          ? ("oauth2" as const)
+          : inspection === "none"
+            ? ("none" as const)
+            : null,
+      metadata: { ...rawItem.metadata, authDiscovery: inspection },
+    };
+  }, [rawItem, needsAuthInspection, inspectUrl, authInspection]);
   useEffect(() => {
     if (item) onResolvedItem(item);
   }, [item, onResolvedItem]);

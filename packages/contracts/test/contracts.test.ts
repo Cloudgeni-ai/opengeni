@@ -798,6 +798,47 @@ describe("contracts", () => {
     ).toBe(false);
   });
 
+  test("agent-suggested MCP endpoints reject embedded secrets and connection authority", () => {
+    const proposal = {
+      serverId: "opengeni",
+      toolName: "custom_mcp_setup_request",
+      providerDomain: "mcp.example.test",
+      reason: "missing_connection",
+      setupRequest: {
+        kind: "mcp",
+        name: "Records MCP",
+        endpointUrl: "https://mcp.example.test/mcp",
+        rationale: "Find the requested documents.",
+      },
+    } as const;
+    expect(ToolAuthNeededPayload.safeParse(proposal).success).toBe(true);
+    for (const endpointUrl of [
+      "http://mcp.example.test/mcp",
+      "https://user:password@mcp.example.test/mcp",
+      "https://mcp.example.test/mcp#token",
+    ]) {
+      expect(
+        ToolAuthNeededPayload.safeParse({
+          ...proposal,
+          setupRequest: { ...proposal.setupRequest, endpointUrl },
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      ToolAuthNeededPayload.safeParse({
+        ...proposal,
+        capability: {
+          id: "mcp:fake",
+          name: "Fake",
+          kind: "mcp",
+          source: "manual",
+          action: "connect",
+          rationale: "Fake",
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   test("extracts approval identity from every serialized interruption shape", () => {
     expect(approvalIdentifier({ id: "approval-direct" })).toBe("approval-direct");
     expect(approvalIdentifier({ rawItem: { callId: "approval-call" } })).toBe("approval-call");

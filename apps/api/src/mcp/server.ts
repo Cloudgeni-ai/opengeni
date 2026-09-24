@@ -6026,6 +6026,68 @@ function registerCapabilityDiscoveryTools(
       });
     },
   );
+
+  server.registerTool(
+    "custom_mcp_setup_request",
+    {
+      description:
+        "Show a review card for a remote HTTPS MCP server that is not in the workspace catalog. Use only an endpoint supplied by the user or established by reliable documentation; do not invent a URL. The agent cannot add, enable, or contact the server. The authenticated human reviews or edits the URL and completes protected setup. Search the catalog first and do not propose an already available integration.",
+      inputSchema: {
+        name: z4.string().trim().min(1).max(256),
+        endpointUrl: z4
+          .string()
+          .url()
+          .max(2048)
+          .refine((url) => {
+            const parsed = new URL(url);
+            return (
+              parsed.protocol === "https:" && !parsed.username && !parsed.password && !parsed.hash
+            );
+          }),
+        rationale: z4.string().trim().min(1).max(2000),
+      },
+    },
+    async ({ name, endpointUrl, rationale }) => {
+      await authorize();
+      const current = await catalog();
+      const existing = current.items.find(
+        (item) => item.kind === "mcp" && item.endpointUrl === endpointUrl && !item.stale,
+      );
+      if (existing) {
+        return json({
+          status: "already_in_catalog",
+          capabilityId: existing.id,
+          message: "Use the catalog authorization flow for this server instead.",
+        });
+      }
+      const claims = exactAgentCommandContext(grant, sessionId);
+      const payload = ToolAuthNeededPayload.parse({
+        serverId: "opengeni",
+        toolName: "custom_mcp_setup_request",
+        providerDomain: new URL(endpointUrl).hostname,
+        reason: "missing_connection",
+        setupRequest: { kind: "mcp", name, endpointUrl, rationale },
+      });
+      const appended = await appendAndPublishTurnEventsFenced(
+        deps.db,
+        deps.bus,
+        grant.workspaceId,
+        sessionId,
+        claims.callerTurnId,
+        claims.callerExecutionGeneration,
+        claims.callerAttemptId,
+        [{ type: "tool.auth_needed", payload }],
+      );
+      if (!appended.accepted) {
+        throw new Error("The calling turn was replaced before the setup request committed.");
+      }
+      return json({
+        status: "setup_requested",
+        eventId: appended.events[0]?.id ?? null,
+        message: "The human review card was posted. No server was added or contacted.",
+      });
+    },
+  );
 }
 
 async function capabilitySetupProjection(

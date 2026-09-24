@@ -1382,6 +1382,11 @@ Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.m
 connection inventory and OAuth setup. Presentation filters never authorize
 acquisition. Session-targeted setup preserves exact personal consent/tool
 selection; connection-only setup never mutates sessions.
+Agent-proposed remote MCP setup is an attempt-fenced recommendation, not a
+catalog mutation: the human reviews/edits the HTTPS endpoint, adds it through
+the protected Capabilities API, then uses the ordinary setup and session
+selection card. Unregistered API specifications keep their separate preview
+wizard. See [Capabilities](capabilities.md).
 Canonical mechanics: [shared connection presentation](connection-presentation.md).
 
 `SessionConversation` includes feed, queue/actions, durable composer, model policy,

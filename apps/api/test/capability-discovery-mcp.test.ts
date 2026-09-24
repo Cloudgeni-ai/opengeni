@@ -63,6 +63,67 @@ afterAll(async () => {
 }, 60_000);
 
 describe("agent capability discovery MCP (real PostgreSQL)", () => {
+  test("custom MCP proposal only posts an attempt-fenced human review event", async () => {
+    if (!shared) throw new Error("Real PostgreSQL fixture required");
+    const attempt = await seedAttempt(false, ["custom_mcp_setup_request"]);
+    const server = buildOpenGeniMcpServer(
+      { settings: testSettings(), db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+      {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["workspace:read"],
+        principalKind: "agent_attempt",
+        metadata: { ...attempt, firstPartyMcpTools: ["custom_mcp_setup_request"] },
+      },
+    );
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "custom-mcp-proposal", version: "1" });
+    await server.connect(st);
+    await mcp.connect(ct);
+    try {
+      const invalid = await mcp.callTool({
+        name: "custom_mcp_setup_request",
+        arguments: {
+          name: "Internal Tools",
+          endpointUrl: "http://localhost:8000/mcp",
+          rationale: "Read the internal tools.",
+        },
+      });
+      expect(invalid.isError).toBe(true);
+      const result = await mcp.callTool({
+        name: "custom_mcp_setup_request",
+        arguments: {
+          name: "Internal Tools",
+          endpointUrl: "https://mcp.example.test/mcp",
+          rationale: "Use the server to find the requested records.",
+        },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(mcpJson(result)).toMatchObject({ status: "setup_requested" });
+      const notices = (
+        await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
+      ).filter((event) => event.type === "tool.auth_needed");
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toMatchObject({
+        turnId: attempt.turnId,
+        turnAttemptId: attempt.attemptId,
+        payload: {
+          serverId: "opengeni",
+          toolName: "custom_mcp_setup_request",
+          providerDomain: "mcp.example.test",
+          setupRequest: {
+            kind: "mcp",
+            name: "Internal Tools",
+            endpointUrl: "https://mcp.example.test/mcp",
+          },
+        },
+      });
+    } finally {
+      await Promise.all([mcp.close(), server.close()]);
+    }
+  }, 60_000);
+
   test("Fiken setup distinguishes connection health, human tool selection, and exact attempt availability", async () => {
     if (!shared) throw new Error("Real PostgreSQL fixture required");
     const connection = await createConnection(client.db, {
