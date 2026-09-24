@@ -1,5 +1,6 @@
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import { registerFeedbackRoutes } from "./routes/feedback";
+import { registerWorkspaceIntegrationRoutes } from "./routes/workspace-integrations";
 import { codemodeSessionRequest } from "./codemode";
 import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
@@ -1334,6 +1335,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
+  registerWorkspaceIntegrationRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);

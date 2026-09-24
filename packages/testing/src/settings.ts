@@ -321,6 +321,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sandboxMaxWarmSecondsPerWorkspace: 0,
     sandboxPreparationProfiles: "none",
     sandboxEnvAllowlist: "",
+    sandboxImageAllowlist: "",
     objectStorageEndpoint: undefined,
     objectStorageSandboxEndpoint: undefined,
     objectStorageBackend: "s3-compatible",

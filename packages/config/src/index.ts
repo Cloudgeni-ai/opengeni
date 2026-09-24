@@ -1230,6 +1230,9 @@ const SettingsSchema = z.object({
   sandboxMaxWarmSecondsPerWorkspace: z.coerce.number().int().nonnegative().default(0),
   sandboxPreparationProfiles: z.string().default("none"),
   sandboxEnvAllowlist: z.string().default(""),
+  // Comma-separated image references a workspace may select as its default
+  // sandbox image. Empty keeps every workspace on the deployment image.
+  sandboxImageAllowlist: z.string().default(""),
   objectStorageEndpoint: z.string().url().optional(),
   objectStorageInternalEndpoint: z.string().url().optional(),
   objectStorageSandboxEndpoint: z.string().url().optional(),
@@ -3379,6 +3382,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxMaxWarmSecondsPerWorkspace: optional("OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE"),
     sandboxPreparationProfiles: optional("OPENGENI_SANDBOX_PREPARATION_PROFILES"),
     sandboxEnvAllowlist: optional("OPENGENI_SANDBOX_ENV_ALLOWLIST"),
+    sandboxImageAllowlist: optional("OPENGENI_SANDBOX_IMAGE_ALLOWLIST"),
     objectStorageEndpoint: optional("OPENGENI_OBJECT_STORAGE_ENDPOINT"),
     objectStorageInternalEndpoint: optional("OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT"),
     objectStorageSandboxEndpoint: optional("OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT"),
@@ -7660,6 +7664,11 @@ function splitCsv(raw: string): string[] {
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+}
+
+/** Image references a workspace may select as its default sandbox image. */
+export function sandboxImageAllowlist(settings: Pick<Settings, "sandboxImageAllowlist">): string[] {
+  return [...new Set(splitCsv(settings.sandboxImageAllowlist ?? ""))];
 }
 
 function uniqueEnvNames(raw: string[], fieldName: string): string[] {
