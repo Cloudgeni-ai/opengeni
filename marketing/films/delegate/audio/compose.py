@@ -126,14 +126,14 @@ piano += [(B(3, 3), "E5", 0.8, 28), (B(3, 3.5), "E5", 0.4, 30)]
 # THE LAST CLICK — resolution.
 roll(piano, B(4), ["D2", "A2", "D3", "F#3", "A3", "E4", "F#4", "A4"], 3.0, 64, spread=0.022, dv=2)
 roll(piano, B(4, 2), ["G3", "B3", "D4"], 1.4, 30, spread=0.03)
-# "hour" found in the dark; the flip; morning.
-roll(piano, B(5), ["D1", "D2"], 2.6, 50, spread=0.0)
-piano.append((T["flip"] + 0.02, "D6", 0.9, 40))
-roll(piano, T["wipe"], ["G3", "D4", "A4", "B4", "D5"], 2.2, 50, spread=0.03, dv=2)
-roll(piano, B(6), ["E3", "B3", "D4", "G4"], 0.8, 40, spread=0.025)
-roll(piano, B(6, 1), ["A2", "E3", "C#4", "E4"], 0.8, 40, spread=0.025)
-roll(piano, B(6, 2), ["B2", "F#3", "A3", "D4"], 0.8, 38, spread=0.025)
-roll(piano, B(6, 3), ["A2", "E3", "A3", "C#4"], 0.8, 38, spread=0.025)
+# Morning: the paper rises on the downbeat; the backstage walk-through.
+roll(piano, T["wipe"], ["G3", "D4", "A4", "B4", "D5"], 2.0, 50, spread=0.03, dv=2)
+roll(piano, B(5, 2), ["E3", "B3", "D4", "G4"], 0.8, 36, spread=0.025)
+roll(piano, B(5, 3), ["A2", "E3", "C#4", "E4"], 0.8, 38, spread=0.025)
+roll(piano, B(6), ["B2", "F#3", "A3", "D4"], 0.8, 38, spread=0.025)
+roll(piano, B(6, 1), ["G2", "D3", "B3", "D4"], 0.8, 40, spread=0.025)
+roll(piano, B(6, 2), ["C#3", "E3", "A3", "E4"], 0.8, 40, spread=0.025)
+roll(piano, B(6, 3), ["B2", "F#3", "A3", "D4"], 0.8, 36, spread=0.025)
 roll(piano, B(7), ["G2", "D3", "B3", "D4", "G4"], 0.85, 48, spread=0.025, dv=1)
 roll(piano, B(7, 1), ["A2", "E3", "C#4", "E4", "A4"], 0.85, 50, spread=0.025, dv=1)
 roll(piano, B(7, 2), ["D2", "A2", "F#3", "A3", "D4", "F#4", "A4", "D5"], 2.4, 56, spread=0.024, dv=2)
@@ -144,7 +144,7 @@ for t, n in zip(cues["chips"], ["D5", "E5", "F#5", "A5", "B5", "D6", "E6"]):
 # Seven messages sent: a cascade settling downwards.
 for t, n in zip(cues["sends"], ["A6", "F#6", "E6", "D6", "B5", "A5", "F#5"]):
     celesta.append((t, n, 0.9, 40))
-celesta.append((T["flip"] + 0.02, "F#6", 1.2, 36))
+celesta += [(T["wipe"] + 0.12, "D6", 1.4, 30), (T["wipe"] + 0.3, "A6", 1.4, 26)]
 
 # Each booking landing is a step up: the work becomes a melody.
 for t, n in zip(cues["landings"], ["A4", "B4", "D5", "E5", "F#5", "A5", "B5"]):
@@ -166,21 +166,23 @@ PAD_CHORDS = [
     (B(3, 2), B(3, 3.5), ["A2", "E3", "A3", "D4"]),
     (B(3, 3.5), B(4), ["A2", "E3", "A3", "C#4"]),
     (B(4), B(5), ["D3", "A3", "E4", "F#4"]),
-    (B(5), T["wipe"], ["D3", "A3"]),
-    (T["wipe"], B(6), ["G3", "D4", "A4", "B4"]),
-    (B(6), B(6, 1), ["E3", "G3", "B3", "D4"]),
-    (B(6, 1), B(6, 2), ["A2", "E3", "A3", "C#4"]),
-    (B(6, 2), B(6, 3), ["B2", "F#3", "A3", "D4"]),
-    (B(6, 3), B(7), ["A2", "E3", "A3", "C#4"]),
+    (B(5), B(5, 2), ["G3", "D4", "A4", "B4"]),
+    (B(5, 2), B(5, 3), ["E3", "G3", "B3", "D4"]),
+    (B(5, 3), B(6), ["A2", "E3", "A3", "C#4"]),
+    (B(6), B(6, 1), ["B2", "F#3", "A3", "D4"]),
+    (B(6, 1), B(6, 2), ["G2", "D3", "G3", "B3"]),
+    (B(6, 2), B(6, 3), ["C#3", "E3", "A3", "E4"]),
+    (B(6, 3), B(7), ["B2", "F#3", "A3", "D4"]),
     (B(7), B(7, 1), ["G2", "D3", "G3", "B3"]),
     (B(7, 1), B(7, 2), ["A2", "E3", "A3", "C#4"]),
     (B(7, 2), DUR + 0.6, ["D3", "A3", "D4", "F#4"]),
 ]
 BASS = [
     (B(1), B(1, 2), "E2"), (B(1, 2), B(2), "A1"), (B(2), B(2, 2), "D2"), (B(2, 2), B(3), "C#2"),
-    (B(3), B(3, 2), "B1"), (B(3, 2), B(4), "A1"), (B(4), B(5) - 0.2, "D2"), (B(5), B(5, 1.4), "D1"),
-    (T["wipe"], B(6), "G1"), (B(6), B(6, 1), "E2"), (B(6, 1), B(6, 2), "A1"), (B(6, 2), B(6, 3), "B1"),
-    (B(6, 3), B(7), "A1"), (B(7), B(7, 1), "G1"), (B(7, 1), B(7, 2), "A1"), (B(7, 2), DUR + 0.4, "D2"),
+    (B(3), B(3, 2), "B1"), (B(3, 2), B(4), "A1"), (B(4), B(5) - 0.2, "D2"),
+    (B(5), B(5, 2), "G1"), (B(5, 2), B(5, 3), "E2"), (B(5, 3), B(6), "A1"), (B(6), B(6, 1), "B1"),
+    (B(6, 1), B(6, 2), "G1"), (B(6, 2), B(6, 3), "C#2"), (B(6, 3), B(7), "B1"),
+    (B(7), B(7, 1), "G1"), (B(7, 1), B(7, 2), "A1"), (B(7, 2), DUR + 0.4, "D2"),
 ]
 
 
@@ -502,9 +504,9 @@ def main() -> None:
     place(sfx, flop(), T["lieAgain"] + 0.33, gain=db(-24.0), pan=0.1)
     for i, t in enumerate(cues["liftoffs"]):
         place(sfx, swell(0.42, 500, 2600, peak_at=0.55, seed=40 + i), t, gain=db(-33.0), pan=-0.4 + 0.12 * i)
-    place(sfx, swell(0.9, 300, 3500, peak_at=0.9, seed=7), T["toMark"] + 0.05, gain=db(-30.0))
-    place(sfx, swell(0.18, 900, 4200, peak_at=0.45, seed=8), T["flip"] - 0.03, gain=db(-24.0))
-    place(sfx, swell(0.62, 250, 5200, peak_at=0.82, seed=9), T["wipe"] - 0.1, gain=db(-24.0))
+    # Night into morning: an airy rise that crests as the paper edge passes.
+    place(sfx, swell(0.8, 300, 3200, peak_at=0.92, seed=7), T["wipe"] - 0.72, gain=db(-30.0))
+    place(sfx, swell(0.62, 250, 5200, peak_at=0.82, seed=9), T["wipe"] - 0.05, gain=db(-25.0))
 
     room_ir = make_ir(rt60=0.45, length=0.7, predelay=0.006, damp=9000, seed=5)
     sfx = sfx + reverb(sfx, room_ir) * 0.12

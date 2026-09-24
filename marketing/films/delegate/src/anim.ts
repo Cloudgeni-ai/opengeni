@@ -85,3 +85,9 @@ export function quad(p0: number, p1: number, p2: number, t: number) {
   const u = 1 - t;
   return u * u * p0 + 2 * u * t * p1 + t * t * p2;
 }
+
+/** Point on a cubic Bézier. */
+export function cubic(p0: number, p1: number, p2: number, p3: number, t: number) {
+  const u = 1 - t;
+  return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3;
+}

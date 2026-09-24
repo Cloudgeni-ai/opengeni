@@ -131,7 +131,7 @@ export const G = {
   cardW: 564,
   cardH: 84,
   cardGap: 12,
-  listY: 204,
+  listY: 330,
   gridX: 620,
   gutter: 66,
   gridTop: 158,
@@ -140,7 +140,8 @@ export const G = {
   lastHour: 18,
   dayW: (1920 - 620 - 66 - 18) / 6,
   askX: 28,
-  askY: 976,
+  /** The ask bar sits at the top of the Tomorrow column and grows downward. */
+  askY: 192,
   askW: 564,
   askH: 68,
 } as const;

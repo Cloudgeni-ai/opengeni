@@ -3,240 +3,202 @@ import { C } from "../theme";
 import { F } from "../fonts";
 import { clamp01, ease, lerp, prog, springAt } from "../anim";
 import { T } from "../timeline";
-import { MARK_SCALE } from "../camera";
-import { Wordmark, WORDMARK_SIZE } from "./HourMark";
 import { OpenGeniWordmark } from "./OpenGeniWordmark";
 
-type Tok = [string, "kw" | "fn" | "key" | "str" | "p" | "id" | "your"];
+type Tok = [string, "kw" | "fn" | "key" | "str" | "p" | "id"];
 
-/** Real @opengeni/sdk call (OpenGeniClient.createSession). Excerpt: the client
- * construction and error handling are omitted and say so on screen. */
+/** Real @opengeni/sdk call (OpenGeniClient.createSession). Excerpt: client
+ * construction and error handling are omitted, and the fine print says so. */
 export const CODE: Tok[][] = [
   [["await ", "kw"], ["opengeni", "id"], [".", "p"], ["createSession", "fn"], ["(", "p"], ["workspaceId", "id"], [", {", "p"]],
   [["  initialMessage", "key"], [": ", "p"], ["text", "id"], [",", "p"]],
   [["  tools", "key"], [": [{ ", "p"], ["kind", "key"], [": ", "p"], ['"mcp"', "str"], [", ", "p"], ["id", "key"], [": ", "p"], ['"your-app"', "str"], [" }],", "p"]],
   [["  mcpServers", "key"], [": [{", "p"]],
   [["    id", "key"], [": ", "p"], ['"your-app"', "str"], [",", "p"]],
-  [["    url", "key"], [": ", "p"], ['"https://', "str"], ["your", "your"], ['.app/mcp"', "str"], [",", "p"]],
+  [["    url", "key"], [": ", "p"], ['"https://your.app/mcp"', "str"], [",", "p"]],
   [["    headers", "key"], [": { ", "p"], ["Authorization", "key"], [": ", "p"], ["userToken", "id"], [" },", "p"]],
   [["    requireApproval", "key"], [": [", "p"], ['"send_messages"', "str"], ["],", "p"]],
   [["  }],", "p"]],
   [["});", "p"]],
 ];
 
-const TOK_COLOR: Record<Tok[1], string> = {
-  kw: "#9a998f",
+const TOK: Record<Tok[1], string> = {
+  kw: "#8f8e85",
   fn: C.ink,
-  key: "#5d5e57",
+  key: "#55564f",
   str: "#b8401b",
-  p: "#a3a299",
+  p: "#9b9a91",
   id: C.ink,
-  your: "#b8401b",
 };
 
-const CODE_SIZE = 35;
-const CHAR_W = CODE_SIZE * 0.6;
-const LINE_H = 57;
-const CARD = { x: 132, y: 190, padX: 44, head: 60, padY: 28 };
-const CARD_W = 44 * CHAR_W + CARD.padX * 2;
-const CARD_H = CARD.head + CARD.padY * 2 + CODE.length * LINE_H;
-const codeLeft = CARD.x + CARD.padX;
-const lineTop = (i: number) => CARD.y + CARD.head + CARD.padY + i * LINE_H;
-const YOUR_COL = 18;
-export const YOUR_TARGET = { x: codeLeft + YOUR_COL * CHAR_W, y: lineTop(5), w: 4 * CHAR_W, h: LINE_H };
+const SIZE = 38;
+const CHAR_W = SIZE * 0.6;
+const LINE_H = 60;
+const ORIGIN = { x: 124, y: 240 };
+const BLOCK_W = 44 * CHAR_W;
+const lineTop = (i: number) => ORIGIN.y + i * LINE_H;
 
-const ANN = [
-  { line: 0, at: T.ann1, label: "A cloud agent, per customer" },
-  { line: 5, at: T.ann2, label: "Your product's own actions" },
-  { line: 7, at: T.ann3, label: "Needs your user's OK" },
+/** One idea at a time: token, line, plain-English callout. */
+const CALLOUTS = [
+  { line: 5, token: "url", at: T.ann1, until: T.ann2, text: ["Your product's", "own actions."] },
+  { line: 7, token: "requireApproval", at: T.ann2, until: T.ann3, text: ["Your user", "says yes first."] },
+  { line: 0, token: "createSession", at: T.ann3, until: T.line1, text: ["A cloud agent", "for each customer."] },
 ];
-
-/** Screen box of the in-app wordmark once the camera has landed on it. */
-const START = { x: 960 + (68 - 103) * MARK_SCALE, y: 540 + (22 - 38) * MARK_SCALE, size: WORDMARK_SIZE * MARK_SCALE };
 
 export const BrandScenes: React.FC<{ t: number }> = ({ t }) => {
   if (t < T.wipe) return null;
-  const wipe = prog(t, T.wipe, T.wipe + 0.5, ease.inOut);
+  // Morning: the paper rises like a blind, with a hard, clean edge.
+  const wipe = prog(t, T.wipe, T.wipe + 0.55, ease.inOut);
   const paperH = 1080 * wipe;
-
-  // "your" leaves the product and lands inside the code.
-  const fly = prog(t, T.yourFly, T.yourFly + 0.85, ease.camera);
-  const size = Math.exp(lerp(Math.log(START.size), Math.log(CODE_SIZE * 1.06), fly));
-  const endX = YOUR_TARGET.x + YOUR_TARGET.w / 2 - 0.53 * CODE_SIZE * 1.06 * 2;
-  const endY = YOUR_TARGET.y + (LINE_H - CODE_SIZE * 1.06) / 2 - 2;
-  const wx = lerp(START.x, endX, fly);
-  const wy = lerp(START.y, endY, fly);
-  const landed = prog(t, T.yourFly + 0.78, T.yourFly + 0.92, (x) => x);
-
-  const codeOn = prog(t, T.code, T.code + 0.45, ease.out);
-  // Hard cut on the downbeat from the code to the end line: no ghosted overlap.
-  const out = t >= T.line1 ? 1 : 0;
-
-  const word = (color: string) => (
-    <div style={{ position: "absolute", left: wx, top: wy, opacity: 1 - landed }}>
-      <Wordmark size={size} color={color} first={<span>y</span>} />
-    </div>
-  );
-
+  const endCut = t >= T.line1;
   return (
-    <>
-      {/* Above the rising paper: the lit word on the dark app */}
-      <div style={{ position: "absolute", inset: 0, clipPath: `inset(0 0 ${paperH}px 0)` }}>{word(C.text)}</div>
-      {/* The paper world */}
-      <div style={{ position: "absolute", inset: 0, clipPath: `inset(${1080 - paperH}px 0 0 0)`, background: C.paper }}>
-        <div style={{ position: "absolute", inset: 0, opacity: 1 - out, transform: `translateY(${-40 * out}px)` }}>
-          <CodeCard t={t} on={codeOn} landed={landed} />
-        </div>
-        {word(C.ink)}
-        <EndCard t={t} />
-        <FinePrint t={t} />
-      </div>
-    </>
+    <div style={{ position: "absolute", inset: 0, clipPath: `inset(${1080 - paperH}px 0 0 0)`, background: C.paper }}>
+      {!endCut && <CodeSpread t={t} />}
+      <EndCard t={t} />
+      <FinePrint t={t} />
+    </div>
   );
 };
 
-const CodeCard: React.FC<{ t: number; on: number; landed: number }> = ({ t, on, landed }) => (
-  <>
+const CodeSpread: React.FC<{ t: number }> = ({ t }) => {
+  const on = prog(t, T.code, T.code + 0.5, ease.out);
+  const whole = prog(t, T.whole, T.whole + 0.45, ease.inOut);
+  // A slow push for life; the page never sits dead still.
+  const drift = prog(t, T.code, T.line1, (x) => x);
+  const scale = 1 + 0.035 * drift;
+  const active = CALLOUTS.find((c) => t >= c.at - 0.02 && t < c.until) ?? null;
+
+  const lineLevel = (i: number) => {
+    // Before the first callout everything is quiet texture.
+    let lit = 0;
+    for (const c of CALLOUTS) {
+      if (c.line !== i) continue;
+      const k = prog(t, c.at, c.at + 0.32) * (1 - prog(t, c.until - 0.18, c.until + 0.12));
+      lit = Math.max(lit, k);
+    }
+    return Math.max(lit, whole);
+  };
+
+  return (
     <div
       style={{
         position: "absolute",
-        left: CARD.x,
-        top: CARD.y - 50,
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        fontFamily: F.mono,
-        fontSize: 17,
-        letterSpacing: "0.14em",
-        color: C.ink2,
-        opacity: on,
-      }}
-    >
-      <span style={{ width: 9, height: 9, borderRadius: "50%", background: C.verm, display: "inline-block" }} />
-      YOUR BACKEND
-    </div>
-    <div
-      style={{
-        position: "absolute",
-        left: CARD.x,
-        top: CARD.y,
-        width: CARD_W,
-        height: CARD_H,
-        background: C.paper2,
-        border: `1px solid ${C.rule}`,
-        opacity: on,
-        transform: `translateY(${(1 - on) * 14}px)`,
+        inset: 0,
+        transform: `scale(${scale})`,
+        transformOrigin: `${ORIGIN.x + BLOCK_W / 2}px 540px`,
       }}
     >
       <div
         style={{
           position: "absolute",
-          left: 0,
-          right: 0,
-          top: 0,
-          height: CARD.head,
-          borderBottom: `1px solid ${C.rule}`,
+          left: ORIGIN.x,
+          top: ORIGIN.y - 74,
           display: "flex",
           alignItems: "center",
-          paddingLeft: CARD.padX,
+          gap: 12,
           fontFamily: F.mono,
           fontSize: 18,
-          color: C.muted,
+          letterSpacing: "0.14em",
+          color: C.ink2,
+          opacity: on,
         }}
       >
-        server.ts
+        <span style={{ width: 9, height: 9, borderRadius: "50%", background: C.verm, display: "inline-block" }} />
+        YOUR BACKEND
       </div>
-    </div>
-    {ANN.map((a) => {
-      const k = prog(t, a.at, a.at + 0.3, ease.out);
-      if (k <= 0) return null;
-      return (
-        <div
-          key={`hl${a.line}`}
-          style={{
-            position: "absolute",
-            left: CARD.x + 1,
-            top: lineTop(a.line) + 3,
-            width: (CARD_W - 2) * k,
-            height: LINE_H - 6,
-            background: "rgba(246,83,39,0.085)",
-            borderLeft: `4px solid ${C.verm}`,
-          }}
-        />
-      );
-    })}
-    {CODE.map((line, i) => {
-      const k = prog(t, T.code + 0.06 + i * 0.035, T.code + 0.36 + i * 0.035, ease.out);
-      let col = 0;
-      return (
-        <div
-          key={i}
-          style={{
-            position: "absolute",
-            left: codeLeft,
-            top: lineTop(i),
-            height: LINE_H,
-            display: "flex",
-            alignItems: "center",
-            fontFamily: F.mono,
-            fontSize: CODE_SIZE,
-            whiteSpace: "pre",
-            opacity: k,
-            transform: `translateX(${(1 - k) * 10}px)`,
-          }}
-        >
-          {line.map(([text, kind], j) => {
-            const el = (
-              <span
-                key={j}
-                style={{
-                  color: TOK_COLOR[kind],
-                  fontWeight: kind === "fn" ? 700 : kind === "id" ? 500 : 400,
-                  opacity: kind === "your" ? landed : 1,
-                }}
-              >
-                {text}
-              </span>
-            );
-            col += text.length;
-            return el;
-          })}
-        </div>
-      );
-    })}
-    {ANN.map((a) => {
-      const k = prog(t, a.at + 0.08, a.at + 0.5, ease.out);
-      if (k <= 0) return null;
-      const y = lineTop(a.line) + LINE_H / 2;
-      const x0 = CARD.x + CARD_W + 14;
-      return (
-        <React.Fragment key={`ann${a.line}`}>
-          <div style={{ position: "absolute", left: x0, top: y, width: 40 * k, height: 2, background: C.verm }} />
+      {CALLOUTS.map((c) => {
+        const k = prog(t, c.at, c.at + 0.3) * (1 - prog(t, c.until - 0.16, c.until));
+        const hold = c.line === 0 ? whole : 0;
+        const v = Math.max(k, hold * 0.55);
+        if (v <= 0) return null;
+        return (
           <div
+            key={`bar${c.line}`}
             style={{
               position: "absolute",
-              left: x0 + 54,
-              top: y - 26,
-              fontFamily: F.brandSans,
-              fontSize: 41,
-              fontWeight: 600,
-              letterSpacing: "-0.02em",
-              color: C.ink,
-              whiteSpace: "nowrap",
-              opacity: k,
-              transform: `translateX(${(1 - k) * 16}px)`,
+              left: ORIGIN.x - 36,
+              top: lineTop(c.line) + 4,
+              width: BLOCK_W + 60,
+              height: LINE_H - 8,
+              background: `rgba(246,83,39,${0.09 * v})`,
+              borderLeft: `4px solid rgba(246,83,39,${v})`,
+            }}
+          />
+        );
+      })}
+      {CODE.map((line, i) => {
+        const appear = prog(t, T.code + 0.04 * i, T.code + 0.3 + 0.04 * i, ease.out);
+        const level = lineLevel(i);
+        const opacity = appear * lerp(0.3, 1, level);
+        return (
+          <div
+            key={i}
+            style={{
+              position: "absolute",
+              left: ORIGIN.x,
+              top: lineTop(i),
+              height: LINE_H,
+              display: "flex",
+              alignItems: "center",
+              fontFamily: F.mono,
+              fontSize: SIZE,
+              whiteSpace: "pre",
+              opacity,
+              transform: `translateY(${(1 - appear) * 10}px)`,
             }}
           >
-            {a.label}
+            {line.map(([text, kind], j) => (
+              <span key={j} style={{ color: TOK[kind], fontWeight: kind === "fn" ? 700 : kind === "id" ? 500 : 400 }}>
+                {text}
+              </span>
+            ))}
           </div>
-        </React.Fragment>
-      );
-    })}
-  </>
-);
+        );
+      })}
+      {active && <Callout t={t} c={active} />}
+    </div>
+  );
+};
+
+const Callout: React.FC<{ t: number; c: (typeof CALLOUTS)[number] }> = ({ t, c }) => {
+  const inK = prog(t, c.at + 0.06, c.at + 0.4, ease.out);
+  const outK = c.until === T.line1 ? 0 : prog(t, c.until - 0.2, c.until - 0.02, ease.in);
+  const vis = inK * (1 - outK);
+  const cy = lineTop(c.line) + LINE_H / 2;
+  const top = Math.min(Math.max(cy - 92, 150), 820);
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: ORIGIN.x + BLOCK_W + 64,
+        top,
+        opacity: vis,
+        transform: `translateY(${(1 - inK) * 14 - outK * 8}px)`,
+      }}
+    >
+      <div style={{ fontFamily: F.mono, fontSize: 21, letterSpacing: "0.02em", color: C.vermDeep, marginBottom: 14 }}>{c.token}</div>
+      {c.text.map((l) => (
+        <div
+          key={l}
+          style={{
+            fontFamily: F.display,
+            fontSize: 60,
+            fontWeight: 640,
+            letterSpacing: "-0.035em",
+            lineHeight: 1.05,
+            color: C.ink,
+            whiteSpace: "nowrap",
+          }}
+        >
+          {l}
+        </div>
+      ))}
+    </div>
+  );
+};
 
 const EndCard: React.FC<{ t: number }> = ({ t }) => {
-  if (t < T.line1 - 0.05) return null;
+  if (t < T.line1) return null;
   const l1 = springAt(t, T.line1, 120, 19);
   const l2 = springAt(t, T.line2, 120, 19);
   const m = springAt(t, T.mark, 110, 20);
@@ -248,7 +210,6 @@ const EndCard: React.FC<{ t: number }> = ({ t }) => {
     lineHeight: 1.04,
     color: C.ink,
     whiteSpace: "nowrap",
-    fontVariationSettings: "'wdth' 100",
   };
   return (
     <>
@@ -288,10 +249,10 @@ const FinePrint: React.FC<{ t: number }> = ({ t }) => {
       style={{
         position: "absolute",
         left: 150,
-        bottom: 54,
+        bottom: 50,
         fontFamily: F.mono,
-        fontSize: 16,
-        letterSpacing: "0.02em",
+        fontSize: 18,
+        letterSpacing: "0.01em",
         color: C.muted,
         opacity: k,
       }}

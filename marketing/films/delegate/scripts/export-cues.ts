@@ -16,7 +16,6 @@ const cues = {
   liftoffs: Array.from({ length: 7 }, (_, i) => flightStart(i)),
   landings: Array.from({ length: 7 }, (_, i) => flightEnd(i)),
   sends: Array.from({ length: 7 }, (_, i) => sentAt(i)),
-  yourLands: T.yourFly + 0.85,
 };
 
 writeFileSync("audio/cues.json", JSON.stringify(cues, null, 2));

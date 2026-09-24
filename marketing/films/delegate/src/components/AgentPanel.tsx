@@ -11,7 +11,7 @@ const LINE1 = REQUEST.slice(0, LINE_BREAK).trimEnd();
 
 export const APPROVAL_H = 438;
 const PAD = 26;
-export const APPROVE_BTN = { x: G.askX + G.askW - PAD - 158, y: G.askY + G.askH - PAD - 54, w: 158, h: 54 };
+export const APPROVE_BTN = { x: G.askX + G.askW - PAD - 158, y: G.askY + APPROVAL_H - PAD - 54, w: 158, h: 54 };
 const STATUS_H = 106;
 
 function statusAt(t: number): { text: string; count?: string; done?: boolean } {
@@ -54,7 +54,7 @@ export const AgentPanel: React.FC<{ t: number }> = ({ t }) => {
   const typingVis = 1 - typingOut;
   const statusIn1 = prog(t, T.enter + 0.15, T.enter + 0.38, ease.out);
   const statusOut = prog(t, T.approvalIn, T.approvalIn + 0.12);
-  const approvalIn = prog(t, T.approvalIn + 0.24, T.approvalIn + 0.52, ease.out);
+  const approvalIn = prog(t, T.approvalIn + 0.15, T.approvalIn + 0.42, ease.out);
   const approvalOut = prog(t, T.approve + 0.09, T.approve + 0.19);
   const statusIn2 = prog(t, T.approve + 0.3, T.approve + 0.5, ease.out);
   const approvalVis = t >= T.approvalIn && t < collapseAt ? approvalIn * (1 - approvalOut) : 0;
@@ -72,13 +72,13 @@ export const AgentPanel: React.FC<{ t: number }> = ({ t }) => {
       style={{
         position: "absolute",
         left: G.askX,
-        top: G.askY + G.askH - h,
+        top: G.askY,
         width: G.askW,
         height: h,
-        borderRadius: 18,
+        borderRadius: 14,
         background: C.raised,
-        border: `1px solid ${focusRing ? "rgba(143,227,187,0.7)" : C.line2}`,
-        boxShadow: `0 24px 70px rgba(0,0,0,0.55), 0 0 0 ${focusRing ? 4 : 0}px rgba(143,227,187,0.12)`,
+        border: `1px solid ${focusRing ? "rgba(134,214,176,0.7)" : C.line2}`,
+        boxShadow: `0 24px 70px rgba(0,0,0,0.55), 0 0 0 ${focusRing ? 4 : 0}px rgba(134,214,176,0.12)`,
         overflow: "hidden",
         zIndex: 40,
       }}
@@ -147,7 +147,7 @@ export const AgentPanel: React.FC<{ t: number }> = ({ t }) => {
             position: "absolute",
             left: 0,
             right: 0,
-            bottom: 0,
+            top: 0,
             height: STATUS_H,
             opacity: statusVis,
             transform: `translateY(${12 * statusRise}px)`,
@@ -221,7 +221,7 @@ export const AgentPanel: React.FC<{ t: number }> = ({ t }) => {
             position: "absolute",
             left: 0,
             right: 0,
-            bottom: 0,
+            top: 0,
             height: APPROVAL_H,
             opacity: approvalVis,
             transform: `translateY(${14 * (1 - approvalIn)}px)`,
@@ -291,7 +291,7 @@ export const AgentPanel: React.FC<{ t: number }> = ({ t }) => {
               top: 132,
               height: 150,
               boxSizing: "border-box",
-              borderRadius: 14,
+              borderRadius: 10,
               background: "#1e2128",
               border: `1px solid ${C.line2}`,
               padding: "14px 18px",
@@ -308,12 +308,12 @@ export const AgentPanel: React.FC<{ t: number }> = ({ t }) => {
           <div
             style={{
               position: "absolute",
-              left: APPROVE_BTN.x - G.askX - 12 - 112,
+              left: APPROVE_BTN.x - G.askX - 12 - APPROVE_BTN.w,
               top: APPROVAL_H - PAD - APPROVE_BTN.h,
-              width: 112,
+              width: APPROVE_BTN.w,
               height: APPROVE_BTN.h,
-              borderRadius: 12,
-              border: `1px solid ${C.line2}`,
+              borderRadius: 10,
+              border: `1px solid #3a3f48`,
               display: "grid",
               placeItems: "center",
               fontFamily: F.ui,
@@ -331,7 +331,7 @@ export const AgentPanel: React.FC<{ t: number }> = ({ t }) => {
               top: APPROVAL_H - PAD - APPROVE_BTN.h,
               width: APPROVE_BTN.w,
               height: APPROVE_BTN.h,
-              borderRadius: 12,
+              borderRadius: 10,
               background: pressed ? "#74c9a0" : C.accent,
               display: "flex",
               alignItems: "center",

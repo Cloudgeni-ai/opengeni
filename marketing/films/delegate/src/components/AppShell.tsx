@@ -41,7 +41,7 @@ export const TopBar: React.FC<{ hideWordmark?: boolean; detailsOpacity?: number 
             style={{
               width: 34,
               height: 34,
-              borderRadius: 9,
+              borderRadius: 7,
               border: `1px solid ${C.line2}`,
               display: "grid",
               placeItems: "center",
@@ -166,12 +166,14 @@ export const LeftColumn: React.FC<{ t: number }> = ({ t }) => {
             position: "absolute",
             left: 0,
             width: G.colW,
-            top: 360,
+            top: 470,
             display: "flex",
             flexDirection: "column",
             alignItems: "center",
             opacity: empty,
             transform: `translateY(${(1 - empty) * 18}px)`,
+            // Under the approval card while it is open; lit above the night after.
+            zIndex: t > T.approve + 0.6 ? 46 : 20,
           }}
         >
           <div
@@ -296,7 +298,7 @@ export const WeekGrid: React.FC = () => {
               top: r.y,
               width: r.w,
               height: r.h,
-              borderRadius: 8,
+              borderRadius: 6,
               background: "#13161a",
               borderLeft: "3px solid #2f333b",
               padding: "7px 10px",

@@ -10,8 +10,8 @@ export const C = {
   text: "#eceae4",
   text2: "#a4a49d",
   text3: "#6e6f6a",
-  accent: "#8fe3bb",
-  accentDim: "rgba(143,227,187,0.14)",
+  accent: "#86d6b0",
+  accentDim: "rgba(134,214,176,0.14)",
 
   paper: "#f4f3ec",
   paper2: "#fbfaf5",

@@ -2,7 +2,7 @@ import React from "react";
 import { C } from "../theme";
 import { F } from "../fonts";
 import { CLIENTS, Client, cardRect, slotRect } from "../data";
-import { clamp01, ease, lerp, prog, quad, springAt } from "../anim";
+import { clamp01, cubic, ease, lerp, prog, springAt } from "../anim";
 import { T, flightEnd, flightStart, sentAt } from "../timeline";
 import { Check } from "./Icons";
 
@@ -31,17 +31,17 @@ const CardFace: React.FC<{ c: Client; chip: number; w: number }> = ({ c, chip, w
       <div
         style={{
           position: "absolute",
-          right: 76,
-          top: 25,
-          height: 32,
-          padding: "0 12px",
-          borderRadius: 16,
+          right: 74,
+          top: 23,
+          height: 38,
+          padding: "0 14px",
+          borderRadius: 19,
           background: C.accentDim,
-          border: `1px solid rgba(143,227,187,0.28)`,
+          border: `1px solid rgba(134,214,176,0.3)`,
           display: "flex",
           alignItems: "center",
           fontFamily: F.ui,
-          fontSize: 15,
+          fontSize: 17.5,
           fontWeight: 600,
           color: C.accent,
           whiteSpace: "nowrap",
@@ -106,21 +106,21 @@ export const Clients: React.FC<{ t: number }> = ({ t }) => {
         const chipOut = 1 - prog(t, f0 + 0.02, f0 + 0.2);
         const readPulse = t >= chipAt - 0.05 && t < chipAt + 0.6 ? Math.sin(Math.PI * clamp01((t - chipAt + 0.05) / 0.65)) : 0;
 
-        // Travel along an arc; the box morphs from list card to calendar block.
+        // Slide out horizontally, travel an S-curve, slide into the slot
+        // horizontally — the way a calendar moves an event, not a throw.
         const ax = a.x + a.w / 2;
         const ay = a.y + a.h / 2;
         const bx = b.x + b.w / 2;
         const by = b.y + b.h / 2;
-        const cx = (ax + bx) / 2;
-        const cy = Math.min(ay, by) - 150 - i * 6;
-        const px = quad(ax, cx, bx, k);
-        const py = quad(ay, cy, by, k);
-        const sizeK = ease.inOut(clamp01((raw - 0.02) / 0.5));
+        const dx = bx - ax;
+        const px = cubic(ax, ax + dx * 0.46, bx - dx * 0.4, bx, k);
+        const py = cubic(ay, ay, by, by, k);
+        const sizeK = ease.inOut(clamp01((raw - 0.02) / 0.45));
         const w = lerp(a.w, b.w, sizeK);
         const h = lerp(a.h, b.h, sizeK);
         const lift = Math.sin(Math.PI * raw);
-        const settle = landed ? springAt(t, f1, 320, 16) : 1;
-        const landScale = landed ? 1 + (1 - settle) * 0.06 : 1 + lift * 0.05;
+        const settle = landed ? springAt(t, f1, 340, 20) : 1;
+        const landScale = landed ? 1 + (1 - settle) * 0.05 : 1 + lift * 0.035;
         const cardFace = 1 - prog(raw, 0.0, 0.2, (x) => x);
         const flightFace = prog(raw, 0.14, 0.3, (x) => x) * (1 - prog(raw, 0.74, 0.88, (x) => x));
         const blockFace = prog(raw, 0.84, 1.0, (x) => x);
@@ -163,15 +163,15 @@ export const Clients: React.FC<{ t: number }> = ({ t }) => {
               style={{
                 position: "absolute",
                 inset: 0,
-                borderRadius: isCard ? 14 : lerp(14, 8, sizeK),
+                borderRadius: isCard ? 10 : lerp(10, 6, sizeK),
                 background: isCard ? C.raised : `linear-gradient(0deg, ${hexA(c.color, 0.17 * tint)}, ${hexA(c.color, 0.17 * tint)}), ${C.raised}`,
-                border: `1px solid ${isCard ? (readPulse > 0 ? hexA("#8fe3bb", 0.25 + 0.5 * readPulse) : C.line2) : hexA(c.color, 0.34 * tint)}`,
+                border: `1px solid ${isCard ? (readPulse > 0 ? hexA("#86d6b0", 0.25 + 0.5 * readPulse) : C.line2) : hexA(c.color, 0.34 * tint)}`,
                 boxShadow: flying
                   ? `0 ${18 + lift * 18}px ${30 + lift * 30}px rgba(0,0,0,${0.35 + lift * 0.2})`
                   : glow > 0
                     ? `0 0 0 ${2 + glow * 4}px ${hexA(c.color, glow * 0.35)}`
                     : readPulse > 0
-                      ? `0 0 0 ${3 * readPulse}px rgba(143,227,187,${0.12 * readPulse})`
+                      ? `0 0 0 ${3 * readPulse}px rgba(134,214,176,${0.12 * readPulse})`
                       : "none",
                 overflow: "hidden",
               }}

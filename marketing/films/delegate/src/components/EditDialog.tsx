@@ -1,7 +1,7 @@
 import React from "react";
 import { C } from "../theme";
 import { F } from "../fonts";
-import { clamp01, prog, springAt } from "../anim";
+import { clamp01, ease, prog, springAt } from "../anim";
 import { T } from "../timeline";
 import { Chevron, Close } from "./Icons";
 
@@ -23,7 +23,7 @@ const Field: React.FC<{ label: string; value: string; x: number; y: number; w: n
         top: y,
         width: w,
         height: 52,
-        borderRadius: 11,
+        borderRadius: 8,
         border: `1px solid ${hot > 0 ? `rgba(255,255,255,${0.14 + hot * 0.2})` : C.line2}`,
         background: `rgba(255,255,255,${0.03 + hot * 0.03})`,
         boxSizing: "border-box",
@@ -43,11 +43,13 @@ const Field: React.FC<{ label: string; value: string; x: number; y: number; w: n
 );
 
 export const EditDialog: React.FC<{ t: number }> = ({ t }) => {
-  if (t < T.dialogOpen - 0.01 || t > T.cancelClick + 0.3) return null;
-  const open = springAt(t, T.dialogOpen, 260, 21);
-  const close = prog(t, T.cancelClick + 0.05, T.cancelClick + 0.22);
+  if (t < T.dialogOpen - 0.01 || t > T.cancelClick + 0.34) return null;
+  // Opens with a touch of elasticity; closes softly downward, not in one cut.
+  const open = springAt(t, T.dialogOpen, 230, 17);
+  const close = prog(t, T.cancelClick + 0.04, T.cancelClick + 0.3, ease.in);
   const vis = clamp01(open * 1.6) * (1 - close);
-  const scale = (0.94 + 0.06 * open) * (1 - 0.03 * close);
+  const scale = (0.92 + 0.08 * open) * (1 - 0.035 * close);
+  const lift = (1 - open) * 18 + close * 12;
   const d0 = T.dialogOpen;
   const hotDate = prog(t, d0 + 0.34, d0 + 0.44) - prog(t, d0 + 0.66, d0 + 0.76);
   const hotTime = prog(t, d0 + 0.76, d0 + 0.86) - prog(t, d0 + 1.0, d0 + 1.08);
@@ -66,7 +68,7 @@ export const EditDialog: React.FC<{ t: number }> = ({ t }) => {
           height: 1080,
           zIndex: 61,
           opacity: vis,
-          transform: `scale(${scale})`,
+          transform: `translateY(${lift}px) scale(${scale})`,
           transformOrigin: `${DIALOG.x + DIALOG.w / 2}px ${DIALOG.y + 120}px`,
         }}
       >
@@ -77,7 +79,7 @@ export const EditDialog: React.FC<{ t: number }> = ({ t }) => {
             top: DIALOG.y,
             width: DIALOG.w,
             height: DIALOG.h,
-            borderRadius: 20,
+            borderRadius: 14,
             background: C.raised,
             border: `1px solid ${C.line2}`,
             boxShadow: "0 40px 100px rgba(0,0,0,0.6)",
@@ -140,7 +142,7 @@ export const EditDialog: React.FC<{ t: number }> = ({ t }) => {
             top: r2 + 152,
             width: DIALOG.w - PAD * 2,
             height: 80,
-            borderRadius: 11,
+            borderRadius: 8,
             border: `1px solid ${C.line2}`,
             background: "rgba(255,255,255,0.03)",
             boxSizing: "border-box",
@@ -162,7 +164,7 @@ export const EditDialog: React.FC<{ t: number }> = ({ t }) => {
             top: CANCEL_BTN.y,
             width: CANCEL_BTN.w,
             height: CANCEL_BTN.h,
-            borderRadius: 12,
+            borderRadius: 9,
             border: `1px solid ${hotCancel > 0 ? "rgba(255,255,255,0.3)" : C.line2}`,
             background: `rgba(255,255,255,${0.02 + 0.06 * hotCancel})`,
             display: "grid",
@@ -182,7 +184,7 @@ export const EditDialog: React.FC<{ t: number }> = ({ t }) => {
             top: CANCEL_BTN.y,
             width: 184,
             height: CANCEL_BTN.h,
-            borderRadius: 12,
+            borderRadius: 9,
             background: C.accent,
             display: "grid",
             placeItems: "center",

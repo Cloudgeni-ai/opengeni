@@ -69,9 +69,8 @@ marks = {
     "land": cues["landings"],
     "approval": [T["approvalIn"]],
     "LAST CLICK": [T["approve"]],
-    "hour": [T["markArrive"]],
-    "flip": [T["flip"]],
-    "wipe": [T["wipe"]],
+    "morning": [T["wipe"]],
+    "callouts": [T["ann1"], T["ann2"], T["ann3"]],
     "line": [T["line1"], T["line2"]],
     "mark": [T["mark"]],
 }
@@ -79,7 +78,7 @@ for label, times in marks.items():
     for tm in times:
         xx = 60 + tm / dur * (W - 80)
         d.line([xx, 24, xx, top + h], fill=(90, 90, 90) if label == "land" else (200, 200, 90), width=1)
-    d.text((60 + times[0] / dur * (W - 80) + 3, top + h + 8 + (18 if label in ("land", "flip", "line") else 0)), label, fill=(220, 220, 150), font=font)
+    d.text((60 + times[0] / dur * (W - 80) + 3, top + h + 8 + (18 if label in ("land", "callouts", "line") else 0)), label, fill=(220, 220, 150), font=font)
 for s in range(0, int(dur) + 1, 2):
     xx = 60 + s / dur * (W - 80)
     d.text((xx - 6, H - 22), f"{s}", fill=(150, 150, 150), font=font)
