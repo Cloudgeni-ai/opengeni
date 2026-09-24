@@ -1232,7 +1232,9 @@ export async function mintTerminalStream(
           workspaceId: active.workspaceId,
           ...(input.resourceSubjectId ? { resourceSubjectId: input.resourceSubjectId } : {}),
           port: TERMINAL_STREAM_PORT,
-          mode: settings.streamControlEnabled && canControl ? "control" : "view",
+          // PTY control rides on terminal:attach alone — the desktop
+          // stream-control rollout flag never gates terminal keystrokes.
+          mode: canControl ? "control" : "view",
           sandbox: active,
           viewerAuthority,
         },
@@ -1309,7 +1311,7 @@ export async function mintTerminalStream(
         viewerId,
         leaseEpoch: lease.leaseEpoch,
         streamTokenSecret: secret,
-        mode: settings.streamControlEnabled && canControl ? "control" : "view",
+        mode: canControl ? "control" : "view",
         port: TERMINAL_STREAM_PORT,
         ...viewerAuthority,
       });
@@ -1536,7 +1538,13 @@ export async function mintSelfhostedStream(
       leaseEpoch: input.activeEpoch,
       streamTokenSecret: secret,
       port: input.port,
-      mode: settings.streamControlEnabled && input.mode === "control" ? "control" : "view",
+      // The rollout flag gates desktop input only: the terminal port's control
+      // claim comes from terminal:attach and must survive a flag-off deploy.
+      mode:
+        input.mode === "control" &&
+        (input.port === TERMINAL_STREAM_PORT || settings.streamControlEnabled)
+          ? "control"
+          : "view",
       ...(input.viewerAuthority ?? {}),
     });
     return {

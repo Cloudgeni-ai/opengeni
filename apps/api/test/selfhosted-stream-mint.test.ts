@@ -177,6 +177,27 @@ describe("mintSelfhostedStream — relay stream cell fenced by active_epoch (M8b
     const claims = await verifyStreamToken(resolveStreamTokenSecret(settings)!, cell!.token);
     expect(claims?.mode).toBe("view");
   });
+
+  test("the terminal port keeps its control claim with the desktop flag off", async () => {
+    // `settings` leaves streamControlEnabled at its false default: PTY typing
+    // is authorized by terminal:attach alone, so a flag-off deploy must still
+    // mint a control token or authorized keystrokes die at the relay.
+    const cell = await mintSelfhostedStream(
+      { db: {} as never, settings },
+      {
+        workspaceId: WS,
+        sessionId: SESSION,
+        viewerId: VIEWER,
+        activeEpoch: 1,
+        port: 7681,
+        mode: "control",
+        session: fakeSelfhostedSession(7681),
+      },
+    );
+    expect(cell).not.toBeNull();
+    const claims = await verifyStreamToken(resolveStreamTokenSecret(settings)!, cell!.token);
+    expect(claims?.mode).toBe("control");
+  });
 });
 
 describe("stream control authorization", () => {

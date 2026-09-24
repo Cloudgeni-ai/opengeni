@@ -173,8 +173,9 @@ pub(crate) mod conn {
         key: ChannelKey,
         role: Role,
         conn_gen: crate::registry::ConnGen,
-        // Derived once from the verified viewer token and relay rollout flag.
-        can_control_input: bool,
+        // The verified token's control claim; the desktop-input rollout flag is
+        // applied per-message (it gates only typed desktop input, never PTY).
+        control_claim: bool,
         peer_rx: tokio::sync::mpsc::Receiver<RelayMessage>,
     }
 
@@ -199,7 +200,7 @@ pub(crate) mod conn {
 
         // 2. Resolve + authorize the key (token + channel-key scope). A client's
         // fence claims come from this exact token verification.
-        let (key, role, resume_from_seq, viewer, can_control_input) = match authorize(
+        let (key, role, resume_from_seq, viewer, control_claim) = match authorize(
             &open, query, state,
         ) {
             Ok(parts) => parts,
@@ -249,7 +250,7 @@ pub(crate) mod conn {
             key,
             role,
             conn_gen,
-            can_control_input,
+            control_claim,
             peer_rx,
         })
     }
@@ -301,7 +302,8 @@ pub(crate) mod conn {
                         &est.key.channel_id,
                         est.key.port,
                         est.role,
-                        est.can_control_input,
+                        est.control_claim,
+                        state.config.stream_control_enabled,
                         &msg,
                     ) {
                         tracing::debug!(port = est.key.port, role = ?est.role, "relay: dropping unauthorized input");
@@ -441,7 +443,7 @@ pub(crate) mod conn {
                         lease: Some(claims.lease_epoch),
                         authority: claims.authority_epoch,
                     },
-                    claims.mode == "control" && state.config.stream_control_enabled,
+                    claims.mode == "control",
                 ));
             }
         }
@@ -474,14 +476,16 @@ pub(crate) mod conn {
     }
 
     /// Classify by the token-bound port, never the peer's unverified kind label.
-    /// Client Frames on the PTY port ARE terminal keystrokes and DesktopInput is
-    /// computer-use input — both require the verified control claim plus the
-    /// relay rollout flag, so a view-mode token stays strictly read-only.
+    /// Client Frames on the PTY port ARE terminal keystrokes gated by the
+    /// verified control claim alone; DesktopInput is computer-use input and
+    /// additionally requires the desktop-control rollout flag, so a view-mode
+    /// token stays strictly read-only either way.
     fn may_forward_message(
         channel_id: &str,
         port: u32,
         role: Role,
-        can_control_input: bool,
+        control_claim: bool,
+        stream_control_enabled: bool,
         message: &RelayMessage,
     ) -> bool {
         match message {
@@ -489,14 +493,15 @@ pub(crate) mod conn {
                 frame.channel_id == channel_id
                     && match role {
                         Role::Agent => true,
-                        Role::Client => port == PTY_STREAM_PORT && can_control_input,
+                        Role::Client => port == PTY_STREAM_PORT && control_claim,
                     }
             }
             RelayMessage::DesktopInput(input) => {
                 input.channel_id == channel_id
                     && role == Role::Client
                     && port == DESKTOP_STREAM_PORT
-                    && can_control_input
+                    && control_claim
+                    && stream_control_enabled
             }
             RelayMessage::Close(close) => close.channel_id == channel_id,
             RelayMessage::Open(_) | RelayMessage::OpenAck(_) => true,
@@ -629,56 +634,73 @@ pub(crate) mod conn {
             });
             for port in [PTY_STREAM_PORT, DESKTOP_STREAM_PORT, 9999] {
                 for role in [Role::Client, Role::Agent] {
-                    for can_control_input in [false, true] {
-                        assert_eq!(
-                            may_forward_message(channel_id, port, role, can_control_input, &frame),
-                            role == Role::Agent
-                                || (role == Role::Client
-                                    && port == PTY_STREAM_PORT
-                                    && can_control_input),
-                            "Frame on port {port}, role {role:?}, control {can_control_input}"
-                        );
-                        assert_eq!(
-                            may_forward_message(
+                    for control_claim in [false, true] {
+                        for stream_control_enabled in [false, true] {
+                            assert_eq!(
+                                may_forward_message(
+                                    channel_id,
+                                    port,
+                                    role,
+                                    control_claim,
+                                    stream_control_enabled,
+                                    &frame
+                                ),
+                                role == Role::Agent
+                                    || (role == Role::Client
+                                        && port == PTY_STREAM_PORT
+                                        && control_claim),
+                                "Frame on port {port}, role {role:?}, claim {control_claim}, flag {stream_control_enabled}"
+                            );
+                            assert_eq!(
+                                may_forward_message(
+                                    channel_id,
+                                    port,
+                                    role,
+                                    control_claim,
+                                    stream_control_enabled,
+                                    &desktop_input
+                                ),
+                                role == Role::Client
+                                    && port == DESKTOP_STREAM_PORT
+                                    && control_claim
+                                    && stream_control_enabled,
+                                "DesktopInput on port {port}, role {role:?}, claim {control_claim}, flag {stream_control_enabled}"
+                            );
+                            assert!(!may_forward_message(
                                 channel_id,
                                 port,
                                 role,
-                                can_control_input,
-                                &desktop_input
-                            ),
-                            role == Role::Client && port == DESKTOP_STREAM_PORT && can_control_input,
-                            "DesktopInput on port {port}, role {role:?}, control {can_control_input}"
-                        );
-                        assert!(!may_forward_message(
-                            channel_id,
-                            port,
-                            role,
-                            can_control_input,
-                            &wrong_channel_frame
-                        ));
-                        assert!(!may_forward_message(
-                            channel_id,
-                            port,
-                            role,
-                            can_control_input,
-                            &wrong_channel_desktop_input
-                        ));
-                        for message in &lifecycle {
-                            assert!(may_forward_message(
+                                control_claim,
+                                stream_control_enabled,
+                                &wrong_channel_frame
+                            ));
+                            assert!(!may_forward_message(
                                 channel_id,
                                 port,
                                 role,
-                                can_control_input,
-                                message
+                                control_claim,
+                                stream_control_enabled,
+                                &wrong_channel_desktop_input
+                            ));
+                            for message in &lifecycle {
+                                assert!(may_forward_message(
+                                    channel_id,
+                                    port,
+                                    role,
+                                    control_claim,
+                                    stream_control_enabled,
+                                    message
+                                ));
+                            }
+                            assert!(!may_forward_message(
+                                channel_id,
+                                port,
+                                role,
+                                control_claim,
+                                stream_control_enabled,
+                                &wrong_channel_close
                             ));
                         }
-                        assert!(!may_forward_message(
-                            channel_id,
-                            port,
-                            role,
-                            can_control_input,
-                            &wrong_channel_close
-                        ));
                     }
                 }
             }

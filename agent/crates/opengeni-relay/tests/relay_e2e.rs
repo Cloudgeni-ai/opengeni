@@ -305,10 +305,12 @@ async fn view_mode_pty_frames_reach_the_viewer_but_viewer_input_is_dropped() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn control_mode_pty_frames_reach_the_producer() {
+async fn control_mode_pty_frames_reach_the_producer_with_desktop_flag_off() {
     let port = free_port().await;
+    // Terminal keystrokes ride on the control claim alone: the desktop-control
+    // rollout flag must never mute an authorized PTY client.
     let (base, _shutdown, _m) = start_relay_on(port, |config| {
-        config.stream_control_enabled = true;
+        config.stream_control_enabled = false;
     })
     .await;
 

@@ -3924,13 +3924,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       machineOwnerAllowsScreenControl,
     });
     // terminal:attach IS the interactive grant: PTY frames are keystrokes, so
-    // the terminal token claims control whenever attach was authorized above.
-    const terminalCanControl = shouldGrantStreamControl({
-      settingEnabled: settings.streamControlEnabled,
-      accessIncludesControl: hasPermission(grant.permissions, "terminal:attach"),
-      machineConsentRequired: false,
-      machineOwnerAllowsScreenControl: false,
-    });
+    // the terminal token claims control whenever attach was authorized above —
+    // independent of the desktop stream-control rollout flag.
+    const terminalCanControl = hasPermission(grant.permissions, "terminal:attach");
 
     let stream: DesktopStreamMint | null = null;
     let terminal: TerminalStreamMint | null = null;

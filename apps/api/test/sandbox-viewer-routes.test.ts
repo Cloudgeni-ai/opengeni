@@ -113,6 +113,10 @@ describe("P1.4 viewer/stream-capabilities route discipline", () => {
     );
     expect(body.slice(terminalGate)).toContain('"terminal:attach"');
     expect(body.slice(terminalGate)).toContain("canControl: terminalCanControl");
+    // The terminal grant must not be folded into the desktop rollout flag:
+    // an authorized terminal:attach user keeps PTY typing when the flag is off.
+    expect(body.slice(terminalGate)).not.toContain("streamControlEnabled");
+    expect(body.slice(terminalGate)).not.toContain("shouldGrantStreamControl");
   });
 });
 
