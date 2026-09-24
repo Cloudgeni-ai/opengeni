@@ -31,23 +31,27 @@ type SessionCapabilityCardProps = {
 
 export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   const context = useAppContext();
-  const [registeredId, setRegisteredId] = useState<string | null>(null);
-  if (props.item.setupRequest && !registeredId) {
+  const [registered, setRegistered] = useState<{ id: string; restoreFocus: boolean } | null>(null);
+  const onRegistered = useCallback(
+    (id: string, restoreFocus: boolean) => setRegistered({ id, restoreFocus }),
+    [],
+  );
+  if (props.item.setupRequest && !registered) {
     return (
       <SessionCustomMcpCard
         key={`${props.workspaceId}:${props.item.id}`}
         item={props.item}
         workspaceId={props.workspaceId}
-        onRegistered={setRegisteredId}
+        onRegistered={onRegistered}
       />
     );
   }
-  const item = registeredId
+  const item = registered
     ? {
         ...props.item,
         setupRequest: null,
         capability: {
-          id: registeredId,
+          id: registered.id,
           name: props.item.setupRequest!.name,
           kind: "mcp" as const,
           source: "manual" as const,
@@ -78,6 +82,7 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
       key={`${props.workspaceId}:${props.sessionId}:${capability!.id}`}
       {...props}
       item={item}
+      restoreFocus={registered?.restoreFocus ?? false}
     />
   );
 }
@@ -87,7 +92,8 @@ function ScopedSessionCapabilityCard({
   workspaceId,
   sessionId,
   onConfigured,
-}: SessionCapabilityCardProps) {
+  restoreFocus = false,
+}: SessionCapabilityCardProps & { restoreFocus?: boolean }) {
   const context = useAppContext();
   const refreshGitHub = context.refreshGitHub;
   const recommendation = item.capability!;
@@ -102,6 +108,13 @@ function ScopedSessionCapabilityCard({
   const githubRequestSequence = useRef(0);
   const active = useRef(true);
   const github = recommendation.id === "api:github-app";
+  useEffect(() => {
+    if (!restoreFocus) return;
+    // The review dialog's opener is removed when the new connection card
+    // replaces it. Focus the next actionable control after Radix closes it.
+    const frame = requestAnimationFrame(() => opener.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [restoreFocus]);
   useEffect(() => {
     active.current = true;
     return () => {

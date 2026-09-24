@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AuthNeededItem } from "@opengeni/react";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
@@ -10,7 +10,7 @@ import { SessionCapabilityFrame } from "./session-capability-frame";
 type Props = {
   item: AuthNeededItem;
   workspaceId: string;
-  onRegistered: (id: string) => void;
+  onRegistered: (id: string, restoreFocus: boolean) => void;
 };
 
 /** A proposed URL is untrusted display data until the human submits this form.
@@ -24,7 +24,34 @@ export function SessionCustomMcpCard({ item, workspaceId, onRegistered }: Props)
   const [url, setUrl] = useState(proposal.endpointUrl);
   const [description, setDescription] = useState("");
   const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  useEffect(() => {
+    let active = true;
+    // Read-only lookup lets anyone return to the existing connection card after
+    // an admin adds the server; only a human with manage permission may create it.
+    void context.client
+      .listCapabilities(workspaceId)
+      .then((catalog) => {
+        if (!active) return;
+        const existing = catalog.items.find(
+          (entry) =>
+            entry.kind === "mcp" && entry.endpointUrl === proposal.endpointUrl && !entry.stale,
+        );
+        if (existing) onRegistered(existing.id, expandedRef.current);
+      })
+      .catch(() => {
+        // Submission reads the catalog again and reports any uncertainty.
+      })
+      .finally(() => {
+        if (active) setChecking(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [context.client, workspaceId, proposal.endpointUrl, onRegistered]);
   const canManage = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
@@ -38,7 +65,8 @@ export function SessionCustomMcpCard({ item, workspaceId, onRegistered }: Props)
         Boolean(parsed.hostname) &&
         !parsed.username &&
         !parsed.password &&
-        !parsed.hash
+        !parsed.hash &&
+        !parsed.search
       );
     } catch {
       return false;
@@ -47,7 +75,7 @@ export function SessionCustomMcpCard({ item, workspaceId, onRegistered }: Props)
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy || !canManage || !name.trim() || !validUrl) return;
+    if (busy || checking || !canManage || !name.trim() || !validUrl) return;
     setBusy(true);
     setError(null);
     try {
@@ -57,7 +85,7 @@ export function SessionCustomMcpCard({ item, workspaceId, onRegistered }: Props)
         (entry) => entry.kind === "mcp" && entry.endpointUrl === url.trim() && !entry.stale,
       );
       if (existing) {
-        onRegistered(existing.id);
+        onRegistered(existing.id, true);
         return;
       }
       const created = await context.client.createCapability(workspaceId, {
@@ -67,7 +95,7 @@ export function SessionCustomMcpCard({ item, workspaceId, onRegistered }: Props)
         endpointUrl: url.trim(),
         ...(description.trim() ? { description: description.trim() } : {}),
       });
-      onRegistered(created.id);
+      onRegistered(created.id, true);
     } catch (failure) {
       // Read back before offering a retry: the write may have committed even
       // if the response was lost. Never silently repeat an uncertain POST.
@@ -76,7 +104,7 @@ export function SessionCustomMcpCard({ item, workspaceId, onRegistered }: Props)
           (entry) => entry.kind === "mcp" && entry.endpointUrl === url.trim() && !entry.stale,
         );
         if (matching) {
-          onRegistered(matching.id);
+          onRegistered(matching.id, true);
           return;
         }
       } catch {
@@ -135,7 +163,8 @@ export function SessionCustomMcpCard({ item, workspaceId, onRegistered }: Props)
             aria-describedby={`mcp-url-help-${item.id}`}
           />
           <p id={`mcp-url-help-${item.id}`} className="text-xs text-fg-muted">
-            HTTPS only. Tools on this server may receive data you choose to share.
+            HTTPS only. No query parameters or secrets in the URL; add credentials in the next step.
+            Tools may receive data you choose to share.
           </p>
         </div>
         <div className="grid gap-1.5">
@@ -161,8 +190,11 @@ export function SessionCustomMcpCard({ item, workspaceId, onRegistered }: Props)
           <Button type="button" variant="ghost" onClick={() => setExpanded(false)}>
             Cancel
           </Button>
-          <Button type="submit" disabled={!canManage || !name.trim() || !validUrl || busy}>
-            {busy ? "Adding…" : "Add MCP server"}
+          <Button
+            type="submit"
+            disabled={!canManage || !name.trim() || !validUrl || busy || checking}
+          >
+            {busy ? "Adding…" : checking ? "Checking…" : "Add MCP server"}
           </Button>
         </div>
       </form>

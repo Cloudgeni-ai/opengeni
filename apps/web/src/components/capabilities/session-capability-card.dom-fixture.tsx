@@ -282,10 +282,47 @@ describe("conversation connection card", () => {
         endpointUrl: "https://mcp.example.test/mcp",
       });
       expect(h.host.textContent).toContain("Connect Internal Tools");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 40)));
+      expect(document.activeElement).toBe(button(h.container, "Connect Internal Tools"));
       await act(async () => button(h.container, "Connect Internal Tools").click());
       expect(h.container.textContent).toContain("Add to workspace");
     } finally {
       context.accessContext.workspaceGrants = [];
+      createdCatalogItem = null;
+      await h.close();
+    }
+  });
+
+  test("a viewer returning after an admin adds the proposed server sees the connection action", async () => {
+    createdCatalogItem = CapabilityCatalogItem.parse({
+      id: "mcp:reviewed",
+      kind: "mcp",
+      source: "manual",
+      name: "Internal Tools",
+      endpointUrl: "https://mcp.example.test/mcp",
+      runtime: { available: true, mcpServerId: "reviewed" },
+    });
+    context.accessContext.workspaceGrants = [];
+    context.client.createCapability.mockClear();
+    const suggested = {
+      ...item,
+      id: "custom-mcp-notice-return",
+      capability: null,
+      providerDomain: "mcp.example.test",
+      setupRequest: {
+        kind: "mcp" as const,
+        name: "Internal Tools",
+        endpointUrl: "https://mcp.example.test/mcp",
+        rationale: "Find the requested records.",
+      },
+    } as AuthNeededItem;
+    const h = await render(false, catalogItem, catalogItem, false, "workspace", suggested);
+    try {
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(h.host.textContent).toContain("Connect Internal Tools");
+      expect(h.host.textContent).not.toContain("A workspace admin needs to add this server");
+      expect(context.client.createCapability).not.toHaveBeenCalled();
+    } finally {
       createdCatalogItem = null;
       await h.close();
     }

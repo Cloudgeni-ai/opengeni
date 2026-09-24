@@ -12940,7 +12940,11 @@ export const ToolAuthNeededPayload = z
           .refine((url) => {
             const parsed = new URL(url);
             return (
-              parsed.protocol === "https:" && !parsed.username && !parsed.password && !parsed.hash
+              parsed.protocol === "https:" &&
+              !parsed.username &&
+              !parsed.password &&
+              !parsed.hash &&
+              !parsed.search
             );
           }),
         rationale: z.string().trim().min(1).max(2000),

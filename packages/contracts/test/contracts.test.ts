@@ -816,6 +816,7 @@ describe("contracts", () => {
       "http://mcp.example.test/mcp",
       "https://user:password@mcp.example.test/mcp",
       "https://mcp.example.test/mcp#token",
+      "https://mcp.example.test/mcp?token=secret",
     ]) {
       expect(
         ToolAuthNeededPayload.safeParse({

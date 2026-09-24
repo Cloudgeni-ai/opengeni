@@ -6031,7 +6031,7 @@ function registerCapabilityDiscoveryTools(
     "custom_mcp_setup_request",
     {
       description:
-        "Show a review card for a remote HTTPS MCP server that is not in the workspace catalog. Use only an endpoint supplied by the user or established by reliable documentation; do not invent a URL. The agent cannot add, enable, or contact the server. The authenticated human reviews or edits the URL and completes protected setup. Search the catalog first and do not propose an already available integration.",
+        "Show a review card for a remote HTTPS MCP server that is not in the workspace catalog. Use only an endpoint supplied by the user or established by reliable documentation; do not invent a URL. Never include query parameters or secrets in this URL; the human can edit it in the protected setup form. The agent cannot add, enable, or contact the server. Search the catalog first and do not propose an already available integration.",
       inputSchema: {
         name: z4.string().trim().min(1).max(256),
         endpointUrl: z4
@@ -6041,7 +6041,11 @@ function registerCapabilityDiscoveryTools(
           .refine((url) => {
             const parsed = new URL(url);
             return (
-              parsed.protocol === "https:" && !parsed.username && !parsed.password && !parsed.hash
+              parsed.protocol === "https:" &&
+              !parsed.username &&
+              !parsed.password &&
+              !parsed.hash &&
+              !parsed.search
             );
           }),
         rationale: z4.string().trim().min(1).max(2000),

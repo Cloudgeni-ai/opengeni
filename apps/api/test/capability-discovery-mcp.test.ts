@@ -91,6 +91,15 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         },
       });
       expect(invalid.isError).toBe(true);
+      const secret = await mcp.callTool({
+        name: "custom_mcp_setup_request",
+        arguments: {
+          name: "Internal Tools",
+          endpointUrl: "https://mcp.example.test/mcp?token=secret",
+          rationale: "Read the internal tools.",
+        },
+      });
+      expect(secret.isError).toBe(true);
       const result = await mcp.callTool({
         name: "custom_mcp_setup_request",
         arguments: {
