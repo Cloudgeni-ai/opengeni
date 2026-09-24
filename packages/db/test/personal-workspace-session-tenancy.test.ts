@@ -1182,12 +1182,31 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
     ).rejects.toThrow("Session tenancy request is invalid");
     await shared.admin`update session_history_items set position = ${boundary + 1}
       where session_id = ${sourceSessionId} and position = -10`;
+    // A compacted suffix is not part of either earlier message's copy, even
+    // while the source turn is still executing.
+    await shared.admin`insert into session_history_items
+      (account_id, workspace_id, session_id, turn_id, position, item, active)
+      values (${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${claim.turn.id}, ${boundary + 3},
+        ${shared.admin.json({ type: "message", role: "user", content: "Later secret" })}, false)`;
+    await shared.admin`insert into session_history_items
+      (account_id, workspace_id, session_id, turn_id, position, item)
+      values (${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${claim.turn.id}, ${boundary + 3.5},
+        ${shared.admin.json({ type: "compaction", content: "Later summary" })})`;
+    const activeAnswerFork = await forkSessionContent(client.db, {
+      ...input,
+      operationKey: crypto.randomUUID(),
+    });
+    expect(activeAnswerFork.copiedHistoryItemCount).toBe(prefix.length);
     const userFork = await forkSessionContent(client.db, {
       ...input,
       sourceEventId: claim.turn.triggerEventId!,
       operationKey: crypto.randomUUID(),
     });
     expect(userFork.copiedHistoryItemCount).toBe(prefix.length - 1);
+    await shared.admin`delete from session_history_items where session_id = ${sourceSessionId}
+      and position in (${boundary + 3}, ${boundary + 3.5})`;
     expect(
       await appendSessionHistoryItems(client.db, {
         ...authority,
@@ -1281,6 +1300,73 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
       }),
     ).rejects.toThrow("Session tenancy request is invalid");
     expect(await forkSessionContent(client.db, input)).toEqual({ ...fork, replay: true });
+  }, 180_000);
+
+  test("message forks ignore later compaction, but reject unsafe copied history", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const workspaceId = human.personalWorkspaceId;
+    const sourceSessionId = await ownedSession(human, workspaceId);
+    const turnId = crypto.randomUUID();
+    const userEventId = crypto.randomUUID();
+    const replyEventId = crypto.randomUUID();
+    await shared.admin`insert into session_turns (
+      id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+      status, position, prompt, model, reasoning_effort, sandbox_backend
+    ) values (${turnId}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+      ${userEventId}, 'prefix-compaction-fork-test', 'completed', 1,
+      'Earlier question', 'test-model', 'medium', 'none')`;
+    for (const [index, event] of [
+      { id: userEventId, type: "user.message", text: "Earlier question" },
+      { id: replyEventId, type: "agent.message.completed", text: "Earlier answer" },
+    ].entries()) {
+      await shared.admin`insert into session_events
+        (id, account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+        values (${event.id}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+          ${turnId}, ${index + 1}, ${event.type}, ${shared.admin.json({ text: event.text })})`;
+      await shared.admin`insert into session_history_items
+        (account_id, workspace_id, session_id, turn_id, position, item)
+        values (${human.accountId}, ${workspaceId}, ${sourceSessionId},
+          ${turnId}, ${index + 1}, ${shared.admin.json({
+            type: "message",
+            role: index === 0 ? "user" : "assistant",
+            content: event.text,
+          })})`;
+    }
+    // A later compaction supersedes only the suffix. Neither the inactive row
+    // nor its summary can appear in a fork through the earlier messages.
+    await shared.admin`insert into session_history_items
+      (account_id, workspace_id, session_id, turn_id, position, item, active)
+      values (${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${turnId}, 3, ${shared.admin.json({ type: "message", role: "user", content: "Later secret" })}, false)`;
+    await shared.admin`insert into session_history_items
+      (account_id, workspace_id, session_id, turn_id, position, item)
+      values (${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${turnId}, 3.5, ${shared.admin.json({ type: "compaction", content: "Later summary" })})`;
+    const fork = (sourceEventId: string, operationKey = crypto.randomUUID()) =>
+      forkSessionContent(client!.db, {
+        sourceWorkspaceId: workspaceId,
+        sourceSessionId,
+        actorSubjectId: human.subjectId,
+        destinationWorkspaceId: workspaceId,
+        destinationVisibility: "user_private",
+        workspaceSharedAcknowledged: false,
+        sourceEventId,
+        operationKey,
+      });
+    for (const eventId of [userEventId, replyEventId]) {
+      const idleFork = await fork(eventId);
+      expect(idleFork.copiedHistoryItemCount).toBe(eventId === userEventId ? 1 : 2);
+      const rows = await shared.admin`select item from session_history_items
+        where session_id = ${idleFork.sessionId} order by position`;
+      expect(rows).toHaveLength(idleFork.copiedHistoryItemCount);
+      expect(JSON.stringify(rows)).not.toContain("Later secret");
+      expect(JSON.stringify(rows)).not.toContain("Later summary");
+    }
+    await shared.admin`update session_history_items set active = false
+      where session_id = ${sourceSessionId} and position = 1`;
+    await expect(fork(replyEventId)).rejects.toThrow("Session tenancy request is invalid");
+    await expect(fork(userEventId)).rejects.toThrow("Session tenancy request is invalid");
   }, 180_000);
 
   test("message fork copies the exact prefix and replays the same boundary", async () => {

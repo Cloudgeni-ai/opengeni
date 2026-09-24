@@ -63,6 +63,8 @@ const SQL_ENTRY_POINT_ALLOWLIST = new Set([
   "packages/db/drizzle/0501_session_sharing_execution.sql",
   // Allows active message-prefix copies under the unchanged authority/writer locks.
   "packages/db/drizzle/0502_active_message_boundary_forks.sql",
+  // Check only copied history for compaction when forking at a retained message.
+  "packages/db/drizzle/0513_message_fork_prefix_compaction.sql",
   "packages/db/src/session-tenancy.ts",
   "packages/db/src/provision-roles.ts",
   "packages/db/src/runtime-posture.ts",
