@@ -30,18 +30,26 @@ export const SandboxFileArtifactReceipt = z
   .strict()
   .superRefine((value, context) => {
     const pathSegments = value.sandboxPath.split("/");
+    // This is a receipt, not read authority. The publisher confines the path
+    // against its resolved provider root; receipts preserve that native path.
+    const unc = value.sandboxPath.startsWith("//");
+    const absolute = unc
+      ? /^\/\/[^/]+\/[^/]+\/.+/u.test(value.sandboxPath) && !value.sandboxPath.startsWith("//?/")
+      : value.sandboxPath.startsWith("/") || /^[A-Z]:\//u.test(value.sandboxPath);
     if (
-      !value.sandboxPath.startsWith("/workspace/") ||
-      value.sandboxPath.includes("\0") ||
+      !absolute ||
+      /[\\\u0000-\u001f\u007f]/u.test(value.sandboxPath) ||
       pathSegments.some(
-        (segment, index) => index > 1 && (!segment || segment === "." || segment === ".."),
+        (segment, index) =>
+          index >= (unc ? 2 : 1) && (!segment || segment === "." || segment === ".."),
       ) ||
       pathSegments.at(-1) !== value.filename
     ) {
       context.addIssue({
         code: "custom",
         path: ["sandboxPath"],
-        message: "sandbox path must canonically identify the published filename in /workspace",
+        message:
+          "sandbox path must canonically identify the published filename at an absolute host path",
       });
     }
     if (value.artifact.kind !== "file" || value.artifact.retention.policy !== "workspace_file") {

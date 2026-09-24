@@ -1,12 +1,79 @@
 import { describe, expect, test } from "bun:test";
+import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 
 import {
   sandboxArtifactRelativePath,
+  readSandboxArtifactFile,
   sandboxArtifactSafeFilename,
   sandboxFileContentType,
 } from "../src/sandbox-file-artifacts";
 
 describe("sandbox file artifact paths", () => {
+  test.each(["/workspace", "/home/tester/project", "C:/work/project", "//server/share/project"])(
+    "reads relative and absolute aliases through the same service root %s",
+    async (root) => {
+      const reads: string[] = [];
+      const service = new SandboxChannelAService({
+        workspaceRoot: root,
+        providerPathMode: "workspace-relative",
+        fileReadScope: "machine",
+        session: {
+          async readFile({ path }) {
+            reads.push(path);
+            return Buffer.from("synthetic fixture");
+          },
+        },
+      });
+      const relative = await readSandboxArtifactFile(service, "fixtures/upload.txt", 1024);
+      const absolute = await readSandboxArtifactFile(service, `${root}/fixtures/upload.txt`, 1024);
+      expect(absolute).toEqual(relative);
+      expect(absolute.path).toBe("fixtures/upload.txt");
+      expect(absolute.sandboxPath).toBe(`${root}/fixtures/upload.txt`);
+      expect(Buffer.from(absolute.read.content, "base64").toString()).toBe("synthetic fixture");
+      expect(reads).toEqual(["fixtures/upload.txt", "fixtures/upload.txt"]);
+      await expect(readSandboxArtifactFile(service, "../secret.txt", 1024)).rejects.toThrow();
+      expect(reads).toHaveLength(2);
+    },
+  );
+
+  test("does not bypass a provider's final workspace-escape rejection", async () => {
+    const service = new SandboxChannelAService({
+      workspaceRoot: "/workspace",
+      session: {
+        async readFile() {
+          throw new Error("path resolves outside workspace");
+        },
+      },
+    });
+    await expect(readSandboxArtifactFile(service, "link.txt", 1024)).rejects.toThrow();
+  });
+
+  test.each([
+    ["/home/tester/project", "/home/tester/project/reports/final.pdf"],
+    ["/Users/tester/project", "sandbox:/Users/tester/project/reports/final.pdf"],
+    ["C:/work/project", "sandbox:C:\\work\\project\\reports\\final.pdf"],
+    ["//server/share/project", "\\\\server\\share\\project\\reports\\final.pdf"],
+  ])("uses the active host-native root %s", (root, path) => {
+    expect(sandboxArtifactRelativePath(path, root)).toBe("reports/final.pdf");
+    expect(sandboxArtifactRelativePath("reports/final.pdf", root)).toBe("reports/final.pdf");
+  });
+
+  test("rejects root aliases, siblings, traversal and cross-drive paths", () => {
+    for (const path of [
+      "/workspace/reports/final.pdf",
+      "/home/tester/project-other/final.pdf",
+      "/home/tester/project/../secret.txt",
+      "../secret.txt",
+      "/home/tester/project",
+      "sandbox:/home/tester/project/",
+    ]) {
+      expect(() => sandboxArtifactRelativePath(path, "/home/tester/project")).toThrow();
+    }
+    for (const path of ["D:/work/project/file.txt", "C:secret.txt", "..\\secret.txt"]) {
+      expect(() => sandboxArtifactRelativePath(path, "C:/work/project")).toThrow();
+    }
+  });
+
   test("accepts workspace-relative, absolute workspace, and sandbox-link paths", () => {
     expect(sandboxArtifactRelativePath("reports/final.pdf")).toBe("reports/final.pdf");
     expect(sandboxArtifactRelativePath("/workspace/reports/final.pdf")).toBe("reports/final.pdf");
