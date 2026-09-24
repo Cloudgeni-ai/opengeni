@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 4.0.3
+
+### Patch Changes
+
+- 6de2d5d: Clarify bundled integration guidance with lightweight product choices and actionable credential, deployment, and verification steps.
+
 ## 4.0.2
 
 ### Patch Changes
