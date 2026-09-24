@@ -167,7 +167,13 @@ function OperationalWorkspaceSettingsRoute({
   const workspaceGrant =
     context.accessContext.workspaceGrants.find((grant) => grant.workspaceId === workspaceId) ??
     null;
-  const delegablePermissions = delegableApiKeyPermissions(workspaceGrant?.permissions ?? []);
+  const accountGrant = context.accessContext.accountGrants.find(
+    (grant) => grant.accountId === workspaceGrant?.accountId,
+  );
+  const delegablePermissions = delegableApiKeyPermissions(
+    workspaceGrant?.permissions ?? [],
+    accountGrant?.permissions ?? [],
+  );
   const requestedPermissions = [...selectedPermissions].filter((permission) =>
     delegablePermissions.has(permission),
   );
@@ -598,7 +604,20 @@ function OperationalWorkspaceSettingsRoute({
                 </p>
               </div>
               {canManageApiKeys ? (
-                <Button type="button" size="sm" onClick={() => setCreateKeyOpen(true)}>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => {
+                    setSelectedPermissions(
+                      new Set(
+                        [...defaultApiKeyPermissions].filter((permission) =>
+                          delegablePermissions.has(permission),
+                        ),
+                      ),
+                    );
+                    setCreateKeyOpen(true);
+                  }}
+                >
                   <PlusIcon className="size-3.5" />
                   Create API key
                 </Button>
@@ -754,7 +773,7 @@ function OperationalWorkspaceSettingsRoute({
                     </div>
                     <PermissionGroupPicker
                       groups={apiKeyPermissionGroups()}
-                      selected={selectedPermissions}
+                      selected={new Set(requestedPermissions)}
                       delegable={delegablePermissions}
                       disabled={busy}
                       onToggle={togglePermission}

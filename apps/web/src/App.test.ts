@@ -1147,7 +1147,20 @@ describe("api key permission options", () => {
     const wildcardOnly = delegableApiKeyPermissions(["workspace:admin"]);
     expect(wildcardOnly.has("secrets:read")).toBe(false);
     expect(wildcardOnly).toEqual(
-      new Set(Permission.options.filter((permission) => permission !== "secrets:read")),
+      new Set(
+        Permission.options.filter(
+          (permission) =>
+            ![
+              "secrets:read",
+              "members:manage",
+              "account:read",
+              "account:admin",
+              "workspace:create",
+              "billing:read",
+              "billing:manage",
+            ].includes(permission),
+        ),
+      ),
     );
 
     expect(
