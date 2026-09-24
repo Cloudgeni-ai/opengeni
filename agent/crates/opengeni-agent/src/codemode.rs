@@ -27,8 +27,8 @@ const TOKEN_FILE_ENV: &str = "OPENGENI_CODEMODE_TOKEN_FILE";
 // packages/codemode/test/native-api-contract.test.ts pins this mirror to contracts.
 const API_CONTRACT_HEADER: &str = "x-opengeni-api-contract";
 const API_CONTRACT_REVISION: &str = "2026-09-plugins-and-skills-v1";
-/// Absolute installed binary path exposed only to an attempt-scoped child that
-/// already carries Codemode authority. This avoids every PATH/runtime guess.
+/// Executable path for the exact running binary, exposed only to an
+/// attempt-scoped child that already carries Codemode authority.
 pub const NATIVE_CLIENT_ENV: &str = "OPENGENI_CODEMODE_NATIVE_CLIENT";
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 64 * 1024;
@@ -43,15 +43,29 @@ pub fn expose_native_client(request: &mut ExecRequest) {
     if !request.env.contains_key(URL_ENV) || !request.env.contains_key(TOKEN_ENV) {
         return;
     }
-    let Ok(executable) = std::env::current_exe() else {
+    let Some(executable) = running_native_client_path() else {
         return;
     };
-    let executable = executable.canonicalize().unwrap_or(executable);
     if let Some(executable) = executable.to_str() {
         request
             .env
             .insert(NATIVE_CLIENT_ENV.to_string(), executable.to_string());
     }
+}
+
+fn running_native_client_path() -> Option<PathBuf> {
+    // Linux reports an unlinked running executable as "/path/agent (deleted)".
+    // A child cannot execute that literal path, and the replacement at
+    // /path/agent may be a different release. The proc link remains bound to
+    // this exact running binary until the agent exits.
+    #[cfg(target_os = "linux")]
+    {
+        let running = PathBuf::from(format!("/proc/{}/exe", std::process::id()));
+        if running.is_file() {
+            return Some(running);
+        }
+    }
+    std::env::current_exe().ok()?.canonicalize().ok()
 }
 
 /// Bind an attempt-scoped Codemode exec to the deployment origin of the exact
@@ -1266,6 +1280,16 @@ mod tests {
         let executable = ordinary.env.get(NATIVE_CLIENT_ENV).expect("native client");
         assert!(std::path::Path::new(executable).is_absolute());
         assert!(!executable.contains("attempt-secret"));
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(executable, &format!("/proc/{}/exe", std::process::id()));
+            assert!(std::process::Command::new(executable)
+                .arg("--version")
+                .output()
+                .expect("execute the proc link")
+                .status
+                .success());
+        }
     }
 
     #[test]
