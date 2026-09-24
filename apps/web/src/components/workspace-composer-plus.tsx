@@ -20,24 +20,36 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
   const [catalog, setCatalog] = useState<{
     workspaceId: string;
     client: typeof client;
+    epoch: number;
     items: CapabilityCatalogItem[];
     connections: ConnectionMetadata[] | null;
   } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const scope = useRef({ client, workspaceId });
-  scope.current = { client, workspaceId };
   const lifecycle = useRef({
     revision: 0,
     generation: 0,
     successfulConnectionsRevision: 0,
     deniedConnectionsRevision: 0,
   }).current;
+  const scope = useRef({ client, workspaceId });
+  // Fence cached rows on the first render of a new identity, including A -> B -> A.
+  // Effect cleanup runs after that render and cannot protect it on its own.
+  if (scope.current.client !== client || scope.current.workspaceId !== workspaceId) {
+    lifecycle.generation++;
+    lifecycle.successfulConnectionsRevision = 0;
+    lifecycle.deniedConnectionsRevision = 0;
+    scope.current = { client, workspaceId };
+  }
   const refreshRuntime = useRef(context.refreshWorkspaceMcpServers);
   refreshRuntime.current = context.refreshWorkspaceMcpServers;
   const current =
-    catalog?.workspaceId === workspaceId && catalog.client === client ? catalog : null;
+    catalog?.workspaceId === workspaceId &&
+    catalog.client === client &&
+    catalog.epoch === lifecycle.generation
+      ? catalog
+      : null;
   const deniedMessage =
     "Your workspace access doesn't allow connection discovery. Ask a workspace admin for connection access.";
   const reload = useCallback(async () => {
@@ -72,7 +84,9 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
           denied = true;
           // A failed catalog refresh must not leave the prior account rows visible.
           setCatalog((previous) =>
-            previous?.client === client && previous.workspaceId === workspaceId
+            previous?.client === client &&
+            previous.workspaceId === workspaceId &&
+            previous.epoch === generation
               ? { ...previous, connections: null }
               : previous,
           );
@@ -85,7 +99,9 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
         ) {
           lifecycle.successfulConnectionsRevision = request;
           setCatalog((previous) =>
-            previous?.client === client && previous.workspaceId === workspaceId
+            previous?.client === client &&
+            previous.workspaceId === workspaceId &&
+            previous.epoch === generation
               ? { ...previous, connections: result.connections }
               : previous,
           );
@@ -103,11 +119,14 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
       setCatalog((previous) => ({
         client,
         workspaceId,
+        epoch: generation,
         items: result.items,
         connections: accessDenied
           ? null
           : (connectionResult.connections ??
-            (previous?.client === client && previous.workspaceId === workspaceId
+            (previous?.client === client &&
+            previous.workspaceId === workspaceId &&
+            previous.epoch === generation
               ? previous.connections
               : null)),
       }));

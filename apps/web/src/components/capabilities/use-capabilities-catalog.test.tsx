@@ -310,7 +310,7 @@ describe("useCapabilitiesCatalog", () => {
     container.remove();
   });
 
-  test("an in-flight update cannot replace a row after 403 until a successful list read", async () => {
+  test("pre-403 and denied-period callbacks stay retired after recovery; fresh callbacks work", async () => {
     const pendingUpdate = deferred<ConnectionMetadata>();
     const original = { id: "personal", version: 1 } as ConnectionMetadata;
     const updated = { id: "personal", version: 2 } as ConnectionMetadata;
@@ -354,16 +354,59 @@ describe("useCapabilitiesCatalog", () => {
     expect(latest!.connectionsLoadFailed).toBe(true);
     expect(latest!.connectionsAccessDenied).toBe(true);
 
+    const replaceWhileDenied = latest!.replaceConnection;
     denied = false;
     await act(async () => await latest!.fetchConnections());
     expect(latest!.connections).toEqual([recovered]);
     expect(latest!.connectionsAccessDenied).toBe(false);
     await act(async () => {
       replaceFromPendingUpdate(updated);
+      replaceWhileDenied(appended);
+    });
+    expect(latest!.connections).toEqual([recovered]);
+    await act(async () => {
       latest!.replaceConnection(appended);
     });
+    expect(latest!.connections).toEqual([recovered, appended]);
+
+    await act(async () => latest!.replaceConnection(updated));
     expect(latest!.connections).toEqual([updated, appended]);
 
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("a transient failure does not retire a pending mutation without a confirmed denial", async () => {
+    const pendingUpdate = deferred<ConnectionMetadata>();
+    const cached = { id: "cached" } as ConnectionMetadata;
+    const updated = { id: "updated" } as ConnectionMetadata;
+    let fail = false;
+    context.client = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async () => {
+        if (fail) throw { status: 503 };
+        return [cached];
+      },
+    } as unknown as OpenGeniBrowserClient;
+    let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+    function Harness() {
+      latest = useCapabilitiesCatalog("workspace-a");
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Harness />));
+    await act(async () => await latest!.fetchConnections());
+    const mutation = pendingUpdate.promise.then(latest!.replaceConnection);
+    fail = true;
+    await act(async () => await latest!.fetchConnections());
+    expect(latest!.connections).toEqual([cached]);
+    await act(async () => {
+      pendingUpdate.resolve(updated);
+      await mutation;
+    });
+    expect(latest!.connections).toEqual([cached, updated]);
     await act(async () => root.unmount());
     container.remove();
   });

@@ -112,6 +112,8 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
   const connectionRevision = useRef(0);
   const successfulConnectionRevision = useRef(0);
   const deniedConnectionRevision = useRef(0);
+  const mutationAuthorityEpoch = useRef(0);
+  const callbackAuthorityEpoch = mutationAuthorityEpoch.current;
   const isCurrentScope = () => scopeRef.current.epoch === epoch;
   // No effect-time reset: the first render under a different principal must
   // already be safe, and an old request must not clear freshly loaded rows.
@@ -141,6 +143,10 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
         request > deniedConnectionRevision.current &&
         request > successfulConnectionRevision.current
       ) {
+        if (deniedConnectionRevision.current > successfulConnectionRevision.current) {
+          // Callbacks created while access was denied also predate this recovery.
+          mutationAuthorityEpoch.current++;
+        }
         successfulConnectionRevision.current = request;
         update((current) => ({
           ...current,
@@ -159,6 +165,8 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
         request > deniedConnectionRevision.current
       ) {
         deniedConnectionRevision.current = request;
+        // A callback issued before the 403 must remain retired after recovery.
+        mutationAuthorityEpoch.current++;
         update((current) => ({
           ...current,
           connections: null,
@@ -226,7 +234,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
     connectionsAccessDenied: visible.connectionsAccessDenied,
     replaceConnection: (updated) =>
       update((current) =>
-        current.connectionsAccessDenied
+        callbackAuthorityEpoch !== mutationAuthorityEpoch.current || current.connectionsAccessDenied
           ? current // An in-flight update is not a new successful list read.
           : {
               ...current,

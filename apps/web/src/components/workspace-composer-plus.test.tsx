@@ -301,3 +301,112 @@ test("a late denial from a replaced client cannot mask the current composer", as
   await act(async () => root.unmount());
   container.remove();
 });
+
+test("A -> B -> A masks cached composer status before the new A read and fences old requests", async () => {
+  const entry = {
+    id: "mcp:slack",
+    name: "Slack",
+    kind: "mcp",
+    enabled: true,
+    runtime: { available: true, mcpServerId: "slack" },
+    lifecycle: { readiness: "ready" },
+    connectionRef: { connectionId: "connection-1", providerDomain: "slack.com", kind: "oauth2" },
+  } as CapabilityCatalogItem;
+  const connection = {
+    id: "connection-1",
+    providerDomain: "slack.com",
+    subjectId: null,
+    status: "active",
+  } as ConnectionMetadata;
+  const staleA = deferred<ConnectionMetadata[]>();
+  const freshA = deferred<ConnectionMetadata[]>();
+  const staleB = deferred<ConnectionMetadata[]>();
+  let aReads = 0;
+  const clientA = {
+    listCapabilities: async () => ({ items: [entry] }),
+    listConnections: async () => {
+      aReads++;
+      return aReads === 1 ? [connection] : aReads === 2 ? staleA.promise : freshA.promise;
+    },
+    catalogAssetUrl: () => null,
+  } as unknown as OpenGeniBrowserClient;
+  const clientB = {
+    listCapabilities: async () => ({ items: [entry] }),
+    listConnections: async () => staleB.promise,
+    catalogAssetUrl: () => null,
+  } as unknown as OpenGeniBrowserClient;
+  const props = {
+    workspaceId: "workspace-a",
+    servers: [],
+    firstPartyTools: [],
+    fileUploadsEnabled: false,
+    onToolSelectionChange: () => {},
+  } as unknown as ComponentProps<typeof WorkspaceComposerPlus>;
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  context.client = clientA;
+  await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+  expect(composer!.servers[0]?.connectionStatus).toBe("ready");
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  expect(aReads).toBe(2);
+
+  context.client = clientB;
+  await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+  expect(composer!.servers[0]?.connectionStatus).toBeUndefined();
+  context.client = clientA;
+  await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+  expect(aReads).toBe(3);
+  expect(composer!.servers[0]?.connectionStatus).toBeUndefined();
+
+  await act(async () => {
+    staleA.resolve([connection]);
+    staleB.reject({ status: 403 });
+    await Bun.sleep(0);
+  });
+  expect(composer!.servers[0]?.connectionStatus).toBeUndefined();
+  expect(composer!.connectorActions?.error).toBeNull();
+  await act(async () => {
+    freshA.resolve([connection]);
+    await Bun.sleep(0);
+  });
+  expect(composer!.servers[0]?.connectionStatus).toBe("ready");
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("a new identity's transient connection failure does not inherit another identity's denial", async () => {
+  const clientA = {
+    listCapabilities: async () => ({ items: [] }),
+    listConnections: async () => {
+      throw { status: 403 };
+    },
+    catalogAssetUrl: () => null,
+  } as unknown as OpenGeniBrowserClient;
+  const clientB = {
+    listCapabilities: async () => ({ items: [] }),
+    listConnections: async () => {
+      throw { status: 503 };
+    },
+    catalogAssetUrl: () => null,
+  } as unknown as OpenGeniBrowserClient;
+  const props = {
+    workspaceId: "workspace-a",
+    servers: [],
+    firstPartyTools: [],
+    fileUploadsEnabled: false,
+    onToolSelectionChange: () => {},
+  } as unknown as ComponentProps<typeof WorkspaceComposerPlus>;
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  context.client = clientA;
+  await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+  expect(composer!.connectorActions?.error).toContain("doesn't allow connection discovery");
+  context.client = clientB;
+  await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+  expect(composer!.connectorActions?.error).toContain("couldn't be checked");
+  expect(composer!.connectorActions?.error).not.toContain("doesn't allow connection discovery");
+  await act(async () => root.unmount());
+  container.remove();
+});
