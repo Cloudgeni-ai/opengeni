@@ -141,21 +141,33 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
     );
     if (failedSessionVariableSetAttach) {
-      expect(sourceContract.latestMigration).toBe("0514_failed_session_variable_set_attach.sql");
+      expect(sourceContract.latestMigration).toBe(
+        sourceContract.migrations.some(
+          (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+        )
+          ? "0515_autonomous_learning_defaults.sql"
+          : "0514_failed_session_variable_set_attach.sql",
+      );
       expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
     }
     // Keep the published-history assertions below scoped to their existing
     // migration range; the new forward migration is checked explicitly above.
-    const completeSourceContract = failedSessionVariableSetAttach
+    let completeSourceContract = failedSessionVariableSetAttach
       ? {
           ...sourceContract,
           fileCount: sourceContract.fileCount - 1,
-          latestMigration: "0513_message_fork_prefix_compaction.sql",
+          latestMigration:
+            sourceContract.latestMigration === "0515_autonomous_learning_defaults.sql"
+              ? sourceContract.latestMigration
+              : "0513_message_fork_prefix_compaction.sql",
           migrations: sourceContract.migrations.filter(
             (migration) => migration.path !== "0514_failed_session_variable_set_attach.sql",
           ),
         }
       : sourceContract;
+    const autonomousLearningDefaults = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+    );
     const backgroundCommandText = completeSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
     );
@@ -413,6 +425,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (autonomousLearningDefaults ? 1 : 0) +
         (messageForkPrefixCompaction ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
@@ -700,7 +713,22 @@ describe("release schema contract", () => {
       ...(messageForkPrefixCompaction
         ? { latestMigration: "0513_message_fork_prefix_compaction.sql" }
         : {}),
+      ...(autonomousLearningDefaults
+        ? { latestMigration: "0515_autonomous_learning_defaults.sql" }
+        : {}),
     });
+    if (autonomousLearningDefaults) {
+      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+        path: "0515_autonomous_learning_defaults.sql",
+        deploymentMode: "rolling",
+      });
+      completeSourceContract = {
+        ...completeSourceContract,
+        migrations: completeSourceContract.migrations.filter(
+          (migration) => migration.path !== "0515_autonomous_learning_defaults.sql",
+        ),
+      };
+    }
     expect(
       completeSourceContract.migrations.at(
         -1 -
@@ -2023,6 +2051,9 @@ describe("release schema contract", () => {
     const failedSessionVariableSetAttach = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
     );
+    const autonomousLearningDefaults = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+    );
     const controlRevisionFrontier = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -2648,6 +2679,7 @@ describe("release schema contract", () => {
       "0512_insights_fact_reads_hash_join.sql",
       "0513_message_fork_prefix_compaction.sql",
       "0514_failed_session_variable_set_attach.sql",
+      "0515_autonomous_learning_defaults.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -3241,8 +3273,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0514_failed_session_variable_set_attach.sql",
       };
+    if (autonomousLearningDefaults)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0515_autonomous_learning_defaults.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (autonomousLearningDefaults ? 1 : 0) +
         (failedSessionVariableSetAttach ? 1 : 0) +
         (messageForkPrefixCompaction ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
@@ -3735,6 +3773,9 @@ describe("release schema contract", () => {
         : {}),
       ...(failedSessionVariableSetAttach
         ? { latestMigration: "0514_failed_session_variable_set_attach.sql" }
+        : {}),
+      ...(autonomousLearningDefaults
+        ? { latestMigration: "0515_autonomous_learning_defaults.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(

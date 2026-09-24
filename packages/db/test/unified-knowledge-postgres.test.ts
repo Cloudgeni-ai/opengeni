@@ -260,6 +260,43 @@ describe("unified Knowledge storage", () => {
     ).toEqual({});
   });
 
+  test("unsaved workspace and personal policies are automatic; saved review and off still inherit", async () => {
+    const f = await fixture();
+    const automatic = {
+      knowledge: "automatic",
+      instructions: "automatic",
+      skills: "automatic",
+    } as const;
+    for (const scope of ["workspace", "personal"] as const) {
+      expect(await getAgentLearningSettings(client.db, f.human, scope)).toMatchObject({
+        version: 0,
+        settings: automatic,
+      });
+    }
+    const initial = await attempt(f, null);
+    expect((await freezeAgentLearningPolicy(client.db, initial.agent)).effective).toEqual(
+      automatic,
+    );
+    const saved = { knowledge: "off", instructions: "review_first", skills: "off" } as const;
+    await saveAgentLearningSettings(client.db, f.human, {
+      scope: "workspace",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 0,
+      settings: saved,
+    });
+    expect((await getAgentLearningSettings(client.db, f.human, "workspace")).settings).toEqual(
+      saved,
+    );
+    expect((await freezeAgentLearningPolicy(client.db, initial.agent)).effective).toEqual(
+      automatic,
+    );
+    const subsequent = await attempt(f, null);
+    expect((await freezeAgentLearningPolicy(client.db, subsequent.agent)).effective).toEqual(saved);
+    expect((await getAgentLearningSettings(client.db, f.human, "personal")).settings).toEqual(
+      automatic,
+    );
+  });
+
   for (const kind of ["background_command_result", "session_wait_timeout"] as const) {
     test(`review reliability: ${kind} continuation preserves the accepted policy in every category`, async () => {
       const f = await fixture();

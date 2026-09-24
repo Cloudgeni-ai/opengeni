@@ -87,8 +87,11 @@ See [product integration](/guides/integrate-your-product#choose-agent-access-and
 | Category               | Default      | What changes                               |
 | ---------------------- | ------------ | ------------------------------------------ |
 | Knowledge              | Automatic    | Retained sources, findings and collections |
-| Workspace instructions | Review first | Short rules composed into agent prompts    |
-| Skills                 | Review first | Reusable procedures loaded when relevant   |
+| Workspace instructions | Automatic    | Short rules composed into agent prompts    |
+| Skills                 | Automatic    | Reusable procedures loaded when relevant   |
+
+These initial defaults do not overwrite saved workspace or personal choices,
+chat or scheduled-task overrides, or policies already accepted by a running turn.
 
 Each category supports **Automatic**, **Review first** and **Off**. Workspace or
 personal defaults apply unless a chat or scheduled task overrides that category.
