@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { useState, type ReactNode } from "react";
 import { NewSessionRealtimeControl } from "@opengeni/react/realtime";
 import { ComposerMobilePlus } from "../src/components/composer-mobile-plus";
+import { NewSessionDraftSyncNotice } from "../src/components/new-session-draft-sync-notice";
 import { ModelPicker } from "../src/components/pickers";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import {
@@ -136,6 +137,9 @@ function Fixture() {
             </>
           }
         />
+        {newSession && new URLSearchParams(location.search).has("sync-conflict") ? (
+          <NewSessionDraftSyncNotice />
+        ) : null}
         {sent ? <p role="status">Preview only: Send was pressed.</p> : null}
       </main>
     </TooltipProvider>

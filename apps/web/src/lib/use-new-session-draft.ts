@@ -49,7 +49,7 @@ export type UseNewSessionDraftResult = {
   error: Error | null;
   flush: () => Promise<FlushedNewSessionDraft | null>;
   /** Send the visible snapshot, rebasing a stale draft revision without replacing the composer. */
-  flushForSend: () => Promise<FlushedNewSessionDraft | null>;
+  flushForSend: (snapshot?: NewSessionDraftEditable) => Promise<FlushedNewSessionDraft | null>;
   isCurrentSignature: (signature: string) => boolean;
   /**
    * Fence the exact acknowledged snapshot after session creation consumes it,
@@ -57,6 +57,7 @@ export type UseNewSessionDraftResult = {
    */
   acknowledgeConsumed: (
     flushed: FlushedNewSessionDraft,
+    visibleSignature?: string,
   ) => Promise<AcknowledgeConsumedNewSessionDraftResult | null>;
   reload: () => Promise<void>;
   /** Surface a create-time OCC rejection through the ordinary draft recovery UI. */
@@ -383,38 +384,41 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     return await persistSnapshot(cloneEditable(valueRef.current));
   }, [persistSnapshot]);
 
-  const flushForSend = useCallback(async (): Promise<FlushedNewSessionDraft | null> => {
-    if (loadingRef.current || !draftRef.current) return null;
-    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
-    autosaveTimer.current = null;
-    const snapshot = cloneEditable(valueRef.current);
-    const generation = targetGeneration.current;
-    // A sibling can save between our read and write. Retry a bounded number of
-    // times; only the explicit Send may choose the visible snapshot over it.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      if (generation !== targetGeneration.current) return null;
-      if (conflictRef.current) {
-        await saveChain.current;
-        try {
-          const remote = await readRemote();
-          if (!remote || generation !== targetGeneration.current) return null;
-          draftRef.current = remote.draft;
-          lastSavedSignature.current = draftSignature(remote.editable);
-          passiveProjectionSignature.current = null;
-          setDraft(remote.draft);
-          setCurrentConflict(null);
-          setError(null);
-        } catch (cause) {
-          if (generation === targetGeneration.current) setError(asError(cause));
-          return null;
+  const flushForSend = useCallback(
+    async (sendSnapshot?: NewSessionDraftEditable): Promise<FlushedNewSessionDraft | null> => {
+      if (loadingRef.current || !draftRef.current) return null;
+      if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+      autosaveTimer.current = null;
+      const snapshot = cloneEditable(sendSnapshot ?? valueRef.current);
+      const generation = targetGeneration.current;
+      // A sibling can save between our read and write. Retry a bounded number of
+      // times; only the explicit Send may choose the visible snapshot over it.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (generation !== targetGeneration.current) return null;
+        if (conflictRef.current) {
+          await saveChain.current;
+          try {
+            const remote = await readRemote();
+            if (!remote || generation !== targetGeneration.current) return null;
+            draftRef.current = remote.draft;
+            lastSavedSignature.current = draftSignature(remote.editable);
+            passiveProjectionSignature.current = null;
+            setDraft(remote.draft);
+            setCurrentConflict(null);
+            setError(null);
+          } catch (cause) {
+            if (generation === targetGeneration.current) setError(asError(cause));
+            return null;
+          }
         }
+        const flushed = await persistSnapshot(snapshot);
+        if (flushed) return flushed;
+        if (!conflictRef.current) return null;
       }
-      const flushed = await persistSnapshot(snapshot);
-      if (flushed) return flushed;
-      if (!conflictRef.current) return null;
-    }
-    return null;
-  }, [persistSnapshot, readRemote, setCurrentConflict]);
+      return null;
+    },
+    [persistSnapshot, readRemote, setCurrentConflict],
+  );
 
   const isCurrentSignature = useCallback(
     (signature: string): boolean => draftSignature(valueRef.current) === signature,
@@ -424,6 +428,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   const acknowledgeConsumed = useCallback(
     async (
       flushed: FlushedNewSessionDraft,
+      visibleSignature = flushed.signature,
     ): Promise<AcknowledgeConsumedNewSessionDraftResult | null> => {
       const current = draftRef.current;
       if (
@@ -490,7 +495,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           lastSavedSignature.current = draftSignature(remote.editable);
           passiveProjectionSignature.current = null;
           setDraft(remote.draft);
-          if (signature === flushed.signature) {
+          if (signature === visibleSignature) {
             // The server now owns the safe seed. Keep the post-create composer
             // UI-only until the next page load instead of persisting the
             // route's deliberate clear as a new empty draft.

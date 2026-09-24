@@ -8,7 +8,9 @@ describe("session control surface architecture", () => {
   test("new-session Send stays available when background draft saving conflicts", async () => {
     const route = await source("routes/sessions-index.tsx");
     expect(route).toContain("draftConflict: null,");
-    expect(route).toContain("newSessionDraft.flushForSend()");
+    expect(route).toContain("newSessionDraft.flushForSend(submittedSnapshot)");
+    expect(route).toContain("<NewSessionDraftSyncNotice />");
+    expect(route).toContain("newSessionDraft.isCurrentSignature(visibleSignature)");
     expect(route).not.toContain("newSessionDraft.conflict ||");
     expect(route).not.toContain("!newSessionDraft.conflict &&");
     expect(route).not.toContain("newSessionDraft.conflict !== null ||");

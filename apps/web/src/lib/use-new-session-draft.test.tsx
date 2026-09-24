@@ -1050,6 +1050,36 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
+  test("Send retries the clicked snapshot even when the user edits during a create conflict", async () => {
+    let authoritative = remote(1);
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => authoritative,
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          if (request.expectedRevision !== authoritative.revision) throw conflict();
+          authoritative = remote(authoritative.revision + 1, request);
+          return authoritative;
+        },
+      }),
+    );
+    await flush();
+    const clicked = editable({ text: "sent at click" });
+    await actRun(() => hook.result.current.setValue(clicked));
+    const first = await actRun(() => hook.result.current.draft.flushForSend(clicked));
+    expect(first?.revision).toBe(2);
+    authoritative = remote(3, { text: "another tab" });
+    await actRun(() => hook.result.current.draft.captureConflict(conflict()));
+    await actRun(() => hook.result.current.setValue(editable({ text: "typed while sending" })));
+
+    const retried = await actRun(() => hook.result.current.draft.flushForSend(clicked));
+    expect(retried?.revision).toBe(4);
+    expect(requests.at(-1)).toMatchObject({ expectedRevision: 3, text: "sent at click" });
+    expect(hook.result.current.value.text).toBe("typed while sending");
+    await hook.unmount();
+  });
+
   test("Send stops retrying persistent draft conflicts and keeps the visible message", async () => {
     let reads = 0;
     let saves = 0;
@@ -1273,6 +1303,66 @@ describe("useNewSessionDraft", () => {
     expect(preserved?.revision).toBe(4);
     expect(requests[1]).toMatchObject({ expectedRevision: 3, text: "keep this local" });
     expect(hook.result.current.draft.conflict).toBeNull();
+    await hook.unmount();
+  });
+
+  test("unchanged sent text never overwrites a newer sibling draft after create", async () => {
+    const requests: SaveNewSessionDraftRequest[] = [];
+    let reads = 0;
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => {
+          reads += 1;
+          return reads === 1 ? remote(0) : remote(3, { text: "sibling's next draft" });
+        },
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          return remote(request.expectedRevision + 1, request);
+        },
+      }),
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "already sent" })));
+    const flushed = await actRun(() => hook.result.current.draft.flushForSend());
+    if (!flushed) throw new Error("Expected the submitted draft to flush");
+
+    const acknowledged = await actRun(() => hook.result.current.draft.acknowledgeConsumed(flushed));
+    expect(acknowledged).toBeNull();
+    expect(hook.result.current.draft.isCurrentSignature(flushed.signature)).toBe(true);
+    expect(requests).toHaveLength(1);
+    // The route navigates to the accepted session without rebasing the sent
+    // text over the sibling's newer draft.
+    await hook.unmount();
+  });
+
+  test("an effective launch policy can differ from unchanged visible controls", async () => {
+    const requests: SaveNewSessionDraftRequest[] = [];
+    let reads = 0;
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => {
+          reads += 1;
+          return reads === 1 ? remote(0) : remote(2, { model: "effective-model" });
+        },
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          return remote(request.expectedRevision + 1, request);
+        },
+      }),
+    );
+    await flush();
+    const visible = editable({ text: "launch message" });
+    await actRun(() => hook.result.current.setValue(visible));
+    const flushed = await actRun(() =>
+      hook.result.current.draft.flushForSend({ ...visible, model: "effective-model" }),
+    );
+    if (!flushed) throw new Error("Expected the submitted draft to flush");
+    const acknowledged = await actRun(() =>
+      hook.result.current.draft.acknowledgeConsumed(flushed, stableJson(visible)),
+    );
+
+    expect(acknowledged).toEqual({ kind: "consumed" });
+    expect(requests).toHaveLength(1);
     await hook.unmount();
   });
 

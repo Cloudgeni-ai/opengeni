@@ -32,7 +32,7 @@ import {
   useWorkspaceSessions,
   type ComposerState,
 } from "@opengeni/react";
-import { resolveWorkspaceSessionToolDefaults } from "@opengeni/contracts";
+import { resolveWorkspaceSessionToolDefaults, stableJson } from "@opengeni/contracts";
 import { MACHINES_COMPOSER_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import { NewSessionRealtimeControl, useRealtimeModelSelection } from "@opengeni/react/realtime";
 import {
@@ -72,6 +72,7 @@ import { BillingClassMark } from "@/components/billing-class-mark";
 import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { NewSessionStarters } from "@/components/new-session-starters";
+import { NewSessionDraftSyncNotice } from "@/components/new-session-draft-sync-notice";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
 import { SessionVisibilityPicker } from "@/components/session-visibility-picker";
 import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
@@ -1091,6 +1092,15 @@ function SessionsIndexRouteContent({
       const model = policy?.model ?? persistedValue.model;
       const reasoningEffort = policy?.effort ?? persistedValue.reasoningEffort;
       const latencyMode = policy?.latency ?? persistedValue.latencyMode;
+      // One Send always refers to one visible snapshot, even if a sibling edit
+      // forces a draft save or create retry while the user continues typing.
+      const visibleSignature = stableJson(persistedValue);
+      const submittedSnapshot: NewSessionDraftEditable = structuredClone({
+        ...persistedValue,
+        model,
+        reasoningEffort,
+        latencyMode,
+      });
       setSubmitting(true);
       try {
         return await runNewSessionRouteSubmission({
@@ -1102,7 +1112,7 @@ function SessionsIndexRouteContent({
             // lost on navigate, but do not consume it — text stays for later.
             if (realtimeModel) {
               for (let attempt = 0; attempt < 3; attempt += 1) {
-                const flushed = await newSessionDraft.flushForSend();
+                const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
                 if (!flushed) {
                   toast.error("Couldn't save the draft", {
                     description:
@@ -1122,7 +1132,7 @@ function SessionsIndexRouteContent({
                   {
                     text: "",
                     resources: [],
-                    tools: persistedValue.tools,
+                    tools: submittedSnapshot.tools,
                     model,
                     reasoningEffort,
                     latencyMode,
@@ -1165,9 +1175,9 @@ function SessionsIndexRouteContent({
               return null;
             }
 
-            const submittedResources = persistedValue.resources;
+            const submittedResources = submittedSnapshot.resources;
             for (let attempt = 0; attempt < 3; attempt += 1) {
-              const flushed = await newSessionDraft.flushForSend();
+              const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
               if (!flushed) {
                 toast.error("Couldn't save the draft", {
                   description:
@@ -1187,7 +1197,7 @@ function SessionsIndexRouteContent({
                 {
                   text,
                   resources: submittedResources,
-                  tools: persistedValue.tools,
+                  tools: submittedSnapshot.tools,
                   model,
                   reasoningEffort,
                   latencyMode,
@@ -1224,7 +1234,10 @@ function SessionsIndexRouteContent({
               return {
                 sessionId: created.id,
                 settleDraft: async () => {
-                  const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
+                  const acknowledged = await newSessionDraft.acknowledgeConsumed(
+                    flushed,
+                    visibleSignature,
+                  );
                   if (acknowledged?.kind === "consumed") {
                     setMessage("");
                     setDraft(emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend));
@@ -1237,6 +1250,11 @@ function SessionsIndexRouteContent({
                     !acknowledged ||
                     !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
                   ) {
+                    // The message was already accepted. If there is no newer
+                    // local edit, leave a sibling's later draft untouched.
+                    if (!acknowledged && newSessionDraft.isCurrentSignature(visibleSignature)) {
+                      return true;
+                    }
                     const preserved = await newSessionDraft.flushForSend();
                     if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
                       return false;
@@ -1617,6 +1635,8 @@ function SessionsIndexRouteContent({
               />
             }
           />
+
+          {newSessionDraft.conflict ? <NewSessionDraftSyncNotice /> : null}
 
           {connectionAccounts.loading ||
           connectionAccounts.error ||

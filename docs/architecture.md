@@ -1150,7 +1150,9 @@ The web new-session composer (`apps/web/src/lib/use-new-session-draft.ts` and
 `apps/web/src/routes/sessions-index.tsx`) keeps the server's exact draft revision
 fence. Explicit Send rebases the visible snapshot on a stale draft revision and
 retries a create-time draft conflict with a bounded number of attempts; routine
-autosave never silently overwrites a sibling client on conflict.
+autosave never silently overwrites a sibling client on conflict. A post-create
+settlement preserves only a genuinely newer local edit, never the already-sent
+snapshot over another client's subsequent draft.
 
 Canonical: `apps/api/src/app.ts`, `apps/api/src/routes/`, and
 `packages/core/src/`.
