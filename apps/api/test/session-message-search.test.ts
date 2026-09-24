@@ -261,13 +261,14 @@ test("selected preview returns only exact visible text through the 12,000 UTF-16
     "a\u0000\ud800" + "b".repeat(11_997),
   ];
   for (const [index, text] of texts.entries()) {
+    const sequence = index + 4;
     const canonical = index === 4;
     const [row] = await shared.admin<{ id: string }[]>`
       insert into session_events (account_id, workspace_id, session_id, sequence, type, payload, payload_codec_version)
-      values (${f.grant.accountId}, ${f.grant.workspaceId}, ${f.session.id}, ${index + 10}, 'agent.message.completed',
+      values (${f.grant.accountId}, ${f.grant.workspaceId}, ${f.session.id}, ${sequence}, 'agent.message.completed',
         ${shared.admin.json(canonical ? toPostgresLosslessJson({ text, modelContext: "secret" }) : { text, modelContext: "secret" })},
         ${canonical ? 1 : null}) returning id`;
-    const response = await request(row!.id, index + 10);
+    const response = await request(row!.id, sequence);
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body).toEqual(
@@ -300,9 +301,9 @@ test("selected preview rejects stale, duplicate, non-message, malformed and unau
   }
   expect((await read("not-a-uuid", "2")).status).toBe(400);
   for (const [sequence, type, payload, duplicate] of [
-    [20, "agent.toolCall.output", { text: "tool" }, false],
-    [21, "agent.message.completed", { text: "duplicate" }, true],
-    [22, "user.message", { text: { nested: "no scalar" } }, false],
+    [4, "agent.toolCall.output", { text: "tool" }, false],
+    [5, "agent.message.completed", { text: "duplicate" }, true],
+    [6, "user.message", { text: { nested: "no scalar" } }, false],
   ] as const) {
     const [row] = await shared.admin<{ id: string }[]>`
       insert into session_events (account_id, workspace_id, session_id, sequence, type, payload, duplicate_of_event_id)
