@@ -72,7 +72,7 @@ export const Film: React.FC<{ withAudio?: boolean }> = ({ withAudio = true }) =>
           />
         </div>
       )}
-      {withAudio && <Audio src={staticFile("audio/mix.wav")} />}
+      {withAudio && <Audio src={staticFile("audio/original-score.m4a")} />}
     </AbsoluteFill>
   );
 };
