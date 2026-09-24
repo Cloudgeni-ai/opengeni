@@ -1028,6 +1028,7 @@ export async function summarizeForCompaction(
     model?: string;
     promptCacheKey?: string;
     systemInstructions?: string;
+    preparedRequest?: Omit<ModelRequest, "input">;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
   } = {},
 ): Promise<string> {
@@ -1065,27 +1066,44 @@ export async function summarizeForCompaction(
   // Use the same SDK Responses adapter as the real agent call. It converts the
   // structured AgentInputItems (callId/providerData/etc.) to provider wire
   // items without flattening tool history into a fake user transcript.
-  const request: ModelRequest = {
-    systemInstructions: options.systemInstructions ?? "",
-    input: input.map(detachCompactionResponseItemIdentity) as AgentInputItem[],
-    modelSettings: {
-      maxTokens,
-      // Azure can select a historical tool despite empty schemas. Keep this
-      // verified policy off subscription/gateway transports with other contracts.
-      ...(provider.wireProfile === "azure-openai" ? { toolChoice: "none" as const } : {}),
-      // Azure rejects store:false; the Codex subscription transport enforces
-      // it independently. The OpenAI platform path remains explicitly storeless.
-      ...(settings.openaiProvider === "azure" ? {} : { store: false }),
-      ...(options.promptCacheKey
-        ? { providerData: { prompt_cache_key: options.promptCacheKey } }
-        : {}),
-    },
-    tools: [],
-    toolsExplicitlyProvided: true,
-    outputType: "text",
-    handoffs: [],
-    tracing: false,
-  };
+  const request: ModelRequest = options.preparedRequest
+    ? {
+        ...options.preparedRequest,
+        // The history copy is still portable: dependent stored response ids are
+        // removed, and the final checkpoint instruction is appended by the caller.
+        input: input.map(detachCompactionResponseItemIdentity) as AgentInputItem[],
+        modelSettings: {
+          ...options.preparedRequest.modelSettings,
+          maxTokens,
+          // Retain schemas for the warm prefix without letting the checkpoint
+          // model select or execute a tool (including a historical Azure tool).
+          toolChoice: "none",
+          ...(settings.openaiProvider === "azure" ? {} : { store: false }),
+        },
+        outputType: "text",
+        tracing: false,
+      }
+    : {
+        systemInstructions: options.systemInstructions ?? "",
+        input: input.map(detachCompactionResponseItemIdentity) as AgentInputItem[],
+        modelSettings: {
+          maxTokens,
+          // Azure can select a historical tool despite empty schemas. Keep this
+          // verified policy off subscription/gateway transports with other contracts.
+          ...(provider.wireProfile === "azure-openai" ? { toolChoice: "none" as const } : {}),
+          // Azure rejects store:false; the Codex subscription transport enforces
+          // it independently. The OpenAI platform path remains explicitly storeless.
+          ...(settings.openaiProvider === "azure" ? {} : { store: false }),
+          ...(options.promptCacheKey
+            ? { providerData: { prompt_cache_key: options.promptCacheKey } }
+            : {}),
+        },
+        tools: [],
+        toolsExplicitlyProvided: true,
+        outputType: "text",
+        handoffs: [],
+        tracing: false,
+      };
   let response: unknown;
   try {
     response = await new CompactionResponsesModel(client, model, provider).fetchResponse(request);

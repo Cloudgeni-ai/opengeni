@@ -531,16 +531,16 @@ async function summarizeWithCodexOverflowTrimming(
 }> {
   // Codex's estimator is intentionally coarse. Keep the explicit checkpoint
   // request below both the effective input window and the raw window minus the
-  // requested summary, then leave 15% estimator headroom. This changes only the
-  // temporary summarizer input; durable active history remains untouched until
-  // applyContextCompaction succeeds under the attempt fence.
+  // requested summary. Preserve the full portable history copy on the first
+  // call whenever it fits; only trim further after an actual provider overflow.
+  // Durable active history remains untouched until applyContextCompaction.
   const summaryAwareBudget = Math.max(0, settings.contextWindowTokens - SUMMARY_BUFFER_TOKENS);
   const configuredInputBudget = contextInputBudgetTokens(settings);
   const structuralBudget = Math.min(
     configuredInputBudget > 0 ? configuredInputBudget : summaryAwareBudget,
     summaryAwareBudget,
   );
-  const initialBudget = Math.floor(structuralBudget * 0.85);
+  const initialBudget = structuralBudget;
   let preparation = prepareCompactionPromptInput(activeHistory, initialBudget);
   try {
     return {
