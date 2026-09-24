@@ -14,25 +14,13 @@ export function matchAtOffset(text: string, query: string, offset: number): numb
 
 /** Search hit excerpts are authoritative until the exact retained event has been revalidated. */
 export function selectedFormattedMessage(
-  events: ReadonlyArray<{ id: string; sequence: number; type: string; payload: unknown }>,
-  match: {
-    eventId: string;
-    sequence: number;
-    role: "user" | "assistant";
-    messageMatchOffset: number;
-  },
+  preview: { status: "available"; text: string } | { status: "unavailable" },
+  match: { messageMatchOffset: number },
   query: string,
 ): string | null {
-  const selected = events.find(
-    (event) =>
-      event.id === match.eventId &&
-      event.sequence === match.sequence &&
-      event.type === (match.role === "user" ? "user.message" : "agent.message.completed"),
-  );
-  if (!selected || typeof selected.payload !== "object" || selected.payload === null) return null;
-  const text = (selected.payload as Record<string, unknown>).text;
-  if (typeof text !== "string" || text.length > 12_000) return null;
-  return matchAtOffset(text, query, match.messageMatchOffset) >= 0 ? text : null;
+  if (preview.status !== "available" || typeof preview.text !== "string") return null;
+  if (preview.text.length > 12_000) return null;
+  return matchAtOffset(preview.text, query, match.messageMatchOffset) >= 0 ? preview.text : null;
 }
 
 let nextHighlight = 0;
@@ -68,7 +56,13 @@ export function SearchMarkdown({
     let frame = 0;
     const update = () => {
       const ranges: Range[] = [];
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          return node.parentElement?.closest("[data-og-image-placeholder]")
+            ? NodeFilter.FILTER_REJECT
+            : NodeFilter.FILTER_ACCEPT;
+        },
+      });
       let tooMany = false;
       for (let node = walker.nextNode(); node; node = walker.nextNode()) {
         const content = node.textContent ?? "";
@@ -101,11 +95,11 @@ export function SearchMarkdown({
       if (rect.top < paneRect.top + 24 || rect.bottom > paneRect.bottom - 24)
         pane.scrollTop += rect.top - paneRect.top - 80;
       const cell = selected.startContainer.parentElement;
-      const tableScroller = cell?.closest<HTMLElement>('div[tabindex="0"]');
-      if (tableScroller) {
-        const tableRect = tableScroller.getBoundingClientRect();
-        if (rect.left < tableRect.left + 8 || rect.right > tableRect.right - 8)
-          tableScroller.scrollLeft += rect.left - tableRect.left - 24;
+      const horizontalScroller = cell?.closest<HTMLElement>('[tabindex="0"]');
+      if (horizontalScroller) {
+        const scrollerRect = horizontalScroller.getBoundingClientRect();
+        if (rect.left < scrollerRect.left + 8 || rect.right > scrollerRect.right - 8)
+          horizontalScroller.scrollLeft += rect.left - scrollerRect.left - 24;
       }
       navigated.current = true;
     };
@@ -114,7 +108,11 @@ export function SearchMarkdown({
       frame = requestAnimationFrame(update);
     };
     const observer = new MutationObserver(schedule);
-    observer.observe(root, { childList: true, subtree: true, characterData: true });
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
     const resize =
       typeof ResizeObserver === "undefined"
         ? null

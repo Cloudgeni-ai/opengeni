@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { SearchIcon } from "lucide-react";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import { useAppContext } from "@/context";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -104,9 +105,10 @@ export default function SessionSearchDialog(props: {
   }, [titles.value, search.page, accessDenied, committedQuery]);
   // Keep the selected session while closed/revalidating so its cursor and preview
   // survive the dialog → conversation → dialog round trip.
-  const retainedSelection = useRef<{ identity: string; selected: SearchResultSummary } | null>(
-    null,
-  );
+  const retainedSelection = useRef<{
+    identity: string;
+    selected: SearchResultSummary;
+  } | null>(null);
   if (accessDenied || !committedQuery.trim()) retainedSelection.current = null;
   const selected =
     results.find((result) => result.sessionId === selectedId) ??
@@ -166,7 +168,10 @@ export default function SessionSearchDialog(props: {
       onOpenChange(false);
       void navigate({
         to: "/workspaces/$workspaceId/sessions/$sessionId",
-        params: { workspaceId: props.workspaceId, sessionId: previewSelection.sessionId },
+        params: {
+          workspaceId: props.workspaceId,
+          sessionId: previewSelection.sessionId,
+        },
         search: match
           ? {
               find: committedQuery,
@@ -363,7 +368,7 @@ export function SessionSearchPreview(props: SessionSearchPreviewProps) {
         >,
         limit: 2,
       };
-      const [before, after, selectedEvents] = await Promise.all([
+      const [before, after, selectedPreview] = await Promise.all([
         props.client.listEvents(props.workspaceId, props.sessionId, {
           ...options,
           before: match.sequence,
@@ -374,15 +379,22 @@ export function SessionSearchPreview(props: SessionSearchPreviewProps) {
           after: match.sequence,
           direction: "after",
         }),
-        props.client.listEvents(props.workspaceId, props.sessionId, {
-          ...options,
-          after: Math.max(0, match.sequence - 1),
-          before: match.sequence + 1,
-          direction: "after",
-          limit: 1,
-        }),
+        props.client
+          .getSessionMessagePreview(
+            props.workspaceId,
+            props.sessionId,
+            { eventId: match.eventId, sequence: match.sequence },
+            { signal },
+          )
+          .catch((error: unknown) => {
+            // A stale result can disappear after the search read. Keep its
+            // authoritative excerpt; do not swallow access or transport errors.
+            if (error instanceof OpenGeniApiError && error.status === 404)
+              return { status: "unavailable" as const };
+            throw error;
+          }),
       ]);
-      const selectedText = selectedFormattedMessage(selectedEvents, match, props.query);
+      const selectedText = selectedFormattedMessage(selectedPreview, match, props.query);
       const context = (events: typeof before): SearchPreviewMessage[] =>
         events.flatMap((event) => {
           if (event.type !== "user.message" && event.type !== "agent.message.completed") return [];

@@ -8,39 +8,40 @@ const match = {
   role: "assistant" as const,
   messageMatchOffset: text.indexOf("09:00"),
 };
-const event = {
-  id: "event-1",
-  sequence: 7,
-  type: "agent.message.completed",
-  payload: { text, modelContext: "never render this" },
-};
+const available = { status: "available" as const, text };
 
 test("exact authorized match can render the whole table source", () => {
-  expect(selectedFormattedMessage([event], match, "09:00")).toBe(text);
+  expect(selectedFormattedMessage(available, match, "09:00")).toBe(text);
+  const longer = `${"context\n".repeat(600)}${text}`;
+  expect(
+    selectedFormattedMessage(
+      { status: "available", text: longer },
+      { messageMatchOffset: longer.indexOf("09:00") },
+      "09:00",
+    ),
+  ).toBe(longer);
   expect(matchAtOffset("😀 K", "k", 3)).toBe(3);
   expect(matchAtOffset(text, "09:00", match.messageMatchOffset)).toBe(match.messageMatchOffset);
 });
 
-test("stale identity, different role, or changed source offset keeps the excerpt", () => {
-  expect(selectedFormattedMessage([{ ...event, id: "other" }], match, "09:00")).toBeNull();
-  expect(selectedFormattedMessage([{ ...event, sequence: 8 }], match, "09:00")).toBeNull();
-  expect(selectedFormattedMessage([{ ...event, type: "user.message" }], match, "09:00")).toBeNull();
+test("unavailable preview or changed source offset keeps the excerpt", () => {
+  expect(selectedFormattedMessage({ status: "unavailable" }, match, "09:00")).toBeNull();
   expect(
-    selectedFormattedMessage([event], { ...match, messageMatchOffset: 0 }, "09:00"),
+    selectedFormattedMessage(available, { ...match, messageMatchOffset: 0 }, "09:00"),
   ).toBeNull();
-  expect(selectedFormattedMessage([event], match, "09:01")).toBeNull();
+  expect(selectedFormattedMessage(available, match, "09:01")).toBeNull();
 });
 
 test("large or invalid messages remain bounded to the search excerpt", () => {
   const huge = "x".repeat(12_000) + "09:00";
   expect(
     selectedFormattedMessage(
-      [{ ...event, payload: { text: huge } }],
+      { status: "available", text: huge },
       { ...match, messageMatchOffset: 12_000 },
       "09:00",
     ),
   ).toBeNull();
   expect(
-    selectedFormattedMessage([{ ...event, payload: { modelContext: text } }], match, "09:00"),
+    selectedFormattedMessage({ status: "available", text: "wrong message" }, match, "09:00"),
   ).toBeNull();
 });

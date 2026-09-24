@@ -403,7 +403,8 @@ export function retainedImageId(src: string): string | null {
 }
 function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
   const { renderImage, suppressImages } = useContext(InteractiveContext);
-  if (suppressImages) return <span>{alt || "Image"} (preview unavailable)</span>;
+  if (suppressImages)
+    return <span data-og-image-placeholder="">{alt || "Image"} (preview unavailable)</span>;
   if (!src) return <span>{alt ?? "Image unavailable"}</span>;
   if (retainedImageId(src))
     return renderImage ? (

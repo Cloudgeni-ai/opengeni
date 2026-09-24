@@ -10,7 +10,8 @@ import { Input } from "../src/components/ui/input";
 import "../src/styles.css";
 
 // This fixture is sample data and preview-only wiring, not a change to production search.
-const query = "09:00";
+const params = new URLSearchParams(location.search);
+const query = params.has("imagehit") ? "preview" : params.has("code") ? "TARGET" : "09:00";
 const title = "Production activity review";
 const message = `I called it a **multi-day activity ranking** because I was checking how many separate days each person submitted a request—not hours spent online.
 
@@ -25,15 +26,22 @@ In the same 14-day window ending **September 23, 2026**, three accounts submitte
 The remaining accounts submitted turns on a single day.
 
 **This is not a measure of time spent in the product.** It records submissions, not active reading or work between them.`;
-const params = new URLSearchParams(location.search);
-const previewMessage = `${params.has("repeat") ? "An earlier mention of 09:00.\n\n" : ""}${message}${params.has("image") ? "\n\n![tracking](https://example.invalid/pixel.png)" : ""}`;
+const previewMessage = params.has("imagehit")
+  ? "A URL-only hit: ![cat](https://example.invalid/preview.png)"
+  : params.has("code")
+    ? `A long code line:\n\n\`\`\`text\n${"x".repeat(200)}TARGET\n\`\`\``
+    : `${params.has("repeat") ? "An earlier mention of 09:00.\n\n" : ""}${message}${params.has("image") ? "\n\n![tracking](https://example.invalid/pixel.png)" : ""}`;
 
 const results = [
   {
     sessionId: "selected",
     title,
     subtitle: "Sep 23, 2026",
-    snippet: "…Sep 17, **09:00 UTC** | beta@example.test…",
+    snippet: params.has("imagehit")
+      ? "![cat](https://example.invalid/preview.png)"
+      : params.has("code")
+        ? "…TARGET…"
+        : "…Sep 17, **09:00 UTC** | beta@example.test…",
     matchingMessages: 1,
     titleMatch: false,
   },

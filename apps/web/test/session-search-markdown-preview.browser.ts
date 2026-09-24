@@ -36,6 +36,7 @@ try {
   });
   await page.screenshot({ path: `${output}/session-search-markdown-mobile-table.png` });
 
+  await page.setViewportSize({ width: 1054, height: 766 });
   await page.goto("http://127.0.0.1:4329/test/session-search-markdown-preview.html?repeat");
   await page.waitForFunction(() => CSS.highlights.size > 0);
   assert(
@@ -56,6 +57,18 @@ try {
   await page.getByText("tracking (preview unavailable)").waitFor({ state: "attached" });
   assert.equal(await page.locator("img").count(), 0);
   assert.equal(remoteImages, 0);
+
+  await page.goto("http://127.0.0.1:4329/test/session-search-markdown-preview.html?imagehit");
+  await page.getByText("Match in message source:", { exact: false }).waitFor();
+  assert.equal(await page.evaluate(() => CSS.highlights.size), 0);
+  assert(await page.locator("mark").filter({ hasText: "preview" }).count());
+
+  await page.goto("http://127.0.0.1:4329/test/session-search-markdown-preview.html?code");
+  await page.waitForFunction(() => CSS.highlights.size > 0);
+  assert(
+    await page.locator('pre[tabindex="0"]').evaluate((element) => element.scrollLeft > 0),
+    "the selected hit on a long code line should scroll into view",
+  );
 
   const fallback = await browser.newPage({ viewport: { width: 1054, height: 766 } });
   await fallback.addInitScript(() => {

@@ -1,5 +1,8 @@
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
+import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
+import * as sessionPreviewSchema from "@opengeni/db/schema";
+import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { scheduledSessionIds } from "@opengeni/db";
 import { withSiteSessionOrigin } from "@opengeni/core";
@@ -2924,6 +2927,90 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(page.events);
   });
 
+  // Selected search hit only: never use the audit event projection here, even
+  // in summary mode (it can contain modelContext or truncate visible text).
+  app.get(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/events/:eventId/message-preview",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+      const sessionId = c.req.param("sessionId");
+      await assertSessionExists(db, workspaceId, sessionId);
+      const eventId = c.req.param("eventId");
+      const rawSequence = c.req.query("sequence");
+      const sequence = Number(rawSequence);
+      if (
+        !z.string().uuid().safeParse(eventId).success ||
+        rawSequence === undefined ||
+        !/^\d+$/.test(rawSequence) ||
+        !Number.isSafeInteger(sequence) ||
+        sequence < 1 ||
+        sequence > 2_147_483_647
+      )
+        throw new HTTPException(400, { message: "Invalid message preview reference" });
+
+      const notFound = () => new HTTPException(404, { message: "message not found" });
+      const maxUnits = 12_000;
+      const eventTable = sessionPreviewSchema.sessionEvents;
+      // The slice helper supports structured result views too. Check only the
+      // JSON scalar *kind* before calling it; never fetch a structured text value.
+      const candidates = await withWorkspaceRls(db, workspaceId, (tx) =>
+        tx
+          .select({ kind: sql<string | null>`jsonb_typeof(${eventTable.payload}->'text')` })
+          .from(eventTable)
+          .where(
+            and(
+              eq(eventTable.workspaceId, workspaceId),
+              eq(eventTable.sessionId, sessionId),
+              eq(eventTable.id, eventId),
+              eq(eventTable.sequence, sequence),
+              sql`${eventTable.type} in ('user.message', 'agent.message.completed')`,
+            ),
+          )
+          .limit(1),
+      );
+      if (candidates[0]?.kind !== "string") throw notFound();
+      const read = (offset: number) =>
+        listSessionEventSlices(db, workspaceId, sessionId, {
+          sourceSequence: sequence,
+          sourceOffset: offset,
+          after: sequence - 1,
+          before: sequence + 1,
+          includeTypes: ["user.message", "agent.message.completed"],
+          view: "conversation",
+        });
+      const first = await read(0);
+      const event = first.events[0];
+      const slice = first.slices?.[sequence];
+      // Includes the slice reader's duplicate, late and unclaimed-prompt gates.
+      if (!event || event.id !== eventId || event.sequence !== sequence || !slice || slice.omitted)
+        throw notFound();
+      if (slice.total > maxUnits) return c.json({ status: "unavailable" as const });
+
+      let text = slice.text;
+      let offset = slice.unit === "utf16" ? slice.text.length : Array.from(slice.text).length;
+      if (text.length > maxUnits) return c.json({ status: "unavailable" as const });
+      while (offset < slice.total) {
+        if (offset === 0) throw notFound();
+        const next = await read(offset);
+        const part = next.slices?.[sequence];
+        if (
+          next.events[0]?.id !== eventId ||
+          !part ||
+          part.omitted ||
+          part.unit !== slice.unit ||
+          part.total !== slice.total ||
+          part.offset !== offset
+        )
+          throw notFound();
+        text += part.text;
+        offset += slice.unit === "utf16" ? part.text.length : Array.from(part.text).length;
+        if (text.length > maxUnits) return c.json({ status: "unavailable" as const });
+      }
+      return c.json({ status: "available" as const, text });
+    },
+  );
+
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
@@ -4817,6 +4904,8 @@ export function sessionAuthorizationOperationForHttp(
     return verb === "POST" ? "session.context.write" : null;
   }
   if (suffix === "/events/stream" && verb === "GET") return "session.stream.read";
+  if (/^\/events\/[^/]+\/message-preview$/.test(suffix) && verb === "GET")
+    return "session.events.read";
   if (suffix === "/events") {
     if (verb === "GET") return "session.events.read";
     if (verb === "POST") return "session.append";
