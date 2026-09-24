@@ -117,51 +117,57 @@ export const Cursor: React.FC<{ t: number }> = ({ t }) => {
     if (d >= -0.04 && d < 0.16) press = Math.max(press, Math.sin(clamp01((d + 0.04) / 0.2) * Math.PI));
     if (d >= 0 && d < ringAge) ringAge = d;
   }
-  if (ringAge < 0.55) ring = ringAge / 0.55;
+  // A small, quick press ring: reads as a click, never as a transition.
+  if (ringAge < 0.34) ring = ringAge / 0.34;
   const ps = pose(t);
   const scale = 1 - press * 0.14;
-  const approveGlow = t > T.approve - 0.02 && t < T.approve + 0.6;
   const vis = visibility(t);
   if (vis <= 0.001) return null;
 
   return (
     <div style={{ position: "absolute", left: p.x, top: p.y, width: 0, height: 0, zIndex: 50, opacity: vis }}>
-      {ringAge < 0.55 && (
+      {ringAge < 0.34 && (
         <div
           style={{
             position: "absolute",
-            left: -34 * (0.35 + ring),
-            top: -34 * (0.35 + ring),
-            width: 68 * (0.35 + ring),
-            height: 68 * (0.35 + ring),
+            left: -20 * (0.4 + ring),
+            top: -20 * (0.4 + ring),
+            width: 40 * (0.4 + ring),
+            height: 40 * (0.4 + ring),
             borderRadius: "50%",
-            border: `2px solid rgba(255,255,255,${0.55 * (1 - ring)})`,
-            boxShadow: approveGlow ? `0 0 24px rgba(143,227,187,${0.5 * (1 - ring)})` : undefined,
+            border: `1.5px solid rgba(255,255,255,${0.42 * (1 - ring)})`,
           }}
         />
       )}
-      <svg
-        width={34}
-        height={48}
-        viewBox="0 0 20 28"
-        style={{
-          position: "absolute",
-          left: -2,
-          top: -2 + ps.dy,
-          transform: `rotate(${ps.rot}deg) scale(${scale * ps.sx}, ${scale * ps.sy})`,
-          transformOrigin: "10px 15px",
-          filter: "drop-shadow(0 3px 5px rgba(0,0,0,0.45))",
-          overflow: "visible",
-        }}
-      >
-        <path
-          d="M1.2 1.2 L1.2 21.6 L6.1 17.1 L9.3 24.9 L12.6 23.5 L9.5 15.9 L16.1 15.9 Z"
-          fill="#ffffff"
-          stroke="#0a0a0a"
-          strokeWidth={1.3}
-          strokeLinejoin="round"
-        />
-      </svg>
+      <CursorArrow pose={ps} scale={scale} />
     </div>
   );
 };
+
+/** The protagonist's body: a classic arrow, posed by rotation/squash. */
+export const CursorArrow: React.FC<{ pose: Pose; scale?: number }> = ({ pose: ps, scale = 1 }) => (
+  <svg
+    width={34}
+    height={48}
+    viewBox="0 0 20 28"
+    style={{
+      position: "absolute",
+      left: -2,
+      top: -2 + ps.dy,
+      transform: `rotate(${ps.rot}deg) scale(${scale * ps.sx}, ${scale * ps.sy})`,
+      transformOrigin: "10px 15px",
+      filter: "drop-shadow(0 3px 5px rgba(0,0,0,0.45))",
+      overflow: "visible",
+    }}
+  >
+    <path
+      d="M1.2 1.2 L1.2 21.6 L6.1 17.1 L9.3 24.9 L12.6 23.5 L9.5 15.9 L16.1 15.9 Z"
+      fill="#ffffff"
+      stroke="#0a0a0a"
+      strokeWidth={1.3}
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+export { flop as flopPose };

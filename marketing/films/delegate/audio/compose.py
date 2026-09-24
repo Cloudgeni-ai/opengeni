@@ -502,6 +502,8 @@ def main() -> None:
         place(sfx, clock_tick(j % 2 == 0), t, gain=db(-30.0) * fade, pan=0.45)
     place(sfx, flop(), T["lieStart"] + 0.62, gain=db(-21.0), pan=0.2)
     place(sfx, flop(), T["lieAgain"] + 0.33, gain=db(-24.0), pan=0.1)
+    # The protagonist's last beat on the end card: it lies down to rest.
+    place(sfx, flop(), T["restFlop"] + 0.22, gain=db(-22.0), pan=0.35)
     for i, t in enumerate(cues["liftoffs"]):
         place(sfx, swell(0.42, 500, 2600, peak_at=0.55, seed=40 + i), t, gain=db(-33.0), pan=-0.4 + 0.12 * i)
     # Night into morning: an airy rise into the downbeat, then the soft air of

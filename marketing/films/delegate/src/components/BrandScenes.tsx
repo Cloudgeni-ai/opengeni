@@ -4,6 +4,7 @@ import { F } from "../fonts";
 import { clamp01, ease, lerp, prog, springAt } from "../anim";
 import { T } from "../timeline";
 import { OpenGeniWordmark } from "./OpenGeniWordmark";
+import { CursorArrow, flopPose } from "./Cursor";
 
 type Tok = [string, "kw" | "fn" | "key" | "str" | "p" | "id"];
 
@@ -22,13 +23,14 @@ export const CODE: Tok[][] = [
   [["});", "p"]],
 ];
 
+/** Paper-on-ink, like the backend code block on opengeni.ai. */
 const TOK: Record<Tok[1], string> = {
-  kw: "#8f8e85",
-  fn: C.ink,
-  key: "#55564f",
-  str: "#b8401b",
-  p: "#9b9a91",
-  id: C.ink,
+  kw: "#9e9d95",
+  fn: C.paper,
+  key: C.paperDim,
+  str: C.vermOnInk,
+  p: "#86857d",
+  id: C.paper,
 };
 
 const SIZE = 38;
@@ -47,17 +49,15 @@ const CALLOUTS = [
 
 export const BrandScenes: React.FC<{ t: number }> = ({ t }) => {
   if (t < T.wipe) return null;
-  // The page under the product. Its light comes up as the product lifts away,
-  // so the eye adapts instead of being flashed.
-  const light = prog(t, T.wipe, T.wipe + 1.35, ease.out);
+  // The page under the product: warm brand ink, lit softly from above, so the
+  // film stays in one world instead of flashing to a different one.
   const endCut = t >= T.line1;
   return (
     <div
       style={{
         position: "absolute",
         inset: 0,
-        background: C.paper,
-        filter: light < 1 ? `brightness(${0.62 + 0.38 * light})` : undefined,
+        background: `radial-gradient(ellipse 90% 80% at 42% 38%, #292a27 0%, ${C.ink} 55%, #191a18 100%)`,
       }}
     >
       {!endCut && <CodeSpread t={t} />}
@@ -106,7 +106,7 @@ const CodeSpread: React.FC<{ t: number }> = ({ t }) => {
           fontFamily: F.mono,
           fontSize: 18,
           letterSpacing: "0.14em",
-          color: C.ink2,
+          color: C.paperDim,
           opacity: on,
         }}
       >
@@ -127,7 +127,7 @@ const CodeSpread: React.FC<{ t: number }> = ({ t }) => {
               top: lineTop(c.line) + 4,
               width: BLOCK_W + 60,
               height: LINE_H - 8,
-              background: `rgba(246,83,39,${0.09 * v})`,
+              background: `rgba(246,83,39,${0.13 * v})`,
               borderLeft: `4px solid rgba(246,83,39,${v})`,
             }}
           />
@@ -183,7 +183,7 @@ const Callout: React.FC<{ t: number; c: (typeof CALLOUTS)[number] }> = ({ t, c }
         transform: `translateY(${(1 - inK) * 14 - outK * 8}px)`,
       }}
     >
-      <div style={{ fontFamily: F.mono, fontSize: 21, letterSpacing: "0.02em", color: C.vermDeep, marginBottom: 14 }}>{c.token}</div>
+      <div style={{ fontFamily: F.mono, fontSize: 21, letterSpacing: "0.02em", color: C.vermOnInk, marginBottom: 14 }}>{c.token}</div>
       {c.text.map((l) => (
         <div
           key={l}
@@ -193,7 +193,7 @@ const Callout: React.FC<{ t: number; c: (typeof CALLOUTS)[number] }> = ({ t, c }
             fontWeight: 640,
             letterSpacing: "-0.035em",
             lineHeight: 1.05,
-            color: C.ink,
+            color: C.paper,
             whiteSpace: "nowrap",
           }}
         >
@@ -215,7 +215,7 @@ const EndCard: React.FC<{ t: number }> = ({ t }) => {
     fontWeight: 640,
     letterSpacing: "-0.035em",
     lineHeight: 1.04,
-    color: C.ink,
+    color: C.paper,
     whiteSpace: "nowrap",
   };
   // A barely perceptible drift, so the last frame is alive rather than a slide.
@@ -233,7 +233,7 @@ const EndCard: React.FC<{ t: number }> = ({ t }) => {
           fontFamily: F.mono,
           fontSize: 20,
           letterSpacing: "0.14em",
-          color: C.ink2,
+          color: C.paperDim,
           opacity: clamp01(l1 * 1.3),
         }}
       >
@@ -245,10 +245,11 @@ const EndCard: React.FC<{ t: number }> = ({ t }) => {
       </div>
       <div style={{ position: "absolute", left: 150, top: 262 + 116, ...line, opacity: clamp01(l2 * 1.3), transform: `translateY(${(1 - l2) * 26}px)` }}>
         Your users keep the last click<span style={{ color: C.verm }}>.</span>
+        <RestingCursor t={t} />
       </div>
-      <div style={{ position: "absolute", left: 150, right: 150, top: 690, height: 1, background: C.ink, opacity: 0.85 * m, transformOrigin: "left", transform: `scaleX(${m})` }} />
+      <div style={{ position: "absolute", left: 150, right: 150, top: 690, height: 1, background: C.paper, opacity: 0.3 * m, transformOrigin: "left", transform: `scaleX(${m})` }} />
       <div style={{ position: "absolute", left: 150, top: 736, opacity: clamp01(m * 1.4), transform: `translateY(${(1 - m) * 14}px)` }}>
-        <OpenGeniWordmark height={50} color={C.ink} />
+        <OpenGeniWordmark height={50} color={C.paper} />
       </div>
       <div
         style={{
@@ -258,7 +259,7 @@ const EndCard: React.FC<{ t: number }> = ({ t }) => {
           fontFamily: F.mono,
           fontSize: 28,
           letterSpacing: "0.02em",
-          color: C.ink,
+          color: C.paper,
           opacity: clamp01(m * 1.4),
           transform: `translateY(${(1 - m) * 14}px)`,
         }}
@@ -280,11 +281,28 @@ const FinePrint: React.FC<{ t: number }> = ({ t }) => {
         fontFamily: F.mono,
         fontSize: 18,
         letterSpacing: "0.01em",
-        color: C.muted,
+        color: "#8a8980",
         opacity: k,
       }}
     >
       “hour” is a fictional app. Code is an excerpt of the real SDK call; client setup and error handling omitted.
     </div>
+  );
+};
+
+/** The protagonist's last beat: it strolls in and lies down after the period.
+ * No click — the approval was the last one. */
+const RestingCursor: React.FC<{ t: number }> = ({ t }) => {
+  if (t < T.restIn) return null;
+  const k = prog(t, T.restIn, T.restFlop - 0.02, ease.pointer);
+  const x = lerp(520, 16, k);
+  const y = lerp(420, -12, k);
+  const pose = flopPose(t, T.restFlop);
+  return (
+    <span style={{ position: "relative", display: "inline-block", width: 0, height: 0, verticalAlign: "baseline" }}>
+      <span style={{ position: "absolute", left: x + 6, top: y - 34 }}>
+        <CursorArrow pose={pose} scale={1.6} />
+      </span>
+    </span>
   );
 };

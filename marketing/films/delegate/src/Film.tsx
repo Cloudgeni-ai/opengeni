@@ -42,7 +42,10 @@ export const Film: React.FC<{ withAudio?: boolean }> = ({ withAudio = true }) =>
             borderRadius: 22 * lift,
             transform: `translateY(${-1260 * slide}px) scale(${surfaceScale})`,
             transformOrigin: "50% 50%",
-            boxShadow: lift > 0 ? `0 ${46 * lift}px ${130 * lift}px rgba(40,30,20,${0.32 * lift}), 0 ${6 * lift}px ${16 * lift}px rgba(40,30,20,${0.18 * lift})` : "none",
+            boxShadow:
+              lift > 0
+                ? `0 ${50 * lift}px ${140 * lift}px rgba(0,0,0,${0.6 * lift}), 0 ${6 * lift}px ${18 * lift}px rgba(0,0,0,${0.4 * lift}), 0 0 0 1px rgba(255,255,255,${0.07 * lift})`
+                : "none",
             background: C.bg,
           }}
         >

@@ -21,6 +21,10 @@ export const C = {
   rule: "#d5d5ca",
   verm: "#f65327",
   vermDeep: "#c43b16",
+  /** Vermilion tuned for text on the ink page (opengeni.ai uses #ff744e/#ffa184 on dark). */
+  vermOnInk: "#ff8a5c",
+  /** Body text on the ink page. */
+  paperDim: "#c9c7bf",
 } as const;
 
 export const W = 1920;

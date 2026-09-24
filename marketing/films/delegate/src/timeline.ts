@@ -50,6 +50,9 @@ export const T = {
   line1: bar(7),
   line2: bar(7, 1),
   mark: bar(7, 2),
+  /** The protagonist comes back and lies down after the final period. */
+  restIn: bar(7, 2) + 0.5,
+  restFlop: bar(7, 2) + 1.12,
   end: bar(7, 2) + 2.4,
 } as const;
 
