@@ -304,6 +304,159 @@ test("paid indexing waits for funding, settles accepted batches and finishes a f
   expect(calls).toBe(2);
 });
 
+test("a frozen paid generation pauses across a billing-mode rollback and resumes at its original tariff", async () => {
+  const accountId = crypto.randomUUID();
+  const workspaceId = crypto.randomUUID();
+  fixtureAccounts.push(accountId);
+  await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Rollback index account')`;
+  await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Rollback index workspace')`;
+  const context: KnowledgeContext = {
+    accountId,
+    workspaceId,
+    actor: {
+      kind: "human",
+      principalKind: "human_session",
+      subjectId: "user:rollback-index-owner",
+      writeScopes: ["workspace"],
+      settingsScopes: ["workspace"],
+      review: true,
+    },
+  };
+  const settings = {
+    billingMode: "stripe",
+    usageLimitsMode: "managed",
+    staticUsageLimitsJson: "{}",
+    documentEmbeddingProvider: "openai",
+    documentEmbeddingBillingMode: "credits",
+    documentEmbeddingCreditsActivatedAt: "2026-01-01T00:00:00Z",
+    documentEmbeddingRateMicrosPerMillionBytes: 1_000_000,
+  } as Settings;
+  let calls = 0;
+  const embedder: DocumentServices["embedder"] = {
+    model: "paid-rollback-index-test",
+    dimensions: 3,
+    embedMany: async (inputs) => {
+      calls++;
+      return inputs.map(() => [1, 0, 0]);
+    },
+    embedQuery: async () => [1, 0, 0],
+  };
+  const makeWorker = () =>
+    createKnowledgeIndexingActivities(
+      async () =>
+        ({
+          db: client.db,
+          settings,
+          observability: { warn: () => undefined },
+        }) as ControlActivityServices,
+      async () => ({ embedder }) as DocumentServices,
+    );
+  const worker = makeWorker();
+  const content = "A paid revision that spans multiple indexing batches. ".repeat(1600);
+  const saved = await saveKnowledgeEntry(client.db, context, {
+    operationId: crypto.randomUUID(),
+    entryId: crypto.randomUUID(),
+    expectedVersion: 0,
+    scope: "workspace",
+    entry: { kind: "fact", title: "Rollback contract", content },
+  });
+  const chunks = [...knowledgeIndexChunks({ title: "Rollback contract", content })];
+  expect(chunks.length).toBeGreaterThan(32);
+  await shared.admin`INSERT INTO credit_ledger_entries(account_id,type,amount_micros,idempotency_key)
+    VALUES(${accountId},'grant',1000000,${`rollback-index:${saved.revisionId}`})`;
+  expect((await worker.indexKnowledge()).advanced).toBe(1);
+  expect(calls).toBe(1);
+  const [firstBatch] = await shared.admin<
+    Array<{
+      next_index: number;
+      billing_mode: string;
+      rate: number;
+      vectors: number;
+      debits: number;
+    }>
+  >`
+    SELECT j.next_index,j.billing_mode,j.billing_rate_micros_per_million_bytes AS rate,
+      (SELECT count(*)::int FROM knowledge_entry_vectors WHERE revision_id=${saved.revisionId}) AS vectors,
+      (SELECT count(*)::int FROM credit_ledger_entries WHERE source_id=${saved.revisionId}
+        AND type='document_embedding_debit') AS debits
+    FROM knowledge_index_jobs j WHERE j.revision_id=${saved.revisionId}`;
+  expect(firstBatch?.next_index).toBe(32);
+  expect(firstBatch?.billing_mode).toBe("credits");
+  expect(Number(firstBatch?.rate)).toBe(1_000_000);
+  expect(firstBatch?.vectors).toBe(32);
+  expect(firstBatch?.debits).toBe(1);
+  const balanceAfterFirstBatch = (await getBillingBalance(client.db, accountId)).balanceMicros;
+
+  settings.documentEmbeddingBillingMode = "usage_only";
+  settings.documentEmbeddingRateMicrosPerMillionBytes = 2_000_000;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    expect((await makeWorker().indexKnowledge()).deferred).toBe(1);
+    const [paused] = await shared.admin<
+      Array<{ state: string; next_index: number; vectors: number; debits: number; indexed: number }>
+    >`
+      SELECT j.state,j.next_index,
+        (SELECT count(*)::int FROM knowledge_entry_vectors WHERE revision_id=${saved.revisionId}) AS vectors,
+        (SELECT count(*)::int FROM credit_ledger_entries WHERE source_id=${saved.revisionId}
+          AND type='document_embedding_debit') AS debits,
+        (SELECT coalesce(sum(quantity),0)::int FROM usage_events WHERE source_resource_id=${saved.revisionId}
+          AND event_type='document.indexed') AS indexed
+      FROM knowledge_index_jobs j WHERE j.revision_id=${saved.revisionId}`;
+    expect(paused).toMatchObject({
+      state: "pending",
+      next_index: 32,
+      vectors: 32,
+      debits: 1,
+      indexed: 32,
+    });
+    expect(calls).toBe(1);
+    expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(
+      balanceAfterFirstBatch,
+    );
+    await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second'
+      WHERE revision_id=${saved.revisionId}`;
+  }
+  expect(
+    (
+      await searchKnowledgeEntries(
+        client.db,
+        context,
+        { query: "Rollback", mode: "keyword" },
+        () => embedder,
+        settings,
+      )
+    ).entries,
+  ).toHaveLength(1);
+
+  settings.documentEmbeddingBillingMode = "credits";
+  expect((await makeWorker().indexKnowledge()).completed).toBe(1);
+  expect(calls).toBe(2);
+  const [settled] = await shared.admin<
+    Array<{
+      state: string;
+      next_index: number;
+      rate: number;
+      bytes: number;
+      charged: number;
+      debits: number;
+    }>
+  >`
+    SELECT j.state,j.next_index,j.billing_rate_micros_per_million_bytes AS rate,
+      (SELECT coalesce(sum(quantity),0)::bigint FROM usage_events
+        WHERE event_type='document.embedding_bytes' AND source_resource_id=${saved.revisionId}) AS bytes,
+      (SELECT coalesce(-sum(amount_micros),0)::bigint FROM credit_ledger_entries
+        WHERE source_id=${saved.revisionId} AND type='document_embedding_debit') AS charged,
+      (SELECT count(*)::int FROM credit_ledger_entries
+        WHERE source_id=${saved.revisionId} AND type='document_embedding_debit') AS debits
+    FROM knowledge_index_jobs j WHERE j.revision_id=${saved.revisionId}`;
+  expect(settled?.state).toBe("ready");
+  expect(settled?.next_index).toBe(chunks.length);
+  expect(Number(settled?.rate)).toBe(1_000_000);
+  expect(settled?.debits).toBe(2);
+  expect(Number(settled?.charged)).toBe(Number(settled?.bytes));
+  expect((await worker.indexKnowledge()).completed).toBe(0);
+  expect(calls).toBe(2);
+});
+
 test("paid indexing waits for publication without charging a review-first draft", async () => {
   const accountId = crypto.randomUUID();
   const workspaceId = crypto.randomUUID();
