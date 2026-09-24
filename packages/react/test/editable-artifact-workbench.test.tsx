@@ -99,6 +99,26 @@ describe("editable artifact workbench", () => {
     await rendered.unmount();
   });
 
+  test("embedded surfaces omit duplicate headers across modalities while retaining error states", async () => {
+    for (const modality of ["document", "spreadsheet", "presentation"] as const) {
+      const rendered = await renderComponent(
+        <EditableArtifactWorkbench
+          session={asSession(session(modality))}
+          document={{ title: "Session draft", showHeader: false }}
+          spreadsheet={{ title: "Session draft", showHeader: false }}
+          presentation={{ title: "Session draft", showHeader: false }}
+        />,
+      );
+      await flush(10);
+      expect(rendered.container.querySelector("section")?.getAttribute("aria-label")).toBe(
+        `${modality[0]!.toUpperCase()}${modality.slice(1)}: Session draft`,
+      );
+      expect(rendered.container.querySelector("section header")).toBeNull();
+      expect(rendered.container.textContent?.length).toBeGreaterThan(0);
+      await rendered.unmount();
+    }
+  });
+
   test("keeps one active SDK session per authority key and closes every replacement", async () => {
     const first = session("document");
     const second = session("presentation");

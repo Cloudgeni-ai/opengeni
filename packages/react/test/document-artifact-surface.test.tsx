@@ -101,9 +101,66 @@ describe("artifact document surface", () => {
         ?.getAttribute("data-og-document-layout"),
     ).toBe("paginated");
     const page = paginated.container.querySelector<HTMLElement>("[data-og-document-page]")!;
-    expect(Number.parseFloat(page.style.width)).toBeLessThanOrEqual(358);
+    expect(Number.parseFloat(page.style.width)).toBeGreaterThan(358);
+    expect(page.className).toContain("left-4");
+    expect(page.parentElement?.style.minWidth).toBeTruthy();
     expect(page.firstElementChild?.getAttribute("style")).toContain("scale(");
     await paginated.unmount();
+  });
+
+  test("keeps table headers readable and wide columns scrollable in both layouts", async () => {
+    const document = Document.create();
+    document.blocks.addTable(
+      [
+        ["Owner", "Status", "Next step"],
+        ["Taylor", "Ready", "Review"],
+      ],
+      { headerRows: 1, columnWidthsPt: [150, 150, 150], widthPt: 450 },
+    );
+    const rendered = await renderComponent(
+      <DocumentArtifactSurface
+        document={document}
+        title="Session draft"
+        showHeader={false}
+        layout="continuous"
+      />,
+    );
+    await flush();
+    const surface = rendered.container.querySelector("section")!;
+    expect(surface.getAttribute("aria-label")).toBe("Document: Session draft");
+    expect(surface.querySelector("header")).toBeNull();
+    const table = surface.querySelector("table")!;
+    expect(table.parentElement?.className).toContain("overflow-x-auto");
+    expect(table.parentElement?.className).toContain("max-w-full");
+    expect(table.style.width).toBe("450pt");
+    const header = table.querySelector("th")!;
+    expect(header.style.background).toBe("#f3f4f6");
+    expect(header.style.color).toBe("#171717");
+    const page = surface.querySelector<HTMLElement>("[data-og-document-page]")!;
+    expect(page.style.containerType).toBe("inline-size");
+    expect(surface.querySelector('[aria-label="Continuous layout"]')).not.toBeNull();
+    expect(surface.querySelector('[aria-label="Paginated layout"]')).not.toBeNull();
+    await rendered.unmount();
+
+    const paginated = await renderComponent(
+      <DocumentArtifactSurface document={document} title="Session draft" layout="paginated" />,
+    );
+    await flush();
+    expect(paginated.container.querySelector("section header h2")?.textContent).toBe(
+      "Session draft",
+    );
+    expect(paginated.container.querySelector("th")?.getAttribute("style")).toContain("#171717");
+    await paginated.unmount();
+
+    const darkFill = Document.create();
+    darkFill.blocks.addTable([["Owner"], ["Taylor"]], {
+      headerRows: 1,
+      headerFill: "#1f2937",
+    });
+    const custom = await renderComponent(<DocumentEditor document={darkFill} />);
+    await flush();
+    expect(custom.container.querySelector("th")?.getAttribute("style")).toContain("#fff");
+    await custom.unmount();
   });
 
   test("remeasures pages in both directions without moving the visible page", async () => {

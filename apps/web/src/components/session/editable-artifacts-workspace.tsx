@@ -4,7 +4,6 @@ import {
   FilePenLineIcon,
   GalleryHorizontalEndIcon,
   Loader2Icon,
-  Maximize2Icon,
   PanelsTopLeftIcon,
   RefreshCwIcon,
   Table2Icon,
@@ -18,11 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { EditableArtifactRoute } from "@/routes/editable-artifact";
 import { ArtifactLibrary } from "@/components/artifacts/artifact-library";
-import {
-  artifactRoute,
-  defaultArtifactFilters,
-  filterArtifactCatalog,
-} from "@/lib/artifact-catalog";
+import { defaultArtifactFilters, filterArtifactCatalog } from "@/lib/artifact-catalog";
 const RetainedArtifactRoute = lazy(() =>
   import("@/routes/retained-artifact").then((module) => ({
     default: module.RetainedArtifactRoute,
@@ -251,22 +246,6 @@ export function SessionEditableArtifactsWorkspace({
             <RefreshCwIcon className="size-4" />
           </Button>
         ) : null}
-        <Button
-          asChild
-          variant="ghost"
-          size="icon-sm"
-          className="ml-auto shrink-0"
-          title={artifact.modality === "site" ? "Open Site" : "Open full-page editor"}
-        >
-          <Link
-            to={artifactRoute(artifact.modality)}
-            params={{ workspaceId, artifactId: artifact.id }}
-            search={sessionId ? { fromSession: sessionId } : {}}
-            aria-label={`Open ${artifact.title} full-page`}
-          >
-            <Maximize2Icon className="size-4" />
-          </Link>
-        </Button>
       </div>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {artifact.modality === "site" ? (

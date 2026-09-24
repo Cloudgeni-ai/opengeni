@@ -13,6 +13,8 @@ export type ArtifactModality = "spreadsheet" | "document" | "presentation";
 export type ArtifactSurfaceProps = {
   modality: ArtifactModality;
   title: string;
+  /** An embedding host may already provide the artifact title and navigation. */
+  showHeader?: boolean | undefined;
   subtitle?: ReactNode | undefined;
   actions?: ReactNode | undefined;
   children: ReactNode;
@@ -46,6 +48,7 @@ function ModalityIcon({ modality }: { modality: ArtifactModality }) {
 export function ArtifactSurface({
   modality,
   title,
+  showHeader = true,
   subtitle,
   actions,
   children,
@@ -63,25 +66,29 @@ export function ArtifactSurface({
         className,
       )}
     >
-      <header className="flex min-h-11 shrink-0 items-center gap-2 border-b border-og-border bg-og-surface-2 px-3">
-        <span
-          aria-hidden
-          className="grid size-7 shrink-0 place-items-center rounded-og-sm bg-og-surface-3 text-og-fg-muted"
-        >
-          <ModalityIcon modality={modality} />
-        </span>
-        <div className="min-w-0 flex-1">
-          <h2 className="truncate text-og-base font-medium text-og-fg">{title}</h2>
-          {subtitle ? <div className="truncate text-og-xs text-og-fg-muted">{subtitle}</div> : null}
-        </div>
-        {busy ? (
-          <LoaderCircleIcon
-            aria-label="Updating artifact"
-            className="size-4 shrink-0 animate-spin text-og-fg-muted"
-          />
-        ) : null}
-        {actions ? <div className="flex shrink-0 items-center gap-1">{actions}</div> : null}
-      </header>
+      {showHeader ? (
+        <header className="flex min-h-11 shrink-0 items-center gap-2 border-b border-og-border bg-og-surface-2 px-3">
+          <span
+            aria-hidden
+            className="grid size-7 shrink-0 place-items-center rounded-og-sm bg-og-surface-3 text-og-fg-muted"
+          >
+            <ModalityIcon modality={modality} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2 className="truncate text-og-base font-medium text-og-fg">{title}</h2>
+            {subtitle ? (
+              <div className="truncate text-og-xs text-og-fg-muted">{subtitle}</div>
+            ) : null}
+          </div>
+          {busy ? (
+            <LoaderCircleIcon
+              aria-label="Updating artifact"
+              className="size-4 shrink-0 animate-spin text-og-fg-muted"
+            />
+          ) : null}
+          {actions ? <div className="flex shrink-0 items-center gap-1">{actions}</div> : null}
+        </header>
+      ) : null}
 
       <div className="min-h-0 min-w-0 flex-1">{children}</div>
 

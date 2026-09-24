@@ -204,6 +204,7 @@ export type DocumentProjectionArtifactSurfaceProps = Omit<
   "ariaLabel" | "className"
 > & {
   title: string;
+  showHeader?: boolean | undefined;
   subtitle?: ReactNode | undefined;
   busy?: boolean | undefined;
   className?: string | undefined;
@@ -212,6 +213,7 @@ export type DocumentProjectionArtifactSurfaceProps = Omit<
 
 export type DocumentArtifactSurfaceProps = Omit<DocumentEditorProps, "ariaLabel" | "className"> & {
   title: string;
+  showHeader?: boolean | undefined;
   subtitle?: ReactNode | undefined;
   busy?: boolean | undefined;
   className?: string | undefined;
@@ -907,7 +909,23 @@ function DocumentEditorCore({
             </div>
           </div>
         ) : (
-          <div className="relative min-w-full" style={{ height: axis.total }}>
+          <div
+            className="relative min-w-full"
+            style={{
+              height: axis.total,
+              minWidth:
+                layout === "paginated"
+                  ? pages.reduce(
+                      (width, page) =>
+                        Math.max(
+                          width,
+                          page.page.widthPt * POINT_TO_CSS_PIXEL * page.renderScale + 32,
+                        ),
+                      0,
+                    )
+                  : undefined,
+            }}
+          >
             {mountedIndexes.map((pageIndex) => {
               const page = pages[pageIndex]!;
               const top = axis.offsets[pageIndex]!;
@@ -923,7 +941,10 @@ function DocumentEditorCore({
                   className={cn(
                     "absolute overflow-hidden",
                     layout === "paginated"
-                      ? "left-1/2 -translate-x-1/2 border shadow-og-sm"
+                      ? page.page.widthPt * POINT_TO_CSS_PIXEL * page.renderScale >
+                        measuredViewport.width
+                        ? "left-4 border shadow-og-sm"
+                        : "left-1/2 -translate-x-1/2 border shadow-og-sm"
                       : "left-0 right-0 border-b border-og-border bg-og-surface-1 text-og-fg",
                   )}
                   style={{
@@ -936,6 +957,7 @@ function DocumentEditorCore({
                         ? page.page.widthPt * POINT_TO_CSS_PIXEL * page.renderScale
                         : undefined,
                     height: page.height,
+                    containerType: layout === "continuous" ? "inline-size" : undefined,
                   }}
                 >
                   <MeasuredPageBody
@@ -998,6 +1020,7 @@ function DocumentEditorCore({
 export function DocumentArtifactSurface({
   document,
   title,
+  showHeader,
   subtitle,
   busy,
   className,
@@ -1008,6 +1031,7 @@ export function DocumentArtifactSurface({
     <ArtifactSurface
       modality="document"
       title={title}
+      showHeader={showHeader}
       subtitle={subtitle}
       busy={busy}
       className={className}
@@ -1026,6 +1050,7 @@ export function DocumentArtifactSurface({
 export function DocumentProjectionArtifactSurface({
   projection,
   title,
+  showHeader,
   subtitle,
   busy,
   className,
@@ -1036,6 +1061,7 @@ export function DocumentProjectionArtifactSurface({
     <ArtifactSurface
       modality="document"
       title={title}
+      showHeader={showHeader}
       subtitle={subtitle}
       busy={busy}
       className={className}
@@ -1386,7 +1412,7 @@ function DocumentTableView({
     <div
       data-og-document-block={viewBlockId}
       data-og-block-kind="table"
-      className="overflow-x-auto py-2"
+      className="w-full max-w-full overflow-x-auto py-2"
     >
       <table
         className="w-full border-collapse text-left"
@@ -1422,6 +1448,7 @@ function DocumentTableView({
                     style={{
                       borderColor: table.style.borderColor ?? "#d1d5db",
                       background: header ? (table.style.headerFill ?? "#f3f4f6") : undefined,
+                      color: header ? tableHeaderTextColor(table.style.headerFill) : undefined,
                       padding: `${table.style.cellPaddingPt ?? 6}pt`,
                     }}
                   >
@@ -1441,6 +1468,23 @@ function DocumentTableView({
       </table>
     </div>
   );
+}
+
+/** Keep authored header fills legible independently of the surrounding editor theme. */
+function tableHeaderTextColor(fill: string | undefined): string {
+  if (!fill) return "#171717";
+  const hex = /^#([\da-f]{3}|[\da-f]{6}|[\da-f]{8})$/i.exec(fill)?.[1];
+  if (!hex) return "#171717";
+  const channels =
+    hex.length === 3
+      ? [...hex].map((digit) => Number.parseInt(digit + digit, 16))
+      : [0, 2, 4].map((index) => Number.parseInt(hex.slice(index, index + 2), 16));
+  const linear = channels.map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  const luminance = linear[0]! * 0.2126 + linear[1]! * 0.7152 + linear[2]! * 0.0722;
+  return luminance < 0.18 ? "#fff" : "#171717";
 }
 
 function ToolbarButton({
@@ -1633,7 +1677,9 @@ function responsiveDocumentPageScale(
 ): number {
   if (viewportWidth <= 0) return 1;
   const naturalWidth = page.widthPt * POINT_TO_CSS_PIXEL;
-  return Math.min(1, Math.max(0.1, (viewportWidth - 32) / naturalWidth));
+  // Below this scale the page text becomes too small to read in a narrow dock.
+  // The viewport can pan horizontally without changing the chosen layout.
+  return Math.min(1, Math.max(0.75, (viewportWidth - 32) / naturalWidth));
 }
 
 function pageContentStyle(
@@ -1642,7 +1688,7 @@ function pageContentStyle(
 ): CSSProperties {
   if (layout === "continuous") {
     return {
-      padding: "24px clamp(24px, 8vw, 96px)",
+      padding: "24px clamp(12px, 4cqw, 72px)",
     };
   }
   return {
