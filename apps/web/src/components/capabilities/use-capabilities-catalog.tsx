@@ -225,14 +225,18 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
     connectionsLoadFailed: visible.connectionsLoadFailed,
     connectionsAccessDenied: visible.connectionsAccessDenied,
     replaceConnection: (updated) =>
-      update((current) => ({
-        ...current,
-        connections: current.connections
-          ? current.connections.some((entry) => entry.id === updated.id)
-            ? current.connections.map((entry) => (entry.id === updated.id ? updated : entry))
-            : [...current.connections, updated]
-          : [updated],
-      })),
+      update((current) =>
+        current.connectionsAccessDenied
+          ? current // An in-flight update is not a new successful list read.
+          : {
+              ...current,
+              connections: current.connections
+                ? current.connections.some((entry) => entry.id === updated.id)
+                  ? current.connections.map((entry) => (entry.id === updated.id ? updated : entry))
+                  : [...current.connections, updated]
+                : [updated],
+            },
+      ),
     fetchConnections,
     apiIntegrationDefinitions: visible.apiIntegrationDefinitions,
     apiIntegrationInstances: visible.apiIntegrationInstances,

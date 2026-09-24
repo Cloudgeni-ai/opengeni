@@ -250,6 +250,7 @@ describe("useCapabilitiesCatalog", () => {
     context.client = clientA;
     await act(async () => root.render(<Harness />));
     await act(async () => await latest!.refresh());
+    const oldCallbacks = latest!;
     await act(async () => {
       void latest!.fetchConnections();
     });
@@ -258,6 +259,8 @@ describe("useCapabilitiesCatalog", () => {
     expect(latest!.connections).toBeNull();
     context.client = clientA;
     await act(async () => root.render(<Harness />));
+    expect(latest!.connections).toBeNull();
+    await act(async () => oldCallbacks.replaceConnection(personal));
     expect(latest!.connections).toBeNull();
     await act(async () => {
       stale.resolve([personal]);
@@ -302,6 +305,64 @@ describe("useCapabilitiesCatalog", () => {
     expect(latest!.connectionsAccessDenied).toBe(true);
     expect(latest!.items).toEqual([]);
     expect(latest!.loadError).toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("an in-flight update cannot replace a row after 403 until a successful list read", async () => {
+    const pendingUpdate = deferred<ConnectionMetadata>();
+    const original = { id: "personal", version: 1 } as ConnectionMetadata;
+    const updated = { id: "personal", version: 2 } as ConnectionMetadata;
+    const appended = { id: "another" } as ConnectionMetadata;
+    const recovered = { id: "personal", version: 3 } as ConnectionMetadata;
+    let denied = false;
+    context.client = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async () => {
+        if (denied) throw { status: 403 };
+        return [recovered];
+      },
+    } as unknown as OpenGeniBrowserClient;
+
+    let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+    function Harness() {
+      latest = useCapabilitiesCatalog("workspace-a");
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Harness />));
+    await act(async () => await latest!.refresh());
+    await act(async () => latest!.replaceConnection(original));
+    expect(latest!.connections).toEqual([original]);
+
+    const replaceFromPendingUpdate = latest!.replaceConnection;
+    const update = pendingUpdate.promise.then(replaceFromPendingUpdate);
+    denied = true;
+    await act(async () => await latest!.fetchConnections());
+    expect(latest!.connections).toBeNull();
+    expect(latest!.connectionsAccessDenied).toBe(true);
+
+    await act(async () => {
+      pendingUpdate.resolve(updated);
+      await update;
+      latest!.replaceConnection(appended);
+    });
+    expect(latest!.connections).toBeNull();
+    expect(latest!.connectionsLoadFailed).toBe(true);
+    expect(latest!.connectionsAccessDenied).toBe(true);
+
+    denied = false;
+    await act(async () => await latest!.fetchConnections());
+    expect(latest!.connections).toEqual([recovered]);
+    expect(latest!.connectionsAccessDenied).toBe(false);
+    await act(async () => {
+      replaceFromPendingUpdate(updated);
+      latest!.replaceConnection(appended);
+    });
+    expect(latest!.connections).toEqual([updated, appended]);
 
     await act(async () => root.unmount());
     container.remove();
