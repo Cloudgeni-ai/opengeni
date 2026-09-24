@@ -303,10 +303,9 @@ for j, n in enumerate(["E4", "G4", "B4"]):
 
 # Code highlights over A7sus4, each replaying the moment it caused.
 hl = {h["key"]: h for h in C["highlights"]}
-place(pads, pad([note("A2"), note("E3"), note("G3"), note("D4")], C["finalStart"] + 0.5 - hl["tenant"]["start"] + 0.3, 0.6, 0.8, 1100, 6), hl["tenant"]["start"] - 0.3, 0.14)
-place(fx, whoosh(0.5, 400, 1400, 90), hl["tenant"]["start"] - 0.62, 0.05)
-place(music, felt_piano(note("D4"), 3.5, 0.7), hl["tenant"]["start"], 0.2)
-place(fx, glass(note("D7"), 0.3, 1.0), hl["tenant"]["start"] + 0.01, 0.03)
+push_at = hl["tools"]["start"] - 0.9
+place(pads, pad([note("A2"), note("E3"), note("G3"), note("D4")], C["finalStart"] + 0.5 - push_at, 0.7, 0.8, 1100, 6), push_at + 0.1, 0.14)
+place(fx, whoosh(0.9, 380, 1500, 90), push_at - 0.02, 0.06)
 place(fx, whoosh(0.5, 700, 2600, 31), hl["tools"]["start"] - 0.04, 0.05)
 place(music, felt_piano(note("F#5"), 3.0, 0.8), hl["tools"]["start"], 0.28, pan=0.2)
 place(music, felt_piano(note("A5"), 3.0, 0.8), hl["tools"]["start"] + 0.16, 0.28, pan=0.3)

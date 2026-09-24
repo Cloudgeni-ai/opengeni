@@ -24,6 +24,24 @@ Every product claim in the film, and where it was verified. Source revision:
 | MCP server `{ id, url, headers, requireApproval: [toolName] }` | `docs/session-mcp-servers.md` contract |
 | One handler serves `GET` (restore history + unresolved approvals) and `POST` (send / respond) | `packages/sdk/README.md` chat quick start; `handler.ts` |
 
+### Compile-time proof
+
+`scripts/check-snippet.ts` writes the exact on-screen source (plus a one-line
+declaration of the product's own `authenticate()`, as the official snippet
+assumes) and `snippet-check/tsconfig.json` compiles it against the repository's
+current SDK source (`packages/sdk`, `packages/contracts`) with the repo's strict
+settings (`strict`, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`).
+Result: clean.
+
+Negative controls (to prove the harness can fail): a wrong tool `kind`, a
+non-string `tenant`, and an unknown handler option are each rejected. A
+misspelled optional MCP-server field is *not* rejected in that nested position,
+so those names were verified directly against the contract schema instead:
+`SessionMcpServerInput` = `id`, `name?`, `url` (HTTPS), `allowedTools?`,
+`timeoutMs?`, `cacheToolsList?`, `requireApproval?` (boolean or tool-name list),
+`headers?` (string record), `connectionRef?`. The id `"app"` is not one of the
+reserved session MCP ids (`opengeni`, `files`, `docs`, `codex_apps`).
+
 ## Dramatized mechanics (true of this integration)
 
 | Depicted | Why it is true |

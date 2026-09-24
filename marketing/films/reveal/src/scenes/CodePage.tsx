@@ -3,7 +3,7 @@ import { BRAND, CODE, SERVICE, inter, mono } from "../theme";
 import { ReasonPill } from "./AppPage";
 import { T } from "../timeline";
 import { CODE_LINES, HIGHLIGHTS, tokenize, type HighlightKey, type TokenKind } from "../data/code";
-import { alpha, clamp, easeOut, prog } from "../lib/anim";
+import { alpha, clamp, easeOut, easeSoft, mix, prog } from "../lib/anim";
 
 export const CODE_X = 0;
 export const CODE_FONT = 24;
@@ -27,8 +27,8 @@ const COLORS: Record<TokenKind, string> = {
 function highlightLevel(key: HighlightKey, t: number): number {
   const h = T.highlights.find((x) => x.key === key);
   if (!h) return 0;
-  const inK = prog(t, h.start, h.start + 0.2, easeOut);
-  const outK = prog(t, h.end - 0.2, h.end, easeOut);
+  const inK = prog(t, h.start, h.start + 0.3, easeSoft);
+  const outK = prog(t, h.end - 0.26, h.end, easeSoft);
   return inK * (1 - outK);
 }
 
@@ -36,10 +36,9 @@ export const CodePage: React.FC<{ t: number }> = ({ t }) => {
   const first = T.highlights[0];
   const last = T.highlights[T.highlights.length - 1];
   const focus =
-    prog(t, first.start - 0.1, first.start + 0.25, easeOut) *
-    (1 - prog(t, last.end - 0.05, last.end + 0.35, easeOut));
+    prog(t, first.start - 0.2, first.start + 0.3, easeSoft) *
+    (1 - prog(t, last.end - 0.1, last.end + 0.4, easeSoft));
   const levels = {
-    tenant: highlightLevel("tenant", t),
     tools: highlightLevel("tools", t),
     approval: highlightLevel("approval", t),
   } satisfies Record<HighlightKey, number>;
@@ -150,12 +149,14 @@ export const CodePage: React.FC<{ t: number }> = ({ t }) => {
               }}
             >
               {tokenize(line).map((tok, i) => {
-                const isCueComment = tok.kind === "com" && levels.tools > 0.5;
+                const base = COLORS[tok.kind];
+                const lit = tok.kind === "com" ? BRAND.orange : tok.kind === "punct" ? base : "#ffffff";
+                const toward = tok.kind === "com" ? levels.tools * (lvl > 0 ? 1 : 0) : lvl;
                 return (
                   <span
                     key={i}
                     style={{
-                      color: isCueComment ? BRAND.orange : lvl > 0 && tok.kind !== "punct" ? brighten(COLORS[tok.kind], lvl) : COLORS[tok.kind],
+                      color: toward > 0 ? mix(base, lit, toward) : base,
                       fontStyle: tok.kind === "com" ? "italic" : "normal",
                     }}
                   >
@@ -175,7 +176,7 @@ export const CodePage: React.FC<{ t: number }> = ({ t }) => {
 };
 
 function groupOf(n: number): HighlightKey {
-  return (Object.keys(HIGHLIGHTS) as HighlightKey[]).find((k) => n >= HIGHLIGHTS[k].from && n <= HIGHLIGHTS[k].to) ?? "tenant";
+  return (Object.keys(HIGHLIGHTS) as HighlightKey[]).find((k) => n >= HIGHLIGHTS[k].from && n <= HIGHLIGHTS[k].to) ?? "tools";
 }
 
 function cueX(key: HighlightKey): number {
@@ -185,10 +186,6 @@ function cueX(key: HighlightKey): number {
 }
 
 const bandRight = (key: HighlightKey) => cueX(key) - 6;
-
-function brighten(color: string, lvl: number): string {
-  return lvl > 0.5 ? "#ffffff" : color;
-}
 
 const Cue: React.FC<{ hkey: HighlightKey; level: number; t: number }> = ({ hkey, level, t }) => {
   if (level <= 0) return null;
@@ -206,44 +203,10 @@ const Cue: React.FC<{ hkey: HighlightKey; level: number; t: number }> = ({ hkey,
         transform: `translate(${(1 - k) * -16}px, -50%)`,
       }}
     >
-      {hkey === "tenant" ? <TenantChip /> : hkey === "tools" ? <MovedBlock t={t} start={start} /> : <SendReplica t={t} start={start} />}
+      {hkey === "tools" ? <MovedBlock t={t} start={start} /> : <SendReplica t={t} start={start} />}
     </div>
   );
 };
-
-const TenantChip: React.FC = () => (
-  <div
-    style={{
-      height: 54,
-      padding: "0 22px 0 7px",
-      borderRadius: 27,
-      background: "#ffffff",
-      display: "flex",
-      alignItems: "center",
-      gap: 12,
-      fontFamily: inter,
-      boxShadow: `0 0 0 2px ${BRAND.orange}`,
-    }}
-  >
-    <div
-      style={{
-        width: 40,
-        height: 40,
-        borderRadius: 20,
-        background: "#dccfbd",
-        color: "#4a3d2c",
-        fontSize: 15,
-        fontWeight: 600,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-      }}
-    >
-      LO
-    </div>
-    <span style={{ fontSize: 21, fontWeight: 600, color: "#1d1d1b", letterSpacing: -0.2 }}>Studio Lena</span>
-  </div>
-);
 
 const MovedBlock: React.FC<{ t: number; start: number }> = ({ t, start }) => {
   const slide = prog(t, start + 0.04, start + 0.5, easeOut);

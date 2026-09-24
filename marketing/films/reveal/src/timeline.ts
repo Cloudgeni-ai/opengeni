@@ -71,14 +71,13 @@ export const T = {
   slideEnd: 17.1,
   superYou: 16.8,
   highlights: [
-    { key: "tenant", start: 18.4, end: 19.35 },
-    { key: "tools", start: 19.35, end: 20.35 },
-    { key: "approval", start: 20.35, end: 21.35 },
+    { key: "tools", start: 18.45, end: 19.65 },
+    { key: "approval", start: 19.65, end: 20.9 },
   ],
-  finalStart: 21.35,
-  finalEnd: 22.65,
-  brandIn: 22.8,
-  duration: 26.5,
+  finalStart: 20.9,
+  finalEnd: 22.2,
+  brandIn: 22.35,
+  duration: 26.0,
 } as const;
 
 export const DURATION_FRAMES = Math.round(T.duration * FPS);

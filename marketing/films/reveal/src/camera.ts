@@ -15,27 +15,30 @@ export const BRAND_TOP = 1290;
 const closeUp = (s: number): Cam => ({ x: FIELD.x - 16 + 960 / s, y: 540 / s, s });
 
 const FULL: Cam = { x: 960, y: 540, s: 1 };
-const FULL_DRIFT: Cam = { x: 972, y: 530, s: 1.032 };
+const FULL_DRIFT: Cam = { x: 998, y: 528, s: 1.06 };
 const CARD_FOCUS: Cam = { x: 640, y: 360, s: 1.5 };
 const WIDE: Cam = { x: 960, y: 372, s: 0.665 };
-const PUSH: Cam = { x: 940, y: 600, s: 1.45 };
-const FINAL: Cam = { x: FINAL_CENTER_X, y: 640, s: 0.444 };
-const FINAL_SETTLE: Cam = { x: FINAL_CENTER_X, y: 640, s: 0.456 };
+const PUSH_TOOLS: Cam = { x: 940, y: 600, s: 1.45 };
+const PUSH_APPROVAL: Cam = { x: 940, y: 676, s: 1.45 };
+const FINAL: Cam = { x: FINAL_CENTER_X, y: 630, s: 0.425 };
+const FINAL_SETTLE: Cam = { x: FINAL_CENTER_X, y: 630, s: 0.436 };
 
 type Segment = { t0: number; t1: number; from: Cam; to: Cam; ease?: (x: number) => number };
 
-const CU_START = 1.8;
-const CU_END = 1.88;
+const CU_START = 1.72;
+const CU_END = 1.92;
 const cuAt = (t: number) => closeUp(lerp(CU_START, CU_END, easeSoft(clamp(t / T.pullStart))));
 const h0 = T.highlights[0].start;
+const h1 = T.highlights[1].start;
 
 const SEGMENTS: Segment[] = [
   { t0: T.pullStart, t1: T.pullEnd, from: closeUp(CU_END), to: FULL },
   { t0: T.pullEnd, t1: T.closeStart, from: FULL, to: FULL_DRIFT },
   { t0: T.cardIn + 0.15, t1: T.cardIn + 1.05, from: FULL_DRIFT, to: CARD_FOCUS },
   { t0: T.wideHerStart, t1: T.wideHerEnd, from: CARD_FOCUS, to: WIDE },
-  { t0: h0 - 0.6, t1: h0 - 0.02, from: WIDE, to: PUSH },
-  { t0: T.finalStart, t1: T.finalEnd, from: PUSH, to: FINAL },
+  { t0: h0 - 0.9, t1: h0 - 0.05, from: WIDE, to: PUSH_TOOLS },
+  { t0: h1 - 0.15, t1: h1 + 0.4, from: PUSH_TOOLS, to: PUSH_APPROVAL },
+  { t0: T.finalStart, t1: T.finalEnd, from: PUSH_APPROVAL, to: FINAL },
   { t0: T.finalEnd, t1: T.duration, from: FINAL, to: FINAL_SETTLE, ease: (x: number) => x },
 ];
 

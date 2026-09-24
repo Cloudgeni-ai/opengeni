@@ -92,6 +92,7 @@ const PageBody: React.FC<{ t: number; finished: boolean; morph: number }> = ({
         {BOOKED.map((b, i) => (
           <BookedBlock key={i} {...b} />
         ))}
+        {finished ? null : T.moves.map((_, i) => <Trail key={i} index={i} t={t} />)}
         {TODAY.map((a, i) => (
           <AppointmentBlock key={a.id} a={a} index={i} t={t} finished={finished} />
         ))}
@@ -529,6 +530,30 @@ function appointmentState(a: Appointment, index: number, t: number, finished: bo
   return { rect, p, flying, outline, tag, landedAt: move.land };
 }
 
+/** The path the agent moved an appointment along: drawn as it flies, then gone. */
+const Trail: React.FC<{ index: number; t: number }> = ({ index, t }) => {
+  const move = T.moves[index];
+  const a = TODAY[index];
+  const raw = clamp((t - move.start) / ((move.land - move.start) / ARRIVAL));
+  const fade = 1 - prog(t, move.land + 0.1, move.land + 0.9, easeOut);
+  if (raw <= 0 || fade <= 0) return null;
+  const from = todayRect(a);
+  const to = weekRect(a.to.day, a.to.start, a.duration);
+  const head = easeGlide(raw);
+  const pts: string[] = [];
+  for (let i = 0; i <= 48; i++) {
+    const p = (head * i) / 48;
+    const x = lerp(from.x, to.x, p) + from.w / 2;
+    const y = lerp(from.y, to.y, p) + Math.sin(Math.PI * p) * -30 + from.h / 2;
+    pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+  }
+  return (
+    <svg width={PAGE_W} height={PAGE_H} style={{ position: "absolute", left: 0, top: 0, zIndex: 4, opacity: fade }}>
+      <polyline points={pts.join(" ")} fill="none" stroke={BRAND.orange} strokeWidth={3} strokeLinecap="round" strokeDasharray="0.1 10" />
+    </svg>
+  );
+};
+
 const AppointmentBlock: React.FC<{ a: Appointment; index: number; t: number; finished: boolean }> = ({
   a,
   index,
@@ -550,9 +575,9 @@ const AppointmentBlock: React.FC<{ a: Appointment; index: number; t: number; fin
         background: svc.fill,
         overflow: "hidden",
         zIndex: st.flying > 0 ? 5 : 2,
-        transform: `scale(${1 + 0.035 * st.flying})`,
+        transform: `scale(${1 + 0.07 * st.flying})`,
         boxShadow: [
-          st.flying > 0 ? `0 ${18 * st.flying}px ${40 * st.flying}px rgba(20,20,18,${0.16 * st.flying})` : null,
+          st.flying > 0 ? `0 ${26 * st.flying}px ${54 * st.flying}px rgba(20,20,18,${0.2 * st.flying})` : null,
           st.outline > 0 ? agentShadow(st.outline) : null,
         ]
           .filter(Boolean)

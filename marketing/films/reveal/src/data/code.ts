@@ -71,12 +71,11 @@ export function tokenize(line: string): Token[] {
   return tokens;
 }
 
-export type HighlightKey = "tenant" | "tools" | "approval";
+export type HighlightKey = "tools" | "approval";
 
 /** 1-based inclusive line ranges, the line the cue is centred on, and the
  * lines whose text the cue must stay clear of horizontally. */
 export const HIGHLIGHTS: Record<HighlightKey, { from: number; to: number; cueLine: number; clear: number[] }> = {
-  tenant: { from: 12, to: 13, cueLine: 12.5, clear: [12, 13] },
   tools: { from: 14, to: 18, cueLine: 16, clear: [14, 15, 16, 17, 18] },
   approval: { from: 20, to: 20, cueLine: 20, clear: [19, 20, 21] },
 };

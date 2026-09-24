@@ -8,7 +8,8 @@
     "score": "bun run cues && python3 audio/score.py",
     "render": "remotion render src/index.ts Reveal out/reveal.mp4",
     "build": "bash scripts/build.sh",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:snippet": "bun scripts/check-snippet.ts && tsc -p snippet-check/tsconfig.json"
   },
   "dependencies": {
     "@remotion/cli": "4.0.527",
@@ -18,7 +19,11 @@
     "remotion": "4.0.527"
   },
   "devDependencies": {
+    "@noble/hashes": "1.8.0",
+    "@types/bun": "^1.4.2",
     "@types/react": "19.2.14",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "yaml": "2.9.0",
+    "zod": "4.2.1"
   }
 }
