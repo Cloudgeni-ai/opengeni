@@ -90,6 +90,7 @@ function ScopedCard({
   const reservedPopup = useRef<(() => void) | null>(null);
   const startKey = useRef(crypto.randomUUID());
   const advanceKey = useRef(crypto.randomUUID());
+  const startInput = useRef<string | null>(null);
   const storageKey = sessionId
     ? `opengeni:session-connect:${workspaceId}:${sessionId}:${capabilityId}`
     : `opengeni:workspace-connect:${workspaceId}:${capabilityId}`;
@@ -357,6 +358,15 @@ function ScopedCard({
             );
           reconnectAccountId = connections[0]?.id;
         }
+        // A closed request can still have reached the server. Keep its key for
+        // an exact replay, but never reuse it when ownership or another input
+        // changes while the user reopens setup.
+        const input = JSON.stringify({ ownership, returnUrl, reconnectAccountId, mcpUrl });
+        if (startInput.current !== null && startInput.current !== input) {
+          startKey.current = crypto.randomUUID();
+          advanceKey.current = crypto.randomUUID();
+        }
+        startInput.current = input;
         let attempt = await controller.begin({
           providerId: "mcp-oauth",
           ownership,
@@ -592,7 +602,8 @@ function ScopedCard({
                     else void begin();
                   }}
                 >
-                  {retryFresh || ((error || notice) && view.attempt?.nextAction.type === "authorize")
+                  {retryFresh ||
+                  ((error || notice) && view.attempt?.nextAction.type === "authorize")
                     ? "Try signing in again"
                     : `Continue to ${item.name}`}
                 </button>
