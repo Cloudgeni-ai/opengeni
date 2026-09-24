@@ -1172,6 +1172,51 @@ describe("durable BrowserSession lifecycle", () => {
     });
   });
 
+  test("retires a browser whose controller confirms its session is missing", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const active = await activeBrowser(scope);
+    const operationId = crypto.randomUUID();
+    await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId: active.session.id,
+      operationId,
+      actorSubjectId: scope.subjectId,
+    });
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId,
+      browserSessionId: active.session.id,
+      controllerGeneration: active.controllerGeneration,
+    });
+    const failed = await failBrowserSessionSuspension(client.db, {
+      ...scope,
+      operationId,
+      browserSessionId: active.session.id,
+      controllerGeneration: active.controllerGeneration,
+      missingControllerSession: true,
+      error: {
+        code: "resource_not_found",
+        message: "browser session is not active",
+        retryable: false,
+      },
+    });
+    expect(failed.session).toMatchObject({
+      lifecycle: "lost",
+      controller: null,
+      failureCode: "controller_resource_missing",
+    });
+    expect(failed.operation.state).toBe("failed");
+    const replay = await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId: active.session.id,
+      operationId,
+      actorSubjectId: scope.subjectId,
+    });
+    expect(replay.operation).toMatchObject({ state: "failed", replayed: true });
+    expect(replay.session.lifecycle).toBe("lost");
+  });
+
   test("enforces workspace RLS for reads", async () => {
     if (!available) return;
     const owner = await fixture();

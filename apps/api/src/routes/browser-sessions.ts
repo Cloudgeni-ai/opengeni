@@ -4144,6 +4144,7 @@ async function settleBrowserSessionSuspensionCaptureFailure(
   return await failBrowserSessionSuspension(deps.db, {
     ...input,
     ...(outcomeUnknown ? { state: "outcome_unknown" as const } : {}),
+    missingControllerSession: error.status === 404 && isMissingBrowserControllerSession(error),
     error: error.error,
   });
 }

@@ -1956,6 +1956,7 @@ export async function failBrowserSessionSuspension(
     browserSessionId: string;
     controllerGeneration: string;
     state?: "failed" | "outcome_unknown";
+    missingControllerSession?: boolean;
     error: InteractionErrorValue;
   },
 ): Promise<BrowserSessionMutationResponseValue> {
@@ -1963,8 +1964,8 @@ export async function failBrowserSessionSuspension(
     ...input,
     kind: "suspend",
     expectedLifecycle: "suspending",
-    resultLifecycle: "active",
-    clearController: false,
+    resultLifecycle: input.missingControllerSession ? "lost" : "active",
+    clearController: input.missingControllerSession === true,
   });
 }
 
@@ -2020,7 +2021,7 @@ async function failBrowserSessionTransition(
     controllerGeneration: string | null;
     kind: "suspend" | "resume";
     expectedLifecycle: "suspending" | "restoring";
-    resultLifecycle: "active" | "suspended";
+    resultLifecycle: "active" | "suspended" | "lost";
     state?: "failed" | "outcome_unknown";
     clearController: boolean;
     error: InteractionErrorValue;
@@ -2065,7 +2066,7 @@ async function failBrowserSessionTransition(
                   controllerHeartbeatAt: null,
                 }
               : {}),
-            failureCode: null,
+            failureCode: input.resultLifecycle === "lost" ? "controller_resource_missing" : null,
             updatedAt: now,
           })
           .where(
