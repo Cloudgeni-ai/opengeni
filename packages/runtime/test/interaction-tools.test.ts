@@ -404,7 +404,7 @@ describe("interaction attempt tools", () => {
     });
   });
 
-  test("keeps semantic Computer actions observation-fenced but free of pixel frame authority", async () => {
+  test("ignores a supplied pixel frame for semantic Computer actions while preserving the observation fence", async () => {
     const target = computerTarget();
     const observation = computerObservation(target);
     let request: ComputerActionRequest | null = null;
@@ -426,6 +426,8 @@ describe("interaction attempt tools", () => {
       {
         computerSessionId,
         targetId: target.id,
+        expectedObservationId: observation.observationId,
+        expectedFrameId: observation.frameId,
         action: {
           type: "semantic",
           locator: { kind: "role", role: "button", name: "Save" },
