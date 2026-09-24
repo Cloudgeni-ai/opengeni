@@ -458,11 +458,11 @@ stdin; already admitted writes remain blockers until settled. Provider loss,
 missing proof, and descriptor-free legacy commands never become successful
 supervision. See [command supervision](command-supervision.md).
 
-Native Modal `TaskExecStart` DNS failure is retryable only when the authenticated
-wire boundary binds the gRPC resolution target to its selected router host;
-the shell tool propagates that proof to bounded same-turn recovery. Generic
-`UNAVAILABLE` or ambiguous starts still retain their exact invocation and
-never authorize replay.
+Native Modal `TaskExecStart` recovery requires client-side channel readiness to
+fail before any Start RPC is issued. The shell tool carries only this pre-dispatch
+proof to bounded same-turn recovery; server-supplied DNS text and post-dispatch
+errors never prove non-execution. Supervised retries first settle their exact
+never-started reservation; retained or outcome-unknown causes block recovery.
 
 Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotations
 may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot reserves the

@@ -6,7 +6,7 @@ import {
   withSupervisedLaunchReservation,
 } from "../src/sandbox/provider-command-session";
 import {
-  ModalCommandStartDnsResolutionError,
+  ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartRejectedError,
 } from "../src/sandbox/providers/modal-command-router-wire";
 
@@ -132,15 +132,13 @@ test("authenticated definite start rejection is not converted into running", asy
   expect(f.starts).toHaveLength(1);
 });
 
-test("pre-dispatch native DNS failure escapes supervised start without a second launch", async () => {
+test("pre-dispatch readiness failure escapes supervised start without a second launch", async () => {
   const f = fixture();
-  const host = "task-fbhzq89jcdq2rfyqsxjs1uuk3.w.modal.host:443";
-  const details = `Name resolution failed for target dns:${host}`;
-  const error = ModalCommandStartDnsResolutionError.fromStart(
-    Object.assign(new Error(`14 UNAVAILABLE: ${details}`), { code: 14, details }),
-    host,
-  );
-  expect(error).toBeInstanceOf(ModalCommandStartDnsResolutionError);
+  const error = await ModalCommandStartPreDispatchUnavailableError.ensureReady({
+    waitForReady: (_deadline: number, callback: (error: Error) => void) =>
+      callback(new Error("not ready")),
+  } as never).catch((failure) => failure);
+  expect(error).toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
   f.failStart(error);
   await expect(
     withCommandSupervisionReady(true, () => f.control.start({ cmd: "never" })),

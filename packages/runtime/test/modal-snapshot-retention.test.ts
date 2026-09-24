@@ -12,12 +12,14 @@ import {
   OpenGeniModalSandboxClient,
   installOpenGeniModalSnapshotPolicy,
   isModalExecAlreadyCompletedError,
-  isModalTaskExecStartDnsResolutionError,
+  isModalTaskExecStartPreDispatchUnavailableError,
   modalProvider,
 } from "../src/sandbox/providers/modal";
 import { discoverWorkspaceSkills } from "../src/workspace-skills";
 import { SandboxChannelAService } from "../src/sandbox/channel-a";
 import { ModalProcessObservationUnavailableError } from "../src/sandbox/errors";
+import { ModalCommandStartPreDispatchUnavailableError } from "../src/sandbox/providers/modal-command-router-wire";
+import { RoutingMutationOutcomeUnknownError } from "../src/sandbox/routing/routing-session";
 
 type Persistence = "tar" | "snapshot_filesystem" | "snapshot_directory";
 const SNAPSHOT_REQUEST_ID = "11111111-1111-4111-8111-111111111111";
@@ -36,6 +38,13 @@ function modalTaskExecStartDnsError(overrides: Record<string, unknown> = {}) {
     },
     overrides,
   );
+}
+
+async function preDispatchFailure(): Promise<ModalCommandStartPreDispatchUnavailableError> {
+  return ModalCommandStartPreDispatchUnavailableError.ensureReady({
+    waitForReady: (_deadline: number, callback: (error: Error) => void) =>
+      callback(new Error("not ready")),
+  } as never).catch((error) => error);
 }
 
 function fakeSession(
@@ -148,33 +157,44 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     }
   });
 
-  test("matches the exact TaskExecStart DNS ClientError with numeric or string UNAVAILABLE", () => {
-    expect(isModalTaskExecStartDnsResolutionError(modalTaskExecStartDnsError())).toBe(true);
+  test("never accepts SDK DNS text as proof of non-dispatch", () => {
+    expect(isModalTaskExecStartPreDispatchUnavailableError(modalTaskExecStartDnsError())).toBe(
+      false,
+    );
     expect(
-      isModalTaskExecStartDnsResolutionError(modalTaskExecStartDnsError({ code: "UNAVAILABLE" })),
-    ).toBe(true);
+      isModalTaskExecStartPreDispatchUnavailableError(
+        modalTaskExecStartDnsError({ code: "UNAVAILABLE" }),
+      ),
+    ).toBe(false);
   });
 
-  test("traverses ToolCallError.error, cause, and all AggregateError leaves", () => {
-    const toolWrapped = new ToolCallError(
-      "Failed to run function tools",
-      modalTaskExecStartDnsError(),
-    );
+  test("traverses SDK wrappers only around authentic pre-dispatch proof", async () => {
+    const proven = await preDispatchFailure();
+    const toolWrapped = new ToolCallError("Failed to run function tools", proven);
     const causeWrapped = new Error("outer", { cause: toolWrapped });
     const aggregate = new AggregateError(
-      [
-        causeWrapped,
-        new ToolCallError(
-          "second tool failed",
-          modalTaskExecStartDnsError({ code: "UNAVAILABLE" }),
-        ),
-      ],
+      [causeWrapped, new ToolCallError("second tool failed", await preDispatchFailure())],
       "parallel tools failed",
     );
 
-    expect(isModalTaskExecStartDnsResolutionError(toolWrapped)).toBe(true);
-    expect(isModalTaskExecStartDnsResolutionError(causeWrapped)).toBe(true);
-    expect(isModalTaskExecStartDnsResolutionError(aggregate)).toBe(true);
+    expect(isModalTaskExecStartPreDispatchUnavailableError(toolWrapped)).toBe(true);
+    expect(isModalTaskExecStartPreDispatchUnavailableError(causeWrapped)).toBe(true);
+    expect(isModalTaskExecStartPreDispatchUnavailableError(aggregate)).toBe(true);
+    const retained = new RoutingMutationOutcomeUnknownError(
+      "execCommand",
+      "exact process retained",
+      {
+        cause: proven,
+        retainedProcess: { id: crypto.randomUUID(), providerSessionId: 17 },
+      },
+    );
+    expect(isModalTaskExecStartPreDispatchUnavailableError(retained)).toBe(false);
+    expect(
+      isModalTaskExecStartPreDispatchUnavailableError(new Error("outer", { cause: retained })),
+    ).toBe(false);
+    expect(
+      isModalTaskExecStartPreDispatchUnavailableError(new AggregateError([proven, retained])),
+    ).toBe(false);
   });
 
   test("rejects every near match and any HTTP status metadata", () => {
@@ -206,7 +226,7 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
       modalTaskExecStartDnsError({ statusCode: "404" }),
       modalTaskExecStartDnsError({ response: { status: 422 } }),
     ]) {
-      expect(isModalTaskExecStartDnsResolutionError(nearMatch)).toBe(false);
+      expect(isModalTaskExecStartPreDispatchUnavailableError(nearMatch)).toBe(false);
     }
   });
 
@@ -230,11 +250,11 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
       overDeep = new Error("wrapper", { cause: overDeep });
     }
 
-    expect(isModalTaskExecStartDnsResolutionError(mixedAggregate)).toBe(false);
-    expect(isModalTaskExecStartDnsResolutionError(mixedLinks)).toBe(false);
-    expect(isModalTaskExecStartDnsResolutionError(messageOnly)).toBe(false);
-    expect(isModalTaskExecStartDnsResolutionError(shutdown)).toBe(false);
-    expect(isModalTaskExecStartDnsResolutionError(overDeep)).toBe(false);
+    expect(isModalTaskExecStartPreDispatchUnavailableError(mixedAggregate)).toBe(false);
+    expect(isModalTaskExecStartPreDispatchUnavailableError(mixedLinks)).toBe(false);
+    expect(isModalTaskExecStartPreDispatchUnavailableError(messageOnly)).toBe(false);
+    expect(isModalTaskExecStartPreDispatchUnavailableError(shutdown)).toBe(false);
+    expect(isModalTaskExecStartPreDispatchUnavailableError(overDeep)).toBe(false);
   });
 
   test("translates snapshot_filesystem timeout and disables provider expiry", async () => {

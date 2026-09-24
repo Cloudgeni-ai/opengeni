@@ -47,36 +47,32 @@ export class ModalCommandStartRejectedError extends ProviderCommandStartRejected
   }
 }
 
-/** Proof created only by the native TaskExecStart boundary. A generic gRPC 14
- * is not proof that a command was never delivered. */
-export class ModalCommandStartDnsResolutionError extends Error {
-  private constructor(cause: ServiceError) {
-    super(cause.message, { cause });
-    this.name = "ModalCommandStartDnsResolutionError";
+/** Only a local channel-readiness failure BEFORE TaskExecStart is issued can
+ * prove that start was never dispatched. RPC status/details, even if they look
+ * like a DNS resolver error, can originate from an accepting server. */
+export class ModalCommandStartPreDispatchUnavailableError extends Error {
+  private constructor(cause: Error) {
+    super("Modal command router was not ready before Start dispatch", { cause });
+    this.name = "ModalCommandStartPreDispatchUnavailableError";
   }
 
-  static fromStart(
-    error: unknown,
-    routerHost: string,
-    signal?: AbortSignal,
-  ): ModalCommandStartDnsResolutionError | null {
-    if (signal?.aborted || !error || typeof error !== "object") return null;
-    const record = error as Partial<ServiceError> & Record<string, unknown>;
-    const host = /^task-[a-z0-9]+\.w\.modal\.host:443$/.test(routerHost) ? routerHost : null;
-    if (
-      !host ||
-      record.name !== "Error" ||
-      record.code !== status.UNAVAILABLE ||
-      record.details !== `Name resolution failed for target dns:${host}` ||
-      [record.status, record.statusCode, record.httpStatus, record.httpStatusCode].some(
-        (value) => value !== undefined,
-      ) ||
-      record.response !== undefined ||
-      record.cause !== undefined ||
-      record.error !== undefined
-    )
-      return null;
-    return new ModalCommandStartDnsResolutionError(record as ServiceError);
+  static async ensureReady(client: Client, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", abort);
+        if (signal?.aborted) reject(signal.reason);
+        else if (error) reject(new ModalCommandStartPreDispatchUnavailableError(error));
+        else resolve();
+      };
+      const abort = () => finish();
+      signal?.addEventListener("abort", abort, { once: true });
+      client.waitForReady(Date.now() + 5_000, finish);
+      if (signal?.aborted) abort();
+    });
   }
 }
 
@@ -109,18 +105,21 @@ export class ModalCommandRouterWire {
   private readonly client: Client;
   private readonly metadata: Metadata;
   private closed = false;
-  private readonly routerHost: string;
-
   constructor(access: ModalRouterAccess, trustedRoots?: Buffer) {
     const url = new URL(access.url);
     if (url.protocol !== "https:" || url.username || url.password || !access.jwt)
       throw new Error("Modal command router requires authenticated TLS");
-    this.routerHost = `${url.hostname}:${url.port || "443"}`;
-    this.client = new Client(url.host, credentials.createSsl(trustedRoots), {
-      "grpc.max_receive_message_length": maxWireBytes,
-      "grpc.max_send_message_length": maxWireBytes,
-      "grpc.enable_retries": 0,
-    });
+    // URL.host elides HTTPS's default :443; use the actual normalized gRPC
+    // target for both the resolver and the authenticated TLS transport.
+    this.client = new Client(
+      `${url.hostname}:${url.port || "443"}`,
+      credentials.createSsl(trustedRoots),
+      {
+        "grpc.max_receive_message_length": maxWireBytes,
+        "grpc.max_send_message_length": maxWireBytes,
+        "grpc.enable_retries": 0,
+      },
+    );
     this.metadata = new Metadata();
     this.metadata.set("authorization", `Bearer ${access.jwt}`);
   }
@@ -162,6 +161,13 @@ export class ModalCommandRouterWire {
   }
 
   async start(request: ModalRouterStart, signal?: AbortSignal): Promise<void> {
+    if (this.closed) throw new Error("Modal command router is closed");
+    try {
+      await ModalCommandStartPreDispatchUnavailableError.ensureReady(this.client, signal);
+    } catch (error) {
+      if (this.closed) throw new Error("Modal command router is closed", { cause: error });
+      throw error;
+    }
     try {
       await this.unary(
         "TaskExecStart",
@@ -175,12 +181,6 @@ export class ModalCommandRouterWire {
         signal,
       );
     } catch (error) {
-      const dnsError = ModalCommandStartDnsResolutionError.fromStart(
-        error,
-        this.routerHost,
-        signal,
-      );
-      if (dnsError) throw dnsError;
       const code = (error as Partial<ServiceError> | null)?.code;
       if (
         typeof code === "number" &&

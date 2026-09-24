@@ -20,7 +20,7 @@ import {
 } from "./modal-legacy-command-control";
 import {
   ModalCommandRouterWire,
-  ModalCommandStartDnsResolutionError,
+  ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartRejectedError,
 } from "./modal-command-router-wire";
 
@@ -240,7 +240,7 @@ export class ModalCommandControl {
       if (
         !supervision ||
         error instanceof ModalCommandStartRejectedError ||
-        error instanceof ModalCommandStartDnsResolutionError
+        error instanceof ModalCommandStartPreDispatchUnavailableError
       )
         throw error;
     }

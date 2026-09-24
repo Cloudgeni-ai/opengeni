@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import { status } from "@grpc/grpc-js";
 import { ModalCommandRouterWire } from "../src/sandbox/providers/modal-command-router-wire";
-import { isModalTaskExecStartDnsResolutionError } from "../src/sandbox/providers/modal";
+import { isModalTaskExecStartPreDispatchUnavailableError } from "../src/sandbox/providers/modal";
 import {
   buildAgentCapabilities,
   buildOpenGeniAgent,
@@ -29,10 +29,18 @@ describe("portable local compaction capability boundary", () => {
 });
 
 describe("turn sandbox-tool cancellation boundary", () => {
-  test("the production shell tool propagates native pre-dispatch DNS proof, not ambiguous starts", async () => {
+  test("the production shell tool propagates pre-dispatch proof, not DNS-shaped server replies", async () => {
     const host = "task-fbhzq89jcdq2rfyqsxjs1uuk3.w.modal.host";
     const details = `Name resolution failed for target dns:${host}:443`;
     const wire = new ModalCommandRouterWire({ url: `https://${host}`, jwt: "test-token" });
+    let ready = false;
+    Object.defineProperty(wire, "client", {
+      value: {
+        waitForReady: (_deadline: number, callback: (error?: Error) => void) =>
+          callback(ready ? undefined : new Error("channel not ready")),
+        close: () => {},
+      },
+    });
     let calls = 0;
     Object.defineProperty(wire, "unary", {
       value: async () => {
@@ -67,18 +75,20 @@ describe("turn sandbox-tool cancellation boundary", () => {
       const failure = await tool
         .invoke({} as never, JSON.stringify({ cmd: "true" }))
         .catch((error: unknown) => error);
-      expect(isModalTaskExecStartDnsResolutionError(failure)).toBe(true);
-      expect(calls).toBe(1);
+      expect(isModalTaskExecStartPreDispatchUnavailableError(failure)).toBe(true);
+      expect(calls).toBe(0);
+      ready = true;
       Object.defineProperty(wire, "unary", {
         value: async () => {
           calls++;
-          throw Object.assign(new Error("ambiguous start"), { code: status.UNAVAILABLE });
+          throw Object.assign(new Error(`14 UNAVAILABLE: ${details}`), {
+            code: status.UNAVAILABLE,
+            details,
+          });
         },
       });
-      expect(await tool.invoke({} as never, JSON.stringify({ cmd: "true" }))).toContain(
-        "ambiguous start",
-      );
-      expect(calls).toBe(2);
+      expect(await tool.invoke({} as never, JSON.stringify({ cmd: "true" }))).toContain(details);
+      expect(calls).toBe(1);
     } finally {
       wire.close();
     }

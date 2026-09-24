@@ -1,12 +1,19 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { Server, ServerCredentials, status, type ServiceDefinition } from "@grpc/grpc-js";
+import {
+  Client,
+  Server,
+  ServerCredentials,
+  credentials,
+  status,
+  type ServiceDefinition,
+} from "@grpc/grpc-js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   ModalCommandRouterWire,
-  ModalCommandStartDnsResolutionError,
+  ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartRejectedError,
   modalRouterWire,
 } from "../src/sandbox/providers/modal-command-router-wire";
@@ -71,6 +78,13 @@ beforeAll(async () => {
       start(call: any, callback: any) {
         startCalls++;
         expect(call.metadata.get("authorization")).toEqual(["Bearer test-token"]);
+        if (call.request.execId === "server-spoof") {
+          callback({
+            code: status.UNAVAILABLE,
+            details: "Name resolution failed for target dns:task-spoof.w.modal.host:443",
+          });
+          return;
+        }
         callback({
           code: call.request.execId === "rejected" ? status.NOT_FOUND : status.UNAVAILABLE,
           details:
@@ -130,53 +144,83 @@ function wire() {
 }
 const identity = (execId = "normal") => ({ taskId: "task-test", execId });
 
-test("native grpc-js DNS failure is typed only at the matching Start router", async () => {
-  const host = "task-fbhzq89jcdq2rfyqsxjs1uuk3.w.modal.host";
-  const details = `Name resolution failed for target dns:${host}:443`;
-  const native = Object.assign(new Error(`14 UNAVAILABLE: ${details}`), {
-    code: status.UNAVAILABLE,
-    details,
-  });
-  const client = new ModalCommandRouterWire({ url: `https://${host}`, jwt: "test-token" });
-  let calls = 0;
-  Object.defineProperty(client, "unary", {
-    value: async () => {
-      calls++;
-      throw native;
-    },
-    configurable: true,
-  });
-  const start = () =>
-    client.start({ ...identity(), commandArgs: ["true"], workdir: "/tmp", env: {} });
+test("real no-port DNS target never dispatches Start; the client readiness gate proves it", async () => {
+  const host = "task-notarealtask2707.w.modal.host";
+  // grpc-js accepts a no-port authority and reports a resolver error without
+  // :443; server-shaped error fields are therefore not useful dispatch proof.
+  const raw = new Client(host, credentials.createInsecure());
   try {
-    await expect(start()).rejects.toBeInstanceOf(ModalCommandStartDnsResolutionError);
-    expect(calls).toBe(1);
-    for (const override of [
-      { details: `${details}.` },
-      { details: "Name resolution failed for target dns:task-other.w.modal.host:443" },
-      { code: status.UNKNOWN },
-      { status: 503 },
-      { response: { status: 503 } },
-      { name: "ClientError" },
-    ]) {
-      const other = Object.assign(
-        new Error(native.message),
-        { code: status.UNAVAILABLE, details },
-        override,
-      );
-      Object.defineProperty(client, "unary", {
-        value: async () => {
-          calls++;
-          throw other;
-        },
-        configurable: true,
-      });
-      await expect(start()).rejects.toBe(other);
-    }
-    expect(calls).toBe(7); // no start is replayed inside the wire
+    const native = await new Promise<unknown>((resolve) =>
+      raw.makeUnaryRequest(
+        `/${service}/TaskExecStart`,
+        () => Buffer.alloc(0),
+        (bytes) => bytes,
+        {},
+        { deadline: Date.now() + 1_000 },
+        (error) => resolve(error),
+      ),
+    );
+    expect((native as { details: string }).details).toContain(`dns:${host}`);
+    expect((native as { details: string }).details).not.toContain(`${host}:443`);
+  } finally {
+    raw.close();
+  }
+
+  const client = new ModalCommandRouterWire({ url: `https://${host}`, jwt: "test-token" });
+  try {
+    expect((client as any).client.getChannel().getTarget()).toBe(`dns:${host}:443`);
+    let dispatched = 0;
+    Object.defineProperty(client, "unary", {
+      value: async () => {
+        dispatched++;
+      },
+    });
+    await expect(
+      client.start({ ...identity(), commandArgs: ["true"], workdir: "/tmp", env: {} }),
+    ).rejects.toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
+    expect(dispatched).toBe(0);
   } finally {
     client.close();
   }
+});
+
+test("an accepting TLS server cannot authorize replay by returning DNS-shaped text", async () => {
+  const client = wire();
+  const before = startCalls;
+  try {
+    const failure = await client
+      .start({ ...identity("server-spoof"), commandArgs: ["true"], workdir: "/tmp", env: {} })
+      .catch((error) => error);
+    expect(startCalls - before).toBe(1);
+    expect(failure).toMatchObject({
+      code: status.UNAVAILABLE,
+      details: "Name resolution failed for target dns:task-spoof.w.modal.host:443",
+    });
+    expect(failure).not.toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
+  } finally {
+    client.close();
+  }
+});
+
+test("closing during pre-dispatch readiness never becomes a retryable transport failure", async () => {
+  const client = wire();
+  let ready: ((error?: Error) => void) | undefined;
+  Object.defineProperty(client, "client", {
+    value: {
+      waitForReady: (_deadline: number, callback: (error?: Error) => void) => {
+        ready = callback;
+      },
+      close: () => {},
+    },
+  });
+  const result = client
+    .start({ ...identity(), commandArgs: ["true"], workdir: "/tmp", env: {} })
+    .catch((error) => error);
+  client.close();
+  ready!(new Error("channel closed"));
+  const error = await result;
+  expect(error).toHaveProperty("message", "Modal command router is closed");
+  expect(error).not.toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
 });
 
 test("authenticated Start rejection is typed separately from transport uncertainty", async () => {
