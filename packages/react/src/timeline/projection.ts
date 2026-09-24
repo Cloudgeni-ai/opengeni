@@ -1016,6 +1016,7 @@ export function buildTimeline(
       case "tool.auth_needed":
       case "credential.auth_needed": {
         const capability = capabilityAuthorizationRequest(payload.capability);
+        const setupRequest = customMcpSetupRequest(payload.setupRequest);
         if (
           event.type === "tool.auth_needed" &&
           !stringValue(payload.toolName) &&
@@ -1045,11 +1046,12 @@ export function buildTimeline(
             payload.connectionSubjectScope === "workspace"
               ? payload.connectionSubjectScope
               : null,
-          source: capability
-            ? "capability"
-            : event.type === "tool.auth_needed"
-              ? "tool"
-              : "credential",
+          source:
+            capability || setupRequest
+              ? "capability"
+              : event.type === "tool.auth_needed"
+                ? "tool"
+                : "credential",
           providerDomain: stringValue(payload.providerDomain),
           connectionId: typeof payload.connectionId === "string" ? payload.connectionId : null,
           authoritySource: payload.authoritySource === "host" ? "host" : null,
@@ -1064,6 +1066,7 @@ export function buildTimeline(
           authorizationUrl:
             typeof payload.authorizationUrl === "string" ? payload.authorizationUrl : null,
           capability,
+          setupRequest,
           occurredAt: event.occurredAt,
         });
         break;
@@ -2620,6 +2623,29 @@ function capabilityAuthorizationRequest(
     action: action as NonNullable<AuthNeededItem["capability"]>["action"],
     rationale: record.rationale,
     requiredVariables: stringList(record.requiredVariables),
+  };
+}
+
+function customMcpSetupRequest(value: unknown): NonNullable<AuthNeededItem["setupRequest"]> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  if (
+    input.kind !== "mcp" ||
+    typeof input.name !== "string" ||
+    typeof input.rationale !== "string" ||
+    typeof input.endpointUrl !== "string"
+  )
+    return null;
+  try {
+    if (new URL(input.endpointUrl).protocol !== "https:") return null;
+  } catch {
+    return null;
+  }
+  return {
+    kind: "mcp",
+    name: input.name,
+    endpointUrl: input.endpointUrl,
+    rationale: input.rationale,
   };
 }
 
