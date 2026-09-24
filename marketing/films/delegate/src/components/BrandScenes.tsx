@@ -13,7 +13,7 @@ type Tok = [string, "kw" | "fn" | "key" | "str" | "p" | "id"];
 
 /** Selected, current SDK integration surfaces. The authenticated hourTools
  * MCP server, client/provider, tenant mapping, and error handling live outside
- * this excerpt; the film explicitly discloses those omissions. */
+ * this excerpt; RECUT.md documents those omissions. */
 export const CODE: Tok[][] = [
   [["const ", "kw"], ["session", "id"], [" = await ", "kw"], ["og", "id"], [".", "p"], ["createSession", "fn"], ["(", "p"]],
   [["  workspaceId, { initialMessage: text,", "p"]],
@@ -136,7 +136,6 @@ export const BrandScenes: React.FC<{ t: number }> = ({ t }) => {
       {!endCut && <CodeSpread t={t} />}
       {t < T.ann2 + 0.18 && <Bridge t={t} />}
       <EndCard t={t} />
-      <FinePrint t={t} />
     </div>
   );
 };
@@ -375,26 +374,6 @@ const EndCard: React.FC<{ t: number }> = ({ t }) => {
       <div style={{ position: "absolute", left: 150, top: 855, fontFamily: F.ui, fontSize: 36, letterSpacing: "-0.01em", color: C.paperDim, opacity: clamp01(m * 1.4) }}>
         Apache-2.0 · Managed or self-hosted
       </div>
-    </div>
-  );
-};
-
-const FinePrint: React.FC<{ t: number }> = ({ t }) => {
-  const k = prog(t, T.code + 0.3, T.code + 0.8);
-  return (
-    <div
-      style={{
-        position: "absolute",
-        left: 150,
-        bottom: 50,
-        fontFamily: F.mono,
-        fontSize: 27,
-        letterSpacing: "0.01em",
-        color: "#8a8980",
-        opacity: k,
-      }}
-    >
-      Illustrative app. Excerpts omit auth, customer setup and the protected tool endpoint.
     </div>
   );
 };
