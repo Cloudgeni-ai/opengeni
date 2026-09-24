@@ -1569,6 +1569,17 @@ describe("contracts", () => {
       capturedAt: "2026-08-17T12:00:00.000Z",
     };
     const goalContext = renderSessionGoalContext(goalSnapshot)!;
+    expect(goalContext).toContain("You may update your operational goal directly");
+    expect(goalContext).not.toContain("adaptations and replacements are proposals");
+    expect(goalContext).toContain("Root constraints are user/API authority");
+    const reviewedGoalContext = renderSessionGoalContext({
+      ...goalSnapshot,
+      mutationPolicy: "review_changes",
+    })!;
+    expect(reviewedGoalContext).toContain(
+      "Semantic changes are proposals until a user applies them.",
+    );
+    expect(reviewedGoalContext).not.toContain("You may update your operational goal directly");
     expect(
       renderUserMessageContentForModel("Continue", [], "selected record 42", goalSnapshot),
     ).toEqual([

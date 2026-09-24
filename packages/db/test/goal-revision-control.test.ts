@@ -103,6 +103,49 @@ function command(ctx: Awaited<ReturnType<typeof fixture>>, operationKey = crypto
 }
 
 describe("goal revision decisions", () => {
+  test.each(["refinement", "adaptation", "replacement"] as const)(
+    "default operational goal %s applies without a second approval and replays exactly",
+    async (changeKind) => {
+      const ctx = await fixture({ rootConstraints: ["Do not deploy"] });
+      const input = {
+        text: "Deliver the human's clarified intended behavior",
+        successCriteria: "Verify the clarified behavior without deployment",
+        changeKind,
+        rationale: "The human clarified the intended behavior in the conversation",
+        expectedObjectiveRevision: 1,
+        actor: "agent" as const,
+        command: command(ctx),
+      };
+      const updated = await updateSessionGoalWithEvent(
+        client.db,
+        ctx.grant.workspaceId,
+        ctx.session.id,
+        input,
+      );
+      expect(updated).toMatchObject({
+        outcome: "applied",
+        proposalId: null,
+        replay: false,
+        goal: { text: input.text, objectiveRevision: 2, rootConstraints: ["Do not deploy"] },
+      });
+      expect(
+        await updateSessionGoalWithEvent(client.db, ctx.grant.workspaceId, ctx.session.id, input),
+      ).toMatchObject({ outcome: "applied", replay: true, events: [], goal: updated.goal });
+      await expect(
+        updateSessionGoalWithEvent(client.db, ctx.grant.workspaceId, ctx.session.id, {
+          ...input,
+          command: command(ctx),
+        }),
+      ).rejects.toBeInstanceOf(SessionControlConflictError);
+      const revisions = await listSessionGoalRevisions(
+        client.db,
+        ctx.grant.workspaceId,
+        ctx.session.id,
+      );
+      expect(revisions.map((revision) => revision.disposition)).toEqual(["applied", "applied"]);
+    },
+  );
+
   test("agent semantic rewrites require classification, rationale, and an exact revision fence", async () => {
     const ctx = await fixture({ rootConstraints: ["human-owned constraint"] });
     await expect(
