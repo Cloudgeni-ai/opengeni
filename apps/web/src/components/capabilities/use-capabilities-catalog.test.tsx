@@ -4,7 +4,11 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import type { IntegrationDefinitionSummary } from "@/types";
+import type {
+  CapabilityCatalogItem,
+  ConnectionMetadata,
+  IntegrationDefinitionSummary,
+} from "@/types";
 
 const context: { client: OpenGeniBrowserClient } = { client: {} as OpenGeniBrowserClient };
 
@@ -58,9 +62,84 @@ function fakeClient(definitions: Promise<{ definitions: IntegrationDefinitionSum
 }
 
 describe("useCapabilitiesCatalog", () => {
-  test("identifies connection authorization failures without hiding the readable catalog", async () => {
+  test("revoked connection access clears previously loaded rows without hiding the catalog", async () => {
+    const connection = { id: "previously-visible" } as ConnectionMetadata;
+    let denied = false;
     context.client = {
       ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async () => {
+        if (denied) throw { status: 403 };
+        return [connection];
+      },
+    } as unknown as OpenGeniBrowserClient;
+
+    let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+    function Harness() {
+      latest = useCapabilitiesCatalog("workspace-a");
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Harness />));
+    await act(async () => await latest!.refresh());
+    expect(latest!.connections).toEqual([connection]);
+    expect(latest!.connectionsAccessDenied).toBe(false);
+
+    denied = true;
+    await act(async () => await latest!.refresh());
+    expect(latest!.connections).toBeNull();
+    expect(latest!.connectionsLoadFailed).toBe(true);
+    expect(latest!.connectionsAccessDenied).toBe(true);
+    expect(latest!.items).toEqual([]);
+    expect(latest!.loadError).toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("transient connection refresh failures preserve previously loaded rows", async () => {
+    const connection = { id: "cached" } as ConnectionMetadata;
+    let failed = false;
+    context.client = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async () => {
+        if (failed) throw new Error("Temporary failure");
+        return [connection];
+      },
+    } as unknown as OpenGeniBrowserClient;
+
+    let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+    function Harness() {
+      latest = useCapabilitiesCatalog("workspace-a");
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Harness />));
+    await act(async () => await latest!.refresh());
+    failed = true;
+    await act(async () => await latest!.refresh());
+    expect(latest!.connections).toEqual([connection]);
+    expect(latest!.connectionsLoadFailed).toBe(true);
+    expect(latest!.connectionsAccessDenied).toBe(false);
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("identifies connection authorization failures without hiding the readable catalog", async () => {
+    const item = {
+      id: "mail",
+      name: "Mail",
+      enabled: true,
+      runtime: { mcpServerId: "mail" },
+      connectionRef: { providerDomain: "example.com" },
+    } as CapabilityCatalogItem;
+    context.client = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listCapabilities: async () => ({ items: [item] }),
       listConnections: async () => {
         throw { status: 403 };
       },
@@ -77,7 +156,7 @@ describe("useCapabilitiesCatalog", () => {
     await act(async () => root.render(<Harness />));
     await act(async () => await latest!.refresh());
 
-    expect(latest!.items).toEqual([]);
+    expect(latest!.items).toEqual([item]);
     expect(latest!.loadError).toBeNull();
     expect(latest!.connectionsLoadFailed).toBe(true);
     expect(latest!.connectionsAccessDenied).toBe(true);

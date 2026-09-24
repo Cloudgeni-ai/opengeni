@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { CapabilityCatalogItem, Session } from "@opengeni/sdk";
+import { isWorkspacePermissionDenied } from "@/lib/permissions";
 import {
   selectedConnectionAccounts,
   sessionConnectedAccounts,
@@ -29,6 +30,7 @@ export function useConnectionAccounts(
     catalog: CapabilityCatalogItem[];
     groups: ConnectedAccountGroup[];
     error: string | null;
+    accessDenied: boolean;
   } | null>(null);
   const request = useRef(0);
   const refresh = useCallback(async () => {
@@ -46,17 +48,21 @@ export function useConnectionAccounts(
         invocation.session.workspaceId,
         invocation.catalog,
       );
-      if (current()) setResult({ ...invocation, groups, error: null });
+      if (current()) setResult({ ...invocation, groups, error: null, accessDenied: false });
     } catch (failure) {
-      if (current())
+      if (current()) {
+        const accessDenied = isWorkspacePermissionDenied(failure);
         setResult({
           ...invocation,
           groups: [],
-          error:
-            failure instanceof Error
+          error: accessDenied
+            ? "You don't have permission to view connection accounts. Ask a workspace admin for connection access."
+            : failure instanceof Error
               ? failure.message
               : "Connection accounts could not be checked.",
+          accessDenied,
         });
+      }
     }
     // Inventory stays available when a connector is toggled off. Selection is
     // projected separately, without a refetch that removes the settings control.
@@ -114,6 +120,7 @@ export function useConnectionAccounts(
         },
       })),
     error: matches && hasNative ? result.error : null,
+    accessDenied: Boolean(matches && hasNative && result.accessDenied),
     loading: hasNative && !matches,
     refresh,
   };

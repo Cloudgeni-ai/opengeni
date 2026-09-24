@@ -98,7 +98,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
           client.listCapabilities(workspaceId),
           // null (not []) on failure so health can tell "didn't load" from "loaded empty".
           client.listConnections(workspaceId).then(
-            (connections) => ({ connections, denied: false }),
+            (loadedConnections) => ({ connections: loadedConnections, denied: false }),
             (error: unknown) => ({ connections: null, denied: isWorkspacePermissionDenied(error) }),
           ),
           client.listSocialConnections(workspaceId).catch(() => null),
@@ -109,11 +109,9 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
       if (!isCurrentScope()) return;
       const conns = connectionResult.connections;
       setItems(catalog.items);
-      // Don't clobber previously-loaded connections with null on a failed refetch
-      // (that would flip healthy items to "unverified" until the next reload); a
-      // first-load failure leaves the prior null = "not loaded", which is correct.
-      // The failure itself is tracked so the integrations can say so and retry.
-      if (conns !== null) setConnections(conns);
+      // Keep cached connections on a transient failure, but a revoked grant
+      // must not leave previously visible connection data in the catalog.
+      if (conns !== null || connectionResult.denied) setConnections(conns);
       setConnectionsLoadFailed(conns === null);
       setConnectionDenialScope(connectionResult.denied ? scope : null);
       if (socials !== null) setSocialConnections(socials);

@@ -2805,6 +2805,7 @@ function SessionChatPane(props: {
                       onChoose: connectionAccounts.selectAccount,
                       loading: connectionAccounts.loading,
                       error: connectionAccounts.error,
+                      accessDenied: connectionAccounts.accessDenied,
                       onRefresh: () => void connectionAccounts.refresh(),
                       disabled:
                         terminal || composer.sending || durableToolsSaving || !durableToolsHydrated,

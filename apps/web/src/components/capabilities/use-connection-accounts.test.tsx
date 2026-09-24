@@ -145,6 +145,29 @@ test("failed inventory blocks sending and retry recovers without forgetting excl
   await act(async () => state.refresh());
   expect(state.error).toBeNull();
   expect(state.selections).toEqual([{ serverId: "mail", connectionId: "two" }]);
+  expect(state.accessDenied).toBe(false);
+});
+
+test("403 refresh hides prior accounts and gives scoped permission guidance until access returns", async () => {
+  let denied = false;
+  const client = clientFor(async () => {
+    if (denied) throw { status: 403 };
+    return accounts;
+  });
+  await act(async () => root.render(<Harness client={client} />));
+  expect(state.selections).toHaveLength(2);
+  denied = true;
+  await act(async () => state.refresh());
+  expect(state.availableAccountGroups).toEqual([]);
+  expect(state.selections).toEqual([]);
+  expect(state.error).toContain("Ask a workspace admin for connection access");
+  expect(state.accessDenied).toBe(true);
+
+  denied = false;
+  await act(async () => state.refresh());
+  expect(state.error).toBeNull();
+  expect(state.accessDenied).toBe(false);
+  expect(state.selections).toHaveLength(2);
 });
 
 test("returning to connector defaults restores emptied accounts but preserves nonempty narrowing", async () => {

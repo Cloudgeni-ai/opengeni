@@ -143,10 +143,14 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+          (migration) => migration.path === "0518_member_connection_read_backfill.sql",
         )
-          ? "0515_autonomous_learning_defaults.sql"
-          : "0514_failed_session_variable_set_attach.sql",
+          ? "0518_member_connection_read_backfill.sql"
+          : sourceContract.migrations.some(
+                (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+              )
+            ? "0515_autonomous_learning_defaults.sql"
+            : "0514_failed_session_variable_set_attach.sql",
       );
       expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
     }
@@ -157,9 +161,9 @@ describe("release schema contract", () => {
           ...sourceContract,
           fileCount: sourceContract.fileCount - 1,
           latestMigration:
-            sourceContract.latestMigration === "0515_autonomous_learning_defaults.sql"
-              ? sourceContract.latestMigration
-              : "0513_message_fork_prefix_compaction.sql",
+            sourceContract.latestMigration === "0514_failed_session_variable_set_attach.sql"
+              ? "0513_message_fork_prefix_compaction.sql"
+              : sourceContract.latestMigration,
           migrations: sourceContract.migrations.filter(
             (migration) => migration.path !== "0514_failed_session_variable_set_attach.sql",
           ),
@@ -167,6 +171,15 @@ describe("release schema contract", () => {
       : sourceContract;
     const autonomousLearningDefaults = completeSourceContract.migrations.some(
       (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+    );
+    const memberConnectionRead = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0516_member_connection_read.sql",
+    );
+    const memberConnectionReadBackfillIndex = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0517_member_connection_read_backfill_index.sql",
+    );
+    const memberConnectionReadBackfill = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0518_member_connection_read_backfill.sql",
     );
     const backgroundCommandText = completeSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
@@ -425,6 +438,9 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (memberConnectionRead ? 1 : 0) +
+        (memberConnectionReadBackfillIndex ? 1 : 0) +
+        (memberConnectionReadBackfill ? 1 : 0) +
         (autonomousLearningDefaults ? 1 : 0) +
         (messageForkPrefixCompaction ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
@@ -716,7 +732,27 @@ describe("release schema contract", () => {
       ...(autonomousLearningDefaults
         ? { latestMigration: "0515_autonomous_learning_defaults.sql" }
         : {}),
+      ...(memberConnectionRead ? { latestMigration: "0516_member_connection_read.sql" } : {}),
+      ...(memberConnectionReadBackfillIndex
+        ? { latestMigration: "0517_member_connection_read_backfill_index.sql" }
+        : {}),
+      ...(memberConnectionReadBackfill
+        ? { latestMigration: "0518_member_connection_read_backfill.sql" }
+        : {}),
     });
+    // Keep the historical migration-order probes below scoped to published
+    // history after checking the three forward rollout steps above.
+    completeSourceContract = {
+      ...completeSourceContract,
+      migrations: completeSourceContract.migrations.filter(
+        (migration) =>
+          ![
+            "0516_member_connection_read.sql",
+            "0517_member_connection_read_backfill_index.sql",
+            "0518_member_connection_read_backfill.sql",
+          ].includes(migration.path),
+      ),
+    };
     if (autonomousLearningDefaults) {
       expect(completeSourceContract.migrations.at(-1)).toMatchObject({
         path: "0515_autonomous_learning_defaults.sql",
@@ -2181,6 +2217,9 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0472_usage_events_workspace_recent_index.sql",
     );
     let completeSourceContract = await contractWithoutMigrations([
+      "0516_member_connection_read.sql",
+      "0517_member_connection_read_backfill_index.sql",
+      "0518_member_connection_read_backfill.sql",
       "0463_host_mcp_resolver_registration.sql",
       "0461_unified_knowledge.sql",
       "0460_host_export_message_attribution.sql",
@@ -2680,6 +2719,9 @@ describe("release schema contract", () => {
       "0513_message_fork_prefix_compaction.sql",
       "0514_failed_session_variable_set_attach.sql",
       "0515_autonomous_learning_defaults.sql",
+      "0516_member_connection_read.sql",
+      "0517_member_connection_read_backfill_index.sql",
+      "0518_member_connection_read_backfill.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

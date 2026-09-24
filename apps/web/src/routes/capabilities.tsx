@@ -116,6 +116,8 @@ const CustomApiSetupDialog = lazy(async () => {
 
 import {
   catalogStatusForChip,
+  connectionAccessChip,
+  connectionAccessModel,
   type IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
 
@@ -383,15 +385,20 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     refreshRevision: catalogData.revision,
   });
   const integrations = [
-    slack,
+    { ...slack, model: connectionAccessModel(slack.model, connectionsAccessDenied) },
     github,
-    googleDrive,
-    atlassian,
+    { ...googleDrive, model: connectionAccessModel(googleDrive.model, connectionsAccessDenied) },
+    { ...atlassian, model: connectionAccessModel(atlassian.model, connectionsAccessDenied) },
     outlookMail,
     outlookCalendar,
     outlookContacts,
     oneDrive,
   ];
+  const connectorChip = (item: CapabilityCatalogItem) =>
+    connectionAccessChip(
+      capabilityStateChip(item, connectionHealth(item, connections ?? [], connectionsLoaded)),
+      connectionsAccessDenied,
+    );
   const connectionServices = mergeConnectionServices([
     ...integrations.map(({ model }) => ({
       id: model.id,
@@ -448,13 +455,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             catalogServiceIdentity(item.id, item.name, item.providerDomain).id === "slack"
               ? "Let OpenGeni read and send Slack messages as you."
               : (item.description ?? undefined),
-          status: capabilityStateChip(
-            item,
-            connectionHealth(item, connections ?? [], connectionsLoaded),
-          ).label,
-          state: catalogStatusForChip(
-            capabilityStateChip(item, connectionHealth(item, connections ?? [], connectionsLoaded)),
-          ),
+          status: connectorChip(item).label,
+          state: catalogStatusForChip(connectorChip(item)),
           connected: item.enabled,
           onOpen: () => openItem(item),
         },
@@ -1327,10 +1329,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                             .map((item) => ({
                               id: item.id,
                               name: item.name,
-                              status: capabilityStateChip(
-                                item,
-                                connectionHealth(item, connections ?? [], connectionsLoaded),
-                              ).label,
+                              status: connectorChip(item).label,
                               logoSrc: logoUrl(item),
                               onOpen: () => openItem(item),
                             })),

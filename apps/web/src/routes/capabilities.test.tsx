@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { ConnectionCatalog } from "@opengeni/react/connect";
 import { OPENGENI_SLACK_BOT_REQUESTED_SCOPES } from "@opengeni/contracts/slack-bot-scopes";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import { atlassianChip } from "@/components/capabilities/use-atlassian-integration";
 import { githubChip } from "@/components/capabilities/use-github-integration";
@@ -12,7 +14,13 @@ import {
   slackBotDocumentDestinationAuthority,
 } from "@/components/capabilities/use-slack-integration";
 import type { AccessContext, GitHubAppInfo } from "@/types";
-import type { IntegrationViewModel } from "@/components/capabilities/integration-view-model";
+import {
+  catalogStatusForChip,
+  connectionAccessChip,
+  connectionAccessModel,
+  type IntegrationViewModel,
+} from "@/components/capabilities/integration-view-model";
+import { capabilityStateChip } from "@/lib/capabilities";
 import {
   canManageApiIntegrations,
   integrationQuickConnect,
@@ -40,6 +48,64 @@ function accessContext(
 }
 
 describe("integration state chips", () => {
+  test("an initial 403 presents restricted connection-dependent tiles, not Loading or Retry", () => {
+    const denied = true;
+    const connectorChip = connectionAccessChip(
+      capabilityStateChip({ enabled: true }, { state: "unverified" }),
+      denied,
+    );
+    const integration: IntegrationViewModel = {
+      id: "google-drive",
+      name: "Google Drive",
+      description: "Read connected files",
+      mark: { monogram: "G" },
+      chip: { label: "Loading", tone: "plain" },
+      connection: [],
+      options: [],
+      footer: { kind: "setup", onSetup: () => {} },
+      notice: {
+        tone: "failed",
+        title: "Temporary failure",
+        action: { label: "Retry", onClick: () => {} },
+      },
+    };
+    const model = connectionAccessModel(integration, denied);
+    expect(connectorChip).toEqual({ label: "Access restricted", tone: "plain" });
+    expect(model.chip).toEqual(connectorChip);
+    expect(model.notice?.description).toContain("Ask a workspace admin for connection access");
+    expect(model.notice?.action).toBeUndefined();
+    expect(model.footer.kind).toBe("locked");
+    expect(catalogStatusForChip(model.chip)).toBe("unavailable");
+
+    const markup = renderToStaticMarkup(
+      <ConnectionCatalog
+        services={[model, { ...integration, id: "mail", name: "Mail", chip: connectorChip }].map(
+          (entry) => ({
+            id: entry.id,
+            name: entry.name,
+            options: [
+              {
+                id: entry.id,
+                name: entry.name,
+                status: entry.chip.label,
+                state: catalogStatusForChip(entry.chip),
+                connected: false,
+                onOpen: () => {},
+              },
+            ],
+          }),
+        )}
+      />,
+    );
+    expect(markup).not.toContain("Loading");
+    expect(markup.match(/Access restricted/g)).toHaveLength(2);
+    expect(markup).toContain("og-capability-catalog-row");
+    expect(connectionAccessChip({ label: "Connected", tone: "ok" }, denied).label).toBe(
+      "Connected",
+    );
+    expect(connectionAccessChip(integration.chip, false).label).toBe("Loading");
+  });
+
   test("normalizes Google Drive states onto the shared chip vocabulary", () => {
     expect(googleDriveChip("connected", true, true).label).toBe("Connected");
     expect(googleDriveChip("connected", true, false).label).toBe("Set up by an admin");
