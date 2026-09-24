@@ -93,6 +93,7 @@ import {
   dispatchExternalAuth,
   dispatchProtectedAuthFill,
   failBrowserSessionOperation,
+  failPreparedBrowserSessionEnd,
   failPreparedBrowserSessionSuspend,
   failBrowserSessionResume,
   failBrowserSessionResumePreparation,
@@ -2607,6 +2608,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       const request = await parseJsonBody(context, BrowserSessionLifecycleRequest);
       const startedAtMs = performance.now();
       const origin = requestOrigin(context, deps.settings);
+      let endPreparation: {
+        restoreLifecycle: BrowserSessionValue["lifecycle"];
+        restoreFailureCode: string | null;
+        expectedControllerGeneration: string | null;
+      } | null = null;
       try {
         const before = await getBrowserSessionControlRecord(deps.db, {
           accountId: grant.accountId,
@@ -2621,6 +2627,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           browserSessionId,
           operationId: request.operationId,
           actorSubjectId: grant.subjectId,
+          expectedLifecycle: before.session.lifecycle,
+          expectedFailureCode: before.session.failureCode,
+          expectedControllerGeneration: before.session.controller?.controllerGeneration ?? null,
         });
         if (isTerminalOperation(prepared.operation.state)) {
           if (prepared.operation.state === "completed") {
@@ -2635,6 +2644,13 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           const parsed = BrowserSessionMutationResponse.parse(prepared);
           observeLifecycleResult(deps.observability, startedAtMs, parsed);
           return context.json(parsed, 200);
+        }
+        if (before.session.lifecycle !== "ending") {
+          endPreparation = {
+            restoreLifecycle: before.session.lifecycle,
+            restoreFailureCode: before.session.failureCode,
+            expectedControllerGeneration: before.session.controller?.controllerGeneration ?? null,
+          };
         }
 
         const record = await getBrowserSessionControlRecord(deps.db, {
@@ -2729,6 +2745,16 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         observeLifecycleResult(deps.observability, startedAtMs, parsed);
         return context.json(parsed, 200);
       } catch (error) {
+        if (endPreparation) {
+          await failPreparedBrowserSessionEnd(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+            operationId: request.operationId,
+            ...endPreparation,
+            error: interactionFailure(error),
+          });
+        }
         throw browserRouteError(error);
       }
     },
