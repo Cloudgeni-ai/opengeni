@@ -14,7 +14,9 @@ export const HourApp: React.FC<{ t: number }> = ({ t }) => {
   const darkness = 0.72 * prog(t, T.dim, T.dim + 0.9);
   const focusScrim = prog(t, T.askClick, T.askClick + 0.3) * (1 - prog(t, T.enter + 0.05, T.enter + 0.45));
   const approvalScrim = prog(t, T.approvalIn, T.approvalIn + 0.4) * (1 - prog(t, T.approve + 0.15, T.approve + 0.5));
-  const scrim = Math.max(focusScrim, approvalScrim);
+  // The calendar stays visible behind the question: dimmed, never a void.
+  const scrimAlpha = Math.max(0.5 * focusScrim, 0.34 * approvalScrim);
+  const scrim = scrimAlpha > 0 ? 1 : 0;
   return (
     <div style={{ position: "absolute", left: 0, top: 0, width: 1920, height: 1080 }}>
       <WeekGrid />
@@ -29,7 +31,7 @@ export const HourApp: React.FC<{ t: number }> = ({ t }) => {
             top: -600,
             width: 3120,
             height: 2280,
-            background: `rgba(4,5,7,${0.5 * scrim})`,
+            background: `rgba(4,5,7,${scrimAlpha})`,
             zIndex: 35,
           }}
         />

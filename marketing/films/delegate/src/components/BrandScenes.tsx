@@ -49,7 +49,7 @@ export const BrandScenes: React.FC<{ t: number }> = ({ t }) => {
   if (t < T.wipe) return null;
   // The page under the product. Its light comes up as the product lifts away,
   // so the eye adapts instead of being flashed.
-  const light = prog(t, T.wipe, T.wipe + 1.1, ease.out);
+  const light = prog(t, T.wipe, T.wipe + 1.35, ease.out);
   const endCut = t >= T.line1;
   return (
     <div
@@ -57,7 +57,7 @@ export const BrandScenes: React.FC<{ t: number }> = ({ t }) => {
         position: "absolute",
         inset: 0,
         background: C.paper,
-        filter: light < 1 ? `brightness(${0.7 + 0.3 * light})` : undefined,
+        filter: light < 1 ? `brightness(${0.62 + 0.38 * light})` : undefined,
       }}
     >
       {!endCut && <CodeSpread t={t} />}
@@ -218,8 +218,10 @@ const EndCard: React.FC<{ t: number }> = ({ t }) => {
     color: C.ink,
     whiteSpace: "nowrap",
   };
+  // A barely perceptible drift, so the last frame is alive rather than a slide.
+  const drift = prog(t, T.line1, T.end, (x) => x);
   return (
-    <>
+    <div style={{ position: "absolute", inset: 0, transform: `scale(${1 + 0.014 * drift})`, transformOrigin: "150px 480px" }}>
       <div
         style={{
           position: "absolute",
@@ -263,7 +265,7 @@ const EndCard: React.FC<{ t: number }> = ({ t }) => {
       >
         opengeni.ai
       </div>
-    </>
+    </div>
   );
 };
 

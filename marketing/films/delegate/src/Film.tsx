@@ -25,9 +25,9 @@ export const Film: React.FC<{ withAudio?: boolean }> = ({ withAudio = true }) =>
 
   // Morning: the product lifts off the page like an object, then slides away,
   // revealing what it took, underneath it.
-  const lift = prog(t, T.wipe, T.wipe + 0.42, ease.out);
-  const slide = prog(t, T.wipe + 0.32, T.wipe + 1.0, ease.inOut);
-  const surfaceGone = t >= T.wipe + 1.0;
+  const lift = prog(t, T.wipe, T.wipe + 0.5, ease.out);
+  const slide = prog(t, T.wipe + 0.36, T.wipe + 1.14, ease.inOut);
+  const surfaceGone = t >= T.wipe + 1.14;
   const surfaceScale = 1 - 0.075 * lift - 0.03 * slide;
 
   return (

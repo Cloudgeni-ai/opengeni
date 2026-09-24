@@ -1,8 +1,8 @@
 import React from "react";
 import { C } from "../theme";
 import { F } from "../fonts";
-import { CLIENTS, Client, cardRect, slotRect } from "../data";
-import { clamp01, cubic, ease, lerp, prog, springAt } from "../anim";
+import { CLIENTS, Client, G, cardRect, slotRect } from "../data";
+import { bezier, clamp01, cubic, ease, lerp, prog, springAt } from "../anim";
 import { T, flightEnd, flightStart, sentAt } from "../timeline";
 import { Check } from "./Icons";
 
@@ -89,16 +89,28 @@ const BlockFace: React.FC<{ c: Client; h: number }> = ({ c, h }) => (
   </div>
 );
 
+/** Decelerates into the slot: an event being placed, not thrown. */
+const placeEase = bezier(0.42, 0, 0.18, 1);
+
+/** Conveyor: as each card ahead departs, the rest glide up one slot, so the
+ * list never shows holes and every card leaves from the top. */
+function listSlot(i: number, t: number) {
+  let slot = i;
+  for (let j = 0; j < i; j++) slot -= springAt(t, flightStart(j) + 0.1, 210, 25);
+  return slot;
+}
+
 export const Clients: React.FC<{ t: number }> = ({ t }) => {
   return (
     <>
       {CLIENTS.map((c, i) => {
-        const a = cardRect(i);
-        const b = slotRect(c.to.day, c.to.start, c.to.hours);
         const f0 = flightStart(i);
         const f1 = flightEnd(i);
+        const home = cardRect(0);
+        const a = { ...home, y: home.y + listSlot(i, Math.min(t, f0)) * (G.cardH + G.cardGap) };
+        const b = slotRect(c.to.day, c.to.start, c.to.hours);
         const raw = clamp01((t - f0) / (f1 - f0));
-        const k = ease.inOut(raw);
+        const k = placeEase(raw);
         const flying = t >= f0 && t < f1;
         const landed = t >= f1;
         const chipAt = T.check + i * T.checkGap;

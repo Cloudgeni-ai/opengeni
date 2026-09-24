@@ -19,11 +19,11 @@ export const CAM: Key[] = [
   { t: T.check - 0.05, cx: ben.x + 12, cy: ben.y, s: 2.78 },
   { t: T.check + 0.45, cx: ben.x + 14, cy: ben.y + 4, s: 2.82 },
   { t: T.check + 1.25, cx: 430, cy: 622, s: 1.42 },
-  { t: T.flights - 0.2, cx: 440, cy: 626, s: 1.42 },
+  { t: T.flights - 0.15, cx: 440, cy: 626, s: 1.42 },
   // Hold nearly still while Ben's card — the one we read — travels to Thu 5:00.
-  { t: T.flights + 0.3, cx: 760, cy: 610, s: 1.24 },
-  { t: T.flights + 0.85, cx: 772, cy: 606, s: 1.22 },
-  { t: T.flights + 1.6, cx: 960, cy: 540, s: 1 },
+  { t: T.flights + 0.35, cx: 760, cy: 610, s: 1.24 },
+  { t: T.firstLanding + 0.05, cx: 772, cy: 606, s: 1.22 },
+  { t: T.firstLanding + 0.8, cx: 960, cy: 540, s: 1 },
   { t: T.approvalIn - 0.3, cx: 956, cy: 542, s: 1.025 },
   // Close enough that the drafted message reads on a phone.
   { t: T.approvalIn + 0.8, cx: 344, cy: approvalCy, s: 1.98 },

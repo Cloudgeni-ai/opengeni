@@ -26,9 +26,10 @@ export const T = {
   lieEnd: bar(1) + 1.92,
   check: bar(1) + 0.75,
   checkGap: 0.16,
-  flights: bar(2, 0.5) - 0.85,
+  /** First landing (Ben, Thu 5:00) is on an eighth; one lands every 0.4 s. */
+  firstLanding: bar(2, 0.5),
+  flights: bar(2, 0.5) - 1.25,
   flightGap: 0.4,
-  flightDur: 0.85,
   draft: bar(3) - 0.3,
   approvalIn: bar(3),
   sitUp: bar(3, 2),
@@ -57,8 +58,10 @@ export const DURATION_S = T.end;
 /** Every mouse click in the film. The approval is deliberately the last one. */
 export const CLICKS = [T.benClick, T.cancelClick, T.askClick, T.approve];
 
-export const flightStart = (i: number) => T.flights + i * T.flightGap;
-export const flightEnd = (i: number) => flightStart(i) + T.flightDur;
+/** Ben's flight is the one we read, so it travels slower than the rest. */
+export const flightDur = (i: number) => (i === 0 ? 1.25 : 0.95);
+export const flightEnd = (i: number) => T.firstLanding + i * T.flightGap;
+export const flightStart = (i: number) => flightEnd(i) - flightDur(i);
 export const sentAt = (i: number) => T.sent + i * T.sentGap;
 
 /** Deterministic pseudo-random in [0,1). */
