@@ -940,6 +940,64 @@ describe("BrowserSession React resources", () => {
 });
 
 describe("BrowserSession frame stream", () => {
+  test("detaches media while the page is hidden and reconnects on return", async () => {
+    const originalVisibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    let visibility: DocumentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    const sockets: FakeBrowserSocket[] = [];
+    let attachCalls = 0;
+    const client = fakeClient({
+      attachBrowserSession: async (_workspaceId, _browserSessionId, request) => {
+        attachCalls += 1;
+        return attachment(request.targetId);
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useBrowserFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          browserSessionId: BROWSER_SESSION_ID,
+          targetId: "target-1",
+          webSocketFactory: (url, protocols) => {
+            const socket = new FakeBrowserSocket(url, protocols);
+            sockets.push(socket);
+            return socket as unknown as BrowserFrameWebSocket;
+          },
+        }),
+      undefined,
+    );
+    try {
+      await flush(10);
+      expect(attachCalls).toBe(1);
+      expect(sockets).toHaveLength(1);
+
+      visibility = "hidden";
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+      await flush(2_050);
+      expect(sockets[0]?.closed).toBe(true);
+      expect(hook.result.current.state).toBe("idle");
+      expect(attachCalls).toBe(1);
+
+      visibility = "visible";
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+      await flush(10);
+      expect(attachCalls).toBe(2);
+      expect(sockets).toHaveLength(2);
+      expect(sockets[1]?.closed).toBe(false);
+    } finally {
+      await hook.unmount();
+      if (originalVisibility) {
+        Object.defineProperty(document, "visibilityState", originalVisibility);
+      } else {
+        Reflect.deleteProperty(document, "visibilityState");
+      }
+    }
+  });
+
   test("keeps grants in protocols, accepts latest frames, and clears on target switch", async () => {
     const sockets: FakeBrowserSocket[] = [];
     const attachCalls: string[] = [];

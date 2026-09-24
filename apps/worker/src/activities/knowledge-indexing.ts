@@ -98,7 +98,16 @@ export function createKnowledgeIndexingActivities(
                 result.unavailable++;
                 return;
               }
-              const paid = frozenPolicy.mode === "credits" && paidDocumentEmbedding(settings);
+              // An already-priced generation cannot become free when the
+              // operator turns off paid embedding. Retain its checkpoint and
+              // retry only after paid mode is restored; never call the provider
+              // or append a batch that the live policy would not debit.
+              if (frozenPolicy.mode === "credits" && !paidDocumentEmbedding(settings)) {
+                await deferKnowledgeIndexJob(lockedDb, claim);
+                result.deferred++;
+                return;
+              }
+              const paid = frozenPolicy.mode === "credits";
               if (paid && current.nextIndex === 0) {
                 const balance = await getBillingBalance(lockedDb, claim.accountId);
                 if (balance.balanceMicros <= 0) {

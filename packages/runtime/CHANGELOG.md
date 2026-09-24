@@ -1,5 +1,36 @@
 # @opengeni/runtime
 
+## 4.0.3
+
+### Patch Changes
+
+- 6de2d5d: Clarify bundled integration guidance with lightweight product choices and actionable credential, deployment, and verification steps.
+
+## 4.0.2
+
+### Patch Changes
+
+- c41aecd: Fix attached-browser event pagination and dedicated-tab creation, isolate concurrent macOS native capture helpers, separate still screenshots from live-stream reads, and serialize exact frame bytes. Preserve bounded controller diagnostics, read legacy browser capabilities conservatively, and respect explicit placement and identity when reusing interaction resources. Install matching agent and controller builds together; native capture uses protocol version 3.
+
+  Clean up partially allocated virtual desktops when a required executable is missing instead of letting an unhandled spawn error terminate the controller.
+
+- e65a4ac: Document the Connected Machine native client's offline document-ID helper for
+  artifact authoring when the JavaScript client is unavailable. This workflow
+  requires an agent binary with the `codemode document-id` command; existing
+  artifact authorization and inspected-head edit requirements are unchanged.
+- 22b2dd5: Recover Modal command-router DNS failures when the provider omits the default port.
+- Updated dependencies [31cf6ac]
+- Updated dependencies [3d33f17]
+- Updated dependencies [c41aecd]
+- Updated dependencies [23f4717]
+- Updated dependencies [d0b5efd]
+  - @opengeni/config@2.1.1
+  - @opengeni/sdk@7.1.1
+  - @opengeni/contracts@5.1.1
+  - @opengeni/codex@0.2.26
+  - @opengeni/codemode@0.6.2
+  - @opengeni/tool-gateway@0.1.13
+
 ## 4.0.1
 
 ### Patch Changes

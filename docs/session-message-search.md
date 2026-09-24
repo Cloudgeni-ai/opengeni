@@ -138,17 +138,27 @@ workspace identifiers, so search latency and status can be measured separately.
 
 ## Selected-result context
 
-Use the existing bounded `listEventPage` around the selected `sequence`, in two
-directions if necessary, with `includeTypes: ["user.message",
-"agent.message.completed"]` and `payloadMode: "summary"` for a visible-text
-preview. Cursor/byte bounds on that reader remain authoritative. The search
-preview must render **only `payload.text`** from those two event types: the
-existing event reader also serves audits and can retain `modelContext` and other
-fields even in summary mode. Do not stringify whole events/payloads into the
-preview. Search itself never includes those fields. The search
-snippet is the precise hit excerpt even when a legacy message is larger than
-the ordinary event projection. Do not interpret a truncated context projection
-as a complete message, or expect the match to be inside its prefix.
+For the **selected** search hit, call
+`getSessionMessagePreview(workspaceId, sessionId, { eventId, sequence }, { signal })`.
+This browser-compatible SDK read issues
+`GET /v1/workspaces/:workspaceId/sessions/:sessionId/events/:eventId/message-preview?sequence=N`.
+It returns `{ status: "available", text }` for the entire selected visible
+message at or below 12,000 UTF-16 units, or `{ status: "unavailable" }` for
+larger text. Stale event-ID/sequence pairs, duplicate/late/unclaimed events,
+non-message types, and missing text fail closed with 404; invalid references
+return 400. It reuses target-session read authorization and 8192-unit scalar
+slices, without projecting the event or other payload fields (including
+`modelContext`) into the response. The response is not a history/stream API.
+
+For **surrounding** context, the bounded `listEventPage` reader selects nearby
+event identities in two directions around the selected sequence with
+`includeTypes: ["user.message", "agent.message.completed"]` and
+`payloadMode: "summary"`. Read their visible text separately through the same
+text-only preview endpoint. Summary projections discard the payload codec
+version and can contain an encoded storage marker even when they fit under the
+4096-byte cutoff; never render their `payload.text` or stringify the event.
+Omit unavailable context messages. Search snippets remain the precise hit
+excerpt even when the selected preview is unavailable.
 
 Search authorization is list-shaped even with `sessionId`: the normal live
 grant plus complete host/agent list scope precedes SQL, and the subject RLS,

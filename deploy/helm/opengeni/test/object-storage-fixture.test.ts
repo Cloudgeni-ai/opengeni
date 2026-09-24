@@ -14,6 +14,7 @@ describe("in-cluster object-storage fixtures", () => {
 
     expect(values).toContain("garage:\n  enabled: false");
     expect(values).toContain("minio:\n  enabled: false");
+    expect(values).toContain("OPENGENI_OBJECT_STORAGE_S3_PROVIDER: Other");
     expect(helpers).toContain(
       "Enable only one in-cluster object-storage fixture: set garage.enabled or minio.enabled, not both",
     );

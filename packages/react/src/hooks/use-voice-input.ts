@@ -163,6 +163,7 @@ export function useVoiceInput({
   const automaticRetryAttemptRef = useRef(0);
   const ownerHeartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
+  const disabledRef = useRef(disabled);
   const valueRef = useRef(value);
   const storeRef = useRef<VoiceRecordingStore | null>(null);
   const storePromiseRef = useRef<Promise<VoiceRecordingStore> | null>(null);
@@ -176,6 +177,7 @@ export function useVoiceInput({
   const statusRef = useRef(status);
   valueRef.current = value;
   statusRef.current = status;
+  disabledRef.current = disabled;
   workspaceIdRef.current = workspaceId;
 
   const ensureOwnerId = useCallback(async (): Promise<string> => {
@@ -465,6 +467,14 @@ export function useVoiceInput({
           setStatus("transcript-ready");
           setError("handoff_uncertain");
           focusInput();
+          return;
+        }
+
+        // Session creation can disable the composer while a recording is
+        // transcribing. Keep the durable transcript for explicit insertion
+        // later; never append text after Send captured its visible snapshot.
+        if (disabledRef.current) {
+          setStatus("transcript-ready");
           return;
         }
 
@@ -944,6 +954,7 @@ export function useVoiceInput({
   const insertSavedTranscript = useCallback(async (): Promise<void> => {
     const manifest = manifestRef.current;
     if (
+      disabledRef.current ||
       !manifest ||
       manifest.workspaceId !== workspaceId ||
       manifest.finalizationState !== "transcript-ready" ||
@@ -955,7 +966,7 @@ export function useVoiceInput({
     controllerRef.current?.abort();
     controllerRef.current = null;
     const store = await ensureStore();
-    if (generation !== generationRef.current) return;
+    if (generation !== generationRef.current || disabledRef.current) return;
     const next = appendFinalTranscript(valueRef.current, manifest.transcriptText);
     if (next !== valueRef.current) {
       valueRef.current = next;

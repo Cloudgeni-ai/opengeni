@@ -82,6 +82,12 @@ import {
   isConsistentGitHubBindingProof,
 } from "../integrations/github-installation-proof";
 import {
+  githubInstallationChooserHtml,
+  githubSetupPendingHtml,
+  githubSetupSuccessHtml,
+  githubSuccessHtml,
+} from "./github-browser-pages";
+import {
   completeGitHubAppConnect,
   isGitHubAppConnectState,
 } from "../integrations/github-app-connect";
@@ -1051,39 +1057,6 @@ function isSecureRequest(c: Context, deps: ApiRouteDeps): boolean {
   );
 }
 
-function githubSuccessHtml(envLines: string[]): string {
-  const envText = envLines.join("\n");
-  const escaped = escapeHtml(envText);
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App Created</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(760px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px;line-height:1.2}p{margin:0 0 18px;color:#d4d4d8}.env-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:22px 0 8px}.env-header h2{margin:0;font-size:13px;line-height:1.2;text-transform:uppercase;letter-spacing:.08em;color:#a1a1aa}pre{white-space:pre-wrap;word-break:break-word;max-height:380px;overflow:auto;background:#09090b;border:1px solid #27272a;border-radius:8px;padding:16px;font-size:13px;line-height:1.5}button{display:inline-flex;align-items:center;justify-content:center;min-height:36px;border-radius:6px;border:1px solid #3f3f46;padding:0 12px;background:#f4f4f5;color:#09090b;font:600 14px system-ui,sans-serif;cursor:pointer}button:disabled{cursor:not-allowed;opacity:.7}</style></head><body><main><h1>GitHub App created</h1><p>Add these values to .env, then restart API and worker.</p><div class="env-header"><h2>Environment variables</h2><button id="copy-env" type="button">Copy env</button></div><pre id="env-lines">${escaped}</pre><script>(()=>{const button=document.getElementById("copy-env");const env=document.getElementById("env-lines");async function copyText(text){if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);return;}const area=document.createElement("textarea");area.value=text;area.setAttribute("readonly","");area.style.position="fixed";area.style.inset="-9999px";document.body.append(area);area.select();document.execCommand("copy");area.remove();}button?.addEventListener("click",async()=>{try{await copyText(env?.textContent||"");button.textContent="Copied";setTimeout(()=>button.textContent="Copy env",1600);}catch{button.textContent="Copy failed";setTimeout(()=>button.textContent="Copy env",2200);}});})();</script></main></body></html>`;
-}
-
-function githubSetupSuccessHtml(account: string, returnUrl: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App Connected</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px;line-height:1.2}p{margin:0 0 18px;color:#d4d4d8}.button{display:inline-flex;align-items:center;justify-content:center;min-height:36px;border-radius:6px;border:1px solid #3f3f46;padding:0 12px;background:#f4f4f5;color:#09090b;font:600 14px system-ui,sans-serif;text-decoration:none}</style></head><body><main><h1>GitHub App connected</h1><p>${escapeHtml(account)} is now available to this OpenGeni workspace through an explicit repository allowlist.</p><a class="button" href="${escapeHtml(returnUrl)}">Back to OpenGeni</a></main></body></html>`;
-}
-
-function githubInstallationChooserHtml(
-  candidates: GitHubInstallationBindingCandidate[],
-  state: string,
-  workspaceId: string,
-  baseUrl: string,
-): string {
-  const action = `${baseUrl}/v1/workspaces/${encodeURIComponent(workspaceId)}/github/installations/select`;
-  const options = candidates
-    .map(({ installation, authorityKind }, index) => {
-      const account = escapeHtml(
-        installation.accountLogin ?? `installation ${installation.installationId}`,
-      );
-      const label = authorityKind === "personal_owner" ? "Personal account" : "Organization owner";
-      return `<label class="option"><input type="radio" name="installation_id" value="${installation.installationId}" required${candidates.length === 1 && index === 0 ? " checked" : ""}><span><strong>${account}</strong><small>${label}</small></span></label>`;
-    })
-    .join("");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Choose GitHub installation</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:12px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px}p{margin:0 0 18px;color:#d4d4d8}.options{display:grid;gap:8px;margin-bottom:18px}.option{display:flex;align-items:center;gap:12px;border:1px solid #3f3f46;border-radius:8px;padding:12px;cursor:pointer}.option span{display:grid;gap:2px}.option small{color:#a1a1aa}button{min-height:38px;border-radius:7px;border:1px solid #3f3f46;padding:0 14px;background:#f4f4f5;color:#09090b;font:600 14px system-ui,sans-serif;cursor:pointer}.secondary{margin-left:8px;background:transparent;color:#f4f4f5}</style></head><body><main><h1>Choose a GitHub account</h1><p>These accounts already have the OpenGeni GitHub App installed and GitHub proved you are the personal owner or an active organization owner.</p><form method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><div class="options">${options}</div><button type="submit">Connect selected</button><button class="secondary" type="submit" name="installation_id" value="new" formnovalidate>Install on another account</button></form></main></body></html>`;
-}
-
-function githubSetupPendingHtml(): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App Requested</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px;line-height:1.2}p{margin:0;color:#d4d4d8}</style></head><body><main><h1>GitHub App request sent</h1><p>A GitHub organization owner must approve the installation. OpenGeni has not created a workspace binding.</p></main></body></html>`;
-}
-
 function parsePositiveInteger(value: string | undefined | null): number | null {
   if (!value || !/^\d+$/.test(value)) {
     return null;
@@ -1095,20 +1068,6 @@ function parsePositiveInteger(value: string | undefined | null): number | null {
 function isFreshGitHubBindingState(payload: GitHubSignedStatePayload): boolean {
   const age = Math.floor(Date.now() / 1_000) - payload.iat;
   return age >= 0 && age < githubBindingStateMaxAgeSeconds;
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(
-    /[&<>"']/g,
-    (char) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;",
-      })[char] ?? char,
-  );
 }
 
 function openGeniReturnUrl(

@@ -963,9 +963,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             if (error instanceof InteractionDefiniteDriverError && completedActions === 0)
               throw error;
             throw error instanceof InteractionDefiniteDriverError
-              ? new Error("browser action batch had a partial outcome", {
-                  cause: error,
-                })
+              ? new InteractionOutcomeUnknownDriverError(
+                  "outcome_unknown",
+                  `browser action batch completed ${completedActions} action(s) before a later action failed (${error.code}); re-observe before continuing`,
+                )
               : error;
           }
         }

@@ -118,7 +118,9 @@ Provider work stays outside retries; retry only idempotent settlement.
 Accepted-policy [compatibility/recovery](run-lifecycle.md).
 Replay: [notices/catalogs](run-lifecycle.md),
 [compaction](context-compaction.md). `packages/runtime/src/prepared-compaction-request.ts`
-shares sandbox/lazy-tool-prepared requests with remote compaction, including before first inference.
+shares sandbox/lazy-tool-prepared requests with remote and portable Responses
+compaction, including before first inference. Chat portable compaction retains
+its transcript adapter; see the focused compaction contract.
 
 Failed-session retry differs from Pause/Resume and prompt admission.
 `packages/db/src/session-retry.ts` fences failure identity, reserves actor-scoped
@@ -1146,6 +1148,10 @@ admission behavior. Routes reuse domain rules shared with MCP, workers, and embe
 Composer submission's shared command, `packages/core/src/application/composer-submit.ts`,
 serves stock HTTP and in-process embedding hosts, owning validation, draft rotation,
 event append, turn routing, receipt/replay behavior, and the response contract.
+Web Send rebases drafts (including unavailable files), aligns
+file-only text with create, freezes edits, preserves late voice transcripts
+(`packages/react/src/hooks/use-voice-input.ts`, `apps/web/src/lib/use-new-session-draft.ts`,
+`apps/web/src/routes/sessions-index.tsx`), and protects sibling drafts.
 
 Canonical: `apps/api/src/app.ts`, `apps/api/src/routes/`, and
 `packages/core/src/`.

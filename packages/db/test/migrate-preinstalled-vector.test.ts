@@ -66,7 +66,19 @@ describe("explicit preinstalled-vector migration", () => {
     await executeMigrationFile(sql, "0001_other.sql", "SELECT 1;", { preinstalledVector: true });
     expect(inspections).toEqual([]);
     expect(statements).toEqual([
-      "SELECT\n  pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),\n  pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true);\nSELECT 1;",
+      "SELECT\n  pg_catalog.set_config('lock_timeout', '5s', true),\n  pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),\n  pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true);\nSELECT 1;",
     ]);
   });
+});
+
+test("0510 receives the ordinary lock bound without changing its migration SQL", async () => {
+  const file = "0510_knowledge_index_funding_wait.sql";
+  const body = await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8");
+  expect(body.match(/ALTER TABLE knowledge_index_jobs ADD COLUMN/g)).toHaveLength(3);
+  expect(body).not.toMatch(/^\s*(?:SET(?: LOCAL)?|RESET)\s+lock_timeout\b/im);
+  const { sql, statements } = connection(false);
+  await executeMigrationFile(sql, file, body);
+  expect(statements).toHaveLength(1);
+  expect(statements[0]).toContain("pg_catalog.set_config('lock_timeout', '5s', true)");
+  expect(statements[0]?.endsWith(body)).toBe(true);
 });

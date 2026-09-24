@@ -55,7 +55,10 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
   missing access is configured. Read
   [Discovery and autonomy](references/discovery-and-autonomy.md) for that workflow.
 - Ask only for consequential product choices or external authority that cannot
-  be inferred. Do not ask the customer to restate facts the system proves.
+  be inferred. Offer a recommended setup and use the existing structured question
+  UI, when available, for the few unresolved choices about chat sharing, learning
+  across chats, or data access. Skip choices already settled; do not impose an
+  onboarding questionnaire. See [Discovery and autonomy](references/discovery-and-autonomy.md).
 - Use a reversible, clearly stated default when an unresolved choice is
   low-risk. Resolve privacy, tenant authority, data writes, cost exposure, and
   ambiguous external mutations before crossing those boundaries.

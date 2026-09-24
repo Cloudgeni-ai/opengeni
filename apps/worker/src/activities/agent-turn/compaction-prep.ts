@@ -168,6 +168,13 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   const remotePrefix: RemoteCompactionPrefix = {
     agent: null,
   };
+  const portableResponsesNeedsAgentPrefix =
+    resolvedModel?.provider.api === "responses" &&
+    !(billingState.isCodexTurn && session.codexCompactionMode === "remote_v2");
+  const preparedPortableRequest = () => {
+    if (!remotePrefix.agent) throw new Error("Compaction agent is unavailable");
+    return preparedCompactionRequest(remotePrefix.agent);
+  };
 
   const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel) ? input.sessionId : undefined;
   const compactionUsageState = createCompactionModelUsageEventState(claimedModelUsageSourceKeys);
@@ -213,6 +220,9 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               onUsage: recordCompactionUsage,
               ...(systemInstructions ? { systemInstructions } : {}),
               ...(promptCacheKey ? { promptCacheKey } : {}),
+              ...(portableResponsesNeedsAgentPrefix
+                ? { preparedRequest: preparedPortableRequest() }
+                : {}),
             }),
           )
       : (s: Settings, m: Array<Record<string, unknown>>) =>
@@ -265,13 +275,9 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     ...(remoteCompactionRequester ? { requestRemoteCompactionV2: remoteCompactionRequester } : {}),
   } as const;
 
-  // Operator /compact:
-  // - portable (incl. Codex portable): early maintenance path — no
-  //   prepareTools/sandbox; summarizer only needs composed instructions.
-  // - remote_v2: fall through to prepareTools/buildAgent so the compact
-  //   request reuses the ordinary tools→instructions cache prefix, then
-  //   settle without inference. (Requester is also wired for Codex portable
-  //   turns but unused there — gate on the frozen session mode.)
+  // Responses compaction, portable or remote, prepares the ordinary agent
+  // request first so tool schemas and instructions match the warm cache prefix.
+  // Chat providers keep the standalone portable maintenance path.
   const compactionOnlyTurn = turn.source === "compaction";
   const remoteV2CompactionNeedsAgentPrefix =
     Boolean(remoteCompactionRequester) && session.codexCompactionMode === "remote_v2";
@@ -308,7 +314,11 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     control.activityStatus = "idle";
     return claimedResult({ status: "idle" });
   };
-  if (compactionOnlyTurn && !remoteV2CompactionNeedsAgentPrefix) {
+  if (
+    compactionOnlyTurn &&
+    !remoteV2CompactionNeedsAgentPrefix &&
+    !portableResponsesNeedsAgentPrefix
+  ) {
     const compactionInstructions = appendWorkspaceMemory(
       appendSessionInstructions(
         appendWorkspaceGovernance(
@@ -466,6 +476,7 @@ export async function runPostAgentCompaction(
     claimedResult,
     turn,
     session,
+    resolvedModel,
     remotePrefix,
     remoteCompactionRequester,
     publishCompactionLiveEvents,
@@ -480,10 +491,13 @@ export async function runPostAgentCompaction(
   } = deps;
 
   const agentInstructions = typeof agent.instructions === "string" ? agent.instructions : "";
+  const preparedPortable =
+    resolvedModel?.provider.api === "responses" &&
+    !(remoteCompactionRequester && session.codexCompactionMode === "remote_v2");
   const compactSummarizer = compactionSummarizerFor(
     agentInstructions.trim() ? agentInstructions : undefined,
   );
-  if (remoteCompactionRequester) {
+  if (remoteCompactionRequester || preparedPortable) {
     // The prefix is captured only after this agent passes normal SDK preparation.
     remotePrefix.agent = agent;
   }
@@ -491,7 +505,11 @@ export async function runPostAgentCompaction(
   if (compactionOnlyTurn) {
     const requested = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
     let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
-    if (requested && remoteCompactionRequester && session.codexCompactionMode === "remote_v2") {
+    if (
+      requested &&
+      (preparedPortable ||
+        (remoteCompactionRequester && session.codexCompactionMode === "remote_v2"))
+    ) {
       queuePreparedCompaction(
         agent,
         new CompactionNeededError({
@@ -610,7 +628,10 @@ export async function runPostAgentCompaction(
     return { exit: claimedResult({ status: "idle" }) };
   }
 
-  if (remoteCompactionRequester && session.codexCompactionMode === "remote_v2") {
+  if (
+    preparedPortable ||
+    (remoteCompactionRequester && session.codexCompactionMode === "remote_v2")
+  ) {
     const forced = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
     const thresholdTokens = compactionThresholdTokens(eventing.modelRunSettings);
     if (

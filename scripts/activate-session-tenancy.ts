@@ -14,7 +14,7 @@ const REQUIRED_MIGRATIONS = [
   "0303_session_tenancy_product_activation.sql",
   "0340_tenancy_backfill_activation_evidence.sql",
 ] as const;
-const FLEET_MIGRATION = "0514_private_sessions_fleet_activation.sql";
+const FLEET_MIGRATION = "0515_private_sessions_fleet_activation.sql";
 
 export function requiredActivationMigrations(allOrganizations: boolean): readonly string[] {
   return allOrganizations ? [...REQUIRED_MIGRATIONS, FLEET_MIGRATION] : REQUIRED_MIGRATIONS;

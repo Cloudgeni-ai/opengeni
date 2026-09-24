@@ -5029,7 +5029,7 @@ describe("API component integration", () => {
       { headers: { cookie: oauthCookie } },
     );
     expect(callback.status).toBe(200);
-    expect(await callback.text()).toContain("GitHub App connected");
+    expect(await callback.text()).toContain("GitHub connected");
 
     const replay = await app.request(
       `/v1/github/oauth/callback?code=replayed-owner-code&state=${encodeURIComponent(oauthState)}`,

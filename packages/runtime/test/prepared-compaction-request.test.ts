@@ -11,6 +11,7 @@ import {
   queuePreparedCompaction,
   requestRemoteCompactionV2,
   runAgentStream,
+  summarizeForCompaction,
 } from "../src/index";
 
 function sandbox(agent: ReturnType<typeof buildOpenGeniAgent>) {
@@ -95,6 +96,61 @@ for (const lazy of [false, true]) {
     expect(compactInput.at(-1)).toEqual({ type: "compaction_trigger" });
   });
 }
+
+test("portable Responses compaction keeps the prepared tool and instruction prefix", async () => {
+  const settings = testSettings({
+    sandboxBackend: "local",
+    webSearchEnabled: false,
+    codexToolSearchEnabled: true,
+  });
+  const model = new ScriptedModel("done");
+  const agent = buildOpenGeniAgent(settings, [], { model, hostedWebSearch: false });
+  await drain(
+    await runAgentStream(agent, "test", settings, { ownedSandbox: sandbox(agent) as never }),
+  );
+  const ordinary = model.requests[0]!;
+  const prefix = preparedCompactionRequest(agent);
+  let compactWire: any;
+  const client = {
+    responses: {
+      create: async (body: unknown) => {
+        compactWire = body;
+        return {
+          id: "summary",
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: "summary" }],
+            },
+          ],
+        };
+      },
+    },
+  } as unknown as OpenAI;
+  const summary = await summarizeForCompaction(
+    settings,
+    [
+      ...(ordinary.input as Array<Record<string, unknown>>),
+      {
+        type: "message",
+        role: "user",
+        content: "Create a checkpoint",
+      },
+    ],
+    { client, api: "responses", preparedRequest: prefix },
+  );
+  const normalWire = new WireModel(client, "gpt-6-astra").wire(ordinary);
+  expect(summary).toBe("summary");
+  expect(compactWire.tools).toEqual(normalWire.tools);
+  expect(compactWire.instructions).toBe(normalWire.instructions);
+  expect(compactWire.tool_choice).toBe("none");
+  expect(compactWire.input.slice(0, -1)).toEqual(normalWire.input);
+  expect(compactWire.input.at(-1)).toEqual({ role: "user", content: "Create a checkpoint" });
+  expect(model.calls).toBe(1);
+});
 
 for (const queued of [false, true]) {
   test(`compaction prepares sandbox request but sends no ordinary inference (queued=${queued})`, async () => {

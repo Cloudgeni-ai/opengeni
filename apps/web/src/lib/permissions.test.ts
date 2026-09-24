@@ -5,6 +5,7 @@ import {
   hasWorkspacePermission,
   buildApiKeyPermissionGroups,
   buildWorkspaceMemberPermissionGroups,
+  delegableApiKeyPermissions,
   fixedOrganizationApiKeyPermissions,
 } from "./permissions";
 
@@ -34,6 +35,43 @@ describe("organization API key delegation", () => {
       "api_keys:manage",
     ]);
     expect(fixedOrganizationApiKeyPermissions).not.toContain("secrets:read");
+  });
+});
+
+describe("workspace API key delegation", () => {
+  test("workspace admin cannot delegate missing literal organization or workspace powers", () => {
+    const delegable = delegableApiKeyPermissions(["workspace:admin", "api_keys:manage"]);
+    for (const permission of [
+      "account:read",
+      "account:admin",
+      "workspace:create",
+      "billing:read",
+      "billing:manage",
+      "members:manage",
+      "secrets:read",
+    ]) {
+      expect(delegable.has(permission)).toBe(false);
+    }
+    expect(delegable.has("files:read")).toBe(true);
+  });
+
+  test("only literal grants from the matching authorities enable high-trust permissions", () => {
+    const delegable = delegableApiKeyPermissions(
+      ["workspace:admin", "members:manage"],
+      ["account:read", "billing:manage"],
+    );
+    expect(delegable.has("members:manage")).toBe(true);
+    expect(delegable.has("billing:manage")).toBe(true);
+    expect(delegable.has("account:read")).toBe(true);
+    expect(delegable.has("account:admin")).toBe(false);
+    expect(delegable.has("billing:read")).toBe(false);
+    expect(delegable.has("secrets:read")).toBe(false);
+  });
+
+  test("a non-admin grant cannot borrow the organization's permissions", () => {
+    expect(delegableApiKeyPermissions(["api_keys:manage"], ["billing:manage"])).toEqual(
+      new Set(["api_keys:manage"]),
+    );
   });
 });
 
