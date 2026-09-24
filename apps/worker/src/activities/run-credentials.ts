@@ -6,11 +6,13 @@ import type {
   Session,
   SessionTurn,
 } from "@opengeni/contracts";
+import type { Settings } from "@opengeni/config";
 import { getSessionRootId, type Database } from "@opengeni/db";
 import {
   normalizeRunCredentialsResolution,
   type NormalizedRunCredentialMaterial,
 } from "@opengeni/runtime";
+import { workspaceCredentialProviderResolver } from "./workspace-credential-provider";
 
 export type RunCredentialResolutionContext = {
   db: Database;
@@ -22,6 +24,9 @@ export type RunCredentialResolutionContext = {
   attemptId: string;
   effectiveSandboxBackend: SandboxBackend;
   variableSet: { id: string; name: string } | null;
+  /** Enables the workspace's configured HTTP credential provider. */
+  settings?: Settings;
+  initiatingHumanSubjectId?: string | null;
 };
 
 export type BoundRunCredentialResolver = {
@@ -32,7 +37,10 @@ export type BoundRunCredentialResolver = {
 };
 
 export function buildRunCredentialsRequest(
-  input: Omit<RunCredentialResolutionContext, "db" | "connectionCredentials"> & {
+  input: Omit<
+    RunCredentialResolutionContext,
+    "db" | "connectionCredentials" | "settings" | "initiatingHumanSubjectId"
+  > & {
     rootSessionId: string;
     purpose: "provision" | "renewal";
     forceRefresh: boolean;
@@ -95,11 +103,21 @@ export function runCredentialModelNote(
  * Freeze the provider-neutral host credential request to this exact admitted
  * turn. The host selects connections and material; the worker never infers a
  * provider from repositories, environment names, or an OpenGeni variable set.
+ * A workspace that configured its own HTTP credential provider uses it in
+ * place of the deployment's injected port.
  */
 export async function bindRunCredentialResolver(
   input: RunCredentialResolutionContext,
 ): Promise<BoundRunCredentialResolver | null> {
-  const resolver = input.connectionCredentials?.runCredentials;
+  const workspaceResolver = input.settings
+    ? await workspaceCredentialProviderResolver(
+        input.db,
+        input.settings,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        input.initiatingHumanSubjectId ?? null,
+      )
+    : null;
+  const resolver = workspaceResolver ?? input.connectionCredentials?.runCredentials;
   if (!resolver) return null;
   const rootSessionId = await getSessionRootId(input.db, input.workspaceId, input.session.id);
   if (!rootSessionId) {

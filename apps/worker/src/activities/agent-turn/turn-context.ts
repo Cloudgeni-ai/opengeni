@@ -117,6 +117,8 @@ export type RenewalState = {
   gitCredentialRenewalClosed: boolean;
   runCredentialRenewal: RunCredentialRenewalController | null;
   runCredentialRenewalClosed: boolean;
+  /** Outcome of the most recent renewal attempt, for on-demand refresh reporting. */
+  runCredentialRenewalOutcome: "completed" | "auth_needed" | "error" | null;
   runCredentialSession: RunCredentialCommandSession | null;
   codemodeTokenRenewal: CodemodeTokenRenewalController | null;
   codemodeTokenRenewalClosed: boolean;
@@ -249,6 +251,7 @@ export function createTurnContext(input: {
       gitCredentialRenewals: [],
       gitCredentialRenewalClosed: false,
       runCredentialRenewal: null,
+      runCredentialRenewalOutcome: null,
       runCredentialRenewalClosed: false,
       runCredentialSession: null,
       codemodeTokenRenewal: null,

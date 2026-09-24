@@ -96,6 +96,7 @@ import type { sandboxArtifactRuntimeAdmission } from "./sandbox-route";
 import type {
   AttemptIdentityState,
   EventingState,
+  RenewalState,
   SandboxRuntimeState,
   WorkspaceRefState,
 } from "./turn-context";
@@ -106,6 +107,7 @@ import {
 } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
+import { createRefreshCredentialsAttemptToolDefinition } from "./refresh-credentials";
 import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
@@ -165,6 +167,8 @@ export type PrepareTurnToolRuntimeDeps = {
   runWorkspaceMutationForSandbox: SandboxTurnRuntime["runWorkspaceMutationForSandbox"];
   throwIfWorkerShuttingDown: () => void;
   throwIfTurnCancelled: () => void;
+  /** Present when this turn resolves host-managed run credentials. */
+  runCredentialRenewals?: RenewalState | undefined;
 };
 
 export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
@@ -776,6 +780,20 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       : []),
     ...skillTools,
     ...sourceTools,
+    ...(deps.runCredentialRenewals
+      ? [
+          createRefreshCredentialsAttemptToolDefinition({
+            refresh: async () => {
+              const renewals = deps.runCredentialRenewals!;
+              const controller = renewals.runCredentialRenewal;
+              if (!controller) return "not_provisioned";
+              renewals.runCredentialRenewalOutcome = null;
+              await controller.refreshNow();
+              return renewals.runCredentialRenewalOutcome ?? "completed";
+            },
+          }),
+        ]
+      : []),
     createListModelsAttemptToolDefinition({
       currentModelId: turnExecutionPolicy.productModelId,
       load: async () => {
