@@ -23,6 +23,7 @@ import {
   dispatchComputerSessionOperation,
   failBrowserSessionSuspension,
   failBrowserSessionOperation,
+  failPreparedBrowserSessionSuspend,
   findBrowserSessionControlRecordByOperation,
   getBrowserSession,
   getBrowserSessionControlRecord,
@@ -169,6 +170,61 @@ function checkpointArtifact(
 }
 
 describe("durable BrowserSession lifecycle", () => {
+  test("restores an active browser after a pre-dispatch suspend failure", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const active = await activeBrowser(scope);
+    const operationId = crypto.randomUUID();
+    const input = {
+      ...scope,
+      operationId,
+      browserSessionId: active.session.id,
+      actorSubjectId: scope.subjectId,
+    };
+    const prepared = await prepareBrowserSessionSuspend(client.db, input);
+    expect(prepared.operation.state).toBe("prepared");
+    expect(prepared.session.lifecycle).toBe("suspending");
+
+    const failed = await failPreparedBrowserSessionSuspend(client.db, {
+      ...input,
+      error: { code: "driver_failed", message: "Placement unavailable", retryable: true },
+    });
+    expect(failed).toMatchObject({
+      session: { lifecycle: "active", controller: active.session.controller },
+      operation: { state: "failed", error: { message: "Placement unavailable" } },
+    });
+    expect((await prepareBrowserSessionSuspend(client.db, input)).operation.state).toBe("failed");
+
+    const nextOperationId = crypto.randomUUID();
+    const next = await prepareBrowserSessionSuspend(client.db, {
+      ...input,
+      operationId: nextOperationId,
+    });
+    expect(next.operation.state).toBe("prepared");
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: nextOperationId,
+      browserSessionId: active.session.id,
+      controllerGeneration: active.controllerGeneration,
+    });
+    expect(
+      await failPreparedBrowserSessionSuspend(client.db, {
+        ...input,
+        operationId: nextOperationId,
+        error: { code: "driver_failed", message: "Too late", retryable: true },
+      }),
+    ).toBeNull();
+    expect(
+      (
+        await getBrowserSessionControlRecord(client.db, {
+          ...scope,
+          browserSessionId: active.session.id,
+          operationId: nextOperationId,
+        })
+      ).operation?.state,
+    ).toBe("dispatched");
+  });
+
   test("advertises proven managed transfer capabilities without overclaiming attached Chrome", () => {
     expect(MANAGED_BROWSER_SESSION_CAPABILITIES).toMatchObject({
       downloads: true,

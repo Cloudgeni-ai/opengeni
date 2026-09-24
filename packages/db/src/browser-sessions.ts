@@ -1468,6 +1468,71 @@ export async function prepareBrowserSessionSuspend(
   });
 }
 
+/** Restore the active controller when placement fails before a suspend was dispatched. */
+export async function failPreparedBrowserSessionSuspend(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    operationId: string;
+    browserSessionId: string;
+    error: InteractionErrorValue;
+  },
+): Promise<BrowserSessionMutationResponseValue | null> {
+  const error = InteractionError.parse(input.error);
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        await lockOperation(tx, input.workspaceId, input.operationId);
+        const operation = await loadOperation(tx, input.workspaceId, input.operationId);
+        assertOperationResource(operation, input.browserSessionId, "suspend");
+        if (operation.state !== "prepared" || operation.dispatchedAt) return null;
+
+        await lockBrowserSession(tx, input.workspaceId, input.browserSessionId);
+        const now = new Date();
+        const [sessionRow] = await tx
+          .update(schema.browserSessions)
+          .set({ lifecycle: "active", failureCode: null, updatedAt: now })
+          .where(
+            and(
+              eq(schema.browserSessions.workspaceId, input.workspaceId),
+              eq(schema.browserSessions.id, input.browserSessionId),
+              eq(schema.browserSessions.lifecycle, "suspending"),
+            ),
+          )
+          .returning();
+        if (!sessionRow) {
+          throw new BrowserSessionStateError("Prepared BrowserSession suspension changed state");
+        }
+        const [operationRow] = await tx
+          .update(schema.interactionOperations)
+          .set({
+            state: "failed",
+            errorCode: error.code,
+            errorMessage: error.message,
+            errorRetryable: error.retryable,
+            errorDetails: error.details ?? null,
+            settledAt: now,
+            updatedAt: now,
+          })
+          .where(eq(schema.interactionOperations.operationId, input.operationId))
+          .returning();
+        if (!operationRow) throw new Error("BrowserSession failure receipt was lost");
+        const associations = await loadAssociations(tx, input.workspaceId, [
+          input.browserSessionId,
+        ]);
+        await advanceWorkspaceInteractionRevision(tx, input.accountId, input.workspaceId);
+        return BrowserSessionMutationResponse.parse({
+          session: browserSessionFromRows(sessionRow, associations),
+          operation: operationReceipt(operationRow, false),
+        });
+      }),
+  );
+}
+
 export async function prepareBrowserSessionResume(
   db: Database,
   input: PrepareBrowserSessionLifecycleInput,
