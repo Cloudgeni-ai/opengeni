@@ -63264,10 +63264,7 @@ export async function updateSessionGoalWithEvent(
           proposalId: null,
         };
       }
-      const shouldApply =
-        input.actor === "api" ||
-        existing.mutationPolicy === "autonomous_adaptation" ||
-        (existing.mutationPolicy === "preserve_intent" && changeKind === "refinement");
+      const shouldApply = input.actor === "api" || existing.mutationPolicy !== "review_changes";
       if (!shouldApply) {
         const [proposal] = await tx
           .insert(schema.sessionGoalRevisions)

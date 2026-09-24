@@ -132,11 +132,24 @@ A goal is `active`, `paused`, or `completed`.
   redirect live intent.
 - `goal_update` declares `refinement`, `adaptation`, or `replacement`, a
   rationale, and the expected objective revision. `review_changes` always
-  records an immutable proposal; `preserve_intent` directly applies only a
-  refinement; `autonomous_adaptation` may apply every declared kind. API/user
+  records an immutable proposal when deliberately configured by the user/API;
+  the default `preserve_intent` and `autonomous_adaptation` directly apply every
+  declared kind. These classifications describe the audit history, not separate
+  approval gates. The agent maintains its operational goal in response to human
+  direction and relevant evidence, without requiring the human to approve the
+  same direction again through a second UI/API action. API/user
   redirects apply directly. An applied semantic change advances both objective
   and lifecycle revisions but is not execution progress. Proposed content is
   not composed into model instructions until a user applies it.
+- Goal edits do not grant permissions, change root constraints, or authorize
+  work beyond the human's actual request. Preserve the intended outcome rather
+  than shrinking it to fit completed work. Internal revision numbers remain
+  optimistic-concurrency fences and immutable audit history, not user rituals.
+  Existing default-policy goals receive this behavior when the new API and
+  worker code is deployed; no database rewrite or automatic replay of pending
+  proposals occurs. A previously proposed change must be reconciled against
+  the current goal and submitted as a fresh update if it is still warranted.
+  Explicit `review_changes` goals retain their configured review requirement.
 - Root constraints are bounded, normalized standing constraints that may be
   changed only through the direct human/API path. Every accepted turn freezes
   them with its goal snapshot. A goal-bearing child inherits the calling

@@ -2521,7 +2521,7 @@ function registerGoalTools(
     "goal_update",
     {
       description:
-        "Propose or apply a semantic goal revision under the session's mutation policy. Retain the standing goal unless explicit user direction or meaningful new evidence justifies the declared refinement, adaptation, or replacement. Every rewrite must use the exact expected objective revision and a concise rationale. Root constraints cannot be changed by an agent. A rewrite is not an execution-progress audit fact; use the optional goal_progress tool when such a fact should be recorded.",
+        "Maintain your operational goal as user direction or meaningful new evidence clarifies the intended outcome. Changes apply directly unless the user explicitly configured review_changes; refinement, adaptation, and replacement are audit classifications, not approval gates under the default policy. Use the exact expected objective revision and a concise rationale. Updating a goal grants no additional authority and cannot change root constraints. Use goal_progress for an execution-progress audit fact rather than a goal rewrite.",
       inputSchema: {
         text: goalText.optional(),
         successCriteria: successCriteriaSchema.nullable().optional(),
