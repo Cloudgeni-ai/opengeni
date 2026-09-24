@@ -188,6 +188,96 @@ test("stopping sign-in restores the dialog's close control without a refresh", a
   }
 });
 
+test("a stalled connection reconciliation remains dismissible", async () => {
+  const disconnected = {
+    ...item,
+    id: "service-reconcile",
+    enabled: false,
+    connectionRef: null,
+  } as CapabilityCatalogItem;
+  const authorized = {
+    id: "attempt-reconcile",
+    workspaceId: "workspace",
+    providerId: "mcp-oauth",
+    ownership: "workspace" as const,
+    revision: 2,
+    state: "complete" as const,
+    credentialsCommitted: true,
+    integrationInstalled: false,
+    completionRequirement: "connection" as const,
+    nextAction: { type: "none" as const },
+    expiresAt: "2030-01-01T00:00:00Z",
+    account: {
+      id: "account",
+      providerId: "mcp-oauth",
+      label: "Example service",
+      ownership: "workspace" as const,
+      status: "connected" as const,
+    },
+  };
+  const client = {
+    listCapabilities: async () => ({ items: [disconnected] }),
+    listConnections: async () => await new Promise<never>(() => {}),
+    connectTransport: () => ({
+      begin: async () => ({
+        ...authorized,
+        revision: 1,
+        state: "credential_input" as const,
+        credentialsCommitted: false,
+        nextAction: { type: "credentials" as const, fields: [] },
+      }),
+      advance: async () => ({
+        ...authorized,
+        state: "requires_user_action" as const,
+        credentialsCommitted: false,
+        nextAction: { type: "authorize" as const, url: "https://service.example/authorize" },
+      }),
+      get: async () => authorized,
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => ({
+    opener: null,
+    closed: false,
+    location: { replace() {} },
+    close() {},
+  })) as unknown as typeof window.open;
+  let closed = false;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId="service-reconcile"
+      name="Example service"
+      returnUrl="https://host.example/"
+      dialogOnly
+      onClose={() => {
+        closed = true;
+      }}
+    />,
+  );
+  try {
+    await flush();
+    const continueButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Continue to Example service",
+    );
+    await actRun(() => continueButton!.click());
+    await flush();
+    expect(document.body.textContent).toContain("Finishing your connection…");
+    expect(document.body.textContent).not.toContain("Stop waiting");
+    const close = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close connection setup"]',
+    );
+    expect(close).not.toBeNull();
+    await actRun(() => close!.click());
+    expect(closed).toBe(true);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});
+
 test("personal setup reads sender accounts without conversation grants or consent", async () => {
   const unexpected: string[] = [];
   const personal = {

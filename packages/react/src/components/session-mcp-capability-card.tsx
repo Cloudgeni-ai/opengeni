@@ -78,6 +78,7 @@ function ScopedCard({
   const [complete, setComplete] = useState(false);
   const [connected, setConnected] = useState(false);
   const [waiting, setWaiting] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -375,6 +376,7 @@ function ScopedCard({
       });
       if (!current() || !result) return;
       setWaiting(false);
+      setReconciling(true);
       await reconcile(result);
       if (result.state === "cancelled") {
         setNotice("Sign-in was cancelled. You can try connecting again.");
@@ -383,6 +385,7 @@ function ScopedCard({
       if (result.state !== "complete")
         throw new Error("Sign-in did not finish. You can try connecting again.");
     } finally {
+      if (current()) setReconciling(false);
       lifetime.current?.signal.removeEventListener("abort", abortOnUnmount);
       if (authorization.current === pending) authorization.current = null;
       if (current()) setWaiting(false);
@@ -460,7 +463,7 @@ function ScopedCard({
         setExpanded(false);
         onClose?.();
       }}
-      busy={busy || view.busy}
+      busy={(busy && !reconciling) || view.busy}
       dialogOnly={dialogOnly}
     >
       <div className="og-session-capability-setup">
@@ -487,7 +490,9 @@ function ScopedCard({
                 <p role="status" className="og-session-capability-progress">
                   {waiting
                     ? `Finish signing in with ${item.name} in the opened window. This will close automatically when you’re connected.`
-                    : "Preparing your connection…"}
+                    : reconciling
+                      ? "Finishing your connection…"
+                      : "Preparing your connection…"}
                 </p>
                 {waiting ? (
                   <button
