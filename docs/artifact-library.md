@@ -52,6 +52,16 @@ or deleting the source file does not change the delivered image. Repeating the
 same sandbox path/content publication reuses its identity; changed bytes produce
 a distinct immutable output.
 
+`sandbox_file_publish` reads from the active session filesystem, not a fixed
+managed-sandbox alias. Pass a workspace-relative file path or an absolute path
+inside the resolved root: `/workspace` on managed sandboxes, or the actual
+host-native root on a Connected Machine (including Windows drive/UNC roots).
+The receipt preserves that canonical source path. Publication does not expand
+filesystem authority; traversal and paths outside the active root are rejected.
+Existing managed-sandbox publication identities remain unchanged. Older clients
+whose receipt validator assumes `/workspace` need the matching contract update
+to recognize native-path receipts.
+
 Published-file links use `[Open file](artifact:<artifactId>)`; the console resolves
 them to the authenticated file page and opens the session artifact panel. Inline
 `![Preview](artifact:<artifactId>)` selects image, video, audio or PDF presentation

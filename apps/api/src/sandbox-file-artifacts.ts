@@ -27,6 +27,12 @@ import {
 } from "@opengeni/db";
 import { retryWhileMissing, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
 import { HTTPException } from "hono/http-exception";
+import {
+  isConnectedMachineAbsolutePath,
+  relativeConnectedMachinePath,
+  resolveConnectedMachinePath,
+  type SandboxChannelAService,
+} from "@opengeni/runtime/sandbox";
 
 import { withChannelARead } from "./sandbox/channel-a";
 import { sanitizeFilename } from "./routes/files";
@@ -98,13 +104,12 @@ async function publishSandboxFileArtifactInScope(
     });
   }
 
-  const path = sandboxArtifactRelativePath(input.path);
   const maxArtifactBytes = Math.min(SANDBOX_FILE_ARTIFACT_MAX_BYTES, storage.maxSinglePutSizeBytes);
   if (maxArtifactBytes < 1) {
     throw new HTTPException(503, { message: "object storage cannot accept artifact files" });
   }
   const readLimit = Math.min(25 * 1024 * 1024, maxArtifactBytes + FILE_READ_SENTINEL_BYTES);
-  const read = await withChannelARead(
+  const { path, sandboxPath, read } = await withChannelARead(
     {
       db: deps.db,
       settings: deps.settings,
@@ -119,7 +124,7 @@ async function publishSandboxFileArtifactInScope(
       ...(input.signal ? { waitSignal: input.signal } : {}),
       operation: "artifact.publish",
     },
-    ({ service }) => service.fsRead({ path, encoding: "base64", maxBytes: readLimit }),
+    ({ service }) => readSandboxArtifactFile(service, input.path, readLimit),
   );
   if (read.truncated || read.sizeBytes > maxArtifactBytes) {
     throw new HTTPException(413, {
@@ -234,48 +239,54 @@ async function publishSandboxFileArtifactInScope(
   });
   return SandboxFileArtifactReceipt.parse({
     type: "sandbox_file",
-    sandboxPath: `/workspace/${path}`,
+    sandboxPath,
     filename,
     artifact,
   });
 }
 
-export function sandboxArtifactRelativePath(value: string): string {
+/** Use the root captured by the same fenced Channel-A service that reads bytes,
+ * not the session's placement-home label or a caller-supplied root. */
+export async function readSandboxArtifactFile(
+  service: Pick<SandboxChannelAService, "capabilities" | "fsRead">,
+  value: string,
+  maxBytes: number,
+) {
+  const root = service.capabilities().FileSystem.root;
+  const path = sandboxArtifactRelativePath(value, root);
+  const sandboxPath = resolveConnectedMachinePath(root, path);
+  const read = await service.fsRead({ path, encoding: "base64", maxBytes });
+  return { path, sandboxPath, read };
+}
+
+export function sandboxArtifactRelativePath(value: string, workspaceRoot = "/workspace"): string {
   let path = value.trim();
   if (path.startsWith("sandbox:")) {
     path = path.slice("sandbox:".length);
   }
-  if (path === "/workspace" || path === "/workspace/") {
+  if (!path || /[\\/]$/.test(path)) {
     throw new HTTPException(400, { message: "sandbox artifact path must name a file" });
   }
-  if (path.startsWith("/workspace/")) {
-    path = path.slice("/workspace/".length);
-  } else if (path.startsWith("/")) {
+  let absolute: string;
+  let relative: string | null;
+  try {
+    if (!isConnectedMachineAbsolutePath(workspaceRoot)) throw new Error("Missing workspace root");
+    absolute = resolveConnectedMachinePath(workspaceRoot, path);
+    relative = relativeConnectedMachinePath(workspaceRoot, absolute);
+  } catch {
     throw new HTTPException(400, {
-      message: "sandbox artifact path must be inside /workspace",
+      message: "sandbox artifact path is invalid for this workspace",
     });
   }
-  if (!path) {
-    throw new HTTPException(400, { message: "sandbox artifact path must name a file" });
-  }
-  if (path.includes("\0")) {
-    throw new HTTPException(400, { message: "sandbox artifact path is invalid" });
-  }
-  const normalized = posix.normalize(path);
-  if (
-    normalized === "." ||
-    normalized === ".." ||
-    normalized.startsWith("../") ||
-    normalized.endsWith("/")
-  ) {
+  if (!relative) {
     throw new HTTPException(400, {
-      message: "sandbox artifact path must canonically name a file inside /workspace",
+      message: "sandbox artifact path must name a file inside the active workspace root",
     });
   }
-  if (`/workspace/${normalized}`.length > SANDBOX_ARTIFACT_ABSOLUTE_PATH_MAX_CHARS) {
+  if (absolute.length > SANDBOX_ARTIFACT_ABSOLUTE_PATH_MAX_CHARS) {
     throw new HTTPException(400, { message: "sandbox artifact path is too long" });
   }
-  return normalized;
+  return relative;
 }
 
 export function sandboxArtifactSafeFilename(filename: string): string {

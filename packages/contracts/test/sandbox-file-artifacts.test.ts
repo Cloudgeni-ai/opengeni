@@ -33,6 +33,29 @@ function receipt() {
 }
 
 describe("sandbox-file artifact receipt", () => {
+  test.each([
+    "/home/user/project/reports/summary.pdf",
+    "/Users/user/project/summary.pdf",
+    "C:/work/project/summary.pdf",
+    "//server/share/project/summary.pdf",
+  ])("accepts a canonical host-native publication path %s", (sandboxPath) => {
+    const value = { ...receipt(), sandboxPath };
+    expect(SandboxFileArtifactReceipt.parse(value)).toEqual(value);
+  });
+
+  test.each([
+    "relative/summary.pdf",
+    "/home/user/../summary.pdf",
+    "/home//summary.pdf",
+    "C:summary.pdf",
+    "C:\\work\\summary.pdf",
+    "//?/C:/summary.pdf",
+    "//./C:/summary.pdf",
+    "/home/\n/summary.pdf",
+  ])("rejects malformed host-native receipt path %s", (sandboxPath) => {
+    expect(() => SandboxFileArtifactReceipt.parse({ ...receipt(), sandboxPath })).toThrow();
+  });
+
   test("accepts one closed permanent workspace-file receipt", () => {
     expect(SandboxFileArtifactReceipt.parse(receipt())).toEqual(receipt());
   });
