@@ -58,4 +58,29 @@ describe("compact conversation card states", () => {
     expect(html).toContain("Connected · Available in this conversation");
     expect(html).not.toContain("agent continues");
   });
+
+  test("provider-specific completion copy and a busy opener stay truthful", () => {
+    const connected = renderToStaticMarkup(
+      <SessionCapabilityFrame
+        {...props}
+        skill={false}
+        complete
+        completeLabel="Connected to this workspace"
+      />,
+    );
+    expect(connected).toContain("Connected to this workspace");
+    expect(connected).not.toContain("Available in this conversation");
+    const opening = renderToStaticMarkup(
+      <SessionCapabilityFrame
+        {...props}
+        skill={false}
+        busy
+        opensDialog={false}
+        actionLabel="Opening GitHub…"
+      />,
+    );
+    expect(opening).toContain("Opening GitHub…");
+    expect(opening).toContain('disabled=""');
+    expect(opening).not.toContain('aria-haspopup="dialog"');
+  });
 });
