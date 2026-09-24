@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { StrictMode } from "react";
 import type { OpenGeniClient, CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/sdk";
 import { matchingActiveMcpConnections } from "../src/mcp-connection-status";
-import { actRun, registerDom, renderComponent } from "./render-hook";
+import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 registerDom();
 const { McpConnectionCard } = await import("../src/components/session-mcp-capability-card");
 
@@ -102,6 +102,88 @@ test("connection status retains exact workspace account ownership and endpoint",
   expect(matchingActiveMcpConnections(item, [{ ...connection, status: "revoked" }])).toHaveLength(
     0,
   );
+});
+
+test("stopping sign-in restores the dialog's close control without a refresh", async () => {
+  const disconnected = {
+    ...item,
+    id: "service-cancel",
+    enabled: false,
+    connectionRef: null,
+  } as CapabilityCatalogItem;
+  const authorize = {
+    id: "attempt-cancel",
+    workspaceId: "workspace",
+    providerId: "mcp-oauth",
+    ownership: "workspace" as const,
+    revision: 2,
+    state: "requires_user_action" as const,
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "connection" as const,
+    nextAction: { type: "authorize" as const, url: "https://service.example/authorize" },
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  const client = {
+    listCapabilities: async () => ({ items: [disconnected] }),
+    connectTransport: () => ({
+      begin: async () => ({
+        ...authorize,
+        revision: 1,
+        state: "credential_input" as const,
+        nextAction: { type: "credentials" as const, fields: [] },
+      }),
+      advance: async () => authorize,
+      get: async () => authorize,
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  let popupClosed = false;
+  window.open = (() => ({
+    opener: null,
+    get closed() {
+      return popupClosed;
+    },
+    location: { replace() {} },
+    close() {
+      popupClosed = true;
+    },
+  })) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId="service-cancel"
+      name="Example service"
+      returnUrl="https://host.example/"
+      dialogOnly
+    />,
+  );
+  try {
+    await flush();
+    const continueButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Continue to Example service",
+    );
+    expect(continueButton).toBeDefined();
+    await actRun(() => continueButton!.click());
+    await flush();
+    expect(document.body.textContent).toContain("Finish signing in with Example service");
+    expect(document.querySelector('button[aria-label="Close connection setup"]')).toBeNull();
+    const stop = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Stop waiting",
+    );
+    await actRun(() => stop!.click());
+    await flush();
+    expect(document.body.textContent).toContain("Sign-in window closed");
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(document.querySelector('[role="status"]')?.textContent).toContain(
+      "Sign-in window closed",
+    );
+    expect(document.querySelector('button[aria-label="Close connection setup"]')).not.toBeNull();
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
 });
 
 test("personal setup reads sender accounts without conversation grants or consent", async () => {

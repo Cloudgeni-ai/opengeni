@@ -1,5 +1,6 @@
 import {
   authorizeConnectAttempt,
+  ConnectPopupClosedError,
   ConnectController,
   createBrowserConnectNavigation,
   reserveBrowserConnectNavigation,
@@ -79,8 +80,10 @@ function ScopedCard({
   const [waiting, setWaiting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [ownership, setOwnership] = useState<ConnectOwnership>("workspace");
   const lifetime = useRef<AbortController | null>(null);
+  const authorization = useRef<AbortController | null>(null);
   const operation = useRef(false);
   const startKey = useRef(crypto.randomUUID());
   const advanceKey = useRef(crypto.randomUUID());
@@ -190,15 +193,19 @@ function ScopedCard({
     operation.current = true;
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       await action();
     } catch (failure) {
-      if (current())
-        setError(
-          failure instanceof Error
-            ? failure.message
-            : "Connection setup could not finish. Try again.",
-        );
+      if (current()) {
+        if (failure instanceof ConnectPopupClosedError) setNotice(failure.message);
+        else
+          setError(
+            failure instanceof Error
+              ? failure.message
+              : "Connection setup could not finish. Try again.",
+          );
+      }
     } finally {
       operation.current = false;
       if (current()) setBusy(false);
@@ -353,18 +360,39 @@ function ScopedCard({
   }
 
   async function performAuthorization(attempt: ConnectAttempt, navigation: ConnectNavigation) {
+    const pending = new AbortController();
+    authorization.current = pending;
+    const abortOnUnmount = () => pending.abort(lifetime.current?.signal.reason);
+    lifetime.current!.signal.addEventListener("abort", abortOnUnmount, { once: true });
     setWaiting(true);
     try {
       const result = await authorizeConnectAttempt(controller.transport, attempt, navigation, {
         mode: "popup",
-        signal: lifetime.current!.signal,
+        signal: pending.signal,
       });
       if (!current() || !result) return;
-      await controller.refresh();
-      await reconcile(result);
-      if (result.state !== "complete")
+      const latest = await controller.refresh();
+      await reconcile(latest);
+      if (latest.state === "cancelled") {
+        setNotice("Sign-in was cancelled. You can try connecting again.");
+        return;
+      }
+      if (latest.state !== "complete")
         throw new Error("Sign-in did not finish. You can try connecting again.");
+    } catch (failure) {
+      if (failure instanceof ConnectPopupClosedError && current()) {
+        // Refresh the attempt so Retry starts a new flow if the backend has
+        // already recorded cancellation, and accept a late successful callback.
+        const latest = await controller.refresh().catch(() => null);
+        if (latest?.state === "complete" && current()) {
+          await reconcile(latest);
+          return;
+        }
+      }
+      throw failure;
     } finally {
+      lifetime.current?.signal.removeEventListener("abort", abortOnUnmount);
+      if (authorization.current === pending) authorization.current = null;
       if (current()) setWaiting(false);
     }
   }
@@ -445,6 +473,11 @@ function ScopedCard({
     >
       <div className="og-session-capability-setup">
         {error ? <p role="alert">{error}</p> : null}
+        {notice ? (
+          <p role="status" className="og-session-capability-notice">
+            {notice}
+          </p>
+        ) : null}
         {!item ? (
           <>
             <p role="status">
@@ -458,11 +491,22 @@ function ScopedCard({
           <>
             <p>{item.description || rationale}</p>
             {busy ? (
-              <p role="status" className="og-session-capability-progress">
-                {waiting
-                  ? `Finish signing in with ${item.name} in the opened window. This will close automatically when you’re connected.`
-                  : "Preparing your connection…"}
-              </p>
+              <>
+                <p role="status" className="og-session-capability-progress">
+                  {waiting
+                    ? `Finish signing in with ${item.name} in the opened window. This will close automatically when you’re connected.`
+                    : "Preparing your connection…"}
+                </p>
+                {waiting ? (
+                  <button
+                    type="button"
+                    className="og-session-capability-stop"
+                    onClick={() => authorization.current?.abort(new ConnectPopupClosedError())}
+                  >
+                    Stop waiting
+                  </button>
+                ) : null}
+              </>
             ) : !connected ? (
               <>
                 {!item.connectionRef ? (
@@ -502,7 +546,7 @@ function ScopedCard({
                     else void begin();
                   }}
                 >
-                  {error && view.attempt?.nextAction.type === "authorize"
+                  {(error || notice) && view.attempt?.nextAction.type === "authorize"
                     ? "Try signing in again"
                     : `Continue to ${item.name}`}
                 </button>
