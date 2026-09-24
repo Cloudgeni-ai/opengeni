@@ -710,8 +710,9 @@ renames. Runtimes without this seam retain serialized `set_session_title`.
 
 `packages/db/src/session-execution-policy.ts` derives execution/display policy from the latest started turn, otherwise creation defaults.
 
-Active-source message-point forks preserve canonical history through uncompacted
-protocol boundaries; existing exclusive tenancy and workspace/source row locks
+Active-source message-point forks preserve the current active model-history
+prefix through the selected boundary, including authenticated compaction summaries.
+Existing exclusive tenancy and workspace/source row locks
 serialize validation/copying against history writers/compaction. Source execution
 and whole-session fork quiescence stay unchanged. [Details](organization-tenancy.md#forking-at-a-message).
 
