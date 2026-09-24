@@ -66,6 +66,7 @@ type WorkspaceSettingsSection =
   | "plugins"
   | "models"
   | "api-keys"
+  | "developer"
   | "danger";
 
 export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "@/lib/routes";
@@ -411,6 +412,7 @@ const workspaceSettingsRoute = createRoute({
       search.section === "plugins" ||
       search.section === "models" ||
       search.section === "api-keys" ||
+      search.section === "developer" ||
       search.section === "danger"
         ? search.section
         : search.section === "capabilities"

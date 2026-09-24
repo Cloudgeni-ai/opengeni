@@ -35,6 +35,7 @@ const SECTIONS = new Set([
   "organization",
   "workspaces",
   "api-keys",
+  "developer",
   "variables",
   "knowledge",
 ]);
