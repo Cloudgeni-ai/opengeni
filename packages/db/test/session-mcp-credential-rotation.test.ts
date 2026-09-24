@@ -238,15 +238,19 @@ describe("atomic standalone credential rotation (real PostgreSQL)", () => {
           expectedCredentialVersion: 1,
           expectedServerUrl: serverUrl,
           nativeConnectionId: connectionId,
+          replacementServerUrl: `${serverUrl}/organizations/example`,
         },
       ],
       resolveNativeConnection: async (
         _tx: Database,
-        server: { connectionRef: unknown },
+        server: { connectionRef: unknown; url: string },
         id: string,
+        replacementServerUrl?: string,
       ) => {
         expect(server.connectionRef).toEqual(oldRef);
         expect(id).toBe(connectionId);
+        expect(server.url).toBe(serverUrl);
+        expect(replacementServerUrl).toBe(`${serverUrl}/organizations/example`);
         resolutions++;
         return newRef;
       },
@@ -261,7 +265,7 @@ describe("atomic standalone credential rotation (real PostgreSQL)", () => {
     expect(row!.headers_encrypted).toEqual({});
     expect(row!.credential_version).toBe(2);
     expect(row!.require_approval).toEqual(["write_record"]);
-    expect(row!.url).toBe(serverUrl);
+    expect(row!.url).toBe(`${serverUrl}/organizations/example`);
     expect(
       await admin`select id from session_turns where session_id = ${input.sessionId}`,
     ).toHaveLength(0);

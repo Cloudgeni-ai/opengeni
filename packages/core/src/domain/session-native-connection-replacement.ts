@@ -9,6 +9,7 @@ export function nativeSessionConnectionReplacement(input: {
   workspaceId: string;
   subjectId: string | null;
   serverUrl: string;
+  replacementServerUrl?: string;
   currentRef: McpServerConnectionRef | null;
   nativeConnectionId: string;
   connections: ConnectionMetadata[];
@@ -41,12 +42,23 @@ export function nativeSessionConnectionReplacement(input: {
     throw new Error("native connection provider mismatch");
   const ref: McpServerConnectionRef = {
     ...retained,
+    ...(!input.currentRef?.resource && typeof connection.metadata.resource === "string"
+      ? { resource: connection.metadata.resource }
+      : {}),
     connectionId: connection.id,
     providerDomain: connection.providerDomain,
     kind: connection.kind,
     subjectScope: connection.subjectId === null ? "workspace" : "subject",
   };
-  if (!connectionMetadataMatchesBinding(connection, ref, input.serverUrl))
+  const destination = input.replacementServerUrl ?? input.serverUrl;
+  // A redirect must be explicitly requested and bound in the account metadata;
+  // the broker's legacy provider-host fallback is insufficient for rebinding.
+  if (
+    input.replacementServerUrl &&
+    (typeof connection.metadata.mcpUrl !== "string" || !connection.metadata.mcpUrl.trim())
+  )
+    throw new Error("native connection destination unavailable");
+  if (!connectionMetadataMatchesBinding(connection, ref, destination))
     throw new Error("native connection binding mismatch");
   return ref;
 }

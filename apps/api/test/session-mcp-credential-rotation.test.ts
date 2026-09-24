@@ -202,6 +202,14 @@ describe("standalone credential rotation HTTP authority", () => {
         return identity;
       }),
     );
+    const destination = "https://tools.example.test/mcp/organizations/example";
+    await admin`update session_mcp_servers set connection_ref = ${admin.json({
+      authoritySource: "host",
+      hostBinding: { selection: "accepted_turn" },
+      subjectScope: "subject",
+      providerDomain: "tools.example.test",
+      kind: "delegated",
+    })} where session_id = ${f.session.id}`;
     const native = await createConnection(client.db, {
       accountId: f.accountId,
       workspaceId: f.workspaceId,
@@ -210,7 +218,7 @@ describe("standalone credential rotation HTTP authority", () => {
       kind: "oauth2",
       credentialEncrypted: "synthetic-never-resolved",
       createdBySubjectId: identities[0]!.subjectId,
-      metadata: { mcpUrl: f.request.updates[0]!.expectedServerUrl },
+      metadata: { mcpUrl: destination, resource: destination },
     });
     const app = appWith();
     const service = new OpenGeniClient({
@@ -221,7 +229,9 @@ describe("standalone credential rotation HTTP authority", () => {
     const { headers: _headers, ...preconditions } = f.request.updates[0]!;
     const request = {
       operationKey: f.request.operationKey,
-      updates: [{ ...preconditions, nativeConnectionId: native.id }],
+      updates: [
+        { ...preconditions, nativeConnectionId: native.id, replacementServerUrl: destination },
+      ],
     };
     for (const actor of [service, service.asUser("bob")]) {
       await expect(
@@ -237,8 +247,13 @@ describe("standalone credential rotation HTTP authority", () => {
       servers: [{ id: "external", credentialVersion: 2 }],
     });
     const [row] =
-      await admin`select connection_ref from session_mcp_servers where session_id = ${f.session.id}`;
-    expect(row!.connection_ref).toMatchObject({ connectionId: native.id, subjectScope: "subject" });
+      await admin`select connection_ref, url from session_mcp_servers where session_id = ${f.session.id}`;
+    expect(row!.connection_ref).toMatchObject({
+      connectionId: native.id,
+      subjectScope: "subject",
+      resource: destination,
+    });
+    expect(row!.url).toBe(destination);
   });
 
   test("native replacement uses visible workspace credentials without changing session history or policy", async () => {

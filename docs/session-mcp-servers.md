@@ -226,7 +226,8 @@ The same endpoint and SDK method also accept `nativeConnectionId` **instead of**
     "id": "crm",
     "expectedCredentialVersion": 1,
     "expectedServerUrl": "https://tools.example.test/mcp",
-    "nativeConnectionId": "33333333-3333-4333-8333-333333333333"
+    "nativeConnectionId": "33333333-3333-4333-8333-333333333333",
+    "replacementServerUrl": "https://tools.example.test/mcp/organizations/example"
   }]
 }
 ```
@@ -238,12 +239,21 @@ account inventory: a workspace account in this workspace or that caller's own
 personal account. A service cannot name another user's personal account.
 Caller-supplied owners, references and authority sources are not accepted.
 
+`replacementServerUrl` is optional and exclusive to native replacement. Omit it
+to retain the endpoint. Supply it explicitly when the native account is bound to
+a different endpoint; it must match that account's stored `metadata.mcpUrl`, not
+merely its provider domain. `expectedServerUrl` always names the **old** saved URL
+and remains a strict compare-and-set precondition. Account selection alone never
+redirects an attachment.
+
 The existing provider domain, scopes, OAuth resource and selected-resource
-restrictions remain intact. The native account's metadata must match the unchanged
+restrictions remain intact. If the old reference has no OAuth resource, the native
+account's stored resource is pinned. A conflicting old resource restriction is
+rejected, not dropped. The account metadata must match the explicitly requested
 destination and resource binding; the ordinary credential broker still checks the
 actual credential binding and current execution authority at physical use.
 The replacement removes the retired host binding and clears inline headers,
-then increments `credentialVersion`. URL, selected tools, approval policy,
+then increments `credentialVersion`. Except for the explicitly requested URL replacement, selected tools, approval policy,
 history, files and accepted-attempt snapshots do not change.
 
 All standalone authorization, quiescence, version/destination fencing and keyed

@@ -86,7 +86,12 @@ export async function rotateSessionMcpCredentialsForRequest(
           expectedCredentialVersion: update.expectedCredentialVersion,
           expectedServerUrl: update.expectedServerUrl,
           ...("nativeConnectionId" in update
-            ? { nativeConnectionId: update.nativeConnectionId }
+            ? {
+                nativeConnectionId: update.nativeConnectionId,
+                ...(update.replacementServerUrl
+                  ? { replacementServerUrl: update.replacementServerUrl }
+                  : {}),
+              }
             : {
                 headers: Object.fromEntries(
                   Object.entries(normalizedSessionMcpCredentialHeaders(update.headers))
@@ -132,7 +137,7 @@ export async function rotateSessionMcpCredentialsForRequest(
               ),
             },
       ),
-      resolveNativeConnection: async (tx, server, nativeConnectionId) => {
+      resolveNativeConnection: async (tx, server, nativeConnectionId, replacementServerUrl) => {
         const connections = await listOwnConnectionAccountsForGrant(tx, authorizedGrant);
         const source = personalConnectionDelegationSourceForGrant(authorizedGrant);
         try {
@@ -141,6 +146,7 @@ export async function rotateSessionMcpCredentialsForRequest(
             workspaceId: grant.workspaceId,
             subjectId: source.kind === "subject" ? source.subjectId : null,
             serverUrl: server.url,
+            ...(replacementServerUrl ? { replacementServerUrl } : {}),
             currentRef: server.connectionRef,
             nativeConnectionId,
             connections,

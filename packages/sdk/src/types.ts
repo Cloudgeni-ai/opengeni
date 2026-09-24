@@ -674,7 +674,10 @@ export type RotateSessionMcpCredentialsRequest = {
       id: string;
       expectedCredentialVersion: number;
       expectedServerUrl: string;
-    } & ({ headers: Record<string, string> } | { nativeConnectionId: string })
+    } & (
+      | { headers: Record<string, string> }
+      | { nativeConnectionId: string; replacementServerUrl?: string | undefined }
+    )
   >;
 };
 

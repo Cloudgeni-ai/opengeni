@@ -51,7 +51,10 @@ export type AtomicSessionMcpCredentialRotationInput = {
       id: string;
       expectedCredentialVersion: number;
       expectedServerUrl: string;
-    } & ({ headersEncrypted: Record<string, string> } | { nativeConnectionId: string })
+    } & (
+      | { headersEncrypted: Record<string, string> }
+      | { nativeConnectionId: string; replacementServerUrl?: string | undefined }
+    )
   >;
   /** Resolve an exact native connection using this authenticated transaction.
    * Called only for a fresh, quiescent and CAS-valid operation. */
@@ -59,6 +62,7 @@ export type AtomicSessionMcpCredentialRotationInput = {
     tx: Database,
     server: { url: string; connectionRef: McpServerConnectionRef | null },
     connectionId: string,
+    replacementServerUrl?: string,
   ) => Promise<McpServerConnectionRef>;
   /** Trusted request authorizer, mandatory even for a committed receipt replay.
    * Revalidate the original authenticated subject and permissions on this tx. */
@@ -227,7 +231,12 @@ export async function rotateSessionMcpCredentialsAtomically(
           throw new SessionMcpCredentialRotationError("invalid_request");
         const row = rows.find((server) => server.serverId === update.id)!;
         const ref = McpServerConnectionRef.parse(
-          await input.resolveNativeConnection(tx, row, update.nativeConnectionId),
+          await input.resolveNativeConnection(
+            tx,
+            row,
+            update.nativeConnectionId,
+            update.replacementServerUrl,
+          ),
         );
         if (
           ref.authoritySource ||
@@ -253,7 +262,11 @@ export async function rotateSessionMcpCredentialsAtomically(
           .set({
             ...("headersEncrypted" in update
               ? { headersEncrypted: update.headersEncrypted }
-              : { headersEncrypted: {}, connectionRef: nativeRefs.get(update.id)! }),
+              : {
+                  headersEncrypted: {},
+                  connectionRef: nativeRefs.get(update.id)!,
+                  ...(update.replacementServerUrl ? { url: update.replacementServerUrl } : {}),
+                }),
             credentialVersion: update.expectedCredentialVersion + 1,
             updatedAt: new Date(receipt.appliedAt),
           })

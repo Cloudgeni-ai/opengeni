@@ -5897,6 +5897,8 @@ export const RotateSessionMcpCredentialsRequest = z
                 expectedServerUrl: httpsUrl,
                 /** Resolve from the authenticated caller's native account inventory. */
                 nativeConnectionId: z.string().uuid(),
+                /** Explicit opt-in; must match the selected account's bound MCP URL. */
+                replacementServerUrl: httpsUrl.optional(),
               })
               .strict(),
           ),

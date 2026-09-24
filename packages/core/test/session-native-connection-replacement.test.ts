@@ -102,3 +102,44 @@ test("workspace accounts remain ownerless and personal accounts require the exac
     }).connectionId,
   ).toBe(native.id);
 });
+
+test("explicit destination replacement pins the native resource instead of silently reusing the legacy endpoint", () => {
+  const destination = "https://tools.example.test/mcp/organizations/example";
+  const { resource: _resource, ...oldRef } = legacy;
+  const scoped = { ...native, metadata: { mcpUrl: destination, resource: destination } };
+  const request = {
+    ...input,
+    currentRef: oldRef,
+    connections: [scoped],
+    replacementServerUrl: destination,
+  };
+  expect(nativeSessionConnectionReplacement(request)).toMatchObject({
+    connectionId: native.id,
+    resource: destination,
+  });
+  // No implicit redirect; no caller-picked unrelated destination; no removal of an old resource restriction.
+  expect(() =>
+    nativeSessionConnectionReplacement({ ...input, currentRef: oldRef, connections: [scoped] }),
+  ).toThrow();
+  expect(() =>
+    nativeSessionConnectionReplacement({
+      ...request,
+      replacementServerUrl: "https://tools.example.test/other",
+    }),
+  ).toThrow();
+  expect(() => nativeSessionConnectionReplacement({ ...request, currentRef: legacy })).toThrow();
+  expect(() =>
+    nativeSessionConnectionReplacement({
+      ...request,
+      connections: [{ ...scoped, metadata: { resource: destination } }],
+    }),
+  ).toThrow();
+  for (const mcpUrl of ["", " "]) {
+    expect(() =>
+      nativeSessionConnectionReplacement({
+        ...request,
+        connections: [{ ...scoped, metadata: { mcpUrl, resource: destination } }],
+      }),
+    ).toThrow();
+  }
+});

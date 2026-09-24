@@ -17,6 +17,19 @@ test("standalone rotation accepts an exact native account without caller-supplie
   expect(RotateSessionMcpCredentialsRequest.parse(request)).toEqual(request);
 });
 
+test("native replacement can explicitly name the new account-bound destination while retaining the old URL precondition", () => {
+  const candidate = {
+    ...request,
+    updates: [
+      {
+        ...request.updates[0]!,
+        replacementServerUrl: "https://tools.example.test/mcp/organizations/example",
+      },
+    ],
+  };
+  expect(RotateSessionMcpCredentialsRequest.parse(candidate)).toEqual(candidate);
+});
+
 test("native replacement cannot also provide inline secrets, owners, or authority refs", () => {
   for (const extra of [
     { headers: { authorization: "Bearer synthetic" } },
