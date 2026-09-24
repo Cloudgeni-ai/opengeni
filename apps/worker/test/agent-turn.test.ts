@@ -5620,29 +5620,32 @@ describe("transient provider error classifier", () => {
   });
 
   test("server-originated TaskExecStart DNS text never authorizes same-turn recovery", () => {
-    const details =
-      "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host:443";
-    const clientError = Object.assign(
-      new Error(
-        `/modal.task_command_router.TaskCommandRouter/TaskExecStart UNAVAILABLE: ${details}`,
-      ),
-      {
-        name: "ClientError",
-        path: "/modal.task_command_router.TaskCommandRouter/TaskExecStart",
-        code: 14,
-        details,
-      },
-    );
-    const wrapped = new ToolCallError("Failed to run function tools", clientError);
+    for (const details of [
+      "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host:443",
+      "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host",
+    ]) {
+      const clientError = Object.assign(
+        new Error(
+          `/modal.task_command_router.TaskCommandRouter/TaskExecStart UNAVAILABLE: ${details}`,
+        ),
+        {
+          name: "ClientError",
+          path: "/modal.task_command_router.TaskCommandRouter/TaskExecStart",
+          code: 14,
+          details,
+        },
+      );
+      const wrapped = new ToolCallError("Failed to run function tools", clientError);
 
-    expect(isTransientProviderError(wrapped)).toBe(false);
-    expect(agentRunFailurePayload(wrapped).code).not.toBe("sandbox_command_start_unavailable");
-    expect(
-      providerRecoveryResult({
-        failureCode: "sandbox_command_start_unavailable",
-        attemptNumber: 1,
-      }),
-    ).toEqual({ status: "recovering", continueDelayMs: 2_000 });
+      expect(isTransientProviderError(wrapped)).toBe(false);
+      expect(agentRunFailurePayload(wrapped).code).not.toBe("sandbox_command_start_unavailable");
+      expect(
+        providerRecoveryResult({
+          failureCode: "sandbox_command_start_unavailable",
+          attemptNumber: 1,
+        }),
+      ).toEqual({ status: "recovering", continueDelayMs: 2_000 });
+    }
   });
 
   test("recovers only a client pre-dispatch failure within a finite retry budget", async () => {

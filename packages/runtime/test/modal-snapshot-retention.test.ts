@@ -26,6 +26,8 @@ const SNAPSHOT_REQUEST_ID = "11111111-1111-4111-8111-111111111111";
 const MODAL_TASK_EXEC_START_PATH = "/modal.task_command_router.TaskCommandRouter/TaskExecStart";
 const MODAL_TASK_EXEC_START_DNS_DETAILS =
   "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host:443";
+const MODAL_TASK_EXEC_START_DNS_DETAILS_NO_PORT =
+  "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host";
 
 function modalTaskExecStartDnsError(overrides: Record<string, unknown> = {}) {
   return Object.assign(
@@ -164,6 +166,11 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     expect(
       isModalTaskExecStartPreDispatchUnavailableError(
         modalTaskExecStartDnsError({ code: "UNAVAILABLE" }),
+      ),
+    ).toBe(false);
+    expect(
+      isModalTaskExecStartPreDispatchUnavailableError(
+        modalTaskExecStartDnsError({ details: MODAL_TASK_EXEC_START_DNS_DETAILS_NO_PORT }),
       ),
     ).toBe(false);
   });

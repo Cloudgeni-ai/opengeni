@@ -61,6 +61,13 @@ const MAX_ENRICH_CONCURRENCY: usize = 32;
 const MAX_DETAILED_ENRICHMENT_NODES: usize = 64;
 const MAX_APPLICATION_SNAPSHOTS: usize = 128;
 const MAX_WINDOW_FRAME_FENCES: usize = 512;
+const WINDOW_CAPTURE_RESIZE_ERROR: &str = "X11 window resized during capture";
+const WINDOW_CAPTURE_RETRY_DELAYS: [Duration; 4] = [
+    Duration::ZERO,
+    Duration::from_millis(16),
+    Duration::from_millis(32),
+    Duration::from_millis(64),
+];
 const MUTATION_SETTLE_DELAYS: [Duration; 4] = [
     Duration::ZERO,
     Duration::from_millis(16),
@@ -76,6 +83,30 @@ const FOCUS_SETTLE_DELAYS: [Duration; 7] = [
     Duration::from_millis(256),
     Duration::from_millis(256),
 ];
+
+async fn retry_window_capture<T, F, Fut>(mut capture: F) -> NativeAdapterResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = NativeAdapterResult<T>>,
+{
+    for (index, delay) in WINDOW_CAPTURE_RETRY_DELAYS.into_iter().enumerate() {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        match capture().await {
+            Err(error)
+                if index + 1 < WINDOW_CAPTURE_RETRY_DELAYS.len()
+                    && error.code == NativeAdapterErrorCode::FrameStale
+                    && error.message.starts_with(WINDOW_CAPTURE_RESIZE_ERROR) =>
+            {
+                // No frame fence was stored. Recapture after a bounded settle
+                // instead of forcing the caller to rediscover the window.
+            }
+            result => return result,
+        }
+    }
+    unreachable!("the final capture attempt returns its result")
+}
 
 async fn register_semantic_events(connection: &AccessibilityConnection) -> bool {
     // A reused application snapshot is safe only while every event family that
@@ -1345,21 +1376,28 @@ impl AtspiComputerAdapter {
                 true,
             )
         })?;
-        let captured = desktop.capture_window(window.id).await.map_err(|error| {
-            NativeAdapterError::definite(
-                NativeAdapterErrorCode::DriverFailed,
-                format!("capture Linux X11 window: {error}"),
-                true,
-            )
-        })?;
-        self.finish_window_capture(
-            record,
-            window,
-            (captured.width, captured.height),
-            (captured.width, captured.height),
-            "image/png",
-            captured.png,
-        )
+        retry_window_capture(|| {
+            let record = record.clone();
+            let window = window.clone();
+            async move {
+                let captured = desktop.capture_window(window.id).await.map_err(|error| {
+                    NativeAdapterError::definite(
+                        NativeAdapterErrorCode::DriverFailed,
+                        format!("capture Linux X11 window: {error}"),
+                        true,
+                    )
+                })?;
+                self.finish_window_capture(
+                    record,
+                    window,
+                    (captured.width, captured.height),
+                    (captured.width, captured.height),
+                    "image/png",
+                    captured.png,
+                )
+                .await
+            }
+        })
         .await
     }
 
@@ -1378,25 +1416,32 @@ impl AtspiComputerAdapter {
                 true,
             )
         })?;
-        let captured = desktop
-            .capture_window_rgba(window.id)
-            .await
-            .map_err(|error| {
-                NativeAdapterError::definite(
-                    NativeAdapterErrorCode::DriverFailed,
-                    format!("capture Linux X11 live window: {error}"),
-                    true,
+        retry_window_capture(|| {
+            let record = record.clone();
+            let window = window.clone();
+            async move {
+                let captured = desktop
+                    .capture_window_rgba(window.id)
+                    .await
+                    .map_err(|error| {
+                        NativeAdapterError::definite(
+                            NativeAdapterErrorCode::DriverFailed,
+                            format!("capture Linux X11 live window: {error}"),
+                            true,
+                        )
+                    })?;
+                let (width, height, mime_type, bytes) = encode_live_frame(&captured, options)?;
+                self.finish_window_capture(
+                    record,
+                    window,
+                    (captured.width, captured.height),
+                    (width, height),
+                    mime_type,
+                    bytes,
                 )
-            })?;
-        let (width, height, mime_type, bytes) = encode_live_frame(&captured, options)?;
-        self.finish_window_capture(
-            record,
-            window,
-            (captured.width, captured.height),
-            (width, height),
-            mime_type,
-            bytes,
-        )
+                .await
+            }
+        })
         .await
     }
 
@@ -1441,7 +1486,10 @@ impl AtspiComputerAdapter {
         if source_size != (current.bounds.width, current.bounds.height) {
             return Err(NativeAdapterError::definite(
                 NativeAdapterErrorCode::FrameStale,
-                "X11 window resized during capture",
+                format!(
+                    "{WINDOW_CAPTURE_RESIZE_ERROR}: captured {}x{}, current {}x{}",
+                    source_size.0, source_size.1, current.bounds.width, current.bounds.height
+                ),
                 true,
             ));
         }
@@ -2679,6 +2727,46 @@ mod live_tests {
     use tokio::process::Command;
 
     use super::*;
+
+    #[tokio::test]
+    async fn window_capture_retries_only_a_resize_before_recording_a_frame() {
+        let mut attempts = 0;
+        let frame = retry_window_capture(|| {
+            attempts += 1;
+            let attempt = attempts;
+            async move {
+                if attempt == 1 {
+                    Err(NativeAdapterError::definite(
+                        NativeAdapterErrorCode::FrameStale,
+                        "X11 window resized during capture: captured 420x180, current 430x180",
+                        true,
+                    ))
+                } else {
+                    Ok(attempt)
+                }
+            }
+        })
+        .await
+        .expect("the new frame is returned after a resize");
+        assert_eq!(frame, 2);
+        assert_eq!(attempts, 2);
+
+        let mut attempts = 0;
+        let error = retry_window_capture(|| {
+            attempts += 1;
+            async {
+                Err::<(), _>(NativeAdapterError::definite(
+                    NativeAdapterErrorCode::FrameStale,
+                    "X11 window frame, placement, or target generation changed",
+                    true,
+                ))
+            }
+        })
+        .await
+        .expect_err("other stale-frame errors must not be replayed");
+        assert_eq!(error.code, NativeAdapterErrorCode::FrameStale);
+        assert_eq!(attempts, 1);
+    }
 
     #[test]
     fn validates_linux_desktop_application_ids_without_shell_metacharacters() {
