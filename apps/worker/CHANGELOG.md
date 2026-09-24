@@ -1,5 +1,38 @@
 # @opengeni/worker-bundle
 
+## 2.0.2
+
+### Patch Changes
+
+- 31cf6ac: Preserve accepted Codex Astra turns across the implicit prompt-caching metadata
+  rollout. Recover typed model-definition setup mismatches with bounded same-turn
+  retries and truthful failure diagnostics, without changing accepted model authority
+  or replaying completed external work.
+- Updated dependencies [31cf6ac]
+- Updated dependencies [3d33f17]
+- Updated dependencies [c41aecd]
+- Updated dependencies [23f4717]
+- Updated dependencies [8ae84ec]
+- Updated dependencies [d0b5efd]
+- Updated dependencies [c41aecd]
+- Updated dependencies [e65a4ac]
+- Updated dependencies [7217a79]
+- Updated dependencies [22b2dd5]
+  - @opengeni/config@2.1.1
+  - @opengeni/sdk@7.1.1
+  - @opengeni/contracts@5.1.1
+  - @opengeni/core@4.0.2
+  - @opengeni/codex@0.2.26
+  - @opengeni/runtime@4.0.2
+  - @opengeni/db@6.0.2
+  - @opengeni/documents@0.8.33
+  - @opengeni/github@0.7.16
+  - @opengeni/storage@0.2.133
+  - @opengeni/codemode@0.6.2
+  - @opengeni/events@0.4.31
+  - @opengeni/observability@0.8.32
+  - @opengeni/tool-gateway@0.1.13
+
 ## 2.0.1
 
 ### Patch Changes

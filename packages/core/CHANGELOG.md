@@ -1,5 +1,31 @@
 # @opengeni/core
 
+## 4.0.2
+
+### Patch Changes
+
+- 8ae84ec: Preserve Fiken's connection-derived catalog status so session OAuth completion
+  can attach its tools. Distinguish connected integrations awaiting human tool
+  selection from connections needing reconnection, and report readiness only for
+  Fiken tools available in the current attempt.
+- Updated dependencies [31cf6ac]
+- Updated dependencies [c41aecd]
+- Updated dependencies [23f4717]
+- Updated dependencies [d0b5efd]
+- Updated dependencies [c41aecd]
+- Updated dependencies [e65a4ac]
+- Updated dependencies [7217a79]
+- Updated dependencies [22b2dd5]
+  - @opengeni/config@2.1.1
+  - @opengeni/contracts@5.1.1
+  - @opengeni/codex@0.2.26
+  - @opengeni/runtime@4.0.2
+  - @opengeni/db@6.0.2
+  - @opengeni/documents@0.8.33
+  - @opengeni/storage@0.2.133
+  - @opengeni/events@0.4.31
+  - @opengeni/observability@0.8.32
+
 ## 4.0.1
 
 ### Patch Changes

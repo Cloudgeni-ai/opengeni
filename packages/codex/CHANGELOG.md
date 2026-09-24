@@ -1,5 +1,13 @@
 # @opengeni/codex
 
+## 0.2.26
+
+### Patch Changes
+
+- d0b5efd: Preserve provider-hosted tool call status through history persistence and Codex request normalization. Hosted search, code interpreter and image-generation calls require this field on replay; function and message annotations retain their existing compatibility behavior.
+- Updated dependencies [23f4717]
+  - @opengeni/contracts@5.1.1
+
 ## 0.2.25
 
 ### Patch Changes
