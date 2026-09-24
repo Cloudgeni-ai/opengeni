@@ -2610,6 +2610,15 @@ queue, provider-dispatch, and first-byte SLO samples from the durable turn queue
 timestamp. Their labels are limited to the closed provider/backend/outcome and,
 where applicable, phase/count/cache vocabularies; session, turn, request,
 credential, and content values remain only in authenticated durable events.
+These cumulative percentiles are dashboard SLIs, not paging signals: every
+sample includes intentional per-session FIFO wait behind an already-running
+turn, so queue-to-provider-dispatch and queue-to-first-byte can rise together
+while Temporal has no runnable backlog and provider-native latency is normal.
+Operator pages instead use the freshness-gated Temporal eligible-backlog,
+slot-saturation, and capacity-monitor signals for worker admission, first-byte
+availability for logical turns that terminate without a byte, and provider
+request-phase diagnostics for attributable transport latency.
+
 Operation durations can nest and overlap; summing them does not produce a
 critical path. `runtime_stream_initialization` measures the enclosing runtime
 entry, not provider network dispatch. Background MCP connection/catalog work

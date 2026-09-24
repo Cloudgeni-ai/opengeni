@@ -11,6 +11,7 @@ describe("turn startup dashboard", () => {
     expect(titles).toContain("Worker preparation p50 / p95 / p99");
     expect(titles).toContain("Selected startup phase p50 / p95 / p99");
     expect(titles).toContain("End-to-end startup milestones p50 / p95 / p99");
+    expect(titles).toContain("Startup SLI threshold observations");
     expect(titles).toContain("First-byte availability and pre-byte failure pressure");
     expect(titles).toContain("Platform preparation vs provider think time (p95)");
     expect(dashboard.time?.from).toBe("now-7d");
@@ -28,6 +29,22 @@ describe("turn startup dashboard", () => {
     expect(serialized).not.toContain("sessionId");
     expect(serialized).not.toContain("turnId");
     expect(serialized).not.toContain("requestId");
+  });
+
+  test("labels cumulative startup thresholds as non-paging SLI observations", async () => {
+    const dashboard = JSON.parse(
+      await readFile(new URL("./turn-startup.json", import.meta.url), "utf8"),
+    ) as TurnStartupDashboard;
+    const observations = dashboard.panels.find(
+      (panel) => panel.title === "Startup SLI threshold observations",
+    );
+
+    expect(observations?.description).toContain("do not page operators");
+    expect((observations?.targets ?? []).map((target) => target.legendFormat)).toEqual([
+      "queue SLI >5s",
+      "dispatch SLI >60s",
+      "first byte SLI >120s",
+    ]);
   });
 
   test("pins every deployment metric selector to one namespace, environment, and release", async () => {
@@ -111,7 +128,11 @@ describe("turn startup dashboard", () => {
 });
 
 interface TurnStartupDashboard {
-  panels: Array<{ title?: string; targets?: Array<{ expr: string }> }>;
+  panels: Array<{
+    title?: string;
+    description?: string;
+    targets?: Array<{ expr: string; legendFormat?: string }>;
+  }>;
   templating: {
     list: Array<{
       name: string;
