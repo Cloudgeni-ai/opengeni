@@ -597,7 +597,10 @@ function ScopedCard({
                   className="og-session-capability-primary"
                   onClick={() => {
                     if (notice || retryFresh) void begin(true);
-                    else if (view.attempt?.nextAction.type === "authorize")
+                    else if (
+                      view.attempt?.nextAction.type === "authorize" &&
+                      view.attempt.ownership === ownership
+                    )
                       void authorize(view.attempt);
                     else void begin();
                   }}

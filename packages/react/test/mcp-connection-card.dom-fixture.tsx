@@ -513,6 +513,118 @@ test("changing ownership after closing a pending start uses a new idempotency ke
   }
 });
 
+test("changing ownership after reopening an authorization starts a new attempt", async () => {
+  const disconnected = {
+    ...item,
+    id: "service-recovered-ownership",
+    enabled: false,
+    connectionRef: null,
+  } as CapabilityCatalogItem;
+  const begins: { ownership: string; key: string }[] = [];
+  let reads = 0;
+  let popups = 0;
+  const authorize = (id: string, ownership: "workspace" | "personal") => ({
+    id,
+    workspaceId: "workspace",
+    providerId: "mcp-oauth",
+    ownership,
+    revision: 2,
+    state: "requires_user_action" as const,
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "connection" as const,
+    nextAction: { type: "authorize" as const, url: "https://service.example/authorize" },
+    expiresAt: "2030-01-01T00:00:00Z",
+  });
+  const client = {
+    listCapabilities: async () => ({ items: [disconnected] }),
+    connectTransport: () => ({
+      begin: async (
+        _workspace: string,
+        input: { ownership: "workspace" | "personal"; idempotencyKey: string },
+      ) => {
+        begins.push({ ownership: input.ownership, key: input.idempotencyKey });
+        return {
+          ...authorize(`attempt-${begins.length}`, input.ownership),
+          revision: 1,
+          state: "credential_input" as const,
+          nextAction: { type: "credentials" as const, fields: [] },
+        };
+      },
+      advance: async (_workspace: string, id: string) =>
+        authorize(id, id === "attempt-1" ? "workspace" : "personal"),
+      get: async (_workspace: string, id: string) => {
+        reads++;
+        if (reads === 1) return await new Promise<never>(() => {});
+        if (reads === 2) return authorize(id, "workspace");
+        return {
+          ...authorize(id, "personal"),
+          revision: 3,
+          state: "failed" as const,
+          nextAction: { type: "none" as const },
+        };
+      },
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => {
+    popups++;
+    return {
+      opener: null,
+      closed: false,
+      location: { replace() {} },
+      close() {},
+    };
+  }) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId="service-recovered-ownership"
+      name="Example service"
+      returnUrl="https://host.example/"
+    />,
+  );
+  try {
+    await flush();
+    const opener = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Connect Example service",
+    );
+    await actRun(() => opener!.click());
+    await flush();
+    const continueButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Continue to Example service",
+    );
+    await actRun(() => continueButton!.click());
+    await flush();
+    expect(reads).toBeGreaterThan(0);
+    expect(document.body.textContent).toContain("Finish signing in with Example service");
+    const close = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close connection setup"]',
+    );
+    await actRun(() => close!.click());
+    await actRun(() => opener!.click());
+    await flush();
+    expect(reads).toBeGreaterThan(1);
+    const personal = [...document.querySelectorAll<HTMLInputElement>('input[type="radio"]')].find(
+      (input) => input.parentElement?.textContent?.includes("Only me"),
+    );
+    await actRun(() => personal!.click());
+    expect(personal!.checked).toBe(true);
+    const continueAgain = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Continue to Example service",
+    );
+    await actRun(() => continueAgain!.click());
+    await flush();
+    expect(begins.map(({ ownership }) => ownership)).toEqual(["workspace", "personal"]);
+    expect(begins[1]!.key).not.toBe(begins[0]!.key);
+    expect(popups).toBe(2);
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});
+
 test("personal setup reads sender accounts without conversation grants or consent", async () => {
   const unexpected: string[] = [];
   const personal = {
