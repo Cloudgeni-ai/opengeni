@@ -669,12 +669,13 @@ export type SessionMcpCredentialUpdateInput = {
 
 export type RotateSessionMcpCredentialsRequest = {
   operationKey: string;
-  updates: Array<{
-    id: string;
-    expectedCredentialVersion: number;
-    expectedServerUrl: string;
-    headers: Record<string, string>;
-  }>;
+  updates: Array<
+    {
+      id: string;
+      expectedCredentialVersion: number;
+      expectedServerUrl: string;
+    } & ({ headers: Record<string, string> } | { nativeConnectionId: string })
+  >;
 };
 
 export type RotateSessionMcpCredentialsReceipt = {
