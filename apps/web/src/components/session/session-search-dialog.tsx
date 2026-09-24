@@ -12,6 +12,7 @@ import {
 } from "@/lib/use-conversation-search";
 import { useSessionSearchResource } from "@/lib/use-session-search-resource";
 import { cn } from "@/lib/utils";
+import { selectedFormattedMessage } from "./search-markdown-highlight";
 import {
   SearchPreviewView,
   SearchResultsView,
@@ -230,7 +231,7 @@ export default function SessionSearchDialog(props: {
             </label>
           </div>
         </div>
-        <div className="grid min-h-0 flex-1 md:grid-cols-[minmax(250px,0.8fr)_minmax(0,1.2fr)]">
+        <div className="grid min-h-0 min-w-0 flex-1 grid-cols-[minmax(0,1fr)] md:grid-cols-[minmax(250px,0.8fr)_minmax(0,1.2fr)]">
           <div
             className={cn(
               "flex min-h-0 flex-col md:border-r md:border-border",
@@ -293,7 +294,7 @@ export default function SessionSearchDialog(props: {
           </div>
           <div
             className={cn(
-              "min-h-0 md:flex md:flex-col",
+              "min-h-0 min-w-0 md:flex md:flex-col",
               mobilePreview && selected ? "flex flex-col" : "hidden",
             )}
           >
@@ -355,13 +356,14 @@ export function SessionSearchPreview(props: SessionSearchPreviewProps) {
       const options = {
         signal,
         mode: "forensic" as const,
-        payloadMode: "full" as const,
+        // Bound transfer even for legacy events whose retained payload is enormous.
+        payloadMode: "summary" as const,
         includeTypes: ["user.message", "agent.message.completed"] as Array<
           "user.message" | "agent.message.completed"
         >,
         limit: 2,
       };
-      const [before, after] = await Promise.all([
+      const [before, after, selectedEvents] = await Promise.all([
         props.client.listEvents(props.workspaceId, props.sessionId, {
           ...options,
           before: match.sequence,
@@ -372,7 +374,15 @@ export function SessionSearchPreview(props: SessionSearchPreviewProps) {
           after: match.sequence,
           direction: "after",
         }),
+        props.client.listEvents(props.workspaceId, props.sessionId, {
+          ...options,
+          after: Math.max(0, match.sequence - 1),
+          before: match.sequence + 1,
+          direction: "after",
+          limit: 1,
+        }),
       ]);
+      const selectedText = selectedFormattedMessage(selectedEvents, match, props.query);
       const context = (events: typeof before): SearchPreviewMessage[] =>
         events.flatMap((event) => {
           if (event.type !== "user.message" && event.type !== "agent.message.completed") return [];
@@ -396,16 +406,25 @@ export function SessionSearchPreview(props: SessionSearchPreviewProps) {
               role: event.type === "user.message" ? ("user" as const) : ("assistant" as const),
               text,
               selected: false,
+              formatted: payload.text.length <= 1800,
             },
           ];
         });
       return [
         ...context(before),
-        { key: match.eventId, role: match.role, text: match.snippet.text, selected: true },
+        {
+          key: match.eventId,
+          role: match.role,
+          text: selectedText ?? match.snippet.text,
+          selected: true,
+          formatted: selectedText !== null,
+          snippet: match.snippet.text,
+          offset: match.messageMatchOffset,
+        },
         ...context(after),
       ];
     },
-    [props.client, props.workspaceId, props.sessionId, match],
+    [props.client, props.workspaceId, props.sessionId, props.query, match],
   );
   const preview = useSessionSearchResource(
     `${props.authority}:${props.workspaceId}:${props.sessionId}:${props.query}:${match?.eventId}:${match?.messageMatchOffset}`,

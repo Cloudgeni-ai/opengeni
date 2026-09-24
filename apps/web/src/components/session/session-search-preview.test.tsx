@@ -13,10 +13,16 @@ registerDom();
 test("context denial hides the title and passage, signals the parent, and aborts SDK reads", async () => {
   type Props = ComponentProps<typeof SessionSearchPreview>;
   const signals: AbortSignal[] = [];
+  const selectedReads: Array<{ after?: number; before?: number; payloadMode?: string }> = [];
   let denied = 0;
   const client = {
-    listEvents: async (_workspace: string, _session: string, options: { signal: AbortSignal }) => {
+    listEvents: async (
+      _workspace: string,
+      _session: string,
+      options: { signal: AbortSignal; after?: number; before?: number; payloadMode?: string },
+    ) => {
       signals.push(options.signal);
+      selectedReads.push(options);
       throw new OpenGeniApiError(403, "private diagnostics");
     },
   } as unknown as Props["client"];
@@ -60,8 +66,10 @@ test("context denial hides the title and passage, signals the parent, and aborts
   expect(view.container.textContent).not.toContain("secret title");
   expect(view.container.textContent).not.toContain("secret passage");
   expect(view.container.textContent).not.toContain("private diagnostics");
-  expect(signals).toHaveLength(2);
+  expect(signals).toHaveLength(3);
   expect(signals[0]).toBe(signals[1]);
+  expect(signals[0]).toBe(signals[2]);
+  expect(selectedReads[2]).toMatchObject({ after: 6, before: 8, payloadMode: "summary" });
   await view.unmount();
   expect(signals[0]!.aborted).toBe(true);
 });
