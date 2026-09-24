@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { defaultToolRegistry, type ToolCallItem } from "../src/timeline";
+import { RollingActivity } from "../src/timeline/rolling-activity";
 import { registerDom, renderComponent, flush } from "./render-hook";
 
 registerDom();
@@ -40,6 +41,18 @@ const browserReceipt = {
 };
 
 describe("browser screenshot timeline", () => {
+  test("rolling progress omits the image preview without claiming retrieval failed", async () => {
+    const rendered = await renderComponent(
+      <RollingActivity items={[item("interaction__browser_observe", browserReceipt)]} />,
+    );
+    await flush();
+    expect(rendered.container.textContent).toContain("Observed browser");
+    expect(rendered.container.textContent).not.toContain("retrieval is not configured");
+    expect(rendered.container.textContent).not.toContain("retrieval failed");
+    expect(rendered.container.querySelector(".og-reel-preview")).toBeNull();
+    await rendered.unmount();
+  });
+
   test("loads a session-authenticated browser screenshot without inline base64", async () => {
     const tool = item("interaction__browser_screenshot", browserReceipt);
     const Renderer = defaultToolRegistry.resolve(tool);
