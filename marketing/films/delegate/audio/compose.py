@@ -504,9 +504,10 @@ def main() -> None:
     place(sfx, flop(), T["lieAgain"] + 0.33, gain=db(-24.0), pan=0.1)
     for i, t in enumerate(cues["liftoffs"]):
         place(sfx, swell(0.42, 500, 2600, peak_at=0.55, seed=40 + i), t, gain=db(-33.0), pan=-0.4 + 0.12 * i)
-    # Night into morning: an airy rise that crests as the paper edge passes.
+    # Night into morning: an airy rise into the downbeat, then the soft air of
+    # the product sliding off the page.
     place(sfx, swell(0.8, 300, 3200, peak_at=0.92, seed=7), T["wipe"] - 0.72, gain=db(-30.0))
-    place(sfx, swell(0.95, 250, 5200, peak_at=0.8, seed=9), T["wipe"] - 0.05, gain=db(-26.0))
+    place(sfx, swell(0.85, 300, 3800, peak_at=0.7, seed=9), T["wipe"] + 0.22, gain=db(-27.0))
 
     room_ir = make_ir(rt60=0.45, length=0.7, predelay=0.006, damp=9000, seed=5)
     sfx = sfx + reverb(sfx, room_ir) * 0.12

@@ -39,13 +39,13 @@ export const T = {
   lieAgain: bar(4, 2),
   dim: bar(4, 2) + 0.3,
 
-  // Act 3 — morning, backstage: what it took
+  // Act 3 — morning: the product lifts off the page; what it took is underneath
   wipe: bar(5),
   code: bar(5) + 0.3,
-  ann1: bar(5, 1),
-  ann2: bar(5, 3),
-  ann3: bar(6, 1),
-  whole: bar(6, 2),
+  ann1: bar(5, 1.5),
+  ann2: bar(5, 3.5),
+  ann3: bar(6, 1.5),
+  whole: bar(6, 2.5),
   line1: bar(7),
   line2: bar(7, 1),
   mark: bar(7, 2),

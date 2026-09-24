@@ -87,7 +87,10 @@ export const LeftColumn: React.FC<{ t: number }> = ({ t }) => {
   let remaining = 7;
   for (let i = 0; i < 7; i++) if (t >= flightStart(i) + 0.12) remaining--;
   const emptyAt = flightStart(6) + 0.45;
-  const empty = springAt(t, emptyAt, 150, 18);
+  // Hidden while the approval sheet is up; returns once the sheet has rolled away.
+  const empty =
+    springAt(t, emptyAt, 150, 18) * (1 - prog(t, T.approvalIn, T.approvalIn + 0.2)) +
+    prog(t, T.approve + 0.38, T.approve + 0.72);
   const rest = springAt(t, T.clear, 150, 18);
   const badgeSwap = prog(t, emptyAt - 0.1, emptyAt + 0.25);
   return (

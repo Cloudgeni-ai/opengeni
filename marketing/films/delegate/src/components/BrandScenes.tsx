@@ -47,10 +47,8 @@ const CALLOUTS = [
 
 export const BrandScenes: React.FC<{ t: number }> = ({ t }) => {
   if (t < T.wipe) return null;
-  // Morning: the paper rises like a blind with a clean edge, and its light
-  // comes up as it climbs so the eye adapts instead of being flashed.
-  const wipe = prog(t, T.wipe, T.wipe + 0.85, ease.inOut);
-  const paperH = 1080 * wipe;
+  // The page under the product. Its light comes up as the product lifts away,
+  // so the eye adapts instead of being flashed.
   const light = prog(t, T.wipe, T.wipe + 1.1, ease.out);
   const endCut = t >= T.line1;
   return (
@@ -58,9 +56,8 @@ export const BrandScenes: React.FC<{ t: number }> = ({ t }) => {
       style={{
         position: "absolute",
         inset: 0,
-        clipPath: `inset(${1080 - paperH}px 0 0 0)`,
         background: C.paper,
-        filter: light < 1 ? `brightness(${0.72 + 0.28 * light})` : undefined,
+        filter: light < 1 ? `brightness(${0.7 + 0.3 * light})` : undefined,
       }}
     >
       {!endCut && <CodeSpread t={t} />}
@@ -223,6 +220,24 @@ const EndCard: React.FC<{ t: number }> = ({ t }) => {
   };
   return (
     <>
+      <div
+        style={{
+          position: "absolute",
+          left: 152,
+          top: 196,
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          fontFamily: F.mono,
+          fontSize: 20,
+          letterSpacing: "0.14em",
+          color: C.ink2,
+          opacity: clamp01(l1 * 1.3),
+        }}
+      >
+        <span style={{ width: 10, height: 10, borderRadius: "50%", background: C.verm, display: "inline-block" }} />
+        AGENTS INSIDE YOUR PRODUCT
+      </div>
       <div style={{ position: "absolute", left: 150, top: 262, ...line, opacity: clamp01(l1 * 1.3), transform: `translateY(${(1 - l1) * 26}px)` }}>
         Your product does the work.
       </div>

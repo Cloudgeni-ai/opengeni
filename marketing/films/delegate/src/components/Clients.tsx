@@ -115,14 +115,14 @@ export const Clients: React.FC<{ t: number }> = ({ t }) => {
         const dx = bx - ax;
         const px = cubic(ax, ax + dx * 0.46, bx - dx * 0.4, bx, k);
         const py = cubic(ay, ay, by, by, k);
-        const sizeK = ease.inOut(clamp01((raw - 0.02) / 0.45));
+        const sizeK = ease.inOut(clamp01((raw - 0.06) / 0.56));
         const w = lerp(a.w, b.w, sizeK);
         const h = lerp(a.h, b.h, sizeK);
         const lift = Math.sin(Math.PI * raw);
         const settle = landed ? springAt(t, f1, 340, 20) : 1;
         const landScale = landed ? 1 + (1 - settle) * 0.05 : 1 + lift * 0.035;
-        const cardFace = 1 - prog(raw, 0.0, 0.2, (x) => x);
-        const flightFace = prog(raw, 0.14, 0.3, (x) => x) * (1 - prog(raw, 0.74, 0.88, (x) => x));
+        const cardFace = 1 - prog(raw, 0.06, 0.3, (x) => x);
+        const flightFace = prog(raw, 0.22, 0.36, (x) => x) * (1 - prog(raw, 0.76, 0.88, (x) => x));
         const blockFace = prog(raw, 0.84, 1.0, (x) => x);
         const tint = flying ? prog(raw, 0.05, 0.35) : landed ? 1 : 0;
 
