@@ -21,9 +21,22 @@ export type WorkspaceInsightsModelBundleInput = {
   granularity: "day" | "hour";
   provider?: string | null;
   model?: string | null;
+  rootSessionId?: string | null;
+  sessionId?: string | null;
 };
 
+export const INSIGHTS_ROOT_DRIVER_LIMIT = 8;
+export const INSIGHTS_FACET_LIMIT = 500;
+export const INSIGHTS_RECENT_CALL_LIMIT = 50;
+
 export type WorkspaceInsightsModelBundle = {
+  /** Newest `recorded_at` among visible facts in the unfiltered current window. */
+  dataThrough: Date | null;
+  /** Distinct root-session groups before the driver limit is applied. */
+  driverGroups: number;
+  driversTruncated: boolean;
+  facetsTruncated: boolean;
+  recentCallsTruncated: boolean;
   modelRows: ModelCallFactAggregateRow[];
   priorModelRows: ModelCallFactAggregateRow[];
   factBuckets: Map<string, ModelCallFactSeriesAggregate>;
@@ -148,6 +161,14 @@ function mapBundle(value: unknown): WorkspaceInsightsModelBundle {
     calls: numberValue(row, "calls"),
   }));
   return {
+    dataThrough:
+      payload.dataThrough === null || payload.dataThrough === undefined
+        ? null
+        : dateValue(payload, "dataThrough"),
+    driverGroups: numberValue(payload, "driverGroups"),
+    driversTruncated: payload.driversTruncated === true,
+    facetsTruncated: payload.facetsTruncated === true,
+    recentCallsTruncated: payload.recentCallsTruncated === true,
     modelRows: mapModelRows(payload.modelRows, "modelRows"),
     priorModelRows: mapModelRows(payload.priorModelRows, "priorModelRows"),
     factBuckets: new Map(
@@ -227,8 +248,10 @@ function mapBundle(value: unknown): WorkspaceInsightsModelBundle {
 /**
  * One bounded model-fact query for the Workspace Insights response. The two
  * narrow materialized inputs are the exact filtered current/prior UTC windows.
- * A filtered request adds one unfiltered current-window read because facets are
- * deliberately workspace-wide; an unfiltered request reuses current_visible.
+ * A filtered or session-scoped request adds one unfiltered current-window read
+ * because facets and the freshness watermark are deliberately workspace-wide; an
+ * unfiltered request reuses current_visible. Every bounded list reads one row
+ * past its limit so truncation is reported rather than silent.
  */
 export async function readWorkspaceInsightsModelBundle(
   db: Database,
@@ -239,16 +262,28 @@ export async function readWorkspaceInsightsModelBundle(
     input.granularity === "hour"
       ? sql`to_char(date_trunc('hour', fact.occurred_at at time zone 'UTC'), 'YYYY-MM-DD"T"HH24:00')`
       : sql`to_char(date_trunc('day', fact.occurred_at at time zone 'UTC'), 'YYYY-MM-DD')`;
-  const facetSource =
-    input.provider != null || input.model != null
-      ? sql`opengeni_private.visible_workspace_insights_model_call_facts(
+  const rootSessionId = input.rootSessionId ?? null;
+  const sessionId = input.sessionId ?? null;
+  const narrowed =
+    input.provider != null || input.model != null || rootSessionId != null || sessionId != null;
+  const workspaceCurrentSource = narrowed
+    ? sql`select fact.provider, fact.model, fact.recorded_at
+        from opengeni_private.visible_workspace_insights_model_call_facts(
           ${input.workspaceId},
           ${input.since.toISOString()}::timestamp with time zone,
           ${input.until.toISOString()}::timestamp with time zone,
           null::text,
           null::text
         ) fact`
-      : sql`current_visible fact`;
+    : sql`select fact.provider, fact.model, fact.recorded_at from current_visible fact`;
+  const scopeFilter = sql`where (${sessionId}::uuid is null or fact.session_id = ${sessionId}::uuid)
+          and (${rootSessionId}::uuid is null or exists (
+            select 1
+            from sessions scope_session
+            where scope_session.workspace_id = fact.workspace_id
+              and scope_session.id = fact.session_id
+              and scope_session.root_session_id = ${rootSessionId}::uuid
+          ))`;
   return await withRlsContext(db, context, async (scopedDb) => {
     const [row] = await scopedDb.execute<RawBundleRow>(sql`
       with current_visible as materialized (
@@ -282,6 +317,7 @@ export async function readWorkspaceInsightsModelBundle(
           ${input.provider ?? null}::text,
           ${input.model ?? null}::text
         ) fact
+        ${scopeFilter}
       ), prior_visible as materialized (
         select
           fact.workspace_id,
@@ -305,6 +341,9 @@ export async function readWorkspaceInsightsModelBundle(
           ${input.provider ?? null}::text,
           ${input.model ?? null}::text
         ) fact
+        ${scopeFilter}
+      ), workspace_current as materialized (
+        ${workspaceCurrentSource}
       ), selected_session_refs as (
         select fact.workspace_id, fact.session_id
         from current_visible fact
@@ -445,10 +484,14 @@ export async function readWorkspaceInsightsModelBundle(
           on session.workspace_id = fact.workspace_id and session.session_id = fact.session_id
         group by session.root_session_id, session.root_title
       ), current_root_rows as materialized (
-        select *
-        from current_root_aggregates
-        order by total_tokens desc
-        limit 8
+        select
+          aggregate.*,
+          row_number() over (
+            order by aggregate.total_tokens desc, aggregate.root_session_id
+          ) as rn
+        from current_root_aggregates aggregate
+        order by aggregate.total_tokens desc, aggregate.root_session_id
+        limit ${INSIGHTS_ROOT_DRIVER_LIMIT + 1}
       ), prior_root_rows as (
         select
           session.root_session_id,
@@ -474,6 +517,7 @@ export async function readWorkspaceInsightsModelBundle(
           on session.workspace_id = fact.workspace_id and session.session_id = fact.session_id
         inner join current_root_rows selected_root
           on selected_root.root_session_id = session.root_session_id
+          and selected_root.rn <= ${INSIGHTS_ROOT_DRIVER_LIMIT}
         group by session.root_session_id, session.root_title
       ), schedule_rows as (
         select
@@ -500,11 +544,17 @@ export async function readWorkspaceInsightsModelBundle(
         from current_visible fact
         where fact.scheduled_task_id is not null
         group by fact.scheduled_task_id
-      ), facet_rows as (
+      ), facet_values as (
         select distinct fact.provider, fact.model
-        from ${facetSource}
-        order by fact.provider, fact.model
-        limit 500
+        from workspace_current fact
+      ), facet_rows as (
+        select
+          facet.provider,
+          facet.model,
+          row_number() over (order by facet.provider, facet.model) as rn
+        from facet_values facet
+        order by facet.provider, facet.model
+        limit ${INSIGHTS_FACET_LIMIT + 1}
       ), recent_rows as (
         select
           fact.id,
@@ -527,12 +577,13 @@ export async function readWorkspaceInsightsModelBundle(
           fact.priced_cost_micros,
           fact.estimated_provider_cost_micros,
           fact.equivalent_credit_cost_micros,
-          fact.pricing_source
+          fact.pricing_source,
+          row_number() over (order by fact.occurred_at desc, fact.id desc) as rn
         from current_visible fact
         left join selected_sessions session
           on session.workspace_id = fact.workspace_id and session.session_id = fact.session_id
         order by fact.occurred_at desc, fact.id desc
-        limit 50
+        limit ${INSIGHTS_RECENT_CALL_LIMIT + 1}
       ), contribution_coverage as (
         select
           count(*)::bigint as total_calls,
@@ -651,6 +702,7 @@ export async function readWorkspaceInsightsModelBundle(
             'cacheInputTokens', cache_input_tokens
           ) order by total_tokens desc)
           from current_root_rows
+          where rn <= ${INSIGHTS_ROOT_DRIVER_LIMIT}
         ), '[]'::jsonb),
         'priorRootDrivers', coalesce((
           select jsonb_agg(jsonb_build_object(
@@ -689,6 +741,7 @@ export async function readWorkspaceInsightsModelBundle(
             'model', model
           ) order by provider, model)
           from facet_rows
+          where rn <= ${INSIGHTS_FACET_LIMIT}
         ), '[]'::jsonb),
         'recentCalls', coalesce((
           select jsonb_agg(jsonb_build_object(
@@ -715,6 +768,7 @@ export async function readWorkspaceInsightsModelBundle(
             'pricingSource', pricing_source
           ) order by occurred_at desc, id desc)
           from recent_rows
+          where rn <= ${INSIGHTS_RECENT_CALL_LIMIT}
         ), '[]'::jsonb),
         'promptContributions', jsonb_build_object(
           'estimatedTokens', coalesce((select sum(estimated_tokens) from contribution_rows), 0),
@@ -731,7 +785,12 @@ export async function readWorkspaceInsightsModelBundle(
             ) order by estimated_tokens desc nulls last, source)
             from contribution_rows
           ), '[]'::jsonb)
-        )
+        ),
+        'driverGroups', (select count(*) from current_root_aggregates),
+        'driversTruncated', (select count(*) > ${INSIGHTS_ROOT_DRIVER_LIMIT} from current_root_rows),
+        'facetsTruncated', (select count(*) > ${INSIGHTS_FACET_LIMIT} from facet_rows),
+        'recentCallsTruncated', (select count(*) > ${INSIGHTS_RECENT_CALL_LIMIT} from recent_rows),
+        'dataThrough', (select max(recorded_at) from workspace_current)
       ) as payload
     `);
     if (!row) {

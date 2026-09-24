@@ -3608,7 +3608,7 @@ export const InsightsSeriesPoint = z.object({
   totalTokens: z.number().nonnegative(),
   tokenKnownCalls: z.number().int().nonnegative(),
   cacheKnownCalls: z.number().int().nonnegative(),
-  cacheHitPct: z.number().int().min(0).max(100),
+  cacheHitPct: z.number().int().min(0).max(100).nullable(),
   calls: z.number().int().nonnegative(),
 });
 export type InsightsSeriesPoint = z.infer<typeof InsightsSeriesPoint>;
@@ -3635,7 +3635,7 @@ export const InsightsSpendDriver = z.object({
   equivalentCreditUsd: z.number().nonnegative(),
   equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
   tokens: z.number().nonnegative(),
-  cacheHitPct: z.number().int().min(0).max(100),
+  cacheHitPct: z.number().int().min(0).max(100).nullable(),
   pctOfCreditUsd: z.number().int().min(0).max(100),
   pctOfTokens: z.number().int().min(0).max(100),
   deltaUsdVsPrior: z.number(),
@@ -3721,6 +3721,12 @@ export const InsightsModelCallRow = z.object({
 });
 export type InsightsModelCallRow = z.infer<typeof InsightsModelCallRow>;
 
+export const InsightsScope = z.object({
+  rootSessionId: z.string().uuid().nullable(),
+  sessionId: z.string().uuid().nullable(),
+});
+export type InsightsScope = z.infer<typeof InsightsScope>;
+
 export const WorkspaceInsightsSnapshot = z.object({
   range: InsightsRange,
   rangeLabel: z.string().min(1),
@@ -3773,7 +3779,7 @@ export const WorkspaceInsightsSnapshot = z.object({
   modelCalls: z.number().int().nonnegative(),
   priorInputTokens: z.number().nonnegative(),
   priorTotalTokens: z.number().nonnegative(),
-  priorCacheHitPct: z.number().int().min(0).max(100),
+  priorCacheHitPct: z.number().int().min(0).max(100).nullable(),
   priorCalls: z.number().int().nonnegative(),
   /** Lifetime workspace topology (not scoped to the selected Insights range). */
   goalsActive: z.number().int().nonnegative(),
@@ -3792,6 +3798,16 @@ export const WorkspaceInsightsSnapshot = z.object({
   agentRunCap: z.number().int().positive().nullable(),
   /** True when provider/model filters exclude workspace-wide warm/caps meaning. */
   modelFilterActive: z.boolean(),
+  /** Latest `recorded_at` among visible facts in the window; null when none were ingested. */
+  dataThrough: z.string().datetime().nullable().default(null),
+  /** Null when no call in the window reported both input and cached tokens. */
+  cacheHitPct: z.number().int().min(0).max(100).nullable().default(null),
+  scope: InsightsScope.default({ rootSessionId: null, sessionId: null }),
+  /** Root sessions with spend in the window; `drivers` holds the top slice. */
+  driverGroups: z.number().int().nonnegative().default(0),
+  driversTruncated: z.boolean().default(false),
+  facetsTruncated: z.boolean().default(false),
+  recentCallsTruncated: z.boolean().default(false),
 });
 export type WorkspaceInsightsSnapshot = z.infer<typeof WorkspaceInsightsSnapshot>;
 

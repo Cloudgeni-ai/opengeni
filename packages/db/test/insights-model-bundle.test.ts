@@ -220,10 +220,15 @@ async function fixture(): Promise<Fixture> {
   };
 }
 
+type LegacyComparableBundle = Omit<
+  WorkspaceInsightsModelBundle,
+  "dataThrough" | "driverGroups" | "driversTruncated" | "facetsTruncated" | "recentCallsTruncated"
+>;
+
 async function legacyModelBundle(
   db: Database,
   input: WorkspaceInsightsModelBundleInput,
-): Promise<WorkspaceInsightsModelBundle> {
+): Promise<LegacyComparableBundle> {
   const filter = {
     ...(input.provider !== undefined ? { provider: input.provider } : {}),
     ...(input.model !== undefined ? { model: input.model } : {}),
@@ -278,7 +283,15 @@ async function legacyModelBundle(
   };
 }
 
-function comparable(bundle: WorkspaceInsightsModelBundle) {
+function comparable(input: LegacyComparableBundle | WorkspaceInsightsModelBundle) {
+  const {
+    dataThrough: _dataThrough,
+    driverGroups: _driverGroups,
+    driversTruncated: _driversTruncated,
+    facetsTruncated: _facetsTruncated,
+    recentCallsTruncated: _recentCallsTruncated,
+    ...bundle
+  } = input as WorkspaceInsightsModelBundle;
   return {
     ...bundle,
     modelRows: [...bundle.modelRows].sort((a, b) =>
@@ -421,8 +434,16 @@ describe("Workspace Insights model bundle", () => {
   test("matches the legacy helpers for shared/private visibility, filters, and UTC buckets", async () => {
     if (!shared || !client) return;
     const seeded = await fixture();
-    const cases: Array<{ subjectId: string; input: WorkspaceInsightsModelBundleInput }> = [
-      { subjectId: seeded.ownerSubjectId, input: seeded.input },
+    const cases: Array<{
+      subjectId: string;
+      input: WorkspaceInsightsModelBundleInput;
+      expectedDataThrough: string;
+    }> = [
+      {
+        subjectId: seeded.ownerSubjectId,
+        input: seeded.input,
+        expectedDataThrough: "2026-08-14T12:00:01.000Z",
+      },
       {
         subjectId: seeded.ownerSubjectId,
         input: {
@@ -431,8 +452,13 @@ describe("Workspace Insights model bundle", () => {
           provider: "openai",
           model: "gpt-bundle",
         },
+        expectedDataThrough: "2026-08-14T12:00:01.000Z",
       },
-      { subjectId: `user:${crypto.randomUUID()}`, input: seeded.input },
+      {
+        subjectId: `user:${crypto.randomUUID()}`,
+        input: seeded.input,
+        expectedDataThrough: "2026-08-12T10:30:01.000Z",
+      },
     ];
     for (const testCase of cases) {
       const [legacy, bundled] = await withSessionRlsActorContext(
@@ -444,6 +470,11 @@ describe("Workspace Insights model bundle", () => {
           ]),
       );
       expect(comparable(bundled)).toEqual(comparable(legacy));
+      expect(bundled.driverGroups).toBe(legacy.rootDrivers.length);
+      expect(bundled.driversTruncated).toBe(false);
+      expect(bundled.facetsTruncated).toBe(false);
+      expect(bundled.recentCallsTruncated).toBe(false);
+      expect(bundled.dataThrough?.toISOString()).toBe(testCase.expectedDataThrough);
       if (testCase.input.provider || testCase.input.model) {
         expect(bundled.facets).toEqual([
           { provider: "azure", model: "azure-bundle" },
@@ -451,6 +482,32 @@ describe("Workspace Insights model bundle", () => {
         ]);
       }
     }
+  });
+
+  test("scopes a session drilldown while keeping facets and freshness workspace-wide", async () => {
+    if (!shared || !client) return;
+    const seeded = await fixture();
+    const bundled = await withSessionRlsActorContext(
+      { subjectId: seeded.ownerSubjectId },
+      async () =>
+        await readWorkspaceInsightsModelBundle(client!.db, {
+          ...seeded.input,
+          sessionId: seeded.sharedSessionId,
+        }),
+    );
+    expect(bundled.recentCalls).toHaveLength(2);
+    expect(bundled.recentCalls.every((call) => call.sessionId === seeded.sharedSessionId)).toBe(
+      true,
+    );
+    expect(bundled.rootDrivers.length).toBeGreaterThan(0);
+    expect(
+      bundled.rootDrivers.every((driver) => driver.rootSessionId === seeded.sharedSessionId),
+    ).toBe(true);
+    expect(bundled.facets).toEqual([
+      { provider: "azure", model: "azure-bundle" },
+      { provider: "openai", model: "gpt-bundle" },
+    ]);
+    expect(bundled.dataThrough?.toISOString()).toBe("2026-08-14T12:00:01.000Z");
   });
 
   test("backfill preserves free external billing when the live fact write was lost", async () => {
