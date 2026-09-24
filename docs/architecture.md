@@ -685,6 +685,7 @@ boundaries still apply.
 Console appearance: `apps/web/src/lib/appearance.tsx`; pre-paint bootstrap: `apps/web/index.html`.
 Managed/broker sign-in: `apps/web/src/components/signed-out-page.tsx`; authentication unchanged.
 Workspace management route classification lives in `apps/web/src/lib/workspace-management-location.ts`. The workspace route loads `components/settings/workspace-settings-shell.tsx` lazily only for management destinations, so session navigation does not import the settings interface.
+Shared settings presentation lives in `apps/web/src/components/ui/settings-patterns.tsx` (sections, rows, switches, checkboxes, choices, and list toolbars). `ui/page-header.tsx` owns the existing catalog header, re-exported by `components/common.tsx`. The isolated `apps/web/settings-preview.html` entry imports these same implementation components with sample data; its Site build does not bootstrap the application client or write live settings. It is a visual-review surface, not a replacement for production authorization or provider setup flows.
 
 ---
 
