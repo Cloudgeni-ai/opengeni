@@ -1537,6 +1537,9 @@ Turn-end review capture yields to queued turns and fences late commits. Single-r
 
 `@opengeni/db` owns cross-service Postgres contracts, forward migrations, and
 runtime-role/RLS posture.
+Managed PostgreSQL may preinstall pgvector for restricted migrators. The
+explicit initial-migration opt-in verifies its public extension-owned type;
+see [deployment](deployment.md#database-identities-and-runtime-posture).
 
 Postgres owns file access/liveness; fork screenshots require ancestry and copied receipts, preserving RLS.
 Storage endpoints and signed URLs are transport details; keep URLs, object keys,

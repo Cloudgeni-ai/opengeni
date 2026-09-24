@@ -659,6 +659,16 @@ continuity while that machine is down.
 
 ### Database identities and runtime posture
 
+On managed PostgreSQL where only a provider administrator can install pgvector,
+install it in the target database's `public` schema before the first migration.
+Set `OPENGENI_MIGRATIONS_PREINSTALLED_VECTOR=true` for the migration Job (or
+`MigrationRuntimeOptions.preinstalledVector` for a programmatic invocation).
+The runner verifies the extension-owned `public.vector` type and omits only the
+exact vector-installation statement in `0000_initial.sql`. A missing extension
+or changed initial preamble fails before initial migration DDL; other migrations
+and the default path remain unchanged. Do not set this flag merely to hide an
+extension permission error without independently confirming installation.
+
 Standalone deployments using the default `OPENGENI_RLS_STRATEGY=force` require
 two distinct secret paths:
 
