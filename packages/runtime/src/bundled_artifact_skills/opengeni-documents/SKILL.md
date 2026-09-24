@@ -44,7 +44,10 @@ Skill was installed or explicitly checked out to the filesystem.
 2. Make the smallest coherent edit. One `opengeni__editable_artifact_apply`
    call is one atomic command batch. Use stable ids from inspection for existing
    objects and `openGeni.artifacts.ids.document(...)` for new objects in
-   CodeMode. A direct call must pass the inspected `headSequence` and
+   CodeMode. On a Connected Machine without the JS client, use the offline native
+   `codemode document-id <kind> <namespace>` helper described in `references/api.md`;
+   copy the exact namespace from the inspected summary, never invent it.
+   A direct call must pass the inspected `headSequence` and
    `stateHash`; CodeMode carries its last read head automatically.
 3. For one simple edit, call the artifact tools directly. For loops, several
    inspections, generated ids, or a multi-part batch, write auditable Bun code
