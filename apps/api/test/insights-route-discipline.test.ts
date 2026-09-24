@@ -60,6 +60,31 @@ describe("insights route discipline", () => {
     );
   });
 
+  test("normalizes session scope to a lowercase UUID and rejects anything else", () => {
+    const upper = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    expect(normalizeWorkspaceInsightsQueryFilter(` ${upper} `, "rootSessionId")).toBe(
+      upper.toLowerCase(),
+    );
+    expect(normalizeWorkspaceInsightsQueryFilter(upper, "sessionId")).toBe(upper.toLowerCase());
+    expect(normalizeWorkspaceInsightsQueryFilter(" all ", "sessionId")).toBeNull();
+    expect(normalizeWorkspaceInsightsQueryFilter("", "rootSessionId")).toBeNull();
+    expect(normalizeWorkspaceInsightsQueryFilter(undefined, "rootSessionId")).toBeNull();
+
+    for (const field of ["rootSessionId", "sessionId"] as const) {
+      for (const value of ["not-a-uuid", `${upper}0`, "a".repeat(36)]) {
+        let caught: unknown;
+        try {
+          normalizeWorkspaceInsightsQueryFilter(value, field);
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBeInstanceOf(HTTPException);
+        expect((caught as HTTPException).status).toBe(400);
+        expect((caught as HTTPException).message).toBe(`${field} must be a UUID`);
+      }
+    }
+  });
+
   test("maps exact ASCII and multibyte filter overflow to deterministic HTTP 400", () => {
     const cases = [
       ["provider", "p".repeat(257), "provider must be at most 256 UTF-8 bytes"],
@@ -124,6 +149,8 @@ describe("insights route discipline", () => {
       ["model", "m".repeat(513), "model must be at most 512 UTF-8 bytes"],
       ["provider", `${"é".repeat(127)}aaa`, "provider must be at most 256 UTF-8 bytes"],
       ["model", `${"é".repeat(255)}aaa`, "model must be at most 512 UTF-8 bytes"],
+      ["rootSessionId", "not-a-uuid", "rootSessionId must be a UUID"],
+      ["sessionId", "not-a-uuid", "sessionId must be a UUID"],
     ] as const;
     for (const [field, value, message] of cases) {
       const response = await app.request(
@@ -241,6 +268,22 @@ describe("insights route discipline", () => {
       { workspaceId: "a", range: "week", provider: "", model: null, rlsActor: null },
       { workspaceId: "a", range: "week", provider: null, model: null, rlsActor: "admin-a" },
       { workspaceId: "a", range: "week", provider: null, model: null, rlsActor: "admin-b" },
+      {
+        workspaceId: "a",
+        range: "week",
+        provider: null,
+        model: null,
+        rootSessionId: "11111111-1111-4111-8111-111111111111",
+        rlsActor: null,
+      },
+      {
+        workspaceId: "a",
+        range: "week",
+        provider: null,
+        model: null,
+        sessionId: "11111111-1111-4111-8111-111111111111",
+        rlsActor: null,
+      },
     ].map(workspaceInsightsCoalesceKey);
     expect(new Set(keys).size).toBe(keys.length);
 

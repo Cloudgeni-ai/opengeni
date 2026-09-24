@@ -48,4 +48,23 @@ describe("workspace Insights requests", () => {
     await client.getWorkspaceInsights("workspace-one");
     expect(url).toBe("https://api.example.test/v1/workspaces/workspace-one/insights?range=week");
   });
+
+  test("sends root-session and session scope as query parameters", async () => {
+    let url = "";
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: (async (input, init) => {
+        url = new Request(input, init).url;
+        return Response.json({ snapshot: {} });
+      }) as typeof fetch,
+    });
+    await client.getWorkspaceInsights("workspace-one", {
+      range: "month",
+      rootSessionId: "11111111-1111-4111-8111-111111111111",
+      sessionId: "22222222-2222-4222-8222-222222222222",
+    });
+    expect(url).toBe(
+      "https://api.example.test/v1/workspaces/workspace-one/insights?range=month&rootSessionId=11111111-1111-4111-8111-111111111111&sessionId=22222222-2222-4222-8222-222222222222",
+    );
+  });
 });
