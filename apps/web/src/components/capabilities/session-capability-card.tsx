@@ -65,20 +65,72 @@ function ScopedSessionCapabilityCard({
   const [expanded, setExpanded] = useState(false);
   const [complete, setComplete] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [githubError, setGithubError] = useState<string | null>(null);
   const [resolvedItem, setResolvedItem] = useState<CapabilityCatalogItem | null>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLElement>(null);
+  const githubInFlight = useRef(false);
+  const active = useRef(true);
+  const github = recommendation.id === "api:github-app";
+  useEffect(() => {
+    active.current = true;
+    return () => {
+      active.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (github && context.githubStatus) setComplete(context.githubStatus.status === "bound");
+  }, [github, context.githubStatus]);
   const catalogItem =
     resolvedItem ??
     context.workspaceCapabilityCatalog.find((entry) => entry.id === recommendation.id);
   const logo = catalogItem
     ? capabilityLogoSource(catalogItem, (path) => context.client.catalogAssetUrl(path))
-    : null;
+    : github
+      ? capabilityLogoSource({ id: recommendation.id, logoAssetPath: null }, () => null)
+      : null;
   const close = () => {
     setExpanded(false);
   };
   const skill = recommendation.kind === "skill";
   const apiKey = catalogItem ? capabilityConnectPlan(catalogItem).mode === "api_key" : false;
+  async function connectGitHub() {
+    if (githubInFlight.current) return;
+    githubInFlight.current = true;
+    setBusy(true);
+    setGithubError(null);
+    let navigating = false;
+    try {
+      const status = await context.client.getGitHubApp(workspaceId, {
+        returnPath: `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
+      });
+      if (!active.current) return;
+      if (status.status === "bound") {
+        setComplete(true);
+        void context.refreshGitHub(workspaceId);
+        return;
+      }
+      if (!status.linkUrl)
+        throw new Error(
+          status.configured
+            ? "Your account cannot manage this workspace's GitHub connection."
+            : "GitHub is not configured on this deployment.",
+        );
+      navigating = true;
+      window.location.assign(status.linkUrl);
+    } catch (failure) {
+      navigating = false;
+      if (active.current) {
+        setGithubError(
+          failure instanceof Error ? failure.message : "Couldn't start GitHub setup. Try again.",
+        );
+        setExpanded(true);
+      }
+    } finally {
+      if (!navigating) githubInFlight.current = false;
+      if (active.current && !navigating) setBusy(false);
+    }
+  }
   return (
     <SessionCapabilityFrame
       name={catalogItem?.name ?? recommendation.name}
@@ -89,39 +141,40 @@ function ScopedSessionCapabilityCard({
       skill={skill}
       expanded={expanded}
       complete={complete}
+      completeLabel={github ? "Connected to this workspace" : undefined}
       actionLabel={
-        catalogItem?.enabled
-          ? "Review"
-          : skill
-            ? "Review skill"
-            : apiKey
-              ? "Add API key"
-              : `Connect ${catalogItem?.name ?? recommendation.name}`
+        github && busy
+          ? "Opening GitHub…"
+          : catalogItem?.enabled
+            ? "Review"
+            : skill
+              ? "Review skill"
+              : apiKey
+                ? "Add API key"
+                : `Connect ${catalogItem?.name ?? recommendation.name}`
       }
+      opensDialog={!github}
       note={
-        skill
-          ? "Skill content is reviewed separately from permission to use any integration."
-          : apiKey
-            ? "Add credentials in the protected form, not in a chat message."
-            : "Review access before signing in. You'll return to this conversation after authorization."
+        github
+          ? "Choose which account and repositories this workspace can access on GitHub."
+          : skill
+            ? "Skill content is reviewed separately from permission to use any integration."
+            : apiKey
+              ? "Add credentials in the protected form, not in a chat message."
+              : "Review access before signing in. You'll return to this conversation after authorization."
       }
-      onOpen={() => setExpanded(true)}
+      onOpen={() => (github ? void connectGitHub() : setExpanded(true))}
       onClose={close}
       busy={busy}
       opener={opener}
       cardRef={cardRef}
     >
-      {recommendation.id === "api:github-app" ? (
+      {github ? (
         <SessionGitHubSetup
           busy={busy}
-          setBusy={setBusy}
-          workspaceId={workspaceId}
-          sessionId={sessionId}
+          error={githubError}
+          onRetry={() => void connectGitHub()}
           onClose={close}
-          onComplete={() => {
-            setComplete(true);
-            close();
-          }}
         />
       ) : recommendation.id === "mcp:codex_apps" ? (
         <SessionCodexAppsSetup
@@ -352,60 +405,15 @@ function SessionCapabilitySetup({
 
 function SessionGitHubSetup({
   busy,
-  setBusy,
-  workspaceId,
-  sessionId,
+  error,
+  onRetry,
   onClose,
-  onComplete,
 }: {
   busy: boolean;
-  setBusy: (busy: boolean) => void;
-  workspaceId: string;
-  sessionId: string;
+  error: string | null;
+  onRetry: () => void;
   onClose: () => void;
-  onComplete: () => void;
 }) {
-  const { client } = useAppContext();
-  const [error, setError] = useState<string | null>(null);
-  const active = useRef(true);
-  const inFlight = useRef(false);
-  useEffect(
-    () => () => {
-      active.current = false;
-    },
-    [],
-  );
-  async function connect() {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    setBusy(true);
-    setError(null);
-    try {
-      const status = await client.getGitHubApp(workspaceId, {
-        returnPath: `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
-      });
-      if (!active.current) return;
-      if (status.status === "bound") {
-        onComplete();
-        return;
-      }
-      if (!status.linkUrl)
-        throw new Error(
-          status.configured
-            ? "Your account cannot manage this workspace's GitHub connection."
-            : "GitHub is not configured on this deployment.",
-        );
-      window.location.assign(status.linkUrl);
-    } catch (failure) {
-      if (active.current)
-        setError(
-          failure instanceof Error ? failure.message : "Couldn't start GitHub setup. Try again.",
-        );
-    } finally {
-      inFlight.current = false;
-      if (active.current) setBusy(false);
-    }
-  }
   return (
     <div className="space-y-3 p-6 sm:p-8">
       <p className="text-xs leading-[1.7] text-fg-muted">
@@ -417,8 +425,8 @@ function SessionGitHubSetup({
         <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>
           Cancel
         </Button>
-        <Button size="sm" disabled={busy} onClick={() => void connect()}>
-          {busy ? <Loader2Icon className="animate-spin" /> : null}Continue to GitHub
+        <Button size="sm" disabled={busy} onClick={onRetry}>
+          {busy ? <Loader2Icon className="animate-spin" /> : null}Try again
         </Button>
       </div>
     </div>

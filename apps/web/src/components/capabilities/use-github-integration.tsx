@@ -23,10 +23,9 @@ import type { GitHubAppInfo } from "@/types";
 
 export const GITHUB_APP_DESCRIPTION =
   "Use the workspace App for automation, or your identity for reviews and merges.";
-// GitHub is the workspace App binding, not a catalog item, so there is no
-// catalogAssetUrl logo path for it; like the other integration marks this is a
-// provider-hosted logo with the monogram as the offline fallback.
-export const GITHUB_LOGO_URL = "https://github.githubassets.com/favicons/favicon.svg";
+// Use the same bundled mark as the conversation card. The workspace App row
+// does not have a registry logo path, and a remote favicon is not reliable.
+export const GITHUB_LOGO_URL = "/capability-logos/github.svg";
 
 const GITHUB_ACTION_POLICY_GROUPS: Array<{
   id: GitHubActionPolicyGroup;
