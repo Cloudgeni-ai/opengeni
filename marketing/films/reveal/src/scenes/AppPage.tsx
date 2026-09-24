@@ -535,7 +535,7 @@ const Trail: React.FC<{ index: number; t: number }> = ({ index, t }) => {
   const move = T.moves[index];
   const a = TODAY[index];
   const raw = clamp((t - move.start) / ((move.land - move.start) / ARRIVAL));
-  const fade = 1 - prog(t, move.land + 0.1, move.land + 0.9, easeOut);
+  const fade = 0.8 * (1 - prog(t, move.land + 0.05, move.land + 0.65, easeOut));
   if (raw <= 0 || fade <= 0) return null;
   const from = todayRect(a);
   const to = weekRect(a.to.day, a.to.start, a.duration);
@@ -620,11 +620,11 @@ const AppointmentBlock: React.FC<{ a: Appointment; index: number; t: number; fin
 export const ReasonPill: React.FC<{ text: string; k: number }> = ({ text, k }) => (
   <span
     style={{
-      fontSize: 13,
+      fontSize: 14,
       fontWeight: 600,
       color: "#fff",
       background: BRAND.orange,
-      borderRadius: 10,
+      borderRadius: 11,
       padding: "3px 9px 3px 7px",
       display: "flex",
       alignItems: "center",

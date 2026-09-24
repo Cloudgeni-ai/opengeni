@@ -1,5 +1,5 @@
 import React from "react";
-import { BRAND, mono } from "../theme";
+import { BRAND, archivo, mono } from "../theme";
 import { T } from "../timeline";
 import { easeOut, prog } from "../lib/anim";
 
@@ -16,7 +16,8 @@ export const Wordmark: React.FC<{ width: number; color: string }> = ({ width, co
 /** The sign-off that builds beneath the two pages in the final frame. */
 export const BrandRow: React.FC<{ t: number; cx: number; top: number }> = ({ t, cx, top }) => {
   const k1 = prog(t, T.brandIn, T.brandIn + 0.7, easeOut);
-  const k2 = prog(t, T.brandIn + 0.35, T.brandIn + 1.0, easeOut);
+  const k2 = prog(t, T.brandIn + 0.3, T.brandIn + 0.95, easeOut);
+  const k3 = prog(t, T.brandIn + 0.6, T.brandIn + 1.2, easeOut);
   return (
     <div
       style={{
@@ -34,19 +35,33 @@ export const BrandRow: React.FC<{ t: number; cx: number; top: number }> = ({ t, 
       </div>
       <div
         style={{
-          marginTop: 70,
-          display: "flex",
-          alignItems: "center",
-          gap: 30,
-          fontFamily: mono,
-          fontSize: 62,
-          color: BRAND.muted,
-          letterSpacing: 2,
+          marginTop: 62,
+          fontFamily: archivo,
+          fontWeight: 500,
+          fontSize: 84,
+          letterSpacing: -84 * 0.025,
+          color: BRAND.ink,
           opacity: k2,
           transform: `translateY(${(1 - k2) * 20}px)`,
         }}
       >
-        <span style={{ width: 24, height: 24, background: BRAND.orange, display: "inline-block" }} />
+        AI that works in your product.
+      </div>
+      <div
+        style={{
+          marginTop: 44,
+          display: "flex",
+          alignItems: "center",
+          gap: 26,
+          fontFamily: mono,
+          fontSize: 54,
+          color: BRAND.muted,
+          letterSpacing: 2,
+          opacity: k3,
+          transform: `translateY(${(1 - k3) * 16}px)`,
+        }}
+      >
+        <span style={{ width: 20, height: 20, background: BRAND.orange, display: "inline-block" }} />
         opengeni.ai
       </div>
     </div>

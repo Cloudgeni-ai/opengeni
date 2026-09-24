@@ -237,7 +237,7 @@ const MovedBlock: React.FC<{ t: number; start: number }> = ({ t, start }) => {
   );
 };
 
-export const SEND_REPLICA_PRESS = 0.45;
+export const SEND_REPLICA_PRESS = 0.6;
 
 const SendReplica: React.FC<{ t: number; start: number }> = ({ t, start }) => {
   const at = start + SEND_REPLICA_PRESS;

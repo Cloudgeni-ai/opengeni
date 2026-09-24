@@ -309,7 +309,7 @@ place(fx, whoosh(0.9, 380, 1500, 90), push_at - 0.02, 0.06)
 place(fx, whoosh(0.5, 700, 2600, 31), hl["tools"]["start"] - 0.04, 0.05)
 place(music, felt_piano(note("F#5"), 3.0, 0.8), hl["tools"]["start"], 0.28, pan=0.2)
 place(music, felt_piano(note("A5"), 3.0, 0.8), hl["tools"]["start"] + 0.16, 0.28, pan=0.3)
-SEND_REPLICA_PRESS = 0.45  # matches CodePage.tsx
+SEND_REPLICA_PRESS = 0.6  # matches CodePage.tsx
 place(fx, key_click("enter", 1300), hl["approval"]["start"] + SEND_REPLICA_PRESS - 0.005, 0.18)
 for i, n in enumerate(["A5", "B5", "D6"]):
     place(fx, glass(note(n), 0.45, 1.0), hl["approval"]["start"] + SEND_REPLICA_PRESS + 0.09 + i * 0.08, 0.065, pan=-0.2 + 0.2 * i)
@@ -337,7 +337,7 @@ room = make_ir(1.1, 7, 1.0)
 hall = make_ir(2.8, 8, 0.8)
 
 # Bus balance: the motif leads; pads sit underneath; sub is felt, not heard.
-keys = keys * 0.83
+keys = keys * 0.46  # foley, not lead: a hushed opening; the score blooms on Enter
 fx = lowpass(fx, 7500, 2) * 0.85
 music = music * 1.6
 pads = highpass(pads, 110, 2) * 0.66
@@ -359,6 +359,31 @@ mix = (
     + subs
 )
 mix = highpass(mix, 28, 2)
+
+
+def biquad(kind: str, f0: float, gain_db: float, q: float = 0.707):
+    """RBJ cookbook shelf/peak biquad, returned as (b, a)."""
+    A = 10 ** (gain_db / 40)
+    w0 = 2 * np.pi * f0 / SR
+    alpha = np.sin(w0) / (2 * q)
+    cw = np.cos(w0)
+    if kind == "low":
+        b = [A * ((A + 1) - (A - 1) * cw + 2 * np.sqrt(A) * alpha), 2 * A * ((A - 1) - (A + 1) * cw), A * ((A + 1) - (A - 1) * cw - 2 * np.sqrt(A) * alpha)]
+        a = [(A + 1) + (A - 1) * cw + 2 * np.sqrt(A) * alpha, -2 * ((A - 1) + (A + 1) * cw), (A + 1) + (A - 1) * cw - 2 * np.sqrt(A) * alpha]
+    elif kind == "high":
+        b = [A * ((A + 1) + (A - 1) * cw + 2 * np.sqrt(A) * alpha), -2 * A * ((A - 1) + (A + 1) * cw), A * ((A + 1) + (A - 1) * cw - 2 * np.sqrt(A) * alpha)]
+        a = [(A + 1) - (A - 1) * cw + 2 * np.sqrt(A) * alpha, 2 * ((A - 1) - (A + 1) * cw), (A + 1) - (A - 1) * cw - 2 * np.sqrt(A) * alpha]
+    else:
+        b = [1 + alpha * A, -2 * cw, 1 - alpha * A]
+        a = [1 + alpha / A, -2 * cw, 1 - alpha / A]
+    return np.array(b) / a[0], np.array(a) / a[0]
+
+
+# Master EQ for small-speaker translation (phones cannot reproduce the sub
+# region, and presence carries the motif): gentle shelves, one soft peak.
+for kind, f0, g, q in (("low", 110, -2.0, 0.707), ("high", 3500, 3.0, 0.707), ("peak", 2500, 1.5, 0.9)):
+    b_, a_ = biquad(kind, f0, g, q)
+    mix = signal.lfilter(b_, a_, mix, axis=-1)
 end = int((DUR - 0.08) * SR)
 mix[:, end:] *= 0
 fade_n = int(0.6 * SR)

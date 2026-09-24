@@ -15,13 +15,13 @@ export const BRAND_TOP = 1290;
 const closeUp = (s: number): Cam => ({ x: FIELD.x - 16 + 960 / s, y: 540 / s, s });
 
 const FULL: Cam = { x: 960, y: 540, s: 1 };
-const FULL_DRIFT: Cam = { x: 998, y: 528, s: 1.06 };
+const FULL_DRIFT: Cam = { x: 952, y: 540, s: 1.03 };
 const CARD_FOCUS: Cam = { x: 640, y: 360, s: 1.5 };
 const WIDE: Cam = { x: 960, y: 372, s: 0.665 };
 const PUSH_TOOLS: Cam = { x: 940, y: 600, s: 1.45 };
 const PUSH_APPROVAL: Cam = { x: 940, y: 676, s: 1.45 };
-const FINAL: Cam = { x: FINAL_CENTER_X, y: 630, s: 0.425 };
-const FINAL_SETTLE: Cam = { x: FINAL_CENTER_X, y: 630, s: 0.436 };
+const FINAL: Cam = { x: FINAL_CENTER_X, y: 668, s: 0.425 };
+const FINAL_SETTLE: Cam = { x: FINAL_CENTER_X, y: 668, s: 0.436 };
 
 type Segment = { t0: number; t1: number; from: Cam; to: Cam; ease?: (x: number) => number };
 
