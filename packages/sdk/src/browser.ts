@@ -4,6 +4,8 @@ export type {
   SessionMessageSearchRequest,
   SessionMessageSearchMatch,
   SessionMessageSearchResponse,
+  SessionMessagePreview,
+  SessionMessagePreviewReference,
 } from "./session-message-search";
 export {
   OpenGeniToolCallError,

@@ -8,6 +8,7 @@ export type ConnectBrowserWindow = {
     features: string,
   ): {
     opener: unknown;
+    readonly closed?: boolean;
     location: { replace(url: string): void };
     close(): void;
   } | null;
@@ -48,7 +49,12 @@ export function reserveBrowserConnectNavigation(browser: ConnectBrowserWindow): 
       openPopup(url) {
         validateDestination(url);
         popup.location.replace(url);
-        return { close };
+        return {
+          close,
+          get closed() {
+            return popup.closed;
+          },
+        };
       },
       redirect(url) {
         validateDestination(url);
@@ -81,7 +87,12 @@ export function createBrowserConnectNavigation(browser: ConnectBrowserWindow): C
         }
         throw new Error("Connect popup could not navigate safely; retry with redirect mode");
       }
-      return { close: () => popup.close() };
+      return {
+        close: () => popup.close(),
+        get closed() {
+          return popup.closed;
+        },
+      };
     },
     redirect(url) {
       validateDestination(url);

@@ -809,6 +809,9 @@
 :where(.og-root).og-session-capability-setup [role=alert],:where(.og-root) .og-session-capability-setup [role=alert] {
   color: var(--og-color-danger,#b42318);
 }
+:where(.og-root).og-session-capability-setup .og-session-capability-notice,:where(.og-root) .og-session-capability-setup .og-session-capability-notice {
+  color: var(--og-color-fg-muted);
+}
 :where(.og-root).og-session-capability-shell[data-state="complete"],:where(.og-root) .og-session-capability-shell[data-state="complete"] {
   border-color: var(--og-color-status-success,#16804a);
   @supports (color: color-mix(in lab, red, red)) {
@@ -856,6 +859,9 @@
 :where(.og-root).og-session-capability-progress,:where(.og-root) .og-session-capability-progress {
   color: var(--og-color-fg-muted);
   padding-block: 8px;
+}
+:where(.og-root).og-session-capability-setup .og-session-capability-stop,:where(.og-root) .og-session-capability-setup .og-session-capability-stop {
+  justify-self: end;
 }
 @media (pointer:coarse) {
   :where(.og-root).og-session-capability-actions button,:where(.og-root) .og-session-capability-actions button,:where(.og-root).og-session-capability-setup button,:where(.og-root) .og-session-capability-setup button {

@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 7.1.2
+
+### Patch Changes
+
+- 24968dd: Keep retained image retrieval out of compact progress labels so they do not report a missing image loader while the full timeline image remains available.
+
 ## 7.1.1
 
 ### Patch Changes
