@@ -70,3 +70,15 @@ describe("explicit preinstalled-vector migration", () => {
     ]);
   });
 });
+
+test("0510 receives the ordinary lock bound without changing its migration SQL", async () => {
+  const file = "0510_knowledge_index_funding_wait.sql";
+  const body = await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8");
+  expect(body.match(/ALTER TABLE knowledge_index_jobs ADD COLUMN/g)).toHaveLength(3);
+  expect(body).not.toMatch(/^\s*(?:SET(?: LOCAL)?|RESET)\s+lock_timeout\b/im);
+  const { sql, statements } = connection(false);
+  await executeMigrationFile(sql, file, body);
+  expect(statements).toHaveLength(1);
+  expect(statements[0]).toContain("pg_catalog.set_config('lock_timeout', '5s', true)");
+  expect(statements[0]?.endsWith(body)).toBe(true);
+});
