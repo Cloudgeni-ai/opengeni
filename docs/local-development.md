@@ -118,7 +118,8 @@ Use this when you want separate terminals for each long-running process:
 
 ```bash
 bun install
-docker compose up -d postgres nats temporal garage garage-init
+docker compose up -d postgres nats temporal garage
+bun scripts/dev-native-storage.ts provision .
 bun run db:migrate
 docker build -f docker/sandbox.Dockerfile -t opengeni-sandbox:local .
 bun run dev:api

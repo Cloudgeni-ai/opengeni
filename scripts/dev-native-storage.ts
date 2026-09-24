@@ -178,7 +178,12 @@ export function signedRequest(
     authorization: `AWS4-HMAC-SHA256 Credential=${accessKey}/${scope}, SignedHeaders=${names}, Signature=${hmac(key, `AWS4-HMAC-SHA256\n${date}\n${scope}\n${sha256(canonical)}`).toString("hex")}`,
   };
 }
-export async function provisionGarage(settings = storageSettings()) {
+export async function provisionGarage(
+  settings: Pick<
+    ReturnType<typeof storageSettings>,
+    "port" | "bucket" | "accessKey" | "secretKey"
+  > = storageSettings(),
+) {
   const body = readFileSync(new URL("../deploy/garage/cors.xml", import.meta.url), "utf8");
   const url = new URL(`http://127.0.0.1:${settings.port}/${settings.bucket}?cors=`);
   for (let attempt = 0; attempt < 60; attempt++) {

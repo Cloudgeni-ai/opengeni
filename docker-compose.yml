@@ -83,32 +83,6 @@ services:
       retries: 20
       start_period: 10s
 
-  garage-init:
-    image: &object-storage-client-image quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
-    depends_on:
-      garage:
-        condition: service_healthy
-    environment:
-      HTTP_PROXY: ""
-      HTTPS_PROXY: ""
-      ALL_PROXY: ""
-      http_proxy: ""
-      https_proxy: ""
-      all_proxy: ""
-      NO_PROXY: "localhost,127.0.0.1,garage"
-      no_proxy: "localhost,127.0.0.1,garage"
-    volumes:
-      - ./deploy/garage/cors.xml:/cors.xml:ro
-    entrypoint: ["/bin/sh", "-c"]
-    command: >
-      "for i in $$(seq 1 30); do
-         mc alias set local http://garage:3900 GK0123456789abcdef0123456789abcdef 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef &&
-         mc cors set local/opengeni-files /cors.xml &&
-         exit 0;
-         sleep 2;
-       done;
-       exit 1"
-
   minio:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     profiles: ["minio"]
@@ -128,7 +102,7 @@ services:
       retries: 20
 
   minio-init:
-    image: *object-storage-client-image
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     profiles: ["minio"]
     depends_on:
       minio:
