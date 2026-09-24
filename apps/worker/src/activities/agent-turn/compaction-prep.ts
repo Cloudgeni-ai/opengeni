@@ -11,6 +11,7 @@ import {
   compactionThresholdTokens,
   CompactionNeededError,
   compactionProviderRejection,
+  estimateSerializedValueTokens,
   SUMMARY_BUFFER_TOKENS,
   type ModelResponseUsage,
 } from "@opengeni/runtime";
@@ -207,8 +208,8 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       contextContributions: eventing.companyBrainContextContributions,
     });
   };
-  const compactionSummarizerFor = (systemInstructions?: string) =>
-    resolvedModel
+  const compactionSummarizerFor = (systemInstructions?: string): CompactionSummarizer => {
+    const summarize: CompactionSummarizer = resolvedModel
       ? (s: Settings, m: Array<Record<string, unknown>>) =>
           withProviderRequestContext(() =>
             summarizeContextForCompaction(s, m, {
@@ -235,6 +236,16 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
             ...(systemInstructions ? { systemInstructions } : {}),
             ...(promptCacheKey ? { promptCacheKey } : {}),
           });
+    summarize.estimatePrefixTokens = () => {
+      if (resolvedModel?.provider.api === "chat") return 0;
+      const prepared = portableResponsesNeedsAgentPrefix ? preparedPortableRequest() : null;
+      return (
+        estimateSerializedValueTokens(prepared?.systemInstructions ?? systemInstructions ?? "") +
+        (prepared ? estimateSerializedValueTokens(prepared.tools) : 0)
+      );
+    };
+    return summarize;
+  };
   // Prompt-cache prefix for remote_v2 MUST match ordinary turns:
   // tools → instructions → history. Filled after buildAgent for every
   // compact path (including operator /compact, which now builds the agent

@@ -162,11 +162,13 @@ copy, preserving recent detail. If that remains too large, it removes whole
 oldest user-delimited work units and re-sanitizes the suffix so no tool result,
 call, or reasoning fragment is orphaned. The temporary history copy is kept
 beneath the effective input ceiling and raw window minus requested summary.
-The estimate does not include the prepared tool/instruction prefix; if the
-provider reports context overflow, OpenGeni performs one half-size refit and
-one final request. That retry can still overflow when the provider's count
-diverges enough from the estimate. It never issues one failing provider call
-per history item.
+For a prepared Responses call, OpenGeni reserves the estimated instruction and
+tool-schema tokens before fitting history. If the provider still reports context
+overflow, it refits history to 40% of the remaining target and sends one final
+request. The provider may still count differently; on another overflow, active
+history stays intact. If only the checkpoint instruction fits, OpenGeni stops
+without asking the model to summarize unseen history. It never issues one
+failing call per history item.
 
 Remote v2 keeps its normal first request unchanged. Only an exact provider
 `context_length_exceeded` code permits one retry to the same remote-compaction
