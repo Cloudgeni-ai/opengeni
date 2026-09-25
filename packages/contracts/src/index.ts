@@ -17927,6 +17927,13 @@ export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
 /** Public OpenGeni documentation linked from the web console's Help menu by default. */
 export const DEFAULT_OPENGENI_DOCUMENTATION_URL = "https://docs.opengeni.ai" as const;
 
+/** An absolute http(s) URL the console may render as a plain link. */
+const ClientLegalDocumentUrl = z
+  .string()
+  .url()
+  .max(2_048)
+  .refine((value) => /^https?:\/\//iu.test(value), "must be an http(s) URL");
+
 export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({
     deploymentRevision: z.string(),
@@ -18063,6 +18070,14 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         }),
       })
       .default({ consentRequired: true, providers: {} }),
+    // Operator-owned legal documents the signed-out console links to. Absent or
+    // empty on self-hosted deployments unless their operator configures them.
+    legal: z
+      .object({
+        privacyPolicyUrl: ClientLegalDocumentUrl.optional(),
+        termsOfServiceUrl: ClientLegalDocumentUrl.optional(),
+      })
+      .optional(),
     // Server-wide hint: does this deployment support Channel-A structured services
     // at all (P4.4). Per-session availability is negotiated on /stream-capabilities
     // (it depends on the session's pinned backend); this is the coarse on/off the

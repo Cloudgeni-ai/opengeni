@@ -2819,7 +2819,7 @@ export function RootRouteComponent() {
     <LoadingPanel />
   ) : managedAuthRequired && !authSession ? (
     <Suspense fallback={<LoadingPanel />}>
-      <SignedOutPage>
+      <SignedOutPage legalLinks={clientConfig?.legal}>
         {browserAccountsEnabled ? (
           <BrowserAccountsSignedOutPanel
             presentation="embedded"
