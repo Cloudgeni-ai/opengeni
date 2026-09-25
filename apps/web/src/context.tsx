@@ -2788,6 +2788,7 @@ export function RootRouteComponent() {
         {browserAccountsEnabled ? (
           <BrowserAccountsSignedOutPanel
             presentation="embedded"
+            search={window.location.search}
             invitation={organizationInvitationContinuation}
             emptySetRegistrationPanel={
               clientConfig?.managedAuthSessionSetMode === "broker" ||
@@ -2947,7 +2948,19 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
-      <SignInCallbackNotice userId={authSession?.user.id ?? null} />
+      <SignInCallbackNotice
+        userId={authSession?.user.id ?? null}
+        verificationLinkError={
+          !clientConfig || (managedAuthRequired && authSession === undefined)
+            ? "pending"
+            : managedAuthRequired &&
+                !authSession &&
+                !browserAccountsEnabled &&
+                managedEmailVerificationRequired
+              ? "auth-panel"
+              : "notice"
+        }
+      />
       {clientConfig ? (
         <Suspense fallback={null}>
           <AnalyticsManager

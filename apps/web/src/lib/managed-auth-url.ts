@@ -24,3 +24,17 @@ export function verificationLinkErrorFromSearch(search: string): VerificationLin
   if (code === "INVALID_TOKEN") return "invalid";
   return null;
 }
+
+/**
+ * Drop a verification-link error the auth panel has taken over from the
+ * address bar, so a reload shows ordinary sign-in instead of the resend form
+ * again. Other parameters (such as attribution) and other errors are kept.
+ */
+export function clearVerificationLinkErrorFromLocation(
+  target: Pick<Window, "location" | "history">,
+): void {
+  const url = new URL(target.location.href);
+  if (!verificationLinkErrorFromSearch(url.search)) return;
+  url.searchParams.delete("error");
+  target.history.replaceState(target.history.state, "", url.pathname + url.search + url.hash);
+}

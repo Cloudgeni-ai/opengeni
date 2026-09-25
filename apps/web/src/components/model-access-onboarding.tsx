@@ -17,7 +17,10 @@ import {
   creditsModelForCheckout,
   type ConnectedModelFamily,
 } from "@/lib/model-access-onboarding";
-import { pollSuperGrokDeviceLogin } from "@/components/supergrok-device-poll";
+import {
+  isRetryableDevicePollError,
+  pollSuperGrokDeviceLogin,
+} from "@/components/supergrok-device-poll";
 
 type ProviderKey = "gateway" | "openrouter";
 
@@ -45,6 +48,15 @@ const PROVIDER_KEYS: Record<
     placeholder: "OpenRouter API key",
     family: "openrouter",
   },
+};
+
+/** Names the service in the selection toast; model labels repeat across services. */
+const FAMILY_LABELS: Record<ConnectedModelFamily, string> = {
+  codex: "Codex",
+  supergrok: "SuperGrok",
+  vercel_gateway: "Vercel AI Gateway",
+  openrouter: "OpenRouter",
+  credits: "OpenGeni credits",
 };
 
 /** ChatGPT keeps device code login behind a per-account (or workspace-admin) setting. */
@@ -96,6 +108,8 @@ export function ModelAccessOnboardingPanel({
   const [topupAmount, setTopupAmount] = useState("25.00");
   const [selectionRetry, setSelectionRetry] = useState<ConnectedModelFamily | null>(null);
   const cancelled = useRef(false);
+  // Set while a connected model is being saved as the next-chat selection.
+  const finishing = useRef(false);
   const pollAbort = useRef<AbortController | null>(null);
   const providerKeyOperation = useRef<{
     provider: ProviderKey;
@@ -125,17 +139,20 @@ export function ModelAccessOnboardingPanel({
   }
 
   function leaveOnboarding(): void {
+    // Leaving mid-save would complete twice or drop the connected selection.
+    if (finishing.current) return;
     stopDeviceLogin();
     onComplete();
   }
 
   async function finishWithConnectedModel(family: ConnectedModelFamily): Promise<boolean> {
     if (client) {
+      finishing.current = true;
       try {
         const model = await applyConnectedModelToNewSessionDraft(client, workspaceId, family);
         if (model) {
           setSelectionRetry(null);
-          toast.success(`${model.label} is selected for your next chat`);
+          toast.success(`${model.label} (${FAMILY_LABELS[family]}) is selected for your next chat`);
         } else {
           setSelectionRetry(family);
           toast.error("The connection is ready, but its model is not selectable yet");
@@ -147,6 +164,8 @@ export function ModelAccessOnboardingPanel({
           description: error instanceof Error ? error.message : String(error),
         });
         return false;
+      } finally {
+        finishing.current = false;
       }
     }
     onComplete();
@@ -182,6 +201,7 @@ export function ModelAccessOnboardingPanel({
             initialIntervalSeconds: Math.max(2, start.intervalSeconds),
             expiresAtMs: Date.now() + CODEX_DEVICE_CODE_TTL_MS,
             signal: controller.signal,
+            retryable: isRetryableDevicePollError,
           });
       } else {
         const start = await client.supergrokConnectStart(workspaceId, "user");
@@ -217,7 +237,13 @@ export function ModelAccessOnboardingPanel({
             ? `Codex connected${result.plan ? ` (${result.plan} plan)` : ""}`
             : "SuperGrok connected",
         );
-        await finishWithConnectedModel(kind);
+        // Hold the leave buttons until the connected model is the next-chat selection.
+        setBusy(true);
+        try {
+          await finishWithConnectedModel(kind);
+        } finally {
+          if (!cancelled.current) setBusy(false);
+        }
         return;
       }
       toast.error(

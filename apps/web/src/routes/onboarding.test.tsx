@@ -131,6 +131,42 @@ async function flush(): Promise<void> {
   await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
 }
 
+const baseModel = {
+  api: "responses",
+  credentialReadiness: {
+    status: "ready",
+    reason: null,
+    basis: "configuration",
+    checkedAt: null,
+  },
+  policyAllowed: true,
+  availability: { status: "available", selectable: true, reason: null, checkedAt: null },
+  capabilities: {
+    reasoning: {
+      upstream: "supported",
+      runnable: true,
+      efforts: ["low"],
+      defaultEffort: "low",
+      required: false,
+    },
+    functionCalling: { upstream: "supported", runnable: true },
+    structuredOutput: { upstream: "supported", runnable: true },
+    hostedTools: {
+      webSearch: { upstream: "unsupported", runnable: false },
+      xSearch: { upstream: "unsupported", runnable: false },
+      codeExecution: { upstream: "unsupported", runnable: false },
+    },
+    inputModalities: ["text"],
+    outputModalities: ["text"],
+    transports: {
+      sse: { upstream: "supported", runnable: true },
+      responsesWebSocket: { upstream: "unsupported", runnable: false },
+      realtimeAudio: { upstream: "unsupported", runnable: false },
+    },
+    latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
+  },
+};
+
 describe("organization onboarding UI", () => {
   test("self-service signup submits only ordinary account fields", async () => {
     const submitted = mock(async () => undefined);
@@ -691,41 +727,6 @@ describe("organization onboarding UI", () => {
 
   test("connecting Codex selects the Codex model, not the free default, for the next chat", async () => {
     const saveNewSessionDraft = mock(async () => undefined);
-    const baseModel = {
-      api: "responses",
-      credentialReadiness: {
-        status: "ready",
-        reason: null,
-        basis: "configuration",
-        checkedAt: null,
-      },
-      policyAllowed: true,
-      availability: { status: "available", selectable: true, reason: null, checkedAt: null },
-      capabilities: {
-        reasoning: {
-          upstream: "supported",
-          runnable: true,
-          efforts: ["low"],
-          defaultEffort: "low",
-          required: false,
-        },
-        functionCalling: { upstream: "supported", runnable: true },
-        structuredOutput: { upstream: "supported", runnable: true },
-        hostedTools: {
-          webSearch: { upstream: "unsupported", runnable: false },
-          xSearch: { upstream: "unsupported", runnable: false },
-          codeExecution: { upstream: "unsupported", runnable: false },
-        },
-        inputModalities: ["text"],
-        outputModalities: ["text"],
-        transports: {
-          sse: { upstream: "supported", runnable: true },
-          responsesWebSocket: { upstream: "unsupported", runnable: false },
-          realtimeAudio: { upstream: "unsupported", runnable: false },
-        },
-        latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
-      },
-    };
     const client = {
       codexConnectStart: mock(async () => ({
         state: "state-a",
@@ -803,6 +804,158 @@ describe("organization onboarding UI", () => {
       expect(
         (saveNewSessionDraft.mock.calls[0] as unknown as [string, { model: string }])[1].model,
       ).toBe("codex/model");
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.setTimeout = priorSetTimeout;
+      await act(async () => root.unmount());
+      container.remove();
+      window.open = priorOpen;
+    }
+  });
+
+  test("the included free path waits for the new workspace catalog to confirm the model", async () => {
+    const modelDefaults = {
+      defaultModel: "free-model",
+      models: [{ id: "free-model", label: "Free Model", cost: "free" }],
+    } as never;
+    for (const selectable of [true, false]) {
+      const getWorkspaceModelCatalog = mock(async (_workspaceId: string) => ({
+        models: [
+          {
+            ...baseModel,
+            id: "free-model",
+            label: "Free Model",
+            provider: "openrouter",
+            providerLabel: "OpenRouter",
+            cost: "free",
+            availability: selectable
+              ? { status: "available", selectable: true, reason: null, checkedAt: null }
+              : {
+                  status: "unavailable",
+                  selectable: false,
+                  reason: "missing_credential",
+                  checkedAt: null,
+                },
+          },
+        ],
+      }));
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        await act(async () =>
+          root.render(
+            <OrganizationOnboardingPanel
+              client={{ ...setupClient, getWorkspaceModelCatalog } as never}
+              billingMode="stripe"
+              modelDefaults={modelDefaults}
+              onComplete={() => undefined}
+            />,
+          ),
+        );
+        await flush();
+        await enter(
+          container.querySelector("#organization-onboarding-name")!,
+          "Northwind Research",
+        );
+        await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+        await flush();
+        await flush();
+        const created = (await completeSelfServiceSetup.mock.results.at(-1)!.value) as {
+          personalWorkspaceId: string;
+        };
+        expect(getWorkspaceModelCatalog).toHaveBeenCalledWith(created.personalWorkspaceId);
+        if (selectable) {
+          expect(container.querySelector("h1")!.textContent).toBe("Start chatting for free");
+        } else {
+          // Client config alone never claims a model the workspace cannot use.
+          expect(container.querySelector("h1")!.textContent).toBe("Choose how to power your chats");
+          expect(container.textContent).not.toContain("free to use");
+        }
+      } finally {
+        await act(async () => root.unmount());
+        container.remove();
+      }
+    }
+  });
+
+  test("leaving is held while a connected model is saved for the next chat", async () => {
+    let releaseSave: () => void = () => undefined;
+    const saveNewSessionDraft = mock(
+      () => new Promise<void>((resolve) => (releaseSave = () => resolve())),
+    );
+    const client = {
+      codexConnectStart: mock(async () => ({
+        state: "state-a",
+        userCode: "CODE-1234",
+        verificationUri: "https://example.test/authorize",
+        intervalSeconds: 1,
+      })),
+      codexConnectPoll: mock(async () => ({ status: "connected" as const, plan: "Plus" })),
+      getWorkspaceModelCatalog: mock(async () => ({
+        models: [
+          {
+            ...baseModel,
+            id: "codex/model",
+            label: "Codex Model",
+            provider: "codex",
+            providerLabel: "Codex",
+            source: "codex",
+            cost: "subscription",
+            billing: { upstreamPayer: "connected_subscription", metering: "external" },
+          },
+        ],
+      })),
+      getNewSessionDraft: mock(async () => ({
+        revision: 1,
+        text: "",
+        resources: [],
+        tools: [],
+        toolsProvided: false,
+        model: "free-model",
+        reasoningEffort: "low",
+        latencyMode: "standard",
+        options: {},
+      })),
+      saveNewSessionDraft,
+    };
+    const onComplete = mock(() => undefined);
+    const priorOpen = window.open;
+    const priorSetTimeout = globalThis.setTimeout;
+    window.open = mock(() => null) as typeof window.open;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      globalThis.setTimeout = ((handler: () => void, delay?: number, ...rest: unknown[]) =>
+        priorSetTimeout(handler, delay === 2_000 ? 0 : delay, ...rest)) as typeof setTimeout;
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            codexEnabled
+            includedModel={{ id: "free-model", label: "Free Model", free: true }}
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('button[aria-label="Connect Codex"]')!.click(),
+      );
+      await flush();
+      await flush();
+      await flush();
+      expect(saveNewSessionDraft).toHaveBeenCalledTimes(1);
+      const start = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Start chatting for free",
+      )!;
+      expect(start.disabled).toBe(true);
+      await act(async () => start.click());
+      expect(onComplete).not.toHaveBeenCalled();
+      await act(async () => releaseSave());
+      await flush();
       expect(onComplete).toHaveBeenCalledTimes(1);
     } finally {
       globalThis.setTimeout = priorSetTimeout;

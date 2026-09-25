@@ -1,9 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
 
-import { pollSuperGrokDeviceLogin } from "./supergrok-device-poll";
+import { isRetryableDevicePollError, pollSuperGrokDeviceLogin } from "./supergrok-device-poll";
 
 describe("SuperGrok device polling", () => {
+  test("keeps waiting through network failures and retryable API errors only", () => {
+    expect(isRetryableDevicePollError(new TypeError("Failed to fetch"))).toBe(true);
+    expect(
+      isRetryableDevicePollError(
+        new OpenGeniApiError(503, "", { retryable: true, mutation: false }),
+      ),
+    ).toBe(true);
+    expect(isRetryableDevicePollError(new OpenGeniApiError(403, "", { mutation: false }))).toBe(
+      false,
+    );
+    expect(isRetryableDevicePollError(new Error("boom"))).toBe(false);
+  });
+
   test("backs off after retryable API errors and continues to connection", async () => {
     let now = 0;
     const delays: number[] = [];

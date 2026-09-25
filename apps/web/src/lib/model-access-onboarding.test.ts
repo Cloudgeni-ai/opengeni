@@ -4,6 +4,7 @@ import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
 import {
   applyConnectedModelToNewSessionDraft,
+  confirmIncludedModel,
   creditCheckoutSuccessUrl,
   creditsModelForCheckout,
   includedDefaultModel,
@@ -154,6 +155,14 @@ const GATEWAY = catalogModel({
   cost: "workspace",
   billing: { upstreamPayer: "workspace", metering: "external" },
 });
+const ORGANIZATION_GATEWAY = catalogModel({
+  id: "organization-gateway/model",
+  provider: "organization-gateway",
+  providerLabel: "Organization Gateway",
+  source: "workspace_gateway",
+  cost: "organization",
+  billing: { upstreamPayer: "organization", metering: "external" },
+});
 const OPENROUTER = catalogModel({
   id: "openrouter-byok/model",
   provider: "workspace-openrouter",
@@ -176,7 +185,18 @@ describe("preferredConnectedModelId after a specific connect", () => {
 
   test("the generic order puts any connected service ahead of the free default", () => {
     expect(preferredConnectedModelId([FREE_DEFAULT, CODEX])).toBe("codex/model");
+    expect(preferredConnectedModelId([FREE_DEFAULT, GATEWAY])).toBe("gateway/model");
     expect(preferredConnectedModelId([FREE_DEFAULT, CREDITS_FIRST])).toBe("free-default");
+  });
+
+  test("the generic order never moves someone onto organization spend ahead of the free model", () => {
+    expect(preferredConnectedModelId([ORGANIZATION_GATEWAY, FREE_DEFAULT])).toBe("free-default");
+    expect(preferredConnectedModelId([ORGANIZATION_GATEWAY, CREDITS_FIRST])).toBe(
+      "organization-gateway/model",
+    );
+    expect(preferredConnectedModelId([ORGANIZATION_GATEWAY, SUPERGROK, FREE_DEFAULT])).toBe(
+      "supergrok/model",
+    );
   });
 
   test("selects the family the person just connected, never the free default", () => {
@@ -255,6 +275,38 @@ describe("includedDefaultModel", () => {
         models: [FREE_DEFAULT],
         billingMode: "stripe",
       }),
+    ).toBeNull();
+  });
+});
+
+describe("confirmIncludedModel", () => {
+  const candidate = { id: "free-default", label: "Free Default", free: true };
+
+  test("keeps the included path when the new workspace can select that free model", () => {
+    expect(confirmIncludedModel(candidate, [CODEX, FREE_DEFAULT])).toEqual(candidate);
+    const deploymentPaid = { id: "credits-first", label: "Zeta credits", free: false };
+    expect(confirmIncludedModel(deploymentPaid, [CREDITS_FIRST])).toEqual(deploymentPaid);
+  });
+
+  test("drops the included path when the workspace catalog cannot back the claim", () => {
+    expect(confirmIncludedModel(candidate, [CODEX])).toBeNull();
+    expect(
+      confirmIncludedModel(candidate, [
+        {
+          ...FREE_DEFAULT,
+          availability: {
+            status: "unavailable",
+            selectable: false,
+            reason: "missing_credential",
+            checkedAt: null,
+          },
+        } as WorkspaceModelCatalogModel,
+      ]),
+    ).toBeNull();
+    expect(
+      confirmIncludedModel(candidate, [
+        { ...FREE_DEFAULT, cost: "credits" } as WorkspaceModelCatalogModel,
+      ]),
     ).toBeNull();
   });
 });

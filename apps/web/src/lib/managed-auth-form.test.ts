@@ -6,7 +6,11 @@ import {
   managedAuthFailure,
   validateManagedAuthInput,
 } from "./managed-auth-form";
-import { managedAuthModeFromSearch, verificationLinkErrorFromSearch } from "./managed-auth-url";
+import {
+  clearVerificationLinkErrorFromLocation,
+  managedAuthModeFromSearch,
+  verificationLinkErrorFromSearch,
+} from "./managed-auth-url";
 
 describe("managed auth form", () => {
   test("returns specific signup field guidance", () => {
@@ -92,6 +96,27 @@ describe("managed auth form", () => {
     expect(verificationLinkErrorFromSearch("?error=access_denied")).toBeNull();
     expect(verificationLinkErrorFromSearch("?error=TOKEN_EXPIRED&error=INVALID_TOKEN")).toBeNull();
     expect(verificationLinkErrorFromSearch("")).toBeNull();
+  });
+
+  test("drops only a verification-link error from the address bar once it is handled", () => {
+    const replaced: Array<{ state: unknown; url: string }> = [];
+    const target = (href: string) => ({
+      location: { href } as Location,
+      history: {
+        state: { key: "router-state" },
+        replaceState: (state: unknown, _unused: string, url?: string | URL | null) =>
+          replaced.push({ state, url: String(url) }),
+      } as unknown as History,
+    });
+    clearVerificationLinkErrorFromLocation(
+      target("https://app.example.test/?error=TOKEN_EXPIRED&utm_source=opengeni.ai#top"),
+    );
+    expect(replaced).toEqual([
+      { state: { key: "router-state" }, url: "/?utm_source=opengeni.ai#top" },
+    ]);
+    clearVerificationLinkErrorFromLocation(target("https://app.example.test/?error=access_denied"));
+    clearVerificationLinkErrorFromLocation(target("https://app.example.test/"));
+    expect(replaced).toHaveLength(1);
   });
 
   test("keeps invalid credentials generic so accounts cannot be enumerated", () => {

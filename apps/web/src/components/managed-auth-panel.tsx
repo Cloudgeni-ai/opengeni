@@ -1,5 +1,5 @@
 import { CheckIcon, Loader2Icon, RefreshCwIcon, UserIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { requestPasswordReset, sendVerificationEmail } from "@/api";
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,7 @@ import {
   type ManagedAuthMode,
 } from "@/lib/managed-auth-form";
 import {
+  clearVerificationLinkErrorFromLocation,
   managedAuthModeFromSearch,
   verificationLinkErrorFromSearch,
   type VerificationLinkError,
@@ -76,6 +77,13 @@ export function ManagedAuthPanel(props: {
     () => emailVerificationRequired && Boolean(verificationLinkError),
   );
   const emailOnlyMode = resetMode || linkResendMode;
+  // When the page query brought the link error, this panel owns it from here.
+  const [ownsLocationLinkError] = useState(
+    () => linkResendMode && !props.verificationLinkError && props.search !== undefined,
+  );
+  useEffect(() => {
+    if (ownsLocationLinkError) clearVerificationLinkErrorFromLocation(window);
+  }, [ownsLocationLinkError]);
   const [busy, setBusy] = useState(false);
   const [socialBusy, setSocialBusy] = useState<ManagedSocialProvider | null>(null);
   const [resendBusy, setResendBusy] = useState(false);

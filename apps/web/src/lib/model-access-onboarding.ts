@@ -7,11 +7,15 @@ import {
   type PickerModelRow,
 } from "@opengeni/react";
 
+/**
+ * Services a person or their workspace connected. Organization-paid providers
+ * (`organization_byok`) are deliberately absent: an implicit fallback never
+ * moves someone onto organization spend ahead of the free deployment model.
+ */
 const CONNECTED_BILLING_CLASSES = new Set([
   "codex_subscription",
   "supergrok_subscription",
   "byok",
-  "organization_byok",
   "external",
 ]);
 
@@ -56,8 +60,10 @@ function rowMatchesFamily(row: PickerModelRow, family: ConnectedModelFamily): bo
  * With a `family`, only that family's selectable models qualify, in the
  * operator-configured catalog order; `null` means the connection is not usable
  * yet (the caller offers a retry instead of silently picking something else).
- * Without a family, a selectable connected service wins over the free
- * deployment model, and OpenGeni-credit models are never chosen implicitly.
+ * Without a family (the new-chat composer fallback when the selected model is
+ * no longer selectable), a selectable Codex, SuperGrok, or workspace provider
+ * wins over the free deployment model; an organization-paid provider ranks
+ * after the free model, and OpenGeni-credit models are never chosen implicitly.
  */
 export function preferredConnectedModelId(
   models: readonly WorkspaceModelCatalogModel[],
@@ -69,6 +75,7 @@ export function preferredConnectedModelId(
   return (
     sorted.find((row) => CONNECTED_BILLING_CLASSES.has(row.billingClass))?.id ??
     sorted.find((row) => row.catalog.cost === "free")?.id ??
+    sorted.find((row) => row.billingClass === "organization_byok")?.id ??
     null
   );
 }
@@ -156,4 +163,21 @@ export function includedDefaultModel(config: {
     return { id: model.id, label: model.label, free: false };
   }
   return null;
+}
+
+/**
+ * Confirm a client-config included model against the new workspace's live
+ * catalog. Client config carries no credential-readiness or workspace-policy
+ * signal, so the included path is offered only when the Personal workspace can
+ * actually select that model (and, for a free claim, the catalog agrees it is
+ * free). Otherwise the caller shows the ordinary connect/credits choice.
+ */
+export function confirmIncludedModel<T extends { id: string; label: string; free: boolean }>(
+  candidate: T,
+  models: readonly WorkspaceModelCatalogModel[],
+): T | null {
+  const model = models.find((row) => row.id === candidate.id);
+  if (!model?.availability.selectable) return null;
+  if (candidate.free && model.cost !== "free") return null;
+  return candidate;
 }

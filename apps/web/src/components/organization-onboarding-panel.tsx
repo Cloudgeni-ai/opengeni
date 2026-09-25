@@ -25,7 +25,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { includedDefaultModel } from "@/lib/model-access-onboarding";
+import { confirmIncludedModel, includedDefaultModel } from "@/lib/model-access-onboarding";
 import {
   clearOrganizationInvitationContinuation,
   storeOrganizationInvitationContinuation,
@@ -85,6 +85,22 @@ export function OrganizationOnboardingPanel({
   } | null>(null);
   const operationId = useRef(crypto.randomUUID());
   const invitationOperationIds = useRef(new Map<string, string>());
+  // An explicit `includedModel` (previews, embedders) is authoritative. The
+  // client-config candidate is only a hint until the new Personal workspace's
+  // catalog confirms that model is selectable there.
+  const includedCandidate =
+    includedModel !== undefined
+      ? null
+      : modelDefaults
+        ? includedDefaultModel({ ...modelDefaults, billingMode })
+        : null;
+  const candidateKey = includedCandidate ? JSON.stringify(includedCandidate) : null;
+  const [confirmedIncluded, setConfirmedIncluded] = useState<{
+    key: string;
+    workspaceId: string;
+    model: IncludedOnboardingModel | null;
+  } | null>(null);
+  const confirmingWorkspaceId = createdSetup?.personalWorkspaceId ?? null;
 
   useEffect(() => {
     if (previewState) return;
@@ -108,6 +124,28 @@ export function OrganizationOnboardingPanel({
       active = false;
     };
   }, [createdSetup, previewState, onComplete, statusRequest]);
+
+  useEffect(() => {
+    if (!candidateKey || !confirmingWorkspaceId) return;
+    if (!client) {
+      setConfirmedIncluded({ key: candidateKey, workspaceId: confirmingWorkspaceId, model: null });
+      return;
+    }
+    let active = true;
+    const candidate = JSON.parse(candidateKey) as IncludedOnboardingModel;
+    void client
+      .getWorkspaceModelCatalog(confirmingWorkspaceId)
+      .then((catalog) => confirmIncludedModel(candidate, catalog.models))
+      // Unverifiable is not included: fall back to the ordinary choice screen.
+      .catch(() => null)
+      .then((model) => {
+        if (active)
+          setConfirmedIncluded({ key: candidateKey, workspaceId: confirmingWorkspaceId, model });
+      });
+    return () => {
+      active = false;
+    };
+  }, [candidateKey, client, confirmingWorkspaceId]);
 
   useEffect(() => {
     if ((state !== "invitation_pending" && !invitation) || !client) return;
@@ -355,6 +393,21 @@ export function OrganizationOnboardingPanel({
   }
 
   if (createdSetup) {
+    let effectiveIncludedModel: IncludedOnboardingModel | null;
+    if (includedModel !== undefined) effectiveIncludedModel = includedModel;
+    else if (!includedCandidate) effectiveIncludedModel = null;
+    else if (
+      confirmedIncluded?.key === candidateKey &&
+      confirmedIncluded.workspaceId === createdSetup.personalWorkspaceId
+    )
+      effectiveIncludedModel = confirmedIncluded.model;
+    else
+      return frame(
+        <section className="flex flex-1 items-center justify-center" role="status">
+          <Loader2Icon className="size-5 animate-spin text-fg-subtle" />
+          <span className="sr-only">Checking your models</span>
+        </section>,
+      );
     return frame(
       <ModelAccessOnboardingPanel
         client={client}
@@ -363,13 +416,7 @@ export function OrganizationOnboardingPanel({
         billingMode={billingMode}
         codexEnabled={codexEnabled}
         supergrokEnabled={supergrokEnabled}
-        includedModel={
-          includedModel !== undefined
-            ? includedModel
-            : modelDefaults
-              ? includedDefaultModel({ ...modelDefaults, billingMode })
-              : null
-        }
+        includedModel={effectiveIncludedModel}
         onComplete={onComplete}
       />,
     );

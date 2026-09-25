@@ -21,6 +21,7 @@ import { Button } from "@/components/ui/button";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
+import { managedAuthModeFromSearch } from "@/lib/managed-auth-url";
 import {
   browserAccountBridgeBlockersSnapshot,
   installBrowserAccountBridgeOperations,
@@ -121,11 +122,15 @@ export function BrowserAccountsSignedOutPanel(props: {
   presentation?: "card" | "embedded";
   emptySetRegistrationPanel?: ReactNode;
   invitation?: OrganizationInvitationContinuation | null;
+  /** The page query string; `?mode=signup` opens account creation when it is offered. */
+  search?: string;
 }) {
   const Heading = props.presentation === "embedded" ? "h2" : "h1";
   const accounts = useBrowserAccounts();
   const popup = useBrowserAccountPopup();
-  const [registrationOpen, setRegistrationOpen] = useState(false);
+  const [registrationOpen, setRegistrationOpen] = useState(
+    () => props.search !== undefined && managedAuthModeFromSearch(props.search) === "signup",
+  );
   const [invitationDismissed, setInvitationDismissed] = useState(false);
   const busy = accounts.phase === "committing" || accounts.phase === "loading";
   const slots = accounts.projection?.slots ?? [];
