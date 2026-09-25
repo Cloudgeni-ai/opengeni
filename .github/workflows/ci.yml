@@ -1441,6 +1441,27 @@ jobs:
             fi
           done
 
+      - name: Run deployment tests
+        run: |
+          # Unit-shard test discovery does not include deploy/, so the chart
+          # render and dashboard tests run here, where Helm is installed. Each
+          # file runs in its own process, as in the unit shards.
+          mapfile -t test_files < <(git ls-files 'deploy/*.test.ts')
+          if [ "${#test_files[@]}" -eq 0 ]; then
+            echo "no deployment test files found" >&2
+            exit 1
+          fi
+          failed=0
+          for test_file in "${test_files[@]}"; do
+            echo "::group::${test_file}"
+            if ! bun test "./${test_file}"; then
+              echo "::error file=${test_file}::deployment test failed"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$failed"
+
       - name: Validate Terraform
         run: |
           terraform -chdir=deploy/terraform/azure fmt -check

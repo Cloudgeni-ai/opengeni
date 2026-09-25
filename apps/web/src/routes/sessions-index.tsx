@@ -1,6 +1,8 @@
 import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "@/lib/analytics-consent";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { useRepositoryCatalogRefresh } from "@/lib/use-follow-up-repositories";
+import { useGitHubAppConnectLauncher } from "@/components/github-app-connect-launcher";
+import { openGitHubInstallationSettings } from "@/lib/github-app-connect";
 import { captureAnalyticsEvent } from "@/lib/analytics-observer";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import {
@@ -227,6 +229,9 @@ function SessionsIndexRouteContent({
       : hasWorkspacePermission(context.accessContext, workspaceId, "connections:read"),
   );
   const repositoryCatalogRefresh = useRepositoryCatalogRefresh(workspaceId, context);
+  // Hosted here, outside the repository menu, so the menu closing when the
+  // authorization popup opens does not unmount GitHub App setup.
+  const githubAppConnect = useGitHubAppConnectLauncher(workspaceId);
   const firstPartyMcpToolPolicy = useMemo(
     () => clientFirstPartyMcpToolPolicy(context.clientConfig),
     [context.clientConfig],
@@ -1511,6 +1516,7 @@ function SessionsIndexRouteContent({
     // The canvas parent is overflow-hidden, so this route owns its scrolling —
     // without it the page clips (recent sessions were unreachable below the fold).
     <div data-workspace-scroll-owner="self-managed" className="min-h-0 flex-1 overflow-y-auto">
+      {githubAppConnect.element}
       <div className="mx-auto flex w-full max-w-3xl flex-col px-4 pt-10 pb-16 sm:px-6 sm:pt-16">
         <section className="flex flex-col items-center gap-2 text-center">
           <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
@@ -1608,6 +1614,7 @@ function SessionsIndexRouteContent({
                             workspaceId={workspaceId}
                             disabled={busy || newSessionDraft.loading}
                             catalogRefresh={repositoryCatalogRefresh}
+                            onConnectWorkspaceApp={githubAppConnect.open}
                           />
                         ),
                       },
@@ -2057,6 +2064,7 @@ function workspaceRepositoryPickerProps(
   context: ReturnType<typeof useAppContext>,
   workspaceId: string,
   disabled: boolean,
+  onConnectWorkspaceApp: () => void,
 ): RepositoryContextPickerProps {
   return {
     setupMode:
@@ -2232,6 +2240,9 @@ function workspaceRepositoryPickerProps(
     onGitHubAppOpenChange: context.setGithubAppOpen,
     onOrgChange: context.setGithubOrg,
     onStartGitHubApp: () => void context.startGitHubAppManifestFlow(workspaceId),
+    onConnectWorkspaceApp,
+    onConfigureInstallation: (installationId: number) =>
+      openGitHubInstallationSettings(context.client, workspaceId, installationId),
     onDisconnectInstallation: async (installationId: number) => {
       await context.disconnectGitHubInstallation(workspaceId, installationId);
     },
@@ -2243,16 +2254,18 @@ function WorkspaceRepositoryMenuBody({
   disabled,
   leading,
   catalogRefresh,
+  onConnectWorkspaceApp,
 }: {
   workspaceId: string;
   disabled: boolean;
   leading?: ReactNode;
   catalogRefresh: ReturnType<typeof useRepositoryCatalogRefresh>;
+  onConnectWorkspaceApp: () => void;
 }) {
   const context = useAppContext();
   return (
     <RepositoryContextMenuBody
-      {...workspaceRepositoryPickerProps(context, workspaceId, disabled)}
+      {...workspaceRepositoryPickerProps(context, workspaceId, disabled, onConnectWorkspaceApp)}
       {...catalogRefresh}
       {...(leading ? { leading } : {})}
     />

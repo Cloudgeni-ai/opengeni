@@ -229,6 +229,17 @@ export const EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_KERNEL_BROWSER_STEALTH",
 ];
 
+/** Jev (TypeSafe) settings for the worker-side `code_search` tool. The key is
+ * a server runtime secret (the worker calls Jev; the API only checks that it is
+ * set); it never reaches a sandbox. Unset keeps the tool off. */
+export const JEV_CODE_SEARCH_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_JEV_API_KEY",
+  "OPENGENI_JEV_BASE_URL",
+  "OPENGENI_JEV_MODEL",
+  "OPENGENI_JEV_REQUEST_TIMEOUT_MS",
+  "OPENGENI_CODE_SEARCH_MODE",
+];
+
 /** Public workspace MCP OAuth rollout settings. The enable switch is
  * deployment-sensitive because OAuth needs a canonical managed/local human
  * session and one stable public issuer origin. */
@@ -2963,6 +2974,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of JEV_CODE_SEARCH_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 

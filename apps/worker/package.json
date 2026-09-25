@@ -65,6 +65,7 @@
     "@opengeni/documents": "workspace:*",
     "@opengeni/events": "workspace:*",
     "@opengeni/github": "workspace:*",
+    "@opengeni/jev": "workspace:*",
     "@opengeni/network": "workspace:*",
     "@opengeni/observability": "workspace:*",
     "@opengeni/runtime": "workspace:*",

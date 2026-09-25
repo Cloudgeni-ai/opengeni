@@ -27,6 +27,7 @@ import {
   type VideoGenerationResolution,
   type FirstPartyMcpToolName as FirstPartyMcpToolNameType,
 } from "@opengeni/contracts";
+import type { CodeSearchDeploymentPolicy } from "@opengeni/contracts/code-search";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
 import {
   CODEX_FALLBACK_MODEL_SLUGS,
@@ -822,6 +823,19 @@ const SettingsSchema = z.object({
   // merged with the MCP-server tools (getAllTools = [...mcpTools, ...tools])
   // and the sandbox capability tools, never replacing them.
   webSearchEnabled: EnvBoolean.default(true),
+  // Jev (TypeSafe's fast judge model) for worker-side agent tools. Without a
+  // usable key every Jev-backed feature is off. The key stays on the server
+  // (API and worker) and never reaches a sandbox or Connected Machine.
+  jevApiKey: z.string().optional(),
+  jevBaseUrl: z.string().url().default("https://api.typesafe.ai"),
+  jevModel: z.string().trim().min(1).max(128).default("jev-latest"),
+  jevRequestTimeoutMs: z.coerce.number().int().positive().max(120_000).default(10_000),
+  // Jev-backed `code_search` agent tool. `off` never offers it, `opt_in` offers
+  // it only where workspace settings enable it, `default_on` offers it
+  // everywhere except workspaces that disable it, and `experiment` gives it to
+  // a fixed half of sessions in workspaces without their own setting, for
+  // comparison. It also needs jevApiKey.
+  codeSearchMode: z.enum(["off", "opt_in", "default_on", "experiment"]).default("off"),
   // Deployment-default agent persona template (the white-label surface). The
   // runtime resolves the effective template per turn as
   // per-session-override > per-workspace override > this default, substitutes
@@ -1621,6 +1635,31 @@ export type VoiceInputProviderConfig =
 
 function usableDeploymentSecret(value: string | null | undefined): string | undefined {
   return isUsableVoiceInputSecret(value) ? value : undefined;
+}
+
+/** The deployment's Jev key, or undefined when it is missing or a placeholder. */
+export function usableJevApiKey(settings: Pick<Settings, "jevApiKey">): string | undefined {
+  return usableDeploymentSecret(settings.jevApiKey);
+}
+
+/**
+ * Deployment half of the `code_search` decision. `available` is false when
+ * the mode is off or no usable Jev key is configured; workspaces then cannot
+ * turn it on. `workspaceDefault` applies to workspaces without their own
+ * setting.
+ */
+export function codeSearchDeploymentPolicy(
+  settings: Pick<Settings, "codeSearchMode" | "jevApiKey">,
+): CodeSearchDeploymentPolicy {
+  const available = settings.codeSearchMode !== "off" && usableJevApiKey(settings) !== undefined;
+  if (!available) return { available: false, workspaceDefault: "off" };
+  const workspaceDefault =
+    settings.codeSearchMode === "default_on"
+      ? "on"
+      : settings.codeSearchMode === "experiment"
+        ? "split"
+        : "off";
+  return { available, workspaceDefault };
 }
 
 /**
@@ -3322,6 +3361,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiReasoningEncryptedContent: optional("OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT"),
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
+    jevApiKey: optional("OPENGENI_JEV_API_KEY"),
+    jevBaseUrl: optional("OPENGENI_JEV_BASE_URL"),
+    jevModel: optional("OPENGENI_JEV_MODEL"),
+    jevRequestTimeoutMs: optional("OPENGENI_JEV_REQUEST_TIMEOUT_MS"),
+    codeSearchMode: optional("OPENGENI_CODE_SEARCH_MODE"),
     agentInstructionsTemplate: optional("OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE"),
     azureOpenaiBaseUrl: optional("OPENGENI_AZURE_OPENAI_BASE_URL"),
     azureOpenaiEndpoint: optional("OPENGENI_AZURE_OPENAI_ENDPOINT"),

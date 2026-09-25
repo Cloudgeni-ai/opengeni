@@ -535,6 +535,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             rigVersion,
             rigName,
             agentHumanInputEnabled,
+            codeSearchEnabled,
             workspaceAgentInstructions,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
@@ -1290,6 +1291,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             credentialSubjectId,
             interactionInterventionResume,
             runWorkspaceMutationForSandbox,
+            codeSearchEnabled,
             throwIfWorkerShuttingDown,
             throwIfTurnCancelled,
           });
@@ -1353,6 +1355,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             connectorActionPolicy,
             trigger,
             preparationIndependentToolNames,
+            codeSearchAvailable: toolRuntime.codeSearchAvailable,
             videoGenerationAcceptancesByCallId,
             activeSandboxBackend,
             groupBoxBackend,

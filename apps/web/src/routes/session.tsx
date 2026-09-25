@@ -170,6 +170,7 @@ import {
   sessionPolicyPickerIds,
 } from "@/lib/session-tools";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
+import { githubAppConnectRequest } from "@/lib/github-app-connect";
 import {
   useFixedResourceScopes,
   usePersonalResourceAttachment,
@@ -720,9 +721,12 @@ export function SessionRoute({
     window.history.replaceState(null, "", window.location.pathname);
     const capabilityId = params.get("capability_auth");
     if (outcome !== "success") {
-      toast.error("Reconnect failed", {
-        description: params.get("reason") ?? undefined,
-      });
+      // The failure copy loads only on this path, keeping it out of the route.
+      void import("@/lib/oauth-callback-messages").then(({ mcpOAuthCallbackFailureMessage }) =>
+        toast.error("Reconnect failed", {
+          description: mcpOAuthCallbackFailureMessage(params.get("stage"), params.get("reason")),
+        }),
+      );
       return;
     }
     if (!capabilityId) {
@@ -833,6 +837,13 @@ export function SessionRoute({
   // calm inline error on the reconnect card.
   const reconnectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
   const [reconnectRequest, setReconnectRequest] = useState<NativeConnectRequest | null>(null);
+  // Workspace GitHub App setup from the follow-up repository menu uses this
+  // route-level Connect dialog: the menu closes when GitHub's authorization
+  // popup takes focus, which would unmount a dialog hosted inside it.
+  const connectGitHubApp = useCallback(
+    () => setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport)),
+    [reconnectTransport, workspaceId],
+  );
   const onReconnect = useCallback(
     async (item: AuthNeededItem) => {
       if (item.authoritySource === "host") {
@@ -1095,6 +1106,7 @@ export function SessionRoute({
       onApprove={(approvalId) => approve(approvalId, "approve")}
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
+      onConnectGitHubApp={connectGitHubApp}
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
       onOpenSandboxFile={openSandboxFile}
@@ -1112,6 +1124,11 @@ export function SessionRoute({
             onClose={() => setReconnectRequest(null)}
             onComplete={() => {
               setReconnectRequest(null);
+              if (reconnectRequest.providerId === "github-app") {
+                toast.success("GitHub connected");
+                void context.refreshGitHub(workspaceId, undefined, { sync: true });
+                return;
+              }
               toast.success("Connection updated", {
                 description: "New tool calls can use the updated connection.",
               });
@@ -1485,6 +1502,8 @@ function SessionChatPane(props: {
   onApprove: (approvalId: string) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
+  /** Opens workspace GitHub App setup in the route-level Connect dialog. */
+  onConnectGitHubApp: () => void;
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
   onOpenSandboxFile: (path: string, line?: number) => void;
@@ -1708,7 +1727,7 @@ function SessionChatPane(props: {
         ? "personal"
         : "workspace",
   });
-  const repositories = useFollowUpRepositories(props.session);
+  const repositories = useFollowUpRepositories(props.session, props.onConnectGitHubApp);
   const firstPartyToolOptions = firstPartySessionToolOptionsFor(
     clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
   );

@@ -9,6 +9,7 @@ import {
 } from "@/components/repository-picker";
 import { actRun, registerDom, renderComponent } from "../../../packages/react/test/render-hook";
 import type {
+  GitHubInstallationBinding,
   GitHubRepository,
   PersonalGitHubConnectionStatusResponse,
   PersonalGitHubRepositoryCatalogItem,
@@ -80,6 +81,85 @@ describe("repository picker GitHub binding status", () => {
   });
 });
 
+describe("repository picker GitHub App links", () => {
+  test("connect and installation settings start from a click, never a page-load link", async () => {
+    const stale =
+      "https://api.opengeni.test/v1/workspaces/workspace/github/connect?state=minted-at-load";
+    let connects = 0;
+    const configured: number[] = [];
+    const rendered = await renderComponent(
+      createElement(RepositoryContextMenuBody, {
+        setupMode: "platform",
+        configured: true,
+        status: "unbound",
+        installUrl: stale,
+        linkUrl: stale,
+        installations: [
+          {
+            installationId: 42,
+            accountLogin: "octo-org",
+            lifecycle: "active",
+            repositoryScope: "selected",
+            repositoryCount: 2,
+            configureUrl: `${stale}&configure=42`,
+          } as unknown as GitHubInstallationBinding,
+        ],
+        repositories: [],
+        groups: [],
+        selectedRepoIds: new Set<number>(),
+        selectedRepoRefs: {},
+        selectedInstallationId: null,
+        manualRepos: [],
+        manualOpen: false,
+        githubAppOpen: false,
+        org: "",
+        pending: false,
+        repoBusy: false,
+        githubAppBusy: false,
+        onRefresh: async () => {},
+        onToggleRepo: () => {},
+        onRefChange: () => {},
+        onManualOpenChange: () => {},
+        onManualAdd: () => {},
+        onManualUpdate: () => {},
+        onManualRemove: () => {},
+        onGitHubAppOpenChange: () => {},
+        onOrgChange: () => {},
+        onStartGitHubApp: () => {},
+        onConnectWorkspaceApp: () => {
+          connects += 1;
+        },
+        onConfigureInstallation: async (installationId: number) => {
+          configured.push(installationId);
+          throw new Error("You can't change this installation's repositories.");
+        },
+        onDisconnectInstallation: async () => {},
+      }),
+    );
+    // No anchor may carry a signed state captured when the page loaded.
+    expect(
+      [...rendered.container.querySelectorAll("a")].filter((anchor) =>
+        anchor.getAttribute("href")?.includes("state="),
+      ),
+    ).toEqual([]);
+
+    const buttons = () => [...rendered.container.querySelectorAll<HTMLButtonElement>("button")];
+    const connect = buttons().find((button) => button.textContent === "Connect workspace App");
+    expect(connect).toBeTruthy();
+    await actRun(() => connect!.click());
+    expect(connects).toBe(1);
+
+    const settings = buttons().find((button) => button.textContent === "Repositories");
+    await actRun(() => settings!.click());
+    await actRun(() => Promise.resolve());
+    expect(configured).toEqual([42]);
+    expect(rendered.container.querySelector('[role="alert"]')?.textContent).toBe(
+      "You can't change this installation's repositories.",
+    );
+    await rendered.unmount();
+  });
+});
+
 describe("additive repository picker", () => {
   const personalRepository: PersonalGitHubRepositoryCatalogItem = {
     repositoryId: "9007199254740993123",
@@ -145,6 +225,8 @@ describe("additive repository picker", () => {
         onGitHubAppOpenChange: () => {},
         onOrgChange: () => {},
         onStartGitHubApp: () => {},
+        onConnectWorkspaceApp: () => {},
+        onConfigureInstallation: async () => {},
         onDisconnectInstallation: async () => {},
       }),
     );
@@ -208,6 +290,8 @@ describe("additive repository picker", () => {
         onGitHubAppOpenChange: () => {},
         onOrgChange: () => {},
         onStartGitHubApp: () => {},
+        onConnectWorkspaceApp: () => {},
+        onConfigureInstallation: async () => {},
         onDisconnectInstallation: async () => {},
       }),
     );
@@ -260,6 +344,8 @@ describe("additive repository picker", () => {
       onGitHubAppOpenChange: () => {},
       onOrgChange: () => {},
       onStartGitHubApp: () => {},
+      onConnectWorkspaceApp: () => {},
+      onConfigureInstallation: async () => {},
       onDisconnectInstallation: async () => {},
     };
     const trigger = await renderComponent(createElement(RepositoryContextPicker, props));

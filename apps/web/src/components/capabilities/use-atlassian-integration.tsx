@@ -21,6 +21,7 @@ import {
   localConnectedAtlassianPreview,
   preferredAtlassianConnection,
 } from "@/lib/atlassian-connection";
+import { oauthCallbackReasonMessage } from "@/lib/oauth-callback-messages";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import type { ConnectionMetadata } from "@/types";
 
@@ -336,7 +337,7 @@ export function atlassianChip(
   }
 }
 
-function atlassianFailureMessage(reason: string | null): string {
+export function atlassianFailureMessage(reason: string | null): string {
   if (reason === "provider_denied") return "Atlassian access was not approved.";
   if (reason === "scope_not_granted") return "The required read permissions were not approved.";
   if (reason === "no_accessible_sites")
@@ -344,5 +345,8 @@ function atlassianFailureMessage(reason: string | null): string {
   if (reason === "account_mismatch") return "Reconnect with the same Atlassian account.";
   if (reason === "refresh_token_missing")
     return "Offline access was not granted. Try connecting again.";
-  return "Check the Atlassian OAuth configuration and try again.";
+  // Expired, reused, and cancelled links are not configuration faults.
+  return (
+    oauthCallbackReasonMessage(reason) ?? "Check the Atlassian OAuth configuration and try again."
+  );
 }
