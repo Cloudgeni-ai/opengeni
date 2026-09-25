@@ -2,6 +2,7 @@ import { Link } from "@tanstack/react-router";
 import { ShieldCheckIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { ContentPage } from "@/components/ui/content-layout";
+import { SettingsPageHeader } from "./settings-layout";
 import {
   SettingsSidebar,
   SETTINGS_SHELL_CLASS,
@@ -23,8 +24,12 @@ export function PersonalSettingsShell({ email, children }: { email: string; chil
           </Link>
         </nav>
       </SettingsSidebar>
-      <ContentPage width="standard" className="max-w-3xl py-6 lg:py-8">
-        {children}
+      <ContentPage width="standard">
+        <SettingsPageHeader
+          title="Security"
+          description="Manage how you sign in and protect your account."
+        />
+        <div className="max-w-3xl py-7">{children}</div>
       </ContentPage>
     </div>
   );
