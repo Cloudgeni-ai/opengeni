@@ -674,13 +674,24 @@ because granting owner there would be a privilege event rather than a repair.
 No migration-time backfill over a FORCE-RLS table is needed.
 
 The stock web console may then show a skippable product step to connect a
-model or buy OpenGeni credits. When the deployment's client-config default
-model is free (or deployment-paid on a deployment that does not bill credits),
-and the new Personal workspace's model catalog confirms that model is
+model or buy OpenGeni credits. When the deployment bills credits and the new
+Personal workspace's model catalog reports a server-resolved default
+(`defaultSelection`) that is a selectable credits-billed model, the step reads
+the organization's balance (`GET /v1/billing`) and, while it is positive (for
+example the one-time verified-signup trial grant), leads with starting to chat
+on those credits: it shows the actual balance and the resolved default model
+and reasoning, names the free deployment model (when one is confirmed) as what
+new chats use after the credits run out, and presents connecting a
+subscription, bringing a key, or buying more credits as optional. When the
+balance read fails but the resolved default's source is `credits` (which the
+server only reports while the balance is positive), the same copy appears
+without the amount. It never hardcodes a model id or an amount. Otherwise, when
+the deployment's client-config default model is free (or deployment-paid on a
+deployment that does not bill credits), and the catalog confirms that model is
 selectable there (client config carries no credential-readiness or policy
 signal), the step leads with starting to chat on that model and presents every
-connection or purchase as an optional upgrade; it never hardcodes a model id.
-An unconfirmed or unreadable catalog shows the ordinary choice screen instead.
+connection or purchase as an optional upgrade. An unconfirmed or unreadable
+catalog shows the ordinary choice screen instead.
 Connecting selects a model from the connected family (Codex, SuperGrok, or the
 provider key) in the human’s actor-private new-session draft with its expected
 revision, preserving the other draft fields, and never falls back to the free
@@ -689,10 +700,11 @@ ordinary `?model=&effort=` launch contract with the server's credits default
 selected (the configured credits model, GPT-6 Luna at extra high reasoning by
 default), unless a connected subscription or saved workspace default would
 still win. `?modelSource=default` keeps that draft following the default, so
-connecting a subscription later still moves it; the verified-signup trial
-credit alone never switches the default. Beyond onboarding, a new chat that follows the default moves to a
+connecting a subscription later still moves it. The verified-signup trial
+grant counts like any other credits, so a new organization holding it already
+defaults to the credits model. Beyond onboarding, a new chat that follows the default moves to a
 connected subscription, or to the credits default while the organization holds
-credits, on its own; see "Default model for new work" in
+a positive credit balance, on its own; see "Default model for new work" in
 [`model-providers.md`](model-providers.md). When the composer's selected model
 later stops being selectable, its fallback takes that resolved default first,
 then prefers a selectable Codex, SuperGrok, or workspace provider model, then
