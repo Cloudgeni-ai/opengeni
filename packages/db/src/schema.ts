@@ -4684,6 +4684,9 @@ export const sessions = pgTable(
     // or portable (plaintext compaction + free provider switching). Existing
     // rows backfill to portable. CHECK lives in the migration.
     codexCompactionMode: text("codex_compaction_mode").notNull().default("portable"),
+    // Frozen at create (migration 0520): whether the optional Jev-backed
+    // code_search tool is offered. NULL, as on every older row, means off.
+    codeSearchEnabled: boolean("code_search_enabled"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     // Assigned once by the explicit transaction commit gate whenever canonical
