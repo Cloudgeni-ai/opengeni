@@ -72,6 +72,14 @@ const legacySandboxReaperWorkflowPath = new URL(
   "../../apps/worker/test/fixtures/legacy-sandbox-reaper-workflow.ts",
   import.meta.url,
 ).pathname;
+// Recorded with the session workflow immediately before
+// session-capacity-wake-jitter-v1: a capacity wait cut short by a capacity
+// signal, then a waiter whose reset timer fired. Delete it only once that patch
+// is deprecated and no pre-jitter capacity wait can still be replayed.
+const legacySessionCapacityWaitHistoryPath = new URL(
+  "../../apps/worker/test/fixtures/legacy-session-capacity-wait-history.json",
+  import.meta.url,
+).pathname;
 
 // This case follows two real 125-second heartbeat-timeout proofs. Temporal can
 // take more than the general 30-second budget to poll and drain its next worker
@@ -2512,10 +2520,144 @@ describe("Temporal workflow integration", () => {
         expect(
           markerPayloadText.some((text) => text.includes("session-capacity-wake-jitter-v1")),
         ).toBe(true);
+        await Worker.runReplayHistory(
+          { workflowsPath: workflowDefinitionsPath },
+          history,
+          workflowId,
+        );
       } finally {
         worker.shutdown();
         await run;
       }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "spreads a fired reset timer and an already-due waiter with replay-safe history",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `session-${sessionId}`;
+      const queuedTurns = [queuedTurn("event-1")];
+      const attempts: Array<{ attemptId: string; turnId: string }> = [];
+      const causes: string[] = [];
+      const jitterCeilingMs = 1_500;
+      const baseTimerMs = 300;
+      const waiter = {
+        waiterId: crypto.randomUUID(),
+        generation: 1,
+        nextCheckAt: new Date(Date.now() + 60_000).toISOString(),
+        wakeRevision: 1,
+      };
+      let current: typeof waiter | null = null;
+      const admission = createTurnAdmission(queuedTurns, async (input, turn) => {
+        attempts.push({ attemptId: input.attemptId, turnId: turn.id });
+        if (attempts.length > 1) return { status: "idle" };
+        // The reset deadline is set at commit time so the first wait is a real
+        // timer rather than an already-due waiter.
+        current = { ...waiter, nextCheckAt: new Date(Date.now() + baseTimerMs).toISOString() };
+        return { status: "waiting_capacity", capacityWait: current };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
+        getCodexCapacityWait: async () => current,
+        reconcileCodexCapacityWait: async (input: { cause: string }) => {
+          causes.push(input.cause);
+          if (causes.length === 1) {
+            // Still exhausted, and the next check is already due: the loop must
+            // spread it instead of reconciling again immediately.
+            current = {
+              ...waiter,
+              generation: 2,
+              nextCheckAt: new Date(0).toISOString(),
+              wakeRevision: 2,
+            };
+            return { action: "waiting", ...current };
+          }
+          current = null;
+          admission.resumeCapacity();
+          return { action: "resumed" };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [
+            {
+              ...scope,
+              sessionId,
+              initialEventId: "event-1",
+              capacityWakeJitterMaxMs: jitterCeilingMs,
+            },
+          ],
+        });
+        await handle.result();
+        expect(causes).toEqual(["timer", "timer"]);
+        expect(attempts).toHaveLength(2);
+        const history = await handle.fetchHistory();
+        const timerMs = (history.events ?? [])
+          .map((event) => event.timerStartedEventAttributes?.startToFireTimeout)
+          .filter((timeout) => timeout != null)
+          .map((timeout) => Number(timeout!.seconds ?? 0) * 1_000 + (timeout!.nanos ?? 0) / 1e6);
+        // The reset timer keeps its own deadline and each spread is a separate
+        // bounded timer (a zero draw creates none), so bound them rather than
+        // count them. The 5 s timers are the ordinary idle window after the turn.
+        const capacityTimers = timerMs.filter((duration) => duration !== 5_000);
+        expect(capacityTimers.length).toBeGreaterThanOrEqual(1);
+        expect(capacityTimers.length).toBeLessThanOrEqual(3);
+        for (const duration of capacityTimers) {
+          expect(duration).toBeLessThanOrEqual(Math.max(baseTimerMs, jitterCeilingMs));
+        }
+        expect(patchIds(history)).toContain("session-capacity-wake-jitter-v1");
+        await Worker.runReplayHistory(
+          { workflowsPath: workflowDefinitionsPath },
+          history,
+          workflowId,
+        );
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "replays a pre-jitter capacity wait recorded by the previous worker",
+    async () => {
+      // Forward rolling direction: a patched worker must replay every capacity
+      // wait an older worker recorded (signal-cut timer, then a fired timer)
+      // without adding the jitter timers. The reverse direction is not
+      // supported: an older worker fails a history that carries the marker.
+      const history = (await Bun.file(legacySessionCapacityWaitHistoryPath).json()) as {
+        events: Array<{
+          workflowExecutionStartedEventAttributes?: { workflowId?: string };
+          markerRecordedEventAttributes?: unknown;
+          timerStartedEventAttributes?: unknown;
+          eventType?: string;
+        }>;
+      };
+      const recordedPatches = patchIds(history);
+      expect(recordedPatches).toContain("session-safe-control-observation-v1");
+      expect(recordedPatches).not.toContain("session-capacity-wake-jitter-v1");
+      expect(history.events.filter((event) => event.timerStartedEventAttributes)).toHaveLength(3);
+      const workflowId =
+        history.events[0]?.workflowExecutionStartedEventAttributes?.workflowId ?? "fake";
+      await Worker.runReplayHistory(
+        { workflowsPath: workflowDefinitionsPath },
+        history,
+        workflowId,
+      );
     },
     temporalWorkflowTestTimeoutMs,
   );
@@ -3193,6 +3335,33 @@ describe("Temporal workflow integration", () => {
     continueAsNewTestTimeoutMs,
   );
 });
+
+/** Patch ids recorded in a fetched or JSON-exported workflow history. */
+function patchIds(history: {
+  events?: Array<{ markerRecordedEventAttributes?: unknown }> | null;
+}): string[] {
+  const ids: string[] = [];
+  for (const event of history.events ?? []) {
+    const marker = event.markerRecordedEventAttributes as
+      | {
+          details?: Record<
+            string,
+            { payloads?: Array<{ data?: Uint8Array | string | null }> | null } | null
+          > | null;
+        }
+      | null
+      | undefined;
+    const data = marker?.details?.["patch-data"]?.payloads?.[0]?.data;
+    if (data == null) continue;
+    const text =
+      typeof data === "string"
+        ? Buffer.from(data, "base64").toString("utf8")
+        : Buffer.from(data).toString("utf8");
+    const id = (JSON.parse(text) as { id?: unknown }).id;
+    if (typeof id === "string") ids.push(id);
+  }
+  return ids;
+}
 
 function decodeContinuedInput(
   event:

@@ -35,7 +35,11 @@ import {
 import { rigProviderImageSourceImage } from "../sandbox-images";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import type { currentActivityContext } from "../streaming";
-import { resumeBoxForTurn, type ResumedTurnSandbox } from "../../sandbox-resume";
+import {
+  createFreshSandboxReadinessReplacementBudget,
+  resumeBoxForTurn,
+  type ResumedTurnSandbox,
+} from "../../sandbox-resume";
 import {
   wrapTurnBoxWithRouting,
   wrapLazyTurnBoxWithRouting,
@@ -298,6 +302,9 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
 }
 
 export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Promise<void> {
+  // One fresh-box readiness replacement per turn attempt, shared by the eager
+  // establish and every lazy provisioner retry of this attempt.
+  const freshSandboxReadinessReplacementBudget = createFreshSandboxReadinessReplacementBudget();
   const {
     input,
     settings,
@@ -593,6 +600,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                 observability,
+                freshSandboxReadinessReplacementBudget,
                 onSandboxLost: publishSandboxLost,
                 objectStorage,
               },
@@ -669,6 +677,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                 observability,
+                freshSandboxReadinessReplacementBudget,
                 onSandboxLost: publishSandboxLost,
                 objectStorage,
               },

@@ -20,6 +20,9 @@ import {
   appendAndPublishEvents,
   createNatsEventBus,
   createResponderConnection,
+  NATS_SUBSCRIPTION_TERMINATIONS_METRIC,
+  natsResubscribeDelayMs,
+  natsSubscriptionTerminationCounter,
   publishDurableSessionEvents,
   requireSessionEventDurableFanoutCapability,
   SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION,
@@ -208,13 +211,19 @@ type FakeMsg = {
 };
 
 /** An async-iterable subscription fed by a script; `fail` ends it like nats.js
- *  does for a subscription permissions violation. */
+ *  does for a subscription permissions violation, and `unsubscribe` ends it
+ *  normally like nats.js does for a requested unsubscribe. */
 function scriptedSubscription(subject: string) {
-  const queued: Array<{ message?: FakeMsg; error?: unknown }> = [];
+  const queued: Array<{ message?: FakeMsg; error?: unknown; end?: true }> = [];
   const waiters: Array<() => void> = [];
   const wake = () => waiters.splice(0).forEach((resolve) => resolve());
+  let unsubscribed = false;
   const iterable = {
-    unsubscribe() {},
+    unsubscribe() {
+      unsubscribed = true;
+      queued.push({ end: true });
+      wake();
+    },
     async *[Symbol.asyncIterator]() {
       for (;;) {
         const next = queued.shift();
@@ -222,6 +231,7 @@ function scriptedSubscription(subject: string) {
           await new Promise<void>((resolve) => waiters.push(resolve));
           continue;
         }
+        if (next.end) return;
         if (next.error !== undefined) throw next.error;
         yield next.message!;
       }
@@ -229,6 +239,8 @@ function scriptedSubscription(subject: string) {
   };
   return {
     iterable,
+    subject,
+    isUnsubscribed: () => unsubscribed,
     push: (data: Uint8Array, extra: Partial<FakeMsg> = {}) => {
       queued.push({ message: { data, subject, ...extra } });
       wake();
@@ -373,6 +385,224 @@ describe("detached NATS subscription loops never reject the process", () => {
       await responder.close();
       await bus.close();
     });
+  });
+});
+
+function scriptedConnection(state: { draining?: boolean } = {}) {
+  const subscriptions: Array<ReturnType<typeof scriptedSubscription>> = [];
+  const connect = async () =>
+    ({
+      ...(fakeNatsConnection() as Record<string, unknown>),
+      subscribe: (subject: string) => {
+        const scripted = scriptedSubscription(subject);
+        subscriptions.push(scripted);
+        return scripted.iterable;
+      },
+      isDraining: () => state.draining === true,
+    }) as never;
+  return { subscriptions, connect };
+}
+
+describe("a subscription that ends while still held is surfaced, never silent", () => {
+  test("session and workspace-control consumers are told once and counted", async () => {
+    await withUnhandledRejectionProbe(async (rejections) => {
+      const { subscriptions, connect } = scriptedConnection();
+      const terminations: unknown[] = [];
+      const warnings: Array<{ message: string; attributes?: Record<string, unknown> }> = [];
+      const bus = await createNatsEventBus("nats://termination.test:4222", undefined, {
+        connect,
+        logger: { warn: (message, attributes) => warnings.push({ message, attributes }) },
+        onSubscriptionTerminated: (termination) => terminations.push(termination),
+      });
+      const sessionEnds: unknown[] = [];
+      const controlEnds: unknown[] = [];
+      await bus.subscribe(SENTINEL_WS, "00000000-0000-4000-8000-000000000001", () => undefined, {
+        onTerminated: (error) => sessionEnds.push(error),
+      });
+      await bus.subscribeWorkspaceControl(SENTINEL_WS, () => undefined, {
+        onTerminated: (error) => controlEnds.push(error),
+      });
+      // A consumer without a hook is still logged and counted.
+      await bus.subscribe(SENTINEL_WS, "00000000-0000-4000-8000-000000000002", () => undefined);
+      const violation = permissionsViolation();
+      for (const scripted of subscriptions) scripted.fail(violation);
+      await waitFor(() => terminations.length === 3);
+      await Bun.sleep(5);
+      expect(sessionEnds).toEqual([violation]);
+      expect(controlEnds).toEqual([violation]);
+      expect(terminations).toEqual([
+        { kind: "session_events", recovery: "consumer_reconnect" },
+        { kind: "workspace_control", recovery: "consumer_reconnect" },
+        { kind: "session_events", recovery: "none" },
+      ]);
+      expect(warnings.map((warning) => warning.attributes?.recovery)).toEqual([
+        "consumer_reconnect",
+        "consumer_reconnect",
+        "none",
+      ]);
+      expect(subscriptions).toHaveLength(3);
+      expect(rejections).toEqual([]);
+      await bus.close();
+    });
+  });
+
+  test("a requested unsubscribe or a closing bus is not a termination", async () => {
+    const state = { draining: false };
+    const { subscriptions, connect } = scriptedConnection(state);
+    const terminations: unknown[] = [];
+    const ends: unknown[] = [];
+    const bus = await createNatsEventBus("nats://termination.test:4222", undefined, {
+      connect,
+      onSubscriptionTerminated: (termination) => terminations.push(termination),
+    });
+    const release = await bus.subscribe(
+      SENTINEL_WS,
+      "00000000-0000-4000-8000-000000000001",
+      () => undefined,
+      {
+        onTerminated: (error) => ends.push(error),
+      },
+    );
+    release();
+    subscriptions[0]!.fail(permissionsViolation());
+    await bus.subscribeWorkspaceControl(SENTINEL_WS, () => undefined, {
+      onTerminated: (error) => ends.push(error),
+    });
+    bus.subscribeRequests("agent.*.*.connection.*.rpc", () => new Uint8Array());
+    state.draining = true;
+    subscriptions[1]!.fail(new Error("closed by drain"));
+    subscriptions[2]!.fail(new Error("closed by drain"));
+    await Bun.sleep(20);
+    expect(ends).toEqual([]);
+    expect(terminations).toEqual([]);
+    expect(subscriptions).toHaveLength(3);
+    await bus.close();
+  });
+
+  test("process-lifetime responders resubscribe with bounded backoff and keep answering", async () => {
+    await withUnhandledRejectionProbe(async (rejections) => {
+      const { subscriptions, connect } = scriptedConnection();
+      const terminations: unknown[] = [];
+      const delays: number[] = [];
+      const resubscribeDelayMs = (attempt: number) => {
+        delays.push(attempt);
+        return 0;
+      };
+      const bus = await createNatsEventBus("nats://termination.test:4222", undefined, {
+        connect,
+        onSubscriptionTerminated: (termination) => terminations.push(termination),
+        resubscribeDelayMs,
+      });
+      const handled: string[] = [];
+      const unsubscribeRequests = bus.subscribeRequests("agent.*.*.connection.*.rpc", (request) => {
+        handled.push(`request:${new TextDecoder().decode(request)}`);
+        return new TextEncoder().encode("pong");
+      });
+      bus.subscribeAgentEvents("agent.*.*.connection.*.events", (payload) => {
+        handled.push(`event:${new TextDecoder().decode(payload)}`);
+      });
+      const responder = await createResponderConnection(
+        SENTINEL_URL,
+        { kind: "anonymous" },
+        "$SYS.REQ.USER.AUTH",
+        (request) => {
+          handled.push(`auth:${new TextDecoder().decode(request)}`);
+          return new TextEncoder().encode("granted");
+        },
+        {
+          connect,
+          onSubscriptionTerminated: (termination) => terminations.push(termination),
+          resubscribeDelayMs,
+        },
+      );
+      expect(subscriptions.map((scripted) => scripted.subject)).toEqual([
+        "agent.*.*.connection.*.rpc",
+        "agent.*.*.connection.*.events",
+        "$SYS.REQ.USER.AUTH",
+      ]);
+      // Two consecutive failures back off with a growing attempt count.
+      subscriptions[0]!.fail(permissionsViolation());
+      await waitFor(() => subscriptions.length === 4);
+      subscriptions[3]!.fail(permissionsViolation());
+      await waitFor(() => subscriptions.length === 5);
+      subscriptions[1]!.fail(permissionsViolation());
+      subscriptions[2]!.fail(permissionsViolation());
+      await waitFor(() => subscriptions.length === 7);
+      expect(subscriptions.slice(4).map((scripted) => scripted.subject)).toEqual([
+        "agent.*.*.connection.*.rpc",
+        "agent.*.*.connection.*.events",
+        "$SYS.REQ.USER.AUTH",
+      ]);
+      expect(delays).toEqual([1, 2, 1, 1]);
+
+      const replies: string[] = [];
+      const respond = (data: Uint8Array) => {
+        replies.push(new TextDecoder().decode(data));
+        return true;
+      };
+      const encode = (text: string) => new TextEncoder().encode(text);
+      subscriptions[4]!.push(encode("ping"), { reply: "_INBOX.1", respond });
+      subscriptions[5]!.push(encode("heartbeat"));
+      subscriptions[6]!.push(encode("authorize"), { reply: "_INBOX.2", respond });
+      await waitFor(() => handled.length === 3 && replies.length === 2);
+      expect(handled.sort()).toEqual(["auth:authorize", "event:heartbeat", "request:ping"]);
+      expect(replies.sort()).toEqual(["granted", "pong"]);
+      expect(terminations).toEqual([
+        { kind: "request_responder", recovery: "resubscribe" },
+        { kind: "request_responder", recovery: "resubscribe" },
+        { kind: "agent_events", recovery: "resubscribe" },
+        { kind: "auth_callout", recovery: "resubscribe" },
+      ]);
+
+      // A delivered message resets the backoff for the next failure.
+      subscriptions[4]!.fail(permissionsViolation());
+      await waitFor(() => subscriptions.length === 8);
+      expect(delays.at(-1)).toBe(1);
+
+      // After the owner unsubscribes, a late end never resubscribes.
+      unsubscribeRequests();
+      expect(subscriptions[7]!.isUnsubscribed()).toBe(true);
+      await responder.close();
+      expect(subscriptions[6]!.isUnsubscribed()).toBe(true);
+      await Bun.sleep(20);
+      expect(subscriptions).toHaveLength(8);
+      expect(rejections).toEqual([]);
+      await bus.close();
+    });
+  });
+
+  test("the resubscribe backoff is bounded and jittered", () => {
+    expect(natsResubscribeDelayMs(1, () => 0)).toBe(1_000);
+    expect(natsResubscribeDelayMs(2, () => 0)).toBe(2_000);
+    expect(natsResubscribeDelayMs(5, () => 0)).toBe(16_000);
+    expect(natsResubscribeDelayMs(6, () => 0)).toBe(30_000);
+    expect(natsResubscribeDelayMs(1_000, () => 0.5)).toBe(30_500);
+    for (const hostile of [Number.NaN, -1, 2, Number.POSITIVE_INFINITY]) {
+      const delay = natsResubscribeDelayMs(3, () => hostile);
+      expect(delay).toBeGreaterThanOrEqual(4_000);
+      expect(delay).toBeLessThan(5_000);
+    }
+    for (const attempt of [0, -3, Number.NaN]) {
+      expect(natsResubscribeDelayMs(attempt, () => 0)).toBe(1_000);
+    }
+  });
+
+  test("the counter adapter uses the closed kind and recovery labels", () => {
+    const counted: unknown[] = [];
+    natsSubscriptionTerminationCounter({ incrementCounter: (input) => counted.push(input) })({
+      kind: "auth_callout",
+      recovery: "resubscribe",
+    });
+    expect(counted).toEqual([
+      {
+        name: NATS_SUBSCRIPTION_TERMINATIONS_METRIC,
+        help: expect.any(String),
+        labels: { kind: "auth_callout", recovery: "resubscribe" },
+      },
+    ]);
+    expect(NATS_SUBSCRIPTION_TERMINATIONS_METRIC).toBe(
+      "opengeni_nats_subscription_terminations_total",
+    );
   });
 });
 

@@ -164,6 +164,10 @@ describe("turn-capacity Prometheus alerts", () => {
         ],
       ],
       ["OpenGeniMcpToolOutcomeUncertain", ["outcome_uncertain"]],
+      [
+        "OpenGeniNatsSubscriptionTerminated",
+        ["opengeni_nats_subscription_terminations_total", "sum by (kind, recovery)"],
+      ],
       ["OpenGeniMcpToolLatencyHigh", ["opengeni_mcp_tool_call_duration_seconds_bucket"]],
       ["OpenGeniHttp5xxRatioHigh", ["opengeni_http_requests_total", 'status=~"5.."']],
       [

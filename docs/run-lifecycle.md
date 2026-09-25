@@ -1451,15 +1451,24 @@ and truthful durations; a command-readiness failure is never rewritten as a
 and rolls only the exact warming epoch back to cold. When that instance was
 freshly created by the elected spawner (not an attached, resumed, or
 provider-continuity box) and the provider confirmed its termination, the same
-turn re-enters ordinary lease admission exactly once after a jittered 2 to 10
-second pause, because boxes created in one burst tend to miss readiness together
-and their replacements must not re-synchronize. The replacement goes through the
-normal epoch-fenced cold->warming CAS (or attaches to a sibling that won it),
-records its own provider instance before readiness, and replays nothing: no
-model- or tool-visible work ran on the discarded box. A second readiness miss,
-an unconfirmed termination, or cancellation during the pause fails the turn
-rather than rapidly creating sibling boxes. Any later display/setup failure
-follows the same owned cleanup path.
+turn re-enters ordinary lease admission after a jittered 2 to 10 second pause,
+because boxes created in one burst tend to miss readiness together and their
+replacements must not re-synchronize. The budget is one replacement per turn
+attempt, shared by the eager establish and every lazy-provisioner retry of that
+attempt, so a typed lease supersession cannot multiply it. The replacement goes
+through the normal epoch-fenced cold->warming CAS (or attaches to a sibling that
+won it), records its own provider instance before readiness, and replays
+nothing: no model- or tool-visible work ran on the discarded box. An
+archive-restored box is replaced the same way: its failed rematerialization
+leaves the lease cold with a retryable `degraded` restore of the same durable
+revision for the pause, and the replacement re-rematerializes that revision
+under a new rematerialization id. A second readiness miss, a spent budget, an
+unconfirmed termination, or cancellation during the pause fails the turn rather
+than rapidly creating sibling boxes. `opengeni_sandbox_readiness_replacements_total`
+(`outcome`: `replaced`, `failed_again`, `replacement_failed`, `cancelled`,
+`budget_spent`) separates replaced boxes from failed turns; the first miss is
+still counted by `opengeni_sandbox_warming_timeouts_total`. Any later
+display/setup failure follows the same owned cleanup path.
 
 After a managed lease is warm, immutable Sandbox Environment setup has a second, setup-specific
 single-flight boundary. One worker claims the exact `(lease epoch, provider

@@ -67,9 +67,16 @@ const ROTATION_IDLE_FLOOR_MS = 60_000; // 60s
  * turns stampede sandbox creation and the provider. Each workflow therefore
  * delays its reconciliation by a bounded, replay-deterministic (Temporal-seeded
  * `Math.random`) jitter: up to one minute past a scheduled reset timer and up to
- * 30 seconds after a capacity or queue wake. The Postgres waiter stays
- * authoritative; jitter only delays the same reconciliation activity and never
- * creates queue rows, input, or inference. Interruptions are never delayed.
+ * 30 seconds after a capacity or queue wake or an already-due waiter. A wake
+ * that lands inside a waiter's timer spread does not shorten it. The Postgres
+ * waiter stays authoritative; jitter only delays the same reconciliation
+ * activity and never creates queue rows, input, or inference. Interruptions are
+ * never delayed.
+ *
+ * The patch marker is not understood by workers built before it: rolling the
+ * worker image back past this change while a session has recorded the marker
+ * (it waited on capacity in its current run) fails that workflow's tasks as
+ * nondeterministic until a patched worker returns.
  */
 export const CAPACITY_WAKE_JITTER_PATCH = "session-capacity-wake-jitter-v1";
 export const CAPACITY_TIMER_WAKE_JITTER_MAX_MS = 60_000;
@@ -516,40 +523,60 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const timerMs = Number.isFinite(parsedDeadline)
         ? Math.max(0, parsedDeadline - Date.now())
         : 0;
+      const observedCause = (): activities.ReconcileCodexCapacityWaitInput["cause"] =>
+        wakeups !== seenWakeups
+          ? "queue"
+          : capacityWakeups !== seenCapacityWakeups
+            ? "signal"
+            : "timer";
       let cause: activities.ReconcileCodexCapacityWaitInput["cause"] = "timer";
+      let spread = false;
       if (wakeups !== seenWakeups) {
         cause = "queue";
       } else if (capacityWakeups !== seenCapacityWakeups) {
         cause = "signal";
       } else if (timerMs > 0) {
-        // Histories recorded before the jitter keep their exact timer duration.
-        const timerJitterMs = patched(CAPACITY_WAKE_JITTER_PATCH)
-          ? capacityWakeJitterMs("timer", Math.random(), input.capacityWakeJitterMaxMs)
-          : 0;
         await condition(
           () =>
             interruptionWakeups !== seenInterruptionWakeups ||
             wakeups !== seenWakeups ||
             capacityWakeups !== seenCapacityWakeups,
-          timerMs + timerJitterMs,
+          timerMs,
         );
         if (interruptionWakeups !== seenInterruptionWakeups) {
           return;
         }
-        cause =
-          wakeups !== seenWakeups
-            ? "queue"
-            : capacityWakeups !== seenCapacityWakeups
-              ? "signal"
-              : "timer";
+        cause = observedCause();
+        // Histories recorded before the jitter replay without the marker and
+        // reconcile right at the deadline, exactly as they did.
+        if (cause === "timer" && patched(CAPACITY_WAKE_JITTER_PATCH)) {
+          // The shared reset deadline itself fired. The first waiter to
+          // reconcile usually refreshes usage and wakes every other waiter; a
+          // waiter already inside its own spread keeps it instead of starting a
+          // second, shorter one, so the backlog resumes across the whole window.
+          spread = true;
+          const timerJitterMs = capacityWakeJitterMs(
+            "timer",
+            Math.random(),
+            input.capacityWakeJitterMaxMs,
+          );
+          if (timerJitterMs > 0) {
+            await condition(() => interruptionWakeups !== seenInterruptionWakeups, timerJitterMs);
+            if (interruptionWakeups !== seenInterruptionWakeups) {
+              return;
+            }
+          }
+          cause = observedCause();
+        }
       }
-      if (cause !== "timer" && patched(CAPACITY_WAKE_JITTER_PATCH)) {
-        // One capacity mutation wakes every waiter of the pool at once, both as
-        // the typed capacity signal and as the generic durable workflow wake
-        // (delivered as `queueChanged`). Spread those reconciliations. A later
-        // wake does not cut the pause short (that would re-synchronize the
-        // herd); a queued prompt stays behind the blocked turn either way, so
-        // only an interruption (Pause/Steer/Cancel) needs to win immediately.
+      if (!spread && patched(CAPACITY_WAKE_JITTER_PATCH)) {
+        // One capacity mutation wakes every waiter of the pool at once (the typed
+        // capacity signal and the generic durable wake), and a fresh run after
+        // continue-as-new, restart, or Resume sees every unobserved wake as an
+        // already-due waiter. Spread those reconciliations too. A later wake
+        // does not cut the pause short (that would re-synchronize the herd); a
+        // queued prompt stays behind the blocked turn either way, so only an
+        // interruption (Pause/Steer/Cancel) wins immediately.
         const wakeJitterMs = capacityWakeJitterMs(
           "wake",
           Math.random(),

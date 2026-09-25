@@ -37,6 +37,14 @@ export type EventBusOptions = {
   logger?: EventLogger;
   /** Test/host transport seam; production defaults to the nats.js connector. */
   connect?: typeof connect;
+  /**
+   * Metrics seam: called once for every subscription that ends without being
+   * unsubscribed (see {@link natsSubscriptionTerminationCounter}). A throwing
+   * sink is ignored.
+   */
+  onSubscriptionTerminated?: (termination: NatsSubscriptionTermination) => void;
+  /** Test seam for the responder resubscribe backoff; production uses {@link natsResubscribeDelayMs}. */
+  resubscribeDelayMs?: (attempt: number) => number;
 };
 
 const silentLogger: Required<EventLogger> = {
@@ -208,23 +216,111 @@ function subscriptionFailureAttributes(error: unknown): Record<string, unknown> 
 }
 
 /**
+ * Closed label set for {@link NatsSubscriptionTermination}. Each value names one
+ * subscription role this package owns; no subject, tenant, or payload
+ * dimension is ever admitted, so a metric sink can use them as labels.
+ */
+export const NATS_SUBSCRIPTION_KINDS = [
+  "session_events",
+  "workspace_control",
+  "request_responder",
+  "agent_events",
+  "auth_callout",
+] as const;
+export type NatsSubscriptionKind = (typeof NATS_SUBSCRIPTION_KINDS)[number];
+
+/**
+ * What happens after an unexpected end: a per-consumer subscription tells its
+ * consumer (`consumer_reconnect`, e.g. session SSE fails retryably and the
+ * client replays from Postgres), a process-lifetime responder resubscribes with
+ * bounded backoff (`resubscribe`), and a consumer that registered no hook only
+ * relies on its own durable re-read (`none`).
+ */
+export const NATS_SUBSCRIPTION_RECOVERIES = ["consumer_reconnect", "resubscribe", "none"] as const;
+export type NatsSubscriptionRecovery = (typeof NATS_SUBSCRIPTION_RECOVERIES)[number];
+
+export type NatsSubscriptionTermination = {
+  kind: NatsSubscriptionKind;
+  recovery: NatsSubscriptionRecovery;
+};
+
+/** Prometheus counter name for {@link natsSubscriptionTerminationCounter}. */
+export const NATS_SUBSCRIPTION_TERMINATIONS_METRIC =
+  "opengeni_nats_subscription_terminations_total";
+
+/**
+ * Adapt a counter sink (the API/worker `Observability`) into the
+ * `onSubscriptionTerminated` hook. Labels are the closed kind/recovery sets.
+ */
+export function natsSubscriptionTerminationCounter(sink: {
+  incrementCounter(input: { name: string; help?: string; labels?: Record<string, string> }): void;
+}): (termination: NatsSubscriptionTermination) => void {
+  return ({ kind, recovery }) => {
+    sink.incrementCounter({
+      name: NATS_SUBSCRIPTION_TERMINATIONS_METRIC,
+      help: "NATS subscriptions that ended without being unsubscribed, by subscription kind and recovery path.",
+      labels: { kind, recovery },
+    });
+  };
+}
+
+/** Per-subscription consumer options for {@link EventBus.subscribe}. */
+export type BusSubscriptionOptions = {
+  /**
+   * Called at most once when the live transport subscription ends while the
+   * consumer still holds it (a broker-side error such as a permissions
+   * violation, or an iterator end the consumer did not request). Live events
+   * stop after this call, so the consumer must reconcile from Postgres: session
+   * and workspace-control SSE fail the stream retryably and the client
+   * reconnects and replays. Never called after the returned unsubscribe runs or
+   * while the bus itself is closing.
+   */
+  onTerminated?: (error: unknown) => void;
+};
+
+/** Bounded resubscribe backoff for process-lifetime responders: 1 s doubling to 30 s, plus up to 1 s jitter. */
+export function natsResubscribeDelayMs(
+  attempt: number,
+  random: () => number = Math.random,
+): number {
+  const exponent = Number.isFinite(attempt) ? Math.min(Math.max(0, Math.trunc(attempt) - 1), 5) : 0;
+  const sample = random();
+  const unit = Number.isFinite(sample) ? Math.min(Math.max(sample, 0), 1 - Number.EPSILON) : 0;
+  return Math.min(30_000, 1_000 * 2 ** exponent) + Math.floor(unit * 1_000);
+}
+
+type SubscriptionContext = {
+  label: string;
+  kind: NatsSubscriptionKind;
+  subject: string;
+  logger?: EventLogger | undefined;
+  onSubscriptionTerminated?: ((termination: NatsSubscriptionTermination) => void) | undefined;
+};
+
+type SubscriptionEnd = { error: unknown } | { error?: undefined };
+
+/**
  * Pump one subscription for its lifetime from a detached loop. The loop must
  * never reject: the API's fatal process boundary exits on any unhandled
  * rejection, so a single broker-side subscription error (a permissions
  * violation delivered to this subscription, a malformed payload, a throwing
  * consumer) used to take down every request and SSE stream on the pod. A
- * per-message failure is isolated so one poison message cannot end delivery;
- * an iterator failure ends only this subscription. Both are logged without the
- * message payload. Durable state stays authoritative: every live consumer
- * reconciles from Postgres (SSE replay/gap-fill, request timeouts).
+ * per-message failure is isolated so one poison message cannot end delivery.
+ * The end of the iterator, with or without an error, is reported to `onEnded`
+ * so the owner can decide whether it was requested (unsubscribe, bus close) or
+ * must be surfaced: consumers reconcile from Postgres and process-lifetime
+ * responders resubscribe (see {@link subscribeWithTermination} and
+ * {@link subscribeWithResubscribe}). Logs never carry message payloads.
  */
 function pumpSubscription<T>(
   subscription: AsyncIterable<T>,
-  context: { label: string; subject: string; logger?: EventLogger | undefined },
+  context: SubscriptionContext,
   onMessage: (message: T) => void | Promise<void>,
+  onEnded: (end: SubscriptionEnd) => void,
 ): void {
   const warn = context.logger?.warn ?? silentLogger.warn;
   void (async () => {
+    let end: SubscriptionEnd = {};
     try {
       for await (const message of subscription) {
         try {
@@ -242,17 +338,150 @@ function pumpSubscription<T>(
         }
       }
     } catch (error) {
-      try {
-        warn("NATS subscription ended with an error", {
-          label: context.label,
-          subject: context.subject,
-          ...subscriptionFailureAttributes(error),
-        });
-      } catch {
-        // Never let a logger failure escape the detached loop.
-      }
+      end = { error };
+    }
+    try {
+      onEnded(end);
+    } catch {
+      // A termination observer must never escape the detached loop.
     }
   })();
+}
+
+/** Log + count one unexpected subscription end. Never throws. */
+function reportSubscriptionTermination(
+  context: SubscriptionContext,
+  recovery: NatsSubscriptionRecovery,
+  end: SubscriptionEnd,
+): void {
+  try {
+    (context.logger?.warn ?? silentLogger.warn)(
+      "error" in end && end.error !== undefined
+        ? "NATS subscription ended with an error"
+        : "NATS subscription ended unexpectedly",
+      {
+        label: context.label,
+        subject: context.subject,
+        recovery,
+        ...("error" in end && end.error !== undefined
+          ? subscriptionFailureAttributes(end.error)
+          : {}),
+      },
+    );
+  } catch {
+    // Logging must never escape the detached loop.
+  }
+  try {
+    context.onSubscriptionTerminated?.({ kind: context.kind, recovery });
+  } catch {
+    // A metrics sink must never escape the detached loop.
+  }
+}
+
+function connectionShuttingDown(nc: NatsConnection): boolean {
+  return nc.isClosed() || nc.isDraining();
+}
+
+/**
+ * A per-consumer subscription (one SSE stream, one MCP wait). An end that the
+ * consumer did not request is logged, counted, and handed to the consumer's
+ * `onTerminated` exactly once so it can reconcile from Postgres instead of
+ * silently receiving nothing while its heartbeats continue.
+ */
+function subscribeWithTermination(
+  nc: NatsConnection,
+  context: SubscriptionContext,
+  onMessage: (message: Msg) => void | Promise<void>,
+  options: BusSubscriptionOptions | undefined,
+): () => void {
+  const sub: Subscription = nc.subscribe(context.subject);
+  let released = false;
+  const onTerminated = options?.onTerminated;
+  pumpSubscription(sub, context, onMessage, (end) => {
+    if (released || connectionShuttingDown(nc)) return;
+    reportSubscriptionTermination(context, onTerminated ? "consumer_reconnect" : "none", end);
+    try {
+      onTerminated?.("error" in end ? end.error : undefined);
+    } catch {
+      // The consumer hook must never escape the detached loop.
+    }
+  });
+  return () => {
+    released = true;
+    sub.unsubscribe();
+  };
+}
+
+/**
+ * A process-lifetime responder (auth callout, Codemode requests, agent-event
+ * ingestion). Nothing else would ever re-create it, so an unexpected end is
+ * logged, counted, and followed by a resubscribe after bounded backoff; the
+ * backoff resets once the new subscription delivers a message. The initial
+ * subscribe still throws synchronously to the caller. Resubscribing stops for
+ * good when the owner unsubscribes or the connection closes or drains.
+ */
+function subscribeWithResubscribe(
+  nc: NatsConnection,
+  context: SubscriptionContext,
+  onMessage: (message: Msg) => void | Promise<void>,
+  resubscribeDelayMs: (attempt: number) => number = natsResubscribeDelayMs,
+): () => void {
+  let stopped = false;
+  let current: Subscription | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let consecutiveFailures = 0;
+  const pump = (sub: Subscription) => {
+    current = sub;
+    pumpSubscription(
+      sub,
+      context,
+      async (message: Msg) => {
+        consecutiveFailures = 0;
+        await onMessage(message);
+      },
+      (end) => {
+        if (current === sub) current = null;
+        if (stopped || connectionShuttingDown(nc)) return;
+        reportSubscriptionTermination(context, "resubscribe", end);
+        schedule();
+      },
+    );
+  };
+  const schedule = () => {
+    if (stopped || connectionShuttingDown(nc)) return;
+    consecutiveFailures += 1;
+    let delayMs = 30_000;
+    try {
+      delayMs = resubscribeDelayMs(consecutiveFailures);
+    } catch {
+      // Keep the bounded default.
+    }
+    timer = setTimeout(() => {
+      timer = null;
+      if (stopped || connectionShuttingDown(nc)) return;
+      let sub: Subscription;
+      try {
+        sub = nc.subscribe(context.subject);
+      } catch (error) {
+        reportSubscriptionTermination(context, "resubscribe", { error });
+        schedule();
+        return;
+      }
+      pump(sub);
+    }, delayMs);
+    (timer as { unref?: () => void }).unref?.();
+  };
+  pump(nc.subscribe(context.subject));
+  return () => {
+    stopped = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    const sub = current;
+    current = null;
+    sub?.unsubscribe();
+  };
 }
 
 export {
@@ -382,10 +611,18 @@ export type EventBus = {
     sessionId: string,
     events: SessionEvent[],
   ) => Promise<void>;
+  /**
+   * Live session-event fanout. `options.onTerminated` reports a transport
+   * subscription that ended while still held; implementations whose
+   * subscriptions can end on their own should call it so the consumer
+   * reconciles from Postgres. Buses that never end a held subscription may
+   * ignore it.
+   */
   subscribe: (
     workspaceId: string,
     sessionId: string,
     onEvents: (events: SessionEvent[]) => void | Promise<void>,
+    options?: BusSubscriptionOptions,
   ) => Promise<() => void>;
   /** Best-effort live invalidation; the event is already durable in Postgres. */
   publishWorkspaceControl: (workspaceId: string, event: WorkspaceControlEvent) => Promise<void>;
@@ -393,6 +630,7 @@ export type EventBus = {
   subscribeWorkspaceControl: (
     workspaceId: string,
     onEvent: (event: WorkspaceControlEvent) => void | Promise<void>,
+    options?: BusSubscriptionOptions,
   ) => Promise<() => void>;
   /**
    * Issue a binary request/reply on a subject over the bus's NATS connection
@@ -568,8 +806,8 @@ export async function createNatsEventBus(
       publishSessionEvents(workspaceId, sessionId, events);
       await flushConfirmedWithTimeout(nc, PUBLISH_FLUSH_TIMEOUT_MS);
     },
-    subscribe: async (workspaceId, sessionId, onEvents) =>
-      subscribeSession(nc, workspaceId, sessionId, onEvents, options.logger),
+    subscribe: async (workspaceId, sessionId, onEvents, subscriptionOptions) =>
+      subscribeSession(nc, workspaceId, sessionId, onEvents, options, subscriptionOptions),
     publishWorkspaceControl: async (workspaceId, event) => {
       try {
         const encoded = workspaceControlEventNatsPayload(event);
@@ -587,12 +825,16 @@ export async function createNatsEventBus(
       }
       await flushWithTimeout(nc, PUBLISH_FLUSH_TIMEOUT_MS);
     },
-    subscribeWorkspaceControl: async (workspaceId, onEvent) => {
-      const subject = workspaceControlSubject(workspaceId);
-      const sub = nc.subscribe(subject);
-      pumpSubscription(
-        sub,
-        { label: "workspace-control", subject, logger: options.logger },
+    subscribeWorkspaceControl: async (workspaceId, onEvent, subscriptionOptions) =>
+      subscribeWithTermination(
+        nc,
+        {
+          label: "workspace-control",
+          kind: "workspace_control",
+          subject: workspaceControlSubject(workspaceId),
+          logger: options.logger,
+          onSubscriptionTerminated: options.onSubscriptionTerminated,
+        },
         async (msg: Msg) => {
           await onEvent(
             boundWorkspaceControlEvent(codec.decode(msg.data) as WorkspaceControlEvent, {
@@ -600,14 +842,11 @@ export async function createNatsEventBus(
             }),
           );
         },
-      );
-      return () => sub.unsubscribe();
-    },
+        subscriptionOptions,
+      ),
     request: async (subject, payload, opts) => requestReply(nc, subject, payload, opts.timeoutMs),
-    subscribeRequests: (subject, handler) =>
-      subscribeRequests(nc, subject, handler, options.logger),
-    subscribeAgentEvents: (subject, handler) =>
-      subscribeAgentEvents(nc, subject, handler, options.logger),
+    subscribeRequests: (subject, handler) => subscribeRequests(nc, subject, handler, options),
+    subscribeAgentEvents: (subject, handler) => subscribeAgentEvents(nc, subject, handler, options),
     getRequestConnection: () => requestConnection,
     getOpStreamConnection: () => opStreamConnection,
     isConnected: () => connected && !nc.isClosed() && !nc.isDraining(),
@@ -660,6 +899,8 @@ export async function createResponderConnection(
     name?: string;
     logger?: EventLogger;
     connect?: typeof connect;
+    onSubscriptionTerminated?: (termination: NatsSubscriptionTermination) => void;
+    resubscribeDelayMs?: (attempt: number) => number;
   } = {},
 ): Promise<ResponderConnection> {
   const connectOptions: ConnectionOptions = { servers: natsUrl };
@@ -678,13 +919,16 @@ export async function createResponderConnection(
     options.name ? `auth-callout:${options.name}` : "auth-callout",
     options.logger,
   );
-  const sub: Subscription = nc.subscribe(subject);
-  pumpSubscription(
-    sub,
+  // A dead callout subscription would deny every Connected Machine connect
+  // while the API pod still looks healthy, so an unexpected end resubscribes.
+  const unsubscribe = subscribeWithResubscribe(
+    nc,
     {
       label: options.name ? `auth-callout:${options.name}` : "auth-callout",
+      kind: "auth_callout",
       subject,
       logger: options.logger,
+      onSubscriptionTerminated: options.onSubscriptionTerminated,
     },
     async (msg: Msg) => {
       if (!msg.reply) {
@@ -698,10 +942,11 @@ export async function createResponderConnection(
         // on its callout timeout; a responder error never grants access.
       }
     },
+    options.resubscribeDelayMs,
   );
   return {
     close: async () => {
-      sub.unsubscribe();
+      unsubscribe();
       await nc.drain();
     },
   };
@@ -874,20 +1119,27 @@ function subscribeSession(
   workspaceId: string,
   sessionId: string,
   onEvents: (events: SessionEvent[]) => void | Promise<void>,
-  logger?: EventLogger,
+  busOptions: EventBusOptions,
+  subscriptionOptions: BusSubscriptionOptions | undefined,
 ): () => void {
-  const subject = sessionSubject(workspaceId, sessionId);
-  const sub: Subscription = nc.subscribe(subject);
-  pumpSubscription(sub, { label: "session-events", subject, logger }, async (msg: Msg) => {
-    const decoded = codec.decode(msg.data) as SessionBusMessage | SessionEvent;
-    const events = ("events" in decoded ? decoded.events : [decoded]).map((event) =>
-      boundSessionEventForSurface(event, "nats_legacy_guard"),
-    );
-    await onEvents(events);
-  });
-  return () => {
-    sub.unsubscribe();
-  };
+  return subscribeWithTermination(
+    nc,
+    {
+      label: "session-events",
+      kind: "session_events",
+      subject: sessionSubject(workspaceId, sessionId),
+      logger: busOptions.logger,
+      onSubscriptionTerminated: busOptions.onSubscriptionTerminated,
+    },
+    async (msg: Msg) => {
+      const decoded = codec.decode(msg.data) as SessionBusMessage | SessionEvent;
+      const events = ("events" in decoded ? decoded.events : [decoded]).map((event) =>
+        boundSessionEventForSurface(event, "nats_legacy_guard"),
+      );
+      await onEvents(events);
+    },
+    subscriptionOptions,
+  );
 }
 
 /**
@@ -918,27 +1170,34 @@ function subscribeRequests(
   nc: NatsConnection,
   subject: string,
   handler: RequestHandler,
-  logger?: EventLogger,
+  busOptions: EventBusOptions,
 ): () => void {
-  const sub: Subscription = nc.subscribe(subject);
-  pumpSubscription(sub, { label: "request-responder", subject, logger }, async (msg: Msg) => {
-    // A request always carries a reply inbox; a plain publish to this subject
-    // (no reply) is ignored - request/reply is the only contract here.
-    if (!msg.reply) {
-      return;
-    }
-    try {
-      const reply = await handler(msg.data, msg.subject);
-      msg.respond(reply);
-    } catch {
-      // Leave the request unanswered: the requester's request times out, which
-      // the selfhosted control plane reads as a transient blip (reconnecting),
-      // never a malformed reply. The responder stays subscribed for the next op.
-    }
-  });
-  return () => {
-    sub.unsubscribe();
-  };
+  return subscribeWithResubscribe(
+    nc,
+    {
+      label: "request-responder",
+      kind: "request_responder",
+      subject,
+      logger: busOptions.logger,
+      onSubscriptionTerminated: busOptions.onSubscriptionTerminated,
+    },
+    async (msg: Msg) => {
+      // A request always carries a reply inbox; a plain publish to this subject
+      // (no reply) is ignored - request/reply is the only contract here.
+      if (!msg.reply) {
+        return;
+      }
+      try {
+        const reply = await handler(msg.data, msg.subject);
+        msg.respond(reply);
+      } catch {
+        // Leave the request unanswered: the requester's request times out, which
+        // the selfhosted control plane reads as a transient blip (reconnecting),
+        // never a malformed reply. The responder stays subscribed for the next op.
+      }
+    },
+    busOptions.resubscribeDelayMs,
+  );
 }
 
 /**
@@ -952,20 +1211,27 @@ function subscribeAgentEvents(
   nc: NatsConnection,
   subject: string,
   handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
-  logger?: EventLogger,
+  busOptions: EventBusOptions,
 ): () => void {
-  const sub: Subscription = nc.subscribe(subject);
-  pumpSubscription(sub, { label: "agent-events", subject, logger }, async (msg: Msg) => {
-    try {
-      await handler(msg.data, msg.subject);
-    } catch {
-      // Swallow: best-effort ingestion. The subscription stays live for the
-      // next event.
-    }
-  });
-  return () => {
-    sub.unsubscribe();
-  };
+  return subscribeWithResubscribe(
+    nc,
+    {
+      label: "agent-events",
+      kind: "agent_events",
+      subject,
+      logger: busOptions.logger,
+      onSubscriptionTerminated: busOptions.onSubscriptionTerminated,
+    },
+    async (msg: Msg) => {
+      try {
+        await handler(msg.data, msg.subject);
+      } catch {
+        // Swallow: best-effort ingestion. The subscription stays live for the
+        // next event.
+      }
+    },
+    busOptions.resubscribeDelayMs,
+  );
 }
 
 export function formatSse<T extends { sequence: number; type: string }>(

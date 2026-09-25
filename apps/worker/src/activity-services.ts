@@ -5,7 +5,7 @@ import { createObservability } from "@opengeni/observability";
 import { resolveCatalogSettings } from "@opengeni/core";
 import { createObjectStorage } from "@opengeni/storage";
 import type { ActivityDependencies, SharedActivityServices } from "./activities/types";
-import { observabilityEventLogger } from "./observability-metrics";
+import { observabilityEventBusOptions } from "./observability-metrics";
 import { buildPersonalGitHubGitCredentials } from "./personal-github-git-credentials";
 import { createStandaloneConnectionCredentialsPort } from "./pr-review-credentials";
 
@@ -51,7 +51,7 @@ export function createSharedActivityServices(
             controlPlaneAuth
               ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
               : undefined,
-            { logger: observabilityEventLogger(observability) },
+            observabilityEventBusOptions(observability),
           )),
         objectStorage: dependencies.objectStorage ?? createObjectStorage(settings),
         observability,

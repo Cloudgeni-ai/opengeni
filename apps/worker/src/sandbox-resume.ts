@@ -81,6 +81,7 @@ import {
   withoutSandboxProviderIdentity,
   type EstablishedSandboxSession,
   type RuntimeMetricsHooks,
+  type SandboxReadinessReplacementOutcome,
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
 import {
@@ -158,8 +159,16 @@ export type SandboxResumeServices = {
     identity: { sandboxGroupId: string },
   ) => Promise<void>;
   /** Test seam for the jittered pause before the single fresh-box readiness
-   * replacement. Production uses {@link freshSandboxReadinessReplacementDelayMs}. */
-  freshSandboxReadinessReplacementDelayMs?: () => number;
+   * replacement. Production uses {@link freshSandboxReadinessReplacementDelayMs}.
+   * It may be async so a test can observe the rolled-back lease in between. */
+  freshSandboxReadinessReplacementDelayMs?: () => number | Promise<number>;
+  /**
+   * The turn attempt's fresh-box readiness replacement budget. The lazy
+   * provisioner may call resumeBoxForTurn again after a typed lease
+   * supersession, so the turn creates the budget once and shares it with every
+   * call. Absent, the call gets its own single replacement.
+   */
+  freshSandboxReadinessReplacementBudget?: FreshSandboxReadinessReplacementBudget;
   /** Called only by the observer that wins the exact warm->cold loss CAS. */
   onSandboxLost?: (input: {
     sandboxGroupId: string;
@@ -363,6 +372,27 @@ export function freshSandboxReadinessReplacementDelayMs(
     FRESH_SANDBOX_READINESS_REPLACEMENT_BASE_DELAY_MS +
     Math.floor(unit * FRESH_SANDBOX_READINESS_REPLACEMENT_JITTER_MS)
   );
+}
+
+/** Replacements allowed per turn attempt, across every resumeBoxForTurn call. */
+export const FRESH_SANDBOX_READINESS_REPLACEMENTS_PER_TURN_ATTEMPT = 1;
+
+export type FreshSandboxReadinessReplacementBudget = { remaining: number };
+
+export function createFreshSandboxReadinessReplacementBudget(): FreshSandboxReadinessReplacementBudget {
+  return { remaining: FRESH_SANDBOX_READINESS_REPLACEMENTS_PER_TURN_ATTEMPT };
+}
+
+function recordFreshSandboxReadinessReplacement(
+  metrics: RuntimeMetricsHooks | undefined,
+  backend: string,
+  outcome: SandboxReadinessReplacementOutcome,
+): void {
+  try {
+    metrics?.onSandboxReadinessReplacement?.({ backend, outcome });
+  } catch {
+    // Metrics emission must never affect sandbox recovery or error propagation.
+  }
 }
 
 async function sleepUnlessCancelled(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
@@ -1122,7 +1152,8 @@ async function persistWarmWorkspaceSnapshot(
  * collide when sibling sessions share one sandbox group.
  *
  * A freshly created box that misses its bounded command-readiness budget is
- * replaced at most once. The first establish has already terminated that exact
+ * replaced at most once per turn attempt (the budget is shared by every call
+ * the turn's provisioner makes). The first establish has already terminated that exact
  * unpublished box, rolled its exact warming epoch back to cold (advancing the
  * epoch), and released its holder, so the replacement is an ordinary new
  * admission: it re-runs the cold->warming CAS, persists its own provider
@@ -1143,28 +1174,71 @@ export async function resumeBoxForTurn(
   } catch (error) {
     if (!isReplaceableFreshSandboxReadinessTimeout(error)) throw error;
     const readiness = error as SandboxExecReadinessTimeoutError;
-    const delayMs = (
-      services.freshSandboxReadinessReplacementDelayMs ?? freshSandboxReadinessReplacementDelayMs
-    )();
-    const fields = {
+    const warn = (message: string, fields: Parameters<Observability["warn"]>[1]) => {
+      if (services.observability) services.observability.warn(message, fields);
+      else console.warn(message, fields);
+    };
+    const identity = {
       workspaceId: ids.workspaceId,
       sessionId: ids.sessionId,
       sandboxGroupId: ids.sandboxGroupId,
       backend: readiness.backend,
       instanceId: readiness.instanceId,
       readinessTimeoutMs: readiness.timeoutMs,
-      replacementDelayMs: delayMs,
     };
-    const message =
-      "sandbox command-readiness timed out on a fresh box; replacing it once after jitter";
-    if (services.observability) services.observability.warn(message, fields);
-    else console.warn(message, fields);
+    const budget =
+      services.freshSandboxReadinessReplacementBudget ??
+      createFreshSandboxReadinessReplacementBudget();
+    if (budget.remaining <= 0) {
+      recordFreshSandboxReadinessReplacement(
+        services.sandboxMetrics,
+        readiness.backend,
+        "budget_spent",
+      );
+      warn(
+        "sandbox command-readiness timed out on a fresh box; this turn attempt already used its replacement",
+        identity,
+      );
+      throw error;
+    }
+    budget.remaining -= 1;
+    const delayMs = await (
+      services.freshSandboxReadinessReplacementDelayMs ?? freshSandboxReadinessReplacementDelayMs
+    )();
+    warn("sandbox command-readiness timed out on a fresh box; replacing it once after jitter", {
+      ...identity,
+      replacementDelayMs: delayMs,
+    });
     if (!(await sleepUnlessCancelled(delayMs, services.cancellationSignal))) {
       // Cancellation owns the turn boundary; surface the original typed
       // readiness failure rather than starting a replacement.
+      recordFreshSandboxReadinessReplacement(
+        services.sandboxMetrics,
+        readiness.backend,
+        "cancelled",
+      );
       throw error;
     }
-    return await resumeBoxForTurnOnce(services, ids, kind, holderId);
+    try {
+      const replaced = await resumeBoxForTurnOnce(services, ids, kind, holderId);
+      recordFreshSandboxReadinessReplacement(
+        services.sandboxMetrics,
+        readiness.backend,
+        "replaced",
+      );
+      return replaced;
+    } catch (replacementError) {
+      recordFreshSandboxReadinessReplacement(
+        services.sandboxMetrics,
+        readiness.backend,
+        services.cancellationSignal?.aborted
+          ? "cancelled"
+          : replacementError instanceof SandboxExecReadinessTimeoutError
+            ? "failed_again"
+            : "replacement_failed",
+      );
+      throw replacementError;
+    }
   }
 }
 

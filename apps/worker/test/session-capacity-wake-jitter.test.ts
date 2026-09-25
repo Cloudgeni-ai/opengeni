@@ -72,8 +72,10 @@ describe("capacity-wait wake jitter", () => {
     const draws = [...source.matchAll(/Math\.random\(\)/g)];
     expect(draws.length).toBe(2);
     for (const draw of draws) {
-      const preceding = source.slice(Math.max(0, draw.index! - 600), draw.index!);
-      expect(preceding).toContain("patched(CAPACITY_WAKE_JITTER_PATCH)");
+      // The nearest enclosing branch of every draw is the patch check itself.
+      const preceding = source.slice(0, draw.index!);
+      const guard = preceding.slice(preceding.lastIndexOf("if ("));
+      expect(guard.split("\n")[0]).toContain("patched(CAPACITY_WAKE_JITTER_PATCH)");
     }
   });
 });
