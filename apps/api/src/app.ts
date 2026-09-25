@@ -66,6 +66,7 @@ import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError, workspaceControlBusyHttpError } from "./http/api-error";
+import { replaceTrustedClientAddressHeader } from "./http/request-source";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
@@ -297,8 +298,11 @@ export function createAppComposition(deps: AppDependencies): {
   const managedEmailTransport =
     deps.managedEmailTransport ?? createManagedEmailTransport(deps.settings);
   assertManagedEmailTransportMetadata(managedEmailTransport);
+  const observability =
+    deps.observability ?? createObservability(deps.settings, { component: "api" });
   const managedAuth =
-    deps.managedAuth ?? createManagedAuth(deps.settings, deps.db, managedEmailTransport);
+    deps.managedAuth ??
+    createManagedAuth(deps.settings, deps.db, managedEmailTransport, { observability });
   const managedAuthSessionAdapter =
     deps.managedAuthSessionAdapter ??
     (managedAuth ? createBetterAuthSessionAdapter(managedAuth, deps.db) : null);
@@ -373,8 +377,6 @@ export function createAppComposition(deps: AppDependencies): {
   // concrete for routes; it throws SandboxResumeError when sandboxBackend=none.
   const sandboxClient = deps.sandboxClient ?? createApiSandboxClient(deps.settings);
   const resumeBoxById = deps.resumeBoxById ?? makeResumeBoxById(sandboxClient);
-  const observability =
-    deps.observability ?? createObservability(deps.settings, { component: "api" });
   if (
     managedAuth &&
     deps.settings.managedAuthSessionSetMode !== "legacy" &&
@@ -432,6 +434,15 @@ export function createAppComposition(deps: AppDependencies): {
       boundedCorrelationId(c.req.header(OPENGENI_CORRELATION_HEADER)) ?? crypto.randomUUID();
     correlationIds.set(c.req.raw, correlationId);
     c.header(OPENGENI_CORRELATION_HEADER, correlationId);
+    await next();
+  });
+
+  // Better Auth keys its rate limits and session addresses on a request
+  // header. Drop any caller-supplied copy everywhere and stamp the trusted
+  // source address on managed-auth routes before any route derives a Better
+  // Auth request from this one.
+  app.use("*", async (c, next) => {
+    replaceTrustedClientAddressHeader(c, deps.settings, c.req.path.startsWith("/v1/auth/"));
     await next();
   });
 

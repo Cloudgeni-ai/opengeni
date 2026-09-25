@@ -65,6 +65,8 @@ import type { Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
+import { trustedRequestSourceAddress } from "../http/request-source";
+import { ManagedAuthEmailThrottleError } from "../auth/managed-auth-rate-limits";
 import { z } from "zod";
 
 const ManagedAuthSocialStartReceipt = z
@@ -1009,11 +1011,9 @@ function digest(deps: ApiRouteDeps, value: unknown): string {
 }
 
 function loginTransactionClientScope(context: Context, deps: ApiRouteDeps): string {
-  const forwarded = context.req.header("x-forwarded-for")?.split(",")[0]?.trim();
-  const address = forwarded || context.req.header("x-real-ip")?.trim() || "unknown";
   return digest(deps, {
     purpose: "managed-auth-login-transaction-rate-limit",
-    client: address.slice(0, 128),
+    client: trustedRequestSourceAddress(context, deps.settings),
   });
 }
 
@@ -1127,7 +1127,10 @@ function throwHttp(error: unknown): never {
   if (error instanceof ManagedAuthActorMutationInFlightError) {
     throw managedAuthApiError(409, "actor_mutation_in_flight", { cause: error, retryable: true });
   }
-  if (error instanceof ManagedAuthLoginTransactionRateLimitError) {
+  if (
+    error instanceof ManagedAuthLoginTransactionRateLimitError ||
+    error instanceof ManagedAuthEmailThrottleError
+  ) {
     throw managedAuthApiError(429, "login_transaction_rate_limited", {
       cause: error,
       retryable: true,

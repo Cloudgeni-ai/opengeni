@@ -232,9 +232,14 @@ export const EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
 /** Public workspace MCP OAuth rollout settings. The enable switch is
  * deployment-sensitive because OAuth needs a canonical managed/local human
  * session and one stable public issuer origin. */
-export const MCP_OAUTH_PASSTHROUGH_ENV: readonly string[] = [
-  "OPENGENI_MCP_OAUTH_ENABLED",
-  "OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS",
+export const MCP_OAUTH_PASSTHROUGH_ENV: readonly string[] = ["OPENGENI_MCP_OAUTH_ENABLED"];
+
+/** Request-source trust for every API rate limit and auth session record.
+ * Unset means forwarded client addresses are ignored; a deployment behind a
+ * fixed, direct-access-blocked proxy chain declares its exact hop count. */
+export const API_REQUEST_SOURCE_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_API_TRUSTED_PROXY_HOPS",
+  "OPENGENI_API_TRUSTED_PROXY_CIDRS",
 ];
 
 /** Control-plane secrets needed for a complete Connected Machine deployment.
@@ -1559,7 +1564,7 @@ export function requiredRuntimeEnvVars(
   if (env.OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS) {
     vars.push("OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS");
   }
-  for (const key of MCP_OAUTH_PASSTHROUGH_ENV) {
+  for (const key of [...MCP_OAUTH_PASSTHROUGH_ENV, ...API_REQUEST_SOURCE_PASSTHROUGH_ENV]) {
     if (env[key]) vars.push(key);
   }
   if (mcpOauthDeploymentEnabled(env)) {
@@ -2578,7 +2583,8 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_INTEGRATIONS_ENABLED", env.OPENGENI_INTEGRATIONS_ENABLED),
     valueEnv("OPENGENI_INTEGRATIONS_STATE_SECRET", env.OPENGENI_INTEGRATIONS_STATE_SECRET),
     valueEnv("OPENGENI_MCP_OAUTH_ENABLED", env.OPENGENI_MCP_OAUTH_ENABLED),
-    valueEnv("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS", env.OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS),
+    valueEnv("OPENGENI_API_TRUSTED_PROXY_HOPS", env.OPENGENI_API_TRUSTED_PROXY_HOPS),
+    valueEnv("OPENGENI_API_TRUSTED_PROXY_CIDRS", env.OPENGENI_API_TRUSTED_PROXY_CIDRS),
     valueEnv("OPENGENI_SLACK_CLIENT_ID", env.OPENGENI_SLACK_CLIENT_ID),
     valueEnv("OPENGENI_SLACK_CLIENT_SECRET", env.OPENGENI_SLACK_CLIENT_SECRET),
     valueEnv("OPENGENI_SLACK_SIGNING_SECRET", env.OPENGENI_SLACK_SIGNING_SECRET),
@@ -3119,7 +3125,8 @@ function addRuntimeConfigHelmValues(
     "OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS",
     "OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS",
     "OPENGENI_MCP_OAUTH_ENABLED",
-    "OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS",
+    "OPENGENI_API_TRUSTED_PROXY_HOPS",
+    "OPENGENI_API_TRUSTED_PROXY_CIDRS",
   ] as const) {
     const value = env[key];
     if (value) {
