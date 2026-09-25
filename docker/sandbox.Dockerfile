@@ -288,6 +288,7 @@ ARG GLAB_VERSION=1.109.0
 ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6
 ARG UV_VERSION=0.12.18
 ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1"
+ARG OPENGENI_PYTHON_EXCLUDE_NEWER=2026-09-25T00:00:00Z
 ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
 ARG OPENGENI_CHROMIUM_VERSION=151.0.7922.108-1~deb13u1
@@ -446,11 +447,15 @@ RUN set -eux; \
 # system interpreter. Both write under /usr/local, and uv puts the whole
 # preinstalled closure there (it ignores Debian's /usr/lib/python3), so a later
 # upgrade never has to touch a distro-owned copy. Neither install command passes
-# an override flag, which proves the pip.conf and uv.toml settings.
+# an override flag, which proves the pip.conf and uv.toml settings. The pip and
+# uv caches live in /var/cache, outside the snapshotted HOME=/workspace, because
+# installed packages under /usr/local are per-box anyway. --exclude-newer freezes
+# the transitive closure to what PyPI had published at that instant, so every
+# rebuild of either image resolves the same versions.
 RUN set -eux; \
-    printf '[global]\nbreak-system-packages = true\nroot-user-action = ignore\n' > /etc/pip.conf; \
+    printf '[global]\nbreak-system-packages = true\nroot-user-action = ignore\ncache-dir = /var/cache/pip\n' > /etc/pip.conf; \
     install -d -m 0755 /etc/uv; \
-    printf '[pip]\nbreak-system-packages = true\n' > /etc/uv/uv.toml; \
+    printf 'cache-dir = "/var/cache/uv"\n\n[pip]\nbreak-system-packages = true\n' > /etc/uv/uv.toml; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     case "${arch}" in \
       amd64) uv_arch="x86_64"; expected="89eadd7c76fc063887959510d5ba0ab1264dfd5f1143b925ddb73021a40acf16" ;; \
@@ -467,11 +472,14 @@ RUN set -eux; \
     install -m 0755 "/tmp/${uv_dir}/uv" "/tmp/${uv_dir}/uvx" /usr/local/bin/; \
     rm -rf "$archive" "/tmp/${uv_dir}"; \
     test "$(uv --version | cut -d' ' -f2)" = "${UV_VERSION}"; \
-    uv pip install --system --no-cache --compile-bytecode --only-binary :all: ${OPENGENI_PYTHON_PACKAGES}; \
+    test "$(uv cache dir)" = /var/cache/uv; \
+    test "$(python3 -m pip cache dir)" = /var/cache/pip; \
+    uv pip install --system --no-cache --compile-bytecode --only-binary :all: \
+      --exclude-newer "${OPENGENI_PYTHON_EXCLUDE_NEWER}" ${OPENGENI_PYTHON_PACKAGES}; \
     python3 -m pip install --no-cache-dir --no-index --dry-run ${OPENGENI_PYTHON_PACKAGES}; \
     python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, pytest, requests'; \
     pytest --version; \
-    rm -rf /root/.cache
+    rm -rf /root/.cache /var/cache/pip /var/cache/uv
 
 # Checkov's large target-native Python closure is independent of the serial
 # final-image toolchain. Build it in parallel, then retain the existing final

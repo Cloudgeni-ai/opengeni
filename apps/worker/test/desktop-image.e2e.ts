@@ -151,9 +151,13 @@ describe("P4.1 desktop image — LOCAL build + stack-up assertions", () => {
       // Debian's python3 is PEP 668 externally managed. An agent's bare pip or
       // uv install (no venv, no override flag) must still reach the system
       // interpreter, and the common data/test packages must be preinstalled.
+      // With HOME=/workspace, the caches must still stay out of the snapshot.
       const python = await sh(
         [
           "cd /workspace",
+          "python --version >/dev/null",
+          'test "$(uv cache dir)" = /var/cache/uv',
+          'test "$(pip cache dir)" = /var/cache/pip',
           "pip install --dry-run --no-index pytest >/dev/null",
           "uv pip install --system --dry-run --offline pytest >/dev/null",
           `python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, pytest, requests'`,

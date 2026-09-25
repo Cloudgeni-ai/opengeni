@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 const BLOCK_START = "# Agent Python toolchain";
-const BLOCK_END = "rm -rf /root/.cache\n";
+const BLOCK_END = "rm -rf /root/.cache /var/cache/pip /var/cache/uv\n";
 const PREINSTALLED = ["matplotlib", "numpy", "pandas", "pytest", "requests"];
 
 async function readDockerfiles() {
@@ -43,20 +43,40 @@ describe("sandbox Python toolchain", () => {
     const pins = packages.split(" ");
     for (const pin of pins) expect(pin).toMatch(/^[a-z][a-z0-9-]*==\d+(\.\d+)+$/u);
     expect(pins.map((pin) => pin.split("==")[0]).sort()).toEqual(PREINSTALLED);
+
+    // The top-level pins do not fix the transitive closure (urllib3, pillow,
+    // ...). One shared PyPI cutoff does, so both images resolve it identically.
+    const excludeNewer = argDefault(sandbox, "OPENGENI_PYTHON_EXCLUDE_NEWER");
+    expect(excludeNewer).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u);
+    expect(argDefault(desktop, "OPENGENI_PYTHON_EXCLUDE_NEWER")).toBe(excludeNewer);
+  });
+
+  test("keeps pip and uv caches out of the snapshotted workspace", async () => {
+    const block = toolchainBlock((await readDockerfiles()).desktop);
+    expect(block).toContain('test "$(uv cache dir)" = /var/cache/uv');
+    expect(block).toContain('test "$(python3 -m pip cache dir)" = /var/cache/pip');
+  });
+
+  test("gives the desktop image a python command like the headless image", async () => {
+    const { desktop } = await readDockerfiles();
+    expect(desktop).toMatch(/base_packages="[^"]*\bpython-is-python3\b[^"]*"/u);
   });
 
   test("lets a bare pip or uv install reach the system interpreter", async () => {
     const block = toolchainBlock((await readDockerfiles()).desktop);
     expect(block).toContain(
-      "printf '[global]\\nbreak-system-packages = true\\nroot-user-action = ignore\\n' > /etc/pip.conf",
+      "printf '[global]\\nbreak-system-packages = true\\nroot-user-action = ignore\\ncache-dir = /var/cache/pip\\n' > /etc/pip.conf",
     );
-    expect(block).toContain("printf '[pip]\\nbreak-system-packages = true\\n' > /etc/uv/uv.toml");
+    expect(block).toContain(
+      `printf 'cache-dir = "/var/cache/uv"\\n\\n[pip]\\nbreak-system-packages = true\\n' > /etc/uv/uv.toml`,
+    );
     // No command-line override: the build install itself proves the global
     // configuration, exactly as an agent's bare `pip install` would hit it.
     expect(block).not.toContain("--break-system-packages");
     expect(block).not.toContain("PIP_BREAK_SYSTEM_PACKAGES");
     expect(block).toContain(
-      "uv pip install --system --no-cache --compile-bytecode --only-binary :all: ${OPENGENI_PYTHON_PACKAGES}",
+      "uv pip install --system --no-cache --compile-bytecode --only-binary :all: \\\n" +
+        '      --exclude-newer "${OPENGENI_PYTHON_EXCLUDE_NEWER}" ${OPENGENI_PYTHON_PACKAGES};',
     );
     expect(block).toContain(
       "python3 -m pip install --no-cache-dir --no-index --dry-run ${OPENGENI_PYTHON_PACKAGES}",
