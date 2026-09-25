@@ -64,6 +64,7 @@ import { sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
+import { SIGNUP_ATTRIBUTION_AUTH_FIELD } from "../auth/signup-funnel-metrics";
 import { ApiHttpError } from "../http/api-error";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 import { ManagedAuthEmailThrottleError } from "../auth/managed-auth-rate-limits";
@@ -394,6 +395,9 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
                 expectedGeneration: body.expectedGeneration,
                 expectedActorEpoch: actorEpoch,
               },
+              // Content-free acquisition metrics read this from the OAuth
+              // state if the callback creates a new account.
+              ...(body.attribution ? { [SIGNUP_ATTRIBUTION_AUTH_FIELD]: body.attribution } : {}),
             },
           },
           headers: isolatedManagedAuthHeaders(context.req.raw),

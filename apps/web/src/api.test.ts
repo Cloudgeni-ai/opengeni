@@ -14,7 +14,9 @@ import {
   redeemCodexResetCredit,
   resolveApiBaseUrl,
   signInEmail,
+  signUpEmail,
   sendVerificationEmail,
+  startManagedSocialSignIn,
   setStoredAccessKey,
   clearStoredAccessKey,
   completeSelfServiceOrganizationSetup,
@@ -24,6 +26,7 @@ import {
   subscribeManagedActorInvalidation,
   subscribeManagedActorMutationBusy,
 } from "./api";
+import { resetSignupAttributionForTests, retainSignupAttribution } from "./lib/signup-attribution";
 
 describe("web API auth helpers", () => {
   test.each(["text", "json"] as const)(
@@ -1259,10 +1262,67 @@ describe("web API auth helpers", () => {
     expect(request!.init?.credentials).toBe("include");
     expect(JSON.parse(String(request!.init?.body))).toEqual({
       email: "user@example.com",
+      callbackURL: "/?auth_event=email_verified",
     });
     expect(new Headers(request!.init?.headers).get("x-opengeni-api-contract")).toBe(
       OPENGENI_API_CONTRACT_REVISION,
     );
+  });
+
+  test("carries first-touch attribution through email and social sign-up without storage", async () => {
+    const originalFetch = globalThis.fetch;
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const assigned: string[] = [];
+    const replaced: string[] = [];
+    const landing = new URL(
+      "https://app.example.test/?mode=signup&utm_source=producthunt&utm_campaign=launch&ref=producthunt&utm_content=bad%3Cscript%3E",
+    );
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: Object.assign(landing, { assign: (url: string) => assigned.push(url) }),
+        history: {
+          state: null,
+          replaceState: (_: unknown, __: string, url: string) => replaced.push(url),
+        },
+      },
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ url: "https://accounts.google.com/o/oauth2/v2/auth?state=s" });
+    }) as unknown as typeof fetch;
+    try {
+      resetSignupAttributionForTests();
+      retainSignupAttribution(window);
+      // Only one-shot markers are consumed from the URL; campaign values stay.
+      expect(replaced).toEqual([]);
+      await signUpEmail({ name: "Human", email: "human@example.test", password: "secret-123" });
+      await startManagedSocialSignIn("google");
+    } finally {
+      resetSignupAttributionForTests();
+      globalThis.fetch = originalFetch;
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+    }
+    const attribution = { utmSource: "producthunt", utmCampaign: "launch", ref: "producthunt" };
+    const returnQuery = "utm_source=producthunt&utm_campaign=launch&ref=producthunt";
+    expect(bodies[0]).toEqual({
+      name: "Human",
+      email: "human@example.test",
+      password: "secret-123",
+      callbackURL: `/?${returnQuery}&auth_event=email_verified`,
+      opengeniAttribution: attribution,
+    });
+    expect(bodies[1]).toEqual({
+      provider: "google",
+      callbackURL: `https://app.example.test/?${returnQuery}&auth_event=google_signin`,
+      errorCallbackURL: `https://app.example.test/?${returnQuery}`,
+      newUserCallbackURL: `https://app.example.test/?${returnQuery}&auth_event=google_signup`,
+      disableRedirect: true,
+      additionalData: { opengeniAttribution: attribution },
+    });
+    expect(assigned).toEqual(["https://accounts.google.com/o/oauth2/v2/auth?state=s"]);
   });
 
   test("sends the exact API contract revision on product-owned auth mutations", async () => {

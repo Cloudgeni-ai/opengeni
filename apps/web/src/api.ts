@@ -12,6 +12,7 @@ import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
 import type { AuthSession, ClientConfig } from "./types";
 import { beginAnalyticsRequest } from "./lib/analytics-observer";
 import { securityReauthenticationPath } from "./lib/sign-in-feedback";
+import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
 
 export function resolveApiBaseUrl(value: string | undefined): string {
   return (value ?? "").replace(/\/+$/, "");
@@ -887,9 +888,17 @@ export async function signUpEmail(input: {
   email: string;
   password: string;
 }): Promise<unknown> {
+  const attribution = signupAttribution();
   return await authRequest<unknown>("/sign-up/email", {
     method: "POST",
-    body: JSON.stringify(input),
+    body: JSON.stringify({
+      ...input,
+      // The verification link returns here with a one-shot marker and the
+      // first-touch campaign parameters; no browser storage is involved.
+      callbackURL: signupReturnPath("/", "email_verified"),
+      // Normalized server-side into a closed acquisition-source metric label.
+      ...(attribution ? { opengeniAttribution: attribution } : {}),
+    }),
   });
 }
 
@@ -952,7 +961,7 @@ export async function sendVerificationEmail(input: {
 }): Promise<{ status: boolean }> {
   return await authRequest<{ status: boolean }>("/send-verification-email", {
     method: "POST",
-    body: JSON.stringify(input),
+    body: JSON.stringify({ ...input, callbackURL: signupReturnPath("/", "email_verified") }),
   });
 }
 
@@ -968,19 +977,27 @@ export async function signInEmail(input: {
 }
 
 export async function startManagedSocialSignIn(provider: "google" | "github"): Promise<void> {
-  const callbackURL = new URL(
-    window.location.pathname === "/settings/security"
+  const reauthentication = window.location.pathname === "/settings/security";
+  const returnUrl = (path: string) => new URL(path, window.location.origin).toString();
+  const callbackURL = returnUrl(
+    reauthentication
       ? securityReauthenticationPath(window.location.search)
-      : "/",
-    window.location.origin,
-  ).toString();
+      : signupReturnPath("/", `${provider}_signin`),
+  );
+  const attribution = reauthentication ? null : signupAttribution();
   const response = await authRequest<{ url?: unknown }>("/sign-in/social", {
     method: "POST",
     body: JSON.stringify({
       provider,
       callbackURL,
-      errorCallbackURL: callbackURL,
+      errorCallbackURL: reauthentication ? callbackURL : returnUrl(signupReturnPath("/")),
+      // Better Auth sends newly created accounts here instead of callbackURL.
+      ...(reauthentication
+        ? {}
+        : { newUserCallbackURL: returnUrl(signupReturnPath("/", `${provider}_signup`)) }),
       disableRedirect: true,
+      // Kept in server-side OAuth state for the callback's sign-up metric.
+      ...(attribution ? { additionalData: { opengeniAttribution: attribution } } : {}),
     }),
   });
   if (typeof response.url !== "string") {

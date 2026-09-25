@@ -24,6 +24,7 @@ import {
   organizationUserSetupTokenDigest,
   selfServiceOrganizationSetupRequestFingerprint,
 } from "../auth/organization-user-setup";
+import { recordOrganizationSetupOutcome } from "../auth/signup-funnel-metrics";
 import { hashManagedAuthPassword } from "../auth/managed-auth";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 
@@ -60,6 +61,7 @@ export function registerManagedOnboardingRoutes(
       await context.req.json().catch(() => null),
     );
     if (!parsed.success) {
+      recordOrganizationSetupOutcome(deps.observability, "failed");
       throw new HTTPException(422, {
         message: "invalid organization setup request",
       });
@@ -70,21 +72,24 @@ export function registerManagedOnboardingRoutes(
         authUserId: session.user.id,
         organizationName,
       });
-      return context.json(
-        CompleteSelfServiceOrganizationSetupResponse.parse(
-          await completeSelfServiceOrganizationSetup(deps.db, {
-            authUserId: session.user.id,
-            actorSubjectId: `user:${session.user.id}`,
-            organizationName,
-            operationId: parsed.data.operationId,
-            requestFingerprint,
-            trialCreditsEnabled:
-              deps.settings.productAccessMode === "managed" &&
-              deps.settings.verifiedSignupTrialCreditsEnabled,
-          }),
-        ),
+      const completed = CompleteSelfServiceOrganizationSetupResponse.parse(
+        await completeSelfServiceOrganizationSetup(deps.db, {
+          authUserId: session.user.id,
+          actorSubjectId: `user:${session.user.id}`,
+          organizationName,
+          operationId: parsed.data.operationId,
+          requestFingerprint,
+          trialCreditsEnabled:
+            deps.settings.productAccessMode === "managed" &&
+            deps.settings.verifiedSignupTrialCreditsEnabled,
+        }),
       );
+      // An idempotent replay of the same operation returns the same committed
+      // setup and is counted again; clients retry only on an ambiguous response.
+      recordOrganizationSetupOutcome(deps.observability, "created");
+      return context.json(completed);
     } catch (error) {
+      recordOrganizationSetupOutcome(deps.observability, "failed");
       const sqlState = nestedPostgresSqlState(error);
       if (sqlState === "22023") {
         throw new HTTPException(422, {

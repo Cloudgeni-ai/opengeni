@@ -73,6 +73,10 @@ import { HTTPException } from "hono/http-exception";
 import { ApiHttpError, workspaceControlBusyHttpError } from "./http/api-error";
 import { replaceTrustedClientAddressHeader } from "./http/request-source";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import {
+  boundedRegisteredRouteLabel,
+  registeredHandlerRoutePath,
+} from "./http/registered-route-label";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
   CodexCompactionV2ProviderLockedError,
@@ -562,7 +566,7 @@ export function createAppComposition(deps: AppDependencies): {
 
   app.use("*", async (c, next) => {
     const url = new URL(c.req.url);
-    const route = routeLabel(url.pathname);
+    const route = routeLabel(url.pathname, registeredHandlerRoutePath(c));
     const correlationId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
     const start = performance.now();
     const span = observability.startSpan(
@@ -1841,6 +1845,21 @@ const routeLabelPatterns: Array<{
   },
   { pattern: /^\/healthz$/, label: "/healthz" },
   { pattern: /^\/readyz$/, label: "/readyz" },
+  // Better Auth answers these behind one `/v1/auth/*` registration, so the
+  // provider endpoints need an explicit closed set to stay distinguishable.
+  {
+    pattern:
+      /^\/v1\/auth\/(sign-up\/email|sign-in\/email|sign-in\/social|sign-out|send-verification-email|verify-email|request-password-reset|reset-password|error|ok)$/,
+    label: (match) => `/v1/auth/${match[1]}`,
+  },
+  { pattern: /^\/v1\/auth\/reset-password\/[^/]+$/, label: "/v1/auth/reset-password/:token" },
+  {
+    pattern: /^\/v1\/auth\/callback\/([^/]+)$/,
+    label: (match) =>
+      match[1] === "google" || match[1] === "github"
+        ? `/v1/auth/callback/${match[1]}`
+        : "/v1/auth/callback/:providerId",
+  },
   { pattern: /^\/traffic-readyz$/, label: "/traffic-readyz" },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/codex\/connect\/start$/,
@@ -2655,7 +2674,13 @@ const routeLabelPatterns: Array<{
   },
 ];
 
-export function routeLabel(pathname: string): string {
+/**
+ * Bounded route label for metrics, spans, and request logs. Explicit patterns
+ * keep established label spellings stable; any other request answered by a
+ * registered handler uses that handler's code-owned path template (see
+ * `registeredHandlerRoutePath`). Only unregistered paths fall into `unknown`.
+ */
+export function routeLabel(pathname: string, registeredRoutePath?: string | null): string {
   if (/^\/v1\/workspaces\/[^/]+\/transcriptions$/.test(pathname))
     return "/v1/workspaces/:workspaceId/transcriptions";
   const transcription = pathname.match(
@@ -2676,6 +2701,8 @@ export function routeLabel(pathname: string): string {
       return typeof candidate.label === "string" ? candidate.label : candidate.label(match);
     }
   }
+  const registered = boundedRegisteredRouteLabel(registeredRoutePath);
+  if (registered) return registered;
   return pathname.startsWith("/v1/") ? "/v1/unknown" : "/unknown";
 }
 

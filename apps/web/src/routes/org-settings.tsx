@@ -1,7 +1,7 @@
 import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
 // Organization settings (formerly "Account"): identity, organization API
 // keys, account-wide billing usage, plan entitlements, and members.
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { ArrowUpRightIcon, GaugeIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -317,6 +317,7 @@ export function OrgSettingsRoute({
   section?: OrganizationAdminSection;
 }) {
   const context = useAppContext();
+  const navigate = useNavigate();
   const client = context.client;
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
@@ -487,15 +488,29 @@ export function OrgSettingsRoute({
   // Confirm the Stripe checkout outcome the /billing return redirect forwarded
   // here. Credits post via the asynchronous webhook, so success is phrased as
   // "shortly" rather than implying the balance already reflects the top-up.
+  // The outcome is one-shot: it is dropped from the URL right away so a reload,
+  // back navigation, or bookmark neither repeats the toast nor re-counts the
+  // funnel event. The Stripe return is a full page load, so the event waits for
+  // the analytics module instead of the not-yet-installed observer shim.
   useEffect(() => {
+    if (!checkout) return;
     if (checkout === "success") {
+      void import("@/lib/analytics")
+        .then(({ captureAnalyticsEvent }) => captureAnalyticsEvent("checkout_completed"))
+        .catch(() => undefined);
       toast.success("Payment received", {
         description: "Your credits will appear shortly.",
       });
-    } else if (checkout === "cancelled") {
+    } else {
       toast("Checkout cancelled", { description: "No charge was made." });
     }
-  }, [checkout]);
+    void navigate({
+      to: "/workspaces/$workspaceId/organization",
+      params: { workspaceId },
+      search: section === "overview" ? {} : { section },
+      replace: true,
+    });
+  }, [checkout, navigate, section, workspaceId]);
 
   async function startCheckout(amountUsd: number) {
     const operation = claimBillingOperation("billing", "mutation");

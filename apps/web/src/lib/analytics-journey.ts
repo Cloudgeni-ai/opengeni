@@ -58,6 +58,20 @@ export type JourneyOperation = {
   properties: JourneyProperties;
 };
 
+/**
+ * Accepted requests that complete a sign-up funnel step. Exact product routes
+ * only; request and response bodies are never inspected.
+ */
+export function journeyMilestone(
+  pathname: string,
+  method: string,
+): "checkout_started" | "organization_setup_completed" | null {
+  if (method.toUpperCase() !== "POST") return null;
+  if (pathname === "/v1/billing/checkout") return "checkout_started";
+  if (pathname === "/v1/auth/organization-onboarding") return "organization_setup_completed";
+  return null;
+}
+
 /** Only classify our finite mutation routes, never fetch URLs, payloads or credentials. */
 export function journeyOperation(pathname: string, method: string): JourneyOperation | null {
   if (!["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase())) return null;

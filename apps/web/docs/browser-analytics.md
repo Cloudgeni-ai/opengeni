@@ -26,6 +26,12 @@ sends email or names. Do not put that directory in PostHog person properties.
 | `model_connection_attempted` / `model_connection_finished` | Recognized provider connection mutation and its HTTP result; accepting an authorization request does not mean the provider is connected. |
 | `model_connection_resolved` | The UI observed a connected/expired/denied provider authorization, or an unknown transport outcome. |
 | `session_started` | A session was successfully created (existing compatibility event), not evidence that an agent turn ran. |
+| `signup_completed` | A sign-up or social authorization completed. `method` is `email`, `google`, or `github`; `is_new_user` is `true` when the flow created the account. Email sign-ups report it when the verification link returns (`is_new_user: true`); a Google/GitHub authorization of an existing account reports `is_new_user: false`. Reopening a still-valid verification link repeats the event, so count unique persons with `is_new_user = true`, or use the server `sign_up` counter, rather than raw events. Social sign-ups through the isolated session-set Add window (`dual`/`broker` modes) do not report it; see below. |
+| `email_verified` | The browser returned from a successful email verification link (`method: "email"`). Reopening an already-used link can repeat it; the server counter is authoritative. |
+| `organization_setup_completed` | The self-service post-sign-in organization setup request was accepted. |
+| `checkout_started` | A credit checkout session was created; the browser is about to leave for Stripe. |
+| `checkout_completed` | The organization page confirmed a Stripe success return. The outcome is one-shot: the page drops `checkout` from the URL immediately, so a reload, back navigation, or bookmark does not repeat it. Credits post asynchronously by webhook; returns to other pages are not observed. |
+| `first_turn_completed` | The first agent turn of a session this page created completed while its view was open. Carries the session, workspace, and account IDs only. |
 
 Finished requests distinguish accepted, unauthenticated, credits required,
 forbidden, conflict, invalid request, rate limit, server error and unknown
@@ -33,16 +39,59 @@ outcome. No request/response bodies, authorization codes, provider error text,
 prompts, credentials, or DOM text are inspected. HTTP acceptance is not proof of
 first response: use the private session/turn event facts for agent execution.
 
-PostHog autocapture and replay stay disabled. The PostHog outbound projection
-removes SDK-generated URL/title/referral/campaign properties, including nested
-initial person properties; page context is explicit closed vocabulary and UUIDs.
+PostHog autocapture and replay stay disabled. For consented visitors PostHog
+runs with `save_campaign_params` and `save_referrer` enabled, so first-touch
+campaign attribution reaches events and initial person properties. The outbound
+projection keeps only closed-charset `utm_source|medium|campaign|content|term`
+tokens (and their `$initial_` person variants) plus `$referring_domain` /
+`$initial_referring_domain` host names. It still removes every URL, pathname,
+title, full referrer, session-entry referral, and ad/click identifier (`gclid`,
+`fbclid`, `msclkid`, `ttclid`, and the rest of PostHog's click-ID list),
+including nested initial person properties; page context is explicit closed
+vocabulary and UUIDs.
+
+## First-touch attribution without device storage
+
+`apps/web/src/lib/signup-attribution.ts` reads `utm_source`, `utm_medium`,
+`utm_campaign`, `utm_content`, and `ref` from the landing URL before the router
+starts and keeps valid values in page memory only. A valid value is a slug token
+of at most 100 characters from `A-Z a-z 0-9 . _ ~ + -`; anything with a space,
+`@`, `:`, `/`, `?`, `=`, or `%` (free text, email addresses, URLs) is dropped. Nothing is written to cookies or browser storage before consent.
+The values travel with the sign-up itself:
+
+- Email sign-up sends them as `opengeniAttribution` in the Better Auth request
+  body and puts them, plus the one-shot `auth_event=email_verified` marker, in
+  the verification link's return URL.
+- Google/GitHub sign-in sends them as Better Auth `additionalData` (kept in the
+  server-side OAuth state) and in the return URLs; new accounts return with
+  `auth_event=<provider>_signup`, existing ones with `auth_event=<provider>_signin`.
+- In session-set `dual`/`broker` mode, social sign-in runs in the isolated
+  `/account-auth` Add window. The opener carries its first-touch values into
+  that window's URL, and the window sends them as the optional `attribution`
+  field of the social transaction start, which the API stores as the same OAuth
+  state `additionalData`. The server acquisition counter therefore keeps working
+  in every mode. That window returns through the fixed `/account-auth` callback
+  with no `auth_event` marker, so browser `signup_completed` is not reported
+  for those social sign-ups; use the server counters for them.
+
+The server normalizes the values into the `opengeni_signup_acquisition_total`
+source label (`producthunt`, `website`, `direct`, `other`) and stores nothing per
+user. In the browser, the `auth_event` marker is removed from the URL at boot
+and reported once analytics collection is allowed; campaign tokens are
+registered as first-wins PostHog super properties when PostHog starts for a
+consented visitor. Marketing links use
+`https://app.opengeni.ai/?mode=signup&utm_source=opengeni.ai&utm_medium=website&utm_campaign=<cta-slug>`.
 Reo and GA4 remain suspended on query-bearing routes. Public authentication routes
 suspend providers. Consent revocation and identity changes invalidate pending
 request/provider results so another actor cannot inherit them.
 
 Coverage limits must appear in reports: declined/missing consent, blockers,
 network loss and browsers blocking telemetry make this a lower bound; historical
-uncaptured clicks cannot be reconstructed. `login_completed` currently covers the
+uncaptured clicks cannot be reconstructed. For sign-up volume, verification,
+sign-in, organization setup, and acquisition source, use the consent-independent
+server counters (`opengeni_auth_events_total`, `opengeni_organization_setup_total`,
+`opengeni_signup_acquisition_total`, see `docs/deployment.md`) and treat
+PostHog funnels as the consented subset. `login_completed` currently covers the
 legacy managed sign-in UI, not broker account-slot additions. Never count agent
 continuations, session creation, or recent page events as successful logins or
 current online users. Always state the product, environment, time zone, interval,

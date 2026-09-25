@@ -73,6 +73,7 @@ export * from "./video-generation";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
+export * from "./signup-attribution";
 export * from "./tool-catalog";
 export * from "./mcp-oauth";
 export * from "./tool-result-spill";
