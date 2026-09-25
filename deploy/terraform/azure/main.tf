@@ -17,6 +17,8 @@ locals {
     24
   )
   observability_enabled                 = try(var.observability.enabled, false)
+  container_insights_enabled            = local.observability_enabled && var.aks_container_insights.enabled
+  container_insights_destination        = "ciworkspace"
   log_analytics_workspace_name          = coalesce(try(var.observability.log_analytics_workspace_name, null), "${var.name_prefix}-logs")
   application_insights_name             = coalesce(try(var.observability.application_insights_name, null), "${var.name_prefix}-appinsights")
   action_group_name                     = coalesce(try(var.observability.action_group_name, null), "${var.name_prefix}-alerts")
@@ -30,8 +32,6 @@ locals {
   availability_test_url                 = try(var.observability.availability_test_url, null)
   observability_action_group_short_name = try(var.observability.action_group_short_name, "opengenialrt")
   observability_alert_email_receivers   = try(var.observability.alert_email_receivers, {})
-  container_insights_enabled            = local.observability_enabled && var.aks_container_insights.enabled
-  container_insights_destination        = "ciworkspace"
   aks_auto_scaling_enabled              = var.aks.auto_scaling_enabled
   aks_max_count                         = local.aks_auto_scaling_enabled ? var.aks.max_count : null
   aks_max_pods                          = var.aks.max_pods

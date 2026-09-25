@@ -236,26 +236,6 @@ target utilization, disruption margin, regional vCPU quota, and the test's hard
 cost ceiling. A lightweight 500-sandbox result is not evidence for 500
 desktop-class rigs.
 
-## Managed PostgreSQL Capacity
-
-Keep non-secret production capacity separate from the credential-bearing `postgres`
-object. This lets private deployment automation pin the live capacity without
-copying or rewriting the administrator password:
-
-```hcl
-managed_postgres_capacity = {
-  sku_name          = "GP_Standard_D4ds_v5"
-  storage_mb        = 131072
-  storage_tier      = "P10"
-  auto_grow_enabled = true
-}
-```
-
-When set, this policy is authoritative for managed PostgreSQL compute and
-storage. When omitted, the existing `postgres.sku_name` and
-`postgres.storage_mb` behavior is unchanged and provider defaults apply to
-storage tier and autogrow.
-
 ## Container Logs (Container Insights)
 
 Kubernetes keeps container stdout/stderr only for the lifetime of each pod.
@@ -304,6 +284,26 @@ memory requests on every node. Check node request headroom before enabling it
 on a saturated pool. Disabling the object removes the addon, the rule, the
 association, and the cap; data already ingested remains until retention
 expires.
+
+## Managed PostgreSQL Capacity
+
+Keep non-secret production capacity separate from the credential-bearing `postgres`
+object. This lets private deployment automation pin the live capacity without
+copying or rewriting the administrator password:
+
+```hcl
+managed_postgres_capacity = {
+  sku_name          = "GP_Standard_D4ds_v5"
+  storage_mb        = 131072
+  storage_tier      = "P10"
+  auto_grow_enabled = true
+}
+```
+
+When set, this policy is authoritative for managed PostgreSQL compute and
+storage. When omitted, the existing `postgres.sku_name` and
+`postgres.storage_mb` behavior is unchanged and provider defaults apply to
+storage tier and autogrow.
 
 ## Resource Records
 
