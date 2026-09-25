@@ -1556,6 +1556,8 @@ The managed browser exposes a separate public contract at
 GET is a bounded, provider-free projection. POST requires the canonical managed
 human cookie, current session-control authority, an operation UUID, explicit
 historical-checkpoint acceptance, and the exact selection returned by GET.
+The exact built-in local human may read GET to see the system-selected Retry
+route; local mode cannot submit POST consent.
 Agents, delegated/API principals, shared groups, non-Modal homes, active foreign
 routes, legacy/unregistered archives, and `archive.previous` are unsupported.
 

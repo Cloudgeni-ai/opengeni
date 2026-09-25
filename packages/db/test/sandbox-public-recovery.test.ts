@@ -518,6 +518,24 @@ describe("explicit singleton checkpoint recovery", () => {
     ).toBeNull();
   });
 
+  test("the operator recovery ledger permits only attributed event IDs through its function", async () => {
+    const f = await fixture();
+    await rejectsWithSqlState(
+      withWorkspaceRls(client.db, f.workspaceId, (tx) =>
+        tx.execute(sql`insert into opengeni_private.sandbox_recovery_operator_receipts
+          (audit_event_id, kind) values (${crypto.randomUUID()}::uuid, 'checkpoint_fallback_selected')`),
+      ),
+      "42501",
+    );
+    await rejectsWithSqlState(
+      withWorkspaceRls(client.db, f.workspaceId, (tx) =>
+        tx.execute(sql`select opengeni_private.record_sandbox_recovery_operator_event(
+          ${crypto.randomUUID()}::uuid, 'checkpoint_fallback_selected')`),
+      ),
+      "42501",
+    );
+  });
+
   test("consent requirement survives disable and lease deletion; receipt identity cannot be erased", async () => {
     const f = await fixture();
     await f.consent();

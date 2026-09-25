@@ -75,6 +75,7 @@ import {
   releaseWorkspaceArchiveCapture,
   replaceWorkspaceArchiveCaptureAfterProof,
   readLease,
+  readRecentSandboxRecoveryObservations,
   reconcileColdLostLeaseInstanceBlockers,
   retainWorkspaceMutationProcess,
   retainedProcessSettlementIdentity,
@@ -6461,6 +6462,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(result.terminated).toBeGreaterThanOrEqual(1);
     expect(await observability.prometheusMetrics()).toMatch(
       /opengeni_sandbox_provider_missing_before_capture_total\{[^}]*backend="modal"[^}]*\} 1\b/,
+    );
+    expect((await readRecentSandboxRecoveryObservations(db)).providerLosses).toBeGreaterThanOrEqual(
+      1,
     );
     // A duplicate child delivery has no cold transition to commit.
     expect(

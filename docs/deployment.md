@@ -86,9 +86,10 @@ reconstructs a deterministic warning after the static instruction prefix;
 unknown command outcomes are never replayed. Operator metrics and alerts
 record the fallback even when the next turn succeeds. A read-only, aggregate
 `opengeni_private.sandbox_recovery_observations()` inventory reconstructs
-the last 30 minutes of provider-loss and fallback decisions from committed
-audit receipts; the partial audit index keeps this fleet scan bounded.
-Normal role provisioning grants its exact EXECUTE capability.
+the last 30 minutes of provider-loss and fallback decisions from a small
+indexed private ledger, committed with their RLS-verified source audit events.
+The ledger stores only event IDs and fixed kinds, not tenant or provider data;
+normal role provisioning grants exact EXECUTE-only capabilities, not table reads.
 
 ## Selective Knowledge source discovery (0469)
 

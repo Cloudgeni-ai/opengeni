@@ -167,38 +167,65 @@ BEGIN
 END
 $paths$;
 
--- A short indexed audit window remains observable even if the committing
--- worker dies before incrementing a process-local counter. Return only two
--- aggregate counts; no workspace, session or provider identities cross the
--- fleet inventory boundary.
-CREATE INDEX audit_events_sandbox_recovery_recent_idx
-  ON audit_events (occurred_at)
-  WHERE action IN (
-    'sandbox.provider_missing_before_capture',
-    'sandbox.automatic_checkpoint_recovery.authorized'
-  );
+-- This private ledger has no tenant identifier, content or provider locator.
+-- The exact source audit row is verified under the caller's live workspace
+-- RLS context before the idempotent write, in the SAME transaction. Reading
+-- the small non-RLS ledger avoids treating a non-BYPASSRLS definer's invisible
+-- audit rows as a healthy zero across workspaces.
+CREATE TABLE opengeni_private.sandbox_recovery_operator_receipts (
+  audit_event_id uuid PRIMARY KEY,
+  kind text NOT NULL CHECK (kind IN (
+    'provider_missing_before_capture', 'checkpoint_fallback_selected'
+  )),
+  occurred_at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp()
+);
+CREATE INDEX sandbox_recovery_operator_receipts_recent_idx
+  ON opengeni_private.sandbox_recovery_operator_receipts (occurred_at);
+REVOKE ALL ON TABLE opengeni_private.sandbox_recovery_operator_receipts FROM PUBLIC;
 
 DO $projection$
 DECLARE target_schema text := current_schema();
 BEGIN
+  EXECUTE format($definition$
+    CREATE FUNCTION opengeni_private.record_sandbox_recovery_operator_event(
+      event_id uuid, event_kind text
+    ) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, %1$I, pg_temp
+    AS $body$
+    DECLARE expected_action text;
+    BEGIN
+      expected_action := CASE event_kind
+        WHEN 'provider_missing_before_capture' THEN 'sandbox.provider_missing_before_capture'
+        WHEN 'checkpoint_fallback_selected' THEN 'sandbox.automatic_checkpoint_recovery.authorized'
+        ELSE NULL END;
+      IF expected_action IS NULL OR NOT EXISTS (
+        SELECT 1 FROM %1$I.audit_events event
+        WHERE event.id = event_id AND event.action = expected_action
+          AND event.account_id = nullif(current_setting('opengeni.account_id', true), '')::uuid
+          AND event.workspace_id = nullif(current_setting('opengeni.workspace_id', true), '')::uuid
+      ) THEN
+        RAISE EXCEPTION 'sandbox recovery operator event is not attributable'
+          USING ERRCODE = '42501';
+      END IF;
+      INSERT INTO opengeni_private.sandbox_recovery_operator_receipts(audit_event_id, kind)
+      VALUES (event_id, event_kind) ON CONFLICT (audit_event_id) DO NOTHING;
+    END $body$;
+  $definition$, target_schema);
   EXECUTE format($definition$
     CREATE FUNCTION opengeni_private.sandbox_recovery_observations()
     RETURNS TABLE(provider_losses bigint, fallback_selections bigint)
     LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, %1$I, pg_temp
     AS $body$
       SELECT
-        count(*) FILTER (WHERE action = 'sandbox.provider_missing_before_capture')::bigint,
-        count(*) FILTER (WHERE action = 'sandbox.automatic_checkpoint_recovery.authorized')::bigint
-      FROM %1$I.audit_events
+        count(*) FILTER (WHERE kind = 'provider_missing_before_capture')::bigint,
+        count(*) FILTER (WHERE kind = 'checkpoint_fallback_selected')::bigint
+      FROM opengeni_private.sandbox_recovery_operator_receipts
       WHERE occurred_at >= pg_catalog.clock_timestamp() - interval '30 minutes'
-        AND action IN (
-          'sandbox.provider_missing_before_capture',
-          'sandbox.automatic_checkpoint_recovery.authorized'
-        )
     $body$;
   $definition$, target_schema);
 END
 $projection$;
+REVOKE ALL ON FUNCTION opengeni_private.record_sandbox_recovery_operator_event(uuid, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.sandbox_recovery_observations() FROM PUBLIC;
 DO $projection_grants$
 DECLARE runtime_role text;
@@ -209,6 +236,10 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = runtime_role) THEN
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION opengeni_private.sandbox_recovery_observations() TO %I',
+        runtime_role
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.record_sandbox_recovery_operator_event(uuid, text) TO %I',
         runtime_role
       );
     END IF;

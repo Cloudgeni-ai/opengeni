@@ -46632,6 +46632,8 @@ export async function authorizeAutomaticSandboxCheckpointRecovery(
         "metadataCodecVersion",
       ),
     );
+    await tx.execute(sql`select opengeni_private.record_sandbox_recovery_operator_event(
+      ${operationId}::uuid, 'checkpoint_fallback_selected')`);
     await reserveSessionCommandReceipt(tx, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -51859,9 +51861,11 @@ export async function confirmDrainCold(
         returning id
       `);
         if (rows.length > 0 && input.providerMissingBeforeCapture) {
+          const eventId = crypto.randomUUID();
           await tx.insert(schema.auditEvents).values(
             withLosslessContentWriteVersion(
               {
+                id: eventId,
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 subjectId: "opengeni:sandbox-reaper",
@@ -51880,6 +51884,8 @@ export async function confirmDrainCold(
               "metadataCodecVersion",
             ),
           );
+          await tx.execute(sql`select opengeni_private.record_sandbox_recovery_operator_event(
+            ${eventId}::uuid, 'provider_missing_before_capture')`);
         }
         if (rows.length > 0 && row.rotation_requested_at !== null) {
           await wakeSandboxLifecycleWaitersTx(tx, input);
