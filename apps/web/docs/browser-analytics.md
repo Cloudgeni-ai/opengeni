@@ -54,3 +54,47 @@ apps/web/test/validate-analytics-browser.ts`. The script intercepts telemetry
 locally and verifies consent, navigation, foreground activity and the visible
 credit notice against the real app. It requires the Vite development server and
 is separate from the default CI browser fixtures.
+
+## Client error beacon
+
+Route render failures, uncaught window errors, unhandled promise rejections and
+stale lazy-chunk loads are reported to `POST /v1/client-errors`
+(`src/lib/client-error-reporting.ts`), which increments
+`opengeni_client_errors_total{kind="route_error|unhandled_rejection|window_error|chunk_load"}`.
+This is operational telemetry, separate from the consent-controlled providers
+above: the body is only the closed `kind`, the matched route pattern (for example
+`/workspaces/$workspaceId/sessions/$sessionId`, or `unknown`), and the bundle
+revision. It never carries an error message, stack, concrete URL, identifier,
+cookie or user content; the request uses `credentials: "omit"`, and the API
+rejects any other field. The route is public so failures before sign-in are
+counted too.
+
+The browser suppresses a repeated kind and route for one minute and sends at
+most ten reports per ten minutes; the API additionally bounds admission per kind
+and per process. ResizeObserver loop notices, opaque cross-origin
+`Script error.` events and `AbortError` rejections are not reported. Treat the
+counter as a lower bound: blocked requests, closed tabs and both rate limits
+drop reports. It is not exception capture; use the route pattern and revision in
+the API's `Web client error reported` log line to locate a failing page and
+release.
+
+`chunk_load` counts documents that failed to load a lazy module or stylesheet,
+which after a deploy usually means the tab still references replaced hashed
+assets. The signal is Vite's `vite:preloadError` event
+(`installVitePreloadErrorReporting`), which fires before the recovery listener
+in `vite-preload-recovery.ts` decides whether to reload, so it counts both tabs
+that recover through the automatic one-time reload and tabs that cannot.
+Browser-specific dynamic-import failures that reach a route boundary or a global
+listener without that event are classified as `chunk_load` too. Each document
+reports at most one `chunk_load` and nothing after it until it reloads: when
+recovery cancels the event, Vite resolves the failed import to `undefined` and
+the router fails with an ordinary `TypeError` while the reload is in flight,
+and counting that as `route_error` would raise the route-error rate on every
+deploy. `route_error` therefore excludes stale-chunk failures.
+
+Every router match has a styled error boundary (`src/components/route-error.tsx`),
+so a failing page keeps the workspace rail and offers Reload and Go home. Once a
+document has observed a chunk-load failure, any route failure it shows is
+presented as an update with Reload first, including the brief follow-on failure
+while the recovery reload is in flight. The raw error text is shown only in
+development builds.

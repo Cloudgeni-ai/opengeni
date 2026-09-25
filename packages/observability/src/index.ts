@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 import { SandboxBackend } from "@opengeni/contracts";
 import {
+  CLIENT_ERROR_REVISION_PATTERN,
+  CLIENT_ERROR_ROUTE_PATTERN,
+} from "@opengeni/contracts/client-error-report";
+import {
   currentTraceContext,
   validTraceContext,
   admissionTraceContext,
@@ -328,6 +332,11 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
 const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["sandboxLeaseKey", /^slk_[0-9a-f]{32}$/],
   ["correlationId", /^[A-Za-z0-9._:-]{1,128}$/],
+  // Web error beacon: a route PATTERN of lowercase literal and `$param`
+  // segments (never a concrete path or id) and the bundle revision token, in
+  // the exact wire grammar the API route admits.
+  ["clientRoute", CLIENT_ERROR_ROUTE_PATTERN],
+  ["clientRevision", CLIENT_ERROR_REVISION_PATTERN],
 ]);
 
 const PUBLIC_CHANNEL_A_OPERATIONS = new Set([

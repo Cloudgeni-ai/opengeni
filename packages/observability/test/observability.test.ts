@@ -784,6 +784,42 @@ describe("observability", () => {
     expect(JSON.parse(observed[1]!)).not.toHaveProperty("sandboxLeaseKey");
   });
 
+  test("public structured logs admit web client route patterns, never concrete paths", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.warn("valid", {
+        surface: "web",
+        reason: "chunk_load",
+        clientRoute: "/workspaces/$workspaceId/sessions/$sessionId",
+        clientRevision: "0123456789abcdef0123456789abcdef01234567",
+      });
+      obs.warn("concrete", {
+        clientRoute: "/workspaces/3f2a9c1e-0000-4000-8000-000000000001/sessions",
+        clientRevision: "rev with spaces",
+      });
+      obs.warn("unknown", { clientRoute: "unknown", clientRevision: "dev" });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      message: "valid",
+      surface: "web",
+      reason: "chunk_load",
+      clientRoute: "/workspaces/$workspaceId/sessions/$sessionId",
+      clientRevision: "0123456789abcdef0123456789abcdef01234567",
+    });
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("clientRoute");
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("clientRevision");
+    expect(JSON.parse(observed[2]!)).toMatchObject({
+      clientRoute: "unknown",
+      clientRevision: "dev",
+    });
+  });
+
   test("public structured logs retain only grammar-validated request correlation ids", () => {
     const observed: string[] = [];
     const originalWarn = console.warn;
