@@ -454,7 +454,7 @@ The NATS client/monitor ports and Garage RPC/admin/web ports are not exposed. On
 bind NodePorts to loopback with
 `--kube-proxy-arg=nodeport-addresses=127.0.0.0/8`, then publish only the five
 loopback listeners through a private edge such as Tailscale Serve. Route `/` to
-web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`, `/metrics`,
+web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`,
 `/install.sh`, `/install.ps1`, `/uninstall.sh`,
 `/opengeni-agent-minisign.pub`, and `/agent` to the API. Give the NATS
 websocket, relay, and Garage S3 API their own private TLS ports. Set
@@ -1577,8 +1577,13 @@ filesystems even though Docker accepts the mount.
 The production web image serves the built SPA through the repository-owned Bun
 server, not Vite's preview server. The build precompresses text assets;
 content-hashed `/assets/*` responses are served with immutable one-year caching,
-while the HTML shell revalidates. The API compresses JSON responses and leaves
-SSE and other streaming transports uncompressed.
+while the HTML shell revalidates. Every shell response carries
+`X-Content-Type-Options: nosniff` and `Referrer-Policy:
+strict-origin-when-cross-origin` (the setup-account page keeps its stricter
+`no-referrer`). The server deliberately sets no `X-Frame-Options`,
+`frame-ancestors`, or other CSP, because the console supports embedding. The
+API compresses JSON responses and leaves SSE and other streaming transports
+uncompressed.
 
 Web assets, the React demo, and the server bundle compile once on BuildKit's
 native build platform. The amd64 and arm64 web images copy those portable
@@ -3116,7 +3121,7 @@ and storage objects, so it proves deeper behavior but is not a liveness probe.
 
 Service endpoints:
 
-- API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts.
+- API: `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts. `GET /metrics` is served on `OPENGENI_API_METRICS_PORT` when it is set, and then never on `OPENGENI_API_PORT`, so an ingress that forwards every path to the API cannot publish it. Without it, `/metrics` stays on `OPENGENI_API_PORT` (the local and Docker Compose default). The Helm chart sets it from `api.metricsPort` (default `9464`) behind a separate always-ClusterIP `<release>-api-metrics` Service that the ServiceMonitor, scrape annotations, and bundled collector use; do not route it through an Ingress. `api.metricsPort: null` restores the legacy single-port layout.
 - Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness requires lifecycle state `ready` plus healthy Postgres, NATS, and Temporal checks. The standalone worker reserves a one-connection Postgres probe pool so ordinary activity-pool saturation cannot create false readiness failures. A draining worker stays live but becomes unready before polling stops.
 - Relay: `GET /metrics` and `GET /healthz` on the relay port when the relay is enabled.
 
@@ -3135,6 +3140,7 @@ Useful settings:
 - `OPENGENI_WORKER_HTTP_PORT=8001` for the worker metrics/health listener.
 - `OPENGENI_AUTH_ALLOW_HEALTH=true` allows `/healthz`, `/traffic-readyz`, and `/readyz` through the deployment-key gate.
 - `OPENGENI_AUTH_ALLOW_METRICS=true` allows API `/metrics` through the deployment-key gate for an internal scraper path.
+- `OPENGENI_API_METRICS_PORT=9464` moves API `/metrics` to a dedicated internal listener. That listener serves nothing else and applies the same deployment-key rules.
 - `OPENGENI_DISABLE_OPENAI_TRACING=true` disables OpenAI Agents SDK tracing; tracing also defaults off when no OTLP endpoint is configured.
 - `OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` to export spans to an OpenTelemetry Collector.
 - `OPENGENI_OTEL_EXPORTER_OTLP_HEADERS=key=value,...` for exporter headers; put this in a secret when it contains credentials.

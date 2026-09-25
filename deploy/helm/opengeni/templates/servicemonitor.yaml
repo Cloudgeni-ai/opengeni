@@ -18,8 +18,12 @@ spec:
     matchLabels:
       {{- include "opengeni.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: api
+      {{- if .Values.api.metricsPort }}
+      opengeni.ai/metrics-endpoint: "true"
+      {{- end }}
   endpoints:
-    - port: http
+    {{- /* The internal listener when api.metricsPort is set; http only in the legacy configuration. */}}
+    - port: {{ if .Values.api.metricsPort }}metrics{{ else }}http{{ end }}
       path: {{ ((.Values.observability).metrics).path | default "/metrics" | quote }}
       interval: {{ ((.Values.observability).serviceMonitor).interval | default "30s" | quote }}
       scrapeTimeout: {{ ((.Values.observability).serviceMonitor).scrapeTimeout | default "10s" | quote }}

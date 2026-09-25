@@ -56,9 +56,10 @@ networkPolicy:
     namespaceSelector: {}
     podSelector: {}
   # Optional: allow a metrics scraper (Prometheus) to reach the relay's
-  # GET /metrics on its wss port. Leave unset to omit the rule (the relay has no
-  # other ingress source than the ingress controller). When the kube-prometheus
-  # ServiceMonitor scrapes from a separate namespace, set both selectors here.
+  # GET /metrics on its wss port and the API's internal api.metricsPort. Leave
+  # unset to omit those rules (the relay has no other ingress source than the
+  # ingress controller). When the kube-prometheus ServiceMonitor scrapes from a
+  # separate namespace, set both selectors here.
   monitoring: {}
     # namespaceSelector:
     #   matchLabels:
@@ -223,6 +224,12 @@ api:
     digest: ""
     pullPolicy: IfNotPresent
   containerPort: 8000
+  # Dedicated internal Prometheus listener (OPENGENI_API_METRICS_PORT). GET
+  # /metrics is then served only here, never on containerPort, so an ingress
+  # that forwards every path to the API cannot publish it. It gets its own
+  # ClusterIP Service (never a NodePort) for the ServiceMonitor and scrape
+  # annotations. Set null to keep the legacy /metrics on containerPort.
+  metricsPort: 9464
   resources:
     requests:
       cpu: 250m
@@ -767,6 +774,13 @@ relay:
     customMetrics: []
     behavior: {}
 
+# Kubernetes deletes each finished one-shot chart Job (migrate, catalog-import,
+# and the disposable object-storage initializers) and its pods this many seconds
+# after it completes or fails. Helm hooks already delete succeeded hook Jobs;
+# this bounds the failed ones, which otherwise linger until the next hook run.
+# Keep it long enough to read a failed Job's logs. null or 0 disables it.
+jobTtlSecondsAfterFinished: 86400
+
 migrations:
   enabled: true
   priorityClassName: ""
@@ -1019,9 +1033,6 @@ ingress:
           pathType: Prefix
           service: api
         - path: /healthz
-          pathType: Exact
-          service: api
-        - path: /metrics
           pathType: Exact
           service: api
         # The self-hosted agent install surface (get.<domain>). The API serves the

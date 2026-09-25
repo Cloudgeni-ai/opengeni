@@ -103,9 +103,6 @@ ingress:
         - path: /healthz
           pathType: Exact
           service: api
-        - path: /metrics
-          pathType: Exact
-          service: api
 
 observability:
   structuredLogs: true

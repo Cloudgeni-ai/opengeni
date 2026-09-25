@@ -197,9 +197,6 @@ ingress:
         - path: /healthz
           pathType: Exact
           service: api
-        - path: /metrics
-          pathType: Exact
-          service: api
         # get.<domain> install-script + device-enrollment routes served by the
         # API (same origin / single trust root). These ride the
         # SAME app host here; point the get.<domain> DNS record at this ingress —

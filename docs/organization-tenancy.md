@@ -611,6 +611,13 @@ renaming an existing initial workspace back to `Default workspace`, so a later
 administrator rename is durable. Migration 0314 itself sends no provider
 message; the later 0348 API delivery path below does.
 
+In the default `legacy` session-set mode, the first successful click of an
+email verification link also signs the user in (Better Auth
+`autoSignInAfterVerification`), so a new user lands directly in organization
+setup. A reused link only redirects and never mints another session. `dual` and
+`broker` modes leave it off: there, sign-in belongs to the isolated browser
+transaction (see `docs/browser-login-session-sets.md`).
+
 ### Post-sign-in organization setup and one-time invited-user setup (0348)
 
 Migration `0348_named_signup_and_user_setup.sql` makes both onboarding paths

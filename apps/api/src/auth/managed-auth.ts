@@ -261,6 +261,11 @@ export function createManagedAuth(
     },
     emailVerification: {
       sendOnSignUp: requireEmailVerification,
+      // The first successful verification link click signs the user in (a
+      // reused link creates no session). Only legacy mode: session-set modes
+      // bind sign-in to an isolated browser transaction, and the provider
+      // session this would create is discarded there by design.
+      autoSignInAfterVerification: settings.managedAuthSessionSetMode === "legacy",
       sendVerificationEmail: async ({ user, url }) => {
         await sendManagedAuthEmail(managedEmailTransport, {
           kind: "email_verification",

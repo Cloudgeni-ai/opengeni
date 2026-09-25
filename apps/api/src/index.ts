@@ -57,6 +57,7 @@ import {
 import type { ApiWebSocketConnection } from "./api-websocket";
 import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
 import { apiRequestBindingsForTransportPeer } from "./http/request-source";
+import { startApiMetricsListener } from "./http/metrics-listener";
 import {
   createStandaloneEditableArtifactApplication,
   type StandaloneEditableArtifactApplication,
@@ -474,6 +475,7 @@ export async function startApi(
       close: (socket) => socket.data.transportClosed(),
     },
   });
+  const metricsServer = startApiMetricsListener(settings, observability);
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
     : undefined;
@@ -540,11 +542,13 @@ export async function startApi(
   observability.info("OpenGeni API listening", {
     host: settings.apiHost,
     port: settings.apiPort,
+    ...(metricsServer ? { metricsPort: settings.apiMetricsPort } : {}),
   });
   return {
     server,
     close: async () => {
       server.stop(true);
+      metricsServer?.stop(true);
       stopSlackInteractionPump?.();
       await stopMemorySlackPublicationPump();
       stopMetricsIngestion?.();
