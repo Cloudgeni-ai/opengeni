@@ -47,7 +47,18 @@ export type SandboxRecoveryState = {
   request: SandboxRecoveryRequest | null;
   uncertain: boolean;
   error: string | null;
+  /**
+   * The API refused the read with 403: recovery requires the canonical
+   * managed-human cookie session plus session control, so it cannot apply to
+   * this viewer (local mode, API keys, delegated or read-only principals).
+   */
+  notApplicable: boolean;
 };
+
+/** A read-only 403 means this viewer can never consent, not that the check failed. */
+export function isRecoveryNotApplicableError(error: unknown): boolean {
+  return error instanceof OpenGeniApiError && error.status === 403;
+}
 
 /** Public blocker codes are stable; UI copy must not expose persistence jargon. */
 export function sandboxRecoveryBlocker(reason: string): string {
@@ -92,6 +103,7 @@ export function createSandboxRecoveryController(
     request: null,
     uncertain: false,
     error: null,
+    notApplicable: false,
   };
   const listeners = new Set<() => void>();
   let read: Promise<SandboxRecoveryProjection | null> | null = null;
@@ -117,15 +129,20 @@ export function createSandboxRecoveryController(
         update({
           projection,
           error: null,
+          notApplicable: false,
           ...(observedRequest ? { uncertain: false } : {}),
         });
         return projection;
-      } catch {
+      } catch (error) {
         if (revision === startedRevision) {
           // Never leave an old eligible action live after an unavailable read.
+          const notApplicable = isRecoveryNotApplicableError(error);
           update({
             projection: null,
-            error: "Could not check checkpoint recovery. No new recovery request was sent.",
+            notApplicable,
+            error: notApplicable
+              ? null
+              : "Could not check checkpoint recovery. No new recovery request was sent.",
           });
         }
         return null;

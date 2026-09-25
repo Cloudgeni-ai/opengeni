@@ -3,6 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { SandboxRecoveryProjection } from "@opengeni/sdk";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { SandboxRecoveryClient, SandboxRecoveryRequest } from "@/lib/sandbox-recovery";
 
 // Radix detects browser support at import time, before rendering its real portal.
@@ -193,6 +194,36 @@ test("unavailable reads and unsupported structural failures never fall back to r
   expect(container.textContent).toContain("unavailable");
   expect(container.textContent).not.toContain("Choose another model");
 });
+
+test.each([false, true])(
+  "a 403 read (structural %p) is not applicable, not a failed check",
+  async (structural) => {
+    let reads = 0;
+    const container = await render(
+      {
+        getSandboxRecovery: async () => {
+          reads++;
+          throw new OpenGeniApiError(
+            403,
+            JSON.stringify({ error: { code: "forbidden", message: "Managed human required." } }),
+          );
+        },
+        recoverSandbox: async () => {
+          throw new Error("unexpected mutation");
+        },
+      },
+      structural,
+    );
+    expect(reads).toBe(1);
+    expect(container.textContent).not.toContain("Could not check checkpoint recovery");
+    expect(container.textContent).not.toContain("Checking checkpoint recovery");
+    expect(container.textContent).not.toContain("Check recovery status");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    // The lane defers to its caller's ordinary remedies; the banner already
+    // withholds generic Retry from structural failures.
+    expect(container.textContent).toContain("Try again");
+  },
+);
 
 test("nonstructural unsupported recovery preserves ordinary failure controls", async () => {
   const container = await render(

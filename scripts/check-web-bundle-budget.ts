@@ -495,6 +495,12 @@ const effectiveBudgets = {
     // The actual merge with main 5ef34cf500 is 2,370,837 raw / 664,028
     // gzip (32 files); preserve the measured integrated raw envelope too.
     wholeKibEnvelope(2_370_837),
+    // Session polish: plain-language provider failure copy, a compact phone
+    // status badge, neutral compute labels and the background tab-title cue.
+    // Base 6eb431b03 measures 2,451,401 raw / 692,833 gzip; this change
+    // 2,459,406 / 695,020 across 34 files (Bun 1.3.14 macOS/arm64). Keep the
+    // established 1.5 KiB headroom; gzip, file-count and other caps stay fixed.
+    wholeKibEnvelope(2_459_406, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,

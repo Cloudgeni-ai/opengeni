@@ -1650,6 +1650,26 @@ describe("summarizeSessionFailure", () => {
     expect(summary.consecutiveRecoveryCount).toBeNull();
   });
 
+  test("keeps the exact recorded text and code beside the humanized reason", () => {
+    const raw = "401 Incorrect API key provided: sk-****abcd.";
+    const summary = summarizeSessionFailure(
+      [event(1, "turn.failed", { error: raw, code: "provider_auth", detail: raw })],
+      "failed",
+    );
+    expect(summary.reason).toContain("rejected this deployment's engine credentials");
+    expect(summary.recordedDetail).toBe(raw);
+    expect(summary.failureCode).toBe("provider_auth");
+    const diagnostics = summarizeSessionFailure([], "failed", {
+      eventId: "event-9",
+      turnId: "turn-9",
+      sequence: 9,
+      occurredAt: "2026-09-20T08:00:00.000Z",
+      payload: { error: "Model provider rate limit hit.", lastRetryableError: "429 Slow down" },
+    });
+    expect(diagnostics.recordedDetail).toBe("Model provider rate limit hit.\n429 Slow down");
+    expect(diagnostics.failureCode).toBeUndefined();
+  });
+
   test("preserves provider-internal failure reasons like the timeline does", () => {
     const summary = summarizeSessionFailure(
       [
