@@ -14,6 +14,7 @@ import type { NativeConnectRequest } from "@/components/capabilities/native-conn
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { observeSessionTurnEvents } from "@/lib/analytics-observer";
 import { needsSandboxRecoveryCheck } from "@/lib/sandbox-failure";
 import {
   admissionRecheckControl,
@@ -307,6 +308,9 @@ export function SessionRoute({
     jumpToSequence,
     error: streamError,
   } = useSessionEvents(sessionId);
+  // Consented funnel telemetry: a session this page started reached its first
+  // completed turn. Only event types are inspected.
+  useEffect(() => observeSessionTurnEvents(sessionId, events), [events, sessionId]);
   const sessionDetailReadOwner = useRef<object>({});
   const beginSessionDetailRead = useCallback(
     () =>

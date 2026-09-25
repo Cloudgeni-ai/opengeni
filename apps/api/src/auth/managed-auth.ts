@@ -26,6 +26,7 @@ import {
   MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
 } from "./managed-auth-rate-limits";
 import { deliverManagedSignInNotification } from "./managed-sign-in-notifications";
+import { createSignupFunnelMetrics } from "./signup-funnel-metrics";
 import {
   currentManagedAuthProviderId,
   currentManagedAuthAttemptId,
@@ -164,6 +165,10 @@ export function createManagedAuth(
   if (settings.productAccessMode !== "managed") {
     return null;
   }
+  // Content-free sign-up funnel counters; recording never fails an auth flow.
+  const funnel = options.observability
+    ? createSignupFunnelMetrics(options.observability)
+    : undefined;
   const requireEmailVerification = managedAuthRequiresEmailVerification(settings);
   const pool = createManagedAuthDatabasePool(settings.databaseUrl, options.observability);
   return betterAuth({
@@ -371,6 +376,7 @@ export function createManagedAuth(
         });
       },
       afterEmailVerification: async (user) => {
+        funnel?.recordEmailVerified();
         await ensureManagedAccessForUser(db, {
           userId: user.id,
           email: user.email,
@@ -494,6 +500,7 @@ export function createManagedAuth(
             };
           },
           after: async (session) => {
+            funnel?.recordSignIn();
             recordCurrentManagedAuthSession(session.id);
             if (!shouldDiscardCurrentManagedAuthProviderSession()) return;
             await db.execute(sql`delete from auth_sessions where id = ${session.id}`);
@@ -504,7 +511,8 @@ export function createManagedAuth(
         create: {
           before: async (user) =>
             managedAuthUserCreateAdmission(settings, user, currentManagedAuthProviderId()),
-          after: async (user) => {
+          after: async (user, context) => {
+            await funnel?.recordSignUp(context);
             if (!user.emailVerified) return;
             await ensureManagedAccessForUser(db, {
               userId: user.id,

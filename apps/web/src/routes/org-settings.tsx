@@ -37,6 +37,7 @@ import {
   type OrganizationAdminSection,
 } from "@/lib/organization-admin";
 import { hasAccountPermission } from "@/lib/permissions";
+import { captureAnalyticsEvent } from "@/lib/analytics-observer";
 import type {
   BillingEntitlementsResponse,
   BillingSummary,
@@ -489,6 +490,7 @@ export function OrgSettingsRoute({
   // "shortly" rather than implying the balance already reflects the top-up.
   useEffect(() => {
     if (checkout === "success") {
+      captureAnalyticsEvent("checkout_completed");
       toast.success("Payment received", {
         description: "Your credits will appear shortly.",
       });
