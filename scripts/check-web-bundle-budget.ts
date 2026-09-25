@@ -471,12 +471,12 @@ const effectiveBudgets = {
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
     // Launch sign-up attribution: memory-only first-touch capture at boot and
-    // attributed sign-up/social request bodies in the shared API helper. The
-    // entries-aware split also moves two shared chunks. Base 6eb431b03 measures
-    // 2,451,401 raw / 692,833 gzip; this change 2,456,884 / 694,580 across 34
-    // files (Bun 1.3.14 macOS/arm64). Keep the established 1.5 KiB headroom;
-    // gzip, file-count, initial, per-file, lazy, and CSS caps stay fixed.
-    wholeKibEnvelope(2_456_884, 1.5 * kib),
+    // attributed sign-up/social request bodies in the shared API helper. Base
+    // 23e0a242a measures 2,453,795 raw / 693,297 gzip; this change 2,455,310 /
+    // 693,921 across 33 files (Bun 1.3.14 macOS/arm64). Keep the established
+    // 1.5 KiB headroom; gzip, file-count, initial, per-file, lazy, and CSS caps
+    // stay fixed.
+    wholeKibEnvelope(2_455_310, 1.5 * kib),
     // Artifact link resolution and host message-presentation plumbing: 2,445,478
     // raw / 691,865 gzip on Bun 1.4 macOS/arm64. Media/PDF viewers remain lazy.
     wholeKibEnvelope(2_445_478, 1.5 * kib),
