@@ -143,6 +143,38 @@ describe("session title generation", () => {
     expect(result.usage?.usage.outputTokens).toBe(12);
   });
 
+  test("a chat reply with inline reasoning keeps only the answer after it", async () => {
+    const { result } = await generateThroughResolvedChatModel(() =>
+      chatCompletion(
+        "<think>\nThe user wants a title for a crashing pod.\n</think>\n\nKubernetes Pod Crash Debugging",
+        "stop",
+      ),
+    );
+
+    expect(result.title).toBe("Kubernetes Pod Crash Debugging");
+  });
+
+  test("a chat reply stopped inside inline reasoning yields no title", async () => {
+    const { result } = await generateThroughResolvedChatModel(() =>
+      chatCompletion("<think>\nThe user wants a title for", "length"),
+    );
+
+    expect(result.title).toBeNull();
+    expect(result.usage?.usage.outputTokens).toBe(12);
+  });
+
+  test("a quoted or bold chat title keeps no dangling closing mark", async () => {
+    for (const content of [
+      '"Kubernetes Pod Crash Debugging"',
+      "**Kubernetes Pod Crash Debugging**",
+    ]) {
+      const { result } = await generateThroughResolvedChatModel(() =>
+        chatCompletion(content, "stop"),
+      );
+      expect(result.title).toBe("Kubernetes Pod Crash Debugging");
+    }
+  });
+
   test("a completed chat title keeps its final word", async () => {
     const { result } = await generateThroughResolvedChatModel(() =>
       chatCompletion("Kubernetes Pod Crash Debugging", "stop"),
@@ -199,5 +231,57 @@ describe("session title generation", () => {
       max_output_tokens: SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
       reasoning: { effort: "low" },
     });
+  });
+
+  test("a title without a resolved provider client still sends one direct request outside a trace", async () => {
+    for (const modelName of ["title-model", "unlisted-title-model"]) {
+      const upstream = providerServer(() =>
+        Response.json({
+          id: `resp-${modelName}`,
+          object: "response",
+          created_at: 1,
+          model: modelName,
+          status: "completed",
+          output: [
+            {
+              id: "msg-title",
+              type: "message",
+              role: "assistant",
+              status: "completed",
+              content: [
+                { type: "output_text", text: "Kubernetes Pod Crash Debugging", annotations: [] },
+              ],
+            },
+          ],
+          usage: {
+            input_tokens: 40,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens: 6,
+            output_tokens_details: { reasoning_tokens: 0 },
+            total_tokens: 46,
+          },
+        }),
+      );
+      const settings = testSettings({
+        sandboxBackend: "none",
+        openaiBaseUrl: upstream.baseUrl,
+        openaiModel: "title-model",
+        openaiAllowedModels: "title-model",
+      });
+
+      const result = await generateSessionTitle(settings, "Debug my crashing Kubernetes pod", {
+        modelName,
+      });
+
+      expect(result.title).toBe("Kubernetes Pod Crash Debugging");
+      expect(result.usage?.usage.outputTokens).toBe(6);
+      expect(upstream.requests).toHaveLength(1);
+      expect(upstream.requests[0]!.path).toBe("/v1/responses");
+      expect(upstream.requests[0]!.body).toMatchObject({
+        model: modelName,
+        max_output_tokens: SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
+        store: false,
+      });
+    }
   });
 });

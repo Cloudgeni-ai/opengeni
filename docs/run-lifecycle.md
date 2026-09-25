@@ -96,10 +96,15 @@ removes that operation from the model-visible catalog for the attempt and starts
 one bounded, tool-less title request beside the ordinary response stream. The
 sidecar uses the same resolved provider and credential authority, receives only
 a bounded conversation opener, and is metered as its own model call. It requests
-the model's lowest runnable reasoning effort with a 512-token output budget, so
-reasoning cannot consume the visible title, and a response stopped by that limit
-keeps only whole words. Chat-completions providers use one direct request
-outside the agent runner, as the compaction summarizer does. The main
+the model's lowest runnable reasoning effort with a 512-token output budget,
+which leaves room for reasoning before the title. A response stopped by that
+limit keeps only whole words; if reasoning still uses the whole budget, no title
+is saved and a later eligible turn retries. Inline `<think>` reasoning before the
+answer is dropped. Every provider route sends one direct request outside the
+agent runner, as the compaction summarizer does. On a shared provider route
+such as the managed free model, the title request counts against the same
+provider rate limit as the turn; a rate-limited title is dropped like any other
+failure. The main
 agent does not wait for a title tool result or make a title follow-up model call.
 When the main stream reaches normal settlement, the worker waits for the
 already-running bounded sidecar and joins it without cancelling. Exceptional or

@@ -1,7 +1,11 @@
 import { hasPermission } from "@opengeni/core";
 import type { AttemptToolDefinition } from "@opengeni/codemode";
 import type { ModelCapabilitiesV1 } from "@opengeni/config";
-import type { GeneratedSessionTitle } from "@opengeni/runtime";
+import type {
+  GeneratedSessionTitle,
+  GenerateSessionTitleOptions,
+  OpenGeniRuntime,
+} from "@opengeni/runtime";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -62,7 +66,7 @@ export const PARALLEL_SESSION_TITLE_TIMEOUT_MS = 15_000;
 /**
  * The lowest reasoning effort the resolved model can run, for the auxiliary
  * title request only. A title needs no deliberation, and a provider default
- * effort can spend the whole output budget before any visible text. Returns
+ * effort can use most of the output budget before any visible text. Returns
  * undefined when the model declares no runnable reasoning control, so the
  * request carries no reasoning parameter.
  */
@@ -77,6 +81,34 @@ export function sessionTitleReasoningEffort(
     if (!lowest || order.indexOf(effort) < order.indexOf(lowest)) lowest = effort;
   }
   return lowest;
+}
+
+/**
+ * Options for the parallel title request. It uses the turn's resolved
+ * provider and credential authority, but its own lowest runnable reasoning
+ * effort rather than the turn's effort.
+ */
+export function sessionTitleGenerationOptions(input: {
+  resolvedModel: ReturnType<OpenGeniRuntime["resolveTurnModel"]>;
+  modelName: string;
+  serviceTier: GenerateSessionTitleOptions["serviceTier"] | null | undefined;
+  signal: AbortSignal;
+}): GenerateSessionTitleOptions {
+  const { resolvedModel, serviceTier } = input;
+  const reasoningEffort = sessionTitleReasoningEffort(resolvedModel?.configured.capabilities);
+  return {
+    ...(resolvedModel
+      ? {
+          client: resolvedModel.client,
+          provider: resolvedModel.provider,
+          model: resolvedModel.model,
+        }
+      : {}),
+    modelName: input.modelName,
+    ...(serviceTier ? { serviceTier } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    signal: input.signal,
+  };
 }
 
 export type ParallelSessionTitleGeneration = {

@@ -3,10 +3,13 @@ import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
 } from "@opengeni/contracts";
+import { resolveTurnModel } from "@opengeni/runtime";
+import { testSettings } from "@opengeni/testing";
 
 import {
   createSessionTitleAttemptToolDefinition,
   SESSION_TITLE_MODEL_TOOL_NAME,
+  sessionTitleGenerationOptions,
   sessionTitleReasoningEffort,
   sessionTitleToolPlan,
   shouldRequestMissingSessionTitle,
@@ -282,5 +285,64 @@ describe("sessionTitleReasoningEffort", () => {
     expect(sessionTitleReasoningEffort(undefined)).toBeUndefined();
     expect(sessionTitleReasoningEffort(reasoning(false, ["low", "medium"]))).toBeUndefined();
     expect(sessionTitleReasoningEffort(reasoning(true, []))).toBeUndefined();
+  });
+});
+
+describe("sessionTitleGenerationOptions", () => {
+  const resolvedModel = resolveTurnModel(testSettings({ sandboxBackend: "none" }), "gpt-5.6-sol")!;
+  const signal = new AbortController().signal;
+
+  test("binds the resolved provider and the model's lowest runnable effort, not the turn's", () => {
+    expect(resolvedModel.configured.capabilities?.reasoning).toMatchObject({
+      runnable: true,
+      defaultEffort: "high",
+    });
+
+    const options = sessionTitleGenerationOptions({
+      resolvedModel,
+      modelName: "gpt-5.6-sol",
+      serviceTier: "priority",
+      signal,
+    });
+
+    expect(options.client).toBe(resolvedModel.client);
+    expect(options.provider).toBe(resolvedModel.provider);
+    expect(options.model).toBe(resolvedModel.model);
+    expect(options.modelName).toBe("gpt-5.6-sol");
+    expect(options.serviceTier).toBe("priority");
+    expect(options.reasoningEffort).toBe(
+      sessionTitleReasoningEffort(resolvedModel.configured.capabilities)!,
+    );
+    expect(options.reasoningEffort).toBe("low");
+    expect(options.signal).toBe(signal);
+  });
+
+  test("omits reasoning effort without a runnable reasoning control or a resolved model", () => {
+    const capabilities = resolvedModel.configured.capabilities!;
+    const withoutRunnableReasoning = sessionTitleGenerationOptions({
+      resolvedModel: {
+        ...resolvedModel,
+        configured: {
+          ...resolvedModel.configured,
+          capabilities: {
+            ...capabilities,
+            reasoning: { ...capabilities.reasoning, runnable: false },
+          },
+        },
+      },
+      modelName: "gpt-5.6-sol",
+      serviceTier: undefined,
+      signal,
+    });
+    expect("reasoningEffort" in withoutRunnableReasoning).toBe(false);
+    expect("serviceTier" in withoutRunnableReasoning).toBe(false);
+
+    const unresolved = sessionTitleGenerationOptions({
+      resolvedModel: null,
+      modelName: "scripted-model",
+      serviceTier: null,
+      signal,
+    });
+    expect(unresolved).toEqual({ modelName: "scripted-model", signal });
   });
 });

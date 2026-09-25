@@ -901,7 +901,7 @@ export type GenerateSessionTitleOptions = {
   serviceTier?: "fast" | "priority";
   /**
    * Reasoning effort for the title request only. Callers pass the model's
-   * lowest runnable effort so reasoning cannot consume the output budget.
+   * lowest runnable effort to leave room in the output budget for the title.
    */
   reasoningEffort?: ReasoningEffort;
   signal?: AbortSignal;
@@ -909,8 +909,9 @@ export type GenerateSessionTitleOptions = {
 
 export const SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS = 4_000;
 // Reasoning models spend output tokens on reasoning before the visible title.
-// The budget must leave room for that; the title itself is bounded afterwards
-// by the automatic-title normalizer.
+// The budget leaves room for that; the title itself is bounded afterwards by
+// the automatic-title normalizer. Reasoning can still use the whole budget, in
+// which case no title is saved and a later eligible turn retries.
 export const SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS = 512;
 
 export const SESSION_TITLE_GENERATION_INSTRUCTIONS =
@@ -972,9 +973,22 @@ export async function generateSessionTitle(
   }
 
   const modelName = options.modelName ?? settings.openaiModel;
-  if (options.client && options.provider?.api === "chat") {
-    return await generateChatSessionTitle(options.client, modelName, boundedPrompt, options);
+  // The SDK Model.getResponse() is runner-facing and throws outside an agent
+  // trace, so every provider route sends one direct request. Only a runtime
+  // model override (tests) has no provider client and keeps getResponse().
+  const binding =
+    options.client && options.provider
+      ? { client: options.client, provider: options.provider, modelId: modelName }
+      : options.model
+        ? null
+        : new MultiProviderModelProvider(settings).resolveBinding(modelName);
+  if (binding?.provider.api === "chat") {
+    return await generateChatSessionTitle(binding.client, binding.modelId, boundedPrompt, options);
   }
+  const wireProvider = binding?.provider ?? options.provider;
+  const azureWire = wireProvider
+    ? wireProvider.wireProfile === "azure-openai"
+    : settings.openaiProvider === "azure";
   const request: ModelRequest = {
     systemInstructions: SESSION_TITLE_GENERATION_INSTRUCTIONS,
     input: boundedPrompt,
@@ -982,10 +996,7 @@ export async function generateSessionTitle(
       maxTokens: SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
       ...(options.reasoningEffort ? { reasoning: { effort: options.reasoningEffort } } : {}),
       text: { verbosity: "low" },
-      ...(options.provider?.wireProfile === "azure-openai" ||
-      (!options.provider && settings.openaiProvider === "azure")
-        ? {}
-        : { store: false }),
+      ...(azureWire ? {} : { store: false }),
       ...(options.serviceTier ? { providerData: { service_tier: options.serviceTier } } : {}),
     },
     tools: [],
@@ -996,16 +1007,13 @@ export async function generateSessionTitle(
     ...(options.signal ? { signal: options.signal } : {}),
   };
 
-  const response =
-    options.client && options.provider?.api === "responses"
-      ? await new CompactionResponsesModel(
-          options.client,
-          modelName,
-          options.provider,
-        ).fetchResponse(request)
-      : await (
-          options.model ?? (await new MultiProviderModelProvider(settings).getModel(modelName))
-        ).getResponse(request);
+  const response = binding
+    ? await new CompactionResponsesModel(
+        binding.client,
+        binding.modelId,
+        binding.provider,
+      ).fetchResponse(request)
+    : await options.model!.getResponse(request);
   return {
     title: normalizeGeneratedSessionTitle(
       extractResponseOutputText(response),
@@ -1054,10 +1062,31 @@ async function generateChatSessionTitle(
   };
 }
 
+/**
+ * Whether a non-streamed Responses reply stopped at the output limit. The
+ * streamed subscription transports reject an incomplete terminal before any
+ * response exists, so that title attempt fails and a later turn retries.
+ */
 function responseStoppedAtOutputLimit(response: unknown): boolean {
   if (!response || typeof response !== "object") return false;
-  const record = response as { status?: unknown; providerData?: { status?: unknown } };
-  return record.status === "incomplete" || record.providerData?.status === "incomplete";
+  return (response as { status?: unknown }).status === "incomplete";
+}
+
+const INLINE_REASONING_CLOSE_TAG = /<\/(?:think|thinking|reasoning)>/giu;
+const INLINE_REASONING_OPEN_TAG = /^\s*<(?:think|thinking|reasoning)>/iu;
+
+/**
+ * Some chat providers return reasoning inline in message content as a
+ * `<think>...</think>` block before the answer. Keep only the text after the
+ * last closing tag. A reply that is still inside an unclosed reasoning block
+ * has no title.
+ */
+function withoutInlineReasoning(text: string): string | null {
+  let answer = text;
+  for (const match of text.matchAll(INLINE_REASONING_CLOSE_TAG)) {
+    answer = text.slice(match.index + match[0].length);
+  }
+  return INLINE_REASONING_OPEN_TAG.test(answer) ? null : answer;
 }
 
 /**
@@ -1068,7 +1097,10 @@ function normalizeGeneratedSessionTitle(
   text: string,
   stoppedAtOutputLimit: boolean,
 ): string | null {
-  const complete = stoppedAtOutputLimit && !/\s$/u.test(text) ? text.replace(/\S+$/u, "") : text;
+  const answer = withoutInlineReasoning(text);
+  if (answer === null) return null;
+  const complete =
+    stoppedAtOutputLimit && !/\s$/u.test(answer) ? answer.replace(/\S+$/u, "") : answer;
   return normalizeAutomaticSessionTitle(complete);
 }
 
