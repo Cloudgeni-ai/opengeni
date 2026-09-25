@@ -5,7 +5,9 @@ import {
 } from "@opengeni/contracts";
 import {
   DEFAULT_OPENROUTER_MODEL_ID,
+  ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+  withOrganizationOpenRouterCredential,
   withWorkspaceOpenRouterCredential,
 } from "@opengeni/config";
 import { resolveTurnModel } from "@opengeni/runtime";
@@ -204,6 +206,16 @@ describe("managed OpenRouter free route", () => {
     expect(workspaceFree.configured.upstreamModelId).toBe(freeUpstreamModelId);
     expect(workspaceFree.provider.kind).toBe("openrouter-workspace");
     expect(routeAllowsSessionTitleRequests(workspaceFree)).toBe(true);
+
+    const organizationFree = resolveTurnModel(
+      withOrganizationOpenRouterCredential(settings, "organization-openrouter-key", [
+        { upstreamModelId: freeUpstreamModelId },
+      ]),
+      `${ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX}${freeUpstreamModelId}`,
+    )!;
+    expect(organizationFree.configured.upstreamModelId).toBe(freeUpstreamModelId);
+    expect(organizationFree.provider.kind).toBe("openrouter-organization");
+    expect(routeAllowsSessionTitleRequests(organizationFree)).toBe(true);
 
     expect(routeAllowsSessionTitleRequests(resolveTurnModel(settings, "gpt-5.6-sol")!)).toBe(true);
     expect(routeAllowsSessionTitleRequests(null)).toBe(true);
