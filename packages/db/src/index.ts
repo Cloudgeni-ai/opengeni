@@ -36491,7 +36491,10 @@ async function sessionFailureDiagnostics(
     ${sql.join(boundedFields, sql`, `)},
     'providerRecoveryCount', case when jsonb_typeof(${schema.sessionEvents.payload}->'providerRecoveryCount') = 'number'
       and length((${schema.sessionEvents.payload}->'providerRecoveryCount')::text) <= 16
-      then ${schema.sessionEvents.payload}->'providerRecoveryCount' else 'null'::jsonb end)`;
+      then ${schema.sessionEvents.payload}->'providerRecoveryCount' else 'null'::jsonb end,
+    'quotaScope', case when jsonb_typeof(${schema.sessionEvents.payload}->'quotaScope') = 'string'
+      and ${schema.sessionEvents.payload}->>'quotaScope' in ('daily', 'monthly', 'credits', 'quota')
+      then ${schema.sessionEvents.payload}->'quotaScope' else 'null'::jsonb end)`;
   const latest = async (type: string) => {
     const [row] = await db
       .select({
@@ -36507,8 +36510,11 @@ async function sessionFailureDiagnostics(
       .orderBy(desc(schema.sessionEvents.sequence))
       .limit(1);
     if (!row) return null;
+    // The closed exhausted-provider-quota marker is projected only as one of
+    // its four literal values, so it adds no unbounded text.
     const payload: Record<string, unknown> = {
       providerRecoveryCount: row.payload.providerRecoveryCount,
+      ...(typeof row.payload.quotaScope === "string" ? { quotaScope: row.payload.quotaScope } : {}),
     };
     const truncatedFields: string[] = [];
     for (const field of diagnosticFields) {

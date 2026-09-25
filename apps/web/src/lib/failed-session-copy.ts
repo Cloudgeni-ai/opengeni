@@ -32,6 +32,11 @@ const DAILY_LIMIT: KnownFailure = {
   retryUnhelpful: false,
   suggestModel: true,
 };
+const MONTHLY_LIMIT: KnownFailure = {
+  message: "This model's monthly limit has been reached.",
+  retryUnhelpful: false,
+  suggestModel: true,
+};
 const QUOTA: KnownFailure = {
   message: "The model provider's usage quota for this model is used up.",
   retryUnhelpful: false,
@@ -48,15 +53,39 @@ const PROVIDER_ERROR: KnownFailure = {
   suggestModel: false,
 };
 
-// Worker codes whose recorded text is the provider's own. Every other code
-// already carries authored copy (Codex, SuperGrok, sandbox, MCP, ...).
-const PROVIDER_TEXT_CODES = new Set(["provider_rate_limited", "provider_unavailable"]);
+/** The worker's closed quota marker, on a quota turn failure or a compaction failure. */
+function quotaScopeFailure(scope: string | null | undefined): KnownFailure | null {
+  switch (scope) {
+    case "daily":
+      return DAILY_LIMIT;
+    case "monthly":
+      return MONTHLY_LIMIT;
+    case "credits":
+      return PROVIDER_BILLING;
+    case "quota":
+      return QUOTA;
+    default:
+      return null;
+  }
+}
+
+// Worker codes whose recorded text is the provider's own (or, for an exhausted
+// quota, authored copy plus the provider's text). Every other code already
+// carries authored copy (Codex, SuperGrok, sandbox, MCP, ...).
+const PROVIDER_TEXT_CODES = new Set([
+  "provider_rate_limited",
+  "provider_unavailable",
+  "provider_quota_exhausted",
+]);
 
 /** Classify recorded provider text. Unknown failures return null and keep their wording. */
 export function classifyProviderFailure(
   recorded: string,
   failureCode?: string | null,
+  quotaScope?: string | null,
 ): KnownFailure | null {
+  const scoped = quotaScopeFailure(quotaScope);
+  if (scoped) return scoped;
   if (failureCode && !PROVIDER_TEXT_CODES.has(failureCode)) return null;
   const text = recorded.toLowerCase();
   // OpenGeni's own credit exhaustion has a dedicated billing remedy upstream.
@@ -85,7 +114,7 @@ export function classifyProviderFailure(
   }
   if (
     status === "402" ||
-    /\bpayment required\b|\binsufficient (?:credits|balance|funds)\b|\brequires more credits\b|\bupgrade to a paid account\b/.test(
+    /\bpayment required\b|\binsufficient (?:credits|balance|funds)\b|\brequires more credits\b|\bout of credits\b|\bcredit balance is too low\b|\bupgrade to a paid account\b/.test(
       text,
     )
   ) {
@@ -97,6 +126,8 @@ export function classifyProviderFailure(
   ) {
     return PROVIDER_ACCESS;
   }
+  // The worker stopped retrying because the quota cannot clear in minutes.
+  if (failureCode === "provider_quota_exhausted") return QUOTA;
   if (failureCode === "provider_rate_limited" || status === "429") return RATE_LIMITED;
   if (failureCode === "provider_unavailable") return PROVIDER_ERROR;
   return null;
@@ -126,7 +157,11 @@ export function failedSessionCopy(
   const known =
     creditExhausted || failure.safetyRefusal || unavailableModel
       ? null
-      : classifyProviderFailure(failure.recordedDetail ?? recorded ?? "", failure.failureCode);
+      : classifyProviderFailure(
+          failure.recordedDetail ?? recorded ?? "",
+          failure.failureCode,
+          failure.quotaScope,
+        );
   if (known) {
     const detail = failure.recordedDetail?.trim() || recorded;
     return {

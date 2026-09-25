@@ -77,12 +77,15 @@ export type SessionFailureSummary = {
   recordedDetail?: string | null;
   /** Recorded failure code, when the worker classified the failure. */
   failureCode?: string | null;
+  /** Closed exhausted-provider-quota marker (`daily`, `monthly`, `credits`, `quota`). */
+  quotaScope?: string | null;
 };
 
 /** The stored failure text and code exactly as recorded (presentation input, never rewritten). */
 function recordedFailureFacts(payload: Record<string, unknown>): {
   recordedDetail?: string;
   failureCode?: string;
+  quotaScope?: string;
 } {
   const text = (key: string): string | null => {
     const value = payload[key];
@@ -93,9 +96,11 @@ function recordedFailureFacts(payload: Record<string, unknown>): {
     (part, index): part is string => part !== null && parts.indexOf(part) === index,
   );
   const code = text("code");
+  const quotaScope = text("quotaScope");
   return {
     ...(recorded.length > 0 ? { recordedDetail: recorded.join("\n") } : {}),
     ...(code ? { failureCode: code } : {}),
+    ...(quotaScope ? { quotaScope } : {}),
   };
 }
 
