@@ -15,6 +15,7 @@ This Terraform root module is the Azure reference substrate for OpenGeni. It is 
 - Azure Storage account and private Blob container when `object_storage.mode = "managed"` and `object_storage.api = "azure-blob"`.
 - ACR pull role assignment for AKS kubelet identity.
 - Optional AKS Microsoft Defender attachment to an existing Log Analytics workspace.
+- Optional namespace-scoped AKS Container Insights log collection into the observability Log Analytics workspace, with a mandatory daily ingestion cap.
 
 Connected Machines (`OPENGENI_SANDBOX_BACKEND=selfhosted`) add one more deployed
 component, the `opengeni-relay` stream relay. Its image is pushed to the same
@@ -254,6 +255,55 @@ When set, this policy is authoritative for managed PostgreSQL compute and
 storage. When omitted, the existing `postgres.sku_name` and
 `postgres.storage_mb` behavior is unchanged and provider defaults apply to
 storage tier and autogrow.
+
+## Container Logs (Container Insights)
+
+Kubernetes keeps container stdout/stderr only for the lifetime of each pod.
+`aks_container_insights` retains it in the observability Log Analytics
+workspace, so it requires `observability.enabled = true`:
+
+```hcl
+aks_container_insights = {
+  enabled                  = true
+  namespaces               = ["opengeni", "opengeni-platform"]
+  workspace_daily_quota_gb = 5
+}
+```
+
+When enabled, Terraform:
+
+- Enables the AKS monitoring addon (`oms_agent`) with managed-identity
+  ingestion (`msi_auth_for_monitoring_enabled = true`).
+- Creates one data collection rule, `MSCI-<location>-<cluster>`, and associates
+  it to the cluster as `ContainerInsightsExtension`, the exact name Container
+  Insights looks up.
+- Collects only the listed namespaces (`namespaceFilteringMode = "Include"`).
+  The default streams are the logs-and-events preset: `ContainerLogV2`,
+  `KubeEvents`, and `KubePodInventory`. `data_collection_interval` (default
+  `5m`) governs inventory sampling, not log latency.
+- Sets `daily_quota_gb` on the workspace. The cap is required: a log loop must
+  not produce an unbounded bill. When it is reached, the workspace stops
+  ingesting until its daily reset, including Application Insights data that
+  shares the workspace, so set it well above normal ingestion.
+- Creates the `<name_prefix>-logs-daily-cap` scheduled query alert. It reads
+  `_LogOperation`, which is not subject to the cap, and notifies the
+  observability action group when ingestion stops for the day.
+
+Retention is the workspace's 30 days. Query retained pod output with KQL, for
+example:
+
+```kusto
+ContainerLogV2
+| where PodNamespace == "opengeni" and PodName startswith "opengeni-api-"
+| where TimeGenerated > ago(1h)
+| project TimeGenerated, PodName, ContainerName, LogSource, LogMessage
+```
+
+The addon runs a DaemonSet and one ReplicaSet in `kube-system` with CPU and
+memory requests on every node. Check node request headroom before enabling it
+on a saturated pool. Disabling the object removes the addon, the rule, the
+association, and the cap; data already ingested remains until retention
+expires.
 
 ## Resource Records
 

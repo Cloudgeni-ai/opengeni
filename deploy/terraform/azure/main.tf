@@ -30,6 +30,8 @@ locals {
   availability_test_url                 = try(var.observability.availability_test_url, null)
   observability_action_group_short_name = try(var.observability.action_group_short_name, "opengenialrt")
   observability_alert_email_receivers   = try(var.observability.alert_email_receivers, {})
+  container_insights_enabled            = local.observability_enabled && var.aks_container_insights.enabled
+  container_insights_destination        = "ciworkspace"
   aks_auto_scaling_enabled              = var.aks.auto_scaling_enabled
   aks_max_count                         = local.aks_auto_scaling_enabled ? var.aks.max_count : null
   aks_max_pods                          = var.aks.max_pods
@@ -159,6 +161,18 @@ resource "azurerm_kubernetes_cluster" "this" {
 
     content {
       log_analytics_workspace_id = microsoft_defender.value
+    }
+  }
+
+  # Container Insights uses managed-identity (AAD) ingestion. Its collection
+  # scope comes only from the data collection rule association below; the
+  # addon never falls back to legacy workspace-key collection.
+  dynamic "oms_agent" {
+    for_each = local.container_insights_enabled ? [azurerm_log_analytics_workspace.observability[0].id] : []
+
+    content {
+      log_analytics_workspace_id      = oms_agent.value
+      msi_auth_for_monitoring_enabled = true
     }
   }
 
@@ -311,7 +325,87 @@ resource "azurerm_log_analytics_workspace" "observability" {
   location            = var.location
   sku                 = "PerGB2018"
   retention_in_days   = 30
+  # -1 is the provider's "no cap" value and preserves workspaces that do not
+  # collect container logs. Container Insights always installs a cap.
+  daily_quota_gb = local.container_insights_enabled ? var.aks_container_insights.workspace_daily_quota_gb : -1
+  tags           = local.tags
+}
+
+resource "azurerm_monitor_data_collection_rule" "container_insights" {
+  count               = local.container_insights_enabled ? 1 : 0
+  name                = "MSCI-${var.location}-${local.aks_name}"
+  resource_group_name = local.resource_group_name
+  location            = azurerm_log_analytics_workspace.observability[0].location
+  description         = "Namespace-scoped AKS Container Insights collection for OpenGeni."
   tags                = local.tags
+
+  destinations {
+    log_analytics {
+      name                  = local.container_insights_destination
+      workspace_resource_id = azurerm_log_analytics_workspace.observability[0].id
+    }
+  }
+
+  data_flow {
+    streams      = var.aks_container_insights.streams
+    destinations = [local.container_insights_destination]
+  }
+
+  data_sources {
+    extension {
+      name           = "ContainerInsightsExtension"
+      extension_name = "ContainerInsights"
+      streams        = var.aks_container_insights.streams
+      extension_json = jsonencode({
+        dataCollectionSettings = {
+          interval               = var.aks_container_insights.data_collection_interval
+          namespaceFilteringMode = "Include"
+          namespaces             = var.aks_container_insights.namespaces
+          enableContainerLogV2   = true
+        }
+      })
+    }
+  }
+}
+
+# Container Insights discovers its rule through this exact association name.
+resource "azurerm_monitor_data_collection_rule_association" "container_insights" {
+  count                   = local.container_insights_enabled ? 1 : 0
+  name                    = "ContainerInsightsExtension"
+  target_resource_id      = azurerm_kubernetes_cluster.this.id
+  data_collection_rule_id = azurerm_monitor_data_collection_rule.container_insights[0].id
+  description             = "Association of the OpenGeni Container Insights data collection rule. Deleting it stops container log collection for this cluster."
+}
+
+# _LogOperation is not subject to the daily cap, so this fires after the
+# workspace has stopped ingesting for the day.
+resource "azurerm_monitor_scheduled_query_rules_alert_v2" "container_insights_daily_cap" {
+  count                = local.container_insights_enabled ? 1 : 0
+  name                 = "${var.name_prefix}-logs-daily-cap"
+  resource_group_name  = local.resource_group_name
+  location             = azurerm_log_analytics_workspace.observability[0].location
+  scopes               = [azurerm_log_analytics_workspace.observability[0].id]
+  description          = "The observability Log Analytics workspace reached its daily ingestion cap and stopped collecting container logs until the daily reset."
+  severity             = 2
+  evaluation_frequency = "PT15M"
+  window_duration      = "PT15M"
+  tags                 = local.tags
+
+  criteria {
+    query                   = "_LogOperation | where Category =~ \"Ingestion\" | where Detail contains \"OverQuota\""
+    time_aggregation_method = "Count"
+    threshold               = 0
+    operator                = "GreaterThan"
+
+    failing_periods {
+      minimum_failing_periods_to_trigger_alert = 1
+      number_of_evaluation_periods             = 1
+    }
+  }
+
+  action {
+    action_groups = [azurerm_monitor_action_group.observability[0].id]
+  }
 }
 
 resource "azurerm_application_insights" "observability" {
