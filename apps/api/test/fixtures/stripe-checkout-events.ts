@@ -1,6 +1,7 @@
 // Realistic Stripe Checkout Session webhook payloads, shaped like the events
-// Stripe delivers (API version 2025-08-27.basil). Shared by the route unit
-// tests and the Postgres-backed webhook integration tests.
+// Stripe delivers (API version 2026-07-29.dahlia, the pinned SDK version).
+// Shared by the route unit tests and the Postgres-backed webhook integration
+// tests.
 
 export type StripeCheckoutEventType =
   | "checkout.session.completed"
@@ -134,7 +135,7 @@ export function checkoutSessionEvent(
   return {
     id: eventId,
     object: "event",
-    api_version: "2025-08-27.basil",
+    api_version: "2026-07-29.dahlia",
     created: Math.floor(Date.now() / 1000),
     data: { object: session },
     livemode: false,

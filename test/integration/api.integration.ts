@@ -2462,6 +2462,23 @@ describe("API component integration", () => {
     ).toEqual({ received: true });
     expect(await balance()).toBe(0);
 
+    // A paid OpenGeni checkout for an account this deployment does not hold,
+    // such as another OpenGeni deployment sharing the Stripe account: retrying
+    // cannot succeed, so it is acknowledged rather than failed for days.
+    const absentAccountId = crypto.randomUUID();
+    expect(
+      await post(
+        checkoutSessionEvent(
+          "checkout.session.completed",
+          openGeniCheckoutSession({
+            metadata: openGeniCheckoutMetadata({ accountId: absentAccountId }),
+            paymentStatus: "paid",
+          }),
+        ),
+      ),
+    ).toEqual({ received: true });
+    expect((await getBillingBalance(dbClient.db, absentAccountId)).balanceMicros).toBe(0);
+
     // A delayed payment method that later fails: nothing is granted.
     const failedMetadata = openGeniCheckoutMetadata({ accountId, amountCents: 1000 });
     const failedSessionId = `cs_test_a1failed${crypto.randomUUID().replaceAll("-", "")}`;

@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import type Stripe from "stripe";
 import {
   stripeCheckoutCreditDecision,
   stripeCheckoutSessionCreateParams,
@@ -16,7 +15,9 @@ import {
 const accountId = "7d6c2b1e-4a5f-4e3d-9c8b-1a2b3c4d5e6f";
 
 function decide(session: CheckoutSessionFixture) {
-  return stripeCheckoutCreditDecision(session as unknown as Stripe.Checkout.Session);
+  return stripeCheckoutCreditDecision(
+    session as unknown as Parameters<typeof stripeCheckoutCreditDecision>[0],
+  );
 }
 
 /** Metadata exactly as the checkout route stamps it on the Stripe session. */

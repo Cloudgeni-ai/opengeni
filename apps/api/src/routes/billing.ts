@@ -433,6 +433,19 @@ async function handleCheckoutSessionPayment(
     return;
   }
   const credit = decision.credit;
+  if (!(await getManagedAccount(deps.db, credit.accountId))) {
+    // Another OpenGeni deployment sharing the Stripe account (or an account
+    // removed before a delayed payment settled). Retrying cannot succeed, so
+    // acknowledge instead of failing the delivery for days.
+    console.info(
+      "[api] stripe webhook ignored a checkout session for an account not in this deployment",
+      {
+        stripeEventType: event.type,
+        livemode: event.livemode,
+      },
+    );
+    return;
+  }
   const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
   if (customerId) {
     await upsertBillingCustomer(deps.db, {
