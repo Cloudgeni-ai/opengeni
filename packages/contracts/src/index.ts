@@ -5888,7 +5888,20 @@ export const RotateSessionMcpCredentialsRequest = z
             expectedServerUrl: httpsUrl,
             headers: z.record(z.string(), z.string()),
           })
-          .strict(),
+          .strict()
+          .or(
+            z
+              .object({
+                id: SessionMcpServerId,
+                expectedCredentialVersion: z.number().int().min(1).max(2_147_483_646),
+                expectedServerUrl: httpsUrl,
+                /** Resolve from the authenticated caller's native account inventory. */
+                nativeConnectionId: z.string().uuid(),
+                /** Explicit opt-in; must match the selected account's bound MCP URL. */
+                replacementServerUrl: httpsUrl.optional(),
+              })
+              .strict(),
+          ),
       )
       .min(1)
       .max(64),

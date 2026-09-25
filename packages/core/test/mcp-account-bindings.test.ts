@@ -6,6 +6,7 @@ import type {
 } from "@opengeni/contracts";
 import { ConnectionAccountSelectionError } from "../src/domain/personal-connection-delegations";
 import { applyCapabilityEnablement } from "../src/domain/capabilities";
+import { settingsWithSessionMcpServerMetadata } from "../src/domain/sessions";
 import {
   mcpAccountBindingsFromVisibleConnections,
   mcpAccountRouteId,
@@ -44,6 +45,35 @@ function connection(subjectId: string | null = "alice"): ConnectionMetadata {
   };
 }
 const input = { accountId, workspaceId, subjectId: "alice", servers: [server] };
+
+test("account selection cannot silently replace a persisted legacy session attachment", () => {
+  const native = connection();
+  const legacy = {
+    ...server,
+    headerNames: [],
+    credentialVersion: 1,
+    connectionRef: {
+      authoritySource: "host" as const,
+      hostBinding: { selection: "accepted_turn" as const },
+      subjectScope: "subject" as const,
+      providerDomain: server.connectionRef.providerDomain,
+      kind: "delegated" as const,
+    },
+  };
+  const projected = settingsWithSessionMcpServerMetadata(
+    { mcpServers: [server] } as Parameters<typeof settingsWithSessionMcpServerMetadata>[0],
+    [legacy],
+  );
+  expect(projected.mcpServers[0]?.connectionRef).toEqual(legacy.connectionRef);
+  expect(() =>
+    mcpAccountBindingsFromVisibleConnections({
+      ...input,
+      servers: projected.mcpServers,
+      connections: [native],
+      selections: [{ serverId: server.id, connectionId: native.id }],
+    }),
+  ).toThrow(ConnectionAccountSelectionError);
+});
 
 test("an unconnected default connector grants no account and does not block admission", () => {
   expect(mcpAccountBindingsFromVisibleConnections({ ...input, connections: [] })).toEqual([]);
