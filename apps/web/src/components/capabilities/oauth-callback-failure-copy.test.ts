@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { atlassianFailureMessage } from "@/components/capabilities/use-atlassian-integration";
 import { googleDriveFailureMessage } from "@/components/capabilities/use-google-drive-integration";
-import { oauthCallbackReasonMessage } from "@/lib/mcp-oauth";
+import { oauthCallbackReasonMessage } from "@/lib/oauth-callback-messages";
 
 describe("provider OAuth callback failure copy", () => {
   for (const [provider, message] of [

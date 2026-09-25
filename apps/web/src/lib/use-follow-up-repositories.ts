@@ -6,7 +6,7 @@ import {
 import { useCallback, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { openGitHubInstallationSettings } from "@/components/github-app-connect-launcher";
+import { openGitHubInstallationSettings } from "@/lib/github-app-connect";
 import type { RepositoryContextPickerProps } from "@/components/repository-picker";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";

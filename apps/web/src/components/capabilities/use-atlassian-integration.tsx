@@ -21,7 +21,7 @@ import {
   localConnectedAtlassianPreview,
   preferredAtlassianConnection,
 } from "@/lib/atlassian-connection";
-import { oauthCallbackReasonMessage } from "@/lib/mcp-oauth";
+import { oauthCallbackReasonMessage } from "@/lib/oauth-callback-messages";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import type { ConnectionMetadata } from "@/types";
 

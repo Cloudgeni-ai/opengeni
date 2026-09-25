@@ -1,10 +1,8 @@
 import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "@/lib/analytics-consent";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { useRepositoryCatalogRefresh } from "@/lib/use-follow-up-repositories";
-import {
-  openGitHubInstallationSettings,
-  useGitHubAppConnectLauncher,
-} from "@/components/github-app-connect-launcher";
+import { useGitHubAppConnectLauncher } from "@/components/github-app-connect-launcher";
+import { openGitHubInstallationSettings } from "@/lib/github-app-connect";
 import { captureAnalyticsEvent } from "@/lib/analytics-observer";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import {

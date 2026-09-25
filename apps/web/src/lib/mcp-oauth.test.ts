@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
+import { startMcpOAuthWithTimeout } from "./mcp-oauth";
 import {
   mcpOAuthCallbackFailureMessage,
   oauthCallbackReasonMessage,
-  startMcpOAuthWithTimeout,
-} from "./mcp-oauth";
+} from "./oauth-callback-messages";
 
 const request = {
   mcpUrl: "https://mcp.linear.app/mcp",

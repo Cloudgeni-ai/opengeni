@@ -38,7 +38,7 @@ import {
   type GoogleDriveAccountState,
   type GoogleDriveDisconnectAttempt,
 } from "@/lib/google-drive-connection";
-import { oauthCallbackReasonMessage } from "@/lib/mcp-oauth";
+import { oauthCallbackReasonMessage } from "@/lib/oauth-callback-messages";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import type {
   ApiIntegrationInstallationSummary,

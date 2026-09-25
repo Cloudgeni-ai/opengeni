@@ -21,7 +21,7 @@ import type {
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ConnectionOwnershipDialog } from "./connection-ownership-selector";
 import { useAppContext } from "@/context";
-import { oauthCallbackReasonMessage } from "@/lib/mcp-oauth";
+import { oauthCallbackReasonMessage } from "@/lib/oauth-callback-messages";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import type {
   ApiIntegrationInstallationSummary,

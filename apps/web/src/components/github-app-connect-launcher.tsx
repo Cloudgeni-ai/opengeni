@@ -1,17 +1,19 @@
-import { lazy, Suspense, useCallback, useState, type ReactNode } from "react";
-import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { lazy, Suspense, useCallback, useMemo, useState, type ReactNode } from "react";
+import { toast } from "sonner";
 
-const GitHubAppConnectDialog = lazy(() =>
-  import("@/components/github-app-connect-dialog").then((module) => ({
-    default: module.GitHubAppConnectDialog,
+import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
+import { useAppContext } from "@/context";
+import { githubAppConnectRequest } from "@/lib/github-app-connect";
+
+const NativeConnectSetup = lazy(() =>
+  import("@/components/capabilities/native-connect-setup").then((module) => ({
+    default: module.NativeConnectSetup,
   })),
 );
 
 /**
- * Opens workspace GitHub App setup from a click. The authorization link is
- * minted when setup starts, not when the page loaded: a page-load link expires
- * after ten minutes and then shows a raw error. Setup runs in the shared Connect
- * dialog, which reports Cancel, owner approval, and failures in the UI.
+ * Opens workspace GitHub App setup from a click in the new-session repository
+ * picker (the session route hosts the same request in its own Connect dialog).
  *
  * The dialog must live outside the repository menu: the menu closes when the
  * authorization popup takes focus, and that would unmount the dialog with it.
@@ -20,39 +22,32 @@ export function useGitHubAppConnectLauncher(workspaceId: string): {
   open: () => void;
   element: ReactNode;
 } {
-  const [openFor, setOpenFor] = useState<string | null>(null);
-  const open = useCallback(() => setOpenFor(workspaceId), [workspaceId]);
-  const close = useCallback(() => setOpenFor(null), []);
+  const { client, refreshGitHub } = useAppContext();
+  const transport = useMemo(() => client.connectTransport(), [client]);
+  const [request, setRequest] = useState<NativeConnectRequest | null>(null);
+  const open = useCallback(
+    () => setRequest(githubAppConnectRequest(workspaceId, transport)),
+    [transport, workspaceId],
+  );
+  const close = useCallback(() => setRequest(null), []);
+  const complete = useCallback(() => {
+    setRequest(null);
+    toast.success("GitHub connected");
+    void refreshGitHub(workspaceId, undefined, { sync: true });
+  }, [refreshGitHub, workspaceId]);
   return {
     open,
     element:
-      openFor === workspaceId ? (
+      request?.scope.workspaceId === workspaceId ? (
         <Suspense fallback={null}>
-          <GitHubAppConnectDialog workspaceId={workspaceId} onClose={close} />
+          <NativeConnectSetup
+            transport={transport}
+            workspaceId={workspaceId}
+            request={request}
+            onClose={close}
+            onComplete={complete}
+          />
         </Suspense>
       ) : null,
   };
-}
-
-/**
- * Opens GitHub's repository settings for one installation through a link
- * minted now. Installation settings links carry the same ten-minute state as
- * the connect link, so a copy captured at page load cannot be used.
- */
-export async function openGitHubInstallationSettings(
-  client: Pick<OpenGeniBrowserClient, "getGitHubApp">,
-  workspaceId: string,
-  installationId: number,
-  navigate: (url: string) => void = (url) => window.location.assign(url),
-): Promise<void> {
-  const status = await client.getGitHubApp(workspaceId);
-  const url = status.installations.find(
-    (installation) => installation.installationId === installationId,
-  )?.configureUrl;
-  if (!url) {
-    throw new Error(
-      "You can't change this installation's repositories. Ask a workspace admin to update it on GitHub.",
-    );
-  }
-  navigate(url);
 }

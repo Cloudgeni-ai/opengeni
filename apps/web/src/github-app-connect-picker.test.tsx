@@ -192,12 +192,14 @@ describe("repository picker routes host the Connect dialog", () => {
     expect(source).toContain("onConnectWorkspaceApp={githubAppConnect.open}");
   });
 
-  test("the follow-up picker opens the launcher it renders outside the menu", async () => {
+  test("the follow-up picker opens the session's route-level Connect dialog", async () => {
     const source = await read("routes/session.tsx");
+    // The route already hosts a Connect dialog outside every menu for reconnects.
     expect(source).toContain(
-      "const githubAppConnect = useGitHubAppConnectLauncher(props.session.workspaceId);",
+      "() => setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport))",
     );
-    expect(source).toContain("useFollowUpRepositories(props.session, githubAppConnect.open)");
-    expect(source).toContain("{githubAppConnect.element}");
+    expect(source).toContain("onConnectGitHubApp={connectGitHubApp}");
+    expect(source).toContain("useFollowUpRepositories(props.session, props.onConnectGitHubApp)");
+    expect(source).toContain('if (reconnectRequest.providerId === "github-app") {');
   });
 });

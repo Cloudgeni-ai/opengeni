@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { openGitHubInstallationSettings } from "@/components/github-app-connect-launcher";
+import { openGitHubInstallationSettings } from "@/lib/github-app-connect";
 import type { GitHubAppInfo } from "@/types";
 
 function clientReturning(configureUrl: string | null) {

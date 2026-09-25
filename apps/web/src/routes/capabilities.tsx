@@ -99,7 +99,10 @@ import {
   type ConnectionHealth,
   type SheetSelection,
 } from "@/lib/capabilities";
-import { mcpOAuthCallbackFailureMessage, oauthCallbackReasonMessage } from "@/lib/mcp-oauth";
+import {
+  mcpOAuthCallbackFailureMessage,
+  oauthCallbackReasonMessage,
+} from "@/lib/oauth-callback-messages";
 import {
   personalGitHubOAuthFailureMessage,
   personalGitHubOAuthReturn,
