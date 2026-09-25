@@ -141,6 +141,10 @@ describe("workspace access settings convergence", () => {
   test("shows the workspace-scoped member manager", async () => {
     const rendered = await renderMembers(true);
     try {
+      expect(
+        rendered.container.querySelector('section[aria-labelledby="workspace-members-heading"] h2')
+          ?.textContent,
+      ).toBe("People with access");
       expect(rendered.container.textContent).toContain("owner@example.com");
       expect(rendered.container.textContent).toContain("Ada Member");
       expect(rendered.container.textContent).toContain("Add member");
