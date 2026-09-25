@@ -11,20 +11,36 @@ use std::time::Duration;
 use opengeni_relay::{serve, RelayConfig, RelayMetrics};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
+use tokio::sync::oneshot::{self, error::TryRecvError};
 
 const SECRET: &str = "relay-metrics-secret";
 
-/// Reserve an ephemeral localhost port (close the probe listener so `serve` can
-/// rebind it; a tiny race window that is fine for a test).
-async fn free_port() -> u16 {
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = l.local_addr().unwrap().port();
-    drop(l);
-    port
+/// Reserve `N` distinct ephemeral localhost ports. Every probe listener stays
+/// bound until all of them are chosen, so the OS cannot hand out one port twice;
+/// they are then closed so `serve` can rebind them (a tiny race window against
+/// other processes that is fine for a test).
+async fn free_ports<const N: usize>() -> [u16; N] {
+    let mut probes = Vec::with_capacity(N);
+    for _ in 0..N {
+        probes.push(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap());
+    }
+    let ports = std::array::from_fn(|i| probes[i].local_addr().unwrap().port());
+    drop(probes);
+    ports
 }
 
-async fn wait_for_listener(port: u16) {
+/// Wait until `port` accepts connections. A relay that already exited (for
+/// example, a refused configuration) fails with its own error instead of an
+/// opaque connect timeout.
+async fn wait_for_listener<T: std::fmt::Debug>(port: u16, exit: &mut oneshot::Receiver<T>) {
     for _ in 0..100 {
+        match exit.try_recv() {
+            Ok(result) => panic!("the relay exited before port {port} was ready: {result:?}"),
+            Err(TryRecvError::Closed) => {
+                panic!("the relay task ended before port {port} was ready")
+            }
+            Err(TryRecvError::Empty) => {}
+        }
         if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
             return;
         }
@@ -34,18 +50,20 @@ async fn wait_for_listener(port: u16) {
 }
 
 /// Start the relay and wait until every given port accepts connections.
-async fn start_relay(config: RelayConfig, ports: &[u16]) -> tokio::sync::oneshot::Sender<()> {
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+async fn start_relay(config: RelayConfig, ports: &[u16]) -> oneshot::Sender<()> {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (exit_tx, mut exit_rx) = oneshot::channel();
     tokio::spawn(async move {
-        let _ = serve(config, RelayMetrics::new(), async {
-            let _ = rx.await;
+        let result = serve(config, RelayMetrics::new(), async {
+            let _ = shutdown_rx.await;
         })
         .await;
+        let _ = exit_tx.send(result);
     });
     for port in ports {
-        wait_for_listener(*port).await;
+        wait_for_listener(*port, &mut exit_rx).await;
     }
-    tx
+    shutdown_tx
 }
 
 /// A minimal HTTP/1.1 GET; returns (status, headers + body text).
@@ -74,7 +92,7 @@ async fn http_get(port: u16, path: &str) -> (u16, String) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dedicated_listener_serves_metrics_and_the_wss_port_does_not() {
-    let (wss_port, metrics_port) = (free_port().await, free_port().await);
+    let [wss_port, metrics_port] = free_ports::<2>().await;
     let mut config = RelayConfig::for_test(SECRET);
     config.bind = format!("127.0.0.1:{wss_port}");
     config.metrics_bind = Some(format!("127.0.0.1:{metrics_port}"));
@@ -108,7 +126,7 @@ async fn dedicated_listener_serves_metrics_and_the_wss_port_does_not() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn without_a_dedicated_listener_metrics_stay_on_the_wss_port() {
-    let wss_port = free_port().await;
+    let [wss_port] = free_ports::<1>().await;
     let mut config = RelayConfig::for_test(SECRET);
     config.bind = format!("127.0.0.1:{wss_port}");
     let _shutdown = start_relay(config, &[wss_port]).await;
@@ -124,7 +142,7 @@ async fn without_a_dedicated_listener_metrics_stay_on_the_wss_port() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_metrics_listener_on_the_wss_port_is_refused() {
-    let port = free_port().await;
+    let [port] = free_ports::<1>().await;
     for metrics_bind in [format!("127.0.0.1:{port}"), format!("0.0.0.0:{port}")] {
         let mut config = RelayConfig::for_test(SECRET);
         config.bind = format!("127.0.0.1:{port}");

@@ -704,8 +704,10 @@ relay:
   # /metrics is then served only here, never on containerPort, so an ingress
   # that forwards every path of the public relay host cannot publish it. It gets
   # its own ClusterIP Service (never a NodePort) for the ServiceMonitor and
-  # scrape annotations. Must differ from containerPort. Set null to keep the
-  # legacy /metrics on containerPort.
+  # scrape annotations. Must differ from containerPort. Requires a relay image
+  # from this chart's release or later (an older relay ignores the bind and its
+  # scrape target goes down). Set null to keep the legacy /metrics on
+  # containerPort, including when pinning an older relay image.
   metricsPort: 9464
   # The runtime-secret keys the relay's two HMAC token secrets are read from.
   # The producer (ogr_) secret falls back to the viewer (ogs_) stream-token secret
