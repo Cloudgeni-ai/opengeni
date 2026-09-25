@@ -133,9 +133,7 @@ function compactEntrySummary(entry: JsonRecord): JsonRecord {
     ...keptRevision
   } = revision as JsonRecord;
   const revisionId = keptRevision.id;
-  const title = keptRevision.title as string;
   const excerptList = (excerpts ?? []) as JsonRecord[];
-  const shownText = [title, ...excerptList.map((excerpt) => excerpt.text as string)];
   return {
     ...kept,
     ...(archived === false ? {} : { archived }),
@@ -146,18 +144,26 @@ function compactEntrySummary(entry: JsonRecord): JsonRecord {
       ...(entryId === entry.id ? {} : { entryId }),
       ...(change === "upsert" ? {} : { change }),
       ...(sourceKind === null ? {} : { sourceKind }),
-      ...(textAlreadyShown(preview, shownText) ? {} : { preview }),
+      ...(previewAlreadyShown(preview, excerptList) ? {} : { preview }),
     },
-    ...(excerpts === undefined
-      ? {}
-      : {
-          excerpts: excerptList.filter(
-            (excerpt) => !(excerpt.field === "title" && title.includes(excerpt.text as string)),
-          ),
-        }),
+    ...(excerpts === undefined ? {} : { excerpts }),
   };
 }
 
-function textAlreadyShown(text: unknown, shown: readonly string[]): boolean {
-  return typeof text === "string" && (text === "" || shown.some((value) => value.includes(text)));
+/**
+ * The preview is the start of the entry's content. It is redundant only when
+ * it is empty or a content excerpt that starts at offset 0 already begins with
+ * it. The title never counts: a short content (a decision's answer) can be a
+ * substring of its title and still be the only place the answer appears.
+ */
+function previewAlreadyShown(preview: unknown, excerpts: readonly JsonRecord[]): boolean {
+  if (typeof preview !== "string") return false;
+  if (preview === "") return true;
+  return excerpts.some(
+    (excerpt) =>
+      excerpt.field === "content" &&
+      excerpt.start === 0 &&
+      typeof excerpt.text === "string" &&
+      excerpt.text.startsWith(preview),
+  );
 }

@@ -361,11 +361,21 @@ function expectEntryLossless(original: Json, compact: Json): void {
   const shown = shownText(compact);
   for (const text of [
     original.revision.title,
-    original.revision.preview,
     ...original.excerpts.map((excerpt: Json) => excerpt.text),
   ]) {
     expect(shown.some((value) => value.includes(text))).toBe(true);
   }
+  // The preview is the start of the content, so only a content excerpt from
+  // offset 0 can stand in for it; the title never does.
+  const preview = original.revision.preview as string;
+  const previewShown =
+    compact.revision.preview === preview ||
+    preview === "" ||
+    compact.excerpts.some(
+      (excerpt: Json) =>
+        excerpt.field === "content" && excerpt.start === 0 && excerpt.text.startsWith(preview),
+    );
+  expect(previewShown).toBe(true);
   for (const key of ["createdAt", "updatedAt", "score"]) expect(compact).not.toHaveProperty(key);
   for (const key of [
     "entryId",
@@ -430,7 +440,7 @@ describe("Knowledge discovery model projection", () => {
     expect(compact.entries[0].revision.preview).toBe(original.entries[0]!.revision.preview);
   });
 
-  test("a title excerpt repeated by the title is dropped", () => {
+  test("title excerpts are kept, and only an empty preview is dropped without a content excerpt", () => {
     const entry = entrySummary({
       label: "empty-group",
       title: "Acme collection",
@@ -441,9 +451,38 @@ describe("Knowledge discovery model projection", () => {
     });
     entry.excerpts = [{ field: "title", start: 0, end: 15, text: "Acme collection" }];
     const compact = compactOf(SEARCH, { entries: [entry], nextCursor: null });
-    expect(compact.entries[0].excerpts).toEqual([]);
+    expect(compact.entries[0].excerpts).toEqual(entry.excerpts);
     expect(compact.entries[0].revision).not.toHaveProperty("preview");
     expect(compact.entries[0].revision.title).toBe("Acme collection");
+  });
+
+  test("a short content that the title contains keeps its preview", () => {
+    // A decision's answer can be a substring of its title and still be the
+    // only place the answer appears.
+    const entry = entrySummary({
+      label: "db-choice",
+      title: "Database choice: Postgres or MySQL",
+      contentLength: 0,
+      view: "published",
+      chunk: null,
+      kind: "decision",
+    });
+    entry.revision.preview = "MySQL";
+    const compact = compactOf(SEARCH, { entries: [entry], nextCursor: null });
+    expect(compact.entries[0].revision.preview).toBe("MySQL");
+  });
+
+  test("a content excerpt that does not start the content never replaces the preview", () => {
+    const entry = entrySummary({
+      label: "later-chunk",
+      title: "Later chunk note",
+      contentLength: 3_000,
+      view: "published",
+      chunk: 1,
+    });
+    const compact = compactOf(SEARCH, { entries: [entry], nextCursor: null });
+    expect(compact.entries[0].excerpts[0].start).toBe(1_040);
+    expect(compact.entries[0].revision.preview).toBe(entry.revision.preview);
   });
 
   test("state that differs from the defaults is kept", () => {
@@ -717,6 +756,35 @@ describe("caller seam", () => {
     } finally {
       await prepared.close();
     }
+  });
+
+  test("a result still too large after compaction spills the exact bytes", async () => {
+    const entries = Array.from({ length: 600 }, (_, index) =>
+      entrySummary({
+        label: `large-${index}`,
+        title: `Large note ${index}`,
+        contentLength: 9_000,
+        view: "published",
+        chunk: 1,
+      }),
+    );
+    const original = textResult({ entries, nextCursor: null });
+    expect(
+      Buffer.byteLength(textOf(projectKnowledgeToolResultForModel(SEARCH, original))),
+    ).toBeGreaterThan(1_048_576);
+    const spilled: Array<{ result: unknown; serializedBytes: number }> = [];
+    const projected = await projectAttemptToolResultForCaller(
+      original,
+      context("model"),
+      async (input) => {
+        spilled.push({ result: input.result, serializedBytes: input.serializedBytes });
+        return textResult({ spilled: true });
+      },
+      SEARCH,
+    );
+    expect(spilled).toHaveLength(1);
+    expect(spilled[0]!.result).toBe(original);
+    expect(textOf(projected)).toContain("spilled");
   });
 });
 

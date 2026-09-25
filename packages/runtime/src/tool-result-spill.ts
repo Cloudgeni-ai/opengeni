@@ -49,7 +49,10 @@ export function spilledModelToolResult(
 /**
  * The single per-caller seam over one executor result. Codemode receives the
  * exact result. The model receives its model-visible projection (compact
- * Knowledge discovery output for the exact tool identity), bounded to 1 MiB.
+ * Knowledge discovery output for the exact tool identity) when that fits in
+ * 1 MiB; otherwise the exact result is spilled to a file, as for any tool.
+ * MCP-backed tools are already bounded on their exact result by the MCP
+ * transport cap before this seam runs.
  */
 export async function projectAttemptToolResultForCaller(
   result: AttemptToolResultValue,
@@ -62,14 +65,13 @@ export async function projectAttemptToolResultForCaller(
       return result;
     case "model": {
       const visible = identity ? projectKnowledgeToolResultForModel(identity, result) : result;
-      const serializedBytes = mcpSerializedSizeBytes(visible);
-      if (serializedBytes <= MCP_MAX_TOOL_RESULT_BYTES) return visible;
+      if (mcpSerializedSizeBytes(visible) <= MCP_MAX_TOOL_RESULT_BYTES) return visible;
       if (!spill) return modelToolResultOverflowError();
       try {
         return await spill({
           operationId: context.operationId,
-          result: visible,
-          serializedBytes,
+          result,
+          serializedBytes: mcpSerializedSizeBytes(result),
         });
       } catch {
         return modelToolResultOverflowError();

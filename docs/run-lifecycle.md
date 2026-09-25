@@ -2383,7 +2383,7 @@ audit reads may return it, so it is never a secret boundary.
    `session_attempt_codemode_calls` is unchanged. See
    `packages/runtime/src/tool-result-spill.ts` and
    `apps/worker/src/activities/agent-turn/tool-result-spill.ts`.
-   The same per-caller seam applies model-only projections before the cap:
+   The same per-caller seam applies model-only projections:
    a model call to `knowledge_search` or `knowledge_prepare_save` receives a
    compact copy without bookkeeping or repeated preview text, and its history
    item and event record that copy, while Codemode receives the exact executor

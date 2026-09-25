@@ -154,14 +154,20 @@ It is the same JSON without bookkeeping or repeated text:
   `publishedRevisionId`/`latestRevisionId` equal to `revision.id` (so a pending
   revision above the published one, or a missing published revision, stays
   visible);
-- `revision.preview` is omitted only when its complete text already appears
-  verbatim in the title or an excerpt. A preview with unique text, such as when
-  the best excerpt is a later chunk, is kept in full. Nothing is truncated.
+- `revision.preview`, the first 512 characters of the content, is omitted only
+  when it is empty or a content excerpt starting at offset 0 already begins with
+  it. The title never counts, because a short content such as a decision's
+  answer can appear inside its title and still be the only place it is stated.
+  A preview with unique text, such as when the best excerpt is a later chunk or
+  there is no excerpt, is kept in full. Every excerpt, including title
+  excerpts, is kept. Nothing is truncated.
 
 An error, structured content, or a result that does not strictly match the
 contract passes through unchanged. The model call's history item and timeline
 event record the compact copy the model received; past tool outputs are never
-re-rendered. On contract-valid fixtures sized to staging medians
+re-rendered. MCP transport bounds the exact result to 1 MiB before this
+projection, so compaction only shrinks results that already fit; a result that
+is still over 1 MiB for the model spills its exact bytes like any tool. On contract-valid fixtures sized to staging medians
 (`packages/runtime/test/knowledge-model-projection.test.ts`), an eight-entry
 search result shrinks from 17.9 KB to 10.0 KB (44%) and a save preparation
 from 21.7 KB to 14.1 KB (35%).
