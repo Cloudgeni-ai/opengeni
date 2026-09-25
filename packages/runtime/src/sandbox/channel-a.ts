@@ -20,6 +20,7 @@
 // apply-patch-only path which cannot do binary, C4), falling back to
 // `createEditor` for text when `exec` is absent.
 
+import { constants as zlibConstants, createGunzip } from "node:zlib";
 import type {
   FileSystemRouteIdentity,
   FsChangedPayload,
@@ -331,6 +332,140 @@ export type RepositoryDiscoveryResult = {
 };
 
 const REPOSITORY_DISCOVERY_TRUNCATED_SENTINEL = "__OPENGENI_REPOSITORY_DISCOVERY_TRUNCATED__";
+
+/** Raw ripgrep stdout kept on the box before encoding. */
+export const CODE_SEARCH_RG_MAX_BYTES = 64 * 1024 * 1024;
+// Providers retain about 1 MiB per output stream. Like Git capture, compressed
+// ripgrep output travels as 512 KiB chunks (~683 KiB base64) with room to spare.
+const CODE_SEARCH_RG_CHUNK_BYTES = 512 * 1024;
+const CODE_SEARCH_RG_FRAME_CHARS = 768 * 1024;
+/** Compressed bytes fetched per call at most; the rest is reported as a cut. */
+const CODE_SEARCH_RG_MAX_TRANSFER_BYTES = 8 * 1024 * 1024;
+const CODE_SEARCH_RG_TOKEN = /^opengeni-code-search\.[A-Za-z0-9]+$/;
+const CODE_SEARCH_RG_BEGIN = "__OPENGENI_CODE_SEARCH_RG_BEGIN__";
+const CODE_SEARCH_RG_END = "__OPENGENI_CODE_SEARCH_RG_END__";
+// Search: status:timedOut:compressedSize:token:rawSize:stored. A box without
+// ripgrep sends only `127:0`, and a chunk fetch sends `0:0:0:-` or `0:0:0:missing`.
+const CODE_SEARCH_RG_TRAILER = new RegExp(
+  `${CODE_SEARCH_RG_END}(\\d+):([01])(?::(\\d+):([A-Za-z0-9._-]+)(?::(\\d+):([01]))?)?__`,
+);
+const CODE_SEARCH_RG_STORE_FAILED =
+  "code search could not store its output on this machine; its temporary directory may be full";
+const CODE_SEARCH_KINDS_BEGIN = "__OPENGENI_CODE_SEARCH_KINDS_BEGIN__";
+const CODE_SEARCH_KINDS_END = "__OPENGENI_CODE_SEARCH_KINDS_END__";
+
+export type CodeSearchRipgrepOutcome = {
+  /** False when ripgrep is not installed on the box. */
+  available: boolean;
+  stdout: string;
+  /** rg exit status (0 matches, 1 none, 2 error); null after a timeout. */
+  exitCode: number | null;
+  /** Output hit the byte cap and was cut at a line boundary. */
+  truncated: boolean;
+  timedOut: boolean;
+};
+
+const CODE_SEARCH_RG_FLAGS: ReadonlySet<string> = new Set([
+  "--files",
+  "--null",
+  "--line-number",
+  "--with-filename",
+  "--no-heading",
+  "-i",
+  "-w",
+  "--no-require-git",
+  "--hidden",
+]);
+const CODE_SEARCH_RG_VALUE_FLAGS: ReadonlyMap<string, (value: string) => boolean> = new Map([
+  ["--color", (value: string) => value === "never"],
+  ["-m", (value: string) => /^[1-9]\d{0,5}$/.test(value)],
+  ["--max-columns", (value: string) => /^[1-9]\d{0,6}$/.test(value)],
+  ["--max-filesize", (value: string) => /^[1-9]\d{0,9}$/.test(value)],
+  ["-g", (value: string) => value.length > 0 && value.length <= 512],
+  ["-e", (value: string) => value.length > 0 && value.length <= 16_384],
+]);
+
+/**
+ * Accept only the ripgrep arguments `code_search` needs. Flags that run a
+ * program (`--pre`, `-z`) or read other files, and paths that leave the
+ * workspace, are rejected before a command is built. `--no-config` stops a
+ * `RIPGREP_CONFIG_PATH` on the box from adding flags.
+ */
+export function validateCodeSearchRipgrepArgs(
+  args: readonly string[],
+  workspaceRoot = "",
+): string[] {
+  const out: string[] = [];
+  let index = 0;
+  for (; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg.includes(NUL)) throw new ChannelAValidationError("ripgrep argument contains NUL");
+    if (arg === "--") break;
+    if (CODE_SEARCH_RG_FLAGS.has(arg)) {
+      out.push(arg);
+      continue;
+    }
+    const valid = CODE_SEARCH_RG_VALUE_FLAGS.get(arg);
+    const value = args[index + 1];
+    if (!valid || value === undefined || value.includes(NUL) || !valid(value)) {
+      throw new ChannelAValidationError(`ripgrep argument is not allowed: ${arg}`);
+    }
+    out.push(arg, value);
+    index++;
+  }
+  const paths = args.slice(index + 1);
+  if (index >= args.length || paths.length === 0) {
+    throw new ChannelAValidationError("ripgrep arguments must end with -- and paths");
+  }
+  out.push("--");
+  for (const path of paths) {
+    if (path.includes(NUL) || path.startsWith("-") || path.startsWith("/")) {
+      throw new ChannelAValidationError(`ripgrep path is not allowed: ${path}`);
+    }
+    out.push(assertSafeRelPathOrRoot(path, workspaceRoot) || ".");
+  }
+  return ["--no-config", ...out];
+}
+
+/** The base64 body between the begin marker and the trailer at `trailerIndex`. */
+function decodeCodeSearchChunk(stdout: string, trailerIndex: number): Buffer {
+  const begin = stdout.indexOf(CODE_SEARCH_RG_BEGIN);
+  if (begin < 0 || begin > trailerIndex) {
+    throw new ChannelAUnavailableError("code search output frame is missing");
+  }
+  const encoded = stdout
+    .slice(begin + CODE_SEARCH_RG_BEGIN.length, trailerIndex)
+    .replace(/\s+/g, "");
+  // A frame longer than one chunk can only come from a broken or hostile box.
+  if (encoded.length > Math.ceil(CODE_SEARCH_RG_CHUNK_BYTES / 3) * 4) {
+    throw new ChannelAUnavailableError("code search output frame is malformed");
+  }
+  return Buffer.from(encoded, "base64");
+}
+
+/**
+ * Inflate at most `limit` bytes of box-controlled gzip. A sync flush decodes a
+ * cut stream as a prefix, and reading stops once `limit` is reached, so a
+ * small hostile frame cannot inflate to hundreds of megabytes in the worker.
+ */
+async function gunzipCodeSearchPrefix(input: Buffer, limit: number): Promise<Buffer> {
+  const gunzip = createGunzip({ finishFlush: zlibConstants.Z_SYNC_FLUSH, chunkSize: 64 * 1024 });
+  gunzip.end(input);
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    for await (const chunk of gunzip as AsyncIterable<Buffer>) {
+      chunks.push(chunk);
+      size += chunk.length;
+      // Leaving the loop destroys the stream before it inflates further.
+      if (size >= limit) break;
+    }
+  } catch {
+    throw new ChannelAUnavailableError("code search output could not be decoded");
+  }
+  return Buffer.concat(chunks, size).subarray(0, limit);
+}
+
 const REPOSITORY_DISCOVERY_STATUS_PREFIX = "__OPENGENI_REPOSITORY_DISCOVERY_STATUS__:";
 
 const NUL = String.fromCharCode(0); // \0 NUL — find/porcelain/numstat -z separator
@@ -2276,6 +2411,241 @@ export class SandboxChannelAService {
   /** Detect repo roots within the workspace (for the Git.repos capability). */
   async detectRepos(): Promise<string[]> {
     return (await this.detectReposDetailed()).repos;
+  }
+
+  // ═════════════════════════ Code search (worker-only) ═══════════════════════
+
+  /**
+   * Run ripgrep read-only in the workspace root for the Jev `code_search` tool.
+   * Arguments are checked against a closed allowlist (no `--pre`, `-z` or other
+   * flags that run programs), so the command is provably read-only and skips
+   * durable mutation admission. stdout is capped at `maxBytes`, gzip+base64
+   * framed so providers that drop newlines or retain limited output cannot
+   * corrupt it, and bounded by a wall-clock watchdog (not GNU `timeout`, which
+   * stock macOS lacks). Resolves `available: false` when `rg` is not installed,
+   * and throws when the box could not store the output whole (a full
+   * temporary directory) rather than returning a prefix as complete.
+   */
+  async codeSearchRipgrep(
+    args: readonly string[],
+    options: { timeoutMs: number; maxBytes: number; maxTransferBytes?: number },
+  ): Promise<CodeSearchRipgrepOutcome> {
+    const argv = validateCodeSearchRipgrepArgs(args, this.workspaceRoot);
+    const maxBytes = Math.max(1, Math.min(CODE_SEARCH_RG_MAX_BYTES, Math.floor(options.maxBytes)));
+    const maxTransferBytes = Math.max(
+      CODE_SEARCH_RG_CHUNK_BYTES,
+      Math.min(
+        CODE_SEARCH_RG_MAX_TRANSFER_BYTES,
+        Math.floor(options.maxTransferBytes ?? CODE_SEARCH_RG_MAX_TRANSFER_BYTES),
+      ),
+    );
+    const seconds = Math.max(1, Math.min(120, Math.ceil(options.timeoutMs / 1_000)));
+    const script = [
+      // Remove output a previous call could not fetch (worker gone mid-transfer).
+      // The trailing slash makes find enter a symlinked /tmp, as on macOS.
+      `find "\${TMPDIR:-/tmp}/" -maxdepth 1 -name 'opengeni-code-search.*' -mmin +15 -exec rm -f {} + 2>/dev/null`,
+      'gz_file=$(mktemp "${TMPDIR:-/tmp}/opengeni-code-search.XXXXXX") || exit 70',
+      'status_file="${gz_file}.status"',
+      'timeout_file="${gz_file}.timed-out"',
+      "keep_gz=",
+      "search_pid=",
+      "watchdog_pid=",
+      'cleanup() { if [ -n "$search_pid" ]; then kill -TERM -- "-$search_pid" 2>/dev/null || kill "$search_pid" 2>/dev/null || true; fi; if [ -n "$watchdog_pid" ]; then kill "$watchdog_pid" 2>/dev/null || true; fi; rm -f "$status_file" "$timeout_file"; [ -n "$keep_gz" ] || rm -f "$gz_file"; }',
+      "abort() { trap - EXIT; keep_gz=; cleanup; exit 143; }",
+      "trap cleanup EXIT",
+      "trap abort HUP INT TERM",
+      `if ! command -v rg >/dev/null 2>&1; then printf '${CODE_SEARCH_RG_END}127:0__'; exit 0; fi`,
+      // Job control gives the pipeline its own process group, so the watchdog
+      // and cleanup stop ripgrep itself rather than only the subshell. Output is
+      // compressed once, straight into the kept file: providers retain only
+      // about 1 MiB per output stream, and later chunks are fetched by name.
+      // That TERM stops only ripgrep and head. The subshell and gzip ignore it
+      // (bash 3.2 runs a trap before the pipeline ends), so a stopped search
+      // still stores a whole member and records every stage's status.
+      "set -m",
+      `( trap '' TERM; ( trap - TERM; exec rg ${argv.map(shellQuote).join(" ")} ) 2>/dev/null | ( trap - TERM; exec head -c ${maxBytes + 1} ) | gzip -c > "$gz_file"; printf '%s %s %s' "\${PIPESTATUS[0]}" "\${PIPESTATUS[1]}" "\${PIPESTATUS[2]}" > "$status_file" ) </dev/null >/dev/null 2>&1 &`,
+      "search_pid=$!",
+      `(sleeper_pid=; stop_watchdog() { if [ -n "$sleeper_pid" ]; then kill "$sleeper_pid" 2>/dev/null || true; wait "$sleeper_pid" 2>/dev/null || true; fi; exit 0; }; trap stop_watchdog HUP INT TERM; sleep ${seconds} & sleeper_pid=$!; wait "$sleeper_pid"; sleeper_pid=; if kill -TERM -- "-$search_pid" 2>/dev/null; then : > "$timeout_file"; fi) </dev/null >/dev/null 2>&1 &`,
+      "watchdog_pid=$!",
+      'wait "$search_pid" 2>/dev/null',
+      "search_pid=",
+      'kill "$watchdog_pid" 2>/dev/null || true',
+      'wait "$watchdog_pid" 2>/dev/null || true',
+      "watchdog_pid=",
+      "set +m",
+      "rg_status= head_status= gzip_status=",
+      'if [ -f "$status_file" ]; then read -r rg_status head_status gzip_status < "$status_file"; fi',
+      '[ -n "$rg_status" ] || rg_status=125',
+      "timed_out=0",
+      'if [ -f "$timeout_file" ]; then timed_out=1; fi',
+      // A full temporary directory cuts the member without a word, so decode it
+      // end to end: that yields the raw size and fails on a cut or corrupt member.
+      "stored=0",
+      'if raw_size=$(set -o pipefail; gzip -dc < "$gz_file" 2>/dev/null | wc -c | tr -d \' \') && [ "$head_status" = 0 ] && [ "$gzip_status" = 0 ]; then stored=1; fi',
+      '[ -n "$raw_size" ] || raw_size=0',
+      "gz_size=$(wc -c < \"$gz_file\" | tr -d ' ')",
+      '[ -n "$gz_size" ] || gz_size=0',
+      "token=-",
+      // The worker fails an unstored search that did not time out, so only
+      // keep output it will fetch.
+      `if [ "$gz_size" -gt ${CODE_SEARCH_RG_CHUNK_BYTES} ] && { [ "$stored" = 1 ] || [ "$timed_out" = 1 ]; }; then keep_gz=1; token=$(basename "$gz_file"); fi`,
+      `printf '${CODE_SEARCH_RG_BEGIN}'`,
+      `head -c ${CODE_SEARCH_RG_CHUNK_BYTES} "$gz_file" | base64 | tr -d '\\r\\n'`,
+      `printf '${CODE_SEARCH_RG_END}%s:%s:%s:%s:%s:%s__' "$rg_status" "$timed_out" "$gz_size" "$token" "$raw_size" "$stored"`,
+    ].join("\n");
+    const { stdout } = await this.runReadOnly({
+      cmd: internalBashCommand(script),
+      workdir: this.providerWorkspaceRoot(),
+      yieldTimeMs: (seconds + 15) * 1_000,
+      maxOutputTokens: CODE_SEARCH_RG_FRAME_CHARS,
+    });
+    const trailer = CODE_SEARCH_RG_TRAILER.exec(stdout);
+    if (!trailer) {
+      throw new ChannelAUnavailableError("code search did not complete in this workspace");
+    }
+    const exitCode = Number.parseInt(trailer[1]!, 10);
+    if (exitCode === 127) {
+      return { available: false, stdout: "", exitCode: null, truncated: false, timedOut: false };
+    }
+    if (trailer[3] === undefined || trailer[5] === undefined) {
+      throw new ChannelAUnavailableError("code search output trailer is malformed");
+    }
+    const timedOut = trailer[2] === "1";
+    // A stopped search keeps the whole lines it stored. Otherwise a lost
+    // status or a failed or corrupt store must not pass as complete output.
+    if (!timedOut && exitCode === 125) {
+      throw new ChannelAUnavailableError(
+        "code search did not record its status on this machine; its temporary directory may be full",
+      );
+    }
+    if (!timedOut && trailer[6] !== "1") {
+      throw new ChannelAUnavailableError(CODE_SEARCH_RG_STORE_FAILED);
+    }
+    const first = decodeCodeSearchChunk(stdout, trailer.index);
+    const reportedSize = Number.parseInt(trailer[3], 10);
+    const rawSize = Number.parseInt(trailer[5], 10);
+    const token = trailer[4] === "-" ? null : trailer[4]!;
+    const parts = [first];
+    let fetched = first.length;
+    if (token !== null && reportedSize > fetched) {
+      if (!CODE_SEARCH_RG_TOKEN.test(token)) {
+        throw new ChannelAUnavailableError("code search output frame is malformed");
+      }
+      // A box that lies about its size never gets more than the transfer cap
+      // fetched from it, nor more calls than that cap needs.
+      const target = Math.min(reportedSize, maxTransferBytes);
+      const maxCalls = Math.ceil(maxTransferBytes / CODE_SEARCH_RG_CHUNK_BYTES);
+      for (let call = 0; call < maxCalls && fetched < target; call++) {
+        const length = Math.min(CODE_SEARCH_RG_CHUNK_BYTES, target - fetched);
+        const chunk = await this.codeSearchRipgrepChunk(
+          token,
+          fetched,
+          length,
+          fetched + length >= target,
+        );
+        if (chunk === null) break;
+        parts.push(chunk);
+        fetched += chunk.length;
+        // A real box returns every byte asked for; a short chunk ends the
+        // transfer and is reported as a cut.
+        if (chunk.length < length) break;
+      }
+    }
+    const transferCut = fetched < reportedSize;
+    // The box already cut stdout at maxBytes + 1, so more decoded bytes than
+    // that come from a broken or hostile box and are dropped as a cut.
+    const compressed = Buffer.concat(parts);
+    const raw = compressed.length
+      ? await gunzipCodeSearchPrefix(compressed, maxBytes + 1)
+      : Buffer.alloc(0);
+    const rawCut = raw.length > maxBytes;
+    // With nothing cut, the output must be exactly what the box verified.
+    const sizeMismatch = !rawCut && !transferCut && !timedOut && raw.length !== rawSize;
+    const truncated = rawCut || transferCut || sizeMismatch;
+    let text = (rawCut ? raw.subarray(0, maxBytes) : raw).toString("utf8");
+    if (truncated || timedOut) {
+      // Drop the last partial line so every returned record is whole.
+      const lastNewline = text.lastIndexOf("\n");
+      text = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
+    }
+    return {
+      available: true,
+      stdout: text,
+      exitCode: timedOut ? null : exitCode,
+      truncated,
+      timedOut,
+    };
+  }
+
+  /**
+   * Fetch one chunk of compressed ripgrep output kept on the box by a previous
+   * codeSearchRipgrep call. The last fetch deletes the file. Null when the
+   * file is gone.
+   */
+  private async codeSearchRipgrepChunk(
+    token: string,
+    offset: number,
+    length: number,
+    last: boolean,
+  ): Promise<Buffer | null> {
+    const script = [
+      'f="${TMPDIR:-/tmp}/$1"',
+      `if [ ! -f "$f" ]; then printf '${CODE_SEARCH_RG_END}0:0:0:missing__'; exit 0; fi`,
+      `printf '${CODE_SEARCH_RG_BEGIN}'`,
+      'tail -c +"$2" "$f" | head -c "$3" | base64 | tr -d \'\\r\\n\'',
+      `printf '${CODE_SEARCH_RG_END}0:0:0:-__'`,
+      'if [ "$4" = 1 ]; then rm -f "$f"; fi',
+    ].join("\n");
+    const { stdout } = await this.runReadOnly({
+      cmd: `${internalBashCommand(script)} opengeni-code-search ${shellQuote(token)} ${offset + 1} ${length} ${last ? 1 : 0}`,
+      workdir: this.providerWorkspaceRoot(),
+      yieldTimeMs: 30_000,
+      maxOutputTokens: CODE_SEARCH_RG_FRAME_CHARS,
+    });
+    const trailer = CODE_SEARCH_RG_TRAILER.exec(stdout);
+    if (!trailer) {
+      throw new ChannelAUnavailableError("code search did not complete in this workspace");
+    }
+    if (trailer[4] === "missing") return null;
+    const chunk = decodeCodeSearchChunk(stdout, trailer.index);
+    if (chunk.length > length) {
+      throw new ChannelAUnavailableError("code search output frame is malformed");
+    }
+    return chunk;
+  }
+
+  /** Classify workspace-relative paths for `code_search` path filters. */
+  async codeSearchPathKinds(
+    paths: readonly string[],
+  ): Promise<Record<string, "file" | "directory" | "missing">> {
+    const checked = paths.map((path) => {
+      if (path.startsWith("-")) throw new ChannelAValidationError(`invalid path: ${path}`);
+      return assertSafeRelPathOrRoot(path, this.workspaceRoot) || ".";
+    });
+    if (checked.length === 0) return {};
+    const script = [
+      `printf '${CODE_SEARCH_KINDS_BEGIN}'`,
+      'for p in "$@"; do if [ -d "$p" ]; then printf d; elif [ -e "$p" ]; then printf f; else printf m; fi; done',
+      `printf '${CODE_SEARCH_KINDS_END}'`,
+    ].join("\n");
+    const { stdout } = await this.runReadOnly({
+      cmd: `${internalBashCommand(script)} opengeni-code-search ${checked.map(shellQuote).join(" ")}`,
+      workdir: this.providerWorkspaceRoot(),
+      yieldTimeMs: 20_000,
+      maxOutputTokens: 4_096,
+    });
+    const match = new RegExp(`${CODE_SEARCH_KINDS_BEGIN}([dfm]*)${CODE_SEARCH_KINDS_END}`).exec(
+      stdout,
+    );
+    if (!match || match[1]!.length !== checked.length) {
+      throw new ChannelAUnavailableError("code search path check did not complete");
+    }
+    const kinds: Record<string, "file" | "directory" | "missing"> = {};
+    paths.forEach((path, index) => {
+      const code = match[1]![index];
+      kinds[path] = code === "d" ? "directory" : code === "f" ? "file" : "missing";
+    });
+    return kinds;
   }
 
   // ════════════════════════ Terminal exec + PTY (A2) ════════════════════════

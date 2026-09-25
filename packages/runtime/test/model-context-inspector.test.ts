@@ -4,6 +4,7 @@ import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS } from 
 import { testSettings } from "@opengeni/testing";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 import {
+  CODE_SEARCH_DIRECTIVE,
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
   composeAgentInstructions,
   coreInstructions,
@@ -48,6 +49,36 @@ describe("model context inspector", () => {
     expect(inspection.composed.indexOf("SESSION RULE")).toBeLessThan(
       inspection.composed.indexOf(CODEMODE_PROGRAMMATIC_DIRECTIVE),
     );
+  });
+
+  test("adds the code_search directive only when the attempt offers the tool", () => {
+    const without = inspectPersistentAgentInstructions(testSettings(), {});
+    expect(without.layers.map((layer) => layer.id)).not.toContain("code_search");
+    expect(without.composed).not.toContain(CODE_SEARCH_DIRECTIVE);
+
+    const plain = inspectPersistentAgentInstructions(testSettings(), {
+      codeSearchAvailable: true,
+      codemodeAvailable: true,
+    });
+    expect(plain.layers.map((layer) => layer.id)).toEqual([
+      "operational_contract",
+      "persona_and_core",
+      "codemode",
+      "code_search",
+    ]);
+    expect(plain.composed).toBe(joinPersistentAgentInstructionLayers(plain.layers));
+
+    const governed = inspectPersistentAgentInstructions(testSettings(), {
+      workspaceGovernance: "Workspace global policy",
+      codeSearchAvailable: true,
+    });
+    expect(governed.layers.map((layer) => layer.id)).toEqual([
+      "operational_contract",
+      "persona_and_core",
+      "workspace_governance",
+      "code_search",
+    ]);
+    expect(governed.composed).toContain(CODE_SEARCH_DIRECTIVE);
   });
 
   test("captured remainder after composed instructions is labeled as SDK capability text", () => {

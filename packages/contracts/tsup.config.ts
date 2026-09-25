@@ -22,6 +22,7 @@ export default defineConfig({
     "src/managed-auth-session-sets.ts",
     "src/managed-sign-in-methods.ts",
     "src/model-picker-order.ts",
+    "src/code-search.ts",
     "src/organization-recovery.ts",
     "src/personal-github.ts",
     "src/session-titles.ts",
