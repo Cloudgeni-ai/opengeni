@@ -22,7 +22,8 @@ import { listSessionDiscoverySummaries } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import { createAttemptToolEnvironment, generateCodemodeDeclarations } from "@opengeni/codemode";
-import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { buildOpenGeniMcpServer, slackBotFileContentResult } from "../src/mcp/server";
+import type { OpenGeniSlackBotClient } from "../src/integrations/slack-bot";
 import { buildFilesMcpServer } from "../src/mcp/files";
 
 const accountId = crypto.randomUUID();
@@ -55,6 +56,36 @@ const DEFAULT_AUTHORIZED_CONNECTOR_TOOLS = [
   "slack_bot_delete_message",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 const INTERACTION_ATTEMPT_TOOL_NAME_SET = new Set<string>(INTERACTION_ATTEMPT_TOOL_NAMES);
+
+test("Slack file content keeps text paginated and sends image bytes as an MCP image block", () => {
+  type Result = Awaited<ReturnType<OpenGeniSlackBotClient["fileContent"]>>;
+  const common = {
+    channel: { id: "C_MEMBER" },
+    file: { id: "F_IMAGE", mimetype: "image/png" },
+    receipt: { operation: "file.content.read" },
+  };
+  const text = slackBotFileContentResult({
+    ...common,
+    content: "Hello",
+    contentType: "text/plain",
+  } as Result);
+  expect(text.content).toHaveLength(1);
+  expect(text.content[0]!.type).toBe("text");
+  const image = slackBotFileContentResult({
+    ...common,
+    image: {
+      fileId: "F_IMAGE",
+      filename: "thread.png",
+      contentType: "image/png",
+      bytes: new Uint8Array([1, 2, 3]),
+    },
+  } as Result);
+  expect(image.content).toEqual([
+    { type: "text", text: expect.stringContaining('"sizeBytes":3') },
+    { type: "image", mimeType: "image/png", data: "AQID" },
+  ]);
+  expect(image.content[0]).not.toHaveProperty("data");
+});
 
 function broadServerTools(tools: readonly FirstPartyMcpToolName[]): FirstPartyMcpToolName[] {
   return tools.filter((tool) => !INTERACTION_ATTEMPT_TOOL_NAME_SET.has(tool));

@@ -202,6 +202,7 @@ function fakeSlack(
     deleteErrorCode?: string;
     transcriptRequiresUserSession?: boolean;
     transcriptInFileInfo?: boolean;
+    image?: { bytes: Uint8Array; declaredMime?: string; responseMime?: string; size?: number };
     fileListResponse?: (input: { count: number; page: number }) => Record<string, unknown>;
   } = {},
 ) {
@@ -305,6 +306,11 @@ function fakeSlack(
           }
         : undefined;
     if (url.hostname === "files.slack.com") {
+      if (url.pathname.includes("F_IMAGE")) {
+        return new Response(options.image?.bytes ?? fixturePng(), {
+          headers: { "content-type": options.image?.responseMime ?? "image/png" },
+        });
+      }
       if (url.pathname.includes("huddle-transcript") && options.transcriptRequiresUserSession) {
         return new Response(null, {
           status: 302,
@@ -552,6 +558,23 @@ function fakeSlack(
     if (method === "files.info") {
       const fileId = params.get("file") ?? "F_CANVAS";
       const transcript = fileId === "FTRANSCRIPT";
+      if (fileId === "F_IMAGE") {
+        return Response.json({
+          ok: true,
+          file: {
+            id: fileId,
+            name: "thread-image.png",
+            title: "Thread image",
+            mode: "hosted",
+            filetype: "png",
+            mimetype: options.image?.declaredMime ?? "image/png",
+            size: options.image?.size ?? (options.image?.bytes ?? fixturePng()).byteLength,
+            channels: ["C_MEMBER"],
+            url_private_download:
+              "https://files.slack.com/files-pri/T_OPEN_GENI-F_IMAGE/download/thread-image.png",
+          },
+        });
+      }
       return Response.json({
         ok: true,
         file: {
@@ -700,6 +723,13 @@ function fakeSlack(
       return { entered, release };
     },
   };
+}
+
+function fixturePng(): Uint8Array {
+  return new Uint8Array([
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 73, 69, 78, 68, 0, 0, 0, 0,
+  ]);
 }
 
 describe("Slack files.list pagination adapter", () => {
@@ -2470,6 +2500,61 @@ describe("OpenGeni Slack bot connection", () => {
       bot.listFiles({ channelId: "C_MEMBER", cursor: first.nextCursor! }),
     ).rejects.toThrow(/reinstalled|authority changed/);
     expect(slack.calls).toHaveLength(callCount);
+  });
+
+  test("reads a channel-shared thread image as validated bytes with bounded authority", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+    const image = await bot.fileContent({ channelId: "C_MEMBER", fileId: "F_IMAGE" });
+    expect("image" in image && image.image).toMatchObject({
+      fileId: "F_IMAGE",
+      filename: "thread-image.png",
+      contentType: "image/png",
+      bytes: fixturePng(),
+    });
+    expect(JSON.stringify(image)).not.toContain("files.slack.com");
+    await expect(bot.fileContent({ channelId: "G_PRIVATE", fileId: "F_IMAGE" })).rejects.toThrow(
+      "not_in_channel",
+    );
+    await expect(
+      bot.fileContent({ channelId: "C_MEMBER", fileId: "F_IMAGE", offset: 1 }),
+    ).rejects.toThrow("invalid_file_offset");
+    slack.setMemberChannelState({ isShared: true });
+    await expect(bot.fileContent({ channelId: "C_MEMBER", fileId: "F_IMAGE" })).rejects.toThrow(
+      "slack_connect_unsupported",
+    );
+
+    for (const option of [
+      { image: { bytes: fixturePng(), responseMime: "text/html" }, code: "unsupported_file_type" },
+      { image: { bytes: new TextEncoder().encode("<svg></svg>") }, code: "invalid_file_content" },
+      { image: { bytes: fixturePng(), size: 4 * 1024 * 1024 + 1 }, code: "invalid_file_size" },
+    ]) {
+      const fake = fakeSlack(option);
+      const candidate = createOpenGeniSlackBotClient(
+        { db: client.db, settings, slackFetch: fake.fetch },
+        await resolveSlackBotConnectionForTool({
+          db: client.db,
+          grant: {
+            ...workspace,
+            subjectId: "subject-a",
+            permissions: ["connections:read"],
+            metadata: {},
+          },
+          sessionId: null,
+        }),
+      );
+      await expect(
+        candidate.fileContent({ channelId: "C_MEMBER", fileId: "F_IMAGE" }),
+      ).rejects.toThrow(option.code);
+      if (option.code === "invalid_file_size") {
+        expect(
+          fake.calls.some((call) => call.method === "files.info" && call.fileId === "F_IMAGE"),
+        ).toBe(true);
+        expect(fake.calls.some((call) => call.method.includes("F_IMAGE"))).toBe(false);
+      }
+    }
   });
 
   test("rechecks authority before a private-file redirect leg", async () => {

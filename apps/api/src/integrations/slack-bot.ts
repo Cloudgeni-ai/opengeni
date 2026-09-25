@@ -991,6 +991,22 @@ export class OpenGeniSlackBotClient {
         "file.content.read",
         input,
       );
+      if (SLACK_REACTION_IMAGE_MIME_TYPES.has(normalizedContentType(file.mimetype))) {
+        if (input.offset !== undefined && input.offset !== 0) {
+          throw new SlackBotProviderError("invalid_file_offset");
+        }
+        // A context file is read only on explicit request. Keep the same
+        // non-shared channel boundary and byte validation as invocation images.
+        await this.requireActiveNonSharedMemberChannel(headers, input.channelId);
+        const image = await this.downloadReactionImage({
+          fileId: file.id,
+          filename: file.name || file.title || file.id,
+          declaredMimeType: normalizedContentType(file.mimetype),
+          declaredSizeBytes: file.size,
+          downloadUrl: privateSlackFileUrl(fileRecord),
+        });
+        return { channel: info, file, image };
+      }
       const embeddedTranscript = embeddedHuddleTranscription(fileRecord, parentFileRecord);
       const { contentType, content } =
         embeddedTranscript ?? (await this.readPrivateFileText(fileRecord, "file.content.read"));
@@ -1718,7 +1734,8 @@ export class OpenGeniSlackBotClient {
         method: "GET",
         headers: {
           ...headers,
-          accept: "text/*, application/json, application/xml, application/xhtml+xml",
+          accept:
+            "image/png, image/jpeg, image/webp, text/*, application/json, application/xml, application/xhtml+xml",
         },
         redirect: "manual",
         signal: AbortSignal.timeout(SLACK_TIMEOUT_MS),
