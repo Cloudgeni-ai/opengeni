@@ -2,6 +2,7 @@ import {
   BillingMode,
   CAPABILITY_DESCRIPTORS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  DEFAULT_OPENGENI_DOCUMENTATION_URL,
   currentAgentLearningToolSelection,
   Entitlements,
   EntitlementsMode,
@@ -307,6 +308,21 @@ const SettingsSchema = z.object({
     .regex(/^G-[A-Z0-9]+$/u)
     .optional(),
   publicBaseUrl: z.string().url().optional(),
+  // Product documentation the web console links from its Help menu. Absent
+  // means the public OpenGeni docs; `none` hides the link for deployments that
+  // publish no documentation of their own.
+  documentationUrl: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value.trim().toLowerCase() === "none"
+          ? null
+          : value.trim()
+        : value,
+    z
+      .url({ protocol: /^https?$/u, error: "must be an absolute http(s) URL or none" })
+      .nullable()
+      .default(DEFAULT_OPENGENI_DOCUMENTATION_URL),
+  ),
   // Standards-based OAuth authorization server for external workspace MCP
   // clients. Opt-in because it creates a new public authentication surface.
   mcpOauthEnabled: EnvBoolean.default(false),
@@ -3170,6 +3186,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     analyticsPosthogHost: optional("OPENGENI_ANALYTICS_POSTHOG_HOST"),
     analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
+    documentationUrl: optional("OPENGENI_DOCUMENTATION_URL"),
     mcpOauthEnabled: optional("OPENGENI_MCP_OAUTH_ENABLED"),
     apiTrustedProxyHops: optional("OPENGENI_API_TRUSTED_PROXY_HOPS"),
     apiTrustedProxyCidrs: optional("OPENGENI_API_TRUSTED_PROXY_CIDRS"),

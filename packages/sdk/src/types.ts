@@ -3960,6 +3960,11 @@ export type ClientConfig = {
   billingMode?: BillingMode | undefined;
   managedAuthSessionSetMode: "legacy" | "dual" | "broker";
   auth: ClientAuthConfig;
+  /**
+   * Product documentation for a console Help link. `null` means the deployment
+   * hides the link; absent means a server that predates the field.
+   */
+  documentationUrl?: string | null | undefined;
   analytics: {
     consentRequired: boolean;
     providers: {

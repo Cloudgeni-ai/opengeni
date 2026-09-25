@@ -16874,6 +16874,9 @@ export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
 
+/** Public OpenGeni documentation linked from the web console's Help menu by default. */
+export const DEFAULT_OPENGENI_DOCUMENTATION_URL = "https://docs.opengeni.ai" as const;
+
 export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({
     deploymentRevision: z.string(),
@@ -16932,6 +16935,15 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // @opengeni/sdk/accounts controller when this is dual or broker.
     managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
     auth: ClientAuthConfig.default({ mode: "none" }),
+    // Product documentation the console links from its Help menu. The API
+    // always sends it: DEFAULT_OPENGENI_DOCUMENTATION_URL unless operators
+    // point it elsewhere or hide it (null) with OPENGENI_DOCUMENTATION_URL.
+    // Parsing adds no default, so an absent field still means a server that
+    // predates it and clients show no link rather than guessing.
+    documentationUrl: z
+      .url({ protocol: /^https?$/u })
+      .nullable()
+      .optional(),
     analytics: z
       .object({
         consentRequired: z.boolean(),

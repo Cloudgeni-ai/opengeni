@@ -52,6 +52,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     authAllowHealth: true,
     authAllowMetrics: false,
     publicBaseUrl: "http://127.0.0.1:3000",
+    documentationUrl: "https://docs.opengeni.ai",
     mcpOauthEnabled: false,
     apiTrustedProxyHops: 0,
     apiTrustedProxyCidrs: "",

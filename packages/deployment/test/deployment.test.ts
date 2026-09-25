@@ -370,6 +370,20 @@ describe("deployment contract", () => {
     expect(missingOrigin.missingEnvVars).toContain("OPENGENI_PUBLIC_BASE_URL");
   });
 
+  test("passes an operator documentation link through only when configured", () => {
+    const configured = generateRuntimeArtifacts(
+      deploymentProfiles["local-kubernetes"],
+      {},
+      { OPENGENI_DOCUMENTATION_URL: "none" },
+    );
+    expect(configured.runtimeEnv).toContain("OPENGENI_DOCUMENTATION_URL=none");
+    expect(configured.helmValuesYaml).toContain('OPENGENI_DOCUMENTATION_URL: "none"');
+
+    const unset = generateRuntimeArtifacts(deploymentProfiles["local-kubernetes"], {}, {});
+    expect(unset.runtimeEnv).not.toContain("OPENGENI_DOCUMENTATION_URL");
+    expect(unset.helmValuesYaml).not.toContain("OPENGENI_DOCUMENTATION_URL");
+  });
+
   test("refuses the retired MCP-only trusted proxy hop setting", () => {
     expect(() =>
       generateRuntimeArtifacts(

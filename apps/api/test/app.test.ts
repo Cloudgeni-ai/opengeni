@@ -2012,6 +2012,19 @@ describe("GET /v1/config/client", () => {
     });
   });
 
+  test("advertises the configured documentation link and hides it when disabled", async () => {
+    expect((await fetchClientConfig(testSettings())).documentationUrl).toBe(
+      "https://docs.opengeni.ai",
+    );
+    expect(
+      (await fetchClientConfig(testSettings({ documentationUrl: "https://docs.example.test/" })))
+        .documentationUrl,
+    ).toBe("https://docs.example.test/");
+    expect(
+      (await fetchClientConfig(testSettings({ documentationUrl: null }))).documentationUrl,
+    ).toBeNull();
+  });
+
   test("supports a Codex subscription model as the client default", async () => {
     const settings = testSettings({
       codexSubscriptionEnabled: true,
