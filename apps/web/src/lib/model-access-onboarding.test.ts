@@ -2,10 +2,13 @@ import { describe, expect, mock, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
+import { projectPickerRows, sortPickerRows } from "@opengeni/react";
 import {
   applyConnectedModelToNewSessionDraft,
+  composerFallbackModel,
   confirmIncludedModel,
   creditCheckoutSuccessUrl,
+  creditsCheckoutModel,
   creditsModelForCheckout,
   includedDefaultModel,
   preferredConnectedModelId,
@@ -321,7 +324,7 @@ describe("credit checkout return", () => {
     );
     expect(model).toEqual({ id: "credits-first", effort: "low" });
     expect(creditCheckoutSuccessUrl("https://app.example.test", "workspace-a", model)).toBe(
-      "https://app.example.test/workspaces/workspace-a/sessions?model=credits-first&effort=low",
+      "https://app.example.test/workspaces/workspace-a/sessions?model=credits-first&effort=low&modelSource=default",
     );
   });
 
@@ -338,6 +341,62 @@ describe("credit checkout return", () => {
     expect(creditCheckoutSuccessUrl("https://app.example.test", "workspace-a", null)).toBe(
       "https://app.example.test/workspaces/workspace-a/sessions",
     );
+  });
+});
+
+describe("resolved default in the composer and after a credit purchase", () => {
+  const rows = (models: WorkspaceModelCatalogModel[]) => sortPickerRows(projectPickerRows(models));
+
+  test("the composer fallback takes the server-resolved default first", () => {
+    const models = [FREE_DEFAULT, CREDITS_FIRST, CREDITS_SECOND];
+    expect(
+      composerFallbackModel({
+        models,
+        rows: rows(models),
+        defaultSelection: { model: "credits-second", reasoningEffort: "high", source: "credits" },
+      }),
+    ).toEqual({ id: "credits-second", effort: "high" });
+  });
+
+  test("an unavailable resolved default falls back to the connected ranking", () => {
+    const models = [FREE_DEFAULT, CODEX];
+    expect(
+      composerFallbackModel({
+        models,
+        rows: rows(models),
+        defaultSelection: { model: "credits-first", reasoningEffort: "xhigh", source: "credits" },
+      }),
+    ).toEqual({ id: "codex/model", effort: "low" });
+    expect(composerFallbackModel({ models, rows: rows(models), defaultSelection: null })).toEqual({
+      id: "codex/model",
+      effort: "low",
+    });
+  });
+
+  test("a credit purchase lands on the server's credits default", () => {
+    expect(
+      creditsCheckoutModel({
+        models: [FREE_DEFAULT, CREDITS_FIRST, CREDITS_SECOND],
+        creditsSelection: { model: "credits-second", reasoningEffort: "xhigh", source: "credits" },
+      }),
+    ).toEqual({ id: "credits-second", effort: "xhigh" });
+  });
+
+  test("a purchase keeps a connected subscription or saved default as the default", () => {
+    expect(
+      creditsCheckoutModel({
+        models: [FREE_DEFAULT, CREDITS_FIRST, CODEX],
+        creditsSelection: { model: "codex/model", reasoningEffort: "high", source: "subscription" },
+      }),
+    ).toBeNull();
+    expect(creditsCheckoutModel({ models: [FREE_DEFAULT], creditsSelection: null })).toBeNull();
+  });
+
+  test("an older server without a resolved default uses the first credits model", () => {
+    expect(creditsCheckoutModel({ models: [FREE_DEFAULT, CREDITS_FIRST] })).toEqual({
+      id: "credits-first",
+      effort: "low",
+    });
   });
 });
 
@@ -387,6 +446,7 @@ describe("applyConnectedModelToNewSessionDraft", () => {
       model: "codex/gpt-5.6-sol",
       reasoningEffort: "low",
       latencyMode: "priority",
+      modelProvided: true,
       options: draft.options,
       selectedProjectChannelId: null,
       expectedRevision: 7,

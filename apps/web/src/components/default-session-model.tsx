@@ -1,4 +1,5 @@
 import { resolveWorkspaceSessionDefaults } from "@opengeni/contracts";
+import type { DefaultModelSelectionSource } from "@opengeni/sdk";
 import { Loader2Icon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -11,6 +12,18 @@ import type { IntelligenceEffort } from "@/lib/session-tools";
 
 type Draft = { model: string; reasoningEffort: IntelligenceEffort };
 
+/** How an unsaved workspace default is chosen, in plain words. */
+function automaticDefaultNote(source: DefaultModelSelectionSource | undefined): string {
+  switch (source) {
+    case "subscription":
+      return "Following your connected subscription until you choose one.";
+    case "credits":
+      return "Following your OpenGeni credits until you choose one.";
+    default:
+      return "Following the deployment default until you choose one or connect a subscription.";
+  }
+}
+
 /** Workspace default inherited by new chats and new scheduled tasks. */
 export function DefaultSessionModelPreferenceRow(props: {
   workspaceId: string;
@@ -20,9 +33,15 @@ export function DefaultSessionModelPreferenceRow(props: {
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
   const workspace = context.workspaces.find((candidate) => candidate.id === props.workspaceId);
   const configured = resolveWorkspaceSessionDefaults(workspace?.settings);
+  // Without a saved default, show what new chats actually get: the server
+  // resolves a connected subscription, then credits, then the deployment model.
+  const automatic = catalog.defaultSelection;
   const effective: Draft = {
-    model: configured?.model ?? context.clientConfig.defaultModel,
-    reasoningEffort: configured?.reasoningEffort ?? initialReasoningEffort(context.clientConfig),
+    model: configured?.model ?? automatic?.model ?? context.clientConfig.defaultModel,
+    reasoningEffort:
+      configured?.reasoningEffort ??
+      automatic?.reasoningEffort ??
+      initialReasoningEffort(context.clientConfig),
   };
   const [draft, setDraft] = useState<Draft>(effective);
   const draftRef = useRef(draft);
@@ -30,12 +49,21 @@ export function DefaultSessionModelPreferenceRow(props: {
 
   useEffect(() => {
     const next = {
-      model: configured?.model ?? context.clientConfig.defaultModel,
-      reasoningEffort: configured?.reasoningEffort ?? initialReasoningEffort(context.clientConfig),
+      model: configured?.model ?? automatic?.model ?? context.clientConfig.defaultModel,
+      reasoningEffort:
+        configured?.reasoningEffort ??
+        automatic?.reasoningEffort ??
+        initialReasoningEffort(context.clientConfig),
     };
     draftRef.current = next;
     setDraft(next);
-  }, [configured?.model, configured?.reasoningEffort, context.clientConfig]);
+  }, [
+    automatic?.model,
+    automatic?.reasoningEffort,
+    configured?.model,
+    configured?.reasoningEffort,
+    context.clientConfig,
+  ]);
 
   function updateDraft(next: Draft) {
     draftRef.current = next;
@@ -66,6 +94,7 @@ export function DefaultSessionModelPreferenceRow(props: {
         <p className="text-sm font-medium text-fg">Default model</p>
         <p className="mt-0.5 text-xs text-fg-subtle">
           Used for new chats and scheduled tasks in this workspace.
+          {configured ? null : ` ${automaticDefaultNote(automatic?.source)}`}
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-2">

@@ -230,6 +230,53 @@ describe("scheduled task form projection", () => {
     });
   });
 
+  test("a new schedule follows the resolved default model until one is picked", () => {
+    const followed = newScheduledTaskFormState(false, [], {
+      model: "gpt-6-luna",
+      reasoningEffort: "xhigh",
+      modelFollowsDefault: true,
+    });
+    expect(followed).toMatchObject({
+      model: "gpt-6-luna",
+      reasoningEffort: "xhigh",
+      modelFollowsDefault: true,
+    });
+    // Saved without a model so each run uses the default at that time.
+    const config = agentConfigFromFormState(followed);
+    expect(config).not.toHaveProperty("model");
+    expect(config).not.toHaveProperty("reasoningEffort");
+
+    const picked = { ...followed, model: "codex/gpt-6-sol", modelFollowsDefault: false };
+    expect(agentConfigFromFormState(picked)).toMatchObject({
+      model: "codex/gpt-6-sol",
+      reasoningEffort: "xhigh",
+    });
+  });
+
+  test("an existing schedule keeps following only when it names no model policy", () => {
+    const defaults = { model: "gpt-6-luna", reasoningEffort: "xhigh" as const };
+    const following = scheduledTask();
+    delete following.agentConfig.model;
+    delete following.agentConfig.reasoningEffort;
+    const form = formStateFromScheduledTask(following, {
+      ...defaults,
+      modelFollowsDefault: true,
+    });
+    expect(form).toMatchObject({ model: "gpt-6-luna", modelFollowsDefault: true });
+    expect(agentConfigFromFormState(form, following)).not.toHaveProperty("model");
+
+    const pinned = scheduledTask();
+    pinned.agentConfig.model = "openrouter/free";
+    const pinnedForm = formStateFromScheduledTask(pinned, {
+      ...defaults,
+      modelFollowsDefault: true,
+    });
+    expect(pinnedForm).toMatchObject({ model: "openrouter/free", modelFollowsDefault: false });
+    expect(agentConfigFromFormState(pinnedForm, pinned)).toMatchObject({
+      model: "openrouter/free",
+    });
+  });
+
   test("round-trips a Connected Machine target and never copies it to an existing session", () => {
     const targetSandboxId = "77777777-7777-4777-8777-777777777777";
     const task = scheduledTask();

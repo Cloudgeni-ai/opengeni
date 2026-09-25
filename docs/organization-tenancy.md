@@ -685,11 +685,18 @@ Connecting selects a model from the connected family (Codex, SuperGrok, or the
 provider key) in the human’s actor-private new-session draft with its expected
 revision, preserving the other draft fields, and never falls back to the free
 default. A credit purchase returns to the new-chat composer through the
-ordinary `?model=&effort=` launch contract with a credits model selected. When
-the composer's selected model later stops being selectable, its fallback
-prefers a selectable Codex, SuperGrok, or workspace provider model, then the
-free deployment model, and only then an organization-paid provider; it never
-implicitly picks an OpenGeni-credit model.
+ordinary `?model=&effort=` launch contract with the server's credits default
+selected (the configured credits model, GPT-6 Luna at extra high reasoning by
+default), unless a connected subscription or saved workspace default would
+still win. `?modelSource=default` keeps that draft following the default, so
+connecting a subscription later still moves it; the verified-signup trial
+credit alone never switches the default. Beyond onboarding, a new chat that follows the default moves to a
+connected subscription, or to the credits default while the organization holds
+credits, on its own; see "Default model for new work" in
+[`model-providers.md`](model-providers.md). When the composer's selected model
+later stops being selectable, its fallback takes that resolved default first,
+then prefers a selectable Codex, SuperGrok, or workspace provider model, then
+the free deployment model, and only then an organization-paid provider.
 Device-code logins can be cancelled, explain ChatGPT's device-code setting,
 and never block leaving the step. It never writes workspace settings or requires
 `workspace:admin`, which Personal workspace owners deliberately do not hold. Skip and invitation

@@ -102,6 +102,7 @@ import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import {
   EMPTY_COMPOSER_LAUNCH,
   composerLaunchSearchKey,
+  modelProvidedAfterLaunch,
   type ComposerLaunchSearch,
 } from "@/lib/composer-launch";
 import {
@@ -110,7 +111,7 @@ import {
 } from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
 import { displayModel } from "@/lib/format";
-import { preferredConnectedModelId } from "@/lib/model-access-onboarding";
+import { composerFallbackModel } from "@/lib/model-access-onboarding";
 import {
   isMachineComputeSelectable,
   resolveSelectableMachineSandboxId,
@@ -118,7 +119,6 @@ import {
 import {
   effortOptionsForModel,
   findPickerRow,
-  defaultEffortForModel,
   modelUsesCredits,
   runnableLatencyModesForModel,
   type PickerModelRow,
@@ -604,6 +604,10 @@ function SessionsIndexRouteContent({
     },
   );
   const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
+  // Whether the person chose the composer's model policy. False follows the
+  // server-resolved new-chat default; undefined means an older server that
+  // does not report the marker, so none is sent back.
+  const [modelProvided, setModelProvided] = useState<boolean | undefined>(undefined);
   const [connectorCustomizing, setConnectorCustomizing] = useState(false);
   const [connectorExclusions, setConnectorExclusions] = useState<string[]>([]);
   const followWorkspaceConnectors = () => {
@@ -772,6 +776,7 @@ function SessionsIndexRouteContent({
       model: context.model,
       reasoningEffort: context.reasoningEffort,
       latencyMode: context.latencyMode,
+      ...(modelProvided !== undefined ? { modelProvided } : {}),
       ...(projectProvenancePresent ? { selectedProjectChannelId: selectedChannelId } : {}),
       options: {
         ...newSessionDraftOptionsFromSessionDraft(
@@ -793,6 +798,7 @@ function SessionsIndexRouteContent({
       draft,
       defaultFirstPartyMcpTools,
       message,
+      modelProvided,
       createVisibility,
       persistedToolPolicy,
       projectProvenancePresent,
@@ -861,6 +867,7 @@ function SessionsIndexRouteContent({
       setModel(remote.model);
       setReasoningEffort(remote.reasoningEffort);
       setLatencyMode(remote.latencyMode);
+      setModelProvided(remote.modelProvided);
       const customize = newSessionConnectorCustomizeState({
         toolsProvided: remote.toolsProvided,
         tools: remote.tools,
@@ -963,16 +970,23 @@ function SessionsIndexRouteContent({
   useEffect(() => {
     if (modelCatalog.loading || newSessionDraft.loading) return;
     if (findPickerRow(modelCatalog.rows, context.model)?.selectable) return;
-    const nextId =
-      preferredConnectedModelId(modelCatalog.models) ??
-      modelCatalog.rows.find((row) => row.selectable)?.id ??
-      null;
-    if (!nextId || nextId === context.model) return;
-    const next = modelCatalog.models.find((model) => model.id === nextId);
-    setModel(nextId);
-    if (next) setReasoningEffort(defaultEffortForModel(next));
+    // The server-resolved default comes first (saved workspace default, then a
+    // connected subscription, then credits, then the deployment default); the
+    // client ranking only covers a default that is itself unavailable.
+    const resolvedDefault = modelCatalog.defaultSelection;
+    const next = composerFallbackModel({
+      models: modelCatalog.models,
+      rows: modelCatalog.rows,
+      defaultSelection: resolvedDefault,
+    });
+    if (!next || next.id === context.model) return;
+    setModel(next.id);
+    setReasoningEffort(next.effort);
+    // An automatic replacement is not the person's choice.
+    setModelProvided((current) => (current === undefined ? current : false));
   }, [
     context.model,
+    modelCatalog.defaultSelection,
     modelCatalog.loading,
     modelCatalog.models,
     modelCatalog.rows,
@@ -1320,6 +1334,7 @@ function SessionsIndexRouteContent({
   const launchEffort = launch.effort;
   const launchLatency = launch.latency;
   const launchRealtime = launch.realtime;
+  const launchFollowDefault = launch.followDefault === true;
   const launchSkillCapabilityId = launch.skillCapabilityId;
   const launchKey = composerLaunchSearchKey(launch);
   const handledLaunchKeyRef = useRef<string | null>(null);
@@ -1329,6 +1344,19 @@ function SessionsIndexRouteContent({
     if (launchModel) setModel(launchModel);
     if (launchEffort) setReasoningEffort(launchEffort);
     if (launchLatency) setLatencyMode(launchLatency);
+    // A checkout return carries the credits default and keeps following the
+    // default; any other launch policy is the person's choice.
+    setModelProvided((current) =>
+      modelProvidedAfterLaunch(
+        {
+          ...(launchModel ? { model: launchModel } : {}),
+          ...(launchEffort ? { effort: launchEffort } : {}),
+          ...(launchLatency ? { latency: launchLatency } : {}),
+          ...(launchFollowDefault ? { followDefault: true } : {}),
+        },
+        current,
+      ),
+    );
     if (!launchRealtime) {
       handledLaunchKeyRef.current = launchKey;
       void navigate({
@@ -1365,6 +1393,7 @@ function SessionsIndexRouteContent({
     computeReady,
     context.workspaceMcpCatalogReady,
     launchEffort,
+    launchFollowDefault,
     launchLatency,
     launchModel,
     launchRealtime,
@@ -1422,9 +1451,18 @@ function SessionsIndexRouteContent({
       reasoningEffort: context.reasoningEffort,
       latencyMode: context.latencyMode,
     },
-    setModel: context.setModel,
-    setReasoningEffort: context.setReasoningEffort,
-    setLatencyMode: context.setLatencyMode,
+    setModel: (model) => {
+      setModelProvided(true);
+      context.setModel(model);
+    },
+    setReasoningEffort: (effort) => {
+      setModelProvided(true);
+      context.setReasoningEffort(effort);
+    },
+    setLatencyMode: (latencyMode) => {
+      setModelProvided(true);
+      context.setLatencyMode(latencyMode);
+    },
     draftPersistence: "disabled",
     applyDraft: () => {},
     reloadDraft: newSessionDraft.reload,
@@ -1616,6 +1654,7 @@ function SessionsIndexRouteContent({
                   policyError={newSessionPolicyError}
                   disabled={busy || newSessionDraft.loading}
                   workspaceId={workspaceId}
+                  onPolicyChosen={() => setModelProvided(true)}
                 />
               </div>
             }
@@ -1919,12 +1958,15 @@ function SessionModelControl({
   policyError,
   disabled,
   workspaceId,
+  onPolicyChosen,
 }: {
   hasImageAttachments: boolean;
   modelCatalog: WorkspaceModelCatalogState;
   policyError: string | null;
   disabled: boolean;
   workspaceId: string;
+  /** The person picked a model, reasoning level, or speed. */
+  onPolicyChosen: () => void;
 }) {
   const context = useAppContext();
   return (
@@ -1939,9 +1981,18 @@ function SessionModelControl({
       error={modelCatalog.error ?? policyError}
       menuSide="bottom"
       connectModelsHref={`/workspaces/${encodeURIComponent(workspaceId)}/settings?section=models`}
-      onModelChange={context.setModel}
-      onEffortChange={context.setReasoningEffort}
-      onLatencyModeChange={context.setLatencyMode}
+      onModelChange={(model) => {
+        onPolicyChosen();
+        context.setModel(model);
+      }}
+      onEffortChange={(effort) => {
+        onPolicyChosen();
+        context.setReasoningEffort(effort);
+      }}
+      onLatencyModeChange={(latencyMode) => {
+        onPolicyChosen();
+        context.setLatencyMode(latencyMode);
+      }}
     />
   );
 }

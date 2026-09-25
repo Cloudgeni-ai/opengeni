@@ -205,6 +205,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     reasoningConfigurationUpdatesEnabled: false,
     openaiReasoningEffort: "high",
     openaiAllowedReasoningEfforts: "low,medium,high,xhigh,max",
+    creditsDefaultModel: "gpt-6-luna",
+    creditsDefaultReasoningEffort: "xhigh",
     openaiResponsesTransport: "http",
     openaiProviderItemIds: "strip",
     openaiReasoningEncryptedContent: true,

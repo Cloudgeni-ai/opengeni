@@ -3437,8 +3437,24 @@ export type WorkspaceModelCatalogModel = ClientModel & {
   availability: ModelAvailabilityV1;
 };
 
+/** Why a new chat or scheduled task without an explicit model gets its default. */
+export type DefaultModelSelectionSource = "workspace" | "subscription" | "credits" | "deployment";
+
+export type DefaultModelSelection = {
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  source: DefaultModelSelectionSource;
+};
+
 export type WorkspaceModelCatalogResponse = {
   models: WorkspaceModelCatalogModel[];
+  /** Default for new chats and scheduled tasks that name no model. */
+  defaultSelection?: DefaultModelSelection | undefined;
+  /**
+   * The default this workspace would use once its organization holds an
+   * OpenGeni credit balance. Null when the deployment does not bill credits.
+   */
+  creditsSelection?: DefaultModelSelection | null | undefined;
 };
 
 export type WorkspaceGatewayCustomModel = {
@@ -5114,6 +5130,11 @@ export type NewSessionDraft = {
   model: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
+  /**
+   * True when the person chose this model policy; false follows the resolved
+   * default for new chats. Absent from older servers.
+   */
+  modelProvided?: boolean | undefined;
   /** Absent on legacy drafts; null records an explicit Default-project selection. */
   selectedProjectChannelId?: string | null | undefined;
   options: NewSessionDraftOptions;
