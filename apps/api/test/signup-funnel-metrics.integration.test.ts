@@ -208,6 +208,14 @@ describe("managed sign-up funnel metrics", () => {
     // sign-in, not a duplicate increment or another test's counter.
     const verificationSessionIds = await authSessionIds(email);
     expect(verificationSessionIds).toHaveLength(1);
+    const verificationSessionRead = await app.request("/v1/auth/get-session", {
+      headers: requestHeaders(verifiedSession),
+    });
+    expect(verificationSessionRead.status).toBe(200);
+    expect(await verificationSessionRead.json()).toMatchObject({
+      user: { email },
+      session: { id: verificationSessionIds[0] },
+    });
     expect(
       await counter(observability, "opengeni_auth_events_total", {
         event: "sign_in",
@@ -258,6 +266,18 @@ describe("managed sign-up funnel metrics", () => {
     const signedInSessionIds = await authSessionIds(email);
     expect(signedInSessionIds).toHaveLength(2);
     expect(signedInSessionIds).toContain(verificationSessionIds[0]!);
+    const passwordSessionId = signedInSessionIds.find(
+      (sessionId) => sessionId !== verificationSessionIds[0],
+    );
+    expect(passwordSessionId).toBeDefined();
+    const passwordSessionRead = await app.request("/v1/auth/get-session", {
+      headers: requestHeaders(cookiePairs(signIn)),
+    });
+    expect(passwordSessionRead.status).toBe(200);
+    expect(await passwordSessionRead.json()).toMatchObject({
+      user: { email },
+      session: { id: passwordSessionId },
+    });
     expect(
       await counter(observability, "opengeni_auth_events_total", {
         event: "sign_in",
