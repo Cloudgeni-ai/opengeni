@@ -94,6 +94,13 @@ const EnvBoolean = z.preprocess((value) => {
   return value;
 }, z.boolean());
 
+/** An absolute http(s) URL that is safe to render as a browser link. */
+const PublicHttpUrl = z
+  .string()
+  .url()
+  .max(2_048)
+  .refine((value) => /^https?:\/\//iu.test(value), "must be an http(s) URL");
+
 /** Default pacing between consecutive no-input goal continuations. */
 export const DEFAULT_GOAL_IDLE_BACKOFF_MS: readonly number[] = [3_000, 30_000, 120_000, 300_000];
 export const DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS = 600_000;
@@ -304,6 +311,11 @@ const SettingsSchema = z.object({
     .max(32)
     .regex(/^G-[A-Z0-9]+$/u)
     .optional(),
+  // Optional operator-owned legal documents linked from the signed-out console.
+  // Unset by default, so a self-hosted deployment never shows another operator's
+  // policies; the managed service points these at its own published pages.
+  legalPrivacyPolicyUrl: PublicHttpUrl.optional(),
+  legalTermsOfServiceUrl: PublicHttpUrl.optional(),
   publicBaseUrl: z.string().url().optional(),
   // Standards-based OAuth authorization server for external workspace MCP
   // clients. Opt-in because it creates a new public authentication surface.
@@ -3076,6 +3088,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     analyticsPosthogProjectKey: optional("OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY"),
     analyticsPosthogHost: optional("OPENGENI_ANALYTICS_POSTHOG_HOST"),
     analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
+    legalPrivacyPolicyUrl: optional("OPENGENI_LEGAL_PRIVACY_POLICY_URL"),
+    legalTermsOfServiceUrl: optional("OPENGENI_LEGAL_TERMS_OF_SERVICE_URL"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     mcpOauthEnabled: optional("OPENGENI_MCP_OAUTH_ENABLED"),
     mcpOauthTrustedProxyHops: optional("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS"),

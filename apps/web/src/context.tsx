@@ -2784,7 +2784,7 @@ export function RootRouteComponent() {
     <LoadingPanel label="Checking session" />
   ) : managedAuthRequired && !authSession ? (
     <Suspense fallback={<LoadingPanel label="Loading sign in" />}>
-      <SignedOutPage>
+      <SignedOutPage legalLinks={clientConfig?.legal}>
         {browserAccountsEnabled ? (
           <BrowserAccountsSignedOutPanel
             presentation="embedded"

@@ -2012,6 +2012,22 @@ describe("GET /v1/config/client", () => {
     });
   });
 
+  test("publishes legal document links only when the operator configures them", async () => {
+    const unconfigured = await fetchClientConfig(testSettings());
+    expect(unconfigured.legal).toEqual({});
+
+    const configured = await fetchClientConfig(
+      testSettings({
+        legalPrivacyPolicyUrl: "https://opengeni.ai/privacy",
+        legalTermsOfServiceUrl: "https://opengeni.ai/terms",
+      }),
+    );
+    expect(configured.legal).toEqual({
+      privacyPolicyUrl: "https://opengeni.ai/privacy",
+      termsOfServiceUrl: "https://opengeni.ai/terms",
+    });
+  });
+
   test("supports a Codex subscription model as the client default", async () => {
     const settings = testSettings({
       codexSubscriptionEnabled: true,
