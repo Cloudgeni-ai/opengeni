@@ -249,8 +249,8 @@ The public MCP authorization server is disabled by default. Enable it only in
 managed or local product-access mode with
 `OPENGENI_MCP_OAUTH_ENABLED=true` and an exact credential-free
 `OPENGENI_PUBLIC_BASE_URL` origin. Non-local environments require HTTPS.
-Generated runtime env and Helm artifacts carry the explicit enable switch and
-`OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS`; enabling OAuth makes the public base
+Generated runtime env and Helm artifacts carry the explicit enable switch and,
+when set, `OPENGENI_API_TRUSTED_PROXY_HOPS`; enabling OAuth makes the public base
 URL a required artifact input and rejects configured product-access profiles
 before deployment.
 
@@ -271,15 +271,10 @@ through the refresh-token lifetime plus one day. Bounded opportunistic cleanup
 removes expired clients, consent requests, authorization codes, access tokens,
 and refresh tokens without requiring a separate scheduler.
 
-The source quota uses the transport peer address reported by Bun and ignores
-caller-provided `X-Forwarded-For` and `X-Real-IP` by default. A deployment behind
-a fixed trusted proxy chain may set
-`OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS=<count>`; OpenGeni then walks
-`X-Forwarded-For` from the server side by exactly that many hops, so a caller
-cannot evade the quota by prepending values. Enable this only when firewall or
-network-policy rules prevent direct API access and every declared hop overwrites
-or appends the forwarding chain. A missing or shorter chain fails back to the
-server-owned transport peer.
+The source quota keys on the API request source address described in
+[API request source and auth rate limits](#api-request-source-and-auth-rate-limits):
+the transport peer by default, or the forwarded client when
+`OPENGENI_API_TRUSTED_PROXY_HOPS` declares a trusted proxy chain.
 
 Current-human HTTP/SDK calls classified for human approval use the ordinary API
 database and require migration `0405_tool_gateway_approval_capabilities.sql`.
@@ -3008,6 +3003,77 @@ controller:
       service.beta.kubernetes.io/port_80_health-probe_protocol: Tcp
       service.beta.kubernetes.io/port_443_health-probe_protocol: Tcp
 ```
+
+### API request source and auth rate limits
+
+Every API rate limit and abuse quota keys on one request source address:
+managed sign-in, sign-up, verification, and password-reset limits (Better
+Auth), the address recorded on each auth session, MCP OAuth client
+registration, Connected Machine enrollment, invited-user account setup, and
+browser login transactions. By default it is the transport peer address
+reported by Bun, and caller-supplied `X-Forwarded-For` and `X-Real-IP` are
+ignored, so a caller cannot choose its own bucket.
+
+Behind a fixed proxy chain, set `OPENGENI_API_TRUSTED_PROXY_HOPS=<count>`
+(0-16, default 0). OpenGeni then takes the client address from
+`X-Forwarded-For`, walking that many entries from the server side, so values a
+caller prepends never replace the address the trusted edge observed. Each
+trusted proxy must append the address of the peer that connected to it, or
+overwrite the header with the original client address. A missing, short, or
+malformed chain falls back to the transport peer. Enable it only when firewall
+or network-policy rules prevent direct API access; with `networkPolicy.enabled`
+the chart's API NetworkPolicy admits only the ingress controller, web, and
+collector pods. `OPENGENI_API_TRUSTED_PROXY_CIDRS` (comma-separated CIDRs or
+addresses, optional, requires a hop count) additionally honors the forwarded
+chain only when the transport peer is inside one of those ranges, for example
+the node/pod subnet the ingress controller runs in. Boot fails on a malformed
+entry. Without an enforcing NetworkPolicy plugin, any in-cluster pod in a
+trusted range can still reach the API directly and set the header, so keep
+untrusted workloads out of that range.
+
+For `ingress-nginx` on a cloud LoadBalancer, the default
+`externalTrafficPolicy: Cluster` source-NATs every request to a node address,
+so all users share a handful of rate-limit buckets. Set
+`controller.service.externalTrafficPolicy=Local` so the controller sees the
+real client, then set `OPENGENI_API_TRUSTED_PROXY_HOPS=1`: with its default
+`use-forwarded-headers: false`, ingress-nginx overwrites `X-Forwarded-For` with
+the address it observed. Add one hop for each further trusted proxy (for
+example a CDN) in front of the controller. Leaving it at 0 behind
+ingress-nginx keys every client on the controller pod address instead.
+
+Setting the hop count before the traffic policy change is safe, but until
+`externalTrafficPolicy: Local` is live every limiter keys on the few node
+addresses, so each per-address limit acts as a deployment-wide limit. Email
+sign-in and sign-up allow at least Better Auth's previous default (3 per 10 s)
+per address for this reason, but OAuth callbacks, email verification, and
+password-reset completion are tighter than Better Auth's old defaults. Put the
+traffic policy change in place before expecting a burst of real users, such as
+a launch.
+
+Managed auth applies per-client-address limits to sign-in, sign-up, social
+sign-in and callbacks, verification email, email verification, and password
+reset, plus per-email limits (shared by every API replica) on email sign-in,
+sign-up, password-reset requests, and verification-email requests. The exact
+values live in `apps/api/src/auth/managed-auth-rate-limits.ts`. Each per-email
+limit has two fixed windows: a tight one per email and client address, and a
+looser one per email that only attempts admitted by the first reach. A single
+client address therefore exhausts an email's budget only for itself; locking a
+person out of email/password sign-in, sign-up, password reset, or verification
+mail needs at least five client addresses inside the window, and social
+sign-in is never limited per email. The accepted cost is that a distributed
+attacker may still spend the looser budget. IPv6 clients key on their /64 in
+every limiter. A refused Better Auth request receives HTTP 429 with an
+`X-Retry-After` header; the browser session-set sign-in returns 429
+`login_transaction_rate_limited` with `Retry-After` and
+`details.retryAfterSeconds`. Per-email counters are stored as keyed digests,
+never as email or client addresses.
+
+Upgrading a managed deployment behind a proxy: earlier releases let Better Auth
+read a single-value `X-Forwarded-For` by default. It now ignores forwarding
+headers unless `OPENGENI_API_TRUSTED_PROXY_HOPS` is set, so without it every
+user shares the proxy's address and its sign-in and sign-up limits. The
+MCP-only `OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS` is retired; API startup and
+runtime-artifact generation fail when it is still set to anything but `0`.
 
 Secret delivery should use one of these patterns:
 

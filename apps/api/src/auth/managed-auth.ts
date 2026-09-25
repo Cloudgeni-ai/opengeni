@@ -12,13 +12,19 @@ import {
   getCanonicalHumanExactLoginBindingForAuthUser,
   synchronizeCanonicalHumanLoginBindings,
 } from "@opengeni/db/canonical-human-identities";
+import type { Observability } from "@opengeni/observability";
 import { betterAuth } from "better-auth";
 import { createEmailVerificationToken } from "better-auth/api";
 import { hashPassword, verifyPassword } from "better-auth/crypto";
 import { sql } from "drizzle-orm";
-import { Pool } from "pg";
+import { Pool, type PoolConfig } from "pg";
 
+import { TRUSTED_CLIENT_ADDRESS_HEADER } from "../http/request-source";
 import { decideCanonicalHumanSessionAdmission } from "./canonical-human-session-admission";
+import {
+  createManagedAuthEmailThrottleHook,
+  MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
+} from "./managed-auth-rate-limits";
 import { deliverManagedSignInNotification } from "./managed-sign-in-notifications";
 import {
   currentManagedAuthProviderId,
@@ -27,6 +33,10 @@ import {
   shouldDiscardCurrentManagedAuthProviderSession,
   currentManagedSignInConnectIntent,
 } from "./managed-auth-attempt-context";
+
+// Only used when no Better Auth secret is configured (local development);
+// the email throttle key is a content-free digest either way.
+const MANAGED_AUTH_EMAIL_THROTTLE_FALLBACK_KEY = "opengeni:managed-auth:email-throttle:local";
 
 // `ManagedAuth` (the Better Auth `Auth<any>` alias) is owned by @opengeni/core
 // (`managed-auth-type.ts`) — `dependencies.ts`/`access` reference it as a
@@ -72,16 +82,90 @@ export async function verifyManagedAuthPassword(password: string, hash: string):
   return await verifyPassword({ password, hash });
 }
 
+type ManagedAuthPoolObservability = Pick<Observability, "warn" | "incrementCounter">;
+
+/**
+ * Bounded pool settings for Better Auth's dedicated `pg` pool. A connection
+ * attempt fails after 10 s instead of queueing requests indefinitely while the
+ * database is unreachable, and connections recycle like the main postgres-js
+ * pool so a pooler- or failover-replaced backend is not held forever.
+ */
+export const MANAGED_AUTH_DATABASE_POOL_OPTIONS = {
+  max: 10,
+  connectionTimeoutMillis: 10_000,
+  idleTimeoutMillis: 30_000,
+  maxLifetimeSeconds: 1_800,
+  keepAlive: true,
+} as const satisfies PoolConfig;
+
+/**
+ * Better Auth's `pg` pool. When the server closes a connection (a restart,
+ * failover, or maintenance window) `pg` emits `error`: on the pool for an idle
+ * client, and on the client itself for one checked out by Better Auth's query
+ * layer. Without listeners either becomes an uncaught exception and the API's
+ * fatal process boundary exits. Both listeners record one content-free signal
+ * and keep serving. The pool has already discarded a failed idle client and
+ * opens a fresh connection for the next checkout; a checked-out client's
+ * in-flight query already rejects to its caller, and the pool discards the
+ * dead client on release. An idle client's error also reaches its own
+ * listener, so that listener records only while the client is checked out,
+ * and at most once per checkout.
+ */
+export function createManagedAuthDatabasePool(
+  databaseUrl: string,
+  observability?: ManagedAuthPoolObservability,
+): Pool {
+  const pool = new Pool({ connectionString: databaseUrl, ...MANAGED_AUTH_DATABASE_POOL_OPTIONS });
+  const checkedOut = new WeakSet<object>();
+  pool.on("acquire", (client) => checkedOut.add(client));
+  pool.on("release", (_error, client) => checkedOut.delete(client));
+  pool.on("connect", (client) => {
+    client.on("error", () => {
+      // One lost connection can emit twice (the server's termination
+      // message, then the socket end), so count it once.
+      if (checkedOut.delete(client)) {
+        recordManagedAuthPoolError(observability, "checked_out_connection_failed");
+      }
+    });
+  });
+  pool.on("error", () => recordManagedAuthPoolError(observability, "idle_connection_discarded"));
+  return pool;
+}
+
+export const MANAGED_AUTH_DATABASE_POOL_ERRORS_METRIC = {
+  name: "opengeni_managed_auth_database_pool_errors_total",
+  help: "Managed-auth database connections the server closed or lost, by pool state.",
+} as const;
+
+function recordManagedAuthPoolError(
+  observability: ManagedAuthPoolObservability | undefined,
+  outcome: "idle_connection_discarded" | "checked_out_connection_failed",
+): void {
+  try {
+    observability?.incrementCounter({
+      ...MANAGED_AUTH_DATABASE_POOL_ERRORS_METRIC,
+      labels: { outcome },
+    });
+    observability?.warn("Managed auth database connection failed", {
+      dependency: "managed_auth_database",
+      outcome,
+    });
+  } catch {
+    // An observer failure must not turn a recovered pool error into a crash.
+  }
+}
+
 export function createManagedAuth(
   settings: Settings,
   db: Database,
   managedEmailTransport: ManagedEmailTransport,
+  options: { observability?: ManagedAuthPoolObservability } = {},
 ): ManagedAuth | null {
   if (settings.productAccessMode !== "managed") {
     return null;
   }
   const requireEmailVerification = managedAuthRequiresEmailVerification(settings);
-  const pool = new Pool({ connectionString: settings.databaseUrl });
+  const pool = createManagedAuthDatabasePool(settings.databaseUrl, options.observability);
   return betterAuth({
     appName: "OpenGeni",
     baseURL: betterAuthBaseUrl(settings),
@@ -89,7 +173,22 @@ export function createManagedAuth(
     secret: settings.betterAuthSecret,
     database: pool,
     trustedOrigins: betterAuthTrustedOrigins(settings),
+    hooks: {
+      before: createManagedAuthEmailThrottleHook(
+        db,
+        settings.betterAuthSecret ?? MANAGED_AUTH_EMAIL_THROTTLE_FALLBACK_KEY,
+      ),
+    },
     advanced: {
+      // Better Auth reads client addresses only from request headers. The API
+      // strips this header from every inbound request and re-stamps it on
+      // managed-auth routes with the trusted source address (transport peer,
+      // or the forwarded client when OPENGENI_API_TRUSTED_PROXY_HOPS declares
+      // a proxy chain), so callers cannot choose their rate-limit bucket or
+      // recorded session address.
+      ipAddress: {
+        ipAddressHeaders: [TRUSTED_CLIENT_ADDRESS_HEADER],
+      },
       useSecureCookies: settings.publicBaseUrl?.startsWith("https://") ?? false,
       ...(settings.betterAuthCookieDomain
         ? {
@@ -110,6 +209,7 @@ export function createManagedAuth(
       fields: {
         lastRequest: "last_request",
       },
+      customRules: MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
     },
     user: {
       modelName: "auth_users",

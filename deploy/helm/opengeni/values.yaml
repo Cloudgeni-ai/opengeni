@@ -86,6 +86,14 @@ config:
   OPENGENI_AUTH_REQUIRED: "false"
   OPENGENI_AUTH_ALLOW_HEALTH: "true"
   OPENGENI_AUTH_ALLOW_METRICS: "false"
+  # Client source address for every API rate limit and auth session record.
+  # "0" keys on the transport peer and ignores X-Forwarded-For. Behind
+  # ingress-nginx whose controller Service uses externalTrafficPolicy: Local,
+  # with direct API access blocked (networkPolicy.enabled), set "1". See
+  # docs/deployment.md "API request source and auth rate limits". Optionally
+  # restrict the trusted proxy to the controller's address range with
+  # OPENGENI_API_TRUSTED_PROXY_CIDRS (comma-separated CIDRs).
+  OPENGENI_API_TRUSTED_PROXY_HOPS: "0"
   OPENGENI_WEB_ALLOWED_HOSTS: ""
   OPENGENI_PRODUCT_ACCESS_MODE: local
   # Rolling-safe default. First deploy the compatible web handler, dedicated

@@ -25,6 +25,7 @@ import {
   selfServiceOrganizationSetupRequestFingerprint,
 } from "../auth/organization-user-setup";
 import { hashManagedAuthPassword } from "../auth/managed-auth";
+import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 
 export type ManagedOnboardingRouteOptions = {
   accountSetupLimiter?: { take(key: string): boolean };
@@ -108,7 +109,7 @@ export function registerManagedOnboardingRoutes(
     if (deps.settings.productAccessMode !== "managed" || !deps.managedAuth) {
       throw new HTTPException(404, { message: "account setup is unavailable" });
     }
-    enforceAccountSetupRateLimit(context, accountSetupLimiter);
+    enforceAccountSetupRateLimit(context, deps, accountSetupLimiter);
     const parsed = PreviewOrganizationUserSetupRequest.safeParse(
       await context.req.json().catch(() => null),
     );
@@ -129,7 +130,7 @@ export function registerManagedOnboardingRoutes(
     if (deps.settings.productAccessMode !== "managed" || !deps.managedAuth) {
       throw new HTTPException(404, { message: "account setup is unavailable" });
     }
-    enforceAccountSetupRateLimit(context, accountSetupLimiter);
+    enforceAccountSetupRateLimit(context, deps, accountSetupLimiter);
     const parsed = CompleteOrganizationUserSetupRequest.safeParse(
       await context.req.json().catch(() => null),
     );
@@ -192,11 +193,12 @@ export function registerManagedOnboardingRoutes(
 
 function enforceAccountSetupRateLimit(
   context: Context,
+  deps: ApiRouteDeps,
   limiter: { take(key: string): boolean },
 ): void {
   let allowed = false;
   try {
-    allowed = limiter.take(accountSetupClientKey(context));
+    allowed = limiter.take(trustedRequestSourceRateLimitKey(context, deps.settings));
   } catch {
     // A public credential-setting endpoint must fail closed if its abuse gate
     // cannot make a decision.
@@ -204,12 +206,6 @@ function enforceAccountSetupRateLimit(
   if (!allowed) {
     throw new HTTPException(429, { message: "too many account setup requests; slow down" });
   }
-}
-
-function accountSetupClientKey(context: Context): string {
-  const forwarded = context.req.header("x-forwarded-for")?.split(",")[0]?.trim();
-  const address = forwarded || context.req.header("x-real-ip")?.trim() || "unknown";
-  return address.slice(0, 128);
 }
 
 /**

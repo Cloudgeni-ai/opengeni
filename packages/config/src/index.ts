@@ -48,6 +48,7 @@ import {
 } from "@opengeni/xai-subscription";
 export { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 import { z } from "zod";
 
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -308,9 +309,16 @@ const SettingsSchema = z.object({
   // Standards-based OAuth authorization server for external workspace MCP
   // clients. Opt-in because it creates a new public authentication surface.
   mcpOauthEnabled: EnvBoolean.default(false),
-  // Forwarded client addresses are ignored by default. Operators may trust an
+  // Client source address for every API rate limit, abuse quota, and auth
+  // session record (Better Auth, MCP OAuth registration, enrollment, account
+  // setup, login transactions). Forwarded client addresses are ignored by
+  // default so a caller cannot choose its own bucket. Operators may trust an
   // exact number of proxy hops only when direct access to the API is blocked.
-  mcpOauthTrustedProxyHops: z.coerce.number().int().min(0).max(16).default(0),
+  apiTrustedProxyHops: z.coerce.number().int().min(0).max(16).default(0),
+  // Optional comma-separated CIDRs (or single addresses) of the proxy that
+  // connects to the API. When set, forwarded client addresses are honored
+  // only for requests whose transport peer is inside one of them.
+  apiTrustedProxyCidrs: z.string().default(""),
   // Browser origin when the web app and API use separate origins in local
   // development. Production normally leaves this unset and uses publicBaseUrl.
   webBaseUrl: z.string().url().optional(),
@@ -3078,7 +3086,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     mcpOauthEnabled: optional("OPENGENI_MCP_OAUTH_ENABLED"),
-    mcpOauthTrustedProxyHops: optional("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS"),
+    apiTrustedProxyHops: optional("OPENGENI_API_TRUSTED_PROXY_HOPS"),
+    apiTrustedProxyCidrs: optional("OPENGENI_API_TRUSTED_PROXY_CIDRS"),
     webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
@@ -6713,6 +6722,35 @@ function isDigestPinnedModalDesktopImage(settings: Settings): boolean {
   );
 }
 
+export type TrustedProxyCidr = { address: string; prefix: number; family: "ipv4" | "ipv6" };
+
+/**
+ * Parse `OPENGENI_API_TRUSTED_PROXY_CIDRS`: comma-separated IPv4/IPv6 CIDRs or
+ * single addresses. Throws on any malformed entry so a typo can never widen or
+ * silently disable the trusted proxy set.
+ */
+export function trustedProxyCidrEntries(raw: string): TrustedProxyCidr[] {
+  const entries: TrustedProxyCidr[] = [];
+  for (const entry of raw.split(",")) {
+    const value = entry.trim();
+    if (!value) continue;
+    const slash = value.indexOf("/");
+    const address = slash < 0 ? value : value.slice(0, slash);
+    const version = isIP(address);
+    const family = version === 4 ? "ipv4" : version === 6 ? "ipv6" : null;
+    const maxPrefix = family === "ipv4" ? 32 : 128;
+    const prefixText = slash < 0 ? String(maxPrefix) : value.slice(slash + 1);
+    const prefix = /^\d{1,3}$/u.test(prefixText) ? Number(prefixText) : Number.NaN;
+    if (!family || !Number.isInteger(prefix) || prefix < 0 || prefix > maxPrefix) {
+      throw new Error(
+        `OPENGENI_API_TRUSTED_PROXY_CIDRS entry "${value.slice(0, 64)}" is not an IP address or CIDR range`,
+      );
+    }
+    entries.push({ address, prefix, family });
+  }
+  return entries;
+}
+
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   if (
@@ -6807,6 +6845,21 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
         "OPENGENI_PUBLIC_BASE_URL must use https when managed social authentication is configured outside local/test",
       );
     }
+  }
+  // The retired MCP-only name must never be ignored silently: a deployment
+  // that trusted forwarded addresses would fall back to the transport peer.
+  // "0" (the old .env.example value) means the same as the new default.
+  const retiredTrustedProxyHops = source.OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS?.trim();
+  if (retiredTrustedProxyHops && retiredTrustedProxyHops !== "0") {
+    throw new Error(
+      "OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS was renamed to OPENGENI_API_TRUSTED_PROXY_HOPS, which now sets the client address for every API rate limit and auth session; rename the variable",
+    );
+  }
+  const trustedProxyCidrs = trustedProxyCidrEntries(settings.apiTrustedProxyCidrs);
+  if (trustedProxyCidrs.length > 0 && settings.apiTrustedProxyHops === 0) {
+    throw new Error(
+      "OPENGENI_API_TRUSTED_PROXY_CIDRS requires OPENGENI_API_TRUSTED_PROXY_HOPS greater than 0",
+    );
   }
   if (settings.mcpOauthEnabled) {
     if (settings.productAccessMode === "configured") {

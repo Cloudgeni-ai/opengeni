@@ -21,6 +21,7 @@ import {
   WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV,
   MCP_OAUTH_PASSTHROUGH_ENV,
+  API_REQUEST_SOURCE_PASSTHROUGH_ENV,
   SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV,
   SecretDeliveryMode,
   stackPlanFor,
@@ -305,11 +306,12 @@ describe("deployment contract", () => {
   test("renders MCP OAuth settings and requires its canonical public origin when enabled", () => {
     const enabledEnv = {
       OPENGENI_MCP_OAUTH_ENABLED: "true",
-      OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2",
+      OPENGENI_API_TRUSTED_PROXY_HOPS: "2",
+      OPENGENI_API_TRUSTED_PROXY_CIDRS: "10.224.0.0/16",
       OPENGENI_PUBLIC_BASE_URL: "http://localhost:8000",
     };
     const enabledVars = requiredRuntimeEnvVars(deploymentProfiles["local-kubernetes"], enabledEnv);
-    for (const key of MCP_OAUTH_PASSTHROUGH_ENV) {
+    for (const key of [...MCP_OAUTH_PASSTHROUGH_ENV, ...API_REQUEST_SOURCE_PASSTHROUGH_ENV]) {
       expect(enabledVars).toContain(key);
     }
     expect(enabledVars).toContain("OPENGENI_PUBLIC_BASE_URL");
@@ -320,9 +322,11 @@ describe("deployment contract", () => {
       enabledEnv,
     );
     expect(enabled.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_ENABLED=true");
-    expect(enabled.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS=2");
+    expect(enabled.runtimeEnv).toContain("OPENGENI_API_TRUSTED_PROXY_HOPS=2");
     expect(enabled.helmValuesYaml).toContain('OPENGENI_MCP_OAUTH_ENABLED: "true"');
-    expect(enabled.helmValuesYaml).toContain('OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2"');
+    expect(enabled.helmValuesYaml).toContain('OPENGENI_API_TRUSTED_PROXY_HOPS: "2"');
+    expect(enabled.runtimeEnv).toContain("OPENGENI_API_TRUSTED_PROXY_CIDRS=10.224.0.0/16");
+    expect(enabled.helmValuesYaml).toContain('OPENGENI_API_TRUSTED_PROXY_CIDRS: "10.224.0.0/16"');
     expect(enabled.missingEnvVars).not.toContain("OPENGENI_PUBLIC_BASE_URL");
 
     const missingOrigin = generateRuntimeArtifacts(
@@ -335,6 +339,22 @@ describe("deployment contract", () => {
     expect(missingOrigin.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_ENABLED=true");
     expect(missingOrigin.runtimeEnv).toContain("OPENGENI_PUBLIC_BASE_URL=");
     expect(missingOrigin.missingEnvVars).toContain("OPENGENI_PUBLIC_BASE_URL");
+  });
+
+  test("refuses the retired MCP-only trusted proxy hop setting", () => {
+    expect(() =>
+      generateRuntimeArtifacts(
+        deploymentProfiles["local-kubernetes"],
+        {},
+        { OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "1" },
+      ),
+    ).toThrow("renamed to OPENGENI_API_TRUSTED_PROXY_HOPS");
+    const leftoverDefault = generateRuntimeArtifacts(
+      deploymentProfiles["local-kubernetes"],
+      {},
+      { OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "0" },
+    );
+    expect(leftoverDefault.runtimeEnv).not.toContain("TRUSTED_PROXY_HOPS");
   });
 
   test("carries the admitted sandbox warm tariff through runtime and Helm generation", () => {
