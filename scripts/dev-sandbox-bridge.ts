@@ -20,21 +20,16 @@
 import { execFileSync } from "node:child_process";
 import { createServer, request as upstreamRequest, type Server } from "node:http";
 import { createServer as createNetServer, isIPv4 } from "node:net";
+import { localSandboxApiRouteAllowed } from "@opengeni/config";
 
 export const SANDBOX_BRIDGE_HEALTH_PATH = "/__opengeni_sandbox_bridge_health";
 
-const SANDBOX_ROUTES: readonly RegExp[] = [
-  // Codemode calls, journal reads, catalog, and the Site/SDK proxy.
-  /^\/v1\/workspaces\/[^/]+\/codemode(?:\/|$)/u,
-  // First-party MCP, including its /docs and /files servers.
-  /^\/v1\/workspaces\/[^/]+\/mcp(?:\/|$)/u,
-  // The personal GitHub HTTPS smart-Git broker.
-  /^\/v1\/git\/personal\/[A-Za-z0-9_-]{43}\/(?:info\/refs|git-upload-pack|git-receive-pack)$/u,
-];
-
-/** Whether a normalized request path is one a Docker sandbox needs. */
+/**
+ * Whether a normalized request path is one a Docker sandbox needs. The API
+ * applies the same allowlist to requests addressed to its sandbox-only names.
+ */
 export function sandboxBridgeRouteAllowed(pathname: string): boolean {
-  return SANDBOX_ROUTES.some((route) => route.test(pathname));
+  return localSandboxApiRouteAllowed(pathname);
 }
 
 export type DockerBridgeRoute = { gateway: string; subnet: string };

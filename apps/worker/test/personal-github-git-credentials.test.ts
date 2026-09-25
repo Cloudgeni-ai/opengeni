@@ -74,21 +74,24 @@ describe("personal GitHub Git credential consumer", () => {
     expect(
       personalGitBrokerOrigin(
         testSettings({
-          environment: "development",
+          environment: "local",
           sandboxBackend: "docker",
           opengeniMcpUrl: "http://172.18.0.1:8000/v1/workspaces/{workspaceId}/mcp",
         }),
       ),
     ).toBe("http://172.18.0.1:8000");
-    // A public plaintext address is still refused.
-    expect(
-      personalGitBrokerOrigin(
-        testSettings({
-          environment: "development",
-          sandboxBackend: "docker",
-          opengeniMcpUrl: "http://203.0.113.10:8000/v1/workspaces/{workspaceId}/mcp",
-        }),
-      ),
-    ).toBeNull();
+    // Outside local development, a plaintext IP address that is not the Docker
+    // bridge gateway never receives the broker bearer, private or public.
+    for (const host of ["10.250.0.1", "203.0.113.10"]) {
+      expect(
+        personalGitBrokerOrigin(
+          testSettings({
+            environment: "development",
+            sandboxBackend: "docker",
+            opengeniMcpUrl: `http://${host}:8000/v1/workspaces/{workspaceId}/mcp`,
+          }),
+        ),
+      ).toBeNull();
+    }
   });
 });

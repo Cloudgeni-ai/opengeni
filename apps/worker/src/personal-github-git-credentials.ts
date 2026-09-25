@@ -274,17 +274,6 @@ function dockerBridgeGateway(): string | null {
   return cachedDockerBridgeGateway;
 }
 
-/** RFC 1918 IPv4 literal: the address space Docker assigns to bridge networks. */
-function isPrivateIPv4(hostname: string): boolean {
-  if (isIP(hostname) !== 4) return false;
-  const [first = 0, second = 0] = hostname.split(".").map(Number);
-  return (
-    first === 10 ||
-    (first === 172 && second >= 16 && second <= 31) ||
-    (first === 192 && second === 168)
-  );
-}
-
 export function personalGitBrokerOrigin(settings: Settings): string | null {
   const value =
     settings.opengeniMcpUrl ??
@@ -305,9 +294,9 @@ export function personalGitBrokerOrigin(settings: Settings): string | null {
     settings.sandboxBackend === "docker" &&
     (url.hostname === "host.docker.internal" ||
       url.hostname === cachedDockerBridgeGateway ||
-      // A Docker network gateway, such as the local launcher's Linux sandbox route.
-      isPrivateIPv4(url.hostname) ||
       /^[a-z][a-z0-9-]{0,62}$/iu.test(url.hostname));
+  // The `local` and `test` environments accept any origin, which covers the
+  // local launcher's Linux Docker sandbox route on the Compose network gateway.
   const privateExecutionOrigin =
     (url.protocol === "http:" &&
       (url.hostname === "127.0.0.1" || url.hostname === "localhost" || dockerPrivateOrigin)) ||

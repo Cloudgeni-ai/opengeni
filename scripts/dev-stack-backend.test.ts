@@ -270,9 +270,32 @@ describe("development network exposure", () => {
     expect(await merge("http://127.0.0.1:3001,http://127.0.0.1:5173")).toBe(
       "http://127.0.0.1:3001,http://127.0.0.1:5173",
     );
-    expect(source).toContain(
-      "printf 'OPENGENI_LOCAL_ALLOWED_ORIGINS=%s\\n' \"${OPENGENI_LOCAL_ALLOWED_ORIGINS}\"",
+    // Spaces after commas are dropped, so the unquoted .env.runtime line below
+    // survives `set -a; . ./.env.runtime` in the dev:* scripts.
+    const spaced = await merge(" http://127.0.0.1:5173, https://embed.example.test ");
+    expect(spaced).toBe("http://127.0.0.1:5173,https://embed.example.test,http://127.0.0.1:3001");
+    const written =
+      "printf 'OPENGENI_LOCAL_ALLOWED_ORIGINS=%s\\n' \"${OPENGENI_LOCAL_ALLOWED_ORIGINS}\"";
+    expect(source).toContain(written);
+    const root = await mkdtemp(join(tmpdir(), "opengeni-runtime-env-"));
+    temporaryRoots.push(root);
+    const runtimeEnv = join(root, ".env.runtime");
+    const roundTrip = Bun.spawn(
+      [
+        "bash",
+        "-c",
+        `set -eu; ${written} >"$1"; unset OPENGENI_LOCAL_ALLOWED_ORIGINS; set -a; . "$1"; set +a; printf '%s' "$OPENGENI_LOCAL_ALLOWED_ORIGINS"`,
+        "bash",
+        runtimeEnv,
+      ],
+      {
+        env: { ...Bun.env, OPENGENI_LOCAL_ALLOWED_ORIGINS: spaced },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
     );
+    expect(await roundTrip.exited).toBe(0);
+    expect(await new Response(roundTrip.stdout).text()).toBe(spaced);
   });
 
   test("the launcher publishes the route after the Compose network exists and before the API starts", async () => {

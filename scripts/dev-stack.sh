@@ -490,6 +490,10 @@ fi
 # (apps/api/src/http/local-browser-boundary.ts). Keep the printed loopback web
 # URL usable even when OPENGENI_WEB_BASE_URL names another address.
 local_web_origin="http://127.0.0.1:${OPENGENI_WEB_PORT}"
+# Origins never contain whitespace. Drop it so the unquoted assignment written
+# to .env.runtime (which the dev:* scripts source) stays one word.
+OPENGENI_LOCAL_ALLOWED_ORIGINS="${OPENGENI_LOCAL_ALLOWED_ORIGINS:-}"
+OPENGENI_LOCAL_ALLOWED_ORIGINS="${OPENGENI_LOCAL_ALLOWED_ORIGINS//[[:space:]]/}"
 case ",${OPENGENI_LOCAL_ALLOWED_ORIGINS:-}," in
 *",${local_web_origin},"*) ;;
 *) OPENGENI_LOCAL_ALLOWED_ORIGINS="${OPENGENI_LOCAL_ALLOWED_ORIGINS:+${OPENGENI_LOCAL_ALLOWED_ORIGINS},}${local_web_origin}" ;;

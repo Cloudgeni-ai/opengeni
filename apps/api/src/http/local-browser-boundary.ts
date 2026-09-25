@@ -1,4 +1,8 @@
-import { localAllowedOriginEntries, type Settings } from "@opengeni/config";
+import {
+  localAllowedOriginEntries,
+  localSandboxApiRouteAllowed,
+  type Settings,
+} from "@opengeni/config";
 
 /**
  * Browser boundary for the unauthenticated local product mode.
@@ -13,14 +17,25 @@ import { localAllowedOriginEntries, type Settings } from "@opengeni/config";
  * - a DNS-rebinding site can make its own hostname resolve to 127.0.0.1 and
  *   read responses as a same-origin page.
  *
- * The boundary therefore admits a request only when its `Host` names this
- * computer (loopback, the Docker sandbox routes, or an explicitly configured
- * address), and a present `Origin` is this stack's web app, an explicitly
- * configured origin, or the API's own origin. Non-browser clients (the SDK,
- * curl, sandbox callbacks, host-app servers) send no `Origin` and are
- * unaffected. The `Host` port is not compared: a rebinding page controls only
- * the hostname, while local proxies and forwarders legitimately present their
- * own port.
+ * The boundary therefore sorts the `Host` a request is addressed to into two
+ * classes:
+ *
+ * - Browser hosts: loopback, the hosts of the configured web, public, and
+ *   extra origins, the GitHub App callback tunnel, and a specific API bind
+ *   address. A present `Origin` must be this stack's web app, an explicitly
+ *   configured origin, or the API's own address on one of these hosts.
+ * - Sandbox hosts: names only sandboxes and the worker use to reach the API
+ *   (`host.docker.internal` with the Docker sandbox, and the hosts of
+ *   `OPENGENI_MCP_URL` and `OPENGENI_MCP_INTERNAL_URL`). They serve only the
+ *   sandbox routes (Codemode, first-party MCP, and the Git broker) and refuse
+ *   any request that carries browser metadata. A browser cannot tell a
+ *   sandbox name from an attacker's, so a rebinding page on one of these
+ *   names can neither send an accepted `Origin` nor reach the rest of the API.
+ *
+ * Every other `Host` is refused. Non-browser clients (the SDK, curl, sandbox
+ * callbacks, host-app servers) send no `Origin` and are unaffected. The `Host`
+ * port is not compared: a rebinding page controls only the hostname, while
+ * local proxies and forwarders legitimately present their own port.
  *
  * It applies only to `local` access mode in the `local` environment (the
  * `bun run dev` stack and manual local runs). Managed and configured access
@@ -38,17 +53,34 @@ export type LocalBrowserBoundarySettings = Pick<
   | "opengeniMcpInternalUrl"
   | "githubAppManifestBaseUrl"
   | "localAllowedOrigins"
+  | "sandboxBackend"
 >;
+
+export type LocalBrowserBoundaryRejectionCode =
+  | "LOCAL_HOST_NOT_ALLOWED"
+  | "LOCAL_ORIGIN_NOT_ALLOWED"
+  | "LOCAL_SANDBOX_ROUTE_ONLY";
 
 export type LocalBrowserBoundaryRejection = {
   status: 403;
-  code: "LOCAL_HOST_NOT_ALLOWED" | "LOCAL_ORIGIN_NOT_ALLOWED";
+  code: LocalBrowserBoundaryRejectionCode;
   message: string;
+  /** The refused `Host` or `Origin`, for the API log only; never sent back. */
+  refused: string;
 };
+
+/** Called once per distinct refused value, so an operator can see why. */
+export type LocalBrowserBoundaryWarn = (
+  message: string,
+  attributes: Record<string, string>,
+) => void;
 
 export type LocalBrowserBoundary = {
   readonly allowedOrigins: ReadonlySet<string>;
-  readonly allowedHostnames: ReadonlySet<string>;
+  /** Hostnames a browser may address. */
+  readonly browserHostnames: ReadonlySet<string>;
+  /** Hostnames only sandboxes and the worker use; sandbox routes only, no browsers. */
+  readonly sandboxHostnames: ReadonlySet<string>;
   /** Whether a present `Origin` may call the API for a request with this `Host`. */
   originAllowed(origin: string, host: string | null): boolean;
   /** The rejection for this request, or null when the boundary admits it. */
@@ -57,10 +89,18 @@ export type LocalBrowserBoundary = {
 
 const LOOPBACK_HOSTNAMES = ["127.0.0.1", "localhost", "[::1]"] as const;
 /** Docker Desktop's name for the host; Linux sandboxes use the configured bridge route. */
-const DOCKER_HOST_ALIASES = ["host.docker.internal"] as const;
-/** `apps/web` dev server default when neither base URL is configured. */
+const DOCKER_HOST_ALIAS = "host.docker.internal";
+/** `apps/web` dev server default when no web base URL is configured. */
 const DEFAULT_LOCAL_WEB_ORIGIN = "http://127.0.0.1:3000";
 const WILDCARD_BIND_HOSTS = new Set(["", "0.0.0.0", "::", "[::]"]);
+/**
+ * Only browsers send these. (Node's fetch sends `Sec-Fetch-Mode: cors`, so that
+ * header does not identify a browser.)
+ */
+const BROWSER_REQUEST_HEADERS = ["origin", "sec-fetch-site"];
+/** Distinct refused values logged per boundary, so a rebinding page cannot flood the log. */
+const MAX_REPORTED_REJECTIONS = 32;
+const MAX_REPORTED_VALUE_LENGTH = 200;
 
 const HOST_NOT_ALLOWED_MESSAGE =
   "The local OpenGeni API only answers requests addressed to this computer. " +
@@ -69,6 +109,38 @@ const HOST_NOT_ALLOWED_MESSAGE =
 const ORIGIN_NOT_ALLOWED_MESSAGE =
   "The local OpenGeni API has no authentication, so browser requests are accepted only " +
   "from this stack's web app. Add other trusted origins to OPENGENI_LOCAL_ALLOWED_ORIGINS.";
+const SANDBOX_ROUTE_ONLY_MESSAGE =
+  "This address is the local OpenGeni API's sandbox route. It serves only sandbox calls " +
+  "(Codemode, first-party MCP, and the Git broker), never browsers. Open the web app at " +
+  "its own address, or list this address in OPENGENI_LOCAL_ALLOWED_ORIGINS.";
+
+const WARNINGS: Record<LocalBrowserBoundaryRejectionCode, { message: string; setting: string }> = {
+  LOCAL_HOST_NOT_ALLOWED: {
+    message: "Local API refused a request addressed to a name that is not this computer's",
+    setting: "OPENGENI_WEB_BASE_URL, OPENGENI_PUBLIC_BASE_URL, or OPENGENI_LOCAL_ALLOWED_ORIGINS",
+  },
+  LOCAL_ORIGIN_NOT_ALLOWED: {
+    message: "Local API refused a browser request from an origin that is not this stack's web app",
+    setting: "OPENGENI_WEB_BASE_URL or OPENGENI_LOCAL_ALLOWED_ORIGINS",
+  },
+  LOCAL_SANDBOX_ROUTE_ONLY: {
+    message: "Local API refused a browser or non-sandbox request on an address only sandboxes use",
+    setting: "OPENGENI_WEB_BASE_URL or OPENGENI_LOCAL_ALLOWED_ORIGINS",
+  },
+};
+
+/**
+ * Requests the API builds and dispatches to itself, such as the Codemode SDK
+ * proxy's re-dispatch. They never come from the network, and the request they
+ * were built from already passed the boundary.
+ */
+const internalDispatches = new WeakSet<Request>();
+
+/** Mark a request the API dispatches to itself so the boundary admits it. */
+export function markLocalInternalDispatch(request: Request): Request {
+  internalDispatches.add(request);
+  return request;
+}
 
 export function localBrowserBoundaryApplies(
   settings: Pick<Settings, "productAccessMode" | "environment">,
@@ -79,14 +151,13 @@ export function localBrowserBoundaryApplies(
 /** Build the boundary, or null when the deployment is not the local dev product. */
 export function createLocalBrowserBoundary(
   settings: LocalBrowserBoundarySettings,
+  options: { warn?: LocalBrowserBoundaryWarn } = {},
 ): LocalBrowserBoundary | null {
   if (!localBrowserBoundaryApplies(settings)) return null;
 
-  const configuredOrigins = [settings.webBaseUrl, settings.publicBaseUrl]
+  const webOrigins = [settings.webBaseUrl ?? DEFAULT_LOCAL_WEB_ORIGIN, settings.publicBaseUrl]
     .map((value) => parseHttpUrl(value))
     .filter((url): url is URL => url !== null);
-  const webOrigins =
-    configuredOrigins.length > 0 ? configuredOrigins : [new URL(DEFAULT_LOCAL_WEB_ORIGIN)];
   const extraOrigins = localAllowedOriginEntries(settings.localAllowedOrigins).map(
     (origin) => new URL(origin),
   );
@@ -105,30 +176,34 @@ export function createLocalBrowserBoundary(
     }
   }
 
-  const allowedHostnames = new Set<string>([...LOOPBACK_HOSTNAMES, ...DOCKER_HOST_ALIASES]);
-  for (const url of [...webOrigins, ...extraOrigins]) allowedHostnames.add(url.hostname);
-  // The sandbox-visible API route (the Linux Docker bridge address, or a
-  // tunnel for a remote sandbox), the worker's internal route, and a tunnel
-  // configured for GitHub App callbacks arrive with their own Host.
-  for (const value of [
-    settings.opengeniMcpUrl,
-    settings.opengeniMcpInternalUrl,
-    settings.githubAppManifestBaseUrl,
-  ]) {
-    const url = parseHttpUrl(value?.replaceAll("{workspaceId}", "workspace"));
-    if (url) allowedHostnames.add(url.hostname);
-  }
+  const browserHostnames = new Set<string>(LOOPBACK_HOSTNAMES);
+  for (const url of [...webOrigins, ...extraOrigins]) browserHostnames.add(url.hostname);
+  // A tunnel configured for GitHub App callbacks: GitHub redirects the browser there.
+  const githubAppTunnel = parseHttpUrl(settings.githubAppManifestBaseUrl);
+  if (githubAppTunnel) browserHostnames.add(githubAppTunnel.hostname);
   const apiHost = settings.apiHost.trim().toLowerCase();
   if (!WILDCARD_BIND_HOSTS.has(apiHost)) {
     const url = parseHostHeader(
       apiHost.includes(":") && !apiHost.startsWith("[") ? `[${apiHost}]` : apiHost,
     );
-    if (url) allowedHostnames.add(url.hostname);
+    if (url) browserHostnames.add(url.hostname);
   }
 
-  const hostAllowed = (host: string | null): boolean => {
+  // The sandbox-visible API route (Docker Desktop's host alias, the Linux
+  // Docker bridge address, or a tunnel for a remote sandbox) and the worker's
+  // internal route arrive with their own Host.
+  const sandboxHostnames = new Set<string>();
+  if (settings.sandboxBackend === "docker") sandboxHostnames.add(DOCKER_HOST_ALIAS);
+  for (const value of [settings.opengeniMcpUrl, settings.opengeniMcpInternalUrl]) {
+    const url = parseHttpUrl(value?.replaceAll("{workspaceId}", "workspace"));
+    if (url) sandboxHostnames.add(url.hostname);
+  }
+  // A name the developer also uses in the browser stays a browser host.
+  for (const hostname of browserHostnames) sandboxHostnames.delete(hostname);
+
+  const browserHost = (host: string | null): URL | null => {
     const url = host === null ? null : parseHostHeader(host);
-    return url !== null && allowedHostnames.has(url.hostname);
+    return url !== null && browserHostnames.has(url.hostname) ? url : null;
   };
 
   const originAllowed = (origin: string, host: string | null): boolean => {
@@ -136,28 +211,67 @@ export function createLocalBrowserBoundary(
     if (!url || url.origin !== origin.toLowerCase().replace(/\/$/u, "")) return false;
     if (allowedOrigins.has(url.origin)) return true;
     // Pages served by the API itself (for example the MCP OAuth consent form)
-    // and same-origin dev proxies present the API's own address. The Host was
-    // already checked, so this cannot admit a rebinding hostname.
-    const requestHost = host === null ? null : parseHostHeader(host);
-    return requestHost !== null && hostAllowed(host) && requestHost.host === url.host;
+    // and same-origin dev proxies present the API's own address. Only a
+    // browser host qualifies: sandbox names and unknown names never do.
+    const requestHost = browserHost(host);
+    return requestHost !== null && requestHost.host === url.host;
+  };
+
+  const reported = new Set<string>();
+  const report = (rejection: LocalBrowserBoundaryRejection, host: string | null) => {
+    if (!options.warn) return;
+    const key = `${rejection.code}\u0000${rejection.refused}`;
+    if (reported.has(key) || reported.size >= MAX_REPORTED_REJECTIONS) return;
+    reported.add(key);
+    const warning = WARNINGS[rejection.code];
+    options.warn(warning.message, {
+      code: rejection.code,
+      refused: rejection.refused.slice(0, MAX_REPORTED_VALUE_LENGTH),
+      host: (host ?? "").slice(0, MAX_REPORTED_VALUE_LENGTH),
+      setting: warning.setting,
+    });
+  };
+
+  const refuse = (
+    code: LocalBrowserBoundaryRejectionCode,
+    refused: string,
+    host: string | null,
+  ): LocalBrowserBoundaryRejection => {
+    const message =
+      code === "LOCAL_HOST_NOT_ALLOWED"
+        ? HOST_NOT_ALLOWED_MESSAGE
+        : code === "LOCAL_ORIGIN_NOT_ALLOWED"
+          ? ORIGIN_NOT_ALLOWED_MESSAGE
+          : SANDBOX_ROUTE_ONLY_MESSAGE;
+    const rejection: LocalBrowserBoundaryRejection = { status: 403, code, message, refused };
+    report(rejection, host);
+    return rejection;
   };
 
   return {
     allowedOrigins,
-    allowedHostnames,
+    browserHostnames,
+    sandboxHostnames,
     originAllowed,
     rejection(request) {
+      if (internalDispatches.has(request)) return null;
       const host = localBrowserRequestHost(request);
-      if (!hostAllowed(host)) {
-        return { status: 403, code: "LOCAL_HOST_NOT_ALLOWED", message: HOST_NOT_ALLOWED_MESSAGE };
-      }
       const origin = request.headers.get("origin");
-      if (origin !== null && !originAllowed(origin, host)) {
-        return {
-          status: 403,
-          code: "LOCAL_ORIGIN_NOT_ALLOWED",
-          message: ORIGIN_NOT_ALLOWED_MESSAGE,
-        };
+      if (browserHost(host)) {
+        if (origin !== null && !originAllowed(origin, host)) {
+          return refuse("LOCAL_ORIGIN_NOT_ALLOWED", origin, host);
+        }
+        return null;
+      }
+      const parsedHost = host === null ? null : parseHostHeader(host);
+      if (parsedHost === null || !sandboxHostnames.has(parsedHost.hostname)) {
+        return refuse("LOCAL_HOST_NOT_ALLOWED", host ?? "", host);
+      }
+      if (
+        BROWSER_REQUEST_HEADERS.some((name) => request.headers.has(name)) ||
+        !localSandboxApiRouteAllowed(requestPathname(request))
+      ) {
+        return refuse("LOCAL_SANDBOX_ROUTE_ONLY", host ?? "", host);
       }
       return null;
     },
@@ -188,6 +302,15 @@ export function localBrowserRequestHost(request: Request): string | null {
     return new URL(request.url).host || null;
   } catch {
     return null;
+  }
+}
+
+/** The normalized path the router sees (URL parsing resolves dot segments). */
+function requestPathname(request: Request): string {
+  try {
+    return new URL(request.url).pathname;
+  } catch {
+    return "";
   }
 }
 

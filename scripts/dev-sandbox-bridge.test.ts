@@ -119,12 +119,14 @@ describe("Docker sandbox route forwarder", () => {
     for (const server of servers.splice(0)) server.stop();
   });
 
-  async function startBridge(subnet: string) {
+  async function startBridge(subnet: string, handler?: (request: Request) => Promise<Response>) {
     const seen: Array<{ host: string | null; path: string; body: string }> = [];
     const upstream = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
+      idleTimeout: 60,
       async fetch(request) {
+        if (handler) return await handler(request);
         const url = new URL(request.url);
         const body = await request.text();
         seen.push({
@@ -198,4 +200,99 @@ describe("Docker sandbox route forwarder", () => {
     expect(response.status).toBe(403);
     expect(seen).toHaveLength(0);
   });
+
+  // Bun 1.3's node:http could stall or drop bytes relaying bodies this large;
+  // the pinned runtime (.bun-version) relays them intact.
+  test("streams multi-megabyte Git broker uploads through intact", async () => {
+    const received: Array<{ bytes: number; digest: string; expect: string | null }> = [];
+    const { base } = await startBridge("127.0.0.0/8", async (request) => {
+      const body = new Uint8Array(await request.arrayBuffer());
+      received.push({
+        bytes: body.byteLength,
+        digest: new Bun.CryptoHasher("sha256").update(body).digest("hex"),
+        expect: request.headers.get("expect"),
+      });
+      return new Response("ok");
+    });
+    const packfile = new Uint8Array(12 * 1024 * 1024);
+    for (let index = 0; index < packfile.length; index += 4096) packfile[index] = index % 251;
+    const digest = new Bun.CryptoHasher("sha256").update(packfile).digest("hex");
+    const target = `${base}${brokerRoute}/git-receive-pack`;
+
+    // A sized body, as `git push` sends for a small pack.
+    const sized = await fetch(target, { method: "POST", body: packfile });
+    expect(sized.status).toBe(200);
+    expect(await sized.text()).toBe("ok");
+
+    // A chunked body without a length, as `git push` streams a large pack.
+    const chunks = 12;
+    const chunkSize = packfile.length / chunks;
+    let sent = 0;
+    const streamed = await fetch(target, {
+      method: "POST",
+      headers: { "content-type": "application/x-git-receive-pack-request" },
+      body: new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sent === chunks) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(packfile.slice(sent * chunkSize, (sent + 1) * chunkSize));
+          sent += 1;
+        },
+      }),
+      duplex: "half",
+    } as RequestInit);
+    expect(streamed.status).toBe(200);
+    expect(await streamed.text()).toBe("ok");
+
+    expect(received).toEqual([
+      { bytes: packfile.length, digest, expect: null },
+      { bytes: packfile.length, digest, expect: null },
+    ]);
+  }, 60_000);
+
+  test("streams responses without buffering them", async () => {
+    let releaseSecondEvent: () => void = () => {};
+    const secondEventReleased = new Promise<void>((resolve) => {
+      releaseSecondEvent = resolve;
+    });
+    const { base } = await startBridge("127.0.0.0/8", async () => {
+      const encoder = new TextEncoder();
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(encoder.encode("event: first\ndata: 1\n\n"));
+            // The second event waits for the client to have read the first,
+            // so a forwarder that buffered the response would never finish.
+            await secondEventReleased;
+            controller.enqueue(encoder.encode("event: second\ndata: 2\n\n"));
+            controller.close();
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    const response = await fetch(`${base}/v1/workspaces/ws-1/mcp`, {
+      headers: { accept: "text/event-stream" },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/event-stream");
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    while (!text.includes("data: 1\n\n")) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error("stream ended before the first event");
+      text += decoder.decode(value, { stream: true });
+    }
+    expect(text).not.toContain("data: 2");
+    releaseSecondEvent();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
+    expect(text).toBe("event: first\ndata: 1\n\nevent: second\ndata: 2\n\n");
+  }, 30_000);
 });

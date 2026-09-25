@@ -6839,6 +6839,25 @@ export function localAllowedOriginEntries(raw: string | undefined): string[] {
   return origins;
 }
 
+const LOCAL_SANDBOX_API_ROUTES: readonly RegExp[] = [
+  // Codemode calls, journal reads, catalog, and the Site/SDK proxy.
+  /^\/v1\/workspaces\/[^/]+\/codemode(?:\/|$)/u,
+  // First-party MCP, including its /docs and /files servers.
+  /^\/v1\/workspaces\/[^/]+\/mcp(?:\/|$)/u,
+  // The personal GitHub HTTPS smart-Git broker.
+  /^\/v1\/git\/personal\/[A-Za-z0-9_-]{43}\/(?:info\/refs|git-upload-pack|git-receive-pack)$/u,
+];
+
+/**
+ * Local development only: whether a normalized API path is one a sandbox calls
+ * (Codemode, first-party MCP, and the personal Git broker). The Linux Docker
+ * sandbox route relays only these, and the local API serves only these on the
+ * addresses that only sandboxes use (see `apps/api/src/http/local-browser-boundary.ts`).
+ */
+export function localSandboxApiRouteAllowed(pathname: string): boolean {
+  return LOCAL_SANDBOX_API_ROUTES.some((route) => route.test(pathname));
+}
+
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   localAllowedOriginEntries(settings.localAllowedOrigins);

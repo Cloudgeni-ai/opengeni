@@ -159,7 +159,11 @@ import {
   registerPrometheusMetricsRoute,
 } from "./http/metrics-listener";
 import { allowedCorsOrigin } from "./http/cors";
-import { createLocalBrowserBoundary, localBrowserRequestHost } from "./http/local-browser-boundary";
+import {
+  createLocalBrowserBoundary,
+  localBrowserRequestHost,
+  markLocalInternalDispatch,
+} from "./http/local-browser-boundary";
 import { withAccessGrantSessionRlsContext } from "./access-grant-rls";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
@@ -454,8 +458,12 @@ export function createAppComposition(deps: AppDependencies): {
   // Unauthenticated local mode: admit only requests addressed to this computer
   // and, when a browser sent them, from this stack's web app (see
   // http/local-browser-boundary.ts). Runs before CORS so a refused preflight
-  // carries no CORS grant. Null outside local development.
-  const localBrowserBoundary = createLocalBrowserBoundary(deps.settings);
+  // carries no CORS grant, and logs each distinct refused Host or Origin once
+  // because the browser shows only a generic CORS error. Null outside local
+  // development.
+  const localBrowserBoundary = createLocalBrowserBoundary(deps.settings, {
+    warn: (message, attributes) => observability.warn(message, attributes),
+  });
   if (localBrowserBoundary) {
     app.use("*", async (c, next) => {
       const rejection = localBrowserBoundary.rejection(c.req.raw);
@@ -1301,7 +1309,9 @@ export function createAppComposition(deps: AppDependencies): {
     } catch (error) {
       throw codemodeHttpError(error);
     }
-    return app.fetch(forwarded);
+    // The forwarded request drops the caller's Host and names a non-sandbox
+    // path; the request it was built from already passed the local boundary.
+    return app.fetch(markLocalInternalDispatch(forwarded));
   });
 
   app.get("/v1/workspaces/:workspaceId/codemode/catalog", async (c) => {
