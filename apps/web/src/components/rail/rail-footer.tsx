@@ -9,12 +9,13 @@ import {
   UserIcon,
   MessageSquareIcon as FeedbackIcon,
 } from "lucide-react";
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import { Link } from "@tanstack/react-router";
 import { AppearanceMenu } from "@/components/appearance-menu";
+import type { HelpMenuProps } from "@/components/help-menu";
 import {
   accountMenuAriaLabel,
   OrganizationInvitationCountBadge,
@@ -43,9 +44,23 @@ const FeedbackDialog = lazy(() =>
   import("@/components/feedback").then((module) => ({ default: module.FeedbackDialog })),
 );
 
-const HelpMenu = lazy(() =>
-  import("@/components/help-menu").then((module) => ({ default: module.HelpMenu })),
-);
+let helpMenuModule: Promise<{ default: (props: HelpMenuProps) => ReactNode }> | null = null;
+
+/**
+ * The Help section stays out of the direct-session bundle graph, but Radix
+ * mounts menu content only when the menu opens. RailFooter therefore starts
+ * this load on mount, while the page's own build is still current, instead of
+ * on first open, when a tab older than a deploy would fetch a removed chunk.
+ * A failed load hides the section rather than breaking the menu or the route.
+ */
+function loadHelpMenu() {
+  helpMenuModule ??= import("@/components/help-menu")
+    .then((module) => ({ default: module.HelpMenu }))
+    .catch(() => ({ default: () => null }));
+  return helpMenuModule;
+}
+
+const HelpMenu = lazy(loadHelpMenu);
 
 const BrowserAccountMenu = lazy(() =>
   import("@/components/browser-account-menu").then((module) => ({
@@ -64,6 +79,9 @@ export function RailFooter() {
   const managed = context.clientConfig.auth.mode === "managedSession";
   const browserAccounts = managed && context.clientConfig.managedAuthSessionSetMode !== "legacy";
   const showAnalyticsPreferences = analyticsPreferencesAvailable(context.clientConfig.analytics);
+  useEffect(() => {
+    if (!browserAccounts) void loadHelpMenu();
+  }, [browserAccounts]);
   const displayName =
     context.authSession?.user.name ??
     context.authSession?.user.email ??
@@ -187,6 +205,7 @@ export function RailFooter() {
                   <HelpMenu
                     documentationUrl={context.clientConfig.documentationUrl}
                     itemClassName="min-h-11"
+                    leadingSeparator={managed || showAnalyticsPreferences}
                   />
                 </Suspense>
                 {managed ? (

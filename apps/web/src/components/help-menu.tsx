@@ -8,24 +8,29 @@ import {
 import { documentationLinkFromClientConfig } from "@/lib/documentation-link";
 import type { ClientConfig } from "@/types";
 
+export type HelpMenuProps = {
+  documentationUrl: ClientConfig["documentationUrl"];
+  itemClassName?: string;
+  /**
+   * Whether a separator must open the section. Callers pass false when the
+   * item before Help is already a separator (AppearanceMenu ends with one),
+   * so optional items between them never leave two separators back to back.
+   */
+  leadingSeparator: boolean;
+};
+
 /**
  * The account menu's Help section. It renders nothing when the deployment
  * publishes no documentation link (see documentationLinkFromClientConfig).
  * The always-loaded rail footer imports it lazily to keep it out of the
  * direct-session bundle graph.
  */
-export function HelpMenu({
-  documentationUrl,
-  itemClassName,
-}: {
-  documentationUrl: ClientConfig["documentationUrl"];
-  itemClassName?: string;
-}) {
+export function HelpMenu({ documentationUrl, itemClassName, leadingSeparator }: HelpMenuProps) {
   const href = documentationLinkFromClientConfig({ documentationUrl });
   if (!href) return null;
   return (
     <>
-      <DropdownMenuSeparator />
+      {leadingSeparator ? <DropdownMenuSeparator /> : null}
       <DropdownMenuLabel className="text-xs font-normal text-fg-muted">Help</DropdownMenuLabel>
       <DropdownMenuItem asChild className={itemClassName}>
         <a href={href} target="_blank" rel="noopener noreferrer">

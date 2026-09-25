@@ -1587,7 +1587,10 @@ its own origin, so the web server rewrites root-relative `og:image` and
 `twitter:image` URLs against `OPENGENI_WEB_BASE_URL`, or
 `OPENGENI_PUBLIC_BASE_URL` when the console and API share an origin. The Helm
 chart already hands the web pod the shared config map, so no extra setting is
-needed. Without either value the URL stays relative: browsers accept it, but
+needed. A split-origin deployment must set `OPENGENI_WEB_BASE_URL` to the
+console origin: the `OPENGENI_PUBLIC_BASE_URL` fallback would point the image at
+the API host, which does not serve it. Without either value the URL stays
+relative: browsers accept it, but
 some crawlers then show a preview without an image. The origin is never taken
 from request headers. Top-level icon files (`/favicon.ico`, `/favicon.svg`,
 `/apple-touch-icon.png`) ship with the shell, and any other missing top-level

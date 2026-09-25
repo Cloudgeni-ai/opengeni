@@ -16919,12 +16919,15 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // @opengeni/sdk/accounts controller when this is dual or broker.
     managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
     auth: ClientAuthConfig.default({ mode: "none" }),
-    // Product documentation the console links from its Help menu. Operators
+    // Product documentation the console links from its Help menu. The API
+    // always sends it: DEFAULT_OPENGENI_DOCUMENTATION_URL unless operators
     // point it elsewhere or hide it (null) with OPENGENI_DOCUMENTATION_URL.
+    // Parsing adds no default, so an absent field still means a server that
+    // predates it and clients show no link rather than guessing.
     documentationUrl: z
       .url({ protocol: /^https?$/u })
       .nullable()
-      .default(DEFAULT_OPENGENI_DOCUMENTATION_URL),
+      .optional(),
     analytics: z
       .object({
         consentRequired: z.boolean(),

@@ -337,6 +337,7 @@ export function BrowserAccountMenu() {
           <HelpMenu
             documentationUrl={context.clientConfig.documentationUrl}
             itemClassName="min-h-11"
+            leadingSeparator
           />
           <DropdownMenuItem
             className="min-h-11 forced-colors:text-[CanvasText]!"

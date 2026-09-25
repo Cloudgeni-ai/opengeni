@@ -6,14 +6,25 @@ import { HelpMenu } from "@/components/help-menu";
 import { DropdownMenu } from "@/components/ui/dropdown-menu";
 import { documentationLinkFromClientConfig } from "@/lib/documentation-link";
 
-function renderHelpMenu(documentationUrl: string | null | undefined): string {
+function renderHelpMenu(
+  documentationUrl: string | null | undefined,
+  leadingSeparator = true,
+): string {
   return renderToStaticMarkup(
     <DropdownMenu open>
       <Primitive.Content forceMount>
-        <HelpMenu documentationUrl={documentationUrl} itemClassName="min-h-11" />
+        <HelpMenu
+          documentationUrl={documentationUrl}
+          itemClassName="min-h-11"
+          leadingSeparator={leadingSeparator}
+        />
       </Primitive.Content>
     </DropdownMenu>,
   );
+}
+
+function separatorCount(markup: string): number {
+  return markup.match(/role="separator"/g)?.length ?? 0;
 }
 
 describe("documentation link client config", () => {
@@ -49,6 +60,18 @@ describe("account menu Help section", () => {
     expect(markup).toContain("Documentation");
     expect(markup).toContain("(opens in a new tab)");
     expect(markup).toContain("min-h-11");
+  });
+
+  test("opens with a separator only when the caller asks for one", () => {
+    const withLeading = renderHelpMenu("https://docs.example.test/", true);
+    expect(separatorCount(withLeading)).toBe(2);
+    expect(withLeading.indexOf('role="separator"')).toBeLessThan(withLeading.indexOf(">Help<"));
+
+    const withoutLeading = renderHelpMenu("https://docs.example.test/", false);
+    expect(separatorCount(withoutLeading)).toBe(1);
+    expect(withoutLeading.indexOf(">Help<")).toBeLessThan(
+      withoutLeading.indexOf('role="separator"'),
+    );
   });
 
   test("renders nothing when the deployment publishes no documentation", () => {
