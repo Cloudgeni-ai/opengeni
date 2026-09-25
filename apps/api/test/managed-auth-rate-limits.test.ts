@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { APIError } from "better-auth/api";
 
 import {
   createManagedAuthDatabasePool,
@@ -66,7 +65,8 @@ describe("managed auth per-email throttles", () => {
 
   test("refuse as an ordinary Better Auth 429 with a retry hint", () => {
     const error = new ManagedAuthEmailThrottleError(42);
-    expect(error).toBeInstanceOf(APIError);
+    // Better Auth's router renders any error named APIError as its response.
+    expect(error.name).toBe("APIError");
     expect(error.statusCode).toBe(429);
     expect(error.body).toMatchObject({ code: "TOO_MANY_REQUESTS" });
     expect(new Headers(error.headers).get("x-retry-after")).toBe("42");

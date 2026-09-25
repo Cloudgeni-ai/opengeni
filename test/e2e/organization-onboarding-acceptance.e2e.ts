@@ -25,6 +25,7 @@ import {
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
 import { createApp } from "../../apps/api/src/app";
+import { apiRequestBindingsForTransportPeer } from "../../apps/api/src/http/request-source";
 import {
   InMemoryManagedEmailTransport,
   type CapturedManagedEmail,
@@ -398,6 +399,9 @@ beforeAll(async () => {
     runtimeDatabaseRole: "opengeni_app",
     publicBaseUrl: publicOrigin,
     betterAuthSecret: "onboarding-browser-better-auth-secret-at-least-32-bytes",
+    // The local edge below forwards like ingress-nginx: one trusted hop whose
+    // X-Forwarded-For names the client, so per-client limits stay per client.
+    apiTrustedProxyHops: 1,
     organizationUserSetupEmailTokenTransport: "query",
     organizationUserSetupQueryEdgeSanitizationConfirmed: true,
     sandboxBackend: "none",
@@ -442,10 +446,13 @@ beforeAll(async () => {
     hostname: "127.0.0.1",
     port: Number(new URL(publicOrigin).port),
     idleTimeout: 60,
-    fetch: async (request) => {
+    fetch: async (request, server) => {
       const url = new URL(request.url);
       if (url.pathname.startsWith("/v1/") || url.pathname === "/healthz") {
-        return await api.fetch(request);
+        return await api.fetch(
+          request,
+          apiRequestBindingsForTransportPeer(server.requestIP(request)?.address),
+        );
       }
       const safePath = decodeURIComponent(url.pathname).replace(/^\/+/, "");
       const requested = safePath.includes("..") ? null : Bun.file(`${webDist}/${safePath}`);

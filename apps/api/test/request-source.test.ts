@@ -142,7 +142,7 @@ describe("trusted client address header", () => {
   test("strips a caller-supplied value when not stamping or without a peer", async () => {
     expect(
       await stamped({
-        path: "/v1/sessions",
+        path: "/v1/workspaces/workspace-1/sessions",
         stamp: false,
         peer: "10.0.0.10",
         supplied: "192.0.2.55",
