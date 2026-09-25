@@ -2,9 +2,11 @@ import type { AttemptToolDefinition, AttemptToolExecutionContext } from "@openge
 import {
   ToolResultSpilledReceipt,
   sandboxShellPath,
+  type AttemptToolIdentity,
   type AttemptToolResult as AttemptToolResultValue,
   type ToolResultSpilledReceipt as ToolResultSpilledReceiptValue,
 } from "@opengeni/contracts";
+import { projectKnowledgeToolResultForModel } from "./knowledge-model-projection";
 import { MCP_MAX_TOOL_RESULT_BYTES, mcpSerializedSizeBytes } from "./mcp-network";
 
 export type SpillOversizedModelToolResult = (input: {
@@ -44,22 +46,29 @@ export function spilledModelToolResult(
   };
 }
 
+/**
+ * The single per-caller seam over one executor result. Codemode receives the
+ * exact result. The model receives its model-visible projection (compact
+ * Knowledge discovery output for the exact tool identity), bounded to 1 MiB.
+ */
 export async function projectAttemptToolResultForCaller(
   result: AttemptToolResultValue,
   context: AttemptToolExecutionContext,
   spill?: SpillOversizedModelToolResult,
+  identity?: AttemptToolIdentity,
 ): Promise<AttemptToolResultValue> {
   switch (context.caller.kind) {
     case "codemode":
       return result;
     case "model": {
-      const serializedBytes = mcpSerializedSizeBytes(result);
-      if (serializedBytes <= MCP_MAX_TOOL_RESULT_BYTES) return result;
+      const visible = identity ? projectKnowledgeToolResultForModel(identity, result) : result;
+      const serializedBytes = mcpSerializedSizeBytes(visible);
+      if (serializedBytes <= MCP_MAX_TOOL_RESULT_BYTES) return visible;
       if (!spill) return modelToolResultOverflowError();
       try {
         return await spill({
           operationId: context.operationId,
-          result,
+          result: visible,
           serializedBytes,
         });
       } catch {
@@ -76,9 +85,10 @@ export async function projectAttemptToolResultForCaller(
 export function wrapAttemptToolExecute(
   execute: AttemptToolDefinition["execute"],
   spill?: SpillOversizedModelToolResult,
+  identity?: AttemptToolIdentity,
 ): AttemptToolDefinition["execute"] {
   return async (args, context) =>
-    await projectAttemptToolResultForCaller(await execute(args, context), context, spill);
+    await projectAttemptToolResultForCaller(await execute(args, context), context, spill, identity);
 }
 
 export function wrapAttemptToolDefinitions(
@@ -87,6 +97,6 @@ export function wrapAttemptToolDefinitions(
 ): AttemptToolDefinition[] {
   return definitions.map((definition) => ({
     ...definition,
-    execute: wrapAttemptToolExecute(definition.execute, spill),
+    execute: wrapAttemptToolExecute(definition.execute, spill, definition.identity),
   }));
 }

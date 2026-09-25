@@ -4884,6 +4884,7 @@ async function prepareAttemptToolEnvironment(
         execute: wrapAttemptToolExecute(
           async (argumentsValue, context) => await definition.execute(argumentsValue, context),
           options.spillOversizedModelToolResult,
+          definition.identity,
         ),
       })),
       ...wrapAttemptToolDefinitions(

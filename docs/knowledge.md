@@ -132,6 +132,40 @@ cannot become accepted answers. An unavailable prepare tool falls back to
 ordinary search in both views and collection browsing, without widening the
 task's selected tools or permissions.
 
+### Model-visible discovery results
+
+`knowledge_search` (first-party and Docs MCP) and `knowledge_prepare_save`
+return the complete contract to every caller: HTTP, the SDK, Codemode scripts
+and other programmatic callers receive the exact bytes. Only a model tool call
+receives a compact copy, projected in the worker at the per-caller seam
+(`projectAttemptToolResultForCaller` with
+`packages/runtime/src/knowledge-model-projection.ts`), never in the API tool.
+It is the same JSON without bookkeeping or repeated text:
+
+- kept: entry and collection IDs, `version` (the `expectedVersion` for an
+  update), `revision.id` (for evidence pins), scope, `revision.outcome` and
+  collection `view`, titles, kinds, group and parent IDs, descriptions, excerpts
+  with their offsets, index status, `complete`, and every pagination cursor;
+- removed: timestamps, rank score, revision number and lineage, creating
+  session and review batch, and a collection descriptor's `revisionId`;
+- removed only when equal to the default or to another shown field:
+  `archived: false`, `change: "upsert"`, `sourceKind: null`,
+  `descriptionTruncated: false`, `revision.entryId` equal to `id`, and
+  `publishedRevisionId`/`latestRevisionId` equal to `revision.id` (so a pending
+  revision above the published one, or a missing published revision, stays
+  visible);
+- `revision.preview` is omitted only when its complete text already appears
+  verbatim in the title or an excerpt. A preview with unique text, such as when
+  the best excerpt is a later chunk, is kept in full. Nothing is truncated.
+
+An error, structured content, or a result that does not strictly match the
+contract passes through unchanged. The model call's history item and timeline
+event record the compact copy the model received; past tool outputs are never
+re-rendered. On contract-valid fixtures sized to staging medians
+(`packages/runtime/test/knowledge-model-projection.test.ts`), an eight-entry
+search result shrinks from 17.9 KB to 10.0 KB (44%) and a save preparation
+from 21.7 KB to 14.1 KB (35%).
+
 ## Personal and shared Knowledge
 
 Personal and workspace Knowledge use the same schema, tools, versioning and
