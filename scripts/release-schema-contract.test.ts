@@ -183,17 +183,20 @@ describe("release schema contract", () => {
     // migration range; the new forward migration is checked explicitly above.
     let completeSourceContract = failedSessionVariableSetAttach
       ? {
-          ...sourceBeforeAutomatic,
-          fileCount: sourceBeforeAutomatic.fileCount - 1,
+          ...sourceContract,
+          fileCount: sourceContract.fileCount - 1,
           latestMigration:
-            sourceBeforeAutomatic.latestMigration === "0514_failed_session_variable_set_attach.sql"
+            sourceContract.latestMigration === "0514_failed_session_variable_set_attach.sql"
               ? "0513_message_fork_prefix_compaction.sql"
-              : sourceBeforeAutomatic.latestMigration,
-          migrations: sourceBeforeAutomatic.migrations.filter(
+              : sourceContract.latestMigration,
+          migrations: sourceContract.migrations.filter(
             (migration) => migration.path !== "0514_failed_session_variable_set_attach.sql",
           ),
         }
-      : sourceBeforeAutomatic;
+      : sourceContract;
+    const automaticCheckpointDiscontinuityInComplete = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0520_automatic_checkpoint_discontinuity.sql",
+    );
     const autonomousLearningDefaults = completeSourceContract.migrations.some(
       (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
     );
@@ -466,6 +469,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (automaticCheckpointDiscontinuityInComplete ? 1 : 0) +
         (sessionRecoveryBacklogExcludesPaused ? 1 : 0) +
         (memberConnectionRead ? 1 : 0) +
         (memberConnectionReadBackfillIndex ? 1 : 0) +
@@ -771,11 +775,17 @@ describe("release schema contract", () => {
       ...(sessionRecoveryBacklogExcludesPaused
         ? { latestMigration: "0519_session_recovery_backlog_excludes_paused.sql" }
         : {}),
+      ...(automaticCheckpointDiscontinuityInComplete
+        ? { latestMigration: "0520_automatic_checkpoint_discontinuity.sql" }
+        : {}),
     });
     // Keep the historical migration-order probes below scoped to published
     // history after checking the three forward rollout steps above.
     completeSourceContract = {
       ...completeSourceContract,
+      fileCount:
+        completeSourceContract.fileCount - (automaticCheckpointDiscontinuityInComplete ? 1 : 0),
+      latestMigration: sourceBeforeAutomatic.latestMigration,
       migrations: completeSourceContract.migrations.filter(
         (migration) =>
           ![
@@ -783,6 +793,7 @@ describe("release schema contract", () => {
             "0517_member_connection_read_backfill_index.sql",
             "0518_member_connection_read_backfill.sql",
             "0519_session_recovery_backlog_excludes_paused.sql",
+            "0520_automatic_checkpoint_discontinuity.sql",
           ].includes(migration.path),
       ),
     };
