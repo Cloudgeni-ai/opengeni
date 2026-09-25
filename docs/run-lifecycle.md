@@ -689,7 +689,32 @@ therefore starts the next outage at the first backoff step instead of consuming
 a lifetime budget for a long-running turn.
 An explicit provider retry hint is a lower bound. Rate limits use the provider's
 `Retry-After` when present and otherwise wait 60 s; other retryable classes keep
-their existing pacing. Failed session detail includes a bounded `failureDiagnostics` projection through
+their existing pacing.
+An exhausted API-key provider quota is not a rate limit and is never retried:
+a daily or monthly allowance (OpenRouter `free-models-per-day`, requests or
+tokens per day), a used-up quota (`insufficient_quota`, "exceeded your current
+quota", a reached usage limit), an account out of credits (HTTP 402,
+"insufficient balance", `billing_hard_limit_reached`), or a 429 whose own
+provider retry hint exceeds 15 minutes fails the turn at once with
+`provider_quota_exhausted`, `retryable: false`, a `quotaScope` of `daily`,
+`monthly`, `credits` or `quota`, plain-language copy, and the provider text as
+`detail`. Ordinary short limits stay `provider_rate_limited` and retryable: an
+explicit per-minute window (including snake_case metric ids such as Vertex
+`requests_per_minute_per_project`), quota wording whose provider retry hint is at
+most 60 s (Gemini reports per-minute limits with the same "exceeded your current
+quota" sentence), and Google's bare `RESOURCE_EXHAUSTED`, which Google sends
+with every 429 including short dynamic-shared-quota refusals.
+`@opengeni/runtime`'s `provider-quota.ts` is the single classifier and evidence
+reader (`classifyProviderQuotaError`): clients with OpenAI SDK retries enabled
+classify a 429 as the exact `APIError` the SDK will throw and mark an exhausted
+one `x-should-retry: false`, so the SDK veto and the worker never disagree about
+one response. Codex and SuperGrok subscription transports keep their own quota
+semantics (credential rotation and durable capacity waits) and never classify
+here; the loose "429 ... usage limit" Codex cap wording counts as a Codex cap
+only on a Codex transport error or an explicit `usage_limit_reached` type. A
+quota refusal of a compaction request likewise ends as a terminal
+`context_compaction_failed` with active history preserved instead of retrying,
+and carries the same closed `quotaScope` marker. Failed session detail includes a bounded `failureDiagnostics` projection through
 its durable event cursor. The browser uses it independently of retained timeline
 pages; a newer accepted live failure supersedes it while detail refreshes. The
 banner displays `providerRecoveryCount` only as the final consecutive automatic
@@ -2227,9 +2252,14 @@ operation replays before mutable model/billing checks, even after work advances.
 
 The web failure banner is presentation over the stored event, which it never
 rewrites. Uncoded provider failures and `provider_rate_limited` /
-`provider_unavailable` get short plain-language copy (rejected credentials,
-provider billing or access, a used-up daily limit, quota, rate limiting) with the
-exact recorded text behind a Details toggle. A bare leading HTTP status is
+`provider_unavailable` / `provider_quota_exhausted` get short plain-language copy
+(rejected credentials, provider billing or access, a used-up daily limit, quota,
+rate limiting) with the exact recorded text behind a Details toggle. A closed
+`quotaScope` marker, on a quota turn failure or a quota-refused compaction, picks
+the daily, monthly, credits or quota copy directly; the `failureDiagnostics`
+projection carries it only as one of those four literals. Every
+billing, access, limit and quota class points at the model picker ("Choose
+another model below.") while the session still has the failed model selected. A bare leading HTTP status is
 classified only for 401, 402, 403 and 429; any other status keeps its recorded
 wording. Retry stays hidden only for rejected credentials, and only while the
 same model is selected: it stays hidden for that failure on that model even
