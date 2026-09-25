@@ -37,16 +37,19 @@ export function FailedSessionBanner({
 }) {
   const structuralFailure = Boolean(failure.structuralSandboxFailure);
   const billingFailure = creditExhausted && !structuralFailure;
-  const { reason, unavailableModel } = failedSessionCopy(
+  const { reason, unavailableModel, retryUnhelpful, detail } = failedSessionCopy(
     failure,
     billingFailure,
     modelChanged,
     canChooseModel && !structuralFailure,
   );
+  // Retrying the same request on the same model cannot fix a missing model or
+  // rejected credentials; a new model can. Billing, access and limit failures
+  // keep Retry because their condition can clear.
   const retryActions =
     actions &&
     !failure.safetyRefusal &&
-    (!unavailableModel || modelChanged || actions.retryInput) ? (
+    (!(unavailableModel || retryUnhelpful) || modelChanged || actions.retryInput) ? (
       <FailedSessionActions {...actions} />
     ) : null;
   return (
@@ -57,6 +60,16 @@ export function FailedSessionBanner({
       >
         <AlertTriangleIcon aria-hidden="true" className="size-3.5 shrink-0" />
         <span className="min-w-0 break-words">{reason}</span>
+        {detail ? (
+          <details className="group min-w-0 max-w-full text-xs open:basis-full">
+            <summary className="cursor-pointer select-none text-fg-subtle hover:text-fg-muted">
+              Details
+            </summary>
+            <p className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-2xs text-fg-muted">
+              {detail}
+            </p>
+          </details>
+        ) : null}
         {billingFailure ? (
           workspaceId && canBuyCredits ? (
             <Button asChild size="sm" variant="ghost">

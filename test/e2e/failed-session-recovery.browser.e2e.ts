@@ -80,7 +80,7 @@ for (const unsupported of [true, false]) {
       await Promise.race([
         banner.waitFor({ timeout: 45_000 }),
         page
-          .getByText("Something went wrong!", { exact: true })
+          .getByRole("heading", { name: /^(Something went wrong|OpenGeni has been updated)$/ })
           .waitFor({ timeout: 45_000 })
           .then(() => {
             throw new Error("Route failed");

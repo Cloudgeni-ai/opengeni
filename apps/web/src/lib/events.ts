@@ -73,7 +73,31 @@ export type SessionFailureSummary = {
   detailsTruncated?: boolean;
   /** Typed sandbox evidence suppresses generic execution/model remedies, never grants recovery. */
   structuralSandboxFailure?: boolean;
+  /** Exact recorded provider/engine text, before any humanizing. Shown only behind a details toggle. */
+  recordedDetail?: string | null;
+  /** Recorded failure code, when the worker classified the failure. */
+  failureCode?: string | null;
 };
+
+/** The stored failure text and code exactly as recorded (presentation input, never rewritten). */
+function recordedFailureFacts(payload: Record<string, unknown>): {
+  recordedDetail?: string;
+  failureCode?: string;
+} {
+  const text = (key: string): string | null => {
+    const value = payload[key];
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  };
+  const parts = [text("error") ?? text("message"), text("lastRetryableError") ?? text("detail")];
+  const recorded = parts.filter(
+    (part, index): part is string => part !== null && parts.indexOf(part) === index,
+  );
+  const code = text("code");
+  return {
+    ...(recorded.length > 0 ? { recordedDetail: recorded.join("\n") } : {}),
+    ...(code ? { failureCode: code } : {}),
+  };
+}
 
 /**
  * Failure honesty for the session header/banner: the latest failure reason
@@ -116,6 +140,7 @@ export function summarizeSessionFailure(
       failedAt: diagnostics?.occurredAt ?? null,
       failureEventId: diagnostics?.eventId ?? null,
       consecutiveRecoveryCount: failureRecoveryStreak(payload),
+      ...recordedFailureFacts(payload),
       ...(structuralSandboxFailure(payload, events, diagnostics?.turnId, diagnostics?.sequence)
         ? { structuralSandboxFailure: true }
         : {}),
@@ -133,6 +158,7 @@ export function summarizeSessionFailure(
   let consecutiveRecoveryCount: number | null = null;
   let latestFailedTurnId: string | null = null;
   let structuralFailure = false;
+  let recorded: ReturnType<typeof recordedFailureFacts> = {};
   for (const event of events) {
     if (event.type === "turn.failed") {
       latestFailedTurnId = event.turnId ?? null;
@@ -147,6 +173,7 @@ export function summarizeSessionFailure(
       failedAt = event.occurredAt;
       failureEventId = event.id;
       structuralFailure = structuralSandboxFailure(payload, events, event.turnId, event.sequence);
+      recorded = recordedFailureFacts(payload);
     }
     if (event.type === "session.status.changed") {
       const payload = event.payload as Record<string, unknown>;
@@ -167,6 +194,7 @@ export function summarizeSessionFailure(
         failedAt = event.occurredAt;
         failureEventId = event.id;
         structuralFailure = structuralSandboxFailure(payload, events, event.turnId, event.sequence);
+        recorded = recordedFailureFacts(payload);
       }
     }
   }
@@ -177,6 +205,7 @@ export function summarizeSessionFailure(
     failureEventId,
     consecutiveRecoveryCount,
     ...(structuralFailure ? { structuralSandboxFailure: true } : {}),
+    ...recorded,
   };
 }
 

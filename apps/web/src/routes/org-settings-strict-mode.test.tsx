@@ -9,6 +9,7 @@ import * as SonnerPackage from "sonner";
 import * as ReactPackage from "@opengeni/react";
 import * as RouterPackage from "@tanstack/react-router";
 import * as ContextModule from "@/context";
+import * as AnalyticsModule from "@/lib/analytics";
 import type { CompanyProfileAgentPolicy } from "@/types";
 
 const accountId = "account-strict";
@@ -17,6 +18,9 @@ const otherAccountId = "account-other";
 const otherWorkspaceId = "workspace-other";
 const timestamp = "2026-08-20T10:00:00.000Z";
 const toastError = mock((_message: string) => undefined);
+const toastSuccess = mock((_message: string, _options?: unknown) => undefined);
+const navigate = mock(async (_options: unknown) => undefined);
+const captureAnalyticsEvent = mock((_name: string) => true);
 let accountRole: "owner" | "admin" = "owner";
 
 const getBilling = mock(async () => ({
@@ -187,14 +191,16 @@ mock.module("@opengeni/react", () => ({
 mock.module("@tanstack/react-router", () => ({
   ...RouterPackage,
   Link: ({ children }: { children: ReactNode }) => <a href="#organization">{children}</a>,
+  useNavigate: () => navigate,
 }));
+mock.module("@/lib/analytics", () => ({ ...AnalyticsModule, captureAnalyticsEvent }));
 mock.module("sonner", () => ({
   ...SonnerPackage,
   toast: Object.assign(
     mock((_message: string) => undefined),
     {
       error: toastError,
-      success: mock((_message: string) => undefined),
+      success: toastSuccess,
     },
   ),
 }));
@@ -251,6 +257,38 @@ afterAll(() => {
 });
 
 describe("organization billing StrictMode ownership", () => {
+  test("treats a Stripe checkout outcome as one-shot and drops it from the URL", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(<OrgSettingsRoute workspaceId={workspaceId} checkout="success" />),
+      );
+      await flush();
+      expect(toastSuccess).toHaveBeenCalledTimes(1);
+      expect(captureAnalyticsEvent).toHaveBeenCalledTimes(1);
+      expect(captureAnalyticsEvent).toHaveBeenCalledWith("checkout_completed");
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/workspaces/$workspaceId/organization",
+        params: { workspaceId },
+        search: {},
+        replace: true,
+      });
+      // Once the router has dropped the outcome, re-rendering counts nothing.
+      await act(async () => root.render(<OrgSettingsRoute workspaceId={workspaceId} />));
+      await flush();
+      expect(toastSuccess).toHaveBeenCalledTimes(1);
+      expect(captureAnalyticsEvent).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      navigate.mockClear();
+      toastSuccess.mockClear();
+      captureAnalyticsEvent.mockClear();
+    }
+  });
+
   test("shows a negative balance as prior usage rather than available credits", async () => {
     getBilling.mockImplementation(async () => ({
       mode: "stripe",

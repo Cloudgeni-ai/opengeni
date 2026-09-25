@@ -230,6 +230,7 @@ import {
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 import { sanitizeFilename } from "./files";
+import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
 const LIGHTPANDA_DRIVER_ID = "opengeni.lightpanda.cdp.v1";
@@ -4321,6 +4322,7 @@ export function browserScreenshotResponse(
       "cache-control": "no-store",
       "content-type": frame.mediaType,
       "x-opengeni-browser-frame": frame.metadataHeader,
+      ...USER_CONTENT_SECURITY_HEADERS,
     },
   });
 }

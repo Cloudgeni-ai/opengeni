@@ -37,6 +37,8 @@ type PreviewProps = {
   filename?: string;
   /** Explicit opt-in for the workbench; chat and other viewers stay unchanged. */
   workbenchTextPreview?: boolean;
+  /** Let image detail pages fill the available viewer instead of the chat slot. */
+  fullSizeImage?: boolean;
 };
 
 export function RetainedFilePreview(props: PreviewProps) {
@@ -70,6 +72,7 @@ function RetainedFilePreviewBody({
   artifact: initialArtifact,
   title,
   filename,
+  fullSizeImage,
 }: PreviewProps) {
   // The parent remounts on receipt changes, not object allocation on a rerender.
   const [artifact] = useState(initialArtifact);
@@ -132,7 +135,12 @@ function RetainedFilePreviewBody({
   }, [client, key, kind, workspaceId, artifact]);
   if (kind === "image")
     return (
-      <InlineChatImage workspaceId={workspaceId} artifactId={artifact.artifactId} alt={title} />
+      <InlineChatImage
+        workspaceId={workspaceId}
+        artifactId={artifact.artifactId}
+        alt={title}
+        viewer={fullSizeImage}
+      />
     );
   if (!kind)
     return (

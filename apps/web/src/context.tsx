@@ -87,7 +87,7 @@ import {
   retainCreateSessionAttemptAfterFailure,
   type PendingCreateAttempt,
 } from "@/lib/session-create";
-import { isPaymentRequiredError } from "@/lib/model-access-onboarding";
+import { isPaymentRequiredError } from "@/lib/model-access";
 import { hasAccountPermission } from "@/lib/permissions";
 import {
   applySessionPinProjection,
@@ -2788,6 +2788,7 @@ export function RootRouteComponent() {
         {browserAccountsEnabled ? (
           <BrowserAccountsSignedOutPanel
             presentation="embedded"
+            search={window.location.search}
             invitation={organizationInvitationContinuation}
             emptySetRegistrationPanel={
               clientConfig?.managedAuthSessionSetMode === "broker" ||
@@ -2805,6 +2806,7 @@ export function RootRouteComponent() {
         ) : (
           <ManagedAuthPanel
             presentation="embedded"
+            search={window.location.search}
             invitation={organizationInvitationContinuation}
             onDismissInvitation={clearOrganizationInvitationContinuation}
             onSubmit={handleManagedAuth}
@@ -2864,6 +2866,7 @@ export function RootRouteComponent() {
         supergrokEnabled={clientConfig.models.some(
           (catalogModel) => catalogModel.source === "supergrok",
         )}
+        modelDefaults={clientConfig}
         activeEmail={authSession?.user.email ?? null}
         invitation={organizationInvitationContinuation}
         onComplete={revalidatePrincipalAccess}
@@ -2877,6 +2880,7 @@ export function RootRouteComponent() {
           supergrokEnabled={clientConfig.models.some(
             (catalogModel) => catalogModel.source === "supergrok",
           )}
+          modelDefaults={clientConfig}
           activeEmail={authSession?.user.email ?? null}
           invitation={organizationInvitationContinuation}
           onUseInvitedAccount={() => {
@@ -2884,6 +2888,7 @@ export function RootRouteComponent() {
               toast.error("Sign out failed", { description: String(error) }),
             );
           }}
+          onSignOut={handleManagedSignOut}
           onComplete={revalidatePrincipalAccess}
         />
       </Suspense>
@@ -2943,7 +2948,19 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
-      <SignInCallbackNotice userId={authSession?.user.id ?? null} />
+      <SignInCallbackNotice
+        userId={authSession?.user.id ?? null}
+        verificationLinkError={
+          !clientConfig || (managedAuthRequired && authSession === undefined)
+            ? "pending"
+            : managedAuthRequired &&
+                !authSession &&
+                !browserAccountsEnabled &&
+                managedEmailVerificationRequired
+              ? "auth-panel"
+              : "notice"
+        }
+      />
       {clientConfig ? (
         <Suspense fallback={null}>
           <AnalyticsManager

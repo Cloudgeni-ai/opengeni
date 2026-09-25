@@ -22,6 +22,10 @@
       "types": "./src/managed-sign-in-methods.ts",
       "default": "./src/managed-sign-in-methods.ts"
     },
+    "./client-error-report": {
+      "types": "./src/client-error-report.ts",
+      "default": "./src/client-error-report.ts"
+    },
     "./mcp-endpoint": {
       "types": "./src/mcp-endpoint.ts",
       "default": "./src/mcp-endpoint.ts"

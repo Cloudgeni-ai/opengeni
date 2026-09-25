@@ -56,9 +56,10 @@ networkPolicy:
     namespaceSelector: {}
     podSelector: {}
   # Optional: allow a metrics scraper (Prometheus) to reach the relay's
-  # GET /metrics on its wss port. Leave unset to omit the rule (the relay has no
-  # other ingress source than the ingress controller). When the kube-prometheus
-  # ServiceMonitor scrapes from a separate namespace, set both selectors here.
+  # GET /metrics on its wss port and the API's internal api.metricsPort. Leave
+  # unset to omit those rules (the relay has no other ingress source than the
+  # ingress controller). When the kube-prometheus ServiceMonitor scrapes from a
+  # separate namespace, set both selectors here.
   monitoring: {}
     # namespaceSelector:
     #   matchLabels:
@@ -86,6 +87,14 @@ config:
   OPENGENI_AUTH_REQUIRED: "false"
   OPENGENI_AUTH_ALLOW_HEALTH: "true"
   OPENGENI_AUTH_ALLOW_METRICS: "false"
+  # Client source address for every API rate limit and auth session record.
+  # "0" keys on the transport peer and ignores X-Forwarded-For. Behind
+  # ingress-nginx whose controller Service uses externalTrafficPolicy: Local,
+  # with direct API access blocked (networkPolicy.enabled), set "1". See
+  # docs/deployment.md "API request source and auth rate limits". Optionally
+  # restrict the trusted proxy to the controller's address range with
+  # OPENGENI_API_TRUSTED_PROXY_CIDRS (comma-separated CIDRs).
+  OPENGENI_API_TRUSTED_PROXY_HOPS: "0"
   OPENGENI_WEB_ALLOWED_HOSTS: ""
   OPENGENI_PRODUCT_ACCESS_MODE: local
   # Rolling-safe default. First deploy the compatible web handler, dedicated
@@ -131,6 +140,10 @@ config:
   # Optional non-secret JSON values may be supplied here:
   # OPENGENI_MODEL_COST_POLICY_JSON: '{"model-id":"free"}'
   # OPENGENI_MODEL_NOTES_JSON: '{"model-id":"One-line agent guidance."}'
+  # Default for new work while an organization holds OpenGeni credits and has
+  # no connected subscription (see docs/model-providers.md):
+  # OPENGENI_CREDITS_DEFAULT_MODEL: gpt-6-luna
+  # OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT: xhigh
   OPENGENI_STATIC_ENTITLEMENTS_JSON: "{}"
   OPENGENI_STATIC_USAGE_LIMITS_JSON: "{}"
   OPENGENI_OBJECT_STORAGE_BACKEND: s3-compatible
@@ -223,6 +236,12 @@ api:
     digest: ""
     pullPolicy: IfNotPresent
   containerPort: 8000
+  # Dedicated internal Prometheus listener (OPENGENI_API_METRICS_PORT). GET
+  # /metrics is then served only here, never on containerPort, so an ingress
+  # that forwards every path to the API cannot publish it. It gets its own
+  # ClusterIP Service (never a NodePort) for the ServiceMonitor and scrape
+  # annotations. Set null to keep the legacy /metrics on containerPort.
+  metricsPort: 9464
   resources:
     requests:
       cpu: 250m
@@ -767,6 +786,14 @@ relay:
     customMetrics: []
     behavior: {}
 
+# Kubernetes deletes each finished one-shot chart Job (migrate, catalog-import,
+# and the disposable object-storage initializers) and its pods this many seconds
+# after it completes or fails. Helm hooks already delete succeeded hook Jobs;
+# this bounds the failed ones, which otherwise linger until the next hook run.
+# Keep it long enough to read a failed Job's logs. null (or 0) omits the
+# field, so finished Jobs are kept until something else deletes them.
+jobTtlSecondsAfterFinished: 86400
+
 migrations:
   enabled: true
   priorityClassName: ""
@@ -1019,9 +1046,6 @@ ingress:
           pathType: Prefix
           service: api
         - path: /healthz
-          pathType: Exact
-          service: api
-        - path: /metrics
           pathType: Exact
           service: api
         # The self-hosted agent install surface (get.<domain>). The API serves the

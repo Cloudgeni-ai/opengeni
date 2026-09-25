@@ -81,6 +81,7 @@ import {
   withoutSandboxProviderIdentity,
   type EstablishedSandboxSession,
   type RuntimeMetricsHooks,
+  type SandboxReadinessReplacementOutcome,
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
 import {
@@ -150,6 +151,24 @@ export type SandboxResumeServices = {
   /** Test seam for the bounded command-readiness proof performed before an
    * attached provider box is handed to the agent. */
   verifyAttachedSandboxReadiness?: (established: EstablishedSandboxSession) => Promise<void>;
+  /** Test seam for the bounded command-readiness proof the elected spawner runs
+   * on its freshly created box before publishing the lease warm. Production
+   * uses {@link waitForSandboxExecReadiness} with the shared 60 s budget. */
+  verifySpawnedSandboxReadiness?: (
+    established: EstablishedSandboxSession,
+    identity: { sandboxGroupId: string },
+  ) => Promise<void>;
+  /** Test seam for the jittered pause before the single fresh-box readiness
+   * replacement. Production uses {@link freshSandboxReadinessReplacementDelayMs}.
+   * It may be async so a test can observe the rolled-back lease in between. */
+  freshSandboxReadinessReplacementDelayMs?: () => number | Promise<number>;
+  /**
+   * The turn attempt's fresh-box readiness replacement budget. The lazy
+   * provisioner may call resumeBoxForTurn again after a typed lease
+   * supersession, so the turn creates the budget once and shares it with every
+   * call. Absent, the call gets its own single replacement.
+   */
+  freshSandboxReadinessReplacementBudget?: FreshSandboxReadinessReplacementBudget;
   /** Called only by the observer that wins the exact warm->cold loss CAS. */
   onSandboxLost?: (input: {
     sandboxGroupId: string;
@@ -316,6 +335,80 @@ export class SandboxSiblingWarmingTimeoutError extends SandboxWarmingTimeoutErro
     );
     this.name = "SandboxSiblingWarmingTimeoutError";
   }
+}
+
+/**
+ * Out-of-band proof attached to one exact {@link SandboxExecReadinessTimeoutError}
+ * thrown by the elected spawner: the box that missed its readiness budget was
+ * freshly created by this caller (not an attached, resumed, or provider-continuity
+ * box), it was never published warm, the provider terminated it, and the holder
+ * was released. Only such an error may be replaced by re-entering admission.
+ */
+const disposedUnreadyFreshSandboxErrors = new WeakSet<object>();
+
+/** True only for a spawner readiness timeout whose unready fresh box is proven gone. */
+export function isReplaceableFreshSandboxReadinessTimeout(error: unknown): boolean {
+  return (
+    error instanceof SandboxExecReadinessTimeoutError &&
+    disposedUnreadyFreshSandboxErrors.has(error)
+  );
+}
+
+/**
+ * A burst of simultaneous turn starts can leave many freshly created provider
+ * boxes command-unready at once. The single replacement re-enters admission
+ * after a jittered pause so the replacement creates do not re-synchronize into
+ * the same burst. Bounded to [2 s, 10 s).
+ */
+export const FRESH_SANDBOX_READINESS_REPLACEMENT_BASE_DELAY_MS = 2_000;
+export const FRESH_SANDBOX_READINESS_REPLACEMENT_JITTER_MS = 8_000;
+
+export function freshSandboxReadinessReplacementDelayMs(
+  random: () => number = Math.random,
+): number {
+  const sample = random();
+  const unit = Number.isFinite(sample) ? Math.min(Math.max(sample, 0), 1 - Number.EPSILON) : 0;
+  return (
+    FRESH_SANDBOX_READINESS_REPLACEMENT_BASE_DELAY_MS +
+    Math.floor(unit * FRESH_SANDBOX_READINESS_REPLACEMENT_JITTER_MS)
+  );
+}
+
+/** Replacements allowed per turn attempt, across every resumeBoxForTurn call. */
+export const FRESH_SANDBOX_READINESS_REPLACEMENTS_PER_TURN_ATTEMPT = 1;
+
+export type FreshSandboxReadinessReplacementBudget = { remaining: number };
+
+export function createFreshSandboxReadinessReplacementBudget(): FreshSandboxReadinessReplacementBudget {
+  return { remaining: FRESH_SANDBOX_READINESS_REPLACEMENTS_PER_TURN_ATTEMPT };
+}
+
+function recordFreshSandboxReadinessReplacement(
+  metrics: RuntimeMetricsHooks | undefined,
+  backend: string,
+  outcome: SandboxReadinessReplacementOutcome,
+): void {
+  try {
+    metrics?.onSandboxReadinessReplacement?.({ backend, outcome });
+  } catch {
+    // Metrics emission must never affect sandbox recovery or error propagation.
+  }
+}
+
+async function sleepUnlessCancelled(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
+  if (signal?.aborted) return false;
+  if (ms <= 0) return true;
+  return await new Promise<boolean>((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /** The exact attached caller that won warm->cold after proving the provider
@@ -1057,8 +1150,99 @@ async function persistWarmWorkspaceSnapshot(
  * holderId is the globally unique durable turn-attempt id. It must not be a
  * Temporal activity id, because activity ids are only workflow-local and
  * collide when sibling sessions share one sandbox group.
+ *
+ * A freshly created box that misses its bounded command-readiness budget is
+ * replaced at most once per turn attempt (the budget is shared by every call
+ * the turn's provisioner makes). The first establish has already terminated that exact
+ * unpublished box, rolled its exact warming epoch back to cold (advancing the
+ * epoch), and released its holder, so the replacement is an ordinary new
+ * admission: it re-runs the cold->warming CAS, persists its own provider
+ * instance before readiness, and may instead attach to a sibling that won the
+ * CAS first. Nothing model- or tool-visible ran on the discarded box, so no
+ * side effect is replayed. A second readiness timeout fails the turn exactly
+ * as before; attached/resumed boxes and unconfirmed terminations never
+ * replace.
  */
 export async function resumeBoxForTurn(
+  services: SandboxResumeServices,
+  ids: ResumeBoxIds,
+  kind: "turn",
+  holderId: TurnSandboxLeaseHolderId,
+): Promise<ResumedTurnSandbox> {
+  try {
+    return await resumeBoxForTurnOnce(services, ids, kind, holderId);
+  } catch (error) {
+    if (!isReplaceableFreshSandboxReadinessTimeout(error)) throw error;
+    const readiness = error as SandboxExecReadinessTimeoutError;
+    const warn = (message: string, fields: Parameters<Observability["warn"]>[1]) => {
+      if (services.observability) services.observability.warn(message, fields);
+      else console.warn(message, fields);
+    };
+    const identity = {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      sandboxGroupId: ids.sandboxGroupId,
+      backend: readiness.backend,
+      instanceId: readiness.instanceId,
+      readinessTimeoutMs: readiness.timeoutMs,
+    };
+    const budget =
+      services.freshSandboxReadinessReplacementBudget ??
+      createFreshSandboxReadinessReplacementBudget();
+    if (budget.remaining <= 0) {
+      recordFreshSandboxReadinessReplacement(
+        services.sandboxMetrics,
+        readiness.backend,
+        "budget_spent",
+      );
+      warn(
+        "sandbox command-readiness timed out on a fresh box; this turn attempt already used its replacement",
+        identity,
+      );
+      throw error;
+    }
+    budget.remaining -= 1;
+    const delayMs = await (
+      services.freshSandboxReadinessReplacementDelayMs ?? freshSandboxReadinessReplacementDelayMs
+    )();
+    warn("sandbox command-readiness timed out on a fresh box; replacing it once after jitter", {
+      ...identity,
+      replacementDelayMs: delayMs,
+    });
+    if (!(await sleepUnlessCancelled(delayMs, services.cancellationSignal))) {
+      // Cancellation owns the turn boundary; surface the original typed
+      // readiness failure rather than starting a replacement.
+      recordFreshSandboxReadinessReplacement(
+        services.sandboxMetrics,
+        readiness.backend,
+        "cancelled",
+      );
+      throw error;
+    }
+    try {
+      const replaced = await resumeBoxForTurnOnce(services, ids, kind, holderId);
+      recordFreshSandboxReadinessReplacement(
+        services.sandboxMetrics,
+        readiness.backend,
+        "replaced",
+      );
+      return replaced;
+    } catch (replacementError) {
+      recordFreshSandboxReadinessReplacement(
+        services.sandboxMetrics,
+        readiness.backend,
+        services.cancellationSignal?.aborted
+          ? "cancelled"
+          : replacementError instanceof SandboxExecReadinessTimeoutError
+            ? "failed_again"
+            : "replacement_failed",
+      );
+      throw replacementError;
+    }
+  }
+}
+
+async function resumeBoxForTurnOnce(
   services: SandboxResumeServices,
   ids: ResumeBoxIds,
   kind: "turn",
@@ -1656,11 +1840,17 @@ export async function resumeBoxForTurn(
       // A sandbox handle is not sufficient evidence that an asynchronous
       // provider's command router is live. Do not publish a warm lease until
       // one bounded no-op exec works.
-      // On timeout the catch below terminates the box and rolls warming -> cold,
-      // so the next turn cold-creates instead of hanging forever on first use.
-      await waitForSandboxExecReadiness(established, MODAL_EXEC_READINESS_TIMEOUT_MS, {
-        sandboxGroupId: ids.sandboxGroupId,
-      });
+      // On timeout the catch below terminates the box and rolls warming -> cold;
+      // resumeBoxForTurn may then replace a proven-terminated fresh box once.
+      if (services.verifySpawnedSandboxReadiness) {
+        await services.verifySpawnedSandboxReadiness(established, {
+          sandboxGroupId: ids.sandboxGroupId,
+        });
+      } else {
+        await waitForSandboxExecReadiness(established, MODAL_EXEC_READINESS_TIMEOUT_MS, {
+          sandboxGroupId: ids.sandboxGroupId,
+        });
+      }
       await maybeRenewProviderExpiration(true);
       throwIfReleasedOrCancelled();
       // Fold the LIVE box into a re-resumable envelope and persist it as the
@@ -1796,6 +1986,16 @@ export async function resumeBoxForTurn(
       }
       await release();
       recordSandboxWarmingTimeout(services.sandboxMetrics, error);
+      if (
+        terminated &&
+        createdEstablished &&
+        error instanceof SandboxExecReadinessTimeoutError &&
+        error.instanceId === createdEstablished.instanceId &&
+        (createdEstablished.origin === "created" || createdEstablished.origin === "restored") &&
+        !createdEstablished.providerContinuity
+      ) {
+        disposedUnreadyFreshSandboxErrors.add(error);
+      }
       throw sandboxProvisionStageError(rematerialization ? "archive_recovery" : "create", error);
     }
   }

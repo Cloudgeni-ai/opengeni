@@ -84,6 +84,17 @@ secret:
 
 networkPolicy:
   enabled: true
+  # When NetworkPolicy is enforced, only the bundled collector and these
+  # selectors reach the API's internal metrics port (api.metricsPort). Set
+  # them when a Prometheus outside the release scrapes the API (ServiceMonitor
+  # or scrape annotations), or its API target goes down.
+  # monitoring:
+  #   namespaceSelector:
+  #     matchLabels:
+  #       kubernetes.io/metadata.name: monitoring
+  #   podSelector:
+  #     matchLabels:
+  #       app.kubernetes.io/name: prometheus
 
 postgres:
   enabled: false
@@ -148,11 +159,12 @@ config:
   OPENGENI_AUTH_ALLOW_HEALTH: "true"
   OPENGENI_AUTH_ALLOW_METRICS: "false"
   OPENGENI_WEB_ALLOWED_HOSTS: opengeni.example.com
-  # Cross-origin allow-list for the API. The code wraps this as ^(?:<value>)$,
-  # so it is an unanchored exact-alternation regex (no leading ^ / trailing $).
-  # Covers localhost dev plus the managed staging and production app origins
-  # (a single universal value is fine across staging and prod).
-  OPENGENI_CORS_ALLOW_ORIGIN_REGEX: 'https?://(localhost|127\.0\.0\.1)(:\d+)?|https://staging\.app\.opengeni\.ai|https://geni-staging\.app\.opengeni\.ai|https://app\.opengeni\.ai'
+  # Origins allowed to send browser cookies to the API cross-origin
+  # (credentialed CORS). The code wraps this as ^(?:<value>)$, so it is an
+  # unanchored exact-alternation regex (no leading ^ / trailing $). List only
+  # web origins you operate; every other origin still gets non-credentialed
+  # CORS for bearer-token SDK calls. `[.]` matches a literal dot.
+  OPENGENI_CORS_ALLOW_ORIGIN_REGEX: 'https://opengeni[.]example[.]com'
   OPENGENI_PRODUCT_ACCESS_MODE: configured
   OPENGENI_BILLING_MODE: disabled
   OPENGENI_ENTITLEMENTS_MODE: none
@@ -195,9 +207,6 @@ ingress:
           pathType: Prefix
           service: api
         - path: /healthz
-          pathType: Exact
-          service: api
-        - path: /metrics
           pathType: Exact
           service: api
         # get.<domain> install-script + device-enrollment routes served by the

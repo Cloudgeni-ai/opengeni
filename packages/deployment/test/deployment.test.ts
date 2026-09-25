@@ -22,6 +22,7 @@ import {
   WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV,
   MCP_OAUTH_PASSTHROUGH_ENV,
+  API_REQUEST_SOURCE_PASSTHROUGH_ENV,
   SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV,
   SecretDeliveryMode,
   stackPlanFor,
@@ -220,6 +221,34 @@ describe("deployment contract", () => {
     expect(outputs).toContain('output "observability"');
   });
 
+  test("Azure Terraform models managed Postgres availability, connection limits, and saturation alerts", () => {
+    const variables = readFileSync(
+      new URL("../../../deploy/terraform/azure/variables.tf", import.meta.url),
+      "utf8",
+    );
+    const main = readFileSync(
+      new URL("../../../deploy/terraform/azure/main.tf", import.meta.url),
+      "utf8",
+    );
+
+    expect(variables).toContain('variable "managed_postgres_availability"');
+    expect(variables).toContain('variable "managed_postgres_alerts"');
+    // Whitespace-tolerant: terraform fmt realigns the object when attributes change.
+    expect(variables).toMatch(/max_connections\s*=\s*optional\(number\)/);
+    expect(variables).toMatch(/update_timeout\s*=\s*optional\(string\)/);
+    expect(main).toContain('dynamic "high_availability"');
+    expect(main).toContain('dynamic "timeouts"');
+    expect(main).toContain('dynamic "maintenance_window"');
+    expect(main).toContain("high_availability[0].standby_availability_zone");
+    expect(main).toContain(
+      'resource "azurerm_postgresql_flexible_server_configuration" "max_connections"',
+    );
+    expect(main).toContain('resource "azurerm_monitor_metric_alert" "postgres_cpu"');
+    expect(main).toContain('resource "azurerm_monitor_metric_alert" "postgres_connections"');
+    expect(main).toContain('metric_name      = "active_connections"');
+    expect(main).toContain('metric_name      = "cpu_percent"');
+  });
+
   test("models AWS and GCP managed profiles with native object storage", () => {
     const aws = deploymentProfiles["aws-managed"];
     const gcp = deploymentProfiles["gcp-managed"];
@@ -306,11 +335,12 @@ describe("deployment contract", () => {
   test("renders MCP OAuth settings and requires its canonical public origin when enabled", () => {
     const enabledEnv = {
       OPENGENI_MCP_OAUTH_ENABLED: "true",
-      OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2",
+      OPENGENI_API_TRUSTED_PROXY_HOPS: "2",
+      OPENGENI_API_TRUSTED_PROXY_CIDRS: "10.224.0.0/16",
       OPENGENI_PUBLIC_BASE_URL: "http://localhost:8000",
     };
     const enabledVars = requiredRuntimeEnvVars(deploymentProfiles["local-kubernetes"], enabledEnv);
-    for (const key of MCP_OAUTH_PASSTHROUGH_ENV) {
+    for (const key of [...MCP_OAUTH_PASSTHROUGH_ENV, ...API_REQUEST_SOURCE_PASSTHROUGH_ENV]) {
       expect(enabledVars).toContain(key);
     }
     expect(enabledVars).toContain("OPENGENI_PUBLIC_BASE_URL");
@@ -321,9 +351,11 @@ describe("deployment contract", () => {
       enabledEnv,
     );
     expect(enabled.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_ENABLED=true");
-    expect(enabled.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS=2");
+    expect(enabled.runtimeEnv).toContain("OPENGENI_API_TRUSTED_PROXY_HOPS=2");
     expect(enabled.helmValuesYaml).toContain('OPENGENI_MCP_OAUTH_ENABLED: "true"');
-    expect(enabled.helmValuesYaml).toContain('OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2"');
+    expect(enabled.helmValuesYaml).toContain('OPENGENI_API_TRUSTED_PROXY_HOPS: "2"');
+    expect(enabled.runtimeEnv).toContain("OPENGENI_API_TRUSTED_PROXY_CIDRS=10.224.0.0/16");
+    expect(enabled.helmValuesYaml).toContain('OPENGENI_API_TRUSTED_PROXY_CIDRS: "10.224.0.0/16"');
     expect(enabled.missingEnvVars).not.toContain("OPENGENI_PUBLIC_BASE_URL");
 
     const missingOrigin = generateRuntimeArtifacts(
@@ -336,6 +368,22 @@ describe("deployment contract", () => {
     expect(missingOrigin.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_ENABLED=true");
     expect(missingOrigin.runtimeEnv).toContain("OPENGENI_PUBLIC_BASE_URL=");
     expect(missingOrigin.missingEnvVars).toContain("OPENGENI_PUBLIC_BASE_URL");
+  });
+
+  test("refuses the retired MCP-only trusted proxy hop setting", () => {
+    expect(() =>
+      generateRuntimeArtifacts(
+        deploymentProfiles["local-kubernetes"],
+        {},
+        { OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "1" },
+      ),
+    ).toThrow("renamed to OPENGENI_API_TRUSTED_PROXY_HOPS");
+    const leftoverDefault = generateRuntimeArtifacts(
+      deploymentProfiles["local-kubernetes"],
+      {},
+      { OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "0" },
+    );
+    expect(leftoverDefault.runtimeEnv).not.toContain("TRUSTED_PROXY_HOPS");
   });
 
   test("carries the admitted sandbox warm tariff through runtime and Helm generation", () => {

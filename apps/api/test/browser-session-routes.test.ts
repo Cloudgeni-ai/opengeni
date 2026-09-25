@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import type { FileAsset } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 import { allowedCorsOrigin, validateInteractionRequestOrigin } from "../src/http/cors";
+import { USER_CONTENT_SECURITY_POLICY } from "../src/http/user-content";
 import {
   browserNeedsStandaloneDisplayStack,
   browserFileAuthoritySubjectId,
@@ -73,6 +74,9 @@ describe("BrowserSession route discipline", () => {
       Uint8Array.of(0xff, 0xd8, 0xff, 0xd9),
     );
     expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("content-security-policy")).toBe(USER_CONTENT_SECURITY_POLICY);
+    expect(response.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
   });
 
   test("registers the complete lifecycle, semantic control, diagnostics, and frame surface", async () => {

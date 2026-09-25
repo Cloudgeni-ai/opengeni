@@ -3279,6 +3279,7 @@ describe("connections routes", () => {
     const observability = {
       startSpan: () => ({ end: () => undefined }),
       recordHttpRequest: () => undefined,
+      incrementCounter: () => undefined,
       debug: () => undefined,
       info: () => undefined,
       warn: () => undefined,

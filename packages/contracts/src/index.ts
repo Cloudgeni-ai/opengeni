@@ -73,6 +73,7 @@ export * from "./video-generation";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
+export * from "./signup-attribution";
 export * from "./tool-catalog";
 export * from "./mcp-oauth";
 export * from "./tool-result-spill";
@@ -7723,6 +7724,14 @@ export const NewSessionDraft = z.object({
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   latencyMode: LatencyMode,
+  /**
+   * True when the person chose this model policy (model, reasoning, latency).
+   * False means it follows the resolved default for new chats, so a later
+   * subscription or credit purchase can replace it. Absent on a save from an
+   * older client; the server then treats a draft that names the deployment
+   * default as following the default and any other model as chosen.
+   */
+  modelProvided: z.boolean().optional(),
   /** Absent on legacy drafts; null is explicit provenance for the Default project. */
   selectedProjectChannelId: z.string().uuid().nullable().optional(),
   options: NewSessionDraftOptions,
@@ -7739,6 +7748,7 @@ export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
   model: true,
   reasoningEffort: true,
   latencyMode: true,
+  modelProvided: true,
   selectedProjectChannelId: true,
   options: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
@@ -16809,10 +16819,38 @@ export const WorkspaceModelCatalogModel =
   );
 export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogModel>;
 
+/**
+ * Why a new chat or scheduled task without an explicit model gets its default:
+ * a saved workspace default, the first usable connected subscription model, the
+ * configured OpenGeni credits model while the organization holds a credit
+ * balance, or the deployment default.
+ */
+export const DefaultModelSelectionSource = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["workspace", "subscription", "credits", "deployment"]),
+);
+export type DefaultModelSelectionSource = z.infer<typeof DefaultModelSelectionSource>;
+
+export const DefaultModelSelection = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    model: z.string().min(1),
+    reasoningEffort: ReasoningEffort,
+    source: DefaultModelSelectionSource,
+  }),
+);
+export type DefaultModelSelection = z.infer<typeof DefaultModelSelection>;
+
 export const WorkspaceModelCatalogResponse =
   /* @__PURE__ */ defineModelContractSchema(() =>
     z.object({
       models: z.array(WorkspaceModelCatalogModel),
+      /** Default for new chats and scheduled tasks that name no model. */
+      defaultSelection: DefaultModelSelection.optional(),
+      /**
+       * The default this workspace would use once its organization holds an
+       * OpenGeni credit balance. Null when this deployment does not bill
+       * credits.
+       */
+      creditsSelection: DefaultModelSelection.nullable().optional(),
     }),
   );
 export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalogResponse>;

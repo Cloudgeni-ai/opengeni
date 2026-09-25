@@ -95,10 +95,16 @@ tool and permission policy permits `set_session_title`, the production runtime
 removes that operation from the model-visible catalog for the attempt and starts
 one bounded, tool-less title request beside the ordinary response stream. The
 sidecar uses the same resolved provider and credential authority, receives only
-a bounded conversation opener, and is metered as its own model call. The main
-agent does not wait for a title tool result or make a title follow-up model call.
-When the main stream reaches normal settlement, the worker waits for the
-already-running bounded sidecar and joins it without cancelling. Exceptional or
+a bounded conversation opener, and is metered as its own model call. It requests
+the model's lowest runnable reasoning effort with a 512-token output budget,
+which leaves room for reasoning before the title. A response stopped by that
+limit keeps only whole words; if reasoning still uses the whole budget, no title
+is saved and a later eligible turn retries. Inline `<think>` reasoning before the
+answer is dropped. Every provider route sends one direct request outside the
+agent runner, as the compaction summarizer does. The main agent does not wait
+for a title tool result or make a title follow-up model call. When the main
+stream reaches normal settlement, the worker waits for the already-running
+bounded sidecar and joins it without cancelling. Exceptional or
 cancelled exits abort and join any still-pending sidecar. A completed candidate
 then uses the canonical title mutation, which updates the session row and
 appends `session.title_set`. Generation or persistence failure leaves the safe
@@ -106,11 +112,22 @@ pending marker in place, and a human title remains protected from every later
 automatic write. Historical fallback sessions therefore self-heal on their
 next eligible model turn.
 
+The managed OpenRouter free route sends no title request at all. A turn whose
+resolved provider is the deployment-funded OpenRouter provider serving an
+upstream `:free` variant (`isManagedOpenRouterFreeRoute`) spends one deployment
+key's OpenRouter per-minute and per-day request limits, which every user's
+turns share, so the attempt starts no sidecar, promotes no title tool, and
+keeps `set_session_title` out of its catalog while the pending marker remains.
+Web, SDK, and Slack keep showing the safe prompt preview. The next eligible turn
+on any other route, including a workspace or organization OpenRouter
+connection, titles the session.
+
 `OpenGeniRuntime.generateSessionTitle` is a rolling-compatible optional seam.
 Older or custom runtimes that do not implement it retain the prior attempt-local
 `set_session_title` tool plus one-shot model instruction, so an embedding host
 does not silently lose automatic naming during an upgrade. That compatibility
-path remains serialized; the production runtime takes the parallel path.
+path remains serialized; the production runtime takes the parallel path. Neither
+path runs on the managed OpenRouter free route.
 
 Ordinary Send acknowledges locally before transport completion. The composer
 freezes the exact text, annotations, resources, settings, and one
@@ -1447,10 +1464,28 @@ provider instance as soon as create/restore returns, then gives Modal's command
 router a separate 60-second readiness budget before publishing the lease warm.
 The two failures retain different typed stages, group and instance identities,
 and truthful durations; a command-readiness failure is never rewritten as a
-600-second provider-capacity failure. It terminates the unpublished instance,
-rolls only the exact warming epoch back to cold, and fails the turn rather than
-rapidly creating sibling boxes. Any later display/setup failure follows the same
-owned cleanup path.
+600-second provider-capacity failure. It terminates the unpublished instance
+and rolls only the exact warming epoch back to cold. When that instance was
+freshly created by the elected spawner (not an attached, resumed, or
+provider-continuity box) and the provider confirmed its termination, the same
+turn re-enters ordinary lease admission after a jittered 2 to 10 second pause,
+because boxes created in one burst tend to miss readiness together and their
+replacements must not re-synchronize. The budget is one replacement per turn
+attempt, shared by the eager establish and every lazy-provisioner retry of that
+attempt, so a typed lease supersession cannot multiply it. The replacement goes
+through the normal epoch-fenced cold->warming CAS (or attaches to a sibling that
+won it), records its own provider instance before readiness, and replays
+nothing: no model- or tool-visible work ran on the discarded box. An
+archive-restored box is replaced the same way: its failed rematerialization
+leaves the lease cold with a retryable `degraded` restore of the same durable
+revision for the pause, and the replacement re-rematerializes that revision
+under a new rematerialization id. A second readiness miss, a spent budget, an
+unconfirmed termination, or cancellation during the pause fails the turn rather
+than rapidly creating sibling boxes. `opengeni_sandbox_readiness_replacements_total`
+(`outcome`: `replaced`, `failed_again`, `replacement_failed`, `cancelled`,
+`budget_spent`) separates replaced boxes from failed turns; the first miss is
+still counted by `opengeni_sandbox_warming_timeouts_total`. Any later
+display/setup failure follows the same owned cleanup path.
 
 After a managed lease is warm, immutable Sandbox Environment setup has a second, setup-specific
 single-flight boundary. One worker claims the exact `(lease epoch, provider
@@ -1576,6 +1611,13 @@ Model switching is not offered as a filesystem repair. A post-consent observatio
 or authorization failure returns only an unknown-outcome envelope, never newly
 unauthorized session state or a false rejection. The browser retains its immutable
 request, performs read-only status checks, and never resubmits automatically.
+A browser whose recovery read is refused with 403 (not the canonical managed-human
+cookie session, or no session control) treats the lane as not applicable, like an
+unsupported projection: no failed-check notice and no polling, while a
+nonstructural failure keeps its ordinary remedies, still fenced by the Retry
+endpoint. A browser that retains a consent request never takes that shortcut: a
+403 read after consent keeps the fail-closed notice, the retained request, and
+read-only status checks.
 
 Every later agent build reads the durable consent receipt and includes its exact
 filesystem-discontinuity warning in session instructions. This warning is outside
@@ -2183,6 +2225,18 @@ logical turn and settled scheduled occurrences fail closed as unsupported;
 idle credit exhaustion is not a failed-session retry boundary. A committed
 operation replays before mutable model/billing checks, even after work advances.
 
+The web failure banner is presentation over the stored event, which it never
+rewrites. Uncoded provider failures and `provider_rate_limited` /
+`provider_unavailable` get short plain-language copy (rejected credentials,
+provider billing or access, a used-up daily limit, quota, rate limiting) with the
+exact recorded text behind a Details toggle. A bare leading HTTP status is
+classified only for 401, 402, 403 and 429; any other status keeps its recorded
+wording. Retry stays hidden only for rejected credentials, and only while the
+same model is selected: it stays hidden for that failure on that model even
+after the key is fixed, when a new message re-runs the work. Billing, access,
+daily-limit and quota failures keep Retry, because each condition can clear.
+Failures with any other worker code keep their authored wording.
+
 A genuinely new `user.message` can still transition failed → queued and start a
 new turn from stored history. This is a different intent from Try again, and
 clients must not manufacture such a message for retry. Only `cancelled` — an
@@ -2611,7 +2665,11 @@ timestamp. Their labels are limited to the closed provider/backend/outcome and,
 where applicable, phase/count/cache vocabularies; session, turn, request,
 credential, and content values remain only in authenticated durable events.
 Operation durations can nest and overlap; summing them does not produce a
-critical path. `runtime_stream_initialization` measures the enclosing runtime
+critical path. A definite path miss answering a read-only first routed sandbox
+operation (usually repository skill discovery listing an absent
+`.agents/skills`) records the `model_prepare_sandbox_first_routed_*` phases as
+completed; the per-operation sandbox metric keeps its separate `not_found`
+outcome, and writes never qualify. `runtime_stream_initialization` measures the enclosing runtime
 entry, not provider network dispatch. Background MCP connection/catalog work
 starts immediately but does not gate the first request; its measurements use
 `opengeni_tool_background_preparation_duration_seconds` instead of startup

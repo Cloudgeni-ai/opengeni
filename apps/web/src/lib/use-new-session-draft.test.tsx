@@ -472,6 +472,52 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
+  test("a projected default model keeps its follow-the-default marker through Send", async () => {
+    // The server projects a draft that follows the default onto today's
+    // resolved default (for example the credits model after a purchase).
+    let stored = remote(3, { text: "report", model: "free-default", modelProvided: false });
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => ({
+          ...stored,
+          model: "gpt-6-luna",
+          reasoningEffort: "xhigh",
+        }),
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          if (request.expectedRevision !== stored.revision) throw conflict();
+          const { expectedRevision, ...savedEditable } = request;
+          stored = remote(expectedRevision + 1, savedEditable);
+          return stored;
+        },
+      }),
+    );
+    await flush(550);
+    expect(hook.result.current.value).toMatchObject({
+      model: "gpt-6-luna",
+      reasoningEffort: "xhigh",
+      modelProvided: false,
+    });
+    expect(requests).toHaveLength(0);
+
+    await actRun(() => hook.result.current.draft.flushForSend());
+    expect(requests[0]).toMatchObject({
+      expectedRevision: 3,
+      model: "gpt-6-luna",
+      reasoningEffort: "xhigh",
+      modelProvided: false,
+    });
+    await hook.unmount();
+  });
+
+  test("an old-server response without the model marker sends none back", async () => {
+    const hook = await renderDraftHook(client({ getNewSessionDraft: async () => remote(2) }));
+    await flush();
+    expect(Object.hasOwn(hook.result.current.value, "modelProvided")).toBe(false);
+    await hook.unmount();
+  });
+
   test("hydrates and serializes explicit project provenance including Default", async () => {
     const requests: SaveNewSessionDraftRequest[] = [];
     const hook = await renderDraftHook(

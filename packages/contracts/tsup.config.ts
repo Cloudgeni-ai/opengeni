@@ -12,6 +12,7 @@ export default defineConfig({
     "src/host-mcp-bindings.ts",
     "src/atlassian.ts",
     "src/canonical-human-identities.ts",
+    "src/client-error-report.ts",
     "src/connection-authority.ts",
     "src/connector-attachments.ts",
     "src/connector-destinations.ts",

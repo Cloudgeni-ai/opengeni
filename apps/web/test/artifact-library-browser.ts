@@ -95,6 +95,17 @@ try {
     );
     await page.getByRole("link", { name: "Open Project mark", exact: true }).click();
     await page.getByRole("button", { name: "Expand Project mark.svg", exact: true }).waitFor();
+    const imageBounds = await page
+      .getByRole("img", { name: "Project mark.svg", exact: true })
+      .boundingBox();
+    assert.ok(imageBounds, "artifact detail image is visible");
+    if (width === 1440) {
+      assert.ok(imageBounds.width > 800, "image fills the detail viewer width");
+      assert.ok(imageBounds.height > 360, "image is not limited to the chat height");
+    } else {
+      assert.ok(imageBounds.x + imageBounds.width <= width, "image fits the mobile viewport");
+    }
+    await page.screenshot({ path: `${output}/detail-${suffix}.png`, fullPage: true });
     await page.getByRole("button", { name: "Expand Project mark.svg", exact: true }).click();
     await page.getByRole("dialog").waitFor();
     await page.keyboard.press("Escape");

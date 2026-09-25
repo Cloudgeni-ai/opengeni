@@ -18,6 +18,7 @@ import {
 } from "@/lib/browser-account-popup";
 import { readOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
 import { readSignInCallbackError } from "@/lib/sign-in-feedback";
+import { signupAttribution } from "@/lib/signup-attribution";
 
 const browserAccountsApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 
@@ -180,11 +181,15 @@ export function AccountAuthRoute({
               expectedGeneration: projection.generation,
             };
       socialStartAttempt.current = attempt;
+      // First-touch campaign tokens the opener carried into this window's URL;
+      // the server counts them only if the provider callback creates an account.
+      const attribution = signupAttribution();
       const result = await client.startSocialTransaction({
         operationId: attempt.operationId,
         expectedGeneration: attempt.expectedGeneration,
         transactionId: validTransactionId,
         provider,
+        ...(attribution ? { attribution } : {}),
       });
       socialStartAttempt.current = null;
       window.location.assign(result.url);

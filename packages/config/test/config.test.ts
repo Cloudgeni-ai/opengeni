@@ -35,6 +35,7 @@ import {
   startupRetryOptions,
   streamTokenDegraded,
   temporalConnectionOptions,
+  trustedProxyCidrEntries,
 } from "../src";
 
 describe(".env.example", () => {
@@ -116,11 +117,84 @@ describe("optional resource credits and verified signup trial", () => {
   });
 });
 
+describe("API request source settings", () => {
+  test("ignores forwarded client addresses unless proxy hops are explicit", () => {
+    expect(withEnv({}, () => getSettings()).apiTrustedProxyHops).toBe(0);
+  });
+
+  test("bounds explicit trusted proxy hops", () => {
+    expect(
+      withEnv({ OPENGENI_API_TRUSTED_PROXY_HOPS: "2" }, () => getSettings()).apiTrustedProxyHops,
+    ).toBe(2);
+    for (const invalid of ["17", "-1", "1.5", "one"]) {
+      expect(() =>
+        withEnv({ OPENGENI_API_TRUSTED_PROXY_HOPS: invalid }, () => getSettings()),
+      ).toThrow();
+    }
+  });
+
+  test("parses trusted proxy ranges and rejects malformed entries", () => {
+    expect(trustedProxyCidrEntries(" 10.224.0.0/16, 2001:db8::/32 ,192.0.2.1,")).toEqual([
+      { address: "10.224.0.0", prefix: 16, family: "ipv4" },
+      { address: "2001:db8::", prefix: 32, family: "ipv6" },
+      { address: "192.0.2.1", prefix: 32, family: "ipv4" },
+    ]);
+    for (const invalid of [
+      "10.0.0.0/33",
+      "10.0.0.0/",
+      "10.0.0/8",
+      "::/129",
+      "proxy.local",
+      "10.0.0.0/8x",
+    ]) {
+      expect(() => trustedProxyCidrEntries(invalid)).toThrow("OPENGENI_API_TRUSTED_PROXY_CIDRS");
+    }
+  });
+
+  test("refuses the retired MCP-only hop setting instead of ignoring it", () => {
+    for (const value of ["1", "2", " 1 "]) {
+      expect(() =>
+        withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: value }, () => getSettings()),
+      ).toThrow("renamed to OPENGENI_API_TRUSTED_PROXY_HOPS");
+      expect(() =>
+        withEnv(
+          { OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: value, OPENGENI_API_TRUSTED_PROXY_HOPS: "1" },
+          () => getSettings(),
+        ),
+      ).toThrow("renamed to OPENGENI_API_TRUSTED_PROXY_HOPS");
+    }
+    // A leftover "0" from an older .env.example already means the default.
+    for (const value of ["0", ""]) {
+      expect(
+        withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: value }, () => getSettings())
+          .apiTrustedProxyHops,
+      ).toBe(0);
+    }
+  });
+
+  test("requires a proxy hop count before trusting proxy ranges", () => {
+    expect(() =>
+      withEnv({ OPENGENI_API_TRUSTED_PROXY_CIDRS: "10.224.0.0/16" }, () => getSettings()),
+    ).toThrow("requires OPENGENI_API_TRUSTED_PROXY_HOPS");
+    expect(() =>
+      withEnv(
+        { OPENGENI_API_TRUSTED_PROXY_HOPS: "1", OPENGENI_API_TRUSTED_PROXY_CIDRS: "10.224.0.0/33" },
+        () => getSettings(),
+      ),
+    ).toThrow("OPENGENI_API_TRUSTED_PROXY_CIDRS");
+    expect(
+      withEnv(
+        { OPENGENI_API_TRUSTED_PROXY_HOPS: "1", OPENGENI_API_TRUSTED_PROXY_CIDRS: "10.224.0.0/16" },
+        () => getSettings(),
+      ).apiTrustedProxyCidrs,
+    ).toBe("10.224.0.0/16");
+  });
+});
+
 describe("MCP OAuth settings", () => {
   test("defaults off and requires a credential-free public origin when enabled", () => {
     const defaults = withEnv({}, () => getSettings());
     expect(defaults.mcpOauthEnabled).toBe(false);
-    expect(defaults.mcpOauthTrustedProxyHops).toBe(0);
     expect(() => withEnv({ OPENGENI_MCP_OAUTH_ENABLED: "true" }, () => getSettings())).toThrow(
       "OPENGENI_PUBLIC_BASE_URL",
     );
@@ -133,16 +207,6 @@ describe("MCP OAuth settings", () => {
         () => getSettings(),
       ).mcpOauthEnabled,
     ).toBe(true);
-  });
-
-  test("bounds explicit trusted proxy hops", () => {
-    expect(
-      withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2" }, () => getSettings())
-        .mcpOauthTrustedProxyHops,
-    ).toBe(2);
-    expect(() =>
-      withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "17" }, () => getSettings()),
-    ).toThrow();
   });
 
   test("requires HTTPS outside local and test", () => {

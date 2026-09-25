@@ -10,7 +10,7 @@ services:
       POSTGRES_USER: opengeni
       POSTGRES_PASSWORD: opengeni
     ports:
-      - "${OPENGENI_POSTGRES_HOST_PORT:-5432}:5432"
+      - "${OPENGENI_DEV_BIND_HOST:-127.0.0.1}:${OPENGENI_POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -23,8 +23,8 @@ services:
     image: nats:2-alpine
     command: ["-c", "/etc/nats/opengeni.conf"]
     ports:
-      - "${OPENGENI_NATS_HOST_PORT:-4222}:4222"
-      - "${OPENGENI_NATS_MONITOR_HOST_PORT:-8222}:8222"
+      - "${OPENGENI_DEV_BIND_HOST:-127.0.0.1}:${OPENGENI_NATS_HOST_PORT:-4222}:4222"
+      - "${OPENGENI_DEV_BIND_HOST:-127.0.0.1}:${OPENGENI_NATS_MONITOR_HOST_PORT:-8222}:8222"
     volumes:
       - "${OPENGENI_NATS_CONFIG_FILE:-./deploy/nats/local-development.conf}:/etc/nats/opengeni.conf:ro"
     healthcheck:
@@ -61,7 +61,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "${OPENGENI_TEMPORAL_HOST_PORT:-7233}:7233"
+      - "${OPENGENI_DEV_BIND_HOST:-127.0.0.1}:${OPENGENI_TEMPORAL_HOST_PORT:-7233}:7233"
 
   garage:
     image: dxflrs/garage:v2.3.0@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690
@@ -71,7 +71,7 @@ services:
       GARAGE_DEFAULT_SECRET_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
       GARAGE_DEFAULT_BUCKET: opengeni-files
     ports:
-      - "${OPENGENI_GARAGE_HOST_PORT:-3900}:3900"
+      - "${OPENGENI_DEV_BIND_HOST:-127.0.0.1}:${OPENGENI_GARAGE_HOST_PORT:-3900}:3900"
     volumes:
       - ./deploy/garage/local.toml:/etc/garage.toml:ro
       - garage-meta:/var/lib/garage/meta
@@ -91,8 +91,8 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "${OPENGENI_MINIO_HOST_PORT:-9000}:9000"
-      - "${OPENGENI_MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+      - "${OPENGENI_DEV_BIND_HOST:-127.0.0.1}:${OPENGENI_MINIO_HOST_PORT:-9000}:9000"
+      - "${OPENGENI_DEV_BIND_HOST:-127.0.0.1}:${OPENGENI_MINIO_CONSOLE_HOST_PORT:-9001}:9001"
     volumes:
       - minio-data:/data
     healthcheck:

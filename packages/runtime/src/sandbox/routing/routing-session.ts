@@ -27,6 +27,8 @@
 // real `readActiveSandbox` DAO + a backend resolver without coupling the leaf to
 // `@opengeni/db`.
 
+import { SandboxWorkspaceReadNotFoundError } from "@openai/agents/sandbox";
+import { SandboxFilesystemNotFoundError } from "modal";
 import type { ExposedPortEndpoint } from "../stream-port";
 import { ModalCommandStartPreDispatchUnavailableError } from "../providers/modal-command-router-wire";
 import { isDeepStrictEqual } from "node:util";
@@ -373,6 +375,22 @@ export type RoutingSandboxFirstOperationObserver = (
 ) => void;
 
 type RoutingSandboxFirstOperationTiming = Pick<RoutingSandboxFirstOperationObservation, "phases">;
+
+const READ_ONLY_PATH_PROBE_OPERATIONS = new Set(["readFile", "listDir", "pathExists", "viewImage"]);
+
+/** A definite path miss is the provider's authoritative answer to a read-only
+ * probe (repository skill discovery lists absent `.agents/skills` on almost
+ * every turn), not a failed provider operation. Writes never qualify. Only
+ * typed misses count, the same set skill discovery treats as absent: generic
+ * 404 statuses or "not found" text never do. */
+function isReadOnlyPathProbeMiss(op: string, error: unknown): boolean {
+  return (
+    READ_ONLY_PATH_PROBE_OPERATIONS.has(op) &&
+    (isDefinitePathNotFoundError(error) ||
+      error instanceof SandboxWorkspaceReadNotFoundError ||
+      error instanceof SandboxFilesystemNotFoundError)
+  );
+}
 
 function recordFirstOperationPhase(
   timing: RoutingSandboxFirstOperationTiming | undefined,
@@ -1485,6 +1503,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       );
       outcome = "completed";
       return result;
+    } catch (error) {
+      if (isReadOnlyPathProbeMiss(op, error)) outcome = "completed";
+      throw error;
     } finally {
       try {
         firstOperationObserver({
@@ -1677,6 +1698,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
             },
           );
           providerOutcome = "completed";
+        } catch (error) {
+          if (isReadOnlyPathProbeMiss(op, error)) providerOutcome = "completed";
+          throw error;
         } finally {
           recordFirstOperationPhase(
             firstOperationTiming,
@@ -1944,10 +1968,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       return result;
     } catch (error) {
       materializationFailureReason = materializationVerificationDiagnostic(error)?.reason;
-      if (
-        (op === "readFile" || op === "listDir" || op === "pathExists" || op === "viewImage") &&
-        isDefinitePathNotFoundError(error)
-      ) {
+      if (isReadOnlyPathProbeMiss(op, error)) {
         outcome = "not_found";
       }
       throw error;

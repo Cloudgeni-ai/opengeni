@@ -1,5 +1,10 @@
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import { registerFeedbackRoutes } from "./routes/feedback";
+import {
+  CLIENT_ERRORS_PATH,
+  isClientErrorReportRequest,
+  registerClientErrorRoutes,
+} from "./routes/client-errors";
 import { codemodeSessionRequest } from "./codemode";
 import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
@@ -67,7 +72,12 @@ import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError, workspaceControlBusyHttpError } from "./http/api-error";
+import { replaceTrustedClientAddressHeader } from "./http/request-source";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import {
+  boundedRegisteredRouteLabel,
+  registeredHandlerRoutePath,
+} from "./http/registered-route-label";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
   CodexCompactionV2ProviderLockedError,
@@ -145,7 +155,16 @@ import {
   BrowserControlTransportError,
 } from "@opengeni/runtime/sandbox";
 import { requireAccessKey } from "./http/auth";
+import {
+  publicListenerServesMetrics,
+  registerPrometheusMetricsRoute,
+} from "./http/metrics-listener";
 import { allowedCorsOrigin } from "./http/cors";
+import {
+  createLocalBrowserBoundary,
+  localBrowserRequestHost,
+  markLocalInternalDispatch,
+} from "./http/local-browser-boundary";
 import { withAccessGrantSessionRlsContext } from "./access-grant-rls";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
@@ -298,8 +317,11 @@ export function createAppComposition(deps: AppDependencies): {
   const managedEmailTransport =
     deps.managedEmailTransport ?? createManagedEmailTransport(deps.settings);
   assertManagedEmailTransportMetadata(managedEmailTransport);
+  const observability =
+    deps.observability ?? createObservability(deps.settings, { component: "api" });
   const managedAuth =
-    deps.managedAuth ?? createManagedAuth(deps.settings, deps.db, managedEmailTransport);
+    deps.managedAuth ??
+    createManagedAuth(deps.settings, deps.db, managedEmailTransport, { observability });
   const managedAuthSessionAdapter =
     deps.managedAuthSessionAdapter ??
     (managedAuth ? createBetterAuthSessionAdapter(managedAuth, deps.db) : null);
@@ -374,8 +396,6 @@ export function createAppComposition(deps: AppDependencies): {
   // concrete for routes; it throws SandboxResumeError when sandboxBackend=none.
   const sandboxClient = deps.sandboxClient ?? createApiSandboxClient(deps.settings);
   const resumeBoxById = deps.resumeBoxById ?? makeResumeBoxById(sandboxClient);
-  const observability =
-    deps.observability ?? createObservability(deps.settings, { component: "api" });
   if (
     managedAuth &&
     deps.settings.managedAuthSessionSetMode !== "legacy" &&
@@ -433,6 +453,39 @@ export function createAppComposition(deps: AppDependencies): {
       boundedCorrelationId(c.req.header(OPENGENI_CORRELATION_HEADER)) ?? crypto.randomUUID();
     correlationIds.set(c.req.raw, correlationId);
     c.header(OPENGENI_CORRELATION_HEADER, correlationId);
+    await next();
+  });
+
+  // Unauthenticated local mode: admit only requests addressed to this computer
+  // and, when a browser sent them, from this stack's web app (see
+  // http/local-browser-boundary.ts). Runs before CORS so a refused preflight
+  // carries no CORS grant, and logs each distinct refused Host or Origin once
+  // because the browser shows only a generic CORS error. Null outside local
+  // development.
+  const localBrowserBoundary = createLocalBrowserBoundary(deps.settings, {
+    warn: (message, attributes) => observability.warn(message, attributes),
+  });
+  if (localBrowserBoundary) {
+    app.use("*", async (c, next) => {
+      const rejection = localBrowserBoundary.rejection(c.req.raw);
+      if (rejection) {
+        throw new ApiHttpError(rejection.status, {
+          code: "forbidden",
+          message: rejection.message,
+          retryable: false,
+          details: { code: rejection.code },
+        });
+      }
+      await next();
+    });
+  }
+
+  // Better Auth keys its rate limits and session addresses on a request
+  // header. Drop any caller-supplied copy everywhere and stamp the trusted
+  // source address on managed-auth routes before any route derives a Better
+  // Auth request from this one.
+  app.use("*", async (c, next) => {
+    replaceTrustedClientAddressHeader(c, deps.settings, c.req.path.startsWith("/v1/auth/"));
     await next();
   });
 
@@ -499,8 +552,25 @@ export function createAppComposition(deps: AppDependencies): {
       allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin) ? origin : null,
   });
 
+  const localCors = localBrowserBoundary
+    ? cors({
+        ...corsHeaders,
+        credentials: true,
+        origin: (origin, c) =>
+          localBrowserBoundary.originAllowed(origin, localBrowserRequestHost(c.req.raw))
+            ? origin
+            : null,
+      })
+    : null;
+
   app.use("*", (c, next) => {
     const origin = c.req.header("origin");
+    if (localCors) {
+      // The boundary above already refused every other origin. Local mode
+      // never answers with wildcard CORS: a request without credentials acts
+      // as the local user, so any site could otherwise read its responses.
+      return origin ? localCors(c, next) : next();
+    }
     const middleware =
       origin && allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin)
         ? credentialedCors
@@ -517,7 +587,14 @@ export function createAppComposition(deps: AppDependencies): {
     // Git packfiles must stay streaming and can legitimately exceed the JSON
     // request ceiling. The exact closed broker routes apply their own method,
     // content-type, authority, and idle-deadline checks.
-    if (isPersonalGitHubGitBrokerRequest(c.req.method, new URL(c.req.url).pathname)) {
+    const pathname = new URL(c.req.url).pathname;
+    if (isPersonalGitHubGitBrokerRequest(c.req.method, pathname)) {
+      await next();
+      return;
+    }
+    // The anonymous web error beacon enforces its own 512-byte limit on the
+    // streamed body; the generic ceiling would buffer far more first.
+    if (isClientErrorReportRequest(c.req.method, pathname)) {
       await next();
       return;
     }
@@ -540,7 +617,7 @@ export function createAppComposition(deps: AppDependencies): {
 
   app.use("*", async (c, next) => {
     const url = new URL(c.req.url);
-    const route = routeLabel(url.pathname);
+    const route = routeLabel(url.pathname, registeredHandlerRoutePath(c));
     const correlationId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
     const start = performance.now();
     const span = observability.startSpan(
@@ -897,13 +974,13 @@ export function createAppComposition(deps: AppDependencies): {
     return c.json(result, result.ok ? 200 : 503);
   });
 
-  app.get("/metrics", async (c) =>
-    c.text(await observability.prometheusMetrics(), 200, {
-      "content-type": "text/plain; version=0.0.4; charset=utf-8",
-    }),
-  );
+  if (publicListenerServesMetrics(deps.settings)) {
+    registerPrometheusMetricsRoute(app, observability);
+  }
 
   registerMcpOAuthRoutes(app, routeDeps);
+
+  registerClientErrorRoutes(app, { observability, settings: deps.settings });
 
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
@@ -1234,7 +1311,9 @@ export function createAppComposition(deps: AppDependencies): {
     } catch (error) {
       throw codemodeHttpError(error);
     }
-    return app.fetch(forwarded);
+    // The forwarded request drops the caller's Host and names a non-sandbox
+    // path; the request it was built from already passed the local boundary.
+    return app.fetch(markLocalInternalDispatch(forwarded));
   });
 
   app.get("/v1/workspaces/:workspaceId/codemode/catalog", async (c) => {
@@ -1818,6 +1897,21 @@ const routeLabelPatterns: Array<{
   },
   { pattern: /^\/healthz$/, label: "/healthz" },
   { pattern: /^\/readyz$/, label: "/readyz" },
+  // Better Auth answers these behind one `/v1/auth/*` registration, so the
+  // provider endpoints need an explicit closed set to stay distinguishable.
+  {
+    pattern:
+      /^\/v1\/auth\/(sign-up\/email|sign-in\/email|sign-in\/social|sign-out|send-verification-email|verify-email|request-password-reset|reset-password|error|ok)$/,
+    label: (match) => `/v1/auth/${match[1]}`,
+  },
+  { pattern: /^\/v1\/auth\/reset-password\/[^/]+$/, label: "/v1/auth/reset-password/:token" },
+  {
+    pattern: /^\/v1\/auth\/callback\/([^/]+)$/,
+    label: (match) =>
+      match[1] === "google" || match[1] === "github"
+        ? `/v1/auth/callback/${match[1]}`
+        : "/v1/auth/callback/:providerId",
+  },
   { pattern: /^\/traffic-readyz$/, label: "/traffic-readyz" },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/codex\/connect\/start$/,
@@ -1873,6 +1967,7 @@ const routeLabelPatterns: Array<{
   },
   { pattern: /^\/metrics$/, label: "/metrics" },
   { pattern: /^\/v1\/config\/client$/, label: "/v1/config/client" },
+  { pattern: /^\/v1\/client-errors$/, label: "/v1/client-errors" },
   { pattern: /^\/v1\/billing$/, label: "/v1/billing" },
   { pattern: /^\/v1\/billing\/checkout$/, label: "/v1/billing/checkout" },
   { pattern: /^\/v1\/billing\/usage$/, label: "/v1/billing/usage" },
@@ -2631,7 +2726,13 @@ const routeLabelPatterns: Array<{
   },
 ];
 
-export function routeLabel(pathname: string): string {
+/**
+ * Bounded route label for metrics, spans, and request logs. Explicit patterns
+ * keep established label spellings stable; any other request answered by a
+ * registered handler uses that handler's code-owned path template (see
+ * `registeredHandlerRoutePath`). Only unregistered paths fall into `unknown`.
+ */
+export function routeLabel(pathname: string, registeredRoutePath?: string | null): string {
   if (/^\/v1\/workspaces\/[^/]+\/transcriptions$/.test(pathname))
     return "/v1/workspaces/:workspaceId/transcriptions";
   const transcription = pathname.match(
@@ -2652,6 +2753,8 @@ export function routeLabel(pathname: string): string {
       return typeof candidate.label === "string" ? candidate.label : candidate.label(match);
     }
   }
+  const registered = boundedRegisteredRouteLabel(registeredRoutePath);
+  if (registered) return registered;
   return pathname.startsWith("/v1/") ? "/v1/unknown" : "/unknown";
 }
 
@@ -2682,6 +2785,8 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname === "/v1/integrations/slack/commands" ||
     pathname === "/v1/integrations/slack/interactions" ||
     pathname.startsWith("/v1/github/") ||
+    // A stale tab must still report the error that follows a rollout.
+    pathname === CLIENT_ERRORS_PATH ||
     pathname === "/v1/enrollments/device/start" ||
     pathname === "/v1/enrollments/device/poll" ||
     pathname === "/v1/enrollments/token/exchange"
