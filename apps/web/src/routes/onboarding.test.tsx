@@ -963,9 +963,14 @@ describe("organization onboarding UI", () => {
   });
 
   test("after organization create, a positive balance on the credits default replaces the free copy", async () => {
-    const modelDefaults = {
+    const freeModelDefaults = {
       defaultModel: "free-model",
       models: [{ id: "free-model", label: "Free Model", cost: "free" }],
+    } as never;
+    // A deployment whose own default is billed in credits (no free default).
+    const creditsModelDefaults = {
+      defaultModel: "credits-model",
+      models: [{ id: "credits-model", label: "Credits Model", cost: "credits" }],
     } as never;
     const freeModel = {
       ...baseModel,
@@ -989,22 +994,36 @@ describe("organization onboarding UI", () => {
       {
         name: "trial credits",
         billingMode: "stripe" as const,
+        modelDefaults: freeModelDefaults,
         defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "credits" },
         balanceMicros: 10_000_000,
         heading: "Start chatting with OpenGeni credits",
         billingRead: true,
       },
       {
+        // Once the balance reaches zero the server resolves the free
+        // deployment default again, so no balance read is needed.
         name: "credits spent",
         billingMode: "stripe" as const,
-        defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "deployment" },
+        modelDefaults: freeModelDefaults,
+        defaultSelection: { model: "free-model", reasoningEffort: "low", source: "deployment" },
         balanceMicros: 0,
         heading: "Start chatting for free",
+        billingRead: false,
+      },
+      {
+        name: "credits-billed deployment default with zero balance",
+        billingMode: "stripe" as const,
+        modelDefaults: creditsModelDefaults,
+        defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "deployment" },
+        balanceMicros: 0,
+        heading: "Choose how to power your chats",
         billingRead: true,
       },
       {
         name: "free default",
         billingMode: "stripe" as const,
+        modelDefaults: freeModelDefaults,
         defaultSelection: { model: "free-model", reasoningEffort: "low", source: "deployment" },
         balanceMicros: 10_000_000,
         heading: "Start chatting for free",
@@ -1013,6 +1032,7 @@ describe("organization onboarding UI", () => {
       {
         name: "self-hosted",
         billingMode: "disabled" as const,
+        modelDefaults: freeModelDefaults,
         defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "credits" },
         balanceMicros: 10_000_000,
         heading: "Start chatting for free",
@@ -1037,7 +1057,7 @@ describe("organization onboarding UI", () => {
             <OrganizationOnboardingPanel
               client={{ ...setupClient, getWorkspaceModelCatalog, getBilling } as never}
               billingMode={scenario.billingMode}
-              modelDefaults={modelDefaults}
+              modelDefaults={scenario.modelDefaults}
               onComplete={() => undefined}
             />,
           ),
@@ -1072,9 +1092,12 @@ describe("organization onboarding UI", () => {
           expect(container.textContent).toContain(
             "When your credits run out, new chats use Free Model, which is free.",
           );
-        } else {
+        } else if (scenario.heading === "Start chatting for free") {
           expect(container.textContent).toContain("Free Model is set up and free to use");
           expect(container.textContent).not.toContain("of OpenGeni credits included");
+        } else {
+          expect(container.textContent).not.toContain("of OpenGeni credits included");
+          expect(container.textContent).not.toContain("free to use");
         }
       } finally {
         await act(async () => root.unmount());

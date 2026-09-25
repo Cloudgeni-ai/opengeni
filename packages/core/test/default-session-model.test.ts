@@ -12,7 +12,6 @@ import {
   ensureXaiRotationSettings,
   setInitialActiveXaiCredential,
   saveNewSessionDraftInTransaction,
-  VERIFIED_SIGNUP_TRIAL_CREDIT_SOURCE_TYPE,
   workspaceXaiSubscriptionActiveForAuthority,
   XaiAuthorityPoolInactiveError,
   updateCodexRotationSettings,
@@ -327,7 +326,8 @@ async function addTrialCredit(grant: AccessGrant & { workspaceId: string }) {
     workspaceId: grant.workspaceId,
     type: "grant",
     amountMicros: 10_000_000,
-    sourceType: VERIFIED_SIGNUP_TRIAL_CREDIT_SOURCE_TYPE,
+    // Ledger source type of the one-time verified-signup trial grant (migration 0509).
+    sourceType: "verified_signup_trial",
     sourceId: grant.subjectId,
     idempotencyKey: `test:default-model-trial:${grant.workspaceId}`,
   });

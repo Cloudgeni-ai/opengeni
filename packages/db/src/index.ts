@@ -5533,9 +5533,6 @@ export async function getBillingBalance(db: Database, accountId: string): Promis
   });
 }
 
-/** Ledger `source_type` of the one-time verified-signup trial grant (migration 0509). */
-export const VERIFIED_SIGNUP_TRIAL_CREDIT_SOURCE_TYPE = "verified_signup_trial";
-
 /**
  * Whether the organization holds a positive OpenGeni credit balance, whatever
  * its source: a purchase, an operator grant, a test credit, or the one-time
