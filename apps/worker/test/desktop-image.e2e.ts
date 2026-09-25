@@ -148,6 +148,23 @@ describe("P4.1 desktop image — LOCAL build + stack-up assertions", () => {
       expect(runtime.code).toBe(0);
       expect(runtime.out).toContain("RUNTIME_PATH_OK");
 
+      // Debian's python3 is PEP 668 externally managed. An agent's bare pip or
+      // uv install (no venv, no override flag) must still reach the system
+      // interpreter, and the common data/test packages must be preinstalled.
+      const python = await sh(
+        [
+          "cd /workspace",
+          "pip install --dry-run --no-index pytest >/dev/null",
+          "uv pip install --system --dry-run --offline pytest >/dev/null",
+          `python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, pytest, requests'`,
+          "uvx --version >/dev/null",
+          "echo PYTHON_OK",
+        ].join(" && "),
+        120_000,
+      );
+      expect(python.code).toBe(0);
+      expect(python.out).toContain("PYTHON_OK");
+
       // both sockets listen inside the box.
       const socks = await sh(
         "(nc -z localhost 5900 && echo VNC_OK); (nc -z localhost 6080 && echo WS_OK)",
