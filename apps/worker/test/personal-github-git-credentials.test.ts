@@ -70,5 +70,25 @@ describe("personal GitHub Git credential consumer", () => {
         }),
       ),
     ).toBe("http://api:8000");
+    // The launcher's Linux Docker sandbox route on the Compose network gateway.
+    expect(
+      personalGitBrokerOrigin(
+        testSettings({
+          environment: "development",
+          sandboxBackend: "docker",
+          opengeniMcpUrl: "http://172.18.0.1:8000/v1/workspaces/{workspaceId}/mcp",
+        }),
+      ),
+    ).toBe("http://172.18.0.1:8000");
+    // A public plaintext address is still refused.
+    expect(
+      personalGitBrokerOrigin(
+        testSettings({
+          environment: "development",
+          sandboxBackend: "docker",
+          opengeniMcpUrl: "http://203.0.113.10:8000/v1/workspaces/{workspaceId}/mcp",
+        }),
+      ),
+    ).toBeNull();
   });
 });

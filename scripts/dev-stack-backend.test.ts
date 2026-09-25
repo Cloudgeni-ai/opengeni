@@ -284,7 +284,7 @@ describe("development network exposure", () => {
       source.indexOf("docker compose up -d postgres nats temporal garage"),
     );
     expect(resolve).toBeLessThan(source.indexOf("(cd apps/api && bun run dev) &"));
-    expect(source).toContain('register_process "$!" "Docker sandbox route"');
+    expect(source).toContain('register_process "$sandbox_bridge_pid" "Docker sandbox route"');
     expect(source).toContain('OPENGENI_SANDBOX_BRIDGE_PORT="$OPENGENI_API_PORT"');
     expect(source).toContain(
       'OPENGENI_SANDBOX_BRIDGE_API_ORIGIN="http://127.0.0.1:${OPENGENI_API_PORT}"',

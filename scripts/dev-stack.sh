@@ -1268,11 +1268,13 @@ if [ "$sandbox_bridge_mode" != "none" ]; then
         OPENGENI_SANDBOX_BRIDGE_SUBNET="$sandbox_bridge_subnet" \
         OPENGENI_SANDBOX_BRIDGE_API_ORIGIN="http://127.0.0.1:${OPENGENI_API_PORT}" \
         bun scripts/dev-sandbox-bridge.ts serve &
-      register_process "$!" "Docker sandbox route"
-      for _attempt in $(seq 1 100); do
+      sandbox_bridge_pid="$!"
+      register_process "$sandbox_bridge_pid" "Docker sandbox route"
+      for _attempt in $(seq 1 300); do
         curl -fsS -m 1 "${sandbox_bridge_origin}/__opengeni_sandbox_bridge_health" \
           >/dev/null 2>&1 && break
-        sleep 0.05
+        kill -0 "$sandbox_bridge_pid" 2>/dev/null || break
+        sleep 0.1
       done
       curl -fsS -m 1 "${sandbox_bridge_origin}/__opengeni_sandbox_bridge_health" >/dev/null || {
         echo "Could not start the Docker sandbox route on ${sandbox_bridge_origin}. Set OPENGENI_MCP_URL to a sandbox-reachable API address, or OPENGENI_SANDBOX_BACKEND=local." >&2

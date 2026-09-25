@@ -455,20 +455,23 @@ export async function startApi(
     resolveFirstPartyDelegationSecret(settings),
   );
   // WebSocket upgrades below bypass the Hono app, so the local-mode browser
-  // boundary (http/local-browser-boundary.ts) is applied here as well.
+  // boundary (http/local-browser-boundary.ts) is applied to them here; every
+  // other request meets it in the Hono middleware.
   const localBrowserBoundary = createLocalBrowserBoundary(settings);
   const server = Bun.serve<ApiWebSocketConnection>({
     hostname: settings.apiHost,
     port: settings.apiPort,
     idleTimeout: 255,
     fetch: (request, bunServer) => {
-      const localBrowserRejection = localBrowserBoundary?.rejection(request);
-      if (localBrowserRejection) return localBrowserBoundaryResponse(localBrowserRejection);
-      if (interactionFrameProxies.handles(request)) {
-        return interactionFrameProxies.upgrade(request, bunServer);
-      }
-      if (artifactWebSockets.handles(request)) {
-        return artifactWebSockets.upgrade(request, bunServer);
+      const upgrade = interactionFrameProxies.handles(request)
+        ? interactionFrameProxies
+        : artifactWebSockets.handles(request)
+          ? artifactWebSockets
+          : null;
+      if (upgrade) {
+        const localBrowserRejection = localBrowserBoundary?.rejection(request);
+        if (localBrowserRejection) return localBrowserBoundaryResponse(localBrowserRejection);
+        return upgrade.upgrade(request, bunServer);
       }
       return app.fetch(
         request,
