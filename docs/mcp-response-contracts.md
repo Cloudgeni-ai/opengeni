@@ -214,21 +214,21 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `scheduled_tasks_list` | List | Compact, offset-paginated list result; scheduled-task entity bodies are not returned |
 | First-party: `scheduled_task_runs_list` | List | Existing caller-limited run list; not a redundant mutation echo |
 | First-party: `scheduled_tasks_get` | Read | Compact summary by default; optional explicitly bounded entity projection |
-| First-party: `knowledge_search`, `knowledge_browse`, `knowledge_get` | List/read | Bounded canonical entry projection including publication status |
+| First-party: `knowledge_search`, `knowledge_prepare_save`, `knowledge_browse`, `knowledge_get` | List/read | Bounded canonical entry projection including publication status. A model call to `knowledge_search` or `knowledge_prepare_save` receives a compact copy without bookkeeping or repeated preview text; other callers receive the exact result ([details](knowledge.md#model-visible-discovery-results)) |
 | First-party: `sandboxes_list` | List | Existing fleet projection |
 | First-party: `rig_list`, `sessions_list`, `variable_set_list`, deprecated `environment_list` | List | Existing compact list projections; variable values are never returned |
 | First-party: `rig_get`, `session_get` | Read | Existing exact-ID, bounded detail projections |
 | First-party: `session_events` | List/read | Existing paginated and byte-bounded monitoring result |
 | First-party: `session_wait` | Read (blocking) | Byte-bounded per-target compact event summaries plus exact `latestSequence` cursors, own pending-update count, `waitedMs`, `timedOut` |
 | Docs: `list_document_bases` | List | Existing document-base list result |
-| Docs: `search_documents`, `knowledge_search` | List/read | Existing bounded retrieval result |
+| Docs: `search_documents`, `knowledge_search` | List/read | Existing bounded retrieval result; a model call to `knowledge_search` receives the same compact copy as the first-party tool |
 | Docs: `fetch_document_chunk`, `knowledge_fetch` | Read | Explicit chunk read result |
 | First-party: `sandbox_attach`, `sandbox_swap` | Action output | The returned routing target and epoch are the essential result of the action, not an echo of the request |
 | First-party: `run_on` | Action output | Essential remote stdout/read/write result |
 | First-party: `sandbox_provision` | Action output | Essential provisioning or human enrollment result |
 | First-party: `github_connect_link` | Action output | Essential short-lived browser/configuration result |
 | First-party: `github_token` | Action output | Essential short-lived credential result; callers must handle it as a secret |
-| Codemode catalog tools (dynamic selected tool names) | Exact prepared-tool output | Preserve the same result shape returned through model MCP; Codemode adds no proxy/raw-transfer adaptation |
+| Codemode catalog tools (dynamic selected tool names) | Exact prepared-tool output | Preserve the exact executor result; Codemode adds no proxy/raw-transfer adaptation. Model-only projections (the 1 MiB spill and compact Knowledge discovery) never apply to Codemode |
 
 Reads, lists, and action outputs are not converted into receipts: their result
 contains information the caller did not already provide. This work removes

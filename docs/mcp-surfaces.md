@@ -120,6 +120,11 @@ First-party OpenGeni MCP Knowledge tools:
 
 Search published and pending entries before saving; reuse entry IDs and versions
 for corrections and collections across sources. See [Knowledge](knowledge.md).
+A model call to `knowledge_search` or `knowledge_prepare_save` receives a
+compact copy without bookkeeping or repeated preview text, keeping every ID,
+version, status, title, description and excerpt; Codemode and other callers
+receive the exact result. See
+[model-visible discovery results](knowledge.md#model-visible-discovery-results).
 The retired Memory and reviewed-claim tools are not registered for new work.
 
 First-party OpenGeni MCP company-profile tools (separate organization policy):

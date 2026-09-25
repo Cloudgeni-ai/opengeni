@@ -2,9 +2,11 @@ import type { AttemptToolDefinition, AttemptToolExecutionContext } from "@openge
 import {
   ToolResultSpilledReceipt,
   sandboxShellPath,
+  type AttemptToolIdentity,
   type AttemptToolResult as AttemptToolResultValue,
   type ToolResultSpilledReceipt as ToolResultSpilledReceiptValue,
 } from "@opengeni/contracts";
+import { projectKnowledgeToolResultForModel } from "./knowledge-model-projection";
 import { MCP_MAX_TOOL_RESULT_BYTES, mcpSerializedSizeBytes } from "./mcp-network";
 
 export type SpillOversizedModelToolResult = (input: {
@@ -44,23 +46,32 @@ export function spilledModelToolResult(
   };
 }
 
+/**
+ * The single per-caller seam over one executor result. Codemode receives the
+ * exact result. The model receives its model-visible projection (compact
+ * Knowledge discovery output for the exact tool identity) when that fits in
+ * 1 MiB; otherwise the exact result is spilled to a file, as for any tool.
+ * MCP-backed tools are already bounded on their exact result by the MCP
+ * transport cap before this seam runs.
+ */
 export async function projectAttemptToolResultForCaller(
   result: AttemptToolResultValue,
   context: AttemptToolExecutionContext,
   spill?: SpillOversizedModelToolResult,
+  identity?: AttemptToolIdentity,
 ): Promise<AttemptToolResultValue> {
   switch (context.caller.kind) {
     case "codemode":
       return result;
     case "model": {
-      const serializedBytes = mcpSerializedSizeBytes(result);
-      if (serializedBytes <= MCP_MAX_TOOL_RESULT_BYTES) return result;
+      const visible = identity ? projectKnowledgeToolResultForModel(identity, result) : result;
+      if (mcpSerializedSizeBytes(visible) <= MCP_MAX_TOOL_RESULT_BYTES) return visible;
       if (!spill) return modelToolResultOverflowError();
       try {
         return await spill({
           operationId: context.operationId,
           result,
-          serializedBytes,
+          serializedBytes: mcpSerializedSizeBytes(result),
         });
       } catch {
         return modelToolResultOverflowError();
@@ -76,9 +87,10 @@ export async function projectAttemptToolResultForCaller(
 export function wrapAttemptToolExecute(
   execute: AttemptToolDefinition["execute"],
   spill?: SpillOversizedModelToolResult,
+  identity?: AttemptToolIdentity,
 ): AttemptToolDefinition["execute"] {
   return async (args, context) =>
-    await projectAttemptToolResultForCaller(await execute(args, context), context, spill);
+    await projectAttemptToolResultForCaller(await execute(args, context), context, spill, identity);
 }
 
 export function wrapAttemptToolDefinitions(
@@ -87,6 +99,6 @@ export function wrapAttemptToolDefinitions(
 ): AttemptToolDefinition[] {
   return definitions.map((definition) => ({
     ...definition,
-    execute: wrapAttemptToolExecute(definition.execute, spill),
+    execute: wrapAttemptToolExecute(definition.execute, spill, definition.identity),
   }));
 }
