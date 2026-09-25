@@ -286,7 +286,9 @@ describe("code_search tool execution", () => {
       );
       // The Jev-scored pack is still returned, with an unknown status.
       expect(result.isError).toBe(false);
-      expect((result.content[0] as { text: string }).text).toContain("sufficiency check failed");
+      expect((result.content[0] as { text: string }).text).toContain(
+        "evidence rating unknown (check failed)",
+      );
       expect(breaker.isOpen(Date.now())).toBe(true);
     },
   );

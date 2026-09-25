@@ -9,12 +9,13 @@ export const CODE_SEARCH_TOOL_NAME = "code_search";
 
 export const CODE_SEARCH_TOOL_DESCRIPTION =
   "Find where something is implemented, configured or decided in the code under the working directory, in one call " +
-  "instead of many separate searches and file reads. Give one precise question and 6-15 keywords: likely identifiers " +
-  "(camelCase and snake_case), file-name fragments, config keys, error strings and synonyms. Optional subQuestions " +
-  "split a question with distinct parts; optional paths limit the search to directories. It searches the whole " +
-  "workspace in parallel, ranks files and passages with a fast relevance model, follows definitions one level, and " +
-  "returns the most relevant source passages verbatim with file paths and line numbers plus a coverage status. Use " +
-  "its evidence directly and search further only for gaps it reports.";
+  "instead of many separate searches and file reads. Give one precise question and 6-15 keywords: likely identifiers, " +
+  "file-name fragments, config keys, error strings and synonyms. Optional subQuestions split distinct parts (for " +
+  "'is X required?', add one for what could skip or override X); optional paths limit the search. It ranks files and " +
+  "passages with a fast relevance model, follows definitions one level, and returns the best passages verbatim with " +
+  "file paths and line numbers, plus an evidence rating for those passages. The rating cannot see what the search " +
+  "missed: use the passages instead of re-reading them, then check what they do not cover (other entry points, " +
+  "defaults, flags, exceptions) before concluding.";
 
 export const CODE_SEARCH_LIMITS = {
   questionMinChars: 3,

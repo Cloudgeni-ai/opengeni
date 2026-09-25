@@ -216,11 +216,9 @@ describe("runCodeSearch end to end with a fake Jev", () => {
       }
     }
     expect(r.stats.packChars).toBeLessThanOrEqual(4000 * 3.2);
-    expect(
-      r.text.startsWith("code_search: status=sufficient (overall 0.85; s1 0.85, s2 0.85) |"),
-    ).toBe(true);
+    expect(r.text.startsWith("code_search: evidence rating 0.85 (s1 0.85, s2 0.85) |")).toBe(true);
     expect(r.text.split("\n")[0]).toMatch(
-      /^code_search: status=\w+.* \| \d+ passages from \d+ files, ~[\d.k]+ tokens \| [\d.]+s$/,
+      /^code_search: evidence rating .* \| \d+ passages from \d+ files, ~[\d.k]+ tokens \| [\d.]+s$/,
     );
     expect(r.text).toContain("Keywords with zero hits: shouldAutoCompactTurn");
     // wave 1: one Noul per candidate file; wave 2: relevance + 2 coverage Nouls per passage
@@ -376,7 +374,7 @@ describe("failures", () => {
     expect(r.status.error).toMatch(/503/);
     expect(r.statusCheckError).toBeInstanceOf(JevUnavailableError);
     expect(r.text.split("\n")[0]).toMatch(
-      /^code_search: status=unknown \(sufficiency check failed\) \|/,
+      /^code_search: evidence rating unknown \(check failed\) \|/,
     );
     const body = (t: string) => t.split("\n").slice(1).join("\n");
     expect(body(r.text)).toBe(body(good.text));
@@ -394,7 +392,7 @@ describe("failures", () => {
     const r = await runCodeSearch({ question, keywords, workspace: ws, jev: fakeJevClient() });
     expect(r.stats.ripgrepTruncated).toBe(true);
     expect(r.text.split("\n")[0]).toMatch(
-      /^code_search \(partial search: ripgrep output was cut at its size limit; some matches may be missing\): status=/,
+      /^code_search \(partial search: ripgrep output was cut at its size limit; some matches may be missing\): evidence rating /,
     );
   });
 

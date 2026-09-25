@@ -7669,7 +7669,7 @@ function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilt
  * it, so say that plainly rather than relying on the schema description.
  */
 export const CODE_SEARCH_DIRECTIVE =
-  "To find where something is implemented, configured or decided in the code, start with one `code_search` call (a precise question plus 6-15 likely identifiers, file-name fragments, config keys or error strings) instead of a series of separate searches and file reads. Use its passages directly, and search or read further only for gaps it reports.";
+  "To find where something is implemented, configured or decided in the code, start with one `code_search` call (a precise question plus 6-15 likely identifiers, file-name fragments, config keys or error strings) instead of a series of separate searches and file reads. When the question asks whether something is required, enforced or the default, add a subQuestion and keywords for what could skip, bypass or override it. Use the returned passages directly instead of re-reading them. Their evidence rating covers only what the search returned, so spend follow-up searches outside those passages: other entry points to the same outcome (API routes, automatic or self-service paths), defaults, flags, exceptions and its unfollowed leads.";
 
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
   "Default `ogtool list` enumerates every authorized tool with a compact summary, without schemas or an output-size cutoff. " +

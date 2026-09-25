@@ -36,8 +36,11 @@ switched on per deployment or workspace to measure it.
 4. **Leads.** The tool follows up to six definitions named in the best passages,
    one level deep.
 5. **Pack.** Passages that pass are packed within a token budget. A final Jev
-   check labels the pack `sufficient`, `partial` or `insufficient`, so the
-   agent knows whether to search further.
+   check gives the packed passages an evidence rating. The rating cannot see
+   evidence the search missed, so the header, the tool description and the
+   directive all steer follow-up searches outside the pack: other entry points,
+   defaults, flags and exceptions. An earlier `sufficient`/`partial` label read
+   as permission to stop and cost answer completeness in testing.
 
 The engine lives in `@opengeni/jev` and runs in the worker. The workspace sees
 only read-only commands through `SandboxChannelAService`:

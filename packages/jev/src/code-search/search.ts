@@ -724,14 +724,16 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   );
   const wallMs = Math.round(performance.now() - t0);
   const label = partialLabel(session);
+  // A number, not a verdict: "sufficient" read as permission to stop, but the
+  // check only sees the passages the search returned.
   const statusText =
-    status.label === "unknown"
+    status.label === "unknown" || status.overall === null
       ? status.error
-        ? "status=unknown (sufficiency check failed)"
-        : "status=unknown (no sufficiency check)"
-      : `status=${status.label}` +
-        (status.overall !== null
-          ? ` (overall ${r2(status.overall)}${status.subs.length ? "; " + status.subs.map((x, j) => `s${j + 1} ${r2(x)}`).join(", ") : ""})`
+        ? "evidence rating unknown (check failed)"
+        : "evidence rating unknown (no check)"
+      : `evidence rating ${r2(status.overall)}` +
+        (status.subs.length
+          ? ` (${status.subs.map((x, j) => `s${j + 1} ${r2(x)}`).join(", ")})`
           : "");
   const buildText = (packTok: number) => {
     const head = [
@@ -740,7 +742,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     if (subQuestions.length) head.push(subQuestions.map((s, j) => `s${j + 1}: ${s}`).join("\n"));
     head.push(
       body.included.length
-        ? "Passages are verbatim with original line numbers (N| text), grouped by file, best first; rel = relevance, [sN] = covers sub-question N."
+        ? "Passages are verbatim with original line numbers (N| text), grouped by file, best first; rel = relevance, [sN] = covers sub-question N. The rating covers only these passages; it cannot see other entry points, defaults, flags or exceptions the search did not return."
         : "No passage passed verification. Try other keywords (exact identifiers, config keys, error strings) or read the candidates below.",
     );
     return [head.join("\n"), body.body, footer].filter(Boolean).join("\n\n") + "\n";

@@ -62,13 +62,13 @@ ports the validated research tool scout-0.3.1. The ranking, thresholds and defau
    Jev sufficiency check sets the status.
 
 `text` is the rendered pack. Its first line is a status header such as
-`code_search: status=partial (overall 0.55; s1 0.81) | 9 passages from 6 files, ~7.9k tokens | 3.1s`.
+`code_search: evidence rating 0.55 (s1 0.81) | 9 passages from 6 files, ~7.9k tokens | 3.1s`.
 `status` gives the label and scores, and `stats` gives wall time, stage times, counts, workspace calls
 and Jev requests, tokens and cost.
 
 A Jev failure makes the whole search throw. There is no keyword-only fallback, because it lowered
 answer quality in the study. The one exception is a failure of the final sufficiency check: the
-fully Jev-scored pack is still returned, with `status=unknown (sufficiency check failed)` and the
+fully Jev-scored pack is still returned, with `evidence rating unknown (check failed)` and the
 error in `statusCheckError`.
 
 ### Workspace contract
