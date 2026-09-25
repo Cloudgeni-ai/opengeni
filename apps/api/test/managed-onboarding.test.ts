@@ -560,4 +560,46 @@ describe("managed organization onboarding", () => {
     const legacy = createManagedAuth(settings, {} as never, transport)!;
     expect(legacy.options.emailVerification?.autoSignInAfterVerification).toBe(true);
   });
+
+  test("every verification email tells an unsolicited recipient to ignore it", async () => {
+    // The link signs its clicker in, so a recipient who never signed up must
+    // be told not to use it.
+    const sent: Array<{ kind: string; to: string; text: string; html?: string }> = [];
+    const auth = createManagedAuth(settings, {} as never, {
+      sender: "OpenGeni <auth@mail.opengeni.ai>",
+      idempotency: { scope: "test-provider-v1:verify-ignore", retentionSeconds: 86_400 },
+      send: async (message) => {
+        sent.push(message);
+        return { status: "sent", providerMessageId: `test-${sent.length}` };
+      },
+    })!;
+    const user = {
+      id: crypto.randomUUID(),
+      email: "unsolicited@example.test",
+      emailVerified: false,
+      name: "Unsolicited",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await auth.options.emailVerification!.sendVerificationEmail!({
+      user,
+      url: "http://opengeni.test/v1/auth/verify-email?token=signup",
+      token: "signup",
+    });
+    // A repeated sign-up for the same unverified email re-sends verification.
+    await auth.options.emailAndPassword!.onExistingUserSignUp!({ user });
+    expect(sent.map((message) => message.kind)).toEqual([
+      "email_verification",
+      "email_verification",
+    ]);
+    const ignore = "If you did not create an OpenGeni account, ignore this email.";
+    for (const message of sent) {
+      expect(message.to).toBe(user.email);
+      expect(message.text).toContain(ignore);
+      expect(message.html).toContain(ignore);
+      // The link stays the first whitespace-delimited URL in the text body.
+      const link = new URL(message.text.match(/https?:\/\/\S+/u)![0]);
+      expect(link.pathname).toBe("/v1/auth/verify-email");
+    }
+  });
 });

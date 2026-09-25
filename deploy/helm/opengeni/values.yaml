@@ -778,7 +778,8 @@ relay:
 # and the disposable object-storage initializers) and its pods this many seconds
 # after it completes or fails. Helm hooks already delete succeeded hook Jobs;
 # this bounds the failed ones, which otherwise linger until the next hook run.
-# Keep it long enough to read a failed Job's logs. null or 0 disables it.
+# Keep it long enough to read a failed Job's logs. null (or 0) omits the
+# field, so finished Jobs are kept until something else deletes them.
 jobTtlSecondsAfterFinished: 86400
 
 migrations:

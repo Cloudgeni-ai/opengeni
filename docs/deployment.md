@@ -3155,6 +3155,17 @@ helm upgrade --install opengeni deploy/helm/opengeni \
   --set secret.existingSecret=opengeni-runtime
 ```
 
+Upgrade note for clusters that enforce NetworkPolicy: with
+`networkPolicy.enabled=true`, the API NetworkPolicy admits only the bundled
+collector and `networkPolicy.monitoring` to `api.metricsPort`, never the
+`networkPolicy.ingressController` peers. Before the dedicated listener, a
+Prometheus outside the release could scrape the API on its public port through
+the ingress-controller rule, whose default empty selectors admit every pod. If
+such a Prometheus (ServiceMonitor or scrape annotations) scrapes the API, set
+`networkPolicy.monitoring` to its namespace and pod selectors before upgrading;
+otherwise the API target goes down and the `up == 0` availability alert fires.
+The managed example values files carry a commented `monitoring` block.
+
 `ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), a model-aware automatic context-compaction start that remains durably pending for 15 minutes, traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, release-owned turn-worker restarts and crash loops, durable worker-death recovery and exhausted recovery, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Compaction start/completion counters initialize at zero for rate diagnostics; a trigger-maintained exact-attempt pending projection and control-worker freshness gauge preserve alert truth across concurrent activities, terminal skips, and turn-worker restarts without exporting tenant identities. Worker-death recovery outcomes are emitted by the fenced control activity after the durable recovery transaction wins, because the process-local metrics registry of the dead turn worker no longer exists. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
 
 Minimum production dashboards should cover:

@@ -240,13 +240,10 @@ export function createManagedAuth(
       onExistingUserSignUp: async ({ user }) => {
         if (requireEmailVerification && !user.emailVerified) {
           const url = await verificationUrl(settings, user.email);
-          await sendManagedAuthEmail(managedEmailTransport, {
-            kind: "email_verification",
-            to: user.email,
-            subject: "Verify your OpenGeni email",
-            text: `Verify your OpenGeni email: ${url}`,
-            html: `<p>Verify your OpenGeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p>`,
-          });
+          await sendManagedAuthEmail(
+            managedEmailTransport,
+            emailVerificationMessage(user.email, url),
+          );
         }
       },
       sendResetPassword: async ({ user, url }) => {
@@ -267,13 +264,10 @@ export function createManagedAuth(
       // session this would create is discarded there by design.
       autoSignInAfterVerification: settings.managedAuthSessionSetMode === "legacy",
       sendVerificationEmail: async ({ user, url }) => {
-        await sendManagedAuthEmail(managedEmailTransport, {
-          kind: "email_verification",
-          to: user.email,
-          subject: "Verify your OpenGeni email",
-          text: `Verify your OpenGeni email: ${url}`,
-          html: `<p>Verify your OpenGeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p>`,
-        });
+        await sendManagedAuthEmail(
+          managedEmailTransport,
+          emailVerificationMessage(user.email, url),
+        );
       },
       afterEmailVerification: async (user) => {
         await ensureManagedAccessForUser(db, {
@@ -573,6 +567,19 @@ export async function sendManagedAuthEmail(
 ): Promise<void> {
   const result = await transport.send({ ...input, from: transport.sender });
   if (result.status !== "sent") throw new Error(`managed email ${result.status}`);
+}
+
+// Verification can sign the clicker in (autoSignInAfterVerification), so an
+// unsolicited verification email must say plainly that it can be ignored.
+function emailVerificationMessage(to: string, url: string): Omit<ManagedEmailMessage, "from"> {
+  const ignore = "If you did not create an OpenGeni account, ignore this email.";
+  return {
+    kind: "email_verification",
+    to,
+    subject: "Verify your OpenGeni email",
+    text: `Verify your OpenGeni email: ${url}\n\n${ignore}`,
+    html: `<p>Verify your OpenGeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p><p>${ignore}</p>`,
+  };
 }
 
 async function verificationUrl(settings: Settings, email: string): Promise<string> {
