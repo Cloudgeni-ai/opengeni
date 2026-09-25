@@ -13,6 +13,7 @@ import {
   recordOrganizationSetupOutcome,
   signupAttributionFromAuthContext,
 } from "../src/auth/signup-funnel-metrics";
+import { createManagedAuth } from "../src/auth/managed-auth";
 
 function metrics(): Observability {
   return createObservability(testSettings(), { component: "api" });
@@ -95,5 +96,36 @@ describe("sign-up funnel metrics", () => {
     } as unknown as Observability;
     expect(() => recordOrganizationSetupOutcome(failing, "created")).not.toThrow();
     expect(() => recordOrganizationSetupOutcome(undefined, "failed")).not.toThrow();
+  });
+
+  test("a broken or partial metric registry never fails composition or recording", async () => {
+    const throwing = {
+      incrementCounter: () => {
+        throw new Error("registry unavailable");
+      },
+    } as unknown as Observability;
+    // A partial stub (no incrementCounter at all), as some route tests supply.
+    const partial = {} as unknown as Observability;
+    for (const observability of [throwing, partial]) {
+      let funnel: ReturnType<typeof createSignupFunnelMetrics> | undefined;
+      expect(() => {
+        funnel = createSignupFunnelMetrics(observability);
+      }).not.toThrow();
+      await funnel!.recordSignUp({ body: { opengeniAttribution: { ref: "producthunt" } } });
+      expect(() => funnel!.recordSignIn()).not.toThrow();
+      expect(() => funnel!.recordEmailVerified()).not.toThrow();
+    }
+  });
+
+  test("managed app composition survives an observability stub without counters", () => {
+    const partial = { ...metrics(), incrementCounter: undefined } as unknown as Observability;
+    expect(() =>
+      createManagedAuth(
+        { ...testSettings(), productAccessMode: "managed", betterAuthSecret: "x".repeat(32) },
+        {} as never,
+        { send: async () => undefined } as never,
+        { observability: partial },
+      ),
+    ).not.toThrow();
   });
 });

@@ -35,6 +35,9 @@ const SIGNUP_ACQUISITION_METRIC = {
   help: "New managed users by normalized first-touch acquisition source.",
 } as const;
 
+/** The only observability surface funnel telemetry uses. */
+export type SignupFunnelObservability = Pick<Observability, "incrementCounter">;
+
 /** Better Auth request-body / OAuth-state key that carries first-touch attribution. */
 export const SIGNUP_ATTRIBUTION_AUTH_FIELD = "opengeniAttribution";
 
@@ -55,31 +58,34 @@ export function authFunnelMethod(providerId: string | null | undefined): AuthFun
 
 /**
  * Publish every closed series at zero so dashboards and alerts can tell a quiet
- * funnel from missing instrumentation.
+ * funnel from missing instrumentation. Never throws: a metric-registry failure
+ * must not stop managed auth (and with it API startup) from composing.
  */
-export function registerSignupFunnelMetricBaselines(observability: Observability): void {
-  for (const event of AUTH_FUNNEL_EVENTS) {
-    for (const method of AUTH_FUNNEL_METHODS) {
-      observability.incrementCounter({
-        ...AUTH_EVENTS_METRIC,
-        labels: { event, method },
-        amount: 0,
-      });
+export function registerSignupFunnelMetricBaselines(
+  observability: SignupFunnelObservability,
+): void {
+  const baseline = (
+    metric: { name: string; help: string },
+    labels: Record<string, string>,
+  ): void => {
+    try {
+      observability.incrementCounter({ ...metric, labels, amount: 0 });
+    } catch {
+      // Telemetry only; the series appears on its first real increment.
     }
+  };
+  for (const event of AUTH_FUNNEL_EVENTS) {
+    for (const method of AUTH_FUNNEL_METHODS) baseline(AUTH_EVENTS_METRIC, { event, method });
   }
   for (const outcome of ORGANIZATION_SETUP_OUTCOMES) {
-    observability.incrementCounter({
-      ...ORGANIZATION_SETUP_METRIC,
-      labels: { outcome },
-      amount: 0,
-    });
+    baseline(ORGANIZATION_SETUP_METRIC, { outcome });
   }
-  for (const source of SIGNUP_ACQUISITION_SOURCES) {
-    observability.incrementCounter({ ...SIGNUP_ACQUISITION_METRIC, labels: { source }, amount: 0 });
-  }
+  for (const source of SIGNUP_ACQUISITION_SOURCES) baseline(SIGNUP_ACQUISITION_METRIC, { source });
 }
 
-export function createSignupFunnelMetrics(observability: Observability): SignupFunnelMetrics {
+export function createSignupFunnelMetrics(
+  observability: SignupFunnelObservability,
+): SignupFunnelMetrics {
   registerSignupFunnelMetricBaselines(observability);
   const authEvent = (event: AuthFunnelEvent, method: AuthFunnelMethod) => {
     observability.incrementCounter({ ...AUTH_EVENTS_METRIC, labels: { event, method } });
@@ -118,7 +124,7 @@ export function createSignupFunnelMetrics(observability: Observability): SignupF
 
 /** Count one self-service organization setup request outcome. */
 export function recordOrganizationSetupOutcome(
-  observability: Observability | undefined,
+  observability: SignupFunnelObservability | undefined,
   outcome: OrganizationSetupOutcome,
 ): void {
   try {

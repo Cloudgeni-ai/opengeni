@@ -66,6 +66,6 @@ describe("content-free customer journey", () => {
     );
     expect(journeyMilestone("/v1/auth/organization-onboarding", "GET")).toBeNull();
     expect(journeyMilestone("/v1/billing/checkout/extra", "POST")).toBeNull();
-    expect(journeyMilestone("/v1/billing/portal", "POST")).toBeNull();
+    expect(journeyMilestone("/v1/billing/usage-summary", "POST")).toBeNull();
   });
 });

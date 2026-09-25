@@ -56,7 +56,7 @@ describe("HTTP route labels", () => {
       ["GET", "/v1/auth/get-session", "/v1/auth/get-session"],
       ["GET", "/v1/access/me", "/v1/access/me"],
       ["GET", "/v1/billing/usage-summary", "/v1/billing/usage-summary"],
-      ["POST", "/v1/billing/portal", "/v1/billing/portal"],
+      ["GET", "/v1/billing/usage-workspaces", "/v1/billing/usage-workspaces"],
       ["GET", "/v1/workspaces", "/v1/workspaces"],
       ["GET", `/v1/organizations/${ID}/members`, "/v1/organizations/:organizationId/members"],
       [

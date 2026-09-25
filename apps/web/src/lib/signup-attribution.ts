@@ -34,7 +34,7 @@ export const SIGNUP_ATTRIBUTION_PARAMETERS = {
   ref: "ref",
 } as const satisfies Record<keyof SignupAttribution, string>;
 export const SIGNUP_ATTRIBUTION_VALUE_MAX = 100;
-export const SIGNUP_ATTRIBUTION_VALUE = /^[A-Za-z0-9._~:/+ -]+$/;
+export const SIGNUP_ATTRIBUTION_VALUE = /^[A-Za-z0-9._~+-]+$/;
 
 type AttributionKey = keyof typeof SIGNUP_ATTRIBUTION_PARAMETERS;
 

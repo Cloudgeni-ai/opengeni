@@ -48,9 +48,16 @@ describe("sign-up acquisition attribution", () => {
   });
 
   test("attribution values are closed-charset campaign tokens", () => {
-    expect(SignupAttribution.safeParse({ utmCampaign: "launch day 2026" }).success).toBe(true);
-    expect(SignupAttribution.safeParse({ utmContent: "hero/cta:top" }).success).toBe(true);
+    expect(SignupAttribution.safeParse({ utmCampaign: "launch-day_2026" }).success).toBe(true);
+    expect(SignupAttribution.safeParse({ utmSource: "opengeni.ai" }).success).toBe(true);
     expect(SignupAttribution.safeParse({ utmSource: "a?b=c" }).success).toBe(false);
+    // URL-shaped values and free text never pass.
+    expect(SignupAttribution.safeParse({ utmContent: "hero/cta:top" }).success).toBe(false);
+    expect(
+      SignupAttribution.safeParse({ utmSource: "https://intranet.example/path" }).success,
+    ).toBe(false);
+    expect(SignupAttribution.safeParse({ utmCampaign: "Jane Doe" }).success).toBe(false);
+    expect(SignupAttribution.safeParse({ utmCampaign: "launch%20day" }).success).toBe(false);
     expect(SignupAttribution.safeParse({ utmSource: "" }).success).toBe(false);
   });
 });

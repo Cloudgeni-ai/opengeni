@@ -11,7 +11,6 @@ import {
 
 import { createApp } from "../src/app";
 import { createManagedAuth } from "../src/auth/managed-auth";
-import { createSignupFunnelMetrics } from "../src/auth/signup-funnel-metrics";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -227,12 +226,7 @@ describe("managed sign-up funnel metrics", () => {
     const observability = quietObservability();
     const settings = runtimeSettings();
     const { transport } = captureTransport();
-    const auth = createManagedAuth(
-      settings,
-      client.db,
-      transport,
-      createSignupFunnelMetrics(observability),
-    )!;
+    const auth = createManagedAuth(settings, client.db, transport, { observability })!;
     const app = createApp({
       settings,
       db: client.db,

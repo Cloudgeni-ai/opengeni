@@ -327,6 +327,9 @@ describe("analytics providers", () => {
           $session_entry_referring_domain: "private.example",
           utm_source: "producthunt",
           utm_content: "person@sensitive.example",
+          // URL-shaped and free-text campaign values fail the closed token rule.
+          utm_medium: "https://private.example/path",
+          utm_term: "private free text",
           gclid: "sensitive-click",
           ttclid: "sensitive-click",
           _kx: "sensitive-click",

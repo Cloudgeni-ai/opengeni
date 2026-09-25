@@ -17,10 +17,13 @@ export const SIGNUP_ATTRIBUTION_URL_PARAMETERS = {
 export const SIGNUP_ATTRIBUTION_VALUE_MAX_LENGTH = 100;
 
 /**
- * Campaign labels are marketer-chosen tokens. A closed character set keeps
- * free text, email addresses, and URL payloads out of every sink.
+ * Campaign labels are marketer-chosen slug tokens such as `hero-cta` or
+ * `opengeni.ai`. The closed character set has no space, `@`, `:`, `/`, `?`,
+ * `=`, or `%`, so free text, email addresses, and URL payloads are rejected
+ * before they reach any sink. The web boot capture and the session-set social
+ * start request mirror this rule; tests pin each copy to it.
  */
-export const SIGNUP_ATTRIBUTION_VALUE_PATTERN = /^[A-Za-z0-9._~:/+ -]+$/;
+export const SIGNUP_ATTRIBUTION_VALUE_PATTERN = /^[A-Za-z0-9._~+-]+$/;
 
 const SignupAttributionValue = z
   .string()

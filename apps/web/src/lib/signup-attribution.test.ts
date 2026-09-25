@@ -8,6 +8,7 @@ import {
   signupReturnPath,
   takePendingAuthReturn,
 } from "./signup-attribution";
+import { accountAuthPopupPath } from "./browser-account-popup";
 
 function landing(href: string) {
   const replaced: string[] = [];
@@ -70,6 +71,21 @@ describe("first-touch sign-up attribution", () => {
     expect(signupReturnPath("/")).toMatch(/^\/(?!\/)[\w\-.+/@]*(?:\?[\w\-.+/=&%@]*)?$/);
   });
 
+  test("an isolated Add window inherits first-touch tokens and keeps its transaction", () => {
+    const transaction = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    retainSignupAttribution(
+      landing("https://app.opengeni.ai/?mode=signup&ref=producthunt&utm_campaign=hero-cta").target,
+    );
+    const popup = signupReturnPath(accountAuthPopupPath(transaction));
+    expect(popup).toBe(
+      `/account-auth?transaction=${transaction}&utm_campaign=hero-cta&ref=producthunt`,
+    );
+    // The popup is a fresh page: its own boot captures the same first touch.
+    resetSignupAttributionForTests();
+    retainSignupAttribution(landing(`https://app.opengeni.ai${popup}`).target);
+    expect(signupAttribution()).toEqual({ utmCampaign: "hero-cta", ref: "producthunt" });
+  });
+
   test("consumes a return marker once and ignores failed or unknown markers", () => {
     const success = landing(
       "https://app.opengeni.ai/?utm_source=producthunt&auth_event=email_verified#top",
@@ -108,7 +124,16 @@ describe("contract parity", () => {
     expect(local.SIGNUP_ATTRIBUTION_VALUE.source).toBe(
       contract.SIGNUP_ATTRIBUTION_VALUE_PATTERN.source,
     );
-    for (const value of ["producthunt", "launch day", "a@b", "x".repeat(101), "", "hero/cta:1"]) {
+    for (const value of [
+      "producthunt",
+      "hero-cta",
+      "launch day",
+      "a@b",
+      "x".repeat(101),
+      "",
+      "hero/cta:1",
+      "https://intranet.example/path",
+    ]) {
       expect(local.isSignupAttributionValue(value)).toBe(
         contract.SignupAttribution.safeParse({ utmSource: value }).success,
       );

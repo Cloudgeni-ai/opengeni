@@ -77,7 +77,6 @@ import {
   boundedRegisteredRouteLabel,
   registeredHandlerRoutePath,
 } from "./http/registered-route-label";
-import { createSignupFunnelMetrics } from "./auth/signup-funnel-metrics";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
   CodexCompactionV2ProviderLockedError,

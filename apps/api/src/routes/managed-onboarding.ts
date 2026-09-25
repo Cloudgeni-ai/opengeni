@@ -24,8 +24,8 @@ import {
   organizationUserSetupTokenDigest,
   selfServiceOrganizationSetupRequestFingerprint,
 } from "../auth/organization-user-setup";
-import { hashManagedAuthPassword } from "../auth/managed-auth";
 import { recordOrganizationSetupOutcome } from "../auth/signup-funnel-metrics";
+import { hashManagedAuthPassword } from "../auth/managed-auth";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 
 export type ManagedOnboardingRouteOptions = {
