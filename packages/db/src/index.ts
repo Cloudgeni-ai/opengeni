@@ -50734,6 +50734,12 @@ export async function enrollUnobservableCommandIdleDrain(
     const deadlineStopGraceMs = SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS;
     const deadlineRotation =
       initial.rotationReason === "provider_deadline" && initial.rotationRequestedAt !== null;
+    // Normal completion closes an attempt without the interruption-only
+    // quiesced_at receipt. A failed/interrupted owner without that receipt must
+    // remain fenced; a completed and closed owner has finished its own writes.
+    const settledOwnerAt = sql`coalesce(attempt.quiesced_at,
+      case when attempt.state = 'closed' and attempt.outcome = 'completed'
+        then attempt.closed_at else null end)`;
     // Preserve process -> admission -> lease ordering used by settlement.
     const processes = await rawRows<{
       id: string;
@@ -50755,7 +50761,7 @@ export async function enrollUnobservableCommandIdleDrain(
             or (
               process.last_reconcile_outcome = 'provider_error'
               and process.reconcile_attempts >= 5
-              and attempt.quiesced_at is not null
+              and ${settledOwnerAt} is not null
               and exists (
                 select 1 from session_background_commands command
                 where command.retained_process_id = process.id
@@ -50774,8 +50780,8 @@ export async function enrollUnobservableCommandIdleDrain(
               and process.reconcile_attempts >= 1
               and (
                 (process.owner_actor_kind = 'turn' and attempt.state = 'closed'
-                  and attempt.quiesced_at is not null
-                  and greatest(attempt.quiesced_at, process.started_at) < now() -
+                  and ${settledOwnerAt} is not null
+                  and greatest(${settledOwnerAt}, process.started_at) < now() -
                     (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
                 or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
                   and process.started_at < now() -
@@ -50795,8 +50801,8 @@ export async function enrollUnobservableCommandIdleDrain(
               and process.deadline_cancellation_requested_at < now() -
                 (${deadlineStopGraceMs}::bigint * interval '1 millisecond')
               and (
-                (process.owner_actor_kind = 'turn' and attempt.quiesced_at is not null
-                  and greatest(attempt.quiesced_at, process.started_at) < now() -
+                (process.owner_actor_kind = 'turn' and ${settledOwnerAt} is not null
+                  and greatest(${settledOwnerAt}, process.started_at) < now() -
                     (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
                 or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
                   and process.started_at < now() -
