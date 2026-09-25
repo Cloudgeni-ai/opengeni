@@ -2442,6 +2442,7 @@ The runtime secret must provide values such as:
   admins and encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`; do not put
   those keys in Helm values, catalog JSON, or the deployment runtime Secret.
 - `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`; model pricing is also required when `OPENGENI_USAGE_LIMITS_MODE=managed` and any credits model lacks a reviewed built-in price
+  - Point the Stripe webhook endpoint at `/v1/webhooks/stripe` and subscribe it to `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `checkout.session.expired`, the `payment_intent.*` succeeded/failed/canceled events, `charge.refunded`, `refund.*`, `charge.dispute.*`, and `customer.created`/`customer.updated`. Credits are granted only once Stripe reports the Checkout payment `paid` (at completion, or on `async_payment_succeeded` for delayed payment methods). Checkout Sessions without OpenGeni metadata, such as another product sharing the Stripe account, are acknowledged and ignored.
 - sandbox backend credentials when required
 
 Do not commit real secret values.
