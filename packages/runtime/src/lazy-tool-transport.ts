@@ -13,6 +13,7 @@ import {
 import { isSearchableMcpFunctionTool, searchToolPool } from "./codex-tool-search";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "./mcp-network";
 import { notifyModelRequestCapture } from "./model-request-capture";
+import { renderToolGroupDirectory } from "./tool-group-directory";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
 export type LazyToolTransport = "codex_native" | "openai_native" | "generic_dispatch";
@@ -178,6 +179,7 @@ export class LazyToolRuntime {
   private preparedToolsLoaded = false;
   private activeAgent: object | null = null;
   private activeRunContext: unknown;
+  private directoryMessage: { role: "system"; content: string } | undefined;
   readonly controlTools: Tool[];
 
   constructor(
@@ -392,6 +394,18 @@ export class LazyToolRuntime {
 
   private searchableTools(tools: readonly Tool[]): Tool[] {
     return tools.filter((tool) => isFunctionTool(tool) && this.searchableToolNames.has(tool.name));
+  }
+
+  toolGroupContext(): { role: "system"; content: string } | undefined {
+    const content = renderToolGroupDirectory(
+      this.searchableTools(this.currentTools).filter(isFunctionTool),
+      this.hasPendingPreparation(),
+    );
+    // The Responses converter reuses history prefixes by object identity.
+    if (this.directoryMessage?.content !== content) {
+      this.directoryMessage = content ? { role: "system", content } : undefined;
+    }
+    return this.directoryMessage;
   }
 
   search(rawArguments: unknown): Tool[] {
@@ -808,12 +822,20 @@ export function transformGenericDispatchResponse(
 }
 
 function prepareLazyToolRequest(request: ModelRequest, runtime: LazyToolRuntime): ModelRequest {
-  const input = restoreGenericSearchResults(request.input);
+  // Historical generic-dispatch calls must be restored even after switching
+  // the current turn to native OpenAI search.
+  const input = restoreGenericDispatchHistory(restoreGenericSearchResults(request.input));
+  const directory = runtime.toolGroupContext();
   return {
     ...request,
-    // Historical generic-dispatch calls must be restored even after switching
-    // the current turn to native OpenAI search.
-    input: restoreGenericDispatchHistory(input),
+    // Request-local context: do not persist a stale catalog into conversation history,
+    // mutate the stable tool schemas, or wait for background MCP preparation.
+    input: directory
+      ? [
+          directory,
+          ...(typeof input === "string" ? [{ role: "user" as const, content: input }] : input),
+        ]
+      : input,
     tools: request.tools.filter((tool) => !runtime.shouldHideSerializedTool(tool)),
   };
 }
