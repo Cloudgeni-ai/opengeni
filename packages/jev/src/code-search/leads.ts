@@ -4,11 +4,13 @@
  * Extraction (code only): called functions, imported names, PascalCase types, UPPER_CASE constants,
  * env/config keys and camelCase member accesses. Excluded: names already searched (keywords and their
  * variants), names defined inside the selected passages, a stoplist of builtins/common helpers, and
- * names shorter than 4 chars. Definitions are located with one ripgrep regex call.
+ * names shorter than 4 chars. Definitions are located with one ripgrep regex call (a few when the names do
+ * not fit one pattern under CODE_SEARCH_MAX_PATTERN_CHARS).
  */
 import type { CodeSearchConfig } from "./config";
-import type { WorkspaceSession } from "./session";
+import { mapLimit, RIPGREP_SPLIT_CONCURRENCY, type WorkspaceSession } from "./session";
 import { escapeRegex, isTestPath, splitWords } from "./text";
+import { CODE_SEARCH_MAX_PATTERN_CHARS } from "./workspace";
 
 export interface SeedPassage {
   path: string;
@@ -241,7 +243,7 @@ export function definitionKinds(name: string): Array<{ kind: DefinitionHit["kind
  * rg pattern (ASCII mode) for definition-shaped lines of any of the names: declarations, SQL functions,
  * methods and object keys / fields / config keys. Classified per name in JS with definitionKinds().
  */
-export function definitionPattern(names: string[]): string {
+export function definitionPattern(names: readonly string[]): string {
   const alt = names.map(escapeRegex).join("|");
   return (
     "(?-u:" +
@@ -253,6 +255,28 @@ export function definitionPattern(names: string[]): string {
     ].join("|") +
     ")"
   );
+}
+
+/**
+ * definitionPattern over consecutive groups of names, each pattern at most maxChars. A name whose own pattern
+ * is longer is left out: it gets no definition, as after a failed search.
+ */
+export function definitionPatterns(
+  names: readonly string[],
+  maxChars = CODE_SEARCH_MAX_PATTERN_CHARS,
+): string[] {
+  const out: string[] = [];
+  let group: string[] = [];
+  for (const name of names) {
+    if (definitionPattern([name]).length > maxChars) continue;
+    if (group.length && definitionPattern([...group, name]).length > maxChars) {
+      out.push(definitionPattern(group));
+      group = [];
+    }
+    group.push(name);
+  }
+  if (group.length) out.push(definitionPattern(group));
+  return out;
 }
 
 const KIND_RANK: Record<DefinitionHit["kind"], number> = { decl: 3, sqlfn: 3, method: 2, key: 1 };
@@ -329,6 +353,7 @@ export const TEST_EXCLUDES = [
  * and gets none. fileCounts = files with any definition-shaped line for the name (generic fields and helpers
  * redefined everywhere score high), used as a genericity penalty. About 0.4 CPU-s on a 6k-file repository; a
  * second pass that counted every mention cost another ~0.7 CPU-s and full-line mention output was 80k lines.
+ * Names that do not fit one pattern under the cap are searched in a few passes, merged line by line.
  * A failed definition search yields no hits (the leads are then dropped), as in scout.
  */
 export async function locateDefinitions(
@@ -345,38 +370,45 @@ export async function locateDefinitions(
     "-g",
     g,
   ]);
-  const defOut = await session.ripgrep(
-    [
-      "--null",
-      "--line-number",
-      "--with-filename",
-      "--no-heading",
-      "--color",
-      "never",
-      "--no-require-git",
-      "--max-columns",
-      String(cfg.recall.maxLineColumns),
-      "--max-filesize",
-      String(cfg.recall.maxFileBytes),
-      ...excludeArgs,
-      ...extra,
-      "-e",
-      definitionPattern(names),
-      "--",
-      ".",
-    ],
-    { allowFailure: true },
+  const defOuts = await mapLimit(definitionPatterns(names), RIPGREP_SPLIT_CONCURRENCY, (pattern) =>
+    session.ripgrep(
+      [
+        "--null",
+        "--line-number",
+        "--with-filename",
+        "--no-heading",
+        "--color",
+        "never",
+        "--no-require-git",
+        "--max-columns",
+        String(cfg.recall.maxLineColumns),
+        "--max-filesize",
+        String(cfg.recall.maxFileBytes),
+        ...excludeArgs,
+        ...extra,
+        "-e",
+        pattern,
+        "--",
+        ".",
+      ],
+      { allowFailure: true },
+    ),
   );
   const kinds = new Map(names.map((n) => [n, definitionKinds(n)]));
   const nameSet = new Set(names);
   const files = new Map<string, Set<string>>();
   const strong: DefinitionHit[] = [];
   const keys: DefinitionHit[] = [];
-  for (const row of defOut.split("\n")) {
+  const seenRows = new Set<string>();
+  for (const row of defOuts.flatMap((out) => out.split("\n"))) {
     const z = row.indexOf("\0");
     if (z <= 0) continue;
     const colon = row.indexOf(":", z + 1);
     if (colon < 0) continue;
+    // a line matched by two of the split patterns is classified once, as with one pattern
+    const at = row.slice(0, colon);
+    if (seenRows.has(at)) continue;
+    seenRows.add(at);
     const text = row.slice(colon + 1);
     if (text.length > 400 || text.startsWith("[Omitted long line")) continue; // a definition line is short
     const path = row.slice(0, z).replace(/^\.\//, "");

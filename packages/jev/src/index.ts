@@ -45,6 +45,7 @@ export {
   type CodeSearchStatus,
 } from "./code-search/search";
 export {
+  CODE_SEARCH_MAX_PATTERN_CHARS,
   CodeSearchRipgrepMissingError,
   CodeSearchWorkspaceError,
   type CodeSearchRipgrepResult,

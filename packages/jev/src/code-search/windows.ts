@@ -7,7 +7,8 @@
  * (<= maxDown lines below the hit). No enclosing declaration -> fixed context around the hit, labelled
  * with the nearest enclosing declaration further up. Overlapping windows merge; windows longer than
  * maxWindowLines split around hit clusters; each file keeps its best windowsPerFile windows.
- * All line numbers in this module's public API are 1-based.
+ * All line numbers in this module's public API are 1-based. A line past the end of the file as read (it
+ * changed after ripgrep saw it, or could not be read) is skipped by the callers and treated as blank here.
  */
 import type { CodeSearchConfig } from "./config";
 import type { HitLine, KeywordInfo } from "./recall";
@@ -191,6 +192,7 @@ export function blockEnd(lines: string[], d: number, lang: Lang, maxScan = 3000)
 
 function computeBlockEnd(lines: string[], d: number, lang: Lang, maxScan: number): number | null {
   const n = lines.length;
+  if (d < 0 || d >= n) return null;
   const last = Math.min(n - 1, d + maxScan);
   if (lang === "brace") {
     let depth = 0;
@@ -254,7 +256,7 @@ function isCommentOrDecorator(line: string): boolean {
 function leadingComments(lines: string[], d: number, lang: Lang, maxLines = 6): number {
   if (lang === "markdown" || lang === "other") return d;
   let s = d;
-  while (s > 0 && d - s < maxLines && isCommentOrDecorator(lines[s - 1]!)) s--;
+  while (s > 0 && d - s < maxLines && isCommentOrDecorator(lines[s - 1] ?? "")) s--;
   return s;
 }
 
@@ -267,7 +269,7 @@ export function nearestEnclosingLabel(
 ): { line: number; text: string } | undefined {
   const ind = indentOf(lines[idx] ?? "");
   for (let i = idx; i >= Math.max(0, idx - maxScan); i--) {
-    const l = lines[i]!;
+    const l = lines[i] ?? "";
     if (!isDeclLine(l, lang)) continue;
     if (
       lang === "markdown" ||
@@ -295,7 +297,7 @@ export function enclosingWindow(
   const hitIndent = indentOf(lines[hi] ?? "");
   if (lang !== "other") {
     for (let i = hi; i >= Math.max(0, hi - w.maxUp); i--) {
-      const l = lines[i]!;
+      const l = lines[i] ?? "";
       if (!isDeclLine(l, lang)) continue;
       if ((lang === "brace" || lang === "indent") && i !== hi && indentOf(l) > hitIndent) continue;
       const e = blockEnd(lines, i, lang);
@@ -455,8 +457,10 @@ export function buildFileWindows(
       ro,
     ).slice(0, 1);
   }
+  // hits past the end of the file as read (it changed after ripgrep saw it) are dropped
+  const inRange = hitLines.filter((h) => h.line >= 1 && h.line <= lines.length);
   const weight = (h: HitLine) => h.kws.reduce((s, k) => s + (keywords[k]?.idf ?? 0), 0);
-  const ranked = [...hitLines].sort((a, b) => weight(b) - weight(a) || a.line - b.line);
+  const ranked = [...inRange].sort((a, b) => weight(b) - weight(a) || a.line - b.line);
   const budgetHits = w.seedHitsPerFile;
   const raw: Window[] = [];
   let used = 0;
@@ -471,7 +475,7 @@ export function buildFileWindows(
     used++;
   }
   // hits that fall inside kept windows but were not windowed themselves still count
-  for (const h of hitLines) {
+  for (const h of inRange) {
     for (const r of raw)
       if (h.line >= r.start && h.line <= r.end && !r.hits.includes(h.line)) r.hits.push(h.line);
   }

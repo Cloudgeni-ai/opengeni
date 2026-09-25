@@ -774,8 +774,8 @@ const SettingsSchema = z.object({
   // and the sandbox capability tools, never replacing them.
   webSearchEnabled: EnvBoolean.default(true),
   // Jev (TypeSafe's fast judge model) for worker-side agent tools. Without a
-  // usable key every Jev-backed feature is off. The key stays in the worker
-  // process and never reaches a sandbox or Connected Machine.
+  // usable key every Jev-backed feature is off. The key stays on the server
+  // (API and worker) and never reaches a sandbox or Connected Machine.
   jevApiKey: z.string().optional(),
   jevBaseUrl: z.string().url().default("https://api.typesafe.ai"),
   jevModel: z.string().trim().min(1).max(128).default("jev-latest"),

@@ -5,7 +5,15 @@
  * --files, --null, --line-number, --with-filename, --no-heading, --color never, -i, -w, --no-require-git,
  * --hidden, -m N, --max-columns N, --max-filesize N, -g GLOB, -e PATTERN, then `--` followed by
  * workspace-relative paths ("." or paths without a leading "-", no absolute paths, no "..").
+ * A PATTERN is never longer than CODE_SEARCH_MAX_PATTERN_CHARS: the engine splits a longer alternation
+ * into several ripgrep calls and merges their output.
  */
+
+/**
+ * Longest `-e` pattern the engine passes to ripgrep, so an adapter may cap pattern length (the sandbox
+ * adapter rejects patterns over 16,384 characters).
+ */
+export const CODE_SEARCH_MAX_PATTERN_CHARS = 16_000;
 
 export type CodeSearchRipgrepResult = {
   stdout: string;

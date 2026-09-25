@@ -230,7 +230,8 @@ export const EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
 ];
 
 /** Jev (TypeSafe) settings for the worker-side `code_search` tool. The key is
- * a runtime secret held only by worker processes; unset keeps the tool off. */
+ * a server runtime secret (the worker calls Jev; the API only checks that it is
+ * set); it never reaches a sandbox. Unset keeps the tool off. */
 export const JEV_CODE_SEARCH_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_JEV_API_KEY",
   "OPENGENI_JEV_BASE_URL",

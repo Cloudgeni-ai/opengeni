@@ -46,16 +46,22 @@ only read-only commands through `SandboxChannelAService`:
   programs or read other files, such as `--pre` and `-z`, are rejected before
   a command is built. It adds `--no-config`, and paths must stay inside the
   workspace. A watchdog stops the search after its budget; it is portable to
-  macOS, which has no GNU `timeout`. Output is gzip+base64 framed and kept under
-  the provider's 1 MiB output cap. Larger results are cut at a line boundary
-  and reported as partial.
+  macOS, which has no GNU `timeout`. Output is compressed once in the box's
+  temporary directory and fetched in 512 KiB chunks, because providers retain
+  about 1 MiB per command output. The last fetch deletes the file, and files
+  older than 15 minutes are swept on the next call. Up to 8 MiB of compressed
+  output is fetched; anything beyond that is cut at a line boundary and
+  reported as partial.
 - `codeSearchPathKinds` and `fsRead` check path filters and read the selected
   files.
 
-None of these writes to the workspace, so none takes workspace mutation
-admission. The Jev key stays in the worker process and never reaches a sandbox
-or Connected Machine. The tool works on every sandbox backend and Connected
-Machine that has `rg` and `bash`; both stock sandbox images include them.
+None of these writes to the workspace (only to the box's temporary directory),
+so none takes workspace mutation admission. The Jev key stays on the server, in the API and worker processes,
+and never reaches a sandbox or Connected Machine. The worker uses it to call
+Jev; the API reads it only to report whether the deployment offers the tool.
+The tool works on every sandbox backend and Connected Machine that has `rg` and
+`bash`; both stock sandbox images include them. Windows Connected Machines do
+not get the tool, because its search commands are POSIX shell scripts.
 
 ## Turning it on and off
 
@@ -64,7 +70,7 @@ Machine that has `rg` and `bash`; both stock sandbox images include them.
 | Deployment | `OPENGENI_JEV_API_KEY` | Required. Without a usable key, every Jev feature is off. |
 | Deployment | `OPENGENI_CODE_SEARCH_MODE` | `off` (default) never offers the tool. `opt_in` offers it where the workspace turns it on. `default_on` gives it to every workspace that has not turned it off. `experiment` gives it to a fixed half of sessions in workspaces without their own setting. |
 | Workspace | `settings.codeSearchEnabled` | Settings → Session defaults → **Fast code search**: Default, On or Off. `true` or `false` applies to every session; `null` or absent follows the deployment. The row is hidden when the deployment does not offer the tool. |
-| Worker process | Circuit breaker | Three consecutive Jev outages hide the tool from new turns for 5 minutes, or 30 minutes after an auth or billing error (401/402/403). |
+| Worker process | Circuit breaker | Three consecutive Jev outages hide the tool from new turns for 5 minutes, or 30 minutes after an auth or billing error (401/402/403). After the cooldown one trial call runs at a time; others are refused until Jev answers. A search that never needed Jev neither closes nor reopens it. |
 
 `OPENGENI_JEV_BASE_URL`, `OPENGENI_JEV_MODEL` and
 `OPENGENI_JEV_REQUEST_TIMEOUT_MS` default to the native TypeSafe API,
@@ -72,7 +78,7 @@ Machine that has `rg` and `bash`; both stock sandbox images include them.
 
 The decision is made when each turn attempt starts, so a change applies from
 the next turn of every session. A session without compute (`backend: none`)
-never gets the tool.
+never gets the tool, and neither does a turn on a Windows Connected Machine.
 
 ### Measuring it on real work
 
@@ -95,6 +101,8 @@ The tool reports problems to the agent instead of degrading silently:
 - **Jev is down, rate-limited, out of credit or rejects a request.** The tool
   returns an error telling the agent to search with `exec_command` instead.
   Repeated outages trip the breaker.
+- **Only the final status check fails.** The tool still returns the Jev-scored
+  pack with status `unknown`. An outage there counts toward the breaker.
 - **ripgrep is missing** (possible on a Connected Machine). The tool returns an
   error saying so.
 - **Partial search.** A cut or timed-out search is marked partial in the pack

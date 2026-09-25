@@ -38,6 +38,25 @@ describe("code_search workspace setting", () => {
     expect(resolveWorkspaceCodeSearchMode({ codeSearchEnabled: "yes" }, DEFAULT_ON)).toBe("on");
   });
 
+  test("an invalid sibling setting does not hide an explicit choice", () => {
+    const invalidSibling = { maxNestedAgentDepth: "deep", agentHumanInputEnabled: "sometimes" };
+    expect(WorkspaceSettingsSchema.safeParse(invalidSibling).success).toBe(false);
+    expect(
+      resolveWorkspaceCodeSearchMode({ ...invalidSibling, codeSearchEnabled: false }, DEFAULT_ON),
+    ).toBe("off");
+    expect(
+      resolveWorkspaceCodeSearchMode({ ...invalidSibling, codeSearchEnabled: true }, OPT_IN),
+    ).toBe("on");
+    expect(resolveWorkspaceCodeSearchMode(invalidSibling, DEFAULT_ON)).toBe("on");
+    expect(
+      resolveSessionCodeSearchEnabled(
+        { ...invalidSibling, codeSearchEnabled: false },
+        DEFAULT_ON,
+        "session-1",
+      ),
+    ).toBe(false);
+  });
+
   test("workspace settings and admin patch contracts accept booleans and null", () => {
     expect(WorkspaceSettingsSchema.safeParse({ codeSearchEnabled: true }).success).toBe(true);
     expect(WorkspaceSettingsSchema.safeParse({ codeSearchEnabled: null }).success).toBe(true);

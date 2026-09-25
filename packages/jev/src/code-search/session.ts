@@ -6,6 +6,8 @@ import { CodeSearchWorkspaceError, type CodeSearchWorkspace } from "./workspace"
 
 /** Parallel reads per search. */
 export const READ_CONCURRENCY = 8;
+/** Parallel ripgrep calls for one pattern split under CODE_SEARCH_MAX_PATTERN_CHARS. */
+export const RIPGREP_SPLIT_CONCURRENCY = 4;
 
 export class WorkspaceSession {
   calls = 0;

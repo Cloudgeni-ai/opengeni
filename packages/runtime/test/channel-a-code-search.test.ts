@@ -1,7 +1,17 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
+import { gzipSync } from "node:zlib";
 import {
   ChannelAUnavailableError,
   ChannelAValidationError,
@@ -15,13 +25,26 @@ afterAll(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
 
-/** A session double that runs the exact generated command in a host shell. */
-function hostShellSession(root: string, calls: string[] = []): ChannelASession {
+/**
+ * A session double that runs the exact generated command in a host shell.
+ * `binDir` goes first on PATH, so a fake `rg` there replaces the real one.
+ */
+function hostShellSession(
+  root: string,
+  calls: string[] = [],
+  binDir?: string,
+  env: Record<string, string> = {},
+): ChannelASession {
   return {
     exec: async (args) => {
       calls.push(args.cmd);
       const proc = Bun.spawn(["/bin/sh", "-c", args.cmd], {
         cwd: resolve(root, args.workdir ?? "."),
+        env: {
+          ...process.env,
+          ...(binDir ? { PATH: `${binDir}${delimiter}${process.env.PATH}` } : {}),
+          ...env,
+        },
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -44,6 +67,33 @@ function fixtureRepo(): string {
   writeFileSync(join(root, "README.md"), "no match in this file\n");
   return root;
 }
+
+/** A directory holding an executable `rg` that runs `body` and ignores its arguments. */
+function fakeRipgrep(body: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "code-search-bin-"));
+  roots.push(dir);
+  writeFileSync(join(dir, "rg"), `#!/bin/sh\n${body}\n`);
+  chmodSync(join(dir, "rg"), 0o755);
+  return dir;
+}
+
+/** Peak RSS in bytes. Bun reports `maxRSS` in bytes on macOS and kilobytes on Linux. */
+function peakRssBytes(): number {
+  const peak = process.resourceUsage().maxRSS;
+  return peak < process.memoryUsage().rss / 2 ? peak * 1024 : peak;
+}
+
+function processIsGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/** Mirrors the per-frame chunk size in channel-a.ts. */
+const CHUNK_BYTES = 512 * 1024;
 
 const hasRipgrep = Bun.which("rg") !== null;
 const SEARCH = ["--null", "--line-number", "--with-filename", "--no-heading", "--color", "never"];
@@ -164,6 +214,168 @@ describe("SandboxChannelAService.codeSearchRipgrep", () => {
     for (const line of result.stdout.trim().split("\n")) {
       expect(line).toMatch(/^match line \d+$/);
     }
+  });
+
+  test("stops a slow search at the budget and returns whole lines", async () => {
+    const root = fixtureRepo();
+    const pidFile = join(root, "rg.pid");
+    const bin = fakeRipgrep(
+      [
+        `echo $$ > '${pidFile}'`,
+        `awk 'BEGIN { for (i = 0; i < 100000; i++) printf "line %05d\\n", i }'`,
+        "printf 'partial'",
+        "exec sleep 60",
+      ].join("\n"),
+    );
+    const svc = new SandboxChannelAService({ session: hostShellSession(root, [], bin) });
+    const started = Date.now();
+    const result = await svc.codeSearchRipgrep(["-e", "x", "--", "."], {
+      timeoutMs: 1_000,
+      maxBytes: 4 * 1024 * 1024,
+    });
+    expect(Date.now() - started).toBeLessThan(8_000);
+    expect(result).toMatchObject({ available: true, exitCode: null, timedOut: true });
+    // Some lines reach the results file before the kill; the partial record is dropped.
+    expect(result.stdout).toMatch(/^(line \d{5}\n)+$/);
+    const pid = Number.parseInt(readFileSync(pidFile, "utf8"), 10);
+    const deadline = Date.now() + 3_000;
+    while (!processIsGone(pid) && Date.now() < deadline) await Bun.sleep(50);
+    expect(processIsGone(pid)).toBe(true);
+  }, 20_000);
+
+  /** Random base64 lines barely compress, so their gzip spans several frames. */
+  function incompressibleOutput(lines: number): string {
+    return `${Array.from({ length: lines }, () => randomBytes(60).toString("base64")).join("\n")}\n`;
+  }
+
+  test("fetches output larger than one frame in chunks and removes it from the box", async () => {
+    const root = fixtureRepo();
+    const tmp = mkdtempSync(join(tmpdir(), "code-search-tmp-"));
+    roots.push(tmp);
+    const output = incompressibleOutput(20_000);
+    const outputFile = join(root, "rg-output.txt");
+    writeFileSync(outputFile, output);
+    const bin = fakeRipgrep(`exec cat '${outputFile}'`);
+    const calls: string[] = [];
+    const svc = new SandboxChannelAService({
+      session: hostShellSession(root, calls, bin, { TMPDIR: tmp }),
+    });
+    const result = await svc.codeSearchRipgrep(["-e", "x", "--", "."], {
+      timeoutMs: 20_000,
+      maxBytes: 4 * 1024 * 1024,
+    });
+    expect(gzipSync(output).length).toBeGreaterThan(2 * CHUNK_BYTES);
+    expect(result).toEqual({
+      available: true,
+      stdout: output,
+      exitCode: 0,
+      truncated: false,
+      timedOut: false,
+    });
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+    expect(readdirSync(tmp)).toEqual([]);
+  }, 30_000);
+
+  test("stops at the transfer cap, cuts at a whole line, and removes the output", async () => {
+    const root = fixtureRepo();
+    const tmp = mkdtempSync(join(tmpdir(), "code-search-tmp-"));
+    roots.push(tmp);
+    const output = incompressibleOutput(20_000);
+    const outputFile = join(root, "rg-output.txt");
+    writeFileSync(outputFile, output);
+    const bin = fakeRipgrep(`exec cat '${outputFile}'`);
+    const svc = new SandboxChannelAService({
+      session: hostShellSession(root, [], bin, { TMPDIR: tmp }),
+    });
+    const result = await svc.codeSearchRipgrep(["-e", "x", "--", "."], {
+      timeoutMs: 20_000,
+      maxBytes: 4 * 1024 * 1024,
+      maxTransferBytes: CHUNK_BYTES + 100 * 1024,
+    });
+    expect(result).toMatchObject({ available: true, exitCode: 0, truncated: true });
+    expect(result.stdout.length).toBeGreaterThan(CHUNK_BYTES / 2);
+    expect(result.stdout.length).toBeLessThan(output.length);
+    expect(result.stdout.endsWith("\n")).toBe(true);
+    expect(output.startsWith(result.stdout)).toBe(true);
+    expect(readdirSync(tmp)).toEqual([]);
+  }, 30_000);
+
+  test("rejects a frame longer than one chunk", async () => {
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => ({
+          stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${"A".repeat(CHUNK_BYTES * 2)}__OPENGENI_CODE_SEARCH_RG_END__0:0__`,
+          stderr: "",
+          exitCode: 0,
+        }),
+      },
+    });
+    await expect(
+      svc.codeSearchRipgrep(["-e", "x", "--", "."], { timeoutMs: 5_000, maxBytes: 10 }),
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+  });
+
+  test("never passes a malformed output token back to the box", async () => {
+    const calls: string[] = [];
+    const frame = gzipSync("match\n").toString("base64");
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async (args) => {
+          calls.push(args.cmd);
+          return {
+            stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${frame}__OPENGENI_CODE_SEARCH_RG_END__0:0:9999999:..__`,
+            stderr: "",
+            exitCode: 0,
+          };
+        },
+      },
+    });
+    await expect(
+      svc.codeSearchRipgrep(["-e", "x", "--", "."], { timeoutMs: 5_000, maxBytes: 1_000 }),
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("bounds inflation of a hostile compressed frame", async () => {
+    // Concatenated gzip members inflate about 500x; one chunk of them expands
+    // to over 200 MB if decoding is unbounded.
+    const member = gzipSync(Buffer.alloc(1024 * 1024, "match line\n"), { level: 9 });
+    const copies = Math.floor(CHUNK_BYTES / member.length);
+    const frame = Buffer.concat(Array.from({ length: copies }, () => member)).toString("base64");
+    expect(copies).toBeGreaterThan(200);
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => ({
+          stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${frame}__OPENGENI_CODE_SEARCH_RG_END__0:0__`,
+          stderr: "",
+          exitCode: 0,
+        }),
+      },
+    });
+    const peakBefore = peakRssBytes();
+    const result = await svc.codeSearchRipgrep(["-e", "x", "--", "."], {
+      timeoutMs: 5_000,
+      maxBytes: 1_000,
+    });
+    expect(peakRssBytes() - peakBefore).toBeLessThan(128 * 1024 * 1024);
+    expect(result).toMatchObject({ available: true, exitCode: 0, truncated: true });
+    expect(result.stdout.length).toBeLessThanOrEqual(1_000);
+    expect(result.stdout).toMatch(/^(match line\n)+$/);
+  });
+
+  test("fails closed on a frame that is not gzip", async () => {
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => ({
+          stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${Buffer.from("not gzip").toString("base64")}__OPENGENI_CODE_SEARCH_RG_END__0:0__`,
+          stderr: "",
+          exitCode: 0,
+        }),
+      },
+    });
+    await expect(
+      svc.codeSearchRipgrep(["-e", "x", "--", "."], { timeoutMs: 5_000, maxBytes: 10 }),
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
   });
 
   test("reports a box without ripgrep as unavailable", async () => {

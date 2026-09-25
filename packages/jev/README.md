@@ -40,8 +40,11 @@ Retries and errors work like this:
 
 - 3 consecutive `JevUnavailableError`s open it for 5 minutes. If the failure that opens it is a 401,
   402 or 403, it opens for 30 minutes instead.
-- After the cooldown the breaker is half-open. One more unavailable failure reopens it at once, and a
+- After the cooldown the breaker is half-open, and `tryAcquire()` admits one trial call at a time.
+  Other callers are refused until the trial ends with `recordSuccess()`, `recordFailure()` or
+  `release()` (the call never reached Jev). One more unavailable failure reopens it at once, and a
   success closes it.
+- `isOpen()` is true only while the cooldown runs, so a half-open breaker still offers the tool.
 - Other errors are ignored.
 
 ## code_search
@@ -78,6 +81,10 @@ The engine passes ripgrep only these flags, so an adapter can enforce an allowli
 `--no-require-git`, `--hidden`, `-m N`, `--max-columns N`, `--max-filesize N`, `-g GLOB` and
 `-e PATTERN`. These are followed by `--` and then `.` or workspace-relative paths.
 
+A pattern is at most `CODE_SEARCH_MAX_PATTERN_CHARS` (16,000) characters. The engine splits a longer
+keyword union or definition search into several ripgrep calls, runs 4 at a time and merges their
+output, so the result is the same as one call.
+
 If ripgrep output is `truncated` or `timedOut`, the search continues with what it got, and the header
 reports it, for example `code_search (partial search: ...)`.
 
@@ -88,6 +95,9 @@ An adapter reports problems as follows:
 - An adapter throws `CodeSearchWorkspaceError` when the workspace is unreachable. When ripgrep is
   missing, it throws `CodeSearchRipgrepMissingError`, or a `CodeSearchWorkspaceError` whose message
   says ripgrep is not installed.
+- ripgrep exit code 2 with no output counts as no match for the file listing and the searches. That is
+  what ripgrep returns when nothing matched and some path was unreadable. Only an invalid pattern
+  still fails.
 
 ### Tool surface
 
@@ -107,6 +117,9 @@ The package exports the pieces the worker needs to register the tool:
 - Truncated or timed-out ripgrep output is reported in the header.
 - File reads and binary checks run in parallel (8 at a time) through the workspace. Selecting
   candidates gives the same result as the original sequential scan.
+- ripgrep patterns over 16,000 characters are split into several calls with the same merged result.
+- A file that reads shorter than ripgrep saw it, or not at all (for example UTF-16), no longer fails
+  the search. Hits and lead definitions past its end are skipped.
 
 ## Tests
 

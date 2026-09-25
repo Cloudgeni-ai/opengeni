@@ -771,6 +771,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     enabled: codeSearchEnabled,
     settings: runSettings,
     backend: activeSandboxBackend ?? groupBoxBackend,
+    machineWorkspaceRoot: sandboxState.machinePrimarySession?.workspaceRoot ?? null,
     observability,
     // OpenGeni's Jev key pays for these calls whatever model billing the
     // workspace uses; record them per workspace so the cost stays visible.

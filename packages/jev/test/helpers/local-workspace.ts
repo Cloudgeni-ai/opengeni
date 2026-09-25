@@ -1,11 +1,12 @@
 /**
  * A CodeSearchWorkspace over a local directory: runs the local `rg` with Bun.spawn and reads with node:fs.
- * It enforces the same ripgrep flag allowlist as the sandbox adapter, so a test fails if the engine ever
- * passes another flag.
+ * It enforces the same ripgrep flag allowlist as the sandbox adapter, and the documented pattern cap, so a
+ * test fails if the engine ever passes another flag or a longer pattern.
  */
 import { open, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import {
+  CODE_SEARCH_MAX_PATTERN_CHARS,
   CodeSearchRipgrepMissingError,
   CodeSearchWorkspaceError,
   type CodeSearchRipgrepResult,
@@ -38,6 +39,10 @@ export function assertAllowedRipgrepArgs(args: readonly string[]): void {
     if (a === "--color" && v !== "never") throw new Error(`--color ${v} not allowed`);
     if ((a === "-m" || a === "--max-columns" || a === "--max-filesize") && !/^\d+$/.test(v))
       throw new Error(`${a} ${v} not numeric`);
+    if (a === "-e" && (!v || v.length > CODE_SEARCH_MAX_PATTERN_CHARS))
+      throw new Error(
+        `-e pattern of ${v.length} chars (1..${CODE_SEARCH_MAX_PATTERN_CHARS} allowed)`,
+      );
   }
   if (args[i] !== "--") throw new Error("ripgrep args must end with -- and paths");
   const paths = args.slice(i + 1);

@@ -549,6 +549,15 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     for (const x of chosen) {
       for (const d of defs.get(x.l.name) ?? []) {
         const lines = readLines(d.path);
+        // the file could not be read as text (missing, binary, UTF-16) or changed after ripgrep saw it
+        if (d.line > lines.length) {
+          leadsFollowed.push({
+            name: x.l.name,
+            score: x.p,
+            def: `${d.path}:${d.line} (not in the file as read)`,
+          });
+          continue;
+        }
         const w = definitionWindow(
           lines,
           d.line,

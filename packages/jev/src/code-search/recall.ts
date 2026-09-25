@@ -3,12 +3,18 @@
  *
  * One ripgrep pass over the union of every keyword's identifier variants, searched case-insensitively
  * (camelCase <-> snake_case <-> kebab <-> spaced phrase; SCREAMING and Pascal forms are covered by -i);
- * lines are attributed to keywords in JS. Short plain words get a leading word boundary so `turn` does not
+ * a union longer than CODE_SEARCH_MAX_PATTERN_CHARS is split into several passes and merged. Lines are
+ * attributed to keywords in JS. Short plain words get a leading word boundary so `turn` does not
  * match `return`. Per-file score = sum over DISTINCT matched keywords of IDF + path bonus + a small
  * hit-count tie breaker; tests are down-weighted unless the question is about tests.
  */
 import type { CodeSearchConfig } from "./config";
-import { mapLimit, READ_CONCURRENCY, type WorkspaceSession } from "./session";
+import {
+  mapLimit,
+  READ_CONCURRENCY,
+  RIPGREP_SPLIT_CONCURRENCY,
+  type WorkspaceSession,
+} from "./session";
 import {
   compoundFragments,
   escapeRegex,
@@ -21,6 +27,7 @@ import {
   questionMentionsTests,
   splitWords,
 } from "./text";
+import { CODE_SEARCH_MAX_PATTERN_CHARS } from "./workspace";
 
 export const BUILTIN_EXCLUDES = [
   "!**/node_modules/**",
@@ -129,16 +136,20 @@ export async function listFiles(
   paths: string[],
   cfg: CodeSearchConfig,
 ): Promise<string[]> {
-  const out = await session.ripgrep([
-    "--files",
-    "--no-require-git",
-    ...hiddenArgs(cfg),
-    "--max-filesize",
-    String(cfg.recall.maxFileBytes),
-    ...excludeArgs(cfg),
-    "--",
-    ...paths,
-  ]);
+  // exit 2 without output means nothing could be listed (for example only unreadable directories)
+  const out = await session.ripgrep(
+    [
+      "--files",
+      "--no-require-git",
+      ...hiddenArgs(cfg),
+      "--max-filesize",
+      String(cfg.recall.maxFileBytes),
+      ...excludeArgs(cfg),
+      "--",
+      ...paths,
+    ],
+    { allowFailure: true },
+  );
   return out
     .split("\n")
     .filter(Boolean)
@@ -202,6 +213,18 @@ export function parseRgOutput(out: string): RgMatch[] {
   return matches;
 }
 
+const byPathLine = (a: RgMatch, b: RgMatch) =>
+  a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line;
+
+/**
+ * Whether a pattern built by this engine compiles: checked as a JS regex after mapping ripgrep's inline flag
+ * groups (`(?-u:`, `(?i:`) to plain groups. It tells an invalid pattern apart from ripgrep's exit 2 for an
+ * unreadable path.
+ */
+export function ripgrepPatternCompiles(pattern: string): boolean {
+  return jsRegex(pattern.replace(/\(\?[A-Za-z-]+:/g, "(?:")) !== null;
+}
+
 /** One rg pass for a pattern (any number of alternatives), all matching lines, sorted by path then line. */
 export async function searchPattern(
   session: WorkspaceSession,
@@ -210,7 +233,7 @@ export async function searchPattern(
   cfg: CodeSearchConfig,
   opts: { caseInsensitive?: boolean; word?: boolean; maxPerFile?: number } = {},
 ): Promise<RgMatch[]> {
-  const out = await session.ripgrep([
+  const args = [
     "--null",
     "--line-number",
     "--with-filename",
@@ -232,11 +255,90 @@ export async function searchPattern(
     pattern,
     "--",
     ...paths,
-  ]);
+  ];
+  // rg also exits 2 without output when nothing matched and some path was unreadable; that is no match
+  const out = await session.ripgrep(args, { allowFailure: ripgrepPatternCompiles(pattern) });
   const matches = parseRgOutput(out);
   // rg searches in parallel; sort for determinism (same effect as --sort path, without serializing the search)
-  matches.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line));
+  matches.sort(byPathLine);
   return matches;
+}
+
+/** Split a regex at its top-level `|` (outside groups, character classes and escapes). */
+export function splitAlternation(pattern: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let inClass = false;
+  let start = 0;
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === "\\") i++;
+    else if (inClass) inClass = ch !== "]";
+    else if (ch === "[") inClass = true;
+    else if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    else if (ch === "|" && depth === 0) {
+      out.push(pattern.slice(start, i));
+      start = i + 1;
+    }
+  }
+  out.push(pattern.slice(start));
+  return out;
+}
+
+/**
+ * Join alternatives with `|`, in order, into as few patterns of at most maxChars as possible. An alternative
+ * longer than maxChars on its own gets a pattern of its own.
+ */
+export function packAlternatives(alternatives: readonly string[], maxChars: number): string[] {
+  const out: string[] = [];
+  let cur: string | null = null;
+  for (const alt of alternatives) {
+    if (cur !== null && cur.length + 1 + alt.length <= maxChars) {
+      cur += `|${alt}`;
+    } else {
+      if (cur !== null) out.push(cur);
+      cur = alt;
+    }
+  }
+  if (cur !== null) out.push(cur);
+  return out;
+}
+
+/** Matches of several searches, as one search over their union returns them: by path then line, each line once. */
+export function mergeMatches(lists: readonly RgMatch[][]): RgMatch[] {
+  const all = lists.flat().sort(byPathLine);
+  return all.filter(
+    (m, i) => i === 0 || m.path !== all[i - 1]!.path || m.line !== all[i - 1]!.line,
+  );
+}
+
+/**
+ * The lines matching `(?:a)|(?:b)|...` over the alternatives. A union longer than maxPatternChars is split
+ * into several rg passes (an alternative too long on its own is split at its own top-level `|`), run a few
+ * at a time and merged, so the result is the same as one pass. A part that still does not fit (a keyword
+ * of thousands of characters) is not searched, so it reports zero hits.
+ */
+export async function searchAlternatives(
+  session: WorkspaceSession,
+  alternatives: readonly string[],
+  paths: string[],
+  cfg: CodeSearchConfig,
+  maxPatternChars = CODE_SEARCH_MAX_PATTERN_CHARS,
+): Promise<RgMatch[]> {
+  const groups = alternatives
+    .flatMap((p) =>
+      p.length + 4 <= maxPatternChars ? [`(?:${p})`] : splitAlternation(p).map((a) => `(?:${a})`),
+    )
+    .filter((g) => g.length <= maxPatternChars);
+  const patterns = packAlternatives(groups, maxPatternChars);
+  if (patterns.length <= 1) {
+    return patterns.length ? searchPattern(session, patterns[0]!, paths, cfg) : [];
+  }
+  const found = await mapLimit(patterns, RIPGREP_SPLIT_CONCURRENCY, (p) =>
+    searchPattern(session, p, paths, cfg),
+  );
+  return mergeMatches(found);
 }
 
 export function idfOf(df: number, n: number): number {
@@ -364,7 +466,7 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
   /**
    * ONE rg pass over the union of every keyword pattern (and, speculatively, the 2-word fragments of
    * compound keywords); lines are then attributed to keywords in JS. ~0.2 s on a 6k-file repo versus
-   * ~1-2 s for one rg process per keyword.
+   * ~1-2 s for one rg process per keyword. A union over the pattern cap takes a few passes instead.
    */
   const attempt = async (paths: string[]) => {
     const keywords = keywordsFresh();
@@ -389,15 +491,13 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
         });
       }
     }
-    const union = [
+    const alternatives = [
       ...keywords.map((k) => k.rgPattern),
       ...[...fragsOf.values()].map((f) => f.pattern),
-    ]
-      .map((p) => `(?:${p})`)
-      .join("|");
+    ];
     const [files, matches] = await Promise.all([
       listFiles(session, paths, cfg),
-      union ? searchPattern(session, union, paths, cfg) : Promise.resolve([] as RgMatch[]),
+      searchAlternatives(session, alternatives, paths, cfg),
     ]);
     const bySlot = attribute(matches, slots);
     const results: RgMatch[][] = keywords.map(() => []);

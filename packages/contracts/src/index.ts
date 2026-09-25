@@ -2399,15 +2399,18 @@ export type CodeSearchDeploymentPolicy = {
  * What a workspace gets: the deployment decides first, so nothing enables the
  * tool where the deployment does not offer it. Otherwise an explicit workspace
  * choice wins, and an absent, null or malformed setting follows the deployment
- * default.
+ * default. Only this field is read, so an invalid sibling setting cannot turn
+ * an explicit Off back into the deployment default.
  */
 export function resolveWorkspaceCodeSearchMode(
   settings: unknown,
   deployment: CodeSearchDeploymentPolicy,
 ): CodeSearchWorkspaceDefault {
   if (!deployment.available) return "off";
-  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
-  const explicit = parsed.success ? parsed.data.codeSearchEnabled : undefined;
+  const explicit =
+    typeof settings === "object" && settings !== null
+      ? (settings as { codeSearchEnabled?: unknown }).codeSearchEnabled
+      : undefined;
   if (explicit === true) return "on";
   if (explicit === false) return "off";
   return deployment.workspaceDefault;
