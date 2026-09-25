@@ -1,3 +1,5 @@
+import { APIError } from "openai";
+
 /**
  * Provider quota exhaustion versus ordinary rate limiting.
  *
@@ -9,9 +11,12 @@
  *
  * This module is the single classifier for API-key provider responses. It
  * reads only provider-owned evidence: the HTTP status, provider message/code
- * strings, and the provider's own retry hint. Subscription transports (Codex,
- * SuperGrok) own their quota semantics through credential rotation and durable
- * capacity waits and must not route through it.
+ * strings, and the provider's own retry hint. The OpenAI SDK retry veto and the
+ * worker's turn classification both read that evidence from the same thrown
+ * SDK error shape (`classifyProviderQuotaError`), so one response can never be
+ * classified two ways. Subscription transports (Codex, SuperGrok) own their
+ * quota semantics through credential rotation and durable capacity waits and
+ * must not route through it.
  */
 
 export const PROVIDER_QUOTA_EXHAUSTED_CODE = "provider_quota_exhausted";
@@ -45,28 +50,40 @@ const MAX_FIELD_CHARS = 4_096;
 const MAX_FIELDS = 64;
 
 // Account-level exhaustion that nothing clears in seconds. Structured codes are
-// matched exactly; wording is matched as a phrase.
-const CREDIT_CODES = new Set(["insufficient_credits", "insufficient_balance"]);
-const QUOTA_CODES = new Set(["insufficient_quota", "billing_hard_limit_reached"]);
+// matched exactly; wording is matched as a phrase. OpenAI's
+// `billing_hard_limit_reached` is the organization's own spending cap.
+const CREDIT_CODES = new Set([
+  "insufficient_credits",
+  "insufficient_balance",
+  "billing_hard_limit_reached",
+]);
+const QUOTA_CODES = new Set(["insufficient_quota"]);
 const CREDIT_TEXT =
   /\binsufficient[ _](?:credits?|balance|funds)\b|\bcredit balance is too low\b|\brequires more credits\b|\bout of credits\b|\bused all (?:of )?(?:your |the )?(?:available )?credits\b|\bspending limit\b|\bbilling[ _]hard[ _]limit\b|\breached your specified api usage limits?\b/;
 
-// Generic quota wording. Google reports per-minute limits with the same
-// "exceeded your current quota" sentence, so this alone is not decisive: an
-// explicit per-minute scope or a short provider retry hint keeps it retryable.
+// Generic quota wording, including a reached "usage limit". Google reports
+// per-minute limits with the same "exceeded your current quota" sentence, so
+// this alone is not decisive: an explicit per-minute scope or a short provider
+// retry hint keeps it retryable.
+// Google's `RESOURCE_EXHAUSTED` status is deliberately absent: it accompanies
+// every Google 429, including short dynamic-shared-quota capacity refusals, so
+// it only marks the response as rate-shaped.
 const QUOTA_TEXT =
-  /\bexceeded (?:your |the )?(?:current |allotted |daily |monthly )?quota\b|\bquota (?:has been |was |is )?(?:exceeded|exhausted|reached)\b|\bout of (?:call volume )?quota\b|\bquota[ _]?exceeded\b|\bresource[ _]exhausted\b/;
+  /\bexceeded (?:your |the )?(?:current |allotted |daily |monthly )?quota\b|\bquota (?:has been |was |is )?(?:exceeded|exhausted|reached)\b|\bout of (?:call volume )?quota\b|\bquota[ _]?exceeded\b|\b(?:hit|reached|exceeded) (?:your |the |its )?(?:[a-z]+ )?usage limits?\b/;
 
 // Explicit limit windows. "free-models-per-min" is OpenRouter's per-minute
 // free tier; "free-models-per-day" its daily cap. GitHub/Azure AI inference
-// name windows like "UserByModelByDay" or "per 86400s".
+// name windows like "UserByModelByDay" or "per 86400s", and Google/Vertex
+// metric ids join words with underscores
+// ("generate_content_requests_per_minute_per_project"). Letter lookarounds
+// rather than `\b` keep snake_case ids matching, since `_` is a word character.
 const MINUTE_SCOPE =
-  /\bper[ _-]?min(?:ute)?\b|perminute|byminute|\b(?:rpm|tpm)\b|\/min\b|\bper 60 ?s\b|\bper[ _-]?second\b/;
+  /(?<![a-z])per[ _-]?min(?:ute)?s?(?![a-z])|perminute|byminute|(?<![a-z])(?:rpm|tpm)(?![a-z])|\/min(?![a-z])|\bper 60 ?s\b|(?<![a-z])per[ _-]?second(?![a-z])/;
 const DAY_SCOPE =
-  /free-models-per-day|\bper[ _-]?day\b|perday|byday|\b(?:rpd|tpd)\b|\bdaily\b|\bper 86400 ?s\b/;
-const MONTH_SCOPE = /\bper[ _-]?month\b|permonth|bymonth|\bmonthly\b/;
+  /(?<![a-z])per[ _-]?day(?![a-z])|perday|byday|(?<![a-z])(?:rpd|tpd)(?![a-z])|(?<![a-z])daily(?![a-z])|\bper 86400 ?s\b/;
+const MONTH_SCOPE = /(?<![a-z])per[ _-]?month(?![a-z])|permonth|bymonth|(?<![a-z])monthly(?![a-z])/;
 
-const RATE_TEXT = /too many requests|rate.?limit|\b429\b/;
+const RATE_TEXT = /too many requests|rate.?limit|\b429\b|\bresource[ _]exhausted\b/;
 
 const UNIT_MS: Record<string, number> = {
   ms: 1,
@@ -229,37 +246,118 @@ async function boundedCloneText(response: Response, maxBytes: number): Promise<s
   }
 }
 
-function jsonErrorStrings(value: unknown, out: string[], depth: number): void {
-  if (out.length >= MAX_FIELDS || depth > 4) return;
+function statusOf(value: Record<string, unknown>): number | null {
+  const body =
+    value.error && typeof value.error === "object"
+      ? (value.error as Record<string, unknown>)
+      : null;
+  const status = Number(value.status ?? value.statusCode ?? body?.status ?? body?.statusCode);
+  return Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+}
+
+/** The first HTTP status along an error and its cause chain. */
+function errorHttpStatus(error: unknown): number | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    const status = statusOf(current as Record<string, unknown>);
+    if (status !== null) return status;
+    current = (current as Record<string, unknown>).cause;
+  }
+  return null;
+}
+
+/**
+ * Provider-authored strings on an SDK error and its wrappers: message, code,
+ * type, name and param, recursing through `error`, `cause`, `response` and
+ * `data`. These are exactly the fields the worker's other failure classifiers
+ * read, so quota evidence never depends on a key only one reader sees.
+ */
+function errorTexts(value: unknown, out: string[], seen: WeakSet<object>): void {
+  if (out.length >= MAX_FIELDS) return;
   if (typeof value === "string") {
     out.push(value);
     return;
   }
-  if (Array.isArray(value)) {
-    for (const item of value.slice(0, 8)) jsonErrorStrings(item, out, depth + 1);
-    return;
-  }
-  if (!value || typeof value !== "object") return;
+  if (!value || typeof value !== "object" || seen.has(value)) return;
+  seen.add(value);
   const record = value as Record<string, unknown>;
-  for (const key of ["message", "code", "type", "status", "error"]) {
-    jsonErrorStrings(record[key], out, depth + 1);
+  for (const key of ["message", "code", "type", "name", "param"]) {
+    const field = record[key];
+    if (typeof field === "string" && field.length > 0) out.push(field);
+  }
+  for (const key of ["error", "cause", "response", "data"]) errorTexts(record[key], out, seen);
+}
+
+function headerValue(headers: unknown, name: string): string | null {
+  if (!headers || typeof headers !== "object") return null;
+  const getter = (headers as { get?: unknown }).get;
+  if (typeof getter === "function") {
+    const value = getter.call(headers, name);
+    return typeof value === "string" ? value : null;
+  }
+  const entry = Object.entries(headers as Record<string, unknown>).find(
+    ([key, value]) => key.toLowerCase() === name && typeof value === "string",
+  );
+  return typeof entry?.[1] === "string" ? entry[1] : null;
+}
+
+/** A provider retry hint (`retry-after-ms`, `retry-after`, or a structured field) in milliseconds. */
+function errorRetryAfterMs(error: unknown, nowMs: number): number | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    const value = current as Record<string, unknown>;
+    const body =
+      value.error && typeof value.error === "object"
+        ? (value.error as Record<string, unknown>)
+        : null;
+    for (const headers of [value.headers, value.responseHeaders, body?.headers]) {
+      const millis = Number(headerValue(headers, "retry-after-ms") ?? Number.NaN);
+      if (Number.isFinite(millis) && millis > 0) return Math.ceil(millis);
+      const header = headerValue(headers, "retry-after");
+      if (header === null) continue;
+      const seconds = Number(header);
+      if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds * 1_000);
+      const date = Date.parse(header);
+      if (Number.isFinite(date) && date > nowMs) return Math.ceil(date - nowMs);
+    }
+    const seconds = Number(
+      value.retry_after_seconds ?? body?.retry_after_seconds ?? value.retryAfterSeconds,
+    );
+    if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds * 1_000);
+    current = value.cause;
+  }
+  return null;
+}
+
+/**
+ * Classify a thrown provider error: an OpenAI SDK `APIError`, or any wrapper
+ * whose `error`/`cause` chain reaches one. This is the one evidence reader for
+ * both the SDK retry veto and the worker's turn failure.
+ */
+export function classifyProviderQuotaError(
+  error: unknown,
+  nowMs = Date.now(),
+): ProviderQuotaExhaustion | null {
+  try {
+    const texts: string[] = [];
+    errorTexts(error, texts, new WeakSet());
+    return classifyProviderQuotaExhaustion({
+      status: errorHttpStatus(error),
+      texts,
+      retryAfterMs: errorRetryAfterMs(error, nowMs),
+    });
+  } catch {
+    // A hostile getter is not quota evidence; callers keep their existing path.
+    return null;
   }
 }
 
-function headerRetryAfterMs(headers: Headers, nowMs: number): number | null {
-  const millis = Number(headers.get("retry-after-ms"));
-  if (headers.has("retry-after-ms") && Number.isFinite(millis) && millis > 0) {
-    return Math.ceil(millis);
-  }
-  const header = headers.get("retry-after");
-  if (header === null) return null;
-  const seconds = Number(header);
-  if (Number.isFinite(seconds)) return seconds > 0 ? Math.ceil(seconds * 1_000) : null;
-  const date = Date.parse(header);
-  return Number.isFinite(date) && date > nowMs ? Math.ceil(date - nowMs) : null;
-}
-
-/** Classify a raw provider HTTP response without consuming its body. */
+/**
+ * Classify a raw provider HTTP response without consuming its body. It builds
+ * the exact error the OpenAI SDK throws for this response (the same
+ * `APIError.generate` inputs as the SDK's own failure path) and classifies
+ * that, so the veto and the worker read identical evidence.
+ */
 export async function classifyProviderQuotaResponse(
   response: Response,
   nowMs = Date.now(),
@@ -267,17 +365,19 @@ export async function classifyProviderQuotaResponse(
   if (response.status !== 429) return null;
   const text = await boundedCloneText(response, MAX_RESPONSE_BODY_BYTES);
   if (text === null) return null;
-  const texts: string[] = [];
+  let json: unknown;
   try {
-    jsonErrorStrings(JSON.parse(text), texts, 0);
+    json = JSON.parse(text);
   } catch {
-    texts.push(text);
+    json = undefined;
   }
-  return classifyProviderQuotaExhaustion({
-    status: response.status,
-    texts,
-    retryAfterMs: headerRetryAfterMs(response.headers, nowMs),
-  });
+  const sdkError = APIError.generate(
+    response.status,
+    json as object | undefined,
+    json ? undefined : text,
+    response.headers,
+  );
+  return classifyProviderQuotaError(sdkError, nowMs);
 }
 
 /**

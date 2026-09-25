@@ -790,10 +790,10 @@ or converted into a new queue item.
 
 Transient provider recovery is bounded by a durable consecutive-failure streak,
 not lifetime failures across a long turn. A completed model request
-from the exact current attempt clears the streak atomically with its
+from the exact current attempt clears the durable streak atomically with its
 timeline event, and the worker clears its in-memory copy only after that commit;
 late attempt evidence cannot replenish the retry budget. See
-[`run-lifecycle.md`](run-lifecycle.md) for pacing, exhaustion, and quota semantics.
+[`run-lifecycle.md`](run-lifecycle.md) for pacing and exhaustion semantics.
 
 ### 5.3 Goals, schedules, automations, and child work
 

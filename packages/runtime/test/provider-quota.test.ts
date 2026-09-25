@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  classifyProviderQuotaError,
   classifyProviderQuotaExhaustion,
   classifyProviderQuotaResponse,
   providerMessageRetryHintMs,
@@ -107,6 +108,57 @@ const cases: Case[] = [
       "RESOURCE_EXHAUSTED",
     ],
     expected: "quota",
+  },
+  {
+    name: "Google Gemini classic per-minute RESOURCE_EXHAUSTED",
+    status: 429,
+    texts: ["429 Resource has been exhausted (e.g. check quota).", "RESOURCE_EXHAUSTED"],
+    expected: null,
+  },
+  {
+    name: "Vertex AI dynamic shared quota (capacity, not a used-up quota)",
+    status: 429,
+    texts: [
+      "429 Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.",
+      "RESOURCE_EXHAUSTED",
+    ],
+    expected: null,
+  },
+  {
+    name: "Vertex AI per-minute metric id",
+    status: 429,
+    texts: [
+      "429 Quota exceeded for aiplatform.googleapis.com/generate_content_requests_per_minute_per_project_per_base_model with base model: gemini-1.5-pro. Please submit a quota increase request. https://cloud.google.com/vertex-ai/docs/generative-ai/quotas-genai.",
+      "RESOURCE_EXHAUSTED",
+    ],
+    expected: null,
+  },
+  {
+    name: "Vertex AI per-day metric id",
+    status: 429,
+    texts: [
+      "429 Quota exceeded for aiplatform.googleapis.com/generate_content_requests_per_day_per_project_per_base_model with base model: gemini-1.5-pro.",
+      "RESOURCE_EXHAUSTED",
+    ],
+    expected: "daily",
+  },
+  {
+    name: "a monthly request quota",
+    status: 429,
+    texts: ["429 Quota exceeded: requests per month limit reached for this API key."],
+    expected: "monthly",
+  },
+  {
+    name: "an API-key provider's reached usage limit",
+    status: 429,
+    texts: ["429 You have reached your monthly usage limit for this API key."],
+    expected: "monthly",
+  },
+  {
+    name: "OpenAI billing hard limit",
+    status: null,
+    texts: ["Billing hard limit has been reached", "billing_hard_limit_reached"],
+    expected: "credits",
   },
   {
     name: "GitHub Models / Azure AI inference per day",
@@ -351,6 +403,63 @@ describe("SDK retry veto", () => {
     expect(await withoutQuotaExhaustedRetries(async () => ordinary)("https://quota.test")).toBe(
       ordinary,
     );
+  });
+
+  test("the veto and the thrown SDK error read identical evidence", async () => {
+    const bodies: Array<{ name: string; body: string; expected: ProviderQuotaScope | null }> = [
+      {
+        // The body's `status` key never reaches the SDK error, so neither reader uses it.
+        name: "Gemini classic per-minute",
+        body: JSON.stringify({
+          error: {
+            code: 429,
+            message: "Resource has been exhausted (e.g. check quota).",
+            status: "RESOURCE_EXHAUSTED",
+          },
+        }),
+        expected: null,
+      },
+      {
+        // An array body has no top-level `error`, so the SDK error carries no provider text.
+        name: "Gemini OpenAI-compatible array body",
+        body: JSON.stringify([
+          { error: { code: 429, message: "You exceeded your current quota." } },
+        ]),
+        expected: null,
+      },
+      {
+        name: "OpenRouter free-models-per-day",
+        body: JSON.stringify(perDay),
+        expected: "daily",
+      },
+      {
+        name: "non-JSON body",
+        body: "Quota exceeded: requests per day limit reached.",
+        expected: "daily",
+      },
+    ];
+    for (const row of bodies) {
+      const reply = () => new Response(row.body, { status: 429 });
+      const sdk = new ReplayableJsonOpenAI({
+        apiKey: "test",
+        baseURL: "https://quota.test/v1",
+        maxRetries: 0,
+        fetch: async () => reply(),
+      });
+      const thrown = await sdk
+        .post("/chat/completions", { body: { model: "m", messages: [] } })
+        .then(() => null)
+        .catch((caught: unknown) => caught);
+      const expected = row.expected === null ? null : { scope: row.expected };
+      expect({ name: row.name, scope: classifyProviderQuotaError(thrown) }).toEqual({
+        name: row.name,
+        scope: expected,
+      });
+      expect({ name: row.name, scope: await classifyProviderQuotaResponse(reply()) }).toEqual({
+        name: row.name,
+        scope: expected,
+      });
+    }
   });
 
   test("classifies raw responses without consuming their body", async () => {

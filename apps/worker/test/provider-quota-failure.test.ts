@@ -5,6 +5,7 @@ import { testSettings } from "@opengeni/testing";
 import {
   agentRunFailurePayload,
   compactionFailureReasonFromError,
+  compactionFailureTurnEventPayload,
   providerRecoveryResult,
   shouldRecoverCompactionProviderFailure,
 } from "../src/activities/agent-turn";
@@ -106,6 +107,43 @@ const OPENROUTER_OUT_OF_CREDITS: ProviderReply = {
       code: 402,
     },
   },
+};
+
+const GEMINI_RESOURCE_EXHAUSTED: ProviderReply = {
+  status: 429,
+  body: {
+    error: {
+      code: 429,
+      message: "Resource has been exhausted (e.g. check quota).",
+      status: "RESOURCE_EXHAUSTED",
+    },
+  },
+};
+const VERTEX_DYNAMIC_SHARED_QUOTA: ProviderReply = {
+  status: 429,
+  body: {
+    error: {
+      code: 429,
+      message:
+        "Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.",
+      status: "RESOURCE_EXHAUSTED",
+    },
+  },
+};
+const VERTEX_REQUESTS_PER_MINUTE: ProviderReply = {
+  status: 429,
+  body: {
+    error: {
+      code: 429,
+      message:
+        "Quota exceeded for aiplatform.googleapis.com/generate_content_requests_per_minute_per_project_per_base_model with base model: gemini-1.5-pro. Please submit a quota increase request. https://cloud.google.com/vertex-ai/docs/generative-ai/quotas-genai.",
+      status: "RESOURCE_EXHAUSTED",
+    },
+  },
+};
+const GEMINI_COMPAT_ARRAY_BODY: ProviderReply = {
+  status: 429,
+  body: [{ error: { code: 429, message: "You exceeded your current quota." } }],
 };
 
 let server: ReturnType<typeof Bun.serve>;
@@ -220,6 +258,63 @@ describe("provider quota exhaustion fails the turn promptly", () => {
     }
   });
 
+  test("Google and Vertex short limits keep SDK and worker retries", async () => {
+    for (const next of [
+      GEMINI_RESOURCE_EXHAUSTED,
+      VERTEX_DYNAMIC_SHARED_QUOTA,
+      VERTEX_REQUESTS_PER_MINUTE,
+    ]) {
+      const { error, requests } = await providerFailure(next, 1);
+      expect(requests).toBe(2);
+      expect(agentRunFailurePayload(error)).toMatchObject({
+        code: "provider_rate_limited",
+        retryable: true,
+      });
+    }
+  });
+
+  test("the SDK retry veto and the worker agree on every response", async () => {
+    // The veto stops SDK retries exactly when the worker fails the turn as quota.
+    for (const next of [
+      OPENROUTER_FREE_PER_DAY,
+      OPENAI_INSUFFICIENT_QUOTA,
+      AZURE_EXCEEDED_QUOTA_DAY,
+      OPENROUTER_FREE_PER_MINUTE,
+      OPENAI_TOKENS_PER_MINUTE,
+      GEMINI_RESOURCE_EXHAUSTED,
+      VERTEX_DYNAMIC_SHARED_QUOTA,
+      VERTEX_REQUESTS_PER_MINUTE,
+      GEMINI_COMPAT_ARRAY_BODY,
+    ]) {
+      const { error, requests } = await providerFailure(next, 1);
+      const quota = agentRunFailurePayload(error).code === "provider_quota_exhausted";
+      expect({ body: next.body, vetoed: requests === 1 }).toEqual({
+        body: next.body,
+        vetoed: quota,
+      });
+    }
+  });
+
+  test("an API-key provider's usage limit is provider quota, not a Codex cap", () => {
+    const providerCap = Object.assign(
+      new Error("429 You have reached your monthly usage limit for this API key."),
+      { status: 429 },
+    );
+    expect(agentRunFailurePayload(providerCap)).toMatchObject({
+      code: "provider_quota_exhausted",
+      retryable: false,
+      quotaScope: "monthly",
+    });
+    const codexCap = Object.assign(new Error("429 You have hit your usage limit"), {
+      status: 429,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+    expect(agentRunFailurePayload(codexCap)).toMatchObject({
+      code: "codex_usage_limit_reached",
+      retryable: false,
+    });
+  });
+
   test("subscription transports keep their credential-rotation quota semantics", () => {
     const codexQuota = Object.assign(new Error("429 You exceeded your current quota"), {
       status: 429,
@@ -242,13 +337,18 @@ describe("provider quota exhaustion fails the turn promptly", () => {
     expect(compactionFailureReasonFromError(compactError)).toBe(
       "compaction summarization failed: This model's daily limit at the model provider has been reached, so automatic retries stopped. Choose another model, or try again after the limit resets. Active history was preserved.",
     );
+    // The same closed marker as an ordinary quota failure, so clients can
+    // name the limit and point at the model picker.
+    expect(compactionFailureTurnEventPayload(compactError)).toMatchObject({
+      code: "context_compaction_failed",
+      retryable: false,
+      quotaScope: "daily",
+    });
 
     const { error: perMinute } = await providerFailure(OPENROUTER_FREE_PER_MINUTE, 0);
-    expect(
-      shouldRecoverCompactionProviderFailure(
-        new CompactionProviderResponseError({ httpStatus: 429 }, perMinute),
-      ),
-    ).toBe(true);
+    const perMinuteCompaction = new CompactionProviderResponseError({ httpStatus: 429 }, perMinute);
+    expect(shouldRecoverCompactionProviderFailure(perMinuteCompaction)).toBe(true);
+    expect(compactionFailureTurnEventPayload(perMinuteCompaction)).not.toHaveProperty("quotaScope");
   });
 
   test("non-provider quota text keeps its existing classification", () => {

@@ -604,12 +604,8 @@ export {
 
 export {
   PROVIDER_QUOTA_EXHAUSTED_CODE,
-  classifyProviderQuotaExhaustion,
-  classifyProviderQuotaResponse,
-  providerMessageRetryHintMs,
+  classifyProviderQuotaError,
   providerQuotaExhaustedMessage,
-  withoutQuotaExhaustedRetries,
-  type ProviderQuotaEvidence,
   type ProviderQuotaExhaustion,
   type ProviderQuotaScope,
 } from "./provider-quota";

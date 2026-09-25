@@ -25,7 +25,7 @@ import {
   PROVIDER_QUOTA_EXHAUSTED_CODE,
   type ProviderQuotaExhaustion,
   type ProviderQuotaScope,
-  classifyProviderQuotaExhaustion,
+  classifyProviderQuotaError,
   providerQuotaExhaustedMessage,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
@@ -39,6 +39,7 @@ import { CODEX_USAGE_EXHAUSTED_PCT } from "../codex-rotation";
 import { RetainedAttachmentTransportLimitError } from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
 import {
+  CODEX_USAGE_LIMIT_ERROR_TYPE,
   CodexReloginRequired,
   classifyCodexEncryptedArtifactRejection,
   classifyCodexResponseTimeoutError,
@@ -653,8 +654,12 @@ export function compactionFailureTurnEventPayload(
   recovery: "user_message";
   compacted: false;
   providerRejection?: CompactionProviderRejection;
+  quotaScope?: ProviderQuotaScope;
 } {
   const rejection = compactionProviderRejection(error);
+  // The same closed marker as a `provider_quota_exhausted` turn failure, so
+  // clients can name the exhausted limit and offer another model here too.
+  const quota = rejection ? null : classifyProviderQuotaExhaustionError(error);
   return {
     error: overrides.error ?? compactionFailureReasonFromError(error),
     code: "context_compaction_failed",
@@ -662,6 +667,7 @@ export function compactionFailureTurnEventPayload(
     recovery: "user_message",
     compacted: false,
     ...(rejection ? { providerRejection: rejection } : {}),
+    ...(quota ? { quotaScope: quota.scope } : {}),
   };
 }
 
@@ -859,19 +865,9 @@ export function isTransientProviderError(error: unknown): boolean {
   );
 }
 
-function providerHttpStatus(error: unknown): number | null {
-  let current: unknown = error;
-  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
-    const value = current as Record<string, unknown>;
-    const body =
-      value.error && typeof value.error === "object"
-        ? (value.error as Record<string, unknown>)
-        : null;
-    const status = Number(value.status ?? value.statusCode ?? body?.status ?? body?.statusCode);
-    if (Number.isInteger(status) && status >= 100 && status <= 599) return status;
-    current = value.cause;
-  }
-  return null;
+/** An explicit `usage_limit_reached` type or code string anywhere on the error chain. */
+function hasCodexUsageLimitType(error: unknown): boolean {
+  return collectErrorStrings(error).some((value) => value.includes(CODEX_USAGE_LIMIT_ERROR_TYPE));
 }
 
 /**
@@ -886,16 +882,8 @@ export function classifyProviderQuotaExhaustionError(
   error: unknown,
 ): ProviderQuotaExhaustion | null {
   if (isCodexTransportError(error) || isXaiSubscriptionTransportError(error)) return null;
-  try {
-    return classifyProviderQuotaExhaustion({
-      status: providerHttpStatus(error),
-      texts: collectErrorStrings(error),
-      retryAfterMs: providerRetryAfterMs(error),
-    });
-  } catch {
-    // A hostile getter is not quota evidence; keep the existing classification.
-    return null;
-  }
+  // The same reader the OpenAI SDK retry veto uses, so the two never disagree.
+  return classifyProviderQuotaError(error);
 }
 
 export type XaiCredentialFailure = {
@@ -1157,8 +1145,11 @@ function baseAgentRunFailurePayload(
   // `usage_limit_reached` shape must still outrank generic 429 retryability.
   // Credential quarantine/failover remains separately provenance-gated by
   // `isCodexTransportError`; this branch only chooses the truthful user payload.
+  // The looser "429 ... usage limit" wording counts only on a Codex transport
+  // error: an API-key provider's 429 that says "usage limit" is provider quota
+  // evidence, not a ChatGPT/Codex subscription cap.
   const usageLimit = classifyCodexUsageLimitError(error);
-  if (usageLimit) {
+  if (usageLimit && (isCodexTransportError(error) || hasCodexUsageLimitType(error))) {
     return codexUsageLimitFailurePayload(usageLimit, message);
   }
   const codexTimeout = classifyCodexResponseTimeoutError(error, {

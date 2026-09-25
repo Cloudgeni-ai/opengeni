@@ -145,15 +145,17 @@ test("provider rate limits separate daily limits and quota from transient thrott
 
 test("an exhausted provider quota is terminal copy that points at the model picker", () => {
   // The worker's turn.failed payload: authored copy in `error`, provider text in `detail`.
-  const exhausted = (error: string, detail: string) => ({
+  const exhausted = (error: string, detail: string, quotaScope: string) => ({
     ...summary,
     reason: `${error} ${detail}`,
     recordedDetail: `${error}\n${detail}`,
     failureCode: "provider_quota_exhausted",
+    quotaScope,
   });
   const daily = exhausted(
     "This model's daily limit at the model provider has been reached, so automatic retries stopped. Choose another model, or try again after the limit resets.",
     "429 Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day",
+    "daily",
   );
   expect(failedSessionCopy(daily, false, false, true)).toEqual({
     reason: "This model's daily limit has been reached. Choose another model below.",
@@ -169,15 +171,17 @@ test("an exhausted provider quota is terminal copy that points at the model pick
 
   const monthly = exhausted(
     "This model's monthly limit at the model provider has been reached, so automatic retries stopped. Choose another model, or try again after the limit resets.",
-    "429 Quota exceeded for this deployment. Please retry after 20 days.",
+    "429 Quota exceeded: requests per month limit reached for this API key.",
+    "monthly",
   );
   expect(failedSessionCopy(monthly, false, false, true).reason).toBe(
-    "The model provider's usage quota for this model is used up. Choose another model below.",
+    "This model's monthly limit has been reached. Choose another model below.",
   );
 
   const credits = exhausted(
     "The model provider account for this model is out of credits, so automatic retries stopped. Choose another model, or add credits with the provider and try again.",
     "429 Your team has either used all available credits or reached its monthly spending limit.",
+    "credits",
   );
   expect(failedSessionCopy(credits, false, false, true)).toMatchObject({
     reason:
@@ -188,10 +192,39 @@ test("an exhausted provider quota is terminal copy that points at the model pick
   const quota = exhausted(
     "The model provider's usage quota for this model is used up, so automatic retries stopped. Choose another model, or try again after the quota resets.",
     "429 You exceeded your current quota, please check your plan and billing details.",
+    "quota",
   );
   expect(failedSessionCopy(quota, false, false, true).reason).toBe(
     "The model provider's usage quota for this model is used up. Choose another model below.",
   );
+
+  // A failure recorded without the marker still gets the quota copy.
+  const { quotaScope: _unmarked, ...legacy } = quota;
+  expect(failedSessionCopy(legacy, false, false, true).reason).toBe(
+    "The model provider's usage quota for this model is used up. Choose another model below.",
+  );
+
+  // A quota refusal of a compaction request carries the same marker, so it
+  // gets the same short copy instead of the truncated compaction text.
+  const compactionError =
+    "compaction summarization failed: This model's daily limit at the model provider has been reached, so automatic retries stopped. Choose another model, or try again after the limit resets. Active history was preserved.";
+  const compaction = {
+    ...summary,
+    reason: compactionError,
+    recordedDetail: compactionError,
+    failureCode: "context_compaction_failed",
+    quotaScope: "daily",
+  };
+  expect(failedSessionCopy(compaction, false, false, true)).toEqual({
+    reason: "This model's daily limit has been reached. Choose another model below.",
+    unavailableModel: false,
+    retryUnhelpful: false,
+    detail: compactionError,
+  });
+  // An unknown marker value is ignored rather than trusted.
+  expect(
+    failedSessionCopy({ ...compaction, quotaScope: "constructor" }, false, false, true).reason,
+  ).toBe(`${compactionError.slice(0, 157)}…`);
 });
 
 test("authored worker copy and OpenGeni credit failures keep their own wording", () => {
