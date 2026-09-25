@@ -113,6 +113,46 @@ content scrolls inside the preview or opens with the full-screen control. Late
 content resize messages do not resize the conversation. Loading, failure, and
 retry states retain the same chat slot.
 
+## Serving user content from the API origin
+
+Every API response that streams user- or agent-controlled bytes (retained
+file/image/video and screenshot `/content` ranges, browser and computer frames,
+editable-artifact export downloads, and the Company Brain and workspace-state
+exports) uses the shared headers in `apps/api/src/http/user-content.ts`:
+
+- `Content-Security-Policy: default-src 'none'; ...; sandbox`, so a directly
+  opened file is a sandboxed document with no script, form, popup, or network
+  capability. Audio and video use `sandbox allow-same-origin` (never
+  `allow-scripts`) so the browser's media player can re-fetch its own URL.
+- `Cross-Origin-Resource-Policy: same-origin` and `X-Content-Type-Options: nosniff`.
+- `Content-Disposition: attachment` only for active markup types (HTML, XML
+  dialects including SVG, multipart), so opening one downloads it instead of
+  rendering attacker-authored markup on the app origin. Images, media, PDF and
+  text stay inline (a directly opened PDF still renders in Chrome's viewer
+  under the bare `sandbox` policy). The filename carries an ASCII fallback plus
+  an RFC 6266 `filename*` for names the fallback would change.
+
+The console never navigates to these routes; its previews read bytes through
+the SDK and render them in app-owned elements, so the headers do not change
+in-app viewing. Site `/html` responses keep their own `sandbox allow-scripts`
+policy (an opaque origin), add the same CORP and `nosniff` headers, and are
+attachments: clients fetch the HTML and render it in their own frame, so a raw
+`/html` URL never runs a publisher page at an app-origin URL. A new route that
+returns stored bytes must use the same helper;
+`apps/api/test/user-content-headers.test.ts` fails until a new raw route body is
+classified.
+
+Signed object-storage GET URLs follow the same rule through
+`userContentSignedGetUrlOptions`: for active markup (file and document
+downloads, Knowledge originals, the files MCP, and Site HTML downloads) the URL
+carries a signed `Content-Disposition: attachment` response override
+(`response-content-disposition` on S3-compatible and GCS, `rscd` on Azure).
+The storage endpoint is not always a separate site: local development serves
+Garage from loopback, and a preview may route the bucket path on the app
+origin. URLs that only a machine fetches (browser-controller file authorities,
+workspace capture manifests and files stored as JSON or octet-stream) are
+unchanged.
+
 ## Boundaries and compatibility
 
 - No new image storage provider or second HTML execution path.

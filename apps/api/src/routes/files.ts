@@ -58,6 +58,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import { retryWhileMissing } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { buildFilesMcpServer } from "../mcp/files";
+import { userContentResponseHeaders, userContentSignedGetUrlOptions } from "../http/user-content";
 import { mcpOAuthAuthenticateHeader, resolveMcpOAuthRouteAccess } from "../mcp-oauth";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import {
@@ -495,7 +496,10 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!videoPresent) {
       throw new HTTPException(410, { message: "generated video bytes are unavailable" });
     }
-    const signed = await objectStorage.createGetUrl({ key: file.objectKey });
+    const signed = await objectStorage.createGetUrl({
+      key: file.objectKey,
+      ...userContentSignedGetUrlOptions(file.contentType, file.filename),
+    });
     await recordAuditEvent(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -617,7 +621,10 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!present) {
       throw new HTTPException(410, { message: "file bytes are unavailable" });
     }
-    const signed = await objectStorage.createGetUrl({ key: file.objectKey });
+    const signed = await objectStorage.createGetUrl({
+      key: file.objectKey,
+      ...userContentSignedGetUrlOptions(file.contentType, file.filename),
+    });
     await recordAuditEvent(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -685,12 +692,15 @@ async function serveRetainedArtifactContent(
     );
   }
 
+  // Stored bytes and their content type are user- or agent-chosen; this origin
+  // also serves the console, so the response is a sandboxed, non-embeddable
+  // document and active markup downloads instead of rendering.
   const headers = {
     "Accept-Ranges": range.acceptRanges,
     "Cache-Control": "private, no-store",
     "Content-Length": String(range.length),
     "Content-Type": metadata.contentType,
-    "X-Content-Type-Options": "nosniff",
+    ...userContentResponseHeaders(metadata.contentType, file.filename),
     ...(range.contentRange ? { "Content-Range": range.contentRange } : {}),
   };
   if (range.kind === "empty") {

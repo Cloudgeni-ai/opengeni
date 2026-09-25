@@ -1362,12 +1362,11 @@ serves session docks, filtered before pagination by version `sourceSessionId`.
 Workspace/session discovery shares `/artifact-catalog` across Sites, editable
 artifacts, generated images, and published files, preserving existing content
 authority. File provenance stays separate from bytes; `kind:id` identifies list
-entries. Browsing never executes Sites or wakes compute. See
-[`artifact-library.md`](artifact-library.md).
+entries. Browsing never executes Sites or wakes compute.
 
 Published-file links use `Markdown.artifactHref`; `retained-file-preview.tsx`
-shares media/PDF previews through authorized storage APIs. Sandbox links remain
-workspace-inspector requests.
+previews media/PDF via authorized APIs; `sandbox:` opens the inspector.
+Stored-byte routes share `http/user-content.ts` ([`artifact-library.md`](artifact-library.md)).
 
 Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and

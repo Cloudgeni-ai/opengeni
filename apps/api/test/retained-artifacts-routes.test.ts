@@ -37,6 +37,10 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
+import {
+  USER_CONTENT_SECURITY_POLICY,
+  USER_MEDIA_CONTENT_SECURITY_POLICY,
+} from "../src/http/user-content";
 import { registerFileRoutes } from "../src/routes/files";
 
 const SECRET = "retained-artifacts-route-test-secret";
@@ -75,6 +79,7 @@ function storageFixture() {
   const calls: StorageCall[] = [];
   const existenceCalls: string[] = [];
   const signedGetCalls: string[] = [];
+  const signedGetOptions: Array<Parameters<ObjectStorage["createGetUrl"]>[0]> = [];
   const unavailable = async (): Promise<never> => {
     throw new Error("unexpected object-storage operation");
   };
@@ -83,8 +88,10 @@ function storageFixture() {
     backend: "s3-compatible",
     maxSinglePutSizeBytes: 5_000_000_000,
     createPutUrl: unavailable,
-    async createGetUrl({ key }) {
+    async createGetUrl(args) {
+      const { key } = args;
       signedGetCalls.push(key);
+      signedGetOptions.push(args);
       return {
         url: `https://storage.example.test/${encodeURIComponent(key)}?signature=opaque`,
         expiresAt: new Date("2026-08-10T12:05:00.000Z"),
@@ -105,7 +112,7 @@ function storageFixture() {
     putObject: unavailable,
     deleteObject: unavailable,
   };
-  return { storage, objects, calls, existenceCalls, signedGetCalls };
+  return { storage, objects, calls, existenceCalls, signedGetCalls, signedGetOptions };
 }
 
 function routeApp(objectStorage: ObjectStorage | null, db = client.db): Hono {
@@ -155,16 +162,18 @@ async function createArtifact(
     sha256?: string | null;
     contentType?: string;
     ready?: boolean;
+    filename?: string;
   },
 ) {
   const fileId = crypto.randomUUID();
-  const objectKey = `workspaces/${workspace.workspaceId}/files/${fileId}/retained.bin`;
+  const filename = input.filename ?? "retained.bin";
+  const objectKey = `workspaces/${workspace.workspaceId}/files/${fileId}/${filename}`;
   const upload = await createFileUpload(client.db, {
     accountId: workspace.accountId,
     workspaceId: workspace.workspaceId,
     fileId,
-    filename: "retained.bin",
-    safeFilename: "retained.bin",
+    filename,
+    safeFilename: filename,
     contentType: input.contentType ?? "application/octet-stream",
     sizeBytes: input.bytes.byteLength,
     sha256: input.sha256 === undefined ? "a".repeat(64) : input.sha256,
@@ -653,6 +662,134 @@ describe("retained artifact metadata and bounded content", () => {
     ]);
   });
 
+  test("serves uploaded HTML as a sandboxed, non-embeddable attachment", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const fixture = storageFixture();
+    const html = new TextEncoder().encode(
+      "<!doctype html><script>fetch('/v1/me').then(r=>r.text()).then(alert)</script>",
+    );
+    const upload = await createArtifact(workspace, {
+      bytes: html,
+      contentType: "text/html; charset=utf-8",
+      filename: "report.html",
+    });
+    fixture.objects.set(upload.objectKey, html);
+    const svg = new TextEncoder().encode(
+      '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+    );
+    const svgUpload = await createArtifact(workspace, {
+      bytes: svg,
+      contentType: "image/svg+xml",
+      filename: "diagram.svg",
+    });
+    fixture.objects.set(svgUpload.objectKey, svg);
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const image = await createArtifact(workspace, {
+      bytes: png,
+      contentType: "image/png",
+      filename: "chart.png",
+    });
+    fixture.objects.set(image.objectKey, png);
+    const app = routeApp(fixture.storage);
+    const expectUserContentHeaders = (response: Response) => {
+      expect(response.headers.get("content-security-policy")).toBe(USER_CONTENT_SECURITY_POLICY);
+      expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
+      expect(response.headers.get("content-security-policy")).toMatch(/(^|; )sandbox$/);
+      expect(response.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    };
+
+    const whole = await app.request(artifactUrl(workspace.workspaceId, upload.fileId, true), {
+      headers: { authorization: workspace.authorization },
+    });
+    expect(whole.status).toBe(200);
+    expect(whole.headers.get("content-type")).toBe("text/html");
+    expectUserContentHeaders(whole);
+    expect(whole.headers.get("content-disposition")).toBe('attachment; filename="report.html"');
+    expect(new Uint8Array(await whole.arrayBuffer())).toEqual(html);
+
+    const ranged = await app.request(artifactUrl(workspace.workspaceId, upload.fileId, true), {
+      headers: { authorization: workspace.authorization, range: "bytes=0-9" },
+    });
+    expect(ranged.status).toBe(206);
+    expectUserContentHeaders(ranged);
+    expect(ranged.headers.get("content-disposition")).toBe('attachment; filename="report.html"');
+
+    const vector = await app.request(artifactUrl(workspace.workspaceId, svgUpload.fileId, true), {
+      headers: { authorization: workspace.authorization },
+    });
+    expect(vector.status).toBe(200);
+    expect(vector.headers.get("content-type")).toBe("image/svg+xml");
+    expectUserContentHeaders(vector);
+    expect(vector.headers.get("content-disposition")).toBe('attachment; filename="diagram.svg"');
+
+    // Previewable media stays inline; only the sandbox policy is added.
+    const raster = await app.request(artifactUrl(workspace.workspaceId, image.fileId, true), {
+      headers: { authorization: workspace.authorization },
+    });
+    expect(raster.status).toBe(200);
+    expect(raster.headers.get("content-type")).toBe("image/png");
+    expectUserContentHeaders(raster);
+    expect(raster.headers.get("content-disposition")).toBeNull();
+    expect(new Uint8Array(await raster.arrayBuffer())).toEqual(png);
+
+    // A direct navigation to video plays in the browser's own media document,
+    // which keeps the real origin so its same-origin re-fetch is allowed.
+    const mp4 = new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70]);
+    const video = await createArtifact(workspace, {
+      bytes: mp4,
+      contentType: "video/mp4",
+      filename: "clip.mp4",
+    });
+    fixture.objects.set(video.objectKey, mp4);
+    const media = await app.request(artifactUrl(workspace.workspaceId, video.fileId, true), {
+      headers: { authorization: workspace.authorization },
+    });
+    expect(media.status).toBe(200);
+    expect(media.headers.get("content-security-policy")).toBe(USER_MEDIA_CONTENT_SECURITY_POLICY);
+    expect(media.headers.get("content-security-policy")).not.toContain("allow-scripts");
+    expect(media.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect(media.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(media.headers.get("content-disposition")).toBeNull();
+  });
+
+  test("signs active-markup download URLs as attachments and leaves previewable types inline", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const fixture = storageFixture();
+    const html = new TextEncoder().encode("<!doctype html><script>alert(1)</script>");
+    const page = await createArtifact(workspace, {
+      bytes: html,
+      contentType: "text/html",
+      filename: "report.html",
+    });
+    fixture.objects.set(page.objectKey, html);
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const image = await createArtifact(workspace, {
+      bytes: png,
+      contentType: "image/png",
+      filename: "chart.png",
+    });
+    fixture.objects.set(image.objectKey, png);
+    const app = routeApp(fixture.storage);
+
+    for (const fileId of [page.fileId, image.fileId]) {
+      const response = await app.request(
+        `http://x/v1/workspaces/${workspace.workspaceId}/files/${fileId}/download-url`,
+        { method: "POST", headers: { authorization: workspace.authorization } },
+      );
+      expect(response.status).toBe(200);
+    }
+    expect(fixture.signedGetOptions).toEqual([
+      {
+        key: page.objectKey,
+        responseContentDisposition: 'attachment; filename="report.html"',
+      },
+      { key: image.objectKey },
+    ]);
+  });
+
   test("rejects malformed, multipart, oversized, and unsatisfiable ranges before storage", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -885,6 +1022,9 @@ describe("retained artifact metadata and bounded content", () => {
     expect(range.status).toBe(206);
     expect(range.headers.get("content-range")).toBe(`bytes 1048576-1572863/${bytes.byteLength}`);
     expect(range.headers.get("content-length")).toBe("524288");
+    expect(range.headers.get("content-security-policy")).toBe(USER_CONTENT_SECURITY_POLICY);
+    expect(range.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect(range.headers.get("content-disposition")).toBeNull();
     expect(new Uint8Array(await range.arrayBuffer())).toEqual(bytes.slice(1_048_576, 1_572_864));
     expect(fixture.calls).toEqual([
       { fileId: artifact.artifactId, start: 1_048_576, end: 1_572_863 },
