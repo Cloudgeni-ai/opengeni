@@ -44,6 +44,29 @@ async function setInputValue(input: HTMLInputElement, value: string): Promise<vo
 }
 
 describe("workspace deletion confirmation", () => {
+  test.each([
+    { canDelete: false, isOnlyWorkspaceInAccount: false, reason: "Only workspace admins" },
+    { canDelete: true, isOnlyWorkspaceInAccount: true, reason: "only workspace" },
+  ])("keeps deletion unavailable when $reason applies", async (props) => {
+    const onDelete = mock(async () => true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<DangerZone workspaceName="Workspace A" {...props} onDelete={onDelete} />);
+      });
+      const button = container.querySelector<HTMLButtonElement>("button");
+      expect(button?.disabled).toBe(true);
+      expect(container.textContent).toContain(props.reason);
+      expect(document.body.querySelector("#confirm-workspace-name")).toBeNull();
+      expect(onDelete).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("reconciles organization-admin deletion and stays in its manageable workspace roster", () => {
     expect(workspaceSettingsSource).toContain("deleteOrganizationWorkspaceWithReconciliation({");
     expect(workspaceSettingsSource).toContain("completeWorkspaceDeletionFollowUp({");

@@ -642,6 +642,65 @@ describe("compound composer framework", () => {
     expect(search.value).toBe("Needle");
   });
 
+  test("autoFocus on an interactive mount focuses the composer", async () => {
+    mounted = await renderComponent(<ChatComposer composer={fullComposer()} autoFocus />);
+    const textarea = mounted.container.querySelector("textarea")!;
+    await act(async () => {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  test("hydration autofocus leaves an open menu or dialog in control", async () => {
+    for (const role of ["menu", "listbox", "dialog"] as const) {
+      let setDisabled: ((value: boolean) => void) | null = null;
+      function Harness() {
+        const [disabled, set] = useState(true);
+        setDisabled = set;
+        return (
+          <>
+            <div role={role} tabIndex={-1} aria-label="Open popup">
+              <button type="button">Popup action</button>
+            </div>
+            <ChatComposer composer={fullComposer()} disabled={disabled} autoFocus />
+          </>
+        );
+      }
+      mounted = await renderComponent(<Harness />);
+      const action = mounted.container.querySelector("button")!;
+      action.focus();
+      await act(async () => {
+        setDisabled?.(false);
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      });
+      expect(mounted.container.querySelector("textarea")?.disabled).toBe(false);
+      expect(document.activeElement).toBe(action);
+      await mounted.unmount();
+      mounted = null;
+    }
+  });
+
+  test("hydration autofocus still focuses a composer inside the focused dialog", async () => {
+    let setDisabled: ((value: boolean) => void) | null = null;
+    function Harness() {
+      const [disabled, set] = useState(true);
+      setDisabled = set;
+      return (
+        <div role="dialog" aria-label="Composer dialog">
+          <button type="button">Close</button>
+          <ChatComposer composer={fullComposer()} disabled={disabled} autoFocus />
+        </div>
+      );
+    }
+    mounted = await renderComponent(<Harness />);
+    mounted.container.querySelector("button")!.focus();
+    await act(async () => {
+      setDisabled?.(false);
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
+    expect(document.activeElement).toBe(mounted.container.querySelector("textarea"));
+  });
+
   test("the compound composition is server-renderable with deterministic ownership markup", () => {
     const html = renderToString(<DeliveryOnlyComposer />);
     expect(html).toContain("data-og-composer-id");

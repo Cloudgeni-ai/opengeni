@@ -52,7 +52,7 @@ if [ "$OPENGENI_DEV_BIND_HOST" = "127.0.0.1" ] && [ -n "${OPENGENI_API_HOST:-}" 
 fi
 OPENGENI_API_HOST="$OPENGENI_DEV_BIND_HOST"
 export OPENGENI_DEV_BIND_HOST OPENGENI_API_HOST
-opengeni_dev_bind_host_notice "$OPENGENI_DEV_BIND_HOST" "$OPENGENI_SANDBOX_BACKEND" "$(uname -s)" >&2
+opengeni_dev_bind_host_notice "$OPENGENI_DEV_BIND_HOST" >&2
 
 # Connecting another computer is optional. A basic local stack does not need
 # relay binaries or enrollment credentials. Preserve an existing explicit opt-in.
@@ -485,6 +485,20 @@ if [ -z "${OPENGENI_WEB_BASE_URL:-}" ]; then
 else
   export OPENGENI_WEB_BASE_URL
 fi
+
+# The local API accepts browser requests only from its web app
+# (apps/api/src/http/local-browser-boundary.ts). Keep the printed loopback web
+# URL usable even when OPENGENI_WEB_BASE_URL names another address.
+local_web_origin="http://127.0.0.1:${OPENGENI_WEB_PORT}"
+# Origins never contain whitespace. Drop it so the unquoted assignment written
+# to .env.runtime (which the dev:* scripts source) stays one word.
+OPENGENI_LOCAL_ALLOWED_ORIGINS="${OPENGENI_LOCAL_ALLOWED_ORIGINS:-}"
+OPENGENI_LOCAL_ALLOWED_ORIGINS="${OPENGENI_LOCAL_ALLOWED_ORIGINS//[[:space:]]/}"
+case ",${OPENGENI_LOCAL_ALLOWED_ORIGINS:-}," in
+*",${local_web_origin},"*) ;;
+*) OPENGENI_LOCAL_ALLOWED_ORIGINS="${OPENGENI_LOCAL_ALLOWED_ORIGINS:+${OPENGENI_LOCAL_ALLOWED_ORIGINS},}${local_web_origin}" ;;
+esac
+export OPENGENI_LOCAL_ALLOWED_ORIGINS
 
 # Host workers always reach first-party MCP through this worktree's API port.
 # OPENGENI_MCP_URL may later become a public Cloudflare edge for Modal and must
@@ -1160,6 +1174,7 @@ fi
   printf 'OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT=%s\n' "${OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT}"
   printf 'OPENGENI_WEB_PORT=%s\n' "${OPENGENI_WEB_PORT}"
   printf 'OPENGENI_WEB_BASE_URL=%s\n' "${OPENGENI_WEB_BASE_URL}"
+  printf 'OPENGENI_LOCAL_ALLOWED_ORIGINS=%s\n' "${OPENGENI_LOCAL_ALLOWED_ORIGINS}"
   if [ -n "${OPENGENI_SANDBOX_EDGE_PORT:-}" ]; then
     printf 'OPENGENI_SANDBOX_EDGE_PORT=%s\n' "${OPENGENI_SANDBOX_EDGE_PORT}"
   fi
@@ -1239,6 +1254,43 @@ else
   docker compose up -d postgres nats temporal garage
   # Configure the Garage fixture with its S3 API; no MinIO client image is needed.
   bun scripts/dev-native-storage.ts provision .
+fi
+
+# Docker sandboxes call the API for Codemode, first-party MCP, and the Git
+# broker. Docker Desktop forwards host.docker.internal to the loopback API; a
+# Linux Docker Engine container reaches the host only through its network's
+# bridge gateway. Publish just those routes there, never the whole stack.
+sandbox_bridge_mode="$(opengeni_dev_sandbox_bridge_mode "$OPENGENI_DEV_BIND_HOST" \
+  "$OPENGENI_SANDBOX_BACKEND" "$(uname -s)" "$OPENGENI_DEV_BACKEND")"
+if [ "$sandbox_bridge_mode" != "none" ]; then
+  if sandbox_bridge="$(bun scripts/dev-sandbox-bridge.ts resolve "$OPENGENI_DOCKER_NETWORK")"; then
+    IFS=$'\t' read -r sandbox_bridge_gateway sandbox_bridge_subnet <<<"$sandbox_bridge"
+    sandbox_bridge_origin="http://${sandbox_bridge_gateway}:${OPENGENI_API_PORT}"
+    if [ "$sandbox_bridge_mode" = "forward" ]; then
+      OPENGENI_SANDBOX_BRIDGE_HOST="$sandbox_bridge_gateway" \
+        OPENGENI_SANDBOX_BRIDGE_PORT="$OPENGENI_API_PORT" \
+        OPENGENI_SANDBOX_BRIDGE_SUBNET="$sandbox_bridge_subnet" \
+        OPENGENI_SANDBOX_BRIDGE_API_ORIGIN="http://127.0.0.1:${OPENGENI_API_PORT}" \
+        bun scripts/dev-sandbox-bridge.ts serve &
+      sandbox_bridge_pid="$!"
+      register_process "$sandbox_bridge_pid" "Docker sandbox route"
+      for _attempt in $(seq 1 300); do
+        curl -fsS -m 1 "${sandbox_bridge_origin}/__opengeni_sandbox_bridge_health" \
+          >/dev/null 2>&1 && break
+        kill -0 "$sandbox_bridge_pid" 2>/dev/null || break
+        sleep 0.1
+      done
+      curl -fsS -m 1 "${sandbox_bridge_origin}/__opengeni_sandbox_bridge_health" >/dev/null || {
+        echo "Could not start the Docker sandbox route on ${sandbox_bridge_origin}. Set OPENGENI_MCP_URL to a sandbox-reachable API address, or OPENGENI_SANDBOX_BACKEND=local." >&2
+        exit 1
+      }
+    fi
+    export OPENGENI_MCP_URL="${sandbox_bridge_origin}/v1/workspaces/{workspaceId}/mcp"
+    printf 'OPENGENI_MCP_URL=%s\n' "${OPENGENI_MCP_URL}" >>.env.runtime
+    echo "  docker-sandbox-api=${sandbox_bridge_origin} (${sandbox_bridge_subnet} only; Codemode, MCP, and Git broker routes)"
+  else
+    echo "No Docker sandbox route was published. Docker Desktop sandboxes still use host.docker.internal; with rootless Docker, set OPENGENI_MCP_URL to a sandbox-reachable API address for Codemode and the Git broker." >&2
+  fi
 fi
 echo "OpenGeni setup: applying database migrations and runtime roles."
 (cd packages/db && bun run migrate)
