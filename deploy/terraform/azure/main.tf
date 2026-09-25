@@ -331,6 +331,16 @@ resource "azurerm_log_analytics_workspace" "observability" {
   tags           = local.tags
 }
 
+# A container log transform runs in its own data flow; every other stream
+# keeps the untransformed default flow into its standard table.
+locals {
+  container_insights_transformed_streams = var.aks_container_insights.container_log_transform_kql == null ? [] : ["Microsoft-ContainerLogV2"]
+  container_insights_default_streams = [
+    for stream in var.aks_container_insights.streams : stream
+    if !contains(local.container_insights_transformed_streams, stream)
+  ]
+}
+
 resource "azurerm_monitor_data_collection_rule" "container_insights" {
   count               = local.container_insights_enabled ? 1 : 0
   name                = "MSCI-${var.location}-${local.aks_name}"
@@ -346,9 +356,26 @@ resource "azurerm_monitor_data_collection_rule" "container_insights" {
     }
   }
 
-  data_flow {
-    streams      = var.aks_container_insights.streams
-    destinations = [local.container_insights_destination]
+  dynamic "data_flow" {
+    for_each = length(local.container_insights_default_streams) > 0 ? [local.container_insights_default_streams] : []
+
+    content {
+      streams      = data_flow.value
+      destinations = [local.container_insights_destination]
+    }
+  }
+
+  # Ingestion-time transform for container stdout/stderr, for example to
+  # redact request query strings before they are retained.
+  dynamic "data_flow" {
+    for_each = local.container_insights_transformed_streams
+
+    content {
+      streams       = [data_flow.value]
+      destinations  = [local.container_insights_destination]
+      transform_kql = var.aks_container_insights.container_log_transform_kql
+      output_stream = data_flow.value
+    }
   }
 
   data_sources {
@@ -388,14 +415,54 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "container_insights_da
   description          = "The observability Log Analytics workspace reached its daily ingestion cap and stopped collecting container logs until the daily reset."
   severity             = 2
   evaluation_frequency = "PT15M"
-  window_duration      = "PT15M"
-  tags                 = local.tags
+  # Log search alerts evaluate on TimeGenerated without latency compensation.
+  # The OverQuota record is usually a single row, so a window wider than the
+  # evaluation frequency keeps a late-arriving record from falling between
+  # evaluations. The rule is stateless; muting stops it re-notifying every
+  # evaluation while that record stays inside the window.
+  window_duration                   = "PT1H"
+  mute_actions_after_alert_duration = "PT6H"
+  tags                              = local.tags
 
   criteria {
     query                   = "_LogOperation | where Category =~ \"Ingestion\" | where Detail contains \"OverQuota\""
     time_aggregation_method = "Count"
     threshold               = 0
     operator                = "GreaterThan"
+
+    failing_periods {
+      minimum_failing_periods_to_trigger_alert = 1
+      number_of_evaluation_periods             = 1
+    }
+  }
+
+  action {
+    action_groups = [azurerm_monitor_action_group.observability[0].id]
+  }
+}
+
+# Collection can stop without the cap being reached: a deleted association,
+# an agent that cannot authenticate, or the addon removed out of band. The
+# listed namespaces always log, so an empty window means collection stopped.
+resource "azurerm_monitor_scheduled_query_rules_alert_v2" "container_insights_no_data" {
+  count                = local.container_insights_enabled ? 1 : 0
+  name                 = "${var.name_prefix}-logs-collection-stopped"
+  resource_group_name  = local.resource_group_name
+  location             = azurerm_log_analytics_workspace.observability[0].location
+  scopes               = [azurerm_log_analytics_workspace.observability[0].id]
+  description          = "No container log lines from the collected namespaces reached the observability Log Analytics workspace in the last 30 minutes."
+  severity             = 2
+  evaluation_frequency = "PT15M"
+  window_duration      = "PT30M"
+  # Stateful: fires once when collection stops and resolves when it resumes.
+  auto_mitigation_enabled = true
+  tags                    = local.tags
+
+  criteria {
+    query                   = "ContainerLogV2 | where PodNamespace in (${join(", ", [for namespace in var.aks_container_insights.namespaces : "\"${namespace}\""])})"
+    time_aggregation_method = "Count"
+    threshold               = 1
+    operator                = "LessThan"
 
     failing_periods {
       minimum_failing_periods_to_trigger_alert = 1

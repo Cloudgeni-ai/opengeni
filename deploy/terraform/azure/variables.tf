@@ -331,13 +331,14 @@ variable "observability" {
 }
 
 variable "aks_container_insights" {
-  description = "Optional AKS Container Insights collection of container stdout/stderr (ContainerLogV2) and Kubernetes events/pod inventory into the observability Log Analytics workspace. Collection is limited to the listed namespaces and the workspace receives a mandatory daily ingestion cap."
+  description = "Optional AKS Container Insights collection of container stdout/stderr (ContainerLogV2) and Kubernetes events/pod inventory into the observability Log Analytics workspace. Collection is limited to the listed namespaces and the workspace receives a mandatory daily ingestion cap. container_log_transform_kql optionally applies an ingestion-time KQL transformation to ContainerLogV2 only, for example to redact request query strings."
   type = object({
-    enabled                  = optional(bool, false)
-    namespaces               = optional(list(string), [])
-    streams                  = optional(list(string), ["Microsoft-ContainerLogV2", "Microsoft-KubeEvents", "Microsoft-KubePodInventory"])
-    data_collection_interval = optional(string, "5m")
-    workspace_daily_quota_gb = optional(number)
+    enabled                     = optional(bool, false)
+    namespaces                  = optional(list(string), [])
+    streams                     = optional(list(string), ["Microsoft-ContainerLogV2", "Microsoft-KubeEvents", "Microsoft-KubePodInventory"])
+    data_collection_interval    = optional(string, "5m")
+    workspace_daily_quota_gb    = optional(number)
+    container_log_transform_kql = optional(string)
   })
   default = {}
 
@@ -394,6 +395,14 @@ variable "aks_container_insights" {
       false
     )
     error_message = "aks_container_insights.workspace_daily_quota_gb is required when enabled and must be between 0.1 and 100 GB so container log cost stays bounded."
+  }
+
+  validation {
+    condition = (
+      var.aks_container_insights.container_log_transform_kql == null ||
+      can(regex("^source(\\s|$)", trimspace(var.aks_container_insights.container_log_transform_kql)))
+    )
+    error_message = "aks_container_insights.container_log_transform_kql must be null or a KQL transformation that starts with `source`."
   }
 }
 

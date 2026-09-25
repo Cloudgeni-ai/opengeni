@@ -96,6 +96,7 @@ output "aks_container_insights" {
     enabled                  = local.container_insights_enabled
     data_collection_rule_id  = try(azurerm_monitor_data_collection_rule.container_insights[0].id, null)
     daily_cap_alert_id       = try(azurerm_monitor_scheduled_query_rules_alert_v2.container_insights_daily_cap[0].id, null)
+    no_data_alert_id         = try(azurerm_monitor_scheduled_query_rules_alert_v2.container_insights_no_data[0].id, null)
     namespaces               = local.container_insights_enabled ? var.aks_container_insights.namespaces : []
     streams                  = local.container_insights_enabled ? var.aks_container_insights.streams : []
     workspace_daily_quota_gb = local.container_insights_enabled ? var.aks_container_insights.workspace_daily_quota_gb : null

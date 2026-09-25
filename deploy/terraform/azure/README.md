@@ -267,7 +267,21 @@ When enabled, Terraform:
   shares the workspace, so set it well above normal ingestion.
 - Creates the `<name_prefix>-logs-daily-cap` scheduled query alert. It reads
   `_LogOperation`, which is not subject to the cap, and notifies the
-  observability action group when ingestion stops for the day.
+  observability action group when ingestion stops for the day. It evaluates
+  every 15 minutes over a one-hour window, so a late-arriving `OverQuota`
+  record is still counted, and mutes repeat notifications for six hours.
+- Creates the `<name_prefix>-logs-collection-stopped` scheduled query alert.
+  It fires when no `ContainerLogV2` line from the listed namespaces arrived in
+  the last 30 minutes (a deleted association, an agent that cannot
+  authenticate, or the addon removed out of band) and resolves when collection
+  resumes. List at least one namespace that always logs.
+- Optionally applies `container_log_transform_kql`, an ingestion-time
+  [transformation](https://learn.microsoft.com/azure/azure-monitor/containers/container-insights-transformations)
+  that runs only on `ContainerLogV2`, in its own data flow into the standard
+  table. Use it to redact values that must not be retained, such as request
+  query strings in ingress access logs. It must start with `source` and may use
+  only the KQL that transformations support; Azure validates it when the rule
+  is created or updated.
 
 Retention is the workspace's 30 days. Query retained pod output with KQL, for
 example:

@@ -3246,6 +3246,10 @@ events, and pod inventory by default), and a mandatory daily ingestion cap on
 the observability Log Analytics workspace, whose retention stays 30 days.
 The cap is shared with Application Insights data in that workspace, so size it
 well above normal ingestion; reaching it pauses ingestion until the daily reset.
+Two log search alerts notify the observability action group when the cap is
+reached or when collection stops. An optional `container_log_transform_kql`
+redacts container log content, such as ingress query strings, before it is
+retained.
 The addon adds a DaemonSet with CPU and memory requests on every node, so check
 node headroom first. See `deploy/terraform/azure/README.md`.
 
