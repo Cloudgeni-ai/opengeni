@@ -1,7 +1,14 @@
 import { createHmac } from "node:crypto";
+import { isIP } from "node:net";
 import type { Database } from "@opengeni/db";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { sql } from "drizzle-orm";
+
+import {
+  requestSourceRateLimitKey,
+  TRUSTED_CLIENT_ADDRESS_HEADER,
+  UNKNOWN_REQUEST_SOURCE_ADDRESS,
+} from "../http/request-source";
 
 export type ManagedAuthClientRateLimitRule = { window: number; max: number };
 
@@ -17,10 +24,17 @@ export type ManagedAuthClientRateLimitRule = { window: number; max: number };
  * sized for launch traffic that shares one address (office and carrier NAT)
  * while bounding scripted credential guessing and mail sending from one
  * source. Per-email throttles below cap the same abuse across many addresses.
+ *
+ * Email sign-in and sign-up allow 20 per minute, at least Better Auth's
+ * previous default (3 per 10 s, about 18 per minute). Until the edge forwards
+ * real client addresses (for example ingress-nginx behind a cloud load
+ * balancer with `externalTrafficPolicy: Cluster`), every user shares a few
+ * node addresses, and these two limits then bound the whole deployment's
+ * email sign-in and sign-up rate; they must not fall below that default.
  */
 export const MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES = {
-  "/sign-in/email": { window: 60, max: 10 },
-  "/sign-up/email": { window: 60, max: 10 },
+  "/sign-in/email": { window: 60, max: 20 },
+  "/sign-up/email": { window: 60, max: 20 },
   "/sign-in/social": { window: 60, max: 20 },
   "/callback/*": { window: 60, max: 30 },
   "/request-password-reset": { window: 60, max: 5 },
@@ -33,7 +47,10 @@ export const MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES = {
 export type ManagedAuthEmailThrottle = {
   purpose: "sign_in" | "sign_up" | "password_reset" | "verification_email";
   windowSeconds: number;
-  max: number;
+  /** Attempts one client address (an IPv6 /64) may make against one email. */
+  perSourceMax: number;
+  /** Attempts all client addresses together may make against one email. */
+  perEmailMax: number;
 };
 
 /**
@@ -41,12 +58,44 @@ export type ManagedAuthEmailThrottle = {
  * to an address. They bound password guessing against one account and mail
  * bombing of one inbox regardless of how many client addresses an attacker
  * rotates through. Every attempt counts, including successful sign-ins.
+ *
+ * Each email has two fixed windows. The tight one is per (email, client
+ * address); an attempt it refuses never reaches the looser per-email window.
+ * One source can therefore spend only its own share of an email's budget:
+ * locking a person out of email/password sign-in, sign-up, password reset, or
+ * verification mail takes at least `perEmailMax / perSourceMax` (5) distinct
+ * client addresses (IPv6: /64 blocks) inside the window, while one address
+ * can exhaust that email's budget only for requests from the same address.
+ * Social sign-in is never throttled per email. The accepted cost is that a
+ * distributed attacker may make up to `perEmailMax` attempts per window
+ * against one email, and can deny that email's password sign-in for the rest
+ * of the window once it spends them.
  */
 export const MANAGED_AUTH_EMAIL_THROTTLES = {
-  "/sign-in/email": { purpose: "sign_in", windowSeconds: 15 * 60, max: 10 },
-  "/sign-up/email": { purpose: "sign_up", windowSeconds: 60 * 60, max: 5 },
-  "/request-password-reset": { purpose: "password_reset", windowSeconds: 60 * 60, max: 5 },
-  "/send-verification-email": { purpose: "verification_email", windowSeconds: 60 * 60, max: 5 },
+  "/sign-in/email": {
+    purpose: "sign_in",
+    windowSeconds: 15 * 60,
+    perSourceMax: 10,
+    perEmailMax: 50,
+  },
+  "/sign-up/email": {
+    purpose: "sign_up",
+    windowSeconds: 60 * 60,
+    perSourceMax: 5,
+    perEmailMax: 25,
+  },
+  "/request-password-reset": {
+    purpose: "password_reset",
+    windowSeconds: 60 * 60,
+    perSourceMax: 5,
+    perEmailMax: 25,
+  },
+  "/send-verification-email": {
+    purpose: "verification_email",
+    windowSeconds: 60 * 60,
+    perSourceMax: 5,
+    perEmailMax: 25,
+  },
 } as const satisfies Record<string, ManagedAuthEmailThrottle>;
 
 export const MANAGED_AUTH_EMAIL_THROTTLE_KEY_PREFIX = "opengeni:email-throttle:v1:";
@@ -72,8 +121,9 @@ export function managedAuthEmailThrottleFor(path: string): ManagedAuthEmailThrot
 }
 
 /**
- * Content-free counter key. The address is normalized the way Better Auth
- * stores it and keyed-hashed so the rate-limit table never holds an email.
+ * Content-free counter key for one email. The address is normalized the way
+ * Better Auth stores it and keyed-hashed so the rate-limit table never holds
+ * an email.
  */
 export function managedAuthEmailThrottleKey(
   secret: string,
@@ -81,9 +131,44 @@ export function managedAuthEmailThrottleKey(
   email: string,
 ): string {
   const digest = createHmac("sha256", secret)
-    .update(`opengeni:managed-auth:email-throttle:v1\n${purpose}\n${email.trim().toLowerCase()}`)
+    .update(`opengeni:managed-auth:email-throttle:v1\n${purpose}\n${normalizedEmail(email)}`)
     .digest("hex");
   return `${MANAGED_AUTH_EMAIL_THROTTLE_KEY_PREFIX}${purpose}:${digest}`;
+}
+
+/**
+ * Content-free counter key for one (email, client address) pair; `source` is
+ * a {@link requestSourceRateLimitKey}. Neither value is stored.
+ */
+export function managedAuthEmailSourceThrottleKey(
+  secret: string,
+  purpose: ManagedAuthEmailThrottle["purpose"],
+  email: string,
+  source: string,
+): string {
+  const digest = createHmac("sha256", secret)
+    .update(
+      `opengeni:managed-auth:email-source-throttle:v1\n${purpose}\n${normalizedEmail(email)}\n${source}`,
+    )
+    .digest("hex");
+  return `${MANAGED_AUTH_EMAIL_THROTTLE_KEY_PREFIX}${purpose}:source:${digest}`;
+}
+
+/**
+ * The limiter source for a Better Auth request: the trusted address the API
+ * stamped on it, as a rate-limit key. The API strips caller-supplied copies,
+ * so a request without one (an in-process call without a transport peer)
+ * shares the unknown-source bucket.
+ */
+export function managedAuthThrottleSource(headers: Headers | null | undefined): string {
+  const stamped = headers?.get(TRUSTED_CLIENT_ADDRESS_HEADER)?.trim();
+  return stamped && isIP(stamped) !== 0
+    ? requestSourceRateLimitKey(stamped.toLowerCase())
+    : UNKNOWN_REQUEST_SOURCE_ADDRESS;
+}
+
+function normalizedEmail(email: string): string {
+  return email.trim().toLowerCase();
 }
 
 /**
@@ -140,7 +225,9 @@ export async function consumeManagedAuthEmailThrottle(
 /**
  * Better Auth `hooks.before` middleware. It runs after Better Auth's own
  * per-client-address limiter and for both HTTP requests and server-side
- * `auth.api.*` calls, so the product session-set sign-in is covered too.
+ * `auth.api.*` calls, so the product session-set sign-in is covered too. The
+ * per-(email, address) window is consumed first; only an attempt it admits
+ * counts toward the email's shared window.
  */
 export function createManagedAuthEmailThrottleHook(db: Pick<Database, "execute">, secret: string) {
   return createAuthMiddleware(async (ctx) => {
@@ -148,11 +235,18 @@ export function createManagedAuthEmailThrottleHook(db: Pick<Database, "execute">
     if (!throttle) return;
     const email = (ctx.body as { email?: unknown } | undefined)?.email;
     if (typeof email !== "string" || !email.trim()) return;
-    const decision = await consumeManagedAuthEmailThrottle(db, {
+    const source = managedAuthThrottleSource(ctx.headers);
+    const perSource = await consumeManagedAuthEmailThrottle(db, {
+      key: managedAuthEmailSourceThrottleKey(secret, throttle.purpose, email, source),
+      windowSeconds: throttle.windowSeconds,
+      max: throttle.perSourceMax,
+    });
+    if (!perSource.allowed) throw new ManagedAuthEmailThrottleError(perSource.retryAfterSeconds);
+    const perEmail = await consumeManagedAuthEmailThrottle(db, {
       key: managedAuthEmailThrottleKey(secret, throttle.purpose, email),
       windowSeconds: throttle.windowSeconds,
-      max: throttle.max,
+      max: throttle.perEmailMax,
     });
-    if (!decision.allowed) throw new ManagedAuthEmailThrottleError(decision.retryAfterSeconds);
+    if (!perEmail.allowed) throw new ManagedAuthEmailThrottleError(perEmail.retryAfterSeconds);
   });
 }

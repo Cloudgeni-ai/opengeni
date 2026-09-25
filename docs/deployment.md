@@ -3038,18 +3038,42 @@ so all users share a handful of rate-limit buckets. Set
 real client, then set `OPENGENI_API_TRUSTED_PROXY_HOPS=1`: with its default
 `use-forwarded-headers: false`, ingress-nginx overwrites `X-Forwarded-For` with
 the address it observed. Add one hop for each further trusted proxy (for
-example a CDN) in front of the controller. Setting the hop count before the
-traffic policy change is harmless: until then the forwarded value is the node
-address, which is what Better Auth keyed on before. Leaving it at 0 behind
+example a CDN) in front of the controller. Leaving it at 0 behind
 ingress-nginx keys every client on the controller pod address instead.
+
+Setting the hop count before the traffic policy change is safe, but until
+`externalTrafficPolicy: Local` is live every limiter keys on the few node
+addresses, so each per-address limit acts as a deployment-wide limit. Email
+sign-in and sign-up allow at least Better Auth's previous default (3 per 10 s)
+per address for this reason, but OAuth callbacks, email verification, and
+password-reset completion are tighter than Better Auth's old defaults. Put the
+traffic policy change in place before expecting a burst of real users, such as
+a launch.
 
 Managed auth applies per-client-address limits to sign-in, sign-up, social
 sign-in and callbacks, verification email, email verification, and password
 reset, plus per-email limits (shared by every API replica) on email sign-in,
 sign-up, password-reset requests, and verification-email requests. The exact
-values live in `apps/api/src/auth/managed-auth-rate-limits.ts`. A refused
-request receives HTTP 429 with an `X-Retry-After` header. Per-email counters are
-stored as keyed digests, never as email addresses.
+values live in `apps/api/src/auth/managed-auth-rate-limits.ts`. Each per-email
+limit has two fixed windows: a tight one per email and client address, and a
+looser one per email that only attempts admitted by the first reach. A single
+client address therefore exhausts an email's budget only for itself; locking a
+person out of email/password sign-in, sign-up, password reset, or verification
+mail needs at least five client addresses inside the window, and social
+sign-in is never limited per email. The accepted cost is that a distributed
+attacker may still spend the looser budget. IPv6 clients key on their /64 in
+every limiter. A refused Better Auth request receives HTTP 429 with an
+`X-Retry-After` header; the browser session-set sign-in returns 429
+`login_transaction_rate_limited` with `Retry-After` and
+`details.retryAfterSeconds`. Per-email counters are stored as keyed digests,
+never as email or client addresses.
+
+Upgrading a managed deployment behind a proxy: earlier releases let Better Auth
+read a single-value `X-Forwarded-For` by default. It now ignores forwarding
+headers unless `OPENGENI_API_TRUSTED_PROXY_HOPS` is set, so without it every
+user shares the proxy's address and its sign-in and sign-up limits. The
+MCP-only `OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS` is retired; API startup and
+runtime-artifact generation fail when it is still set to anything but `0`.
 
 Secret delivery should use one of these patterns:
 

@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 
 import {
   createManagedAuthDatabasePool,
+  MANAGED_AUTH_DATABASE_POOL_ERRORS_METRIC,
   MANAGED_AUTH_DATABASE_POOL_OPTIONS,
 } from "../src/auth/managed-auth";
 import {
@@ -9,9 +11,15 @@ import {
   MANAGED_AUTH_EMAIL_THROTTLE_KEY_PREFIX,
   MANAGED_AUTH_EMAIL_THROTTLES,
   ManagedAuthEmailThrottleError,
+  managedAuthEmailSourceThrottleKey,
   managedAuthEmailThrottleFor,
   managedAuthEmailThrottleKey,
+  managedAuthThrottleSource,
 } from "../src/auth/managed-auth-rate-limits";
+import {
+  TRUSTED_CLIENT_ADDRESS_HEADER,
+  UNKNOWN_REQUEST_SOURCE_ADDRESS,
+} from "../src/http/request-source";
 
 describe("managed auth client-address rate limits", () => {
   test("cover every credential and mail-sending endpoint", () => {
@@ -37,6 +45,15 @@ describe("managed auth client-address rate limits", () => {
       expect(rule.max).toBeGreaterThanOrEqual(5);
     }
   });
+
+  test("never give email sign-in or sign-up less than Better Auth's previous default", () => {
+    // Better Auth defaulted to 3 per 10 s. Behind a source-NATed edge every
+    // user shares a few node addresses, so these bound the whole deployment.
+    for (const path of ["/sign-in/email", "/sign-up/email"] as const) {
+      const rule = MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES[path];
+      expect(rule.max / rule.window).toBeGreaterThanOrEqual(3 / 10);
+    }
+  });
 });
 
 describe("managed auth per-email throttles", () => {
@@ -52,6 +69,13 @@ describe("managed auth per-email throttles", () => {
     expect(managedAuthEmailThrottleFor("constructor")).toBeNull();
   });
 
+  test("need several client addresses to lock one email out", () => {
+    for (const throttle of Object.values(MANAGED_AUTH_EMAIL_THROTTLES)) {
+      expect(throttle.perSourceMax).toBeGreaterThan(0);
+      expect(throttle.perEmailMax / throttle.perSourceMax).toBeGreaterThanOrEqual(5);
+    }
+  });
+
   test("key one normalized address without storing it", () => {
     const key = managedAuthEmailThrottleKey("secret", "sign_in", " Victim@Example.TEST ");
     expect(key).toBe(managedAuthEmailThrottleKey("secret", "sign_in", "victim@example.test"));
@@ -61,6 +85,42 @@ describe("managed auth per-email throttles", () => {
     expect(key).not.toBe(managedAuthEmailThrottleKey("other", "sign_in", "victim@example.test"));
     // Better Auth's own client-address keys are `address|path`; never collide.
     expect(key).not.toContain("|");
+  });
+
+  test("key one (email, client address) pair without storing either", () => {
+    const key = managedAuthEmailSourceThrottleKey(
+      "secret",
+      "sign_in",
+      " Victim@Example.TEST ",
+      "203.0.113.7",
+    );
+    expect(key).toBe(
+      managedAuthEmailSourceThrottleKey("secret", "sign_in", "victim@example.test", "203.0.113.7"),
+    );
+    expect(key.startsWith(`${MANAGED_AUTH_EMAIL_THROTTLE_KEY_PREFIX}sign_in:source:`)).toBe(true);
+    expect(key.toLowerCase()).not.toContain("victim");
+    expect(key).not.toContain("203.0.113.7");
+    expect(key).not.toContain("|");
+    expect(key).not.toBe(managedAuthEmailThrottleKey("secret", "sign_in", "victim@example.test"));
+    expect(key).not.toBe(
+      managedAuthEmailSourceThrottleKey("secret", "sign_in", "victim@example.test", "203.0.113.8"),
+    );
+    expect(key).not.toBe(
+      managedAuthEmailSourceThrottleKey("secret", "sign_up", "victim@example.test", "203.0.113.7"),
+    );
+  });
+
+  test("take the limiter source from the address the API stamped", () => {
+    const stamped = (value: string) => new Headers({ [TRUSTED_CLIENT_ADDRESS_HEADER]: value });
+    expect(managedAuthThrottleSource(stamped("203.0.113.7"))).toBe("203.0.113.7");
+    // One IPv6 subscriber block is one source, as in Better Auth's limiter.
+    expect(managedAuthThrottleSource(stamped("2001:DB8:1:2::99"))).toBe("2001:db8:1:2::/64");
+    expect(managedAuthThrottleSource(stamped("2001:db8:1:2:ffff::1"))).toBe("2001:db8:1:2::/64");
+    expect(managedAuthThrottleSource(stamped("not-an-address"))).toBe(
+      UNKNOWN_REQUEST_SOURCE_ADDRESS,
+    );
+    expect(managedAuthThrottleSource(new Headers())).toBe(UNKNOWN_REQUEST_SOURCE_ADDRESS);
+    expect(managedAuthThrottleSource(undefined)).toBe(UNKNOWN_REQUEST_SOURCE_ADDRESS);
   });
 
   test("refuse as an ordinary Better Auth 429 with a retry hint", () => {
@@ -91,10 +151,10 @@ describe("managed auth database pool", () => {
 
   test("records a content-free signal and survives a failing observer", async () => {
     const warnings: Array<[string, unknown]> = [];
-    const counters: string[] = [];
+    const counters: Array<{ name: string; labels: unknown }> = [];
     const pool = createManagedAuthDatabasePool("postgres://unused@127.0.0.1:1/unused", {
       warn: (message, attributes) => warnings.push([message, attributes]),
-      incrementCounter: ({ name }) => counters.push(name),
+      incrementCounter: ({ name, labels }) => counters.push({ name, labels }),
     });
     const failing = createManagedAuthDatabasePool("postgres://unused@127.0.0.1:1/unused", {
       warn: () => {
@@ -104,10 +164,18 @@ describe("managed auth database pool", () => {
     });
     try {
       pool.emit("error", new Error("terminating connection for user@example.test"));
-      expect(counters).toEqual(["opengeni_managed_auth_database_pool_errors_total"]);
+      expect(counters).toEqual([
+        {
+          name: MANAGED_AUTH_DATABASE_POOL_ERRORS_METRIC.name,
+          labels: { outcome: "idle_connection_discarded" },
+        },
+      ]);
+      expect(MANAGED_AUTH_DATABASE_POOL_ERRORS_METRIC.name).toBe(
+        "opengeni_managed_auth_database_pool_errors_total",
+      );
       expect(warnings).toEqual([
         [
-          "Managed auth database idle connection failed",
+          "Managed auth database connection failed",
           { dependency: "managed_auth_database", outcome: "idle_connection_discarded" },
         ],
       ]);
@@ -115,6 +183,28 @@ describe("managed auth database pool", () => {
     } finally {
       await pool.end();
       await failing.end();
+    }
+  });
+
+  test("counts a checked-out connection failure once and an idle one only on the pool", async () => {
+    const counters: unknown[] = [];
+    const pool = createManagedAuthDatabasePool("postgres://unused@127.0.0.1:1/unused", {
+      warn: () => undefined,
+      incrementCounter: ({ labels }) => counters.push(labels),
+    });
+    try {
+      const client = new EventEmitter();
+      pool.emit("connect", client);
+      pool.emit("acquire", client);
+      expect(() => client.emit("error", new Error("terminating connection"))).not.toThrow();
+      expect(counters).toEqual([{ outcome: "checked_out_connection_failed" }]);
+
+      // Released, the client's own error is the pool's idle error; count it once.
+      pool.emit("release", undefined, client);
+      expect(() => client.emit("error", new Error("terminating connection"))).not.toThrow();
+      expect(counters).toEqual([{ outcome: "checked_out_connection_failed" }]);
+    } finally {
+      await pool.end();
     }
   });
 });

@@ -41,7 +41,7 @@ import {
 } from "@opengeni/core";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { trustedRequestSourceAddress, type RequestSourceTrust } from "./http/request-source";
+import { trustedRequestSourceRateLimitKey, type RequestSourceTrust } from "./http/request-source";
 import {
   prepareWorkspaceToolGateway,
   requireWorkspaceToolGatewayAuthorization,
@@ -625,7 +625,7 @@ function tokenHash(value: string): string {
 }
 
 function mcpOAuthRegistrationClientKey(c: Context, trust: RequestSourceTrust): string {
-  return `mcp-oauth-registration:${trustedRequestSourceAddress(c, trust)}`;
+  return `mcp-oauth-registration:${trustedRequestSourceRateLimitKey(c, trust)}`;
 }
 
 function expiresIn(seconds: number): Date {

@@ -22,8 +22,10 @@ import { createApp } from "../src/app";
 import { createManagedAuthDatabasePool, hashManagedAuthPassword } from "../src/auth/managed-auth";
 import {
   consumeManagedAuthEmailThrottle,
+  managedAuthEmailSourceThrottleKey,
   managedAuthEmailThrottleKey,
   MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
+  MANAGED_AUTH_EMAIL_THROTTLE_KEY_PREFIX,
   MANAGED_AUTH_EMAIL_THROTTLES,
 } from "../src/auth/managed-auth-rate-limits";
 import {
@@ -177,15 +179,56 @@ describe("managed auth rate limits with Better Auth and PostgreSQL", () => {
     expect(keys).toEqual([{ key: `${peer}|/sign-up/email` }]);
   }, 60_000);
 
+  test("limits one client address per email without locking out other addresses", async () => {
+    const app = managedApp();
+    const email = uniqueEmail("one-source");
+    const attacker = "198.19.0.1";
+    const { perSourceMax } = MANAGED_AUTH_EMAIL_THROTTLES["/sign-in/email"];
+    for (let attempt = 0; attempt < perSourceMax; attempt += 1) {
+      const response = await postFromClient(app, "/v1/auth/sign-in/email", attacker, {
+        email,
+        password: "wrong-password-123",
+      });
+      expect(response.status).toBe(401);
+    }
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const refused = await postFromClient(app, "/v1/auth/sign-in/email", attacker, {
+        email,
+        password: "wrong-password-123",
+      });
+      expect(refused.status).toBe(429);
+      expect(Number(refused.headers.get("x-retry-after"))).toBeGreaterThan(0);
+    }
+
+    // The account owner, from another address, is not locked out.
+    const owner = await postFromClient(app, "/v1/auth/sign-in/email", "198.19.0.2", {
+      email,
+      password: "wrong-password-123",
+    });
+    expect(owner.status).toBe(401);
+
+    // Refused attempts never reached the email's shared window.
+    const [emailWindow] = await shared.admin<Array<{ count: number }>>`
+      select count from auth_rate_limits
+      where key = ${managedAuthEmailThrottleKey(SECRET, "sign_in", email)}
+    `;
+    expect(emailWindow).toMatchObject({ count: perSourceMax + 1 });
+    const [attackerWindow] = await shared.admin<Array<{ count: number }>>`
+      select count from auth_rate_limits
+      where key = ${managedAuthEmailSourceThrottleKey(SECRET, "sign_in", email, attacker)}
+    `;
+    expect(attackerWindow).toMatchObject({ count: perSourceMax + 1 });
+  }, 60_000);
+
   test("throttles one email across rotating client addresses without storing it", async () => {
     const app = managedApp();
     const email = uniqueEmail("victim");
-    const { max } = MANAGED_AUTH_EMAIL_THROTTLES["/sign-in/email"];
-    for (let attempt = 0; attempt < max; attempt += 1) {
+    const { perEmailMax } = MANAGED_AUTH_EMAIL_THROTTLES["/sign-in/email"];
+    for (let attempt = 0; attempt < perEmailMax; attempt += 1) {
       const response = await postFromClient(
         app,
         "/v1/auth/sign-in/email",
-        `198.18.0.${attempt + 1}`,
+        `198.18.${Math.floor(attempt / 200)}.${(attempt % 200) + 1}`,
         {
           email,
           password: "wrong-password-123",
@@ -193,7 +236,7 @@ describe("managed auth rate limits with Better Auth and PostgreSQL", () => {
       );
       expect(response.status).toBe(401);
     }
-    const refused = await postFromClient(app, "/v1/auth/sign-in/email", "198.18.1.1", {
+    const refused = await postFromClient(app, "/v1/auth/sign-in/email", "198.18.255.1", {
       email: email.toUpperCase(),
       password: "wrong-password-123",
     });
@@ -201,7 +244,7 @@ describe("managed auth rate limits with Better Auth and PostgreSQL", () => {
     expect(Number(refused.headers.get("x-retry-after"))).toBeGreaterThan(0);
     expect(await refused.json()).toMatchObject({ code: "TOO_MANY_REQUESTS" });
 
-    const otherEmail = await postFromClient(app, "/v1/auth/sign-in/email", "198.18.1.2", {
+    const otherEmail = await postFromClient(app, "/v1/auth/sign-in/email", "198.18.255.2", {
       email: uniqueEmail("other"),
       password: "wrong-password-123",
     });
@@ -211,11 +254,17 @@ describe("managed auth rate limits with Better Auth and PostgreSQL", () => {
       select key, count from auth_rate_limits
       where key = ${managedAuthEmailThrottleKey(SECRET, "sign_in", email)}
     `;
-    expect(stored).toMatchObject({ count: max + 1 });
+    expect(stored).toMatchObject({ count: perEmailMax + 1 });
     const leaked = await shared.admin<Array<{ key: string }>>`
       select key from auth_rate_limits where key ilike ${"%rate-limit-victim%"}
     `;
     expect(leaked).toEqual([]);
+    // Better Auth's own keys hold the client address; the per-email ones never do.
+    const addressed = await shared.admin<Array<{ key: string }>>`
+      select key from auth_rate_limits
+      where key like ${`${MANAGED_AUTH_EMAIL_THROTTLE_KEY_PREFIX}%`} and key like ${"%198.18.%"}
+    `;
+    expect(addressed).toEqual([]);
   }, 60_000);
 
   test("records the trusted client address on the created session", async () => {
@@ -246,12 +295,12 @@ describe("managed auth rate limits with Better Auth and PostgreSQL", () => {
   test("throttles the session-set email sign-in as a typed login rate limit", async () => {
     const app = managedApp({ managedAuthSessionSetMode: "dual" });
     const email = uniqueEmail("session-set");
-    const { max } = MANAGED_AUTH_EMAIL_THROTTLES["/sign-in/email"];
-    for (let attempt = 0; attempt < max; attempt += 1) {
+    const { perEmailMax, windowSeconds } = MANAGED_AUTH_EMAIL_THROTTLES["/sign-in/email"];
+    for (let attempt = 0; attempt < perEmailMax; attempt += 1) {
       await consumeManagedAuthEmailThrottle(client.db, {
         key: managedAuthEmailThrottleKey(SECRET, "sign_in", email),
-        windowSeconds: 900,
-        max,
+        windowSeconds,
+        max: perEmailMax,
       });
     }
 
@@ -282,8 +331,16 @@ describe("managed auth rate limits with Better Auth and PostgreSQL", () => {
       }),
     });
     expect(completion.status).toBe(429);
+    const retryAfter = Number(completion.headers.get("retry-after"));
+    expect(retryAfter).toBeGreaterThan(windowSeconds - 60);
+    expect(retryAfter).toBeLessThanOrEqual(windowSeconds);
     expect(await completion.json()).toMatchObject({
-      error: { details: { managedAuthCode: "login_transaction_rate_limited" } },
+      error: {
+        details: {
+          managedAuthCode: "login_transaction_rate_limited",
+          retryAfterSeconds: retryAfter,
+        },
+      },
     });
   }, 60_000);
 
@@ -320,9 +377,10 @@ describe("managed auth rate limits with Better Auth and PostgreSQL", () => {
 
   test("keeps serving after the server closes idle and checked-out connections", async () => {
     const warnings: string[] = [];
+    const outcomes: unknown[] = [];
     const pool = createManagedAuthDatabasePool(shared.adminUrl, {
       warn: (message) => warnings.push(message),
-      incrementCounter: () => undefined,
+      incrementCounter: ({ labels }) => outcomes.push(labels?.outcome),
     });
     try {
       const idle = await pool.connect();
@@ -345,6 +403,7 @@ describe("managed auth rate limits with Better Auth and PostgreSQL", () => {
       await expect(busy.query("select 1")).rejects.toThrow();
       busy.release();
       expect((await pool.query("select 1 as ok")).rows).toEqual([{ ok: 1 }]);
+      expect(outcomes).toEqual(["idle_connection_discarded", "checked_out_connection_failed"]);
     } finally {
       await pool.end();
     }

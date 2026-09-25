@@ -4,8 +4,11 @@ import { Hono } from "hono";
 import {
   apiRequestBindingsForTransportPeer,
   replaceTrustedClientAddressHeader,
+  requestSourceRateLimitKey,
   TRUSTED_CLIENT_ADDRESS_HEADER,
   trustedRequestSourceAddress,
+  trustedRequestSourceRateLimitKey,
+  UNKNOWN_REQUEST_SOURCE_ADDRESS,
 } from "../src/http/request-source";
 
 async function resolve(
@@ -93,6 +96,43 @@ describe("trusted request source address", () => {
   test("never trusts forwarding headers without a server-owned transport peer", async () => {
     expect(await resolve(1, { forwardedFor: "203.0.113.7" })).toBe("unknown");
     expect(await resolve(1, { peer: null, forwardedFor: "203.0.113.7" })).toBe("unknown");
+  });
+});
+
+describe("request source rate-limit key", () => {
+  test("keys IPv4 on the address and IPv6 on its /64", () => {
+    expect(requestSourceRateLimitKey("203.0.113.7")).toBe("203.0.113.7");
+    expect(requestSourceRateLimitKey("2001:db8:1:2:3:4:5:6")).toBe("2001:db8:1:2::/64");
+    expect(requestSourceRateLimitKey("2001:db8:1:2::99")).toBe("2001:db8:1:2::/64");
+    expect(requestSourceRateLimitKey("2001:db8::1")).toBe("2001:db8:0:0::/64");
+    expect(requestSourceRateLimitKey("fe80::1")).toBe("fe80:0:0:0::/64");
+    expect(requestSourceRateLimitKey("64:ff9b::192.0.2.33")).toBe("64:ff9b:0:0::/64");
+  });
+
+  test("keys an IPv4-mapped peer as its IPv4 address, not one shared /64", () => {
+    expect(requestSourceRateLimitKey("::ffff:10.0.0.10")).toBe("10.0.0.10");
+    expect(requestSourceRateLimitKey("::ffff:a00:b")).toBe("10.0.0.11");
+  });
+
+  test("passes the unknown source through as one shared bucket", () => {
+    expect(requestSourceRateLimitKey(UNKNOWN_REQUEST_SOURCE_ADDRESS)).toBe(
+      UNKNOWN_REQUEST_SOURCE_ADDRESS,
+    );
+  });
+
+  test("keys the trusted source address of a request", async () => {
+    const app = new Hono();
+    app.get("/", (c) =>
+      c.text(
+        trustedRequestSourceRateLimitKey(c, { apiTrustedProxyHops: 1, apiTrustedProxyCidrs: "" }),
+      ),
+    );
+    const response = await app.request(
+      "/",
+      { headers: { "x-forwarded-for": "198.51.100.1, [2001:db8:7:8::1]:443" } },
+      apiRequestBindingsForTransportPeer("10.0.0.10"),
+    );
+    expect(await response.text()).toBe("2001:db8:7:8::/64");
   });
 });
 

@@ -50,7 +50,7 @@ import {
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { trustedRequestSourceAddress } from "../http/request-source";
+import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -99,7 +99,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   function rateLimit(c: Context, limiter: TokenBucket): void {
-    const ip = trustedRequestSourceAddress(c, settings);
+    const ip = trustedRequestSourceRateLimitKey(c, settings);
     if (!limiter.take(ip)) {
       throw new HTTPException(429, { message: "too many requests; slow down" });
     }

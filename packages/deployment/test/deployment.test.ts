@@ -341,6 +341,22 @@ describe("deployment contract", () => {
     expect(missingOrigin.missingEnvVars).toContain("OPENGENI_PUBLIC_BASE_URL");
   });
 
+  test("refuses the retired MCP-only trusted proxy hop setting", () => {
+    expect(() =>
+      generateRuntimeArtifacts(
+        deploymentProfiles["local-kubernetes"],
+        {},
+        { OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "1" },
+      ),
+    ).toThrow("renamed to OPENGENI_API_TRUSTED_PROXY_HOPS");
+    const leftoverDefault = generateRuntimeArtifacts(
+      deploymentProfiles["local-kubernetes"],
+      {},
+      { OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "0" },
+    );
+    expect(leftoverDefault.runtimeEnv).not.toContain("TRUSTED_PROXY_HOPS");
+  });
+
   test("carries the admitted sandbox warm tariff through runtime and Helm generation", () => {
     const contract = deploymentProfiles["local-kubernetes"];
     const rate = '{"modal":45,"opensandbox":12}';

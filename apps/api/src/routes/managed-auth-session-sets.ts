@@ -65,7 +65,7 @@ import type { Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
-import { trustedRequestSourceAddress } from "../http/request-source";
+import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 import { ManagedAuthEmailThrottleError } from "../auth/managed-auth-rate-limits";
 import { z } from "zod";
 
@@ -315,7 +315,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         }),
       );
     } catch (error) {
-      throwHttp(error);
+      throwHttp(error, context);
     }
   });
 
@@ -1013,7 +1013,7 @@ function digest(deps: ApiRouteDeps, value: unknown): string {
 function loginTransactionClientScope(context: Context, deps: ApiRouteDeps): string {
   return digest(deps, {
     purpose: "managed-auth-login-transaction-rate-limit",
-    client: trustedRequestSourceAddress(context, deps.settings),
+    client: trustedRequestSourceRateLimitKey(context, deps.settings),
   });
 }
 
@@ -1107,7 +1107,7 @@ function appendCookies(context: Context, cookies: readonly string[]): void {
   for (const cookie of cookies) context.header("set-cookie", cookie, { append: true });
 }
 
-function throwHttp(error: unknown): never {
+function throwHttp(error: unknown, context?: Context): never {
   if (error instanceof HTTPException) throw error;
   if (error instanceof ManagedAuthSessionSetGenerationConflictError) {
     throw managedAuthApiError(409, "generation_conflict", { cause: error, retryable: true });
@@ -1127,10 +1127,17 @@ function throwHttp(error: unknown): never {
   if (error instanceof ManagedAuthActorMutationInFlightError) {
     throw managedAuthApiError(409, "actor_mutation_in_flight", { cause: error, retryable: true });
   }
-  if (
-    error instanceof ManagedAuthLoginTransactionRateLimitError ||
-    error instanceof ManagedAuthEmailThrottleError
-  ) {
+  if (error instanceof ManagedAuthEmailThrottleError) {
+    // A per-email window lasts 15 minutes to an hour; tell the client when,
+    // unlike the short login-transaction backoff.
+    context?.header("Retry-After", String(error.retryAfterSeconds));
+    throw managedAuthApiError(429, "login_transaction_rate_limited", {
+      cause: error,
+      retryable: true,
+      retryAfterSeconds: error.retryAfterSeconds,
+    });
+  }
+  if (error instanceof ManagedAuthLoginTransactionRateLimitError) {
     throw managedAuthApiError(429, "login_transaction_rate_limited", {
       cause: error,
       retryable: true,
@@ -1156,6 +1163,7 @@ function managedAuthApiError(
     cause?: unknown;
     retryable?: boolean;
     outcomeUnknown?: boolean;
+    retryAfterSeconds?: number;
   } = {},
 ): ApiHttpError {
   ManagedAuthSessionSetErrorCode.parse(code);
@@ -1180,7 +1188,12 @@ function managedAuthApiError(
     message: code,
     retryable: options.retryable ?? false,
     ...(options.outcomeUnknown === undefined ? {} : { outcomeUnknown: options.outcomeUnknown }),
-    details: { managedAuthCode: code },
+    details: {
+      managedAuthCode: code,
+      ...(options.retryAfterSeconds === undefined
+        ? {}
+        : { retryAfterSeconds: options.retryAfterSeconds }),
+    },
   });
   if (options.cause !== undefined) (error as Error & { cause?: unknown }).cause = options.cause;
   return error;

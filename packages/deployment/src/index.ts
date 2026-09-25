@@ -242,6 +242,18 @@ export const API_REQUEST_SOURCE_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_API_TRUSTED_PROXY_CIDRS",
 ];
 
+/** Generation would drop the retired MCP-only name without a trace, and the
+ * runtime would then key every client on the proxy peer. "0" already means
+ * the default, so only a value that asked for forwarded-address trust fails. */
+function assertNoRetiredTrustedProxyHops(env: Record<string, string | undefined>): void {
+  const retired = env.OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS?.trim();
+  if (retired && retired !== "0") {
+    throw new Error(
+      "OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS was renamed to OPENGENI_API_TRUSTED_PROXY_HOPS, which now sets the client address for every API rate limit and auth session; rename the variable",
+    );
+  }
+}
+
 /** Control-plane secrets needed for a complete Connected Machine deployment.
  * The config layer permits graceful degradation when these are absent; a
  * deployment whose primary backend is selfhosted cannot. */
@@ -1658,6 +1670,7 @@ export function generateRuntimeArtifacts(
   terraformOutputs: TerraformOutputs,
   env: Record<string, string | undefined> = process.env,
 ): DeploymentRuntimeArtifacts {
+  assertNoRetiredTrustedProxyHops(env);
   const helmSetValues = terraformOutputObject(terraformOutputs, "helm_set_values");
   addGeneratedImageValues(helmSetValues, env.OPENGENI_IMAGE_TAG ?? "latest", env);
   addRuntimeConfigHelmValues(helmSetValues, contract, env);

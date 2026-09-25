@@ -6846,6 +6846,15 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       );
     }
   }
+  // The retired MCP-only name must never be ignored silently: a deployment
+  // that trusted forwarded addresses would fall back to the transport peer.
+  // "0" (the old .env.example value) means the same as the new default.
+  const retiredTrustedProxyHops = source.OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS?.trim();
+  if (retiredTrustedProxyHops && retiredTrustedProxyHops !== "0") {
+    throw new Error(
+      "OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS was renamed to OPENGENI_API_TRUSTED_PROXY_HOPS, which now sets the client address for every API rate limit and auth session; rename the variable",
+    );
+  }
   const trustedProxyCidrs = trustedProxyCidrEntries(settings.apiTrustedProxyCidrs);
   if (trustedProxyCidrs.length > 0 && settings.apiTrustedProxyHops === 0) {
     throw new Error(

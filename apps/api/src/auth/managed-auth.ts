@@ -103,38 +103,54 @@ export const MANAGED_AUTH_DATABASE_POOL_OPTIONS = {
  * failover, or maintenance window) `pg` emits `error`: on the pool for an idle
  * client, and on the client itself for one checked out by Better Auth's query
  * layer. Without listeners either becomes an uncaught exception and the API's
- * fatal process boundary exits. The pool listener records a content-free
- * signal and keeps serving: the pool has already discarded the failed client
- * and opens a fresh connection for the next checkout. A checked-out client's
+ * fatal process boundary exits. Both listeners record one content-free signal
+ * and keep serving. The pool has already discarded a failed idle client and
+ * opens a fresh connection for the next checkout; a checked-out client's
  * in-flight query already rejects to its caller, and the pool discards the
- * dead client on release, so its listener only absorbs the event.
+ * dead client on release. An idle client's error also reaches its own
+ * listener, so that listener records only while the client is checked out.
  */
 export function createManagedAuthDatabasePool(
   databaseUrl: string,
   observability?: ManagedAuthPoolObservability,
 ): Pool {
   const pool = new Pool({ connectionString: databaseUrl, ...MANAGED_AUTH_DATABASE_POOL_OPTIONS });
+  const checkedOut = new WeakSet<object>();
+  pool.on("acquire", (client) => checkedOut.add(client));
+  pool.on("release", (_error, client) => checkedOut.delete(client));
   pool.on("connect", (client) => {
-    client.on("error", absorbCheckedOutClientError);
+    client.on("error", () => {
+      if (checkedOut.has(client)) {
+        recordManagedAuthPoolError(observability, "checked_out_connection_failed");
+      }
+    });
   });
-  pool.on("error", () => {
-    try {
-      observability?.incrementCounter({
-        name: "opengeni_managed_auth_database_pool_errors_total",
-        help: "Idle managed-auth database connections the server closed or lost.",
-      });
-      observability?.warn("Managed auth database idle connection failed", {
-        dependency: "managed_auth_database",
-        outcome: "idle_connection_discarded",
-      });
-    } catch {
-      // An observer failure must not turn a recovered pool error into a crash.
-    }
-  });
+  pool.on("error", () => recordManagedAuthPoolError(observability, "idle_connection_discarded"));
   return pool;
 }
 
-function absorbCheckedOutClientError(): void {}
+export const MANAGED_AUTH_DATABASE_POOL_ERRORS_METRIC = {
+  name: "opengeni_managed_auth_database_pool_errors_total",
+  help: "Managed-auth database connections the server closed or lost, by pool state.",
+} as const;
+
+function recordManagedAuthPoolError(
+  observability: ManagedAuthPoolObservability | undefined,
+  outcome: "idle_connection_discarded" | "checked_out_connection_failed",
+): void {
+  try {
+    observability?.incrementCounter({
+      ...MANAGED_AUTH_DATABASE_POOL_ERRORS_METRIC,
+      labels: { outcome },
+    });
+    observability?.warn("Managed auth database connection failed", {
+      dependency: "managed_auth_database",
+      outcome,
+    });
+  } catch {
+    // An observer failure must not turn a recovered pool error into a crash.
+  }
+}
 
 export function createManagedAuth(
   settings: Settings,

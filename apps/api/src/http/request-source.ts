@@ -64,6 +64,35 @@ export function trustedRequestSourceAddress(c: Context, trust: RequestSourceTrus
 }
 
 /**
+ * Rate-limit key for a trusted source address. An IPv6 address keys on its
+ * /64, the block one subscriber normally holds and the granularity Better
+ * Auth applies to the same stamped address, so rotating addresses inside one
+ * /64 cannot mint fresh buckets. An IPv4-mapped IPv6 address (how a
+ * dual-stack listener reports an IPv4 peer) keys on the embedded IPv4 address
+ * instead of collapsing every IPv4 client into one /64. Anything else,
+ * including {@link UNKNOWN_REQUEST_SOURCE_ADDRESS}, is returned unchanged.
+ */
+export function requestSourceRateLimitKey(address: string): string {
+  if (isIP(address) !== 6) return address;
+  const groups = ipv6Groups(address);
+  if (!groups) return address;
+  if (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff) {
+    const high = groups[6]!;
+    const low = groups[7]!;
+    return `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+  }
+  return `${groups
+    .slice(0, 4)
+    .map((group) => group.toString(16))
+    .join(":")}::/64`;
+}
+
+/** {@link trustedRequestSourceAddress} as an application rate-limit key. */
+export function trustedRequestSourceRateLimitKey(c: Context, trust: RequestSourceTrust): string {
+  return requestSourceRateLimitKey(trustedRequestSourceAddress(c, trust));
+}
+
+/**
  * Replace any caller-supplied {@link TRUSTED_CLIENT_ADDRESS_HEADER}. When
  * `stamp` is true the header is set to the trusted source address, so every
  * Better Auth request derived from this request (direct handler calls,
@@ -119,4 +148,31 @@ function normalizedAddress(value: string | null | undefined): string | null {
   if (family === 4) return candidate;
   if (family === 6) return candidate.toLowerCase();
   return null;
+}
+
+/** The eight 16-bit groups of a valid IPv6 address, or null. */
+function ipv6Groups(address: string): number[] | null {
+  let text = address;
+  const tail: number[] = [];
+  const lastColon = text.lastIndexOf(":");
+  const last = text.slice(lastColon + 1);
+  if (last.includes(".")) {
+    const octets = last.split(".").map(Number);
+    if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet))) return null;
+    tail.push((octets[0]! << 8) | octets[1]!, (octets[2]! << 8) | octets[3]!);
+    text = text.slice(0, lastColon + 1);
+    if (!text.endsWith("::")) text = text.slice(0, -1);
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const parse = (part: string): number[] =>
+    part ? part.split(":").map((group) => Number.parseInt(group, 16)) : [];
+  const head = parse(halves[0]!);
+  const rest = halves.length === 2 ? parse(halves[1]!) : [];
+  const fill = halves.length === 2 ? 8 - head.length - rest.length - tail.length : 0;
+  if (fill < 0) return null;
+  const groups = [...head, ...Array.from({ length: fill }, () => 0), ...rest, ...tail];
+  if (groups.length !== 8) return null;
+  if (groups.some((group) => !Number.isInteger(group) || group < 0 || group > 0xffff)) return null;
+  return groups;
 }

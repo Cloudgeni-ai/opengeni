@@ -25,7 +25,7 @@ import {
   selfServiceOrganizationSetupRequestFingerprint,
 } from "../auth/organization-user-setup";
 import { hashManagedAuthPassword } from "../auth/managed-auth";
-import { trustedRequestSourceAddress } from "../http/request-source";
+import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 
 export type ManagedOnboardingRouteOptions = {
   accountSetupLimiter?: { take(key: string): boolean };
@@ -198,7 +198,7 @@ function enforceAccountSetupRateLimit(
 ): void {
   let allowed = false;
   try {
-    allowed = limiter.take(trustedRequestSourceAddress(context, deps.settings));
+    allowed = limiter.take(trustedRequestSourceRateLimitKey(context, deps.settings));
   } catch {
     // A public credential-setting endpoint must fail closed if its abuse gate
     // cannot make a decision.

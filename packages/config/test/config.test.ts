@@ -151,6 +151,27 @@ describe("API request source settings", () => {
     }
   });
 
+  test("refuses the retired MCP-only hop setting instead of ignoring it", () => {
+    for (const value of ["1", "2", " 1 "]) {
+      expect(() =>
+        withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: value }, () => getSettings()),
+      ).toThrow("renamed to OPENGENI_API_TRUSTED_PROXY_HOPS");
+      expect(() =>
+        withEnv(
+          { OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: value, OPENGENI_API_TRUSTED_PROXY_HOPS: "1" },
+          () => getSettings(),
+        ),
+      ).toThrow("renamed to OPENGENI_API_TRUSTED_PROXY_HOPS");
+    }
+    // A leftover "0" from an older .env.example already means the default.
+    for (const value of ["0", ""]) {
+      expect(
+        withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: value }, () => getSettings())
+          .apiTrustedProxyHops,
+      ).toBe(0);
+    }
+  });
+
   test("requires a proxy hop count before trusting proxy ranges", () => {
     expect(() =>
       withEnv({ OPENGENI_API_TRUSTED_PROXY_CIDRS: "10.224.0.0/16" }, () => getSettings()),
