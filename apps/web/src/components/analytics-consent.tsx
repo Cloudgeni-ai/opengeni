@@ -150,7 +150,7 @@ export function AnalyticsManager({
             secrets.
           </p>
           <details className="mt-0.5 text-xs text-fg-muted">
-            <summary className="w-fit cursor-pointer rounded-sm underline underline-offset-2 outline-none hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40">
+            <summary className="w-fit cursor-pointer rounded-sm text-fg underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
               What we collect
             </summary>
             <p data-contrast-audited className="mt-1 max-w-3xl leading-relaxed">

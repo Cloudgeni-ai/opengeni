@@ -496,7 +496,7 @@ export function ManagedAuthPanel(props: {
               type="button"
               variant="link"
               size="sm"
-              className="h-auto px-0 font-medium"
+              className="h-auto px-0 font-medium text-fg underline underline-offset-4"
               disabled={formInteractionBusy}
               onClick={() => selectMode("signup")}
             >
