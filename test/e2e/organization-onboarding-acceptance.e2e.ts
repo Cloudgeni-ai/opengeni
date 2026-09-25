@@ -37,10 +37,11 @@ import {
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
-// The model-access step leads with the included default model when the
-// deployment provides one, otherwise it asks how to power chats.
+// The model-access step leads with credits the organization already holds, or
+// the included default model when the deployment provides one, otherwise it
+// asks how to power chats.
 const MODEL_ACCESS_HEADING =
-  /^(Choose how to power your chats|Start chatting for free|You’re ready to chat)$/;
+  /^(Choose how to power your chats|Start chatting for free|Start chatting with OpenGeni credits|You’re ready to chat)$/;
 const MODEL_ACCESS_CONTINUE = /^(Skip for now|Start chatting( for free)?)$/;
 const EVIDENCE_DIR =
   process.env.OPENGENI_ONBOARDING_EVIDENCE_DIR ?? "/tmp/opengeni-onboarding-evidence";

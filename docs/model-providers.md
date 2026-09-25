@@ -948,9 +948,9 @@ client.getWorkspaceModelCatalog(workspaceId);
 ```
 
 The response also carries `defaultSelection` (the default for new work that
-names no model, see below) and `creditsSelection` (what that default becomes
-once the organization adds OpenGeni credits; `null` when the deployment does
-not bill credits). Both are `{ model, reasoningEffort, source }`
+names no model, see below) and `creditsSelection` (what that default is while
+the organization holds a positive OpenGeni credit balance; `null` when the
+deployment does not bill credits). Both are `{ model, reasoningEffort, source }`
 and are additive: older API instances omit them.
 
 ## Default model for new work
@@ -967,13 +967,13 @@ first match wins:
    operator catalog order (ChatGPT/Codex, then SuperGrok) with its own default
    reasoning. A deployment default that is itself a selectable subscription
    model wins inside this step.
-3. `credits`: while the organization holds OpenGeni credits it added itself
+3. `credits`: while the organization holds a positive OpenGeni credit balance
    and the deployment bills credits (`OPENGENI_BILLING_MODE=stripe`), the
-   configured credits default. "Added" means the balance is positive and at
-   least one positive ledger entry is not the one-time verified-signup trial
-   grant (`source_type = 'verified_signup_trial'`, migration 0509): a Stripe
-   purchase, an operator grant, or a test credit counts, the trial alone does
-   not, so a new user keeps the free default until they buy credits.
+   configured credits default. Any source counts: a Stripe purchase, an
+   operator grant, a test credit, or the one-time verified-signup trial grant
+   (`source_type = 'verified_signup_trial'`, migration 0509), so a new user
+   with the trial starts on the credits default. Once usage brings the balance
+   to zero or below, new work falls back to the next step on its own.
    `OPENGENI_CREDITS_DEFAULT_MODEL` (default `gpt-6-luna`) and
    `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (default `xhigh`, clamped to the
    highest effort the model supports at or below it) configure it. An explicit
@@ -1025,7 +1025,11 @@ Where it applies:
   webhook lands) while the draft keeps following the default, so a later
   subscription connect still replaces it. The draft save response reports the
   same `modelProvided` marker a read of that row reports. Its fallback for an
-  unselectable model takes the resolved default first. The workspace **Default model** setting shows the
+  unselectable model takes the resolved default first. When a new
+  organization starts with a positive balance (for example the trial grant)
+  and its resolved default is a credits-billed model, the post-signup model
+  step shows that balance and the resolved default instead of the free-model
+  copy (see `docs/organization-tenancy.md`). The workspace **Default model** setting shows the
   resolved default and its source until an admin saves one. New schedules
   follow the default and are saved without a model until someone picks one.
 

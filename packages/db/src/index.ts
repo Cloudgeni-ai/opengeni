@@ -5537,27 +5537,13 @@ export async function getBillingBalance(db: Database, accountId: string): Promis
 export const VERIFIED_SIGNUP_TRIAL_CREDIT_SOURCE_TYPE = "verified_signup_trial";
 
 /**
- * Whether the organization added OpenGeni credits itself and still holds a
- * positive balance: the balance is above zero and at least one positive ledger
- * entry is something other than the automatic verified-signup trial grant (a
- * purchase, an operator grant, or a test credit). The trial alone never counts,
- * so a new user keeps the free default until they buy credits. Read-only; it
- * never gates credit admission.
+ * Whether the organization holds a positive OpenGeni credit balance, whatever
+ * its source: a purchase, an operator grant, a test credit, or the one-time
+ * verified-signup trial grant. It turns false again once usage brings the
+ * balance to zero or below. Read-only; it never gates credit admission.
  */
-export async function organizationHoldsAddedCredits(
-  db: Database,
-  accountId: string,
-): Promise<boolean> {
-  return await withAccountRls(db, accountId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        balance: sql<number>`coalesce(sum(${schema.creditLedgerEntries.amountMicros}), 0)`,
-        added: sql<boolean>`coalesce(bool_or(${schema.creditLedgerEntries.amountMicros} > 0 and ${schema.creditLedgerEntries.sourceType} is distinct from ${VERIFIED_SIGNUP_TRIAL_CREDIT_SOURCE_TYPE}), false)`,
-      })
-      .from(schema.creditLedgerEntries)
-      .where(eq(schema.creditLedgerEntries.accountId, accountId));
-    return Number(row?.balance ?? 0) > 0 && row?.added === true;
-  });
+export async function organizationHoldsCredits(db: Database, accountId: string): Promise<boolean> {
+  return (await getBillingBalance(db, accountId)).balanceMicros > 0;
 }
 
 export async function countScheduledTasksForWorkspace(

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { DEFAULT_OPENROUTER_MODEL_ID, type Settings } from "@opengeni/config";
 import type { AccessGrant, WorkspaceModelPolicyContract } from "@opengeni/contracts";
 import {
+  applyCreditDebitAfterUse,
   applyCreditLedgerEntry,
   createDb,
   createXaiSubscriptionCredential,
@@ -308,6 +309,18 @@ async function connectCodex(settings: Settings, grant: AccessGrant & { workspace
   await updateCodexRotationSettings(db, grant.workspaceId, { rotationEnabled: true });
 }
 
+async function spendCredits(grant: AccessGrant & { workspaceId: string }, amountMicros: number) {
+  await applyCreditDebitAfterUse(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    type: "model_usage",
+    amountMicros,
+    sourceType: "test_usage",
+    sourceId: crypto.randomUUID(),
+    idempotencyKey: `test:default-model-spend:${crypto.randomUUID()}`,
+  });
+}
+
 async function addTrialCredit(grant: AccessGrant & { workspaceId: string }) {
   await applyCreditLedgerEntry(db, {
     accountId: grant.accountId,
@@ -570,7 +583,34 @@ describe("server-side default model resolution", () => {
     );
   }, 180_000);
 
-  test("the verified-signup trial credit alone keeps the free default", async () => {
+  test("the verified-signup trial credit alone selects the credits default", async () => {
+    if (!available) return;
+    const settings = hostedSettings();
+    const grant = await workspaceFixture();
+    const context = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+    };
+    await addTrialCredit(grant);
+    expect(await resolveDefaultSessionModel(db, settings, context)).toEqual({
+      model: "gpt-6-luna",
+      reasoningEffort: "xhigh",
+      source: "credits",
+    });
+    // A new chat that follows the default opens on the credits model too.
+    expect(await getActorNewSessionDraft({ db, settings }, grant, grant.workspaceId)).toMatchObject(
+      { model: "gpt-6-luna", reasoningEffort: "xhigh", modelProvided: false },
+    );
+    // A connected subscription still wins over the trial.
+    await connectCodex(settings, grant);
+    expect(await resolveDefaultSessionModel(db, settings, context)).toMatchObject({
+      model: "codex/gpt-6-astra",
+      source: "subscription",
+    });
+  }, 180_000);
+
+  test("a zero or negative balance falls back to the free default", async () => {
     if (!available) return;
     const settings = hostedSettings();
     const grant = await workspaceFixture();
@@ -581,10 +621,36 @@ describe("server-side default model resolution", () => {
     };
     await addTrialCredit(grant);
     expect(await resolveDefaultSessionModel(db, settings, context)).toMatchObject({
+      source: "credits",
+    });
+
+    // Spending the whole trial leaves a zero balance: back to the free default.
+    await spendCredits(grant, 10_000_000);
+    expect(await resolveDefaultSessionModel(db, settings, context)).toEqual({
+      model: DEFAULT_OPENROUTER_MODEL_ID,
+      reasoningEffort: settings.openaiReasoningEffort,
+      source: "deployment",
+    });
+    // Usage that settles after the balance ran out leaves it negative.
+    await spendCredits(grant, 2_000_000);
+    expect(await resolveDefaultSessionModel(db, settings, context)).toMatchObject({
       model: DEFAULT_OPENROUTER_MODEL_ID,
       source: "deployment",
     });
-    // Buying (or being granted) credits on top of the trial switches it.
+    // A top-up that only brings the balance back to zero is still not credits.
+    await applyCreditLedgerEntry(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      type: "test_credit",
+      amountMicros: 2_000_000,
+      sourceType: "test",
+      sourceId: grant.workspaceId,
+      idempotencyKey: `test:default-model-clear:${grant.workspaceId}`,
+    });
+    expect(await resolveDefaultSessionModel(db, settings, context)).toMatchObject({
+      source: "deployment",
+    });
+    // A positive balance selects the credits default again.
     await addCredits(grant);
     expect(await resolveDefaultSessionModel(db, settings, context)).toEqual({
       model: "gpt-6-luna",

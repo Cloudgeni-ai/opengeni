@@ -879,6 +879,210 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("credits the organization already holds lead the step with the real balance", async () => {
+    const onComplete = mock(() => undefined);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={{} as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            billingMode="stripe"
+            codexEnabled
+            supergrokEnabled
+            includedModel={{ id: "free-model", label: "Free Model", free: true }}
+            startingCredits={{
+              balance: { balanceMicros: 7_250_000, currency: "usd" },
+              model: { id: "credits-model", label: "Credits Model", reasoningEffort: "xhigh" },
+            }}
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      expect(container.querySelector("h1")!.textContent).toBe(
+        "Start chatting with OpenGeni credits",
+      );
+      expect(container.textContent).toContain("$7.25 of OpenGeni credits included.");
+      expect(container.textContent).toContain(
+        "New chats use Credits Model with extra high reasoning.",
+      );
+      expect(container.textContent).toContain(
+        "When your credits run out, new chats use Free Model, which is free.",
+      );
+      expect(container.textContent).not.toContain("Start chatting for free");
+      expect(container.textContent).not.toContain("free to use. No card");
+      expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
+      expect(container.querySelector('button[aria-label="Connect OpenRouter"]')).not.toBeNull();
+      expect(container.textContent).toContain("Buy more OpenGeni credits");
+      const buttons = Array.from(container.querySelectorAll("button"));
+      const start = buttons.find((button) => button.textContent?.trim() === "Start chatting")!;
+      const buy = buttons.find((button) => button.textContent?.includes("in credits"))!;
+      // Chatting on the included credits precedes every other option.
+      expect(start.compareDocumentPosition(buy) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(buy.getAttribute("data-variant") ?? buy.className).not.toContain("bg-primary ");
+      await act(async () => start.click());
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("an unreadable balance still names the credits default without an amount", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={{} as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            billingMode="stripe"
+            startingCredits={{
+              balance: null,
+              model: { id: "credits-model", label: "Credits Model", reasoningEffort: "none" },
+            }}
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      expect(container.textContent).toContain("OpenGeni credits are included with your account.");
+      expect(container.textContent).toContain("New chats use Credits Model.");
+      // Without a free default there is nothing to name for after the credits.
+      expect(container.textContent).not.toContain("When your credits run out");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("after organization create, a positive balance on the credits default replaces the free copy", async () => {
+    const modelDefaults = {
+      defaultModel: "free-model",
+      models: [{ id: "free-model", label: "Free Model", cost: "free" }],
+    } as never;
+    const freeModel = {
+      ...baseModel,
+      id: "free-model",
+      label: "Free Model",
+      provider: "openrouter",
+      providerLabel: "OpenRouter",
+      cost: "free",
+      billing: { upstreamPayer: "deployment", metering: "external" },
+    };
+    const creditsModel = {
+      ...baseModel,
+      id: "credits-model",
+      label: "Credits Model",
+      provider: "openai",
+      providerLabel: "OpenAI",
+      cost: "credits",
+      billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+    };
+    const scenarios = [
+      {
+        name: "trial credits",
+        billingMode: "stripe" as const,
+        defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "credits" },
+        balanceMicros: 10_000_000,
+        heading: "Start chatting with OpenGeni credits",
+        billingRead: true,
+      },
+      {
+        name: "credits spent",
+        billingMode: "stripe" as const,
+        defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "deployment" },
+        balanceMicros: 0,
+        heading: "Start chatting for free",
+        billingRead: true,
+      },
+      {
+        name: "free default",
+        billingMode: "stripe" as const,
+        defaultSelection: { model: "free-model", reasoningEffort: "low", source: "deployment" },
+        balanceMicros: 10_000_000,
+        heading: "Start chatting for free",
+        billingRead: false,
+      },
+      {
+        name: "self-hosted",
+        billingMode: "disabled" as const,
+        defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "credits" },
+        balanceMicros: 10_000_000,
+        heading: "Start chatting for free",
+        billingRead: false,
+      },
+    ];
+    for (const scenario of scenarios) {
+      const getWorkspaceModelCatalog = mock(async (_workspaceId: string) => ({
+        models: [freeModel, creditsModel],
+        defaultSelection: scenario.defaultSelection,
+      }));
+      const getBilling = mock(async (_options: { accountId?: string }) => ({
+        mode: "stripe" as const,
+        balance: { balanceMicros: scenario.balanceMicros, currency: "usd" },
+      }));
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        await act(async () =>
+          root.render(
+            <OrganizationOnboardingPanel
+              client={{ ...setupClient, getWorkspaceModelCatalog, getBilling } as never}
+              billingMode={scenario.billingMode}
+              modelDefaults={modelDefaults}
+              onComplete={() => undefined}
+            />,
+          ),
+        );
+        await flush();
+        await enter(
+          container.querySelector("#organization-onboarding-name")!,
+          "Northwind Research",
+        );
+        await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+        await flush();
+        await flush();
+        const created = (await completeSelfServiceSetup.mock.results.at(-1)!.value) as {
+          organizationId: string;
+          personalWorkspaceId: string;
+        };
+        expect(getWorkspaceModelCatalog).toHaveBeenCalledWith(created.personalWorkspaceId);
+        expect({
+          scenario: scenario.name,
+          heading: container.querySelector("h1")!.textContent,
+        }).toEqual({ scenario: scenario.name, heading: scenario.heading });
+        if (scenario.billingRead) {
+          expect(getBilling).toHaveBeenCalledWith({ accountId: created.organizationId });
+        } else {
+          expect(getBilling).not.toHaveBeenCalled();
+        }
+        if (scenario.heading === "Start chatting with OpenGeni credits") {
+          expect(container.textContent).toContain("$10.00 of OpenGeni credits included.");
+          expect(container.textContent).toContain(
+            "New chats use Credits Model with low reasoning.",
+          );
+          expect(container.textContent).toContain(
+            "When your credits run out, new chats use Free Model, which is free.",
+          );
+        } else {
+          expect(container.textContent).toContain("Free Model is set up and free to use");
+          expect(container.textContent).not.toContain("of OpenGeni credits included");
+        }
+      } finally {
+        await act(async () => root.unmount());
+        container.remove();
+      }
+    }
+  });
+
   test("leaving is held while a connected model is saved for the next chat", async () => {
     let releaseSave: () => void = () => undefined;
     const saveNewSessionDraft = mock(
