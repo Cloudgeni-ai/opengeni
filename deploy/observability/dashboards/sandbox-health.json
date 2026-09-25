@@ -807,6 +807,28 @@
         }
       ],
       "gridPos": { "x": 12, "y": 91, "w": 12, "h": 8 }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Provider missing before workspace capture",
+      "description": "1 means at least one exact draining-to-cold commit with definitive provider disappearance in the trailing 30 minutes, by bounded backend. A previously published checkpoint may still be restorable. This is observed loss, independent of overdue rotation backlog.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (backend) (clamp_max(increase(opengeni_sandbox_provider_missing_before_capture_total[30m]), 1) > 0 or clamp_max((opengeni_sandbox_provider_missing_before_capture_total unless opengeni_sandbox_provider_missing_before_capture_total offset 30m), 1))",
+          "legendFormat": "{{backend}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 99, "w": 24, "h": 8 }
     }
   ]
 }

@@ -124,6 +124,25 @@ describe("turn-capacity Prometheus alerts", () => {
     expect(idleTimeout).not.toContain("requestId");
   });
 
+  test("alerts on exact Modal provider loss even without an overdue backlog", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const expression = alertExpression(template, "OpenGeniModalProviderMissingBeforeCapture");
+    expect(expression).toContain("opengeni_sandbox_provider_missing_before_capture_total");
+    expect(expression).toContain('backend="modal"');
+    expect(expression).toContain("increase(");
+    expect(expression).toContain("[30m]) > 0");
+    expect(expression).toContain("unless");
+    expect(expression).toContain("offset 30m");
+    expect(expression).not.toContain("opengeni:sandbox_rotation_backlog:fresh_max");
+    for (const selector of metricSelectors(expression)) {
+      expect(selector).toContain(DEPLOYMENT_SCOPE);
+      expect(selector).not.toMatch(/workspace_id|session_id|sandbox_group_id|instance_id/);
+    }
+  });
+
   test("alerts on bounded runtime, tool, lifecycle, API, and recovery failures", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),

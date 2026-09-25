@@ -644,6 +644,26 @@ spec:
           annotations:
             summary: OpenGeni has a sandbox past its provider deadline
             description: A finite-lifetime sandbox has remained past its precomputed provider deadline for 10m. Check turn, direct-operation, and retained-process blockers, checkpoint capture, reaper health, and Modal API errors before the provider kills it.
+        - alert: OpenGeniModalProviderMissingBeforeCapture
+          # A newly created counter may have only one sample after its first
+          # loss, so increase() alone would miss that first observation. The
+          # offset arm catches a new positive series for the same 30m window.
+          expr: |
+            sum(
+              increase(opengeni_sandbox_provider_missing_before_capture_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal"}[30m]) > 0
+              or
+              (
+                opengeni_sandbox_provider_missing_before_capture_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal"}
+                unless
+                opengeni_sandbox_provider_missing_before_capture_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal"} offset 30m
+              )
+            ) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: A Modal sandbox disappeared before its workspace could be captured
+            description: The exact draining-to-cold commit recorded providerMissingBeforeCapture. Inspect the sandbox.box.terminated event and the current archive/recovery state; a prior checkpoint may still be restorable. This is observed loss, independent of overdue rotation backlog.
         - alert: OpenGeniSandboxCheckpointDeletionFailed
           expr: opengeni:sandbox_checkpoint_artifacts:fresh_max{state="delete_failed"} > 0
           for: 15m

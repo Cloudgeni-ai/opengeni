@@ -155,6 +155,20 @@ periods. A blank recorded series is an inventory
 telemetry failure, not a healthy zero; `OpenGeniSandboxInventoryProjectionStale`
 alerts on that condition.
 
+Sandbox Health also shows `opengeni_sandbox_provider_missing_before_capture_total`
+by bounded backend. It increments only after an exact lease commits cold with
+`providerMissingBeforeCapture=true` (not on a failed probe, stale claim, or
+duplicate drain). `OpenGeniModalProviderMissingBeforeCapture` alerts on an
+observed Modal loss independently of the overdue rotation inventory; the
+first-observation arm covers a new counter with just one scrape sample. This
+does not assert that all files were lost: an earlier published archive may be
+restorable. Inspect the authenticated `sandbox.box.terminated` event and the
+lease recovery state for the affected sandbox. Neither provider identity nor
+workspace/session identifiers are metric labels. Deadline-specific
+legacy-process-blocked inventory is not exposed by the current backlog
+projection; a separate DB projection is needed before an alert can distinguish
+that condition from the existing `process_blocked` count.
+
 > `machine.link.*` and `machine.op.*` are session-scoped **timeline events**, not
 > Prometheus series — a machine's link history lives in the session timeline (which
 > carries the workspace/session context Prometheus omits). The Connected Machines
