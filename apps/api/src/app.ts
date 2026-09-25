@@ -5,6 +5,7 @@ import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@openg
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
   canonicalizeConfiguredModelId,
+  codeSearchDeploymentPolicy,
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   configuredModels,
@@ -934,6 +935,7 @@ export function createAppComposition(deps: AppDependencies): {
           name: server.name ?? server.id,
         })),
         firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
+        codeSearch: codeSearchDeploymentPolicy(deps.settings),
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,

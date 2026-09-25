@@ -2320,6 +2320,9 @@ export const WorkspaceSettingsSchema = z
     // Whether agents may expose and invoke the built-in structured human-input
     // tool. Absent preserves the historical enabled behavior.
     agentHumanInputEnabled: z.boolean().optional(),
+    // Whether agents get the Jev-backed `code_search` tool. Absent or null
+    // follows the deployment default; the deployment can always keep it off.
+    codeSearchEnabled: z.boolean().nullable().optional(),
     // Optional Slack reaction invocation. Absent/invalid fails closed to the
     // disabled default via resolveWorkspaceSlackReactionSummonSettings.
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
@@ -2378,6 +2381,61 @@ export function resolveWorkspaceCodexCompactionDefault(settings: unknown): Codex
 export function resolveWorkspaceAgentHumanInputEnabled(settings: unknown): boolean {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   return parsed.success ? parsed.data.agentHumanInputEnabled !== false : true;
+}
+
+/**
+ * The deployment half of the `code_search` decision. `split` gives the tool to
+ * a fixed half of sessions (see `codeSearchSessionInExperiment`) so staging can
+ * compare sessions with and without it.
+ */
+export const CodeSearchWorkspaceDefault = z.enum(["off", "on", "split"]);
+export type CodeSearchWorkspaceDefault = z.infer<typeof CodeSearchWorkspaceDefault>;
+export type CodeSearchDeploymentPolicy = {
+  available: boolean;
+  workspaceDefault: CodeSearchWorkspaceDefault;
+};
+
+/**
+ * What a workspace gets: the deployment decides first, so nothing enables the
+ * tool where the deployment does not offer it. Otherwise an explicit workspace
+ * choice wins, and an absent, null or malformed setting follows the deployment
+ * default.
+ */
+export function resolveWorkspaceCodeSearchMode(
+  settings: unknown,
+  deployment: CodeSearchDeploymentPolicy,
+): CodeSearchWorkspaceDefault {
+  if (!deployment.available) return "off";
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  const explicit = parsed.success ? parsed.data.codeSearchEnabled : undefined;
+  if (explicit === true) return "on";
+  if (explicit === false) return "off";
+  return deployment.workspaceDefault;
+}
+
+/**
+ * Fixed per-session half for the `split` experiment: 32-bit FNV-1a of the
+ * session id, low bit 0 gets the tool. Deterministic and dependency-free, so
+ * the arm never changes within a session (keeping the prompt prefix stable)
+ * and analysis can recompute it from the id alone.
+ */
+export function codeSearchSessionInExperiment(sessionId: string): boolean {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < sessionId.length; index++) {
+    hash ^= sessionId.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return (hash & 1) === 0;
+}
+
+/** Whether this session's turns get the Jev-backed `code_search` tool. */
+export function resolveSessionCodeSearchEnabled(
+  settings: unknown,
+  deployment: CodeSearchDeploymentPolicy,
+  sessionId: string,
+): boolean {
+  const mode = resolveWorkspaceCodeSearchMode(settings, deployment);
+  return mode === "on" || (mode === "split" && codeSearchSessionInExperiment(sessionId));
 }
 
 /**
@@ -2470,6 +2528,8 @@ export const UpdateWorkspaceSettingsRequest = z
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
     codexCompactionDefault: CodexCompactionMode.optional(),
     agentHumanInputEnabled: z.boolean().optional(),
+    // null returns the workspace to the deployment default.
+    codeSearchEnabled: z.boolean().nullable().optional(),
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
     slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
   })
@@ -16872,6 +16932,11 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       maxSizeBytes: VOICE_INPUT_MAX_SIZE_BYTES,
       acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
     }),
+    // Whether this deployment offers the Jev-backed code_search agent tool and
+    // whether workspaces without their own setting get it.
+    codeSearch: z
+      .object({ available: z.boolean(), workspaceDefault: CodeSearchWorkspaceDefault })
+      .default({ available: false, workspaceDefault: "off" }),
     productAccessMode: ProductAccessMode,
     billingMode: BillingMode.default("disabled"),
     // Safe rollout discriminator: the browser only mounts the optional

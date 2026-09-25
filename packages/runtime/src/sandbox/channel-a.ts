@@ -20,6 +20,7 @@
 // apply-patch-only path which cannot do binary, C4), falling back to
 // `createEditor` for text when `exec` is absent.
 
+import { constants as zlibConstants, gunzipSync } from "node:zlib";
 import type {
   FileSystemRouteIdentity,
   FsChangedPayload,
@@ -331,6 +332,87 @@ export type RepositoryDiscoveryResult = {
 };
 
 const REPOSITORY_DISCOVERY_TRUNCATED_SENTINEL = "__OPENGENI_REPOSITORY_DISCOVERY_TRUNCATED__";
+
+/** Raw ripgrep stdout kept on the box before encoding. */
+export const CODE_SEARCH_RG_MAX_BYTES = 64 * 1024 * 1024;
+const CODE_SEARCH_RG_MAX_ENCODED_CHARS = 896 * 1024;
+const CODE_SEARCH_RG_BEGIN = "__OPENGENI_CODE_SEARCH_RG_BEGIN__";
+const CODE_SEARCH_RG_END = "__OPENGENI_CODE_SEARCH_RG_END__";
+const CODE_SEARCH_KINDS_BEGIN = "__OPENGENI_CODE_SEARCH_KINDS_BEGIN__";
+const CODE_SEARCH_KINDS_END = "__OPENGENI_CODE_SEARCH_KINDS_END__";
+
+export type CodeSearchRipgrepOutcome = {
+  /** False when ripgrep is not installed on the box. */
+  available: boolean;
+  stdout: string;
+  /** rg exit status (0 matches, 1 none, 2 error); null after a timeout. */
+  exitCode: number | null;
+  /** Output hit the byte cap and was cut at a line boundary. */
+  truncated: boolean;
+  timedOut: boolean;
+};
+
+const CODE_SEARCH_RG_FLAGS: ReadonlySet<string> = new Set([
+  "--files",
+  "--null",
+  "--line-number",
+  "--with-filename",
+  "--no-heading",
+  "-i",
+  "-w",
+  "--no-require-git",
+  "--hidden",
+]);
+const CODE_SEARCH_RG_VALUE_FLAGS: ReadonlyMap<string, (value: string) => boolean> = new Map([
+  ["--color", (value: string) => value === "never"],
+  ["-m", (value: string) => /^[1-9]\d{0,5}$/.test(value)],
+  ["--max-columns", (value: string) => /^[1-9]\d{0,6}$/.test(value)],
+  ["--max-filesize", (value: string) => /^[1-9]\d{0,9}$/.test(value)],
+  ["-g", (value: string) => value.length > 0 && value.length <= 512],
+  ["-e", (value: string) => value.length > 0 && value.length <= 16_384],
+]);
+
+/**
+ * Accept only the ripgrep arguments `code_search` needs. Flags that run a
+ * program (`--pre`, `-z`) or read other files, and paths that leave the
+ * workspace, are rejected before a command is built. `--no-config` stops a
+ * `RIPGREP_CONFIG_PATH` on the box from adding flags.
+ */
+export function validateCodeSearchRipgrepArgs(
+  args: readonly string[],
+  workspaceRoot = "",
+): string[] {
+  const out: string[] = [];
+  let index = 0;
+  for (; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg.includes(NUL)) throw new ChannelAValidationError("ripgrep argument contains NUL");
+    if (arg === "--") break;
+    if (CODE_SEARCH_RG_FLAGS.has(arg)) {
+      out.push(arg);
+      continue;
+    }
+    const valid = CODE_SEARCH_RG_VALUE_FLAGS.get(arg);
+    const value = args[index + 1];
+    if (!valid || value === undefined || value.includes(NUL) || !valid(value)) {
+      throw new ChannelAValidationError(`ripgrep argument is not allowed: ${arg}`);
+    }
+    out.push(arg, value);
+    index++;
+  }
+  const paths = args.slice(index + 1);
+  if (index >= args.length || paths.length === 0) {
+    throw new ChannelAValidationError("ripgrep arguments must end with -- and paths");
+  }
+  out.push("--");
+  for (const path of paths) {
+    if (path.includes(NUL) || path.startsWith("-") || path.startsWith("/")) {
+      throw new ChannelAValidationError(`ripgrep path is not allowed: ${path}`);
+    }
+    out.push(assertSafeRelPathOrRoot(path, workspaceRoot) || ".");
+  }
+  return ["--no-config", ...out];
+}
 const REPOSITORY_DISCOVERY_STATUS_PREFIX = "__OPENGENI_REPOSITORY_DISCOVERY_STATUS__:";
 
 const NUL = String.fromCharCode(0); // \0 NUL — find/porcelain/numstat -z separator
@@ -2276,6 +2358,143 @@ export class SandboxChannelAService {
   /** Detect repo roots within the workspace (for the Git.repos capability). */
   async detectRepos(): Promise<string[]> {
     return (await this.detectReposDetailed()).repos;
+  }
+
+  // ═════════════════════════ Code search (worker-only) ═══════════════════════
+
+  /**
+   * Run ripgrep read-only in the workspace root for the Jev `code_search` tool.
+   * Arguments are checked against a closed allowlist (no `--pre`, `-z` or other
+   * flags that run programs), so the command is provably read-only and skips
+   * durable mutation admission. stdout is capped at `maxBytes`, gzip+base64
+   * framed so providers that drop newlines or retain limited output cannot
+   * corrupt it, and bounded by a wall-clock watchdog (not GNU `timeout`, which
+   * stock macOS lacks). Resolves `available: false` when `rg` is not installed.
+   */
+  async codeSearchRipgrep(
+    args: readonly string[],
+    options: { timeoutMs: number; maxBytes: number },
+  ): Promise<CodeSearchRipgrepOutcome> {
+    const argv = validateCodeSearchRipgrepArgs(args, this.workspaceRoot);
+    const maxBytes = Math.max(1, Math.min(CODE_SEARCH_RG_MAX_BYTES, Math.floor(options.maxBytes)));
+    const seconds = Math.max(1, Math.min(120, Math.ceil(options.timeoutMs / 1_000)));
+    const script = [
+      'results_file=$(mktemp "${TMPDIR:-/tmp}/opengeni-code-search.XXXXXX") || exit 70',
+      'status_file="${results_file}.status"',
+      'timeout_file="${results_file}.timed-out"',
+      "search_pid=",
+      "watchdog_pid=",
+      'cleanup() { if [ -n "$search_pid" ]; then kill -TERM -- "-$search_pid" 2>/dev/null || kill "$search_pid" 2>/dev/null || true; fi; if [ -n "$watchdog_pid" ]; then kill "$watchdog_pid" 2>/dev/null || true; fi; rm -f "$results_file" "$status_file" "$timeout_file"; }',
+      "abort() { trap - EXIT; cleanup; exit 143; }",
+      "trap cleanup EXIT",
+      "trap abort HUP INT TERM",
+      `if ! command -v rg >/dev/null 2>&1; then printf '${CODE_SEARCH_RG_END}127:0__'; exit 0; fi`,
+      // Job control gives the pipeline its own process group, so the watchdog
+      // and cleanup stop ripgrep itself rather than only the subshell.
+      "set -m",
+      `( rg ${argv.map(shellQuote).join(" ")} 2>/dev/null | head -c ${maxBytes + 1} > "$results_file"; printf '%s' "\${PIPESTATUS[0]}" > "$status_file" ) </dev/null >/dev/null 2>&1 &`,
+      "search_pid=$!",
+      `(sleeper_pid=; stop_watchdog() { if [ -n "$sleeper_pid" ]; then kill "$sleeper_pid" 2>/dev/null || true; wait "$sleeper_pid" 2>/dev/null || true; fi; exit 0; }; trap stop_watchdog HUP INT TERM; sleep ${seconds} & sleeper_pid=$!; wait "$sleeper_pid"; sleeper_pid=; if kill -TERM -- "-$search_pid" 2>/dev/null; then : > "$timeout_file"; fi) </dev/null >/dev/null 2>&1 &`,
+      "watchdog_pid=$!",
+      'wait "$search_pid" 2>/dev/null',
+      "search_pid=",
+      'kill "$watchdog_pid" 2>/dev/null || true',
+      'wait "$watchdog_pid" 2>/dev/null || true',
+      "watchdog_pid=",
+      "set +m",
+      'status=$(cat "$status_file" 2>/dev/null)',
+      '[ -n "$status" ] || status=125',
+      "timed_out=0",
+      'if [ -f "$timeout_file" ]; then timed_out=1; fi',
+      `printf '${CODE_SEARCH_RG_BEGIN}'`,
+      // Providers retain about 1 MiB per output stream. Cap the encoded body
+      // below that; the worker decodes a cut stream as a partial prefix.
+      `gzip -c < "$results_file" | base64 | tr -d '\\r\\n' | head -c ${CODE_SEARCH_RG_MAX_ENCODED_CHARS + 1}`,
+      `printf '${CODE_SEARCH_RG_END}%s:%s__' "$status" "$timed_out"`,
+    ].join("\n");
+    const { stdout } = await this.runReadOnly({
+      cmd: internalBashCommand(script),
+      workdir: this.providerWorkspaceRoot(),
+      yieldTimeMs: (seconds + 15) * 1_000,
+      maxOutputTokens: CODE_SEARCH_RG_MAX_ENCODED_CHARS,
+    });
+    const trailer = new RegExp(`${CODE_SEARCH_RG_END}(\\d+):([01])__`).exec(stdout);
+    if (!trailer) {
+      throw new ChannelAUnavailableError(
+        "code search output was cut off by the sandbox; retry with narrower paths",
+      );
+    }
+    const exitCode = Number.parseInt(trailer[1]!, 10);
+    if (exitCode === 127) {
+      return { available: false, stdout: "", exitCode: null, truncated: false, timedOut: false };
+    }
+    const begin = stdout.indexOf(CODE_SEARCH_RG_BEGIN);
+    if (begin < 0 || begin > trailer.index) {
+      throw new ChannelAUnavailableError("code search output frame is missing");
+    }
+    let encoded = stdout
+      .slice(begin + CODE_SEARCH_RG_BEGIN.length, trailer.index)
+      .replace(/\s+/g, "");
+    const encodedCut = encoded.length > CODE_SEARCH_RG_MAX_ENCODED_CHARS;
+    if (encodedCut) {
+      encoded = encoded.slice(
+        0,
+        CODE_SEARCH_RG_MAX_ENCODED_CHARS - (CODE_SEARCH_RG_MAX_ENCODED_CHARS % 4),
+      );
+    }
+    // A cut gzip stream still decodes to a prefix with a sync flush.
+    const raw = encoded
+      ? gunzipSync(Buffer.from(encoded, "base64"), { finishFlush: zlibConstants.Z_SYNC_FLUSH })
+      : Buffer.alloc(0);
+    const rawCut = raw.length > maxBytes;
+    let text = (rawCut ? raw.subarray(0, maxBytes) : raw).toString("utf8");
+    if (rawCut || encodedCut) {
+      // Drop the last partial line so every returned record is whole.
+      const lastNewline = text.lastIndexOf("\n");
+      text = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
+    }
+    const timedOut = trailer[2] === "1";
+    return {
+      available: true,
+      stdout: text,
+      exitCode: timedOut || exitCode === 125 ? null : exitCode,
+      truncated: rawCut || encodedCut,
+      timedOut,
+    };
+  }
+
+  /** Classify workspace-relative paths for `code_search` path filters. */
+  async codeSearchPathKinds(
+    paths: readonly string[],
+  ): Promise<Record<string, "file" | "directory" | "missing">> {
+    const checked = paths.map((path) => {
+      if (path.startsWith("-")) throw new ChannelAValidationError(`invalid path: ${path}`);
+      return assertSafeRelPathOrRoot(path, this.workspaceRoot) || ".";
+    });
+    if (checked.length === 0) return {};
+    const script = [
+      `printf '${CODE_SEARCH_KINDS_BEGIN}'`,
+      'for p in "$@"; do if [ -d "$p" ]; then printf d; elif [ -e "$p" ]; then printf f; else printf m; fi; done',
+      `printf '${CODE_SEARCH_KINDS_END}'`,
+    ].join("\n");
+    const { stdout } = await this.runReadOnly({
+      cmd: `${internalBashCommand(script)} opengeni-code-search ${checked.map(shellQuote).join(" ")}`,
+      workdir: this.providerWorkspaceRoot(),
+      yieldTimeMs: 20_000,
+      maxOutputTokens: 4_096,
+    });
+    const match = new RegExp(`${CODE_SEARCH_KINDS_BEGIN}([dfm]*)${CODE_SEARCH_KINDS_END}`).exec(
+      stdout,
+    );
+    if (!match || match[1]!.length !== checked.length) {
+      throw new ChannelAUnavailableError("code search path check did not complete");
+    }
+    const kinds: Record<string, "file" | "directory" | "missing"> = {};
+    paths.forEach((path, index) => {
+      const code = match[1]![index];
+      kinds[path] = code === "d" ? "directory" : code === "f" ? "file" : "missing";
+    });
+    return kinds;
   }
 
   // ════════════════════════ Terminal exec + PTY (A2) ════════════════════════

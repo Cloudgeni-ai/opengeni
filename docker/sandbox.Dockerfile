@@ -118,6 +118,7 @@ COPY packages/documents/package.json packages/documents/package.json
 COPY packages/events/package.json packages/events/package.json
 COPY packages/github/package.json packages/github/package.json
 COPY packages/interaction/package.json packages/interaction/package.json
+COPY packages/jev/package.json packages/jev/package.json
 COPY packages/network/package.json packages/network/package.json
 COPY packages/observability/package.json packages/observability/package.json
 COPY packages/ogtool/package.json packages/ogtool/package.json

@@ -12,6 +12,7 @@ import {
   Loader2Icon,
   PencilIcon,
   PlusIcon,
+  SearchCodeIcon,
   ShrinkIcon,
   Trash2Icon,
   TriangleAlertIcon,
@@ -476,6 +477,7 @@ function OperationalWorkspaceSettingsRoute({
                   workspaceId={workspaceId}
                   canManage={canManageSettings}
                 />
+                <CodeSearchPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
               </div>
             </section>
 
@@ -1295,6 +1297,79 @@ function CodexCompactionPreferenceRow({
       saving={saving}
       onToggle={() => void toggle(!portable)}
     />
+  );
+}
+
+/**
+ * Jev-backed code_search agent tool. Shown only when the deployment offers it.
+ * "Default" follows the deployment (which may give the tool to half of all
+ * sessions during an experiment); On and Off apply to every session. A change
+ * takes effect on the next turn.
+ */
+function CodeSearchPreferenceRow({
+  workspaceId,
+  canManage,
+}: {
+  workspaceId: string;
+  canManage: boolean;
+}) {
+  const context = useAppContext();
+  const capability = context.clientConfig.codeSearch;
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const explicit = workspace?.settings?.codeSearchEnabled;
+  const value = explicit === true ? "on" : explicit === false ? "off" : "default";
+  const [saving, setSaving] = useState(false);
+  if (capability?.available !== true) return null;
+  const defaultLabel =
+    capability.workspaceDefault === "on"
+      ? "Default · on"
+      : capability.workspaceDefault === "split"
+        ? "Default · half of sessions"
+        : "Default · off";
+
+  async function choose(next: "default" | "on" | "off") {
+    if (next === value) return;
+    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
+    setSaving(true);
+    try {
+      const updated = await context.updateWorkspaceSettings(workspaceId, {
+        codeSearchEnabled: next === "default" ? null : next === "on",
+      });
+      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+        toast.success("Fast code search updated");
+      }
+    } catch {
+      if (context.ownsWorkspaceInvocation(workspaceId, acceptedTransition))
+        toast.error("Couldn’t update fast code search");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="flex min-h-10 items-center gap-3 px-1 py-1.5">
+      <SearchCodeIcon className="size-3.5 shrink-0 text-brand" />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium">Fast code search</div>
+        <p className="truncate text-2xs text-fg-subtle">
+          Agents find code in one step with TypeSafe Jev. Faster and cheaper for questions about a
+          codebase.
+        </p>
+      </div>
+      {saving ? <Loader2Icon className="size-3.5 shrink-0 animate-spin text-fg-subtle" /> : null}
+      <Select
+        aria-label="Fast code search"
+        value={value}
+        disabled={!canManage || saving}
+        onChange={(event) => void choose(event.currentTarget.value as "default" | "on" | "off")}
+        className="h-7 w-44 py-0 text-xs"
+      >
+        <option value="default">{defaultLabel}</option>
+        <option value="on">On</option>
+        <option value="off">Off</option>
+      </Select>
+    </div>
   );
 }
 

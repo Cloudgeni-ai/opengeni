@@ -2264,3 +2264,51 @@ export function modelCallAccountContext(input: {
     accountChangedFromPrevCall,
   };
 }
+
+export type CodeSearchCallOutcome =
+  | "completed"
+  | "jev_unavailable"
+  | "jev_rejected"
+  | "workspace_unavailable"
+  | "invalid_arguments"
+  | "breaker_open"
+  | "cancelled"
+  | "failed";
+
+/** One `code_search` tool call: outcome, wall time and the Jev work it used. */
+export function recordCodeSearchCall(
+  observability: Observability,
+  input: {
+    outcome: CodeSearchCallOutcome;
+    durationSeconds: number;
+    jevRequests: number;
+    jevCostUsd: number;
+  },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_code_search_calls_total",
+    help: "Jev-backed code_search tool calls by outcome.",
+    labels: { outcome: input.outcome },
+  });
+  observability.observeHistogram({
+    name: "opengeni_code_search_duration_seconds",
+    help: "Wall time of one code_search tool call.",
+    buckets: [0.5, 1, 2, 4, 8, 15, 30, 60],
+    labels: { outcome: input.outcome },
+    value: Math.max(0, input.durationSeconds),
+  });
+  if (input.jevRequests > 0) {
+    observability.incrementCounter({
+      name: "opengeni_code_search_jev_requests_total",
+      help: "Jev requests made by code_search.",
+      amount: input.jevRequests,
+    });
+  }
+  if (input.jevCostUsd > 0) {
+    observability.incrementCounter({
+      name: "opengeni_code_search_jev_cost_micro_usd_total",
+      help: "Estimated Jev list-price cost of code_search, in micro-USD.",
+      amount: Math.round(input.jevCostUsd * 1_000_000),
+    });
+  }
+}

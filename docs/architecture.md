@@ -901,9 +901,8 @@ path.
 
 The closed always-visible local first-request set is `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
-`request_human_input`, and `list_models`. The last tool returns the current
-workspace's selectable model IDs and deployment-defined costs; it does not
-switch the session model. Other non-MCP function tools and non-eager MCP schemas
+`request_human_input`, `list_models` (lists selectable models; never switches
+them), and optional [`code_search`](code-search.md). Other non-MCP function tools and non-eager MCP schemas
 remain behind progressive search.
 
 Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
@@ -1066,6 +1065,7 @@ handlers because its host owns process lifecycle.
 | `packages/connect` | `@opengeni/connect` | Framework-neutral connection setup, navigation, polling and account-selection contracts |
 | `packages/config` | `@opengeni/config` | Settings parsing, validation, defaults, and derived runtime configuration |
 | `packages/network` | `@opengeni/network` | DNS-pinned, bounded credential-bearing HTTP transport and shared MCP OAuth discovery semantics |
+| `packages/jev` | `@opengeni/jev` | Jev client and `code_search` engine |
 | `packages/core` | `@opengeni/core` | Framework-neutral access, domain, billing, and dependency seams |
 | `packages/db` | `@opengeni/db` | Drizzle schema, scoped repositories, migrations, RLS posture, and role provisioning |
 | `packages/runtime` | `@opengeni/runtime` | Agent construction, model routing, tool execution, history projection, and sandbox abstraction |

@@ -20,7 +20,11 @@ import {
   renderWorkspaceGovernanceContext,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
-import { settingsWithResolvedModelContext, type Settings } from "@opengeni/config";
+import {
+  codeSearchDeploymentPolicy,
+  settingsWithResolvedModelContext,
+  type Settings,
+} from "@opengeni/config";
 import { projectReasoningConfigurations, supportsReasoningConfiguration } from "@opengeni/codex";
 import { settingsWithSessionMcpServersForRun } from "../capabilities";
 import { resolveRigProviderImageForRun } from "@opengeni/core";
@@ -44,6 +48,7 @@ import { WorkspaceModelPolicyBlockedError } from "@opengeni/runtime";
 import {
   evaluateWorkspaceModelPolicy,
   resolveWorkspaceAgentHumanInputEnabled,
+  resolveSessionCodeSearchEnabled,
   type MediaGenerationResult,
 } from "@opengeni/contracts";
 
@@ -89,6 +94,8 @@ export type GovernanceModelOk = {
     | null;
   rigName: string | null;
   agentHumanInputEnabled: boolean;
+  /** Deployment and workspace allow the Jev-backed code_search tool. */
+  codeSearchEnabled: boolean;
   workspaceAgentInstructions: string | null | undefined;
   workspaceGovernance: ReturnType<typeof renderWorkspaceGovernanceContext>;
   structuredWorkspacePolicyActive: boolean;
@@ -230,6 +237,11 @@ export async function prepareGovernanceAndModel(
   workspaceRefs.rigVersionId = session.rigVersionId ?? "";
   if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
   const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
+  const codeSearchEnabled = resolveSessionCodeSearchEnabled(
+    workspace.settings,
+    codeSearchDeploymentPolicy(capabilitySettings),
+    input.sessionId,
+  );
   const contextSelection = await resolveCompanyBrainContextSelection(db, governanceClaims);
   const workspaceAgentInstructions = contextSelection.legacyWorkspaceInstructions;
   const memoryPromptMode = contextSelection.receipt.memoryPromptMode;
@@ -460,6 +472,7 @@ export async function prepareGovernanceAndModel(
       rigVersion,
       rigName,
       agentHumanInputEnabled,
+      codeSearchEnabled,
       workspaceAgentInstructions,
       workspaceGovernance,
       structuredWorkspacePolicyActive,

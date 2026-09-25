@@ -2032,6 +2032,11 @@ export type BuildAgentOptions = {
    * because their bearer is delivered per exec rather than through a token file.
    */
   codemodeAvailable?: boolean;
+  /**
+   * Whether this attempt offers the Jev-backed `code_search` tool. Adds one
+   * short directive so the agent starts code investigation with it.
+   */
+  codeSearchAvailable?: boolean;
   // Sessions without a semantic title only: inject a one-shot instruction into
   // the FIRST model call telling it to title the session via
   // opengeni__set_session_title.
@@ -2272,6 +2277,9 @@ export function inspectPersistentAgentInstructions(
         content: CODEMODE_PROGRAMMATIC_DIRECTIVE,
       });
     }
+    if (options.codeSearchAvailable) {
+      layers.push({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
+    }
     if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
       layers.push({
         id: "git_bindings",
@@ -2294,6 +2302,9 @@ export function inspectPersistentAgentInstructions(
         title: "Codemode",
         content: CODEMODE_PROGRAMMATIC_DIRECTIVE,
       });
+    }
+    if (options.codeSearchAvailable) {
+      layers.push({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
     }
     if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
       layers.push({
@@ -7652,6 +7663,14 @@ function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilt
 // exposes an attempt-scoped Codemode bearer. Stock images carry the importable
 // package and ogtool; Connected Machines carry the native agent client; custom
 // environments can use the exact pinned package hint.
+/**
+ * Directive added only when the attempt offers `code_search`. In testing the
+ * tool saved cost and time on code investigation when the agent started with
+ * it, so say that plainly rather than relying on the schema description.
+ */
+export const CODE_SEARCH_DIRECTIVE =
+  "To find where something is implemented, configured or decided in the code, start with one `code_search` call (a precise question plus 6-15 likely identifiers, file-name fragments, config keys or error strings) instead of a series of separate searches and file reads. Use its passages directly, and search or read further only for gaps it reports.";
+
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
   "Default `ogtool list` enumerates every authorized tool with a compact summary, without schemas or an output-size cutoff. " +
   "Managed sandboxes select the worker-release client on PATH for every command, including warm boxes. When OPENGENI_CODEMODE_CLIENT_MODULE is set, persistent Bun programs must use `const { tools, openGeni } = await import(process.env.OPENGENI_CODEMODE_CLIENT_MODULE!)`; do not import the older image-baked package or invoke /usr/local/bin/ogtool directly. The stock-package import below is only for environments without that deployment-selected module. " +

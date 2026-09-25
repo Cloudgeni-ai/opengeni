@@ -3928,6 +3928,11 @@ export type ClientConfig = {
   fileUploads: { enabled: boolean; maxSizeBytes: number };
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
+  /**
+   * Whether the deployment offers the Jev-backed code_search agent tool and
+   * what workspaces without their own setting get (`split` = half of sessions).
+   */
+  codeSearch?: { available: boolean; workspaceDefault: "off" | "on" | "split" } | undefined;
   productAccessMode: ProductAccessMode;
   /** Client-safe hint for whether the console should offer Stripe checkout. */
   billingMode?: BillingMode | undefined;
@@ -4563,6 +4568,8 @@ export type WorkspaceSettings = {
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   /** Whether agents may invoke the built-in structured human-input tool. */
   agentHumanInputEnabled?: boolean | undefined;
+  /** Whether agents get the Jev-backed code_search tool; absent or null follows the deployment. */
+  codeSearchEnabled?: boolean | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   /** Slack orchestration notices; both default off when absent or invalid. */
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
@@ -4654,6 +4661,7 @@ export type UpdateWorkspaceSettingsRequest = {
   maxNestedAgentDepth?: number | null | undefined;
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   agentHumanInputEnabled?: boolean | undefined;
+  codeSearchEnabled?: boolean | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   [key: string]: unknown;
