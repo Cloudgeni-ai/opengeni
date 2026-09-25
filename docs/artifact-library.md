@@ -111,7 +111,9 @@ action remains available, and browsers without intersection observation load
 normally. Site and inline-HTML chat viewports have bounded fixed heights; larger
 content scrolls inside the preview or opens with the full-screen control. Late
 content resize messages do not resize the conversation. Loading, failure, and
-retry states retain the same chat slot.
+retry states retain the same chat slot. The Artifacts image detail viewer uses
+the available page width and a viewport-height limit instead of the fixed chat
+image slot, while preserving the image aspect ratio and expand action.
 
 ## Serving user content from the API origin
 

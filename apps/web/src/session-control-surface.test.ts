@@ -539,6 +539,21 @@ describe("session control surface architecture", () => {
     expect(rail).toContain("onOpenChange={setSearchOpen}");
   });
 
+  test("the established-session Variable Set editor stays behind its lazy panel", async () => {
+    // A direct session load must not carry the editor: the "+" menu mounts it
+    // on demand (see test/e2e/session-lazy-panels.browser.e2e.ts).
+    const route = await source("routes/session.tsx");
+    expect(route).toContain('from "@/components/session/session-variable-set-picker-panel"');
+    expect(route).not.toContain('from "@/components/session/session-variable-set-picker"');
+    const panel = await source("components/session/session-variable-set-picker-panel.tsx");
+    expect(panel).toContain('import("@/components/session/session-variable-set-picker")');
+    // Only a type-only import of the implementation module is allowed.
+    expect(panel).not.toMatch(
+      /^import (?!type )[^;]*from "@\/components\/session\/session-variable-set-picker";/m,
+    );
+    expect(panel).toContain(".catch(() => ({ default: SessionVariableSetPickerLoadFailed }))");
+  });
+
   test("the retired client-side queue model is gone", async () => {
     expect(await Bun.file(`${import.meta.dir}/lib/queue.ts`).exists()).toBe(false);
   });

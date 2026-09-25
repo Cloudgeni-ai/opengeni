@@ -265,7 +265,7 @@ export function SecurityController({
     <PersonalSettingsShell email={inventory?.email ?? email}>
       {committed ? (
         <div className="grid gap-4">
-          <h1 className="text-xl font-semibold">Sign-in methods updated</h1>
+          <h2 className="text-lg font-semibold">Sign-in methods updated</h2>
           <div role="status">
             <Notice tone="success">{success}</Notice>
           </div>

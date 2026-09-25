@@ -100,10 +100,64 @@ copied `OPENGENI_API_HOST` does not change that. Loopback keeps other devices
 out; it does not authenticate programs on this computer, so treat the local API
 like any other unauthenticated local service. Set `OPENGENI_DEV_BIND_HOST=0.0.0.0`
 only when you deliberately want other devices, for example on a private tailnet,
-to reach the stack; it exposes all of those services on every interface. Docker
-sandboxes on Linux reach the API through the Docker bridge, so Codemode and the
-Git broker inside them need that opt-in (or an explicit sandbox-reachable
-`OPENGENI_MCP_URL`); Docker Desktop reaches a loopback API without it.
+to reach the stack; it exposes all of those services on every interface.
+
+A web page open in your browser can also reach a loopback port, so the local API
+(`local` access mode in the `local` environment) guards browser access itself
+(`apps/api/src/http/local-browser-boundary.ts`):
+
+- It answers only requests whose `Host` names this computer, in two classes.
+  Browser addresses are `127.0.0.1`, `localhost`, `[::1]`, a specific
+  `OPENGENI_API_HOST`, and the hosts of `OPENGENI_WEB_BASE_URL`,
+  `OPENGENI_PUBLIC_BASE_URL`, `OPENGENI_GITHUB_APP_MANIFEST_BASE_URL`, and
+  `OPENGENI_LOCAL_ALLOWED_ORIGINS`. Sandbox addresses are
+  `host.docker.internal` (only with `OPENGENI_SANDBOX_BACKEND=docker`) and the
+  hosts of `OPENGENI_MCP_URL` and `OPENGENI_MCP_INTERNAL_URL`, such as the
+  Docker sandbox route below or a Modal tunnel. A sandbox address serves only
+  the Codemode, first-party MCP, and Git broker routes, and refuses any request
+  that carries an `Origin` or `Sec-Fetch-Site` header. Every other `Host` gets
+  403, so a tunnel reaches the API only when one of these settings names it.
+  This blocks DNS rebinding, where a site makes its own name resolve to
+  `127.0.0.1`: the site's name is none of these, and a page served under a
+  sandbox name (for example `host.docker.internal` from a hostile resolver)
+  reaches only the sandbox routes, never with its own `Origin`.
+- A request that carries an `Origin` must come from this stack's web app
+  (`OPENGENI_WEB_BASE_URL`, default `http://127.0.0.1:3000`, or
+  `OPENGENI_PUBLIC_BASE_URL`, under any loopback name), from the API's own
+  address on a browser address, or from an exact origin listed in
+  `OPENGENI_LOCAL_ALLOWED_ORIGINS` (comma-separated, for example
+  `http://127.0.0.1:5173`). Other origins, including other local ports and
+  `null`, get 403 before any route runs, and the local API never answers with
+  wildcard CORS. `OPENGENI_CORS_ALLOW_ORIGIN_REGEX` does not apply here. The
+  launcher always adds its printed `http://127.0.0.1:<web port>` URL.
+
+A refused browser request usually shows up in the browser only as a CORS error,
+so the API logs a warning naming each distinct refused `Host` or `Origin` once,
+with the setting to change. The SDK, curl, host-app servers such as the
+examples, and sandbox callbacks send no `Origin` and are unaffected. With
+`OPENGENI_DEV_BIND_HOST=0.0.0.0`, set `OPENGENI_WEB_BASE_URL` and
+`VITE_API_BASE_URL` to the address other devices use (for example
+`http://homeserver:3000` and `http://homeserver:8000`) so the API admits it.
+Managed and configured access modes, and deployments that set another
+`OPENGENI_ENVIRONMENT` such as the Helm examples, keep their CORS policy.
+
+Docker sandboxes call the API for Codemode, first-party MCP, and the personal
+Git broker. Docker Desktop (macOS, Windows) forwards `host.docker.internal` to
+the loopback API. A Linux Docker Engine container, including WSL2 without
+Docker Desktop, reaches the host only through its network's bridge gateway, so
+with `OPENGENI_SANDBOX_BACKEND=docker` on Linux the launcher runs
+`scripts/dev-sandbox-bridge.ts`: a forwarder bound to the gateway address of this
+worktree's Compose network (which every sandbox joins) on the API port. It
+relays only the Codemode, MCP, and Git broker routes, refuses peers outside that
+network's subnet, and sets `OPENGENI_MCP_URL` (also written to `.env.runtime`)
+so sandboxes use it. With `OPENGENI_DEV_BIND_HOST=0.0.0.0` the API already
+listens there, so the launcher only sets `OPENGENI_MCP_URL`. An explicit
+non-loopback `OPENGENI_MCP_URL` is kept. Rootless Docker keeps its gateway in a
+separate network namespace, so no route is published; set `OPENGENI_MCP_URL` to
+a sandbox-reachable address there. A host firewall such as ufw must allow the
+Compose bridge to reach the API port. The route narrows exposure but does not
+authenticate: like `host.docker.internal` under Docker Desktop, any container on
+this worktree's Compose network can call those routes as the local user.
 
 Wait for the aggregate readiness message, then open the printed web URL and
 check that the app renders. If a model is connected, verify an assistant reply
@@ -312,9 +366,11 @@ network exposure. The local stack binds loopback, so a machine on this computer
 connects as is. A machine on another computer must reach this stack's API, NATS,
 and relay, so it also needs the stack started with `OPENGENI_DEV_BIND_HOST=0.0.0.0`
 (read [Start the full stack](#start-the-full-stack) first) and
-`OPENGENI_SELFHOSTED_NATS_URL` and `OPENGENI_SELFHOSTED_RELAY_URL` (with
-`OPENGENI_RELAY_BIND` for the local relay) pointing at an address it can reach,
-such as a tailnet address. Operators enable the feature as described in
+`OPENGENI_PUBLIC_BASE_URL`, `OPENGENI_SELFHOSTED_NATS_URL`, and
+`OPENGENI_SELFHOSTED_RELAY_URL` (with `OPENGENI_RELAY_BIND` for the local relay)
+pointing at an address it can reach, such as a tailnet address. The local API
+answers only the addresses it is configured with, so the machine must use the
+`OPENGENI_PUBLIC_BASE_URL` address. Operators enable the feature as described in
 [`deployment.md` § Connected Machines](deployment.md#connected-machines);
 the SDK-level contract is in [`connected-machines.md`](connected-machines.md).
 
