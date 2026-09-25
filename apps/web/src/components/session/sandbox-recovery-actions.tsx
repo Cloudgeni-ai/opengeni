@@ -29,9 +29,18 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
   const trigger = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     void controller.refresh();
-    const interval = setInterval(() => void controller.refresh(), 5_000);
+    // A 403 is stable for this viewer; polling it would only repeat the denial.
+    const interval = setInterval(() => {
+      if (!controller.getSnapshot().notApplicable) void controller.refresh();
+    }, 5_000);
     return () => clearInterval(interval);
   }, [controller]);
+
+  // This viewer cannot use checkpoint recovery (not the owning managed-human
+  // session, or no session control), so the lane is not a failed check. Keep
+  // the ordinary failure remedies, exactly as for an unsupported projection;
+  // a retained consent request still owns the UI.
+  if (state.notApplicable && !state.request) return props.children;
 
   const projection = state.projection;
   // Ordinary retry is disclosed only after a current read rules out this lane.

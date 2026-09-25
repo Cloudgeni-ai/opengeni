@@ -51,6 +51,56 @@ test("compact row offers one ghost Retry without duplicate controls or guidance"
   );
 });
 
+test("credential failures hide Retry until another model is chosen and keep raw detail folded", async () => {
+  const raw =
+    "401 Incorrect API key provided: sk-proj-****abcd. You can find your API key at https://platform.openai.com/account/api-keys.";
+  const credentialFailure = {
+    ...failure,
+    reason:
+      "The model provider rejected this deployment's engine credentials. Sending messages won't help until the deployment's engine configuration is fixed.",
+    recordedDetail: raw,
+  };
+  const container = await render(
+    <FailedSessionBanner failure={credentialFailure} actions={actions} canChooseModel />,
+  );
+  const banner = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(banner.querySelector("button")).toBeNull();
+  const details = banner.querySelector("details")!;
+  expect(details.open).toBe(false);
+  expect(details.querySelector("summary")!.textContent).toBe("Details");
+  expect(details.querySelector("p")!.textContent).toBe(raw);
+  expect(banner.textContent?.replace(details.textContent ?? "", "")).toBe(
+    "The model provider rejected the credentials for this model. Choose another model below.",
+  );
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner failure={credentialFailure} actions={actions} modelChanged />,
+    ),
+  );
+  expect(container.querySelector("button")!.textContent).toBe("Retry");
+});
+
+test("billing and daily-limit failures keep Retry on the same model", async () => {
+  const banner = (raw: string) => (
+    <FailedSessionBanner
+      failure={{ ...failure, reason: raw, recordedDetail: raw }}
+      actions={actions}
+      canChooseModel
+    />
+  );
+  const container = await render(banner("402 Payment Required"));
+  for (const raw of [
+    "402 This request requires more credits. To increase, visit https://openrouter.ai/settings/credits and upgrade to a paid account",
+    "429 Rate limit exceeded: free-models-per-day. Add 10 credits to unlock more.",
+  ]) {
+    await act(async () => root!.render(banner(raw)));
+    const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+    expect(row.textContent).toContain("Choose another model below.");
+    expect(row.querySelectorAll("button")).toHaveLength(1);
+    expect(row.querySelector("button")!.textContent).toBe("Retry");
+  }
+});
+
 test("double clicks and accepted submissions never duplicate recovery", async () => {
   let settle!: (value: boolean) => void;
   let sends = 0;
@@ -190,6 +240,42 @@ test("sandbox projection gates compact Retry and structural failures override bi
   expect(container.textContent).toContain("Checkpoint is older than workspace");
   expect(container.textContent).not.toMatch(/Retry|Choose another|credits/);
   expect(container.querySelector("button")!.textContent).toBe("Check recovery status");
+});
+
+test("a viewer who cannot use checkpoint recovery keeps Retry and sees no failed check", async () => {
+  const sandboxRecovery = {
+    workspaceId: "workspace-a",
+    sessionId: "session-a",
+    canControl: true,
+    client: {
+      getSandboxRecovery: async () => {
+        throw new OpenGeniApiError(
+          403,
+          JSON.stringify({ error: { code: "forbidden", message: "Managed human required." } }),
+        );
+      },
+      recoverSandbox: async () => {
+        throw new Error("Rendering must not submit consent");
+      },
+    },
+  };
+  const container = await render(
+    <FailedSessionBanner failure={failure} actions={actions} sandboxRecovery={sandboxRecovery} />,
+  );
+  expect(container.textContent).not.toContain("checkpoint recovery");
+  expect(container.querySelectorAll("button")).toHaveLength(1);
+  expect(container.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        failure={{ ...failure, structuralSandboxFailure: true }}
+        actions={actions}
+        sandboxRecovery={sandboxRecovery}
+      />,
+    ),
+  );
+  expect(container.textContent).toBe("Connection interrupted.");
+  expect(container.querySelector("button")).toBeNull();
 });
 
 test.each(["restored", "connected_machine"] as const)(
