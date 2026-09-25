@@ -32,6 +32,40 @@ test("signed-out page presents the approved copy around the existing social/emai
   expect(html).not.toContain("max-w-sm");
 });
 
+test("legal links render only when the deployment configures them", () => {
+  const unconfigured = renderToStaticMarkup(
+    <SignedOutPage>
+      <ManagedAuthPanel presentation="embedded" onSubmit={async () => undefined} />
+    </SignedOutPage>,
+  );
+  expect(unconfigured).not.toContain('aria-label="Legal"');
+  expect(unconfigured).not.toContain(">Privacy<");
+  expect(unconfigured).not.toContain(">Terms<");
+
+  const configured = renderToStaticMarkup(
+    <SignedOutPage
+      legalLinks={{
+        privacyPolicyUrl: "https://opengeni.ai/privacy",
+        termsOfServiceUrl: "https://opengeni.ai/terms",
+      }}
+    >
+      <ManagedAuthPanel presentation="embedded" onSubmit={async () => undefined} />
+    </SignedOutPage>,
+  );
+  expect(configured).toContain('aria-label="Legal"');
+  expect(configured).toMatch(/<a href="https:\/\/opengeni\.ai\/privacy"[^>]*>Privacy<\/a>/);
+  expect(configured).toMatch(/<a href="https:\/\/opengeni\.ai\/terms"[^>]*>Terms<\/a>/);
+  expect(configured).toContain('rel="noopener noreferrer"');
+
+  const privacyOnly = renderToStaticMarkup(
+    <SignedOutPage legalLinks={{ privacyPolicyUrl: "https://example.test/privacy" }}>
+      <ManagedAuthPanel presentation="embedded" onSubmit={async () => undefined} />
+    </SignedOutPage>,
+  );
+  expect(privacyOnly).toContain(">Privacy<");
+  expect(privacyOnly).not.toContain(">Terms<");
+});
+
 test("provider configuration and invitation precedence remain owned by the form", () => {
   const unconfigured = renderToStaticMarkup(
     <SignedOutPage>

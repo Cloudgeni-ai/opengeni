@@ -16,8 +16,24 @@ const highlights = [
   { icon: CloudIcon, text: "Your agents keep working, even when you close your laptop" },
 ];
 
+/** Operator-configured legal documents; absent unless the deployment publishes them. */
+export type SignedOutLegalLinks = {
+  privacyPolicyUrl?: string | undefined;
+  termsOfServiceUrl?: string | undefined;
+};
+
 /** Presentation only: the existing managed or broker panel owns authentication. */
-export function SignedOutPage({ children }: { children: ReactNode }) {
+export function SignedOutPage({
+  children,
+  legalLinks,
+}: {
+  children: ReactNode;
+  legalLinks?: SignedOutLegalLinks | undefined;
+}) {
+  const legal = [
+    { href: legalLinks?.privacyPolicyUrl, label: "Privacy" },
+    { href: legalLinks?.termsOfServiceUrl, label: "Terms" },
+  ].filter((link): link is { href: string; label: string } => Boolean(link.href));
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="flex min-h-full flex-col bg-bg text-fg">
@@ -68,8 +84,25 @@ export function SignedOutPage({ children }: { children: ReactNode }) {
             </div>
           </div>
         </div>
-        <footer className="mx-auto flex w-full max-w-6xl flex-wrap justify-between gap-3 px-6 py-6 text-xs text-fg-subtle sm:px-10">
-          <span>OpenGeni</span>
+        <footer className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-6 py-6 text-xs text-fg-subtle sm:px-10">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <span>OpenGeni</span>
+            {legal.length > 0 ? (
+              <nav aria-label="Legal" className="flex items-center gap-4">
+                {legal.map((link) => (
+                  <a
+                    key={link.label}
+                    href={link.href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline-offset-4 hover:text-fg hover:underline"
+                  >
+                    {link.label}
+                  </a>
+                ))}
+              </nav>
+            ) : null}
+          </div>
           <span>Your conversations. Your projects. One workspace.</span>
         </footer>
       </div>

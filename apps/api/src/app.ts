@@ -970,6 +970,7 @@ export function createAppComposition(deps: AppDependencies): {
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(deps.settings),
         analytics: clientAnalyticsConfig(deps.settings),
+        legal: clientLegalConfig(deps.settings),
         // Channel-A structured services (P4.4) ride exec/readFile/createEditor,
         // available on every real backend; `none` has no box so they are all off.
         // Per-session availability is still negotiated on /stream-capabilities.
@@ -1619,6 +1620,15 @@ function clientAnalyticsConfig(settings: AppDependencies["settings"]) {
         ? { ga4: { measurementId: settings.analyticsGa4MeasurementId } }
         : {}),
     },
+  };
+}
+
+function clientLegalConfig(settings: AppDependencies["settings"]) {
+  return {
+    ...(settings.legalPrivacyPolicyUrl ? { privacyPolicyUrl: settings.legalPrivacyPolicyUrl } : {}),
+    ...(settings.legalTermsOfServiceUrl
+      ? { termsOfServiceUrl: settings.legalTermsOfServiceUrl }
+      : {}),
   };
 }
 

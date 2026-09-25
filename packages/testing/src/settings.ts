@@ -47,6 +47,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     analyticsPosthogProjectKey: undefined,
     analyticsPosthogHost: undefined,
     analyticsGa4MeasurementId: undefined,
+    legalPrivacyPolicyUrl: undefined,
+    legalTermsOfServiceUrl: undefined,
     authRequired: false,
     accessKey: undefined,
     authAllowHealth: true,

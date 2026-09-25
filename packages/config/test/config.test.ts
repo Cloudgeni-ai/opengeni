@@ -329,6 +329,32 @@ describe("browser analytics configuration", () => {
   });
 });
 
+describe("legal document links", () => {
+  test("stay unset by default so self-hosted consoles show no operator policies", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings.legalPrivacyPolicyUrl).toBeUndefined();
+    expect(settings.legalTermsOfServiceUrl).toBeUndefined();
+  });
+
+  test("parse configured http(s) links and reject anything a browser should not follow", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_LEGAL_PRIVACY_POLICY_URL: "https://opengeni.ai/privacy",
+        OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "https://opengeni.ai/terms",
+      },
+      () => getSettings(),
+    );
+    expect(settings.legalPrivacyPolicyUrl).toBe("https://opengeni.ai/privacy");
+    expect(settings.legalTermsOfServiceUrl).toBe("https://opengeni.ai/terms");
+    expect(() =>
+      withEnv({ OPENGENI_LEGAL_PRIVACY_POLICY_URL: "javascript:alert(1)" }, () => getSettings()),
+    ).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "/terms" }, () => getSettings()),
+    ).toThrow();
+  });
+});
+
 describe("remote browser placement configuration", () => {
   test("keeps provider credentials optional and parses bounded launch policy", () => {
     const defaults = withEnv({}, () => getSettings());

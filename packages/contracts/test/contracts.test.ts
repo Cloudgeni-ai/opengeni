@@ -1779,6 +1779,35 @@ describe("contracts", () => {
     expect(payload.defaultSandboxBackend).toBe("selfhosted");
   });
 
+  test("accepts optional http(s) legal document links", () => {
+    const base = {
+      apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+      deploymentRevision: "test-sha",
+      defaultModel: "gpt-5.6-sol",
+      allowedModels: ["gpt-5.6-sol"],
+      defaultReasoningEffort: "high",
+      allowedReasoningEfforts: ["high"],
+      fileUploads: { enabled: true, maxSizeBytes: 5_000_000_000 },
+      productAccessMode: "managed",
+    } as const;
+    expect(ClientConfig.parse(base).legal).toBeUndefined();
+    expect(
+      ClientConfig.parse({
+        ...base,
+        legal: {
+          privacyPolicyUrl: "https://opengeni.ai/privacy",
+          termsOfServiceUrl: "https://opengeni.ai/terms",
+        },
+      }).legal,
+    ).toEqual({
+      privacyPolicyUrl: "https://opengeni.ai/privacy",
+      termsOfServiceUrl: "https://opengeni.ai/terms",
+    });
+    expect(() =>
+      ClientConfig.parse({ ...base, legal: { privacyPolicyUrl: "javascript:alert(1)" } }),
+    ).toThrow();
+  });
+
   test("accepts allowlisted browser analytics providers", () => {
     const payload = ClientConfig.parse({
       apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
