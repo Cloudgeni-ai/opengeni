@@ -1157,7 +1157,14 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       .getByRole("button", { name: "Accept invitation to Onboarding Alternate Org" })
       .waitFor();
     await settleDocumentAnimations(alternatePage);
-    await expectNoAxeViolations(alternatePage, "body");
+    // Audit the modal invitation dialog, not the new-session page it covers.
+    // That page keeps loading behind the modal: its composer and starter
+    // suggestions stay disabled (and exempt) until the new-session draft
+    // resolves, then fade from 50% to full opacity. axe does not treat a
+    // Radix modal's aria-hidden background as inactive, and it drops fixed
+    // layers such as the 50% backdrop from its contrast stack, so a scan that
+    // overlaps that fade reports covered, unreachable text as low contrast.
+    await expectNoAxeViolations(alternatePage, '[role="dialog"]');
     await alternatePage.screenshot({
       path: `${EVIDENCE_DIR}/onboarding-existing-account-invitations-desktop-1024.png`,
       fullPage: true,
