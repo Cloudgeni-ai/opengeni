@@ -57,7 +57,11 @@ async function workspace() {
 
 async function create(
   grant: Awaited<ReturnType<typeof workspace>>,
-  options: { requestedSessionId?: string; parentSessionId?: string } = {},
+  options: {
+    requestedSessionId?: string;
+    parentSessionId?: string;
+    codeSearchDeploymentPolicy?: CodeSearchDeploymentPolicy;
+  } = {},
 ) {
   return await createSession(client.db, {
     ...options,
@@ -110,6 +114,15 @@ describe("code_search decision frozen at session create (0520)", () => {
     await updateWorkspaceSettings(client.db, grant.workspaceId!, { codeSearchEnabled: false });
     configureCodeSearchDeploymentPolicy(DEFAULT_ON);
     expect((await create(grant)).codeSearchEnabled).toBe(false);
+  }, 60_000);
+
+  test("a policy passed by the caller wins over the process default", async () => {
+    // Hosts that call @opengeni/core directly never install the process-wide
+    // policy; core passes the policy from its own settings instead.
+    const grant = await workspace();
+    configureCodeSearchDeploymentPolicy(OFF);
+    const session = await create(grant, { codeSearchDeploymentPolicy: DEFAULT_ON });
+    expect(session.codeSearchEnabled).toBe(true);
   }, 60_000);
 
   test("later changes never move an existing session", async () => {

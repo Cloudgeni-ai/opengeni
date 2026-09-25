@@ -238,7 +238,8 @@ export async function prepareGovernanceAndModel(
   if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
   const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
   // The session's decision was frozen when it was created, so only a
-  // deliberate switch-off (deployment or workspace Off) changes its tool list.
+  // deliberate switch-off (deployment or workspace Off), or undoing one,
+  // changes its tool list.
   const codeSearchEnabled = codeSearchEnabledForTurn(
     session.codeSearchEnabled,
     workspace.settings,

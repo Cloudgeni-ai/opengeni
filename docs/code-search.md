@@ -101,12 +101,13 @@ miss for the whole conversation. To keep a session's prompt stable:
   stored in `sessions.code_search_enabled` (migration 0520). A child session
   keeps its parent's decision, so one session tree stays in one arm. A fork
   and every session created before 0520 are off.
-- Later changes never turn the tool on for a running session: turning the
-  mode on, adding the key, switching a workspace to On, or moving from
-  `experiment` to `default_on` affect new sessions only.
+- Later changes never turn the tool on for a session created without it:
+  turning the mode on, adding the key, switching a workspace to On, or moving
+  from `experiment` to `default_on` affect new sessions only.
 - Three deliberate switch-offs still reach running sessions on their next
   turn, because they stop repository content going to Jev: mode `off`,
-  removing the key, and a workspace Off. Each costs every affected running
+  removing the key, and a workspace Off. Undoing one gives the tool back to
+  sessions that were created with it. Each change costs every affected running
   session one prompt-cache miss. Change the mode or key in one rollout; while
   old and new workers overlap, sessions can alternate between them.
 - Transient Jev health never changes the tool list. The breaker is per worker
@@ -122,11 +123,13 @@ In `experiment` mode a root session's half is chosen from its id
 (`codeSearchSessionInExperiment` in `@opengeni/contracts/code-search`: 32-bit
 FNV-1a, low bit 0 gets the tool), and its children share it. The stored
 `sessions.code_search_enabled` (also `codeSearchEnabled` on the session API
-object) says which half a session is in, and each attempt's persisted tool
-catalog (`session_attempt_tool_catalogs`) shows whether `code_search` was
-offered on that attempt. Compare cost, wall time, model requests and prompt
-cache hit rate per session tree between the halves, and grade a sample of
-answers for quality.
+object) records the decision frozen at creation. Limit arm analysis to root,
+non-fork sessions in workspaces whose own setting is unset: workspaces with an
+explicit On or Off are not randomized, and forks are always off. Each
+attempt's persisted tool catalog (`session_attempt_tool_catalogs`) shows
+whether `code_search` was actually offered on that attempt. Compare cost, wall
+time, model requests and prompt cache hit rate per session tree between the
+halves, and grade a sample of answers for quality.
 
 A typical path: run `experiment` in staging, check the result, then set
 `default_on` in production. Any workspace can still choose Off.

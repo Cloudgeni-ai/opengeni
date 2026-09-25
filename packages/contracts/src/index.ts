@@ -12331,7 +12331,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // model admission for the life of the session; portable ⇒ plaintext compaction
     // and free mid-session provider switching (today's behavior).
     codexCompactionMode: CodexCompactionMode,
-    /** Frozen at create: whether the optional `code_search` tool is offered. */
+    /**
+     * The `code_search` decision frozen at create. A turn gets the tool only when
+     * this is true, the deployment still offers it, the workspace is not Off, and
+     * the turn has POSIX compute.
+     */
     codeSearchEnabled: z.boolean().default(false),
     /** Personal (authenticated subject) workspace pin state, never workspace-global. */
     pinned: z.boolean().default(false),

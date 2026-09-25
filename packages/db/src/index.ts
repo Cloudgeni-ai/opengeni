@@ -571,7 +571,10 @@ import {
   childWaitingCapacitySummary,
 } from "./child-lifecycle-notices";
 import { codeSearchDeploymentPolicyForCreate } from "./code-search-policy";
-import { resolveSessionCodeSearchEnabled } from "@opengeni/contracts/code-search";
+import {
+  resolveSessionCodeSearchEnabled,
+  type CodeSearchDeploymentPolicy,
+} from "@opengeni/contracts/code-search";
 import {
   autoResumeGoalPausedByCapInTransaction,
   SESSION_GOAL_CAP_PAUSED_REASON,
@@ -32561,6 +32564,8 @@ export type SessionCreateInput = {
   /** Typed Memory selector (migration 0427); omitted means the workspace layer. */
   memoryScope?: SessionMemoryScope;
   parentSessionId?: string | null;
+  /** Freezes a new root session's code_search decision; omitted uses the boot-installed policy. */
+  codeSearchDeploymentPolicy?: CodeSearchDeploymentPolicy;
   createIdempotencyKey?: string | null;
   /** Exact explicit installed-Skill selection used for keyed-create replay. */
   selectedInstalledSkillIds?: string[];
@@ -33210,7 +33215,7 @@ async function createSessionInTransaction(
     ? await parentSessionCodeSearchEnabled(tx, input.workspaceId, input.parentSessionId)
     : resolveSessionCodeSearchEnabled(
         workspace.settings,
-        codeSearchDeploymentPolicyForCreate(),
+        input.codeSearchDeploymentPolicy ?? codeSearchDeploymentPolicyForCreate(),
         id,
       );
   let insertedRows: (typeof schema.sessions.$inferSelect)[];

@@ -1505,7 +1505,11 @@ export type Session = {
    * admission; `portable` ⇒ plaintext compaction and free provider switching.
    */
   codexCompactionMode: "remote_v2" | "portable";
-  /** Frozen at create: whether the optional `code_search` tool is offered. */
+  /**
+   * The `code_search` decision frozen at create. A turn gets the tool only when
+   * this is true, the deployment still offers it, the workspace is not Off, and
+   * the turn has POSIX compute.
+   */
   codeSearchEnabled?: boolean;
   /** Personal (authenticated subject) workspace pin state, never workspace-global. */
   pinned?: boolean;

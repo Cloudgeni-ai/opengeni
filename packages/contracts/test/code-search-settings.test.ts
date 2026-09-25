@@ -125,4 +125,12 @@ describe("code_search per-turn gate over the frozen session decision", () => {
     expect(codeSearchEnabledForTurn(true, { codeSearchEnabled: null }, EXPERIMENT)).toBe(true);
     expect(codeSearchEnabledForTurn(true, { codeSearchEnabled: "yes" }, OPT_IN)).toBe(true);
   });
+
+  test("undoing a switch-off restores the tool only where it was frozen on", () => {
+    expect(codeSearchEnabledForTurn(true, { codeSearchEnabled: false }, DEFAULT_ON)).toBe(false);
+    expect(codeSearchEnabledForTurn(true, { codeSearchEnabled: null }, DEFAULT_ON)).toBe(true);
+    expect(codeSearchEnabledForTurn(true, {}, OFF)).toBe(false);
+    expect(codeSearchEnabledForTurn(true, {}, DEFAULT_ON)).toBe(true);
+    expect(codeSearchEnabledForTurn(false, { codeSearchEnabled: null }, DEFAULT_ON)).toBe(false);
+  });
 });

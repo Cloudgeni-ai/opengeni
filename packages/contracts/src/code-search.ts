@@ -56,7 +56,7 @@ export function codeSearchSessionInExperiment(sessionId: string): boolean {
 /**
  * The decision frozen on a new root session when it is created. Later changes
  * to the workspace setting or the deployment mode never turn the tool on for a
- * session that already exists.
+ * session that was created without it.
  */
 export function resolveSessionCodeSearchEnabled(
   settings: unknown,
@@ -70,10 +70,11 @@ export function resolveSessionCodeSearchEnabled(
 /**
  * Whether a turn of this session gets `code_search`. Only a session frozen on
  * at creation can have it. The deployment (mode off or no usable key) and an
- * explicit workspace Off still switch it off for running sessions, because
- * they stop repository content going to Jev. That costs each running session
- * one prompt-cache miss, which is accepted for a deliberate switch-off. Nothing
- * else changes the tool list of a running session.
+ * explicit workspace Off still pause it in running sessions, because they stop
+ * repository content going to Jev; undoing that switch-off gives it back to
+ * sessions frozen on. Each such change costs every affected session one
+ * prompt-cache miss, which is accepted for a deliberate switch. Nothing else
+ * changes the tool list of a running session.
  */
 export function codeSearchEnabledForTurn(
   frozen: boolean | null | undefined,

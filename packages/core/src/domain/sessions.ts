@@ -25,8 +25,10 @@ import {
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
+  codeSearchDeploymentPolicy,
   type Settings,
 } from "@opengeni/config";
+import type { CodeSearchDeploymentPolicy } from "@opengeni/contracts/code-search";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   CreateSessionRequest,
@@ -875,6 +877,9 @@ export async function createAndStartSessionWithOutcome(input: {
   // on the creating grant); null for direct API creates and scheduled runs.
   // When set, the worker's terminal-for-now transitions wake this parent.
   parentSessionId?: string | null;
+  // Deployment code_search policy for freezing a new root session's decision.
+  // Omitted falls back to the policy the process installed at boot.
+  codeSearchDeploymentPolicy?: CodeSearchDeploymentPolicy;
   // Workspace-scoped CREATE idempotency key. When present, a double-fire with
   // the same key (sequential retry OR concurrent race) collapses to a single
   // session. Every caller repairs or re-delivers the winner's one atomic start;
@@ -1182,6 +1187,9 @@ export async function createAndStartSessionWithOutcome(input: {
       ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
       ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
       parentSessionId: input.parentSessionId ?? null,
+      ...(input.codeSearchDeploymentPolicy
+        ? { codeSearchDeploymentPolicy: input.codeSearchDeploymentPolicy }
+        : {}),
       sandboxGroupId: input.sandboxGroupId ?? null,
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
@@ -3294,6 +3302,7 @@ async function createSessionForRequestInFileScope(
       db,
       bus,
       workflowClient,
+      codeSearchDeploymentPolicy: codeSearchDeploymentPolicy(deps.settings),
       accountId: grant.accountId,
       workspaceId,
       visibility: effectiveVisibility,
