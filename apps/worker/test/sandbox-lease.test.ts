@@ -3871,9 +3871,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       await admin`update session_turn_attempts set quiesced_at = null, closed_at = now() - interval '2 minutes'
       where id in (${sibling.attemptId}, ${attempt.attemptId})`;
       if (stoppingErrors) {
-        // Explicit cancellation cannot substitute for physical owner quiescence.
+        // A failed owner cannot inherit the completed owner's closed-at proof.
+        await admin`update session_turn_attempts set outcome = 'failed'
+          where id = ${attempt.attemptId}`;
         expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
-        await admin`update session_turn_attempts set quiesced_at = now() - interval '2 minutes'
+        await admin`update session_turn_attempts set outcome = 'completed'
           where id = ${attempt.attemptId}`;
       }
       await verifyPendingQuiescenceBlocks(ids, sibling, async () => {
@@ -4168,7 +4170,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
     await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'turn'`;
     await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
-      closed_at = now() - interval '3 minutes', quiesced_at = now() - interval '3 minutes'
+      closed_at = now() - interval '3 minutes', quiesced_at = null
       where id = ${attempt.attemptId}`;
     // The command itself still gets the full stop window.
     expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
@@ -4182,6 +4184,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       where id = ${secondProcessId}`;
     await admin`update sandbox_retained_processes
       set started_at = now() - interval '3 minutes' where id in (${processId}, ${secondProcessId})`;
+    // A closed failure has no physical-quiescence receipt: unlike an ordinary
+    // completed attempt, it cannot license a potentially lossy capture.
+    await admin`update session_turn_attempts set outcome = 'failed'
+      where id = ${attempt.attemptId}`;
+    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+    await admin`update session_turn_attempts set outcome = 'completed'
+      where id = ${attempt.attemptId}`;
     const strandedProcess = await getRetainedProcess(db, {
       workspaceId: ids.workspaceId,
       sessionId: attempt.sessionId,
