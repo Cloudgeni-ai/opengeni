@@ -109,6 +109,13 @@ describe("API metrics listener chart wiring", () => {
       const monitor = find(manifests, "ServiceMonitor", "metrics-test-opengeni-api")!;
       expect(monitor.spec.selector.matchLabels["opengeni.ai/metrics-endpoint"]).toBe("true");
       expect(monitor.spec.endpoints[0].port).toBe("metrics");
+      // Series keep the public API Service identity for existing alerts/dashboards.
+      expect(monitor.spec.endpoints[0].relabelings).toEqual(
+        expect.arrayContaining([
+          { targetLabel: "service", replacement: "metrics-test-opengeni-api" },
+          { targetLabel: "job", replacement: "metrics-test-opengeni-api" },
+        ]),
+      );
 
       const collector = find(manifests, "ConfigMap", "metrics-test-opengeni-otel-collector")!;
       expect(collector.data!["collector.yaml"]).toContain("metrics-test-opengeni-api-metrics:9464");

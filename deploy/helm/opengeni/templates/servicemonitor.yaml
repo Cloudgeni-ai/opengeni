@@ -34,6 +34,14 @@ spec:
           targetLabel: release
         - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_component]
           targetLabel: opengeni_workload_component
+        {{- if .Values.api.metricsPort }}
+        # Keep the API series identity of the public API Service, so alerts and
+        # dashboards keyed on service/job continue to match the moved target.
+        - targetLabel: service
+          replacement: {{ include "opengeni.fullname" . }}-api
+        - targetLabel: job
+          replacement: {{ include "opengeni.fullname" . }}-api
+        {{- end }}
 {{- end }}
 {{- if and .Values.worker.enabled ((.Values.observability).serviceMonitor).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 {{- range $role := list "control" "turns" }}
