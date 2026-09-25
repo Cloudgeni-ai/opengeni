@@ -141,11 +141,26 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
     );
     if (failedSessionVariableSetAttach) {
+      expect(sourceContract.latestMigration).toBe(
+        sourceContract.migrations.some(
+          (migration) => migration.path === "0519_workspace_integration_primitives.sql",
+        )
+          ? "0519_workspace_integration_primitives.sql"
+          : sourceContract.migrations.some(
+                (migration) => migration.path === "0518_member_connection_read_backfill.sql",
+              )
+            ? "0518_member_connection_read_backfill.sql"
+            : sourceContract.migrations.some(
+                  (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+                )
+              ? "0515_autonomous_learning_defaults.sql"
+              : "0514_failed_session_variable_set_attach.sql",
+      );
       expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
     }
     // Keep the published-history assertions below scoped to their existing
     // migration range; the new forward migration is checked explicitly above.
-    const completeSourceContract = failedSessionVariableSetAttach
+    let completeSourceContract = failedSessionVariableSetAttach
       ? {
           ...sourceContract,
           fileCount: sourceContract.fileCount - 1,
@@ -158,6 +173,21 @@ describe("release schema contract", () => {
           ),
         }
       : sourceContract;
+    const autonomousLearningDefaults = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+    );
+    const memberConnectionRead = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0516_member_connection_read.sql",
+    );
+    const memberConnectionReadBackfillIndex = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0517_member_connection_read_backfill_index.sql",
+    );
+    const memberConnectionReadBackfill = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0518_member_connection_read_backfill.sql",
+    );
+    const workspaceIntegrationPrimitives = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0519_workspace_integration_primitives.sql",
+    );
     const backgroundCommandText = completeSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
     );
@@ -181,9 +211,6 @@ describe("release schema contract", () => {
     );
     const messageForkPrefixCompaction = completeSourceContract.migrations.some(
       (migration) => migration.path === "0513_message_fork_prefix_compaction.sql",
-    );
-    const workspaceIntegrationPrimitives = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0515_workspace_integration_primitives.sql",
     );
     const controlRevisionFrontier = completeSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
@@ -419,6 +446,10 @@ describe("release schema contract", () => {
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (workspaceIntegrationPrimitives ? 1 : 0) +
+        (memberConnectionRead ? 1 : 0) +
+        (memberConnectionReadBackfillIndex ? 1 : 0) +
+        (memberConnectionReadBackfill ? 1 : 0) +
+        (autonomousLearningDefaults ? 1 : 0) +
         (messageForkPrefixCompaction ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
@@ -706,10 +737,46 @@ describe("release schema contract", () => {
       ...(messageForkPrefixCompaction
         ? { latestMigration: "0513_message_fork_prefix_compaction.sql" }
         : {}),
+      ...(autonomousLearningDefaults
+        ? { latestMigration: "0515_autonomous_learning_defaults.sql" }
+        : {}),
+      ...(memberConnectionRead ? { latestMigration: "0516_member_connection_read.sql" } : {}),
+      ...(memberConnectionReadBackfillIndex
+        ? { latestMigration: "0517_member_connection_read_backfill_index.sql" }
+        : {}),
+      ...(memberConnectionReadBackfill
+        ? { latestMigration: "0518_member_connection_read_backfill.sql" }
+        : {}),
       ...(workspaceIntegrationPrimitives
-        ? { latestMigration: "0515_workspace_integration_primitives.sql" }
+        ? { latestMigration: "0519_workspace_integration_primitives.sql" }
         : {}),
     });
+    // Keep the historical migration-order probes below scoped to published
+    // history after checking the three forward rollout steps above.
+    completeSourceContract = {
+      ...completeSourceContract,
+      migrations: completeSourceContract.migrations.filter(
+        (migration) =>
+          ![
+            "0516_member_connection_read.sql",
+            "0517_member_connection_read_backfill_index.sql",
+            "0518_member_connection_read_backfill.sql",
+            "0519_workspace_integration_primitives.sql",
+          ].includes(migration.path),
+      ),
+    };
+    if (autonomousLearningDefaults) {
+      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+        path: "0515_autonomous_learning_defaults.sql",
+        deploymentMode: "rolling",
+      });
+      completeSourceContract = {
+        ...completeSourceContract,
+        migrations: completeSourceContract.migrations.filter(
+          (migration) => migration.path !== "0515_autonomous_learning_defaults.sql",
+        ),
+      };
+    }
     expect(
       completeSourceContract.migrations.at(
         -1 -
@@ -719,8 +786,7 @@ describe("release schema contract", () => {
           Number(knowledgeIndexFundingWait) -
           Number(knowledgeVisibleIndexStatus) -
           Number(insightsFactReadsHashJoin) -
-          Number(messageForkPrefixCompaction) -
-          Number(workspaceIntegrationPrimitives),
+          Number(messageForkPrefixCompaction),
       ),
     ).toMatchObject({
       path: backgroundCommandText
@@ -840,8 +906,7 @@ describe("release schema contract", () => {
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
-            Number(messageForkPrefixCompaction) -
-            Number(workspaceIntegrationPrimitives),
+            Number(messageForkPrefixCompaction),
         ),
       ).toMatchObject({
         path: "0507_integration_oauth_pending_states.sql",
@@ -856,8 +921,7 @@ describe("release schema contract", () => {
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
-            Number(messageForkPrefixCompaction) -
-            Number(workspaceIntegrationPrimitives),
+            Number(messageForkPrefixCompaction),
         ),
       ).toMatchObject({
         path: "0508_deadline_command_workspace_capture.sql",
@@ -871,8 +935,7 @@ describe("release schema contract", () => {
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
-            Number(messageForkPrefixCompaction) -
-            Number(workspaceIntegrationPrimitives),
+            Number(messageForkPrefixCompaction),
         ),
       ).toMatchObject({
         path: "0509_verified_signup_trial_credits.sql",
@@ -885,8 +948,7 @@ describe("release schema contract", () => {
           -1 -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
-            Number(messageForkPrefixCompaction) -
-            Number(workspaceIntegrationPrimitives),
+            Number(messageForkPrefixCompaction),
         ),
       ).toMatchObject({
         path: "0510_knowledge_index_funding_wait.sql",
@@ -896,10 +958,7 @@ describe("release schema contract", () => {
     if (knowledgeVisibleIndexStatus) {
       expect(
         completeSourceContract.migrations.at(
-          -1 -
-            Number(insightsFactReadsHashJoin) -
-            Number(messageForkPrefixCompaction) -
-            Number(workspaceIntegrationPrimitives),
+          -1 - Number(insightsFactReadsHashJoin) - Number(messageForkPrefixCompaction),
         ),
       ).toMatchObject({
         path: "0511_knowledge_visible_index_status.sql",
@@ -908,25 +967,15 @@ describe("release schema contract", () => {
     }
     if (insightsFactReadsHashJoin) {
       expect(
-        completeSourceContract.migrations.at(
-          -1 - Number(messageForkPrefixCompaction) - Number(workspaceIntegrationPrimitives),
-        ),
+        completeSourceContract.migrations.at(-1 - Number(messageForkPrefixCompaction)),
       ).toMatchObject({
         path: "0512_insights_fact_reads_hash_join.sql",
         deploymentMode: "rolling",
       });
     }
     if (messageForkPrefixCompaction) {
-      expect(
-        completeSourceContract.migrations.at(-1 - Number(workspaceIntegrationPrimitives)),
-      ).toMatchObject({
-        path: "0513_message_fork_prefix_compaction.sql",
-        deploymentMode: "rolling",
-      });
-    }
-    if (workspaceIntegrationPrimitives) {
       expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-        path: "0515_workspace_integration_primitives.sql",
+        path: "0513_message_fork_prefix_compaction.sql",
         deploymentMode: "rolling",
       });
     }
@@ -2050,8 +2099,8 @@ describe("release schema contract", () => {
     const failedSessionVariableSetAttach = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
     );
-    const workspaceIntegrationPrimitives = unfilteredSourceContract.migrations.some(
-      (migration) => migration.path === "0515_workspace_integration_primitives.sql",
+    const autonomousLearningDefaults = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
     );
     const controlRevisionFrontier = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
@@ -2180,6 +2229,10 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0472_usage_events_workspace_recent_index.sql",
     );
     let completeSourceContract = await contractWithoutMigrations([
+      "0519_workspace_integration_primitives.sql",
+      "0516_member_connection_read.sql",
+      "0517_member_connection_read_backfill_index.sql",
+      "0518_member_connection_read_backfill.sql",
       "0463_host_mcp_resolver_registration.sql",
       "0461_unified_knowledge.sql",
       "0460_host_export_message_attribution.sql",
@@ -2678,7 +2731,11 @@ describe("release schema contract", () => {
       "0512_insights_fact_reads_hash_join.sql",
       "0513_message_fork_prefix_compaction.sql",
       "0514_failed_session_variable_set_attach.sql",
-      "0515_workspace_integration_primitives.sql",
+      "0515_autonomous_learning_defaults.sql",
+      "0516_member_connection_read.sql",
+      "0517_member_connection_read_backfill_index.sql",
+      "0518_member_connection_read_backfill.sql",
+      "0519_workspace_integration_primitives.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -3272,14 +3329,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0514_failed_session_variable_set_attach.sql",
       };
-    if (workspaceIntegrationPrimitives)
+    if (autonomousLearningDefaults)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0515_workspace_integration_primitives.sql",
+        latestMigration: "0515_autonomous_learning_defaults.sql",
       };
     expect(completeSourceContract).toMatchObject({
       fileCount:
-        (workspaceIntegrationPrimitives ? 1 : 0) +
+        (autonomousLearningDefaults ? 1 : 0) +
         (failedSessionVariableSetAttach ? 1 : 0) +
         (messageForkPrefixCompaction ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
@@ -3773,8 +3830,8 @@ describe("release schema contract", () => {
       ...(failedSessionVariableSetAttach
         ? { latestMigration: "0514_failed_session_variable_set_attach.sql" }
         : {}),
-      ...(workspaceIntegrationPrimitives
-        ? { latestMigration: "0515_workspace_integration_primitives.sql" }
+      ...(autonomousLearningDefaults
+        ? { latestMigration: "0515_autonomous_learning_defaults.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(

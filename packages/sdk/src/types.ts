@@ -669,12 +669,16 @@ export type SessionMcpCredentialUpdateInput = {
 
 export type RotateSessionMcpCredentialsRequest = {
   operationKey: string;
-  updates: Array<{
-    id: string;
-    expectedCredentialVersion: number;
-    expectedServerUrl: string;
-    headers: Record<string, string>;
-  }>;
+  updates: Array<
+    {
+      id: string;
+      expectedCredentialVersion: number;
+      expectedServerUrl: string;
+    } & (
+      | { headers: Record<string, string> }
+      | { nativeConnectionId: string; replacementServerUrl?: string | undefined }
+    )
+  >;
 };
 
 export type RotateSessionMcpCredentialsReceipt = {
@@ -2228,6 +2232,15 @@ export type ToolAuthNeededPayload = {
         requiredVariables: string[];
       }
     | undefined;
+  /** Agent suggestion; never a connection or permission grant. */
+  setupRequest?:
+    | {
+        kind: "mcp";
+        name: string;
+        endpointUrl: string;
+        rationale: string;
+      }
+    | undefined;
 };
 
 // Payload shapes for the high-traffic event types. `SessionEvent.payload` is
@@ -3201,6 +3214,7 @@ export type FirstPartyMcpToolName =
   | "environment_set_variable"
   | "capability_catalog_search"
   | "capability_authorization_request"
+  | "custom_mcp_setup_request"
   | "github_connect_link"
   | "github_repositories_list"
   | "social_connections_list"

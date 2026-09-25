@@ -738,7 +738,7 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
-          // 0515 adds the workspace credential provider, webhook, and delivery tables.
+          // 0519 adds the workspace credential provider, webhook, and delivery tables.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES

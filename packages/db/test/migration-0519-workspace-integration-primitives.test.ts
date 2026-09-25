@@ -26,7 +26,7 @@ import {
   WorkspaceWebhookLimitError,
 } from "../src/index";
 
-const MIGRATION = "0515_workspace_integration_primitives.sql";
+const MIGRATION = "0519_workspace_integration_primitives.sql";
 
 setDefaultTimeout(60_000);
 
@@ -72,7 +72,7 @@ async function workspaceWithSession(label: string) {
   return { scope, session, subjectId };
 }
 
-describe("0515 workspace integration primitives", () => {
+describe("0519 workspace integration primitives", () => {
   test("is a rolling, additive migration", async () => {
     const source = await Bun.file(new URL(`../drizzle/${MIGRATION}`, import.meta.url)).text();
     expect(source).toStartWith("-- deployment-mode: rolling");

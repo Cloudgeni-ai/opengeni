@@ -69,6 +69,12 @@ are removed. `OPENGENI_HOST_MCP_CREDENTIAL_RESOLVERS_JSON` no longer configures
 the runtime. Do not register a callback or copy a host binding into a native
 connection reference. Provision an ordinary connection and select it explicitly.
 
+Existing session attachments are not implicitly migrated by account selection.
+An authorized host can replace their saved binding in place using the
+[standalone native-account replacement](session-mcp-servers.md#standalone-native-account-replacement)
+operation, retaining the session's history and files. This requires a quiescent
+session and exact destination/version preconditions; accepted work is unchanged.
+
 See [product integration](product-integration.md),
 [connection authority](design/connection-authority-delegation.md), and the
 [architecture map](architecture.md) for native ownership and execution behavior.

@@ -5,6 +5,24 @@ async function source(path: string): Promise<string> {
 }
 
 describe("session control surface architecture", () => {
+  test("all three account-inventory callsites pass the live tri-state read grant", async () => {
+    for (const [path, workspace] of [
+      ["routes/session.tsx", "props.session.workspaceId"],
+      ["routes/sessions-index.tsx", "workspaceId"],
+      ["routes/schedules.tsx", "props.workspaceId"],
+    ] as const) {
+      const route = await source(path);
+      const start = route.indexOf("const connectionAccounts = useConnectionAccounts(");
+      expect(start).toBeGreaterThan(-1);
+      const call = route.slice(start, route.indexOf("\n  );", start));
+      expect(call).toContain("context.accessContext === null");
+      expect(call).toContain("hasWorkspacePermission(");
+      expect(call).toContain("context.accessContext,");
+      expect(call).toContain(workspace);
+      expect(call).toContain('"connections:read"');
+    }
+  });
+
   test("new-session Send stays available when background draft saving conflicts", async () => {
     const route = await source("routes/sessions-index.tsx");
     expect(route).toContain("draftConflict: null,");

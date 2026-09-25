@@ -20,6 +20,7 @@ const catalogItem = CapabilityCatalogItem.parse({
 let personal = false;
 let liveCatalogItem = catalogItem;
 let enabled = false;
+let createdCatalogItem: CapabilityCatalogItem | null = null;
 let connections: unknown[] = [];
 const row = {
   id: "connection",
@@ -60,8 +61,23 @@ const context = {
               }
             : {}),
         },
+        ...(createdCatalogItem ? [createdCatalogItem] : []),
       ],
     }),
+    createCapability: mock(
+      async (_workspaceId: string, input: { name: string; endpointUrl: string }) => {
+        createdCatalogItem = CapabilityCatalogItem.parse({
+          id: "mcp:reviewed",
+          kind: "mcp",
+          source: "manual",
+          name: input.name,
+          endpointUrl: input.endpointUrl,
+          runtime: { available: true, mcpServerId: "reviewed" },
+        });
+        return createdCatalogItem;
+      },
+    ),
+    inspectMcpAuthentication: mock(async () => ({ kind: "none" as const })),
     listConnections: async () => connections,
     listSocialConnections: async () => [],
     listSlackInstallationBindings: async () => [],
@@ -86,7 +102,9 @@ const context = {
   githubStatus: null as { status: string } | null,
   refreshGitHub,
   refreshWorkspaceMcpServers: async () => {},
-  accessContext: { workspaceGrants: [] },
+  accessContext: {
+    workspaceGrants: [{ workspaceId: "workspace", permissions: ["connections:read"] }],
+  },
 };
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({ toast: { success: () => {}, error: () => {} } }));
@@ -225,6 +243,96 @@ function button(container: HTMLElement, label: string) {
 }
 
 describe("conversation connection card", () => {
+  test("reviews an agent-suggested URL before a human adds the MCP catalog entry", async () => {
+    createdCatalogItem = null;
+    context.client.createCapability.mockClear();
+    const suggested = {
+      ...item,
+      id: "custom-mcp-notice",
+      capability: null,
+      providerDomain: "mcp.example.test",
+      setupRequest: {
+        kind: "mcp" as const,
+        name: "Internal Tools",
+        endpointUrl: "https://mcp.example.test/mcp",
+        rationale: "Find the records you asked about.",
+      },
+    } as AuthNeededItem;
+    const h = await render(false, catalogItem, catalogItem, false, "workspace", suggested);
+    try {
+      expect(h.host.textContent).toContain("Find the records you asked about.");
+      expect(context.client.createCapability).not.toHaveBeenCalled();
+      await act(async () => {
+        button(h.host, "Review server").click();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+      expect(h.host.querySelector('[data-state="setup"]')).not.toBeNull();
+      expect(h.container.textContent).toContain("Server URL");
+      expect(button(h.container, "Add MCP server").disabled).toBe(true);
+      expect(h.container.textContent).toContain("A workspace admin needs to add this server");
+      context.accessContext.workspaceGrants = [
+        { workspaceId: "workspace", permissions: ["capabilities:manage", "connections:read"] },
+      ];
+      await h.rerender("workspace");
+      expect(button(h.container, "Add MCP server").disabled).toBe(false);
+      await act(async () => button(h.container, "Add MCP server").click());
+      expect(context.client.createCapability).toHaveBeenCalledTimes(1);
+      expect(context.client.createCapability).toHaveBeenCalledWith("workspace", {
+        kind: "mcp",
+        source: "manual",
+        name: "Internal Tools",
+        endpointUrl: "https://mcp.example.test/mcp",
+      });
+      expect(h.host.textContent).toContain("Connect Internal Tools");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 40)));
+      expect(document.activeElement).toBe(button(h.container, "Connect Internal Tools"));
+      await act(async () => button(h.container, "Connect Internal Tools").click());
+      expect(h.container.textContent).toContain("Add to workspace");
+    } finally {
+      context.accessContext.workspaceGrants = [
+        { workspaceId: "workspace", permissions: ["connections:read"] },
+      ];
+      createdCatalogItem = null;
+      await h.close();
+    }
+  });
+
+  test("a viewer returning after an admin adds the proposed server sees the connection action", async () => {
+    createdCatalogItem = CapabilityCatalogItem.parse({
+      id: "mcp:reviewed",
+      kind: "mcp",
+      source: "manual",
+      name: "Internal Tools",
+      endpointUrl: "https://mcp.example.test/mcp",
+      runtime: { available: true, mcpServerId: "reviewed" },
+    });
+    context.accessContext.workspaceGrants = [
+      { workspaceId: "workspace", permissions: ["connections:read"] },
+    ];
+    context.client.createCapability.mockClear();
+    const suggested = {
+      ...item,
+      id: "custom-mcp-notice-return",
+      capability: null,
+      providerDomain: "mcp.example.test",
+      setupRequest: {
+        kind: "mcp" as const,
+        name: "Internal Tools",
+        endpointUrl: "https://mcp.example.test/mcp",
+        rationale: "Find the requested records.",
+      },
+    } as AuthNeededItem;
+    const h = await render(false, catalogItem, catalogItem, false, "workspace", suggested);
+    try {
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(h.host.textContent).toContain("Connect Internal Tools");
+      expect(h.host.textContent).not.toContain("A workspace admin needs to add this server");
+      expect(context.client.createCapability).not.toHaveBeenCalled();
+    } finally {
+      createdCatalogItem = null;
+      await h.close();
+    }
+  });
   const githubItem = {
     ...catalogItem,
     id: "api:github-app",
@@ -413,6 +521,30 @@ describe("conversation connection card", () => {
     expect(createConnection).not.toHaveBeenCalled();
     expect(enableCapability).not.toHaveBeenCalled();
     await h.close();
+  });
+  test("an open connection card masks its connected account when read access is revoked", async () => {
+    const h = await render(true);
+    try {
+      await act(async () => button(h.container, "Add API key").click());
+      expect(button(h.container, "Add tools").disabled).toBe(false);
+      context.accessContext.workspaceGrants = [];
+      await h.rerender("workspace");
+      expect(
+        [...h.container.querySelectorAll("button")].some((node) =>
+          node.textContent?.includes("Add tools"),
+        ),
+      ).toBe(false);
+      context.accessContext.workspaceGrants = [
+        { workspaceId: "workspace", permissions: ["connections:read"] },
+      ];
+      await h.rerender("workspace");
+      expect(button(h.container, "Add tools").disabled).toBe(false);
+    } finally {
+      context.accessContext.workspaceGrants = [
+        { workspaceId: "workspace", permissions: ["connections:read"] },
+      ];
+      await h.close();
+    }
   });
   test("switching workspace discards the open dialog and its credential draft", async () => {
     const h = await render();

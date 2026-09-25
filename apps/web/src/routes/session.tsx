@@ -1735,6 +1735,13 @@ function SessionChatPane(props: {
       selectedIds: [...durableToolSelection.mcpServerIds],
     },
     context.workspaceCapabilityCatalog,
+    context.accessContext === null
+      ? null
+      : hasWorkspacePermission(
+          context.accessContext,
+          props.session.workspaceId,
+          "connections:read",
+        ),
   );
   const reloadSessionAfterSetup = props.onReloadSession;
   const refreshConnectionAccounts = connectionAccounts.refresh;
@@ -1744,7 +1751,9 @@ function SessionChatPane(props: {
   }, [reloadSessionAfterSetup, refreshConnectionAccounts]);
   const renderAuthNeeded = useCallback(
     (item: AuthNeededItem) => {
-      const recommendation = sessionAuthRecommendation(item, context.workspaceCapabilityCatalog);
+      const recommendation = item.setupRequest
+        ? item
+        : sessionAuthRecommendation(item, context.workspaceCapabilityCatalog);
       return recommendation ? (
         <Suspense
           fallback={
@@ -2805,6 +2814,7 @@ function SessionChatPane(props: {
                       onChoose: connectionAccounts.selectAccount,
                       loading: connectionAccounts.loading,
                       error: connectionAccounts.error,
+                      accessDenied: connectionAccounts.accessDenied,
                       onRefresh: () => void connectionAccounts.refresh(),
                       disabled:
                         terminal || composer.sending || durableToolsSaving || !durableToolsHydrated,

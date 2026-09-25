@@ -253,7 +253,7 @@ import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
-  SUMMARY_BUFFER_TOKENS,
+  compactionSummaryOutputTokens,
   buildRemoteCompactionV2PromptInput,
   extractRemoteCompactionV2OutputItem,
   estimateSerializedValueTokens,
@@ -656,6 +656,7 @@ export {
   MIN_COMPACTION_THRESHOLD_RATIO,
   MAX_COMPACTION_THRESHOLD_RATIO,
   SUMMARY_BUFFER_TOKENS,
+  compactionSummaryOutputTokens,
   SUMMARY_PREFIX,
   USER_MESSAGE_TRUNCATION_MARKER,
   REMOTE_COMPACTION_TOOL_RESULT_OMISSION,
@@ -1005,17 +1006,17 @@ export async function generateSessionTitle(
  * call against the resolved provider. `input` is the active history plus
  * Codex's checkpoint prompt. Provider failures propagate to the compaction
  * lifecycle; there is no non-model fallback that silently discards history.
- * The call deliberately does NOT
- * request reasoning encryption, tools, or inline provider compaction; it is a
- * self-contained summarize.
+ * It is a single summary call: prepared Responses requests retain tool schemas
+ * and provider settings for the existing prefix, but tool selection is disabled
+ * and no tool execution loop or inline provider compaction runs.
  *
  * Provider-aware: the summary always runs on the SAME provider that serves the
  * turn (registry providers can't summarize through OpenAI/Azure, and vice
  * versa). `api: "chat"` providers (Fireworks) speak /v1/chat/completions, where
  * the summary is choices[0].message.content; `api: "responses"` (the default,
  * built-in OpenAI/Azure) speaks /v1/responses as before. When no client/api is
- * supplied it uses the built-in OpenAI/Azure Responses path. store:false is set
- * only on the OpenAI-platform Responses path (Azure rejects it; chat ignores it).
+ * supplied it uses the built-in OpenAI/Azure Responses path. Non-Azure Responses
+ * requests use store:false; the resolved Azure wire profile omits it.
  */
 export async function summarizeForCompaction(
   settings: Settings,
@@ -1029,6 +1030,7 @@ export async function summarizeForCompaction(
     promptCacheKey?: string;
     systemInstructions?: string;
     preparedRequest?: Omit<ModelRequest, "input">;
+    signal?: AbortSignal;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
   } = {},
 ): Promise<string> {
@@ -1037,17 +1039,27 @@ export async function summarizeForCompaction(
   const model = options.model ?? settings.openaiModel;
   const provider = options.provider ?? configuredProviders(settings)[0];
   if (!provider) throw new Error("Built-in model provider is unavailable");
-  const maxTokens = options.maxOutputTokens ?? SUMMARY_BUFFER_TOKENS;
+  const azureResponses = provider.wireProfile === "azure-openai";
+  const maxTokens =
+    options.maxOutputTokens ?? compactionSummaryOutputTokens(settings.contextWindowTokens);
   if (api === "chat") {
     const transcript = renderCompactionPromptInputForChat(input);
     let completion: unknown;
     try {
-      completion = await client.chat.completions.create({
-        model,
-        max_tokens: maxTokens,
-        messages: [{ role: "user", content: transcript }],
-        ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
-      } as any);
+      completion = await client.chat.completions.create(
+        {
+          model,
+          max_tokens: maxTokens,
+          messages: [
+            ...(options.systemInstructions
+              ? [{ role: "system" as const, content: options.systemInstructions }]
+              : []),
+            { role: "user", content: transcript },
+          ],
+          ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
+        } as any,
+        options.signal ? { signal: options.signal } : undefined,
+      );
     } catch (error) {
       throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
     }
@@ -1055,8 +1067,23 @@ export async function summarizeForCompaction(
     if (usage) {
       await options.onUsage?.(usage);
     }
-    const text = (completion as { choices?: Array<{ message?: { content?: unknown } }> })
-      .choices?.[0]?.message?.content;
+    const choice = (
+      completion as {
+        choices?: Array<{ finish_reason?: unknown; message?: { content?: unknown } }>;
+      }
+    ).choices?.[0];
+    if (choice?.finish_reason !== "stop") {
+      throw new EmptyCompactionSummaryError({
+        stage: "chat_completion",
+        reason: "non_stop_finish",
+        finishReason: ["length", "content_filter", "tool_calls", "function_call"].includes(
+          String(choice?.finish_reason),
+        )
+          ? choice?.finish_reason
+          : "unknown",
+      });
+    }
+    const text = choice.message?.content;
     const summary = typeof text === "string" ? text.trim() : "";
     if (!summary) {
       throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(completion, summary));
@@ -1066,22 +1093,31 @@ export async function summarizeForCompaction(
   // Use the same SDK Responses adapter as the real agent call. It converts the
   // structured AgentInputItems (callId/providerData/etc.) to provider wire
   // items without flattening tool history into a fake user transcript.
-  const request: ModelRequest = options.preparedRequest
+  // The captured inference signal may have been aborted when its stream
+  // stopped. Compaction must use the still-active turn signal instead.
+  const preparedPrefix = options.preparedRequest
+    ? (({ signal: _priorSignal, ...prefix }) => prefix)(options.preparedRequest)
+    : null;
+  const { store: _priorStore, ...preparedModelSettings } = preparedPrefix?.modelSettings ?? {};
+  const request: ModelRequest = preparedPrefix
     ? {
-        ...options.preparedRequest,
+        ...preparedPrefix,
         // The history copy is still portable: dependent stored response ids are
         // removed, and the final checkpoint instruction is appended by the caller.
         input: input.map(detachCompactionResponseItemIdentity) as AgentInputItem[],
         modelSettings: {
-          ...options.preparedRequest.modelSettings,
+          ...preparedModelSettings,
           maxTokens,
           // Retain schemas for the warm prefix without letting the checkpoint
           // model select or execute a tool (including a historical Azure tool).
           toolChoice: "none",
-          ...(settings.openaiProvider === "azure" ? {} : { store: false }),
+          // The selected provider, not the deployment default, owns this wire
+          // policy. Override any inherited value on a prepared Azure request.
+          ...(azureResponses ? {} : { store: false }),
         },
         outputType: "text",
         tracing: false,
+        ...(options.signal ? { signal: options.signal } : {}),
       }
     : {
         systemInstructions: options.systemInstructions ?? "",
@@ -1090,10 +1126,10 @@ export async function summarizeForCompaction(
           maxTokens,
           // Azure can select a historical tool despite empty schemas. Keep this
           // verified policy off subscription/gateway transports with other contracts.
-          ...(provider.wireProfile === "azure-openai" ? { toolChoice: "none" as const } : {}),
+          ...(azureResponses ? { toolChoice: "none" as const } : {}),
           // Azure rejects store:false; the Codex subscription transport enforces
-          // it independently. The OpenAI platform path remains explicitly storeless.
-          ...(settings.openaiProvider === "azure" ? {} : { store: false }),
+          // it independently. Other Responses routes remain explicitly storeless.
+          ...(azureResponses ? {} : { store: false }),
           ...(options.promptCacheKey
             ? { providerData: { prompt_cache_key: options.promptCacheKey } }
             : {}),
@@ -1103,6 +1139,7 @@ export async function summarizeForCompaction(
         outputType: "text",
         handoffs: [],
         tracing: false,
+        ...(options.signal ? { signal: options.signal } : {}),
       };
   let response: unknown;
   try {

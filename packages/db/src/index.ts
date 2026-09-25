@@ -42788,6 +42788,7 @@ export async function recordSkippedContextCompaction(
     reason:
       | "no_history"
       | "replacement_not_smaller"
+      | "replacement_exceeds_model_budget"
       | "replacement_unchanged"
       | "summarization_failed";
     /**
@@ -63265,10 +63266,7 @@ export async function updateSessionGoalWithEvent(
           proposalId: null,
         };
       }
-      const shouldApply =
-        input.actor === "api" ||
-        existing.mutationPolicy === "autonomous_adaptation" ||
-        (existing.mutationPolicy === "preserve_intent" && changeKind === "refinement");
+      const shouldApply = input.actor === "api" || existing.mutationPolicy !== "review_changes";
       if (!shouldApply) {
         const [proposal] = await tx
           .insert(schema.sessionGoalRevisions)

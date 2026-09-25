@@ -42,6 +42,10 @@ dialog focus. Recommendations resolve against the live catalogue, use the native
 Connect controller and exact host return URL, and require backend-verified
 completion. An isolated provider window is reserved before discovery; successful
 authorization attaches the capability while preserving existing selections.
+An agent-proposed remote MCP endpoint uses this frame for a human-editable URL
+review form; submitting it adds a catalog entry only after the authenticated
+human's ordinary Capabilities permission check. The existing catalog card then
+owns credentials, enablement and conversation tool attachment.
 Personal accounts belong to the authenticated sender; sharing a conversation
 does not delegate account access. No separate conversation consent is required.
 Completion derives from live credentials and tool selection, never a browser

@@ -7,9 +7,23 @@ import {
   buildWorkspaceMemberPermissionGroups,
   delegableApiKeyPermissions,
   fixedOrganizationApiKeyPermissions,
+  workspaceAccessLevels,
+  isWorkspacePermissionDenied,
 } from "./permissions";
 
 describe("workspace member permission groups", () => {
+  test("members can discover connections without gaining connection administration", () => {
+    const member = workspaceAccessLevels.find((level) => level.role === "member")!;
+    expect(member.permissions).toContain("connections:read");
+    expect(member.permissions).not.toContain("connections:write");
+    expect(member.permissions).not.toContain("capabilities:manage");
+  });
+
+  test("distinguishes access denial from transient connection failures", () => {
+    expect(isWorkspacePermissionDenied({ status: 403 })).toBe(true);
+    expect(isWorkspacePermissionDenied({ status: 503 })).toBe(false);
+    expect(isWorkspacePermissionDenied(new Error("network unavailable"))).toBe(false);
+  });
   test("keeps baseline workspace visibility out of the fine-grained editor", () => {
     const permissions = buildWorkspaceMemberPermissionGroups().flatMap(
       (group) => group.permissions,

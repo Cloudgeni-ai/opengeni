@@ -1020,6 +1020,19 @@ describe("bounded checkpoint input", () => {
     expect(reasoning.providerData.encrypted_content).toBe("gAAAA-foreign");
   });
 
+  test("omits reasoning with no content after rejected opaque identity is removed", () => {
+    const raw = [
+      user("continue"),
+      { type: "reasoning", id: "rs_rejected", providerData: { encrypted_content: "opaque" } },
+      { type: "reasoning" },
+    ];
+
+    expect(prepareCompactionPromptInput(raw, 10_000).input.slice(0, -1)).toEqual([
+      user("continue"),
+    ]);
+    expect(raw).toHaveLength(3);
+  });
+
   test("never mutates the raw history used to build the durable replacement", () => {
     const rawResult = result("call-1", "z".repeat(80_000));
     const raw = [user("request"), call("call-1"), rawResult];

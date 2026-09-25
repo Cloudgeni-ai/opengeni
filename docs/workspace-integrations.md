@@ -8,7 +8,7 @@ configured through the API or `@opengeni/sdk`; none requires deployment code.
 
 Canonical sources: `packages/contracts/src/workspace-integrations.ts`
 (contracts and the signature scheme), `packages/db/src/workspace-integrations.ts`
-and migration `0515_workspace_integration_primitives.sql` (storage and the
+and migration `0519_workspace_integration_primitives.sql` (storage and the
 delivery outbox), `apps/api/src/routes/workspace-integrations.ts` (routes),
 `apps/api/src/workspace-webhook-dispatch.ts` (delivery pump),
 `apps/worker/src/activities/workspace-credential-provider.ts` (credential

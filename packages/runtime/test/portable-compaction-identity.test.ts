@@ -56,6 +56,59 @@ function assertProviderDependencies(input: Item[]) {
 }
 
 describe("portable compaction provider identity", () => {
+  for (const prepared of [false, true]) {
+    test(`uses the resolved provider for store policy (prepared=${prepared})`, async () => {
+      const openaiSettings = testSettings({ openaiProvider: "openai" });
+      const selectedAzure = {
+        ...configuredProviders(openaiSettings)[0]!,
+        id: "registry-azure",
+        builtin: false,
+        wireProfile: "azure-openai" as const,
+      };
+      const selectedOpenai = {
+        ...configuredProviders(settings)[0]!,
+        id: "registry-openai",
+        builtin: false,
+        wireProfile: "openai" as const,
+      };
+      const preparedRequest: NonNullable<Options["preparedRequest"]> = {
+        systemInstructions: "Preserve the task",
+        modelSettings: { store: true },
+        tools: [],
+        toolsExplicitlyProvided: true,
+        outputType: "text",
+        handoffs: [],
+        tracing: false,
+      };
+      const azureRequests: Item[] = [];
+      const openaiRequests: Item[] = [];
+      await summarizeForCompaction(
+        openaiSettings,
+        [{ type: "message", role: "user", content: "work" }],
+        {
+          provider: selectedAzure,
+          client: provider(async (request) => {
+            azureRequests.push(request);
+            return response("Azure summary");
+          }),
+          ...(prepared
+            ? { preparedRequest: { ...preparedRequest, modelSettings: { store: false } } }
+            : {}),
+        },
+      );
+      await summarizeForCompaction(settings, [{ type: "message", role: "user", content: "work" }], {
+        provider: selectedOpenai,
+        client: provider(async (request) => {
+          openaiRequests.push(request);
+          return response("OpenAI summary");
+        }),
+        ...(prepared ? { preparedRequest } : {}),
+      });
+      expect(azureRequests[0]!.store).toBeUndefined();
+      expect(openaiRequests[0]!.store).toBe(false);
+    });
+  }
+
   test("reproduces Azure's missing reasoning rejection and compacts long structured history", async () => {
     const raw = longHistory();
     const original = JSON.stringify(raw);

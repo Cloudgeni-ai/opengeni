@@ -13,6 +13,7 @@ import {
   listSessionGoalRevisions,
   recoverSessionDispatch,
   rejectSessionGoalRevisionWithEvent,
+  setSessionGoalStatus,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
   dbSql,
@@ -103,6 +104,148 @@ function command(ctx: Awaited<ReturnType<typeof fixture>>, operationKey = crypto
 }
 
 describe("goal revision decisions", () => {
+  test("operational edits preserve an existing human pause", async () => {
+    const ctx = await fixture({ rootConstraints: ["Do not deploy"] });
+    await setSessionGoalStatus(client.db, ctx.grant.workspaceId, ctx.session.id, {
+      status: "paused",
+      pausedReason: "user_pause",
+      rationale: "Wait for the human",
+    });
+    const updated = await updateSessionGoalWithEvent(
+      client.db,
+      ctx.grant.workspaceId,
+      ctx.session.id,
+      {
+        text: "Clarified operational objective",
+        changeKind: "adaptation",
+        rationale: "Record the clarified objective without resuming work",
+        expectedObjectiveRevision: 1,
+        actor: "agent",
+        command: command(ctx),
+      },
+    );
+    expect(updated).toMatchObject({
+      outcome: "applied",
+      goal: {
+        status: "paused",
+        pausedReason: "user_pause",
+        objectiveRevision: 2,
+        rootConstraints: ["Do not deploy"],
+      },
+    });
+  });
+
+  test("a retained proposal receipt is not silently applied after policy changes", async () => {
+    const ctx = await fixture({
+      mutationPolicy: "review_changes",
+      rootConstraints: ["Do not deploy"],
+    });
+    const input = {
+      text: "Clarified operational objective",
+      changeKind: "adaptation" as const,
+      rationale: "The human clarified the intended outcome",
+      expectedObjectiveRevision: 1,
+      actor: "agent" as const,
+      command: command(ctx),
+    };
+    const proposed = await updateSessionGoalWithEvent(
+      client.db,
+      ctx.grant.workspaceId,
+      ctx.session.id,
+      input,
+    );
+    expect(proposed.outcome).toBe("proposed");
+    await upsertSessionGoalWithEvent(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId,
+      sessionId: ctx.session.id,
+      text: "Initial objective",
+      mutationPolicy: "preserve_intent",
+      expectedObjectiveRevision: 1,
+      changeKind: "refinement",
+      changeRationale: "Human restores the default operational policy",
+      actor: "api",
+      createdBy: "api",
+    });
+    const replay = await updateSessionGoalWithEvent(
+      client.db,
+      ctx.grant.workspaceId,
+      ctx.session.id,
+      input,
+    );
+    expect(replay).toMatchObject({
+      replay: true,
+      outcome: "proposed",
+      proposalId: proposed.proposalId,
+      events: [],
+    });
+    expect((await getSessionGoal(client.db, ctx.grant.workspaceId, ctx.session.id))?.text).toBe(
+      "Initial objective",
+    );
+    const updated = await updateSessionGoalWithEvent(
+      client.db,
+      ctx.grant.workspaceId,
+      ctx.session.id,
+      {
+        ...input,
+        expectedObjectiveRevision: 2,
+        command: command(ctx),
+      },
+    );
+    expect(updated).toMatchObject({
+      outcome: "applied",
+      proposalId: null,
+      goal: {
+        objectiveRevision: 3,
+        text: input.text,
+        rootConstraints: ["Do not deploy"],
+      },
+    });
+  });
+
+  test.each(["refinement", "adaptation", "replacement"] as const)(
+    "default operational goal %s applies without a second approval and replays exactly",
+    async (changeKind) => {
+      const ctx = await fixture({ rootConstraints: ["Do not deploy"] });
+      const input = {
+        text: "Deliver the human's clarified intended behavior",
+        successCriteria: "Verify the clarified behavior without deployment",
+        changeKind,
+        rationale: "The human clarified the intended behavior in the conversation",
+        expectedObjectiveRevision: 1,
+        actor: "agent" as const,
+        command: command(ctx),
+      };
+      const updated = await updateSessionGoalWithEvent(
+        client.db,
+        ctx.grant.workspaceId,
+        ctx.session.id,
+        input,
+      );
+      expect(updated).toMatchObject({
+        outcome: "applied",
+        proposalId: null,
+        replay: false,
+        goal: { text: input.text, objectiveRevision: 2, rootConstraints: ["Do not deploy"] },
+      });
+      expect(
+        await updateSessionGoalWithEvent(client.db, ctx.grant.workspaceId, ctx.session.id, input),
+      ).toMatchObject({ outcome: "applied", replay: true, events: [], goal: updated.goal });
+      await expect(
+        updateSessionGoalWithEvent(client.db, ctx.grant.workspaceId, ctx.session.id, {
+          ...input,
+          command: command(ctx),
+        }),
+      ).rejects.toBeInstanceOf(SessionControlConflictError);
+      const revisions = await listSessionGoalRevisions(
+        client.db,
+        ctx.grant.workspaceId,
+        ctx.session.id,
+      );
+      expect(revisions.map((revision) => revision.disposition)).toEqual(["applied", "applied"]);
+    },
+  );
+
   test("agent semantic rewrites require classification, rationale, and an exact revision fence", async () => {
     const ctx = await fixture({ rootConstraints: ["human-owned constraint"] });
     await expect(

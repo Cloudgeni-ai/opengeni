@@ -9,6 +9,22 @@ import {
 } from "../src/agent-learning";
 
 describe("agent learning policy", () => {
+  test("all unsaved categories are automatic; review and off remain explicit choices", () => {
+    expect(DEFAULT_AGENT_LEARNING).toEqual({
+      knowledge: "automatic",
+      instructions: "automatic",
+      skills: "automatic",
+    });
+    for (const mode of ["review_first", "off"] as const) {
+      const saved = { knowledge: mode, instructions: mode, skills: mode };
+      const inherited = resolveAgentLearningPolicy(saved, {});
+      const optedIn = resolveAgentLearningPolicy(DEFAULT_AGENT_LEARNING, saved);
+      for (const category of ["knowledge", "instructions", "skills"] as const) {
+        expect(inherited[category]).toEqual({ mode, inherited: true });
+        expect(optedIn[category]).toEqual({ mode, inherited: false });
+      }
+    }
+  });
   test("ordinary chat stays automatic while a scheduled task reviews knowledge only", () => {
     const chat = resolveAgentLearningPolicy(DEFAULT_AGENT_LEARNING, {});
     const task = resolveAgentLearningPolicy(DEFAULT_AGENT_LEARNING, {
@@ -16,7 +32,7 @@ describe("agent learning policy", () => {
     });
     expect(chat.knowledge).toEqual({ mode: "automatic", inherited: true });
     expect(task.knowledge).toEqual({ mode: "review_first", inherited: false });
-    expect(task.instructions).toEqual({ mode: "review_first", inherited: true });
+    expect(task.instructions).toEqual({ mode: "automatic", inherited: true });
     expect(task.skills).toEqual(chat.skills);
   });
 
@@ -42,14 +58,18 @@ describe("agent learning policy", () => {
     const defaults = { ...DEFAULT_AGENT_LEARNING };
     const context = { knowledge: "review_first" } as { knowledge: "review_first" | "automatic" };
     const accepted = resolveAgentLearningPolicy(defaults, context);
-    defaults.skills = "automatic";
+    defaults.skills = "off";
     context.knowledge = "automatic";
     expect(accepted.knowledge.mode).toBe("review_first");
-    expect(accepted.skills.mode).toBe("review_first");
+    expect(accepted.skills.mode).toBe("automatic");
   });
 
   test("legacy migration preserves opt-outs without accidentally disabling Knowledge", () => {
-    expect(agentLearningDefaultsFromLegacy({})).toEqual(DEFAULT_AGENT_LEARNING);
+    expect(agentLearningDefaultsFromLegacy({})).toEqual({
+      knowledge: "automatic",
+      instructions: "review_first",
+      skills: "review_first",
+    });
     expect(agentLearningDefaultsFromLegacy({ workspaceMode: "off" })).toEqual({
       knowledge: "automatic",
       instructions: "off",

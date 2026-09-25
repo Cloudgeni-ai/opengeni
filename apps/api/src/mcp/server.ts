@@ -2521,7 +2521,7 @@ function registerGoalTools(
     "goal_update",
     {
       description:
-        "Propose or apply a semantic goal revision under the session's mutation policy. Retain the standing goal unless explicit user direction or meaningful new evidence justifies the declared refinement, adaptation, or replacement. Every rewrite must use the exact expected objective revision and a concise rationale. Root constraints cannot be changed by an agent. A rewrite is not an execution-progress audit fact; use the optional goal_progress tool when such a fact should be recorded.",
+        "Maintain your operational goal as user direction or meaningful new evidence clarifies the intended outcome. Changes apply directly unless the user explicitly configured review_changes; refinement, adaptation, and replacement are audit classifications, not approval gates under the default policy. Use the exact expected objective revision and a concise rationale. Updating a goal grants no additional authority and cannot change root constraints. Use goal_progress for an execution-progress audit fact rather than a goal rewrite.",
       inputSchema: {
         text: goalText.optional(),
         successCriteria: successCriteriaSchema.nullable().optional(),
@@ -6023,6 +6023,72 @@ function registerCapabilityDiscoveryTools(
         eventId: appended.events[0]?.id ?? null,
         message:
           "The recommendation was posted for human confirmation. No access has been granted yet.",
+      });
+    },
+  );
+
+  server.registerTool(
+    "custom_mcp_setup_request",
+    {
+      description:
+        "Show a review card for a remote HTTPS MCP server that is not in the workspace catalog. Use only an endpoint supplied by the user or established by reliable documentation; do not invent a URL. Never include query parameters or secrets in this URL; the human can edit it in the protected setup form. The agent cannot add, enable, or contact the server. Search the catalog first and do not propose an already available integration.",
+      inputSchema: {
+        name: z4.string().trim().min(1).max(256),
+        endpointUrl: z4
+          .string()
+          .url()
+          .max(2048)
+          .refine((url) => {
+            const parsed = new URL(url);
+            return (
+              parsed.protocol === "https:" &&
+              !parsed.username &&
+              !parsed.password &&
+              !parsed.hash &&
+              !parsed.search
+            );
+          }),
+        rationale: z4.string().trim().min(1).max(2000),
+      },
+    },
+    async ({ name, endpointUrl, rationale }) => {
+      await authorize();
+      const current = await catalog();
+      const existing = current.items.find(
+        (item) => item.kind === "mcp" && item.endpointUrl === endpointUrl && !item.stale,
+      );
+      if (existing) {
+        return json({
+          status: "already_in_catalog",
+          capabilityId: existing.id,
+          message: "Use the catalog authorization flow for this server instead.",
+        });
+      }
+      const claims = exactAgentCommandContext(grant, sessionId);
+      const payload = ToolAuthNeededPayload.parse({
+        serverId: "opengeni",
+        toolName: "custom_mcp_setup_request",
+        providerDomain: new URL(endpointUrl).hostname,
+        reason: "missing_connection",
+        setupRequest: { kind: "mcp", name, endpointUrl, rationale },
+      });
+      const appended = await appendAndPublishTurnEventsFenced(
+        deps.db,
+        deps.bus,
+        grant.workspaceId,
+        sessionId,
+        claims.callerTurnId,
+        claims.callerExecutionGeneration,
+        claims.callerAttemptId,
+        [{ type: "tool.auth_needed", payload }],
+      );
+      if (!appended.accepted) {
+        throw new Error("The calling turn was replaced before the setup request committed.");
+      }
+      return json({
+        status: "setup_requested",
+        eventId: appended.events[0]?.id ?? null,
+        message: "The human review card was posted. No server was added or contacted.",
       });
     },
   );

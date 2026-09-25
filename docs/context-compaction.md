@@ -139,6 +139,14 @@ The compaction model receives:
    instructions because their protocol differs;
 4. no provider-side context-management policy.
 
+Portable checkpoint output is capped at 20,000 tokens or one quarter of the
+model's configured context window, whichever is smaller. The input fitting
+budget reserves that same amount, and the retained real-user-message budget
+has the same cap. A Chat completion whose finish reason is
+not `stop` cannot replace active history, even if it contains partial text.
+Provider-specific output ceilings are not in the model catalog; a provider
+that rejects this cap fails compaction with the existing active history intact.
+
 Explicit compaction is a new accepted logical turn and therefore composes the
 same deterministic workspace instruction-policy and preference-descriptor
 governance as an ordinary agent turn. Its service initiator may inherit the
@@ -152,20 +160,27 @@ tool calls/results remain real protocol items on the wire. Chat providers use a
 request-local transcript adapter because Chat Completions has a different item
 protocol. It projects only record types the Chat converter cannot express,
 preserves their readable historical facts, and never mutates canonical history.
+The Chat transcript is text-only: historical image pixels are unavailable to
+that summarizer. Recent user images and references to omitted attachments are
+retained by the replacement-history policy, but their visual meaning is not
+inferred during the checkpoint.
 Historical `tool_search` calls and outputs are not rerun, compared with the
 current catalog, or reclassified. There is no switch-time rewrite and no second
 durable history form.
 
-Before the provider call, OpenGeni estimates the complete checkpoint input. It
+Before the provider call, OpenGeni estimates the history and checkpoint prompt. It
 replaces aggregate oversized tool results oldest-first only in the temporary
 copy, preserving recent detail. If that remains too large, it removes whole
 oldest user-delimited work units and re-sanitizes the suffix so no tool result,
-call, or reasoning fragment is orphaned. The first request is kept beneath the
-effective input ceiling, raw window minus requested summary, and estimator
-headroom. If the provider still reports context overflow, OpenGeni performs one
-half-size refit and one final request. The 50% retry covers the greater-than-2×
-provider/byte-estimator skew measured in the production incident. It never
-issues one failing provider call per history item.
+call, or reasoning fragment is orphaned. The temporary history copy is kept
+beneath the effective input ceiling and raw window minus requested summary.
+For a prepared Responses call, OpenGeni reserves the estimated instruction and
+tool-schema tokens before fitting history. If the provider still reports context
+overflow, it refits history to 40% of the remaining target and sends one final
+request. The provider may still count differently; on another overflow, active
+history stays intact. If only the checkpoint instruction fits, OpenGeni stops
+without asking the model to summarize unseen history. It never issues one
+failing call per history item.
 
 Remote v2 keeps its normal first request unchanged. Only an exact provider
 `context_length_exceeded` code permits one retry to the same remote-compaction
@@ -192,7 +207,8 @@ never installs a manufactured placeholder as conversation truth.
 
 The replacement history is:
 
-1. the newest real user messages that fit one cumulative 20,000-token budget,
+1. the newest real user messages that fit one cumulative budget of at most
+   20,000 tokens (one quarter of the context window on smaller models),
    in chronological order;
 2. one user-role summary item prefixed with Codex's `summary_prefix.md` text and
    marked `opengeni_context_summary: true`.
