@@ -3231,8 +3231,9 @@ It supports:
 - Key Vault for runtime secret storage.
 - Managed Azure PostgreSQL when `postgres.mode = "managed"`, with optional
   non-secret policies for capacity and `max_connections`
-  (`managed_postgres_capacity`), a high-availability standby and custom
-  maintenance window (`managed_postgres_availability`), and CPU/connection
+  (`managed_postgres_capacity`), a high-availability standby, custom
+  maintenance window, and server update timeout for standby seeding
+  (`managed_postgres_availability`), and CPU/connection
   saturation alerts on the observability action group
   (`managed_postgres_alerts`). See `deploy/terraform/azure/README.md`.
 - Existing customer Postgres when `postgres.mode = "external"`.

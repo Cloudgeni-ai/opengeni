@@ -401,7 +401,7 @@ variable "managed_postgres_capacity" {
 }
 
 variable "managed_postgres_availability" {
-  description = "Optional non-secret availability policy for managed PostgreSQL: a high-availability standby and a custom planned-maintenance window. Null (the default) keeps high availability disabled and lets Azure choose the maintenance window. Maintenance window times are UTC and day_of_week counts from 0 = Sunday."
+  description = "Optional non-secret availability policy for managed PostgreSQL: a high-availability standby, a custom planned-maintenance window, and the Terraform update timeout for the server. Null (the default) keeps high availability disabled, lets Azure choose the maintenance window, and keeps the provider's 60-minute update timeout. Maintenance window times are UTC and day_of_week counts from 0 = Sunday. high_availability.standby_availability_zone is used only when HA is first enabled: Terraform ignores later edits because failover swaps the zones, so move the standby with a planned failover or by disabling and re-enabling HA. update_timeout is a Go duration such as \"120m\" or \"2h\"; enabling HA provisions and seeds a standby, which can outlast the provider default."
   type = object({
     high_availability = optional(object({
       mode                      = string
@@ -412,6 +412,7 @@ variable "managed_postgres_availability" {
       start_hour   = number
       start_minute = optional(number, 0)
     }))
+    update_timeout = optional(string)
   })
   default  = null
   nullable = true
@@ -438,6 +439,13 @@ variable "managed_postgres_availability" {
       floor(var.managed_postgres_availability.maintenance_window.start_minute) == var.managed_postgres_availability.maintenance_window.start_minute
     )
     error_message = "managed_postgres_availability.maintenance_window needs day_of_week 0-6 (0 = Sunday), start_hour 0-23, and start_minute 0-59 as whole numbers (UTC)."
+  }
+
+  validation {
+    condition = try(var.managed_postgres_availability.update_timeout, null) == null ? true : (
+      can(regex("^[1-9][0-9]*[mh]$", var.managed_postgres_availability.update_timeout))
+    )
+    error_message = "managed_postgres_availability.update_timeout must be a whole number of minutes or hours, such as \"120m\" or \"2h\"."
   }
 }
 

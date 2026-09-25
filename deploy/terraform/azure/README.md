@@ -282,6 +282,7 @@ managed_postgres_availability = {
     start_hour   = 2
     start_minute = 0
   }
+  update_timeout = "120m" # Terraform update timeout for the server
 }
 ```
 
@@ -291,12 +292,21 @@ but it provisions and seeds a standby, so do it while write activity is low.
 Zone-redundant HA needs a General Purpose or Memory Optimized SKU in a region
 with availability zones.
 
+Seeding the standby can outlast the provider's 60-minute update timeout. Set
+`update_timeout` (a whole number of minutes or hours) so Terraform keeps
+polling instead of failing the apply while Azure is still working, and give the
+automation that runs the apply a longer bound than this value. Azure changes a
+custom maintenance window only from the next monthly cycle; a maintenance that
+was already notified keeps its scheduled time.
+
 With HA enabled, Azure fails over to the standby for planned maintenance and
 for unplanned outages, which swaps the primary and standby zones. The server
 resource therefore ignores later changes to `zone` and
 `high_availability[0].standby_availability_zone`, so a plan never tries to fail
 back or rejects a zone Azure moved. Use a planned failover when the primary
-should return to a preferred zone.
+should return to a preferred zone. For the same reason
+`standby_availability_zone` is used only when HA is first enabled; to move the
+standby later, use a planned failover or disable and re-enable HA.
 
 ## Managed PostgreSQL Alerts
 

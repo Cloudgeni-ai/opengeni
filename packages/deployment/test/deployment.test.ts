@@ -231,8 +231,11 @@ describe("deployment contract", () => {
 
     expect(variables).toContain('variable "managed_postgres_availability"');
     expect(variables).toContain('variable "managed_postgres_alerts"');
-    expect(variables).toContain("max_connections   = optional(number)");
+    // Whitespace-tolerant: terraform fmt realigns the object when attributes change.
+    expect(variables).toMatch(/max_connections\s*=\s*optional\(number\)/);
+    expect(variables).toMatch(/update_timeout\s*=\s*optional\(string\)/);
     expect(main).toContain('dynamic "high_availability"');
+    expect(main).toContain('dynamic "timeouts"');
     expect(main).toContain('dynamic "maintenance_window"');
     expect(main).toContain("high_availability[0].standby_availability_zone");
     expect(main).toContain(

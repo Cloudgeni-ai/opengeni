@@ -32,6 +32,7 @@ locals {
   observability_alert_email_receivers   = try(var.observability.alert_email_receivers, {})
   postgres_high_availability            = try(var.managed_postgres_availability.high_availability, null)
   postgres_maintenance_window           = try(var.managed_postgres_availability.maintenance_window, null)
+  postgres_update_timeout               = try(var.managed_postgres_availability.update_timeout, null)
   postgres_managed_max_connections      = try(var.managed_postgres_capacity.max_connections, null)
   postgres_alerts_enabled               = var.postgres.mode == "managed" && local.observability_enabled && var.managed_postgres_alerts != null
   postgres_alert_max_connections        = try(coalesce(var.managed_postgres_alerts.max_connections, local.postgres_managed_max_connections), null)
@@ -436,6 +437,16 @@ resource "azurerm_postgresql_flexible_server" "this" {
       day_of_week  = maintenance_window.value.day_of_week
       start_hour   = maintenance_window.value.start_hour
       start_minute = maintenance_window.value.start_minute
+    }
+  }
+
+  # Enabling HA provisions and seeds a standby, which can outlast the
+  # provider's 60-minute update default while Azure is still working.
+  dynamic "timeouts" {
+    for_each = local.postgres_update_timeout == null ? [] : [local.postgres_update_timeout]
+
+    content {
+      update = timeouts.value
     }
   }
 

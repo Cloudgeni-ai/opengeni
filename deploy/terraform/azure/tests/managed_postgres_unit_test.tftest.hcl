@@ -110,6 +110,11 @@ run "managed_postgres_defaults_leave_availability_and_parameters_unmanaged" {
   }
 
   assert {
+    condition     = azurerm_postgresql_flexible_server.this[0].timeouts == null
+    error_message = "Without an update_timeout, the server must keep the provider's default timeouts."
+  }
+
+  assert {
     condition     = length(azurerm_postgresql_flexible_server_configuration.max_connections) == 0
     error_message = "max_connections must stay unmanaged unless explicitly pinned, because adopting it restarts the server."
   }
@@ -141,7 +146,13 @@ run "availability_policy_renders_zone_redundant_ha_and_utc_maintenance_window" {
         day_of_week = 3
         start_hour  = 2
       }
+      update_timeout = "120m"
     }
+  }
+
+  assert {
+    condition     = azurerm_postgresql_flexible_server.this[0].timeouts.update == "120m"
+    error_message = "update_timeout must raise the server's Terraform update timeout so HA seeding can finish."
   }
 
   assert {
@@ -209,6 +220,20 @@ run "availability_policy_rejects_invalid_standby_zone" {
         mode                      = "ZoneRedundant"
         standby_availability_zone = "4"
       }
+    }
+  }
+
+  expect_failures = [
+    var.managed_postgres_availability,
+  ]
+}
+
+run "availability_policy_rejects_invalid_update_timeout" {
+  command = plan
+
+  variables {
+    managed_postgres_availability = {
+      update_timeout = "1.5h"
     }
   }
 
