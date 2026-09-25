@@ -3,11 +3,17 @@ import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
 } from "@opengeni/contracts";
+import {
+  DEFAULT_OPENROUTER_MODEL_ID,
+  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+  withWorkspaceOpenRouterCredential,
+} from "@opengeni/config";
 import { resolveTurnModel } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 
 import {
   createSessionTitleAttemptToolDefinition,
+  routeAllowsSessionTitleRequests,
   SESSION_TITLE_MODEL_TOOL_NAME,
   sessionTitleGenerationOptions,
   sessionTitleReasoningEffort,
@@ -32,6 +38,7 @@ describe("shouldRequestMissingSessionTitle", () => {
           selectedFirstPartyMcpTools: ["set_session_title"],
           shouldRequestTitle,
           parallelGenerationAvailable,
+          routeAllowsTitleRequests: true,
         }),
       ).toMatchObject({ promoteTitleTool: false, generateTitleInParallel: false });
     }
@@ -111,6 +118,7 @@ describe("sessionTitleToolPlan", () => {
         selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
         shouldRequestTitle: true,
         parallelGenerationAvailable: true,
+        routeAllowsTitleRequests: true,
       }),
     ).toEqual({
       promoteTitleTool: false,
@@ -131,6 +139,7 @@ describe("sessionTitleToolPlan", () => {
         selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
         shouldRequestTitle: true,
         parallelGenerationAvailable: false,
+        routeAllowsTitleRequests: true,
       }),
     ).toEqual({
       promoteTitleTool: true,
@@ -147,6 +156,7 @@ describe("sessionTitleToolPlan", () => {
         selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
         shouldRequestTitle: true,
         parallelGenerationAvailable: true,
+        routeAllowsTitleRequests: true,
       }),
     ).toEqual({
       promoteTitleTool: false,
@@ -161,6 +171,80 @@ describe("sessionTitleToolPlan", () => {
         selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
         shouldRequestTitle: false,
         parallelGenerationAvailable: true,
+        routeAllowsTitleRequests: true,
+      }),
+    ).toEqual({
+      promoteTitleTool: false,
+      generateTitleInParallel: false,
+      remoteFirstPartyMcpTools: ["set_session_title", "goal_set"],
+      preparationIndependentToolNames: [],
+    });
+  });
+});
+
+describe("managed OpenRouter free route", () => {
+  const freeUpstreamModelId = DEFAULT_OPENROUTER_MODEL_ID.slice("openrouter/".length);
+  const settings = testSettings({
+    sandboxBackend: "none",
+    openrouterApiKey: "deployment-openrouter-key",
+    modelProvidersJson: "[]",
+    resolvedOpenRouterModelsJson: undefined,
+  });
+
+  test("skips title requests only on the deployment-funded free route", () => {
+    const managedFree = resolveTurnModel(settings, DEFAULT_OPENROUTER_MODEL_ID)!;
+    expect(managedFree.provider.kind).toBe("openrouter-managed");
+    expect(managedFree.configured.credentialSource.kind).toBe("deployment");
+    expect(routeAllowsSessionTitleRequests(managedFree)).toBe(false);
+
+    const workspaceFree = resolveTurnModel(
+      withWorkspaceOpenRouterCredential(settings, "workspace-openrouter-key"),
+      `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${freeUpstreamModelId}`,
+    )!;
+    expect(workspaceFree.configured.upstreamModelId).toBe(freeUpstreamModelId);
+    expect(workspaceFree.provider.kind).toBe("openrouter-workspace");
+    expect(routeAllowsSessionTitleRequests(workspaceFree)).toBe(true);
+
+    expect(routeAllowsSessionTitleRequests(resolveTurnModel(settings, "gpt-5.6-sol")!)).toBe(true);
+    expect(routeAllowsSessionTitleRequests(null)).toBe(true);
+  });
+
+  test("an untitled session gets no title sidecar and no title tool", () => {
+    const plan = sessionTitleToolPlan({
+      tools: [{ kind: "mcp", id: "opengeni" }],
+      selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
+      shouldRequestTitle: true,
+      parallelGenerationAvailable: true,
+      routeAllowsTitleRequests: routeAllowsSessionTitleRequests(
+        resolveTurnModel(settings, DEFAULT_OPENROUTER_MODEL_ID),
+      ),
+    });
+    expect(plan).toEqual({
+      promoteTitleTool: false,
+      generateTitleInParallel: false,
+      remoteFirstPartyMcpTools: ["goal_set"],
+      preparationIndependentToolNames: [],
+    });
+
+    expect(
+      sessionTitleToolPlan({
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
+        shouldRequestTitle: true,
+        parallelGenerationAvailable: false,
+        routeAllowsTitleRequests: false,
+      }),
+    ).toEqual(plan);
+  });
+
+  test("a titled session keeps ordinary title-tool disclosure", () => {
+    expect(
+      sessionTitleToolPlan({
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
+        shouldRequestTitle: false,
+        parallelGenerationAvailable: true,
+        routeAllowsTitleRequests: false,
       }),
     ).toEqual({
       promoteTitleTool: false,

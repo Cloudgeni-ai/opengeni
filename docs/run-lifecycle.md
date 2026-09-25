@@ -101,13 +101,10 @@ which leaves room for reasoning before the title. A response stopped by that
 limit keeps only whole words; if reasoning still uses the whole budget, no title
 is saved and a later eligible turn retries. Inline `<think>` reasoning before the
 answer is dropped. Every provider route sends one direct request outside the
-agent runner, as the compaction summarizer does. On a shared provider route
-such as the managed free model, the title request counts against the same
-provider rate limit as the turn; a rate-limited title is dropped like any other
-failure. The main
-agent does not wait for a title tool result or make a title follow-up model call.
-When the main stream reaches normal settlement, the worker waits for the
-already-running bounded sidecar and joins it without cancelling. Exceptional or
+agent runner, as the compaction summarizer does. The main agent does not wait
+for a title tool result or make a title follow-up model call. When the main
+stream reaches normal settlement, the worker waits for the already-running
+bounded sidecar and joins it without cancelling. Exceptional or
 cancelled exits abort and join any still-pending sidecar. A completed candidate
 then uses the canonical title mutation, which updates the session row and
 appends `session.title_set`. Generation or persistence failure leaves the safe
@@ -115,11 +112,22 @@ pending marker in place, and a human title remains protected from every later
 automatic write. Historical fallback sessions therefore self-heal on their
 next eligible model turn.
 
+The managed OpenRouter free route sends no title request at all. A turn whose
+resolved provider is the deployment-funded OpenRouter provider serving an
+upstream `:free` variant (`isManagedOpenRouterFreeRoute`) spends one deployment
+key's OpenRouter per-minute and per-day request limits, which every user's
+turns share, so the attempt starts no sidecar, promotes no title tool, and
+keeps `set_session_title` out of its catalog while the pending marker remains.
+Web, SDK, and Slack keep showing the safe prompt preview. The next eligible turn
+on any other route, including a workspace or organization OpenRouter
+connection, titles the session.
+
 `OpenGeniRuntime.generateSessionTitle` is a rolling-compatible optional seam.
 Older or custom runtimes that do not implement it retain the prior attempt-local
 `set_session_title` tool plus one-shot model instruction, so an embedding host
 does not silently lose automatic naming during an upgrade. That compatibility
-path remains serialized; the production runtime takes the parallel path.
+path remains serialized; the production runtime takes the parallel path. Neither
+path runs on the managed OpenRouter free route.
 
 Ordinary Send acknowledges locally before transport completion. The composer
 freezes the exact text, annotations, resources, settings, and one

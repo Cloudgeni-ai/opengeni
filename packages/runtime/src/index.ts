@@ -1024,9 +1024,10 @@ export async function generateSessionTitle(
 }
 
 /**
- * Chat-completions providers (OpenRouter, including the free default model)
- * use one direct, trace-free request. The SDK chat model's getResponse() is
- * runner-facing and opens a tracing span, which throws outside an agent run.
+ * Chat-completions providers (such as OpenRouter connections) use one direct,
+ * trace-free request. The SDK chat model's getResponse() is runner-facing and
+ * opens a tracing span, which throws outside an agent run. The worker sends no
+ * title request on the managed OpenRouter free route.
  */
 async function generateChatSessionTitle(
   client: OpenAI,

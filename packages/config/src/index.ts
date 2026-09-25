@@ -2556,6 +2556,26 @@ export interface ConfiguredModel {
   hostedWebSearch: boolean;
 }
 
+/**
+ * Whether a resolved route is the deployment-funded OpenRouter free tier: the
+ * managed OpenRouter provider, which sends every workspace's requests with the
+ * deployment's one OpenRouter key, serving an upstream `:free` variant (the
+ * curated catalog admits nothing else). OpenRouter limits free-variant
+ * requests per account per minute and per day, so each request on this route
+ * spends quota that every turn on the deployment shares. A workspace or
+ * organization OpenRouter connection uses its own account and is not this
+ * route.
+ */
+export function isManagedOpenRouterFreeRoute(route: {
+  provider: Pick<ResolvedModelProvider, "kind">;
+  configured: Pick<ConfiguredModel, "upstreamModelId">;
+}): boolean {
+  return (
+    route.provider.kind === "openrouter-managed" &&
+    route.configured.upstreamModelId.endsWith(":free")
+  );
+}
+
 export const VERCEL_AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1" as const;
 export const VERCEL_AI_GATEWAY_AI_SDK_BASE_URL = "https://ai-gateway.vercel.sh/v4/ai" as const;
 export const VERCEL_AI_GATEWAY_CONNECTION_DOMAIN = "ai-gateway.vercel.sh" as const;

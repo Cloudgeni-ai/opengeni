@@ -101,6 +101,7 @@ import type {
 } from "./turn-context";
 import {
   createSessionTitleAttemptToolDefinition,
+  routeAllowsSessionTitleRequests,
   sessionTitleToolPlan,
   shouldRequestMissingSessionTitle,
 } from "./session-title";
@@ -152,6 +153,7 @@ export type PrepareTurnToolRuntimeDeps = {
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   trigger: ClaimTurnOk["trigger"];
   runSettings: GovernanceModelOk["runSettings"];
+  resolvedModel: GovernanceModelOk["resolvedModel"];
   lazyToolTransport: GovernanceModelOk["lazyToolTransport"];
   turnTools: ReturnType<typeof withFirstPartyTools>;
   connectionScope: { accountId: string; workspaceId: string };
@@ -371,6 +373,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     turnExecutionPolicy,
     trigger,
     runSettings: canonicalRunSettings,
+    resolvedModel,
     lazyToolTransport,
     turnTools: canonicalTurnTools,
     sandboxArtifactRuntime,
@@ -573,6 +576,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       firstPartyMcpPermissions: effectiveFirstPartyPermissions,
     }),
     parallelGenerationAvailable: typeof runtime.generateSessionTitle === "function",
+    routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
   const googleDrivePublicationAllowed =
     selectedFirstPartyMcpTools.includes("editable_artifact_export") &&

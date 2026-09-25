@@ -1,6 +1,6 @@
 import { hasPermission } from "@opengeni/core";
 import type { AttemptToolDefinition } from "@opengeni/codemode";
-import type { ModelCapabilitiesV1 } from "@opengeni/config";
+import { isManagedOpenRouterFreeRoute, type ModelCapabilitiesV1 } from "@opengeni/config";
 import type {
   GeneratedSessionTitle,
   GenerateSessionTitleOptions,
@@ -35,11 +35,26 @@ export function shouldRequestMissingSessionTitle(input: {
   return hasPermission([...permissions], "sessions:control");
 }
 
+/**
+ * Whether the turn's route can afford a model request spent only on a title.
+ * The managed OpenRouter free route draws on one deployment-wide per-minute
+ * and per-day request quota that users' turns need, so an untitled session on
+ * it gets no title sidecar and no title tool (whose call would cost a
+ * follow-up request). Clients keep showing the prompt preview, and a later
+ * turn on another route titles the session.
+ */
+export function routeAllowsSessionTitleRequests(
+  resolvedModel: ReturnType<OpenGeniRuntime["resolveTurnModel"]>,
+): boolean {
+  return !resolvedModel || !isManagedOpenRouterFreeRoute(resolvedModel);
+}
+
 export function sessionTitleToolPlan(input: {
   tools: readonly ToolRef[];
   selectedFirstPartyMcpTools: readonly FirstPartyMcpToolName[];
   shouldRequestTitle: boolean;
   parallelGenerationAvailable: boolean;
+  routeAllowsTitleRequests: boolean;
 }): {
   promoteTitleTool: boolean;
   generateTitleInParallel: boolean;
@@ -49,8 +64,9 @@ export function sessionTitleToolPlan(input: {
   const titleToolAvailable =
     input.shouldRequestTitle &&
     input.tools.some((tool) => tool.kind === "mcp" && tool.id === "opengeni");
-  const generateTitleInParallel = titleToolAvailable && input.parallelGenerationAvailable;
-  const promoteTitleTool = titleToolAvailable && !generateTitleInParallel;
+  const titleRequestAllowed = titleToolAvailable && input.routeAllowsTitleRequests;
+  const generateTitleInParallel = titleRequestAllowed && input.parallelGenerationAvailable;
+  const promoteTitleTool = titleRequestAllowed && !generateTitleInParallel;
   return {
     promoteTitleTool,
     generateTitleInParallel,
