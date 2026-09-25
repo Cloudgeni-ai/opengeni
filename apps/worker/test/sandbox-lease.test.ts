@@ -6504,7 +6504,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const ws = await freshWorkspace();
     const epoch = 16;
     const instanceId = "sb-missing-but-replaced";
-    await insertLease(ws, {
+    const leaseId = await insertLease(ws, {
       liveness: "draining",
       refcount: 0,
       leaseEpoch: epoch,
@@ -6558,6 +6558,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(await observability.prometheusMetrics()).not.toContain(
       "opengeni_sandbox_provider_missing_before_capture_total",
     );
+    // This deliberately failed cold commit leaves a drainable row. Do not let
+    // the next global reaper test terminate this fixture as a second sandbox.
+    await admin`delete from sandbox_leases where id = ${leaseId}`;
   }, 60_000);
 
   // ── FINDING 1: even a test/legacy no-archive termination seam must remain

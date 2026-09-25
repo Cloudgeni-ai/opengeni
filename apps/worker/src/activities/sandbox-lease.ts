@@ -57,6 +57,7 @@ import {
   reapStaleLeaseHoldersGlobal,
   requestDueSandboxRotationsGlobal,
   readSandboxRotationBacklog,
+  readRecentSandboxRecoveryObservations,
   workspaceArchiveCaptureDeadlineElapsed,
   retainedProcessReconciliationProof,
   retainedProcessSettlementIdentity,
@@ -159,6 +160,7 @@ import {
   recordSandboxLeaseGauges,
   recordSandboxOrphansTerminated,
   recordSandboxProviderMissingBeforeCapture,
+  recordSandboxRecoveryObservationGauges,
   recordSandboxRotationBacklogGauges,
   recordTurnsQueuedGauge,
   runtimeMetricsHooksForObservability,
@@ -2321,6 +2323,17 @@ async function refreshQueueLeaseAndCreditGauges(
         recordSandboxCheckpointArtifactGauges(
           observability,
           await countSandboxCheckpointArtifactsByState(db),
+        );
+      },
+    ),
+    refreshSandboxInventoryGauge(
+      observability,
+      "recovery_observations",
+      "recovery-observations",
+      async () => {
+        recordSandboxRecoveryObservationGauges(
+          observability,
+          await readRecentSandboxRecoveryObservations(db),
         );
       },
     ),

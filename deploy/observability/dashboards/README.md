@@ -178,8 +178,14 @@ The Modal checkpoint fallback panel and
 counter. A selection is recorded after a durable authorization receipt and
 before restore; it remains an operator signal even if the session later
 continues successfully. It is not proof of restore success or of complete
-file recovery. The warning covers the first scrape sample of a newly created
-counter without using session or provider identifiers as metric labels.
+file recovery. Both loss and fallback panels retain namespace/release/environment
+identity so a shared Prometheus cannot attribute one deployment's loss to
+another. The warning covers the first scrape sample of a newly created counter
+without using session or provider identifiers as metric labels.
+The separate durable observations panel reads a fresh, release-scoped count
+from committed audit receipts over the same 30-minute window. It keeps the
+operator alert visible if a worker exits after committing recovery but before
+its process-local counter can be scraped.
 
 > `machine.link.*` and `machine.op.*` are session-scoped **timeline events**, not
 > Prometheus series — a machine's link history lives in the session timeline (which

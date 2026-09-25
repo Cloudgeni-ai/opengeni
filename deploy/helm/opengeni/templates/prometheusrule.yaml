@@ -60,6 +60,13 @@ spec:
               and on (job, instance)
               (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="checkpoint_artifacts"} < {{ $inventoryFreshnessSeconds }})
             )
+        - record: opengeni:sandbox_recovery_observations_recent:fresh_max
+          expr: |
+            max by (kind) (
+              opengeni_sandbox_recovery_observations_recent{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="recovery_observations"} < {{ $inventoryFreshnessSeconds }})
+            )
         - record: opengeni:sandbox_rotation_backlog:fresh_max
           expr: |
             max by (kind) (
@@ -657,14 +664,18 @@ spec:
           # loss, so increase() alone would miss that first observation. The
           # offset arm catches a new positive series for the same 30m window.
           expr: |
-            sum(
-              increase(opengeni_sandbox_provider_missing_before_capture_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal"}[30m]) > 0
-              or
-              (
-                opengeni_sandbox_provider_missing_before_capture_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal"}
-                unless
-                opengeni_sandbox_provider_missing_before_capture_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal"} offset 30m
-              )
+            (
+              (sum(
+                increase(opengeni_sandbox_provider_missing_before_capture_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal"}[30m]) > 0
+                or
+                (
+                  opengeni_sandbox_provider_missing_before_capture_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal"}
+                  unless
+                  opengeni_sandbox_provider_missing_before_capture_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal"} offset 30m
+                )
+              ) or vector(0))
+              +
+              (sum(opengeni:sandbox_recovery_observations_recent:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},kind="provider_missing_before_capture"}) or vector(0))
             ) > 0
           for: 1m
           labels:
@@ -676,14 +687,18 @@ spec:
           # A newly created counter may have only one scrape sample. The offset
           # arm retains that first positive observation for the alert window.
           expr: |
-            sum(
-              increase(opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="selected"}[30m]) > 0
-              or
-              (
-                opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="selected"}
-                unless
-                opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="selected"} offset 30m
-              )
+            (
+              (sum(
+                increase(opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="selected"}[30m]) > 0
+                or
+                (
+                  opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="selected"}
+                  unless
+                  opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="selected"} offset 30m
+                )
+              ) or vector(0))
+              +
+              (sum(opengeni:sandbox_recovery_observations_recent:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},kind="checkpoint_fallback_selected"}) or vector(0))
             ) > 0
           for: 1m
           labels:

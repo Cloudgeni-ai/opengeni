@@ -107,6 +107,34 @@ test("explicit confirmation names exact timestamp and generation gap, and cancel
   expect(writes).toBe(0);
 });
 
+test("an automatically recoverable failed session offers only Retry with a filesystem warning", async () => {
+  let retries = 0;
+  let consentWrites = 0;
+  const container = await render(
+    {
+      getSandboxRecovery: async () => ({ ...eligible, automaticAvailable: true }),
+      recoverSandbox: async () => {
+        consentWrites++;
+        throw new Error("automatic fallback must not submit human consent");
+      },
+    },
+    true,
+    true,
+    {
+      onRetry: async () => {
+        retries++;
+        return true;
+      },
+    },
+  );
+  expect(container.textContent).toContain("Newer sandbox files may be unavailable");
+  expect(container.textContent).not.toContain("Review checkpoint recovery");
+  expect(container.querySelectorAll("button")).toHaveLength(1);
+  await click("Retry");
+  expect(retries).toBe(1);
+  expect(consentWrites).toBe(0);
+});
+
 test("acceptance is not restoration and double clicks never replay mutation", async () => {
   const requests: SandboxRecoveryRequest[] = [];
   const container = await render({

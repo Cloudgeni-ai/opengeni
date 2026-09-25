@@ -433,16 +433,10 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
-Historical CURRENT recovery has two distinct authorities: explicit same-session
-managed-human consent and automatic continuity after a proved missing Modal
-provider. Both retain checkpoint/generation CAS, singleton and unresolved-writer
-fences, native artifact verification and durable model warnings; neither replays
-commands or creates an empty replacement for an unavailable archive. Authority:
-`packages/core/src/application/sandbox-recovery.ts` for human consent and
-`packages/db/src/index.ts` for exact-attempt automatic selection. Migration 0495
-keeps human consent owner-activated; maintenance migration 0520 fences automatic
-receipts behind the warning-aware worker v2. Retry checks effective routes. See
-[run lifecycle](run-lifecycle.md).
+Modal recovery: human consent (`packages/core/src/application/sandbox-recovery.ts`)
+or proved provider loss (`packages/db/src/index.ts`). Both require a verified
+CURRENT checkpoint, singleton, quiescence and durable warning; no command
+replay/empty reset. See migrations 0495/0520 and [run lifecycle](run-lifecycle.md).
 
 Home-compute selection proves establishment authority; invalid pointers reconcile
 visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture

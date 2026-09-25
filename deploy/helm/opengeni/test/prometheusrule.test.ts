@@ -136,6 +136,9 @@ describe("turn-capacity Prometheus alerts", () => {
     expect(expression).toContain("[30m]) > 0");
     expect(expression).toContain("unless");
     expect(expression).toContain("offset 30m");
+    expect(expression).toContain(
+      `opengeni:sandbox_recovery_observations_recent:fresh_max{${DEPLOYMENT_SCOPE},kind="provider_missing_before_capture"}`,
+    );
     expect(expression).not.toContain("opengeni:sandbox_rotation_backlog:fresh_max");
     for (const selector of metricSelectors(expression)) {
       expect(selector).toContain(DEPLOYMENT_SCOPE);
@@ -171,6 +174,9 @@ describe("turn-capacity Prometheus alerts", () => {
     expect(expression).toContain("[30m]) > 0");
     expect(expression).toContain("unless");
     expect(expression).toContain("offset 30m");
+    expect(expression).toContain(
+      `opengeni:sandbox_recovery_observations_recent:fresh_max{${DEPLOYMENT_SCOPE},kind="checkpoint_fallback_selected"}`,
+    );
     expect(expression).not.toContain("opengeni:sandbox_rotation_backlog:fresh_max");
     for (const selector of metricSelectors(expression)) {
       expect(selector).toContain(DEPLOYMENT_SCOPE);

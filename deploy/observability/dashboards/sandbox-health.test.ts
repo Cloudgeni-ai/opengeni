@@ -6,7 +6,11 @@ describe("sandbox health dashboard", () => {
     const dashboard = JSON.parse(
       await readFile(new URL("./sandbox-health.json", import.meta.url), "utf8"),
     ) as {
-      panels: Array<{ id: number; title?: string; targets?: Array<{ expr?: string }> }>;
+      panels: Array<{
+        id: number;
+        title?: string;
+        targets?: Array<{ expr?: string; legendFormat?: string }>;
+      }>;
     };
     const loss = dashboard.panels.find(
       (panel) => panel.title === "Provider missing before workspace capture",
@@ -18,7 +22,8 @@ describe("sandbox health dashboard", () => {
     expect(loss?.targets?.[0]?.expr).toContain(
       "opengeni_sandbox_provider_missing_before_capture_total",
     );
-    expect(loss?.targets?.[0]?.expr).toContain("max by (backend)");
+    expect(loss?.targets?.[0]?.expr).toContain("max by (namespace, release, environment, backend)");
+    expect(loss?.targets?.[0]?.legendFormat).toContain("{{release}}");
     expect(loss?.targets?.[0]?.expr).toContain("offset 30m");
     expect(loss?.targets?.[0]?.expr).not.toContain("sandbox_rotation_backlog");
     expect(JSON.stringify(loss)).not.toMatch(/workspace_id|session_id|sandbox_group_id/);
@@ -32,7 +37,7 @@ describe("sandbox health dashboard", () => {
         id: number;
         title?: string;
         description?: string;
-        targets?: Array<{ expr?: string }>;
+        targets?: Array<{ expr?: string; legendFormat?: string }>;
       }>;
     };
     const fallback = dashboard.panels.find(
@@ -44,8 +49,31 @@ describe("sandbox health dashboard", () => {
       'opengeni_sandbox_checkpoint_fallback_total{backend="modal",outcome="selected"}',
     );
     expect(fallback?.targets?.[0]?.expr).toContain("offset 30m");
+    expect(fallback?.targets?.[0]?.expr).toContain(
+      "max by (namespace, release, environment, backend)",
+    );
+    expect(fallback?.targets?.[0]?.legendFormat).toContain("{{release}}");
     expect(fallback?.description).toContain("does not prove the subsequent restore succeeded");
     expect(JSON.stringify(fallback)).not.toMatch(/workspace_id|session_id|sandbox_group_id/);
+  });
+
+  test("reconstructs recovery signals from committed receipts per release", async () => {
+    const dashboard = JSON.parse(
+      await readFile(new URL("./sandbox-health.json", import.meta.url), "utf8"),
+    ) as {
+      panels: Array<{
+        title?: string;
+        targets?: Array<{ expr?: string; legendFormat?: string }>;
+      }>;
+    };
+    const durable = dashboard.panels.find(
+      (panel) => panel.title === "Durable recovery observations",
+    );
+    expect(durable?.targets?.[0]?.expr).toBe(
+      "opengeni:sandbox_recovery_observations_recent:fresh_max",
+    );
+    expect(durable?.targets?.[0]?.legendFormat).toContain("{{release}}");
+    expect(durable?.targets?.[0]?.legendFormat).toContain("{{kind}}");
   });
 
   test("separates logical outcomes, internal retries, and unknown failure ratio", async () => {

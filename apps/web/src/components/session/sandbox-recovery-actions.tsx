@@ -59,6 +59,7 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
   }
   const eligible =
     projection?.status === "eligible" && projection.checkpoint?.sessionId === props.sessionId;
+  const automaticAvailable = eligible && projection?.automaticAvailable === true;
   const changed = Boolean(
     selection && (!eligible || !sameRecoverySelection(selection, projection?.checkpoint ?? null)),
   );
@@ -72,8 +73,10 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
     !state.submitting &&
     props.canControl &&
     (restored ||
+      automaticAvailable ||
       (projection?.status === "unsupported" && projection.reason === "connected_machine_selected"));
-  const canConsent = eligible && props.canControl && !state.request && !state.submitting;
+  const canConsent =
+    eligible && !automaticAvailable && props.canControl && !state.request && !state.submitting;
 
   return (
     <div className="mt-3 text-fg">
@@ -88,11 +91,13 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
                 ? "Restoring the selected checkpoint. Restoration has not completed."
                 : restored
                   ? "Checkpoint restored. No commands were retried or replayed."
-                  : eligible
-                    ? "An older checkpoint is available for this session. Review what will be restored before continuing."
-                    : projection
-                      ? "Checkpoint recovery is unavailable for this session."
-                      : "Checking checkpoint recovery availability…"}
+                  : automaticAvailable
+                    ? "Retry will use the latest verified checkpoint. Newer sandbox files may be unavailable."
+                    : eligible
+                      ? "An older checkpoint is available for this session. Review what will be restored before continuing."
+                      : projection
+                        ? "Checkpoint recovery is unavailable for this session."
+                        : "Checking checkpoint recovery availability…"}
       </p>
       {projection?.reason ? (
         <p className="mt-1 text-xs text-fg-muted">{sandboxRecoveryBlocker(projection.reason)}</p>

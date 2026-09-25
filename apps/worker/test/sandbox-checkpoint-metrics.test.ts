@@ -7,6 +7,7 @@ import {
   recordSandboxDeadlineRotationsRequested,
   recordSandboxInventoryProjectionFailure,
   recordSandboxInventoryProjectionSuccess,
+  recordSandboxRecoveryObservationGauges,
   recordSandboxProviderMissingBeforeCapture,
   recordSandboxRotationBacklogGauges,
   runtimeMetricsHooksForObservability,
@@ -132,6 +133,25 @@ describe("sandbox checkpoint and deadline metrics", () => {
     );
     expect(metrics).toMatch(
       /opengeni_sandbox_inventory_refresh_failures_total\{[^}]*domain="leases"[^}]*\} 1\b/,
+    );
+  });
+
+  test("projects committed recovery observations as bounded fixed-kind gauges", async () => {
+    const observability = workerObservability();
+    recordSandboxRecoveryObservationGauges(observability, {
+      providerLosses: 2,
+      fallbackSelections: 1,
+    });
+    recordSandboxInventoryProjectionSuccess(observability, "recovery_observations", 1_700_000_002);
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_recovery_observations_recent\{[^}]*kind="provider_missing_before_capture"[^}]*\} 2\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_recovery_observations_recent\{[^}]*kind="checkpoint_fallback_selected"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_inventory_refresh_timestamp_seconds\{[^}]*domain="recovery_observations"[^}]*\} 1700000002\b/,
     );
   });
 });

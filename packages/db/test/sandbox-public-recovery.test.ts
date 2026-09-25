@@ -19,6 +19,7 @@ import {
   getSandboxRecoveryDiscontinuity,
   markSandboxRestoreVerifying,
   readLease,
+  readRecentSandboxRecoveryObservations,
   readPublicSandboxRecovery,
   recordWarmingSandboxCreated,
   registerSandboxCheckpointArtifact,
@@ -165,6 +166,11 @@ describe("explicit singleton checkpoint recovery", () => {
     );
     await shared.admin`update opengeni_private.sandbox_recovery_rollout set consent_enabled = false`;
     try {
+      // This case tests human consent activation, not the independent,
+      // provider-proven system fallback.
+      await shared.admin`update sandbox_leases set resume_state =
+        jsonb_set(resume_state, '{opengeniRecovery,provider,status}', '"unknown"'::jsonb)
+        where id = ${f.leaseId}`;
       expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
         status: "blocked",
         reason: "recovery_not_enabled",
@@ -362,6 +368,11 @@ describe("explicit singleton checkpoint recovery", () => {
 
   test("provider loss selects a verified older checkpoint once and fences workers without the automatic warning", async () => {
     const f = await fixture();
+    expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
+      status: "eligible",
+      automaticAvailable: true,
+      checkpoint: { archiveGeneration: 10, workspaceGeneration: 44 },
+    });
     await enqueue(f);
     const input = claimInput(f);
     expect(
@@ -389,10 +400,21 @@ describe("explicit singleton checkpoint recovery", () => {
     expect(await authorizeAutomaticSandboxCheckpointRecovery(client.db, scope)).toMatchObject({
       status: "already_authorized",
     });
+    expect(
+      (await readLease(client.db, f.workspaceId, f.session.sandboxGroupId))?.resumeState
+        ?.opengeniAutomaticCheckpointRecovery,
+    ).toMatchObject({ status: "accepted", sessionId: f.session.id });
+    await rejectsWithSqlState(f.create(f.session.sandboxGroupId));
+    await rejectsWithSqlState(
+      shared.admin`update sandbox_leases set archive_generation = 44 where id = ${f.leaseId}`,
+    );
     const [count] = await shared.admin<{ n: number }[]>`select count(*)::int as n
       from session_command_receipts where target_session_id = ${f.session.id}
         and action = 'sandbox.recovery.automatic'`;
     expect(count?.n).toBe(1);
+    expect(
+      (await readRecentSandboxRecoveryObservations(client.db)).fallbackSelections,
+    ).toBeGreaterThanOrEqual(1);
     const warning = await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id);
     expect(warning).toContain(f.request.selection.capturedAt);
     expect(warning).toContain("automatically");
@@ -420,15 +442,51 @@ describe("explicit singleton checkpoint recovery", () => {
     });
     expect(elected.role).toBe("spawner");
     expect(elected.lease.historicalRecoveryAuthorized).toBe(true);
+    const rematerializationId = crypto.randomUUID();
     expect(
       await beginSandboxRematerialization(client.db, {
         accountId: f.accountId,
         workspaceId: f.workspaceId,
         sandboxGroupId: f.session.sandboxGroupId,
         expectedEpoch: elected.lease.leaseEpoch,
-        rematerializationId: crypto.randomUUID(),
+        rematerializationId,
       }),
     ).toMatchObject({ status: "started" });
+    const leaseScope = {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      sandboxGroupId: f.session.sandboxGroupId,
+      expectedEpoch: elected.lease.leaseEpoch,
+    };
+    await recordWarmingSandboxCreated(client.db, {
+      ...leaseScope,
+      rematerializationId,
+      instanceId: "automatic-restored-box",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "automatic-restored-box" } },
+      },
+      leaseTtlMs: 60_000,
+    });
+    await markSandboxRestoreVerifying(client.db, { ...leaseScope, rematerializationId });
+    expect(
+      await commitWarmingToWarm(client.db, {
+        ...leaseScope,
+        instanceId: "automatic-restored-box",
+        leaseTtlMs: 60_000,
+        rematerialization: {
+          id: rematerializationId,
+          verifiedRevision: f.request.selection.revision,
+        },
+      }),
+    ).toMatchObject({ committed: true });
+    const restored = await readLease(client.db, f.workspaceId, f.session.sandboxGroupId);
+    expect(restored?.resumeState?.opengeniAutomaticCheckpointRecovery).toMatchObject({
+      status: "verified",
+      sessionId: f.session.id,
+    });
+    expect(restored?.resumeState?.opengeniHistoricalArchiveRecoveryId).toBeUndefined();
     expect(await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id)).toBe(
       warning,
     );

@@ -45220,6 +45220,12 @@ function resumeStateWithPreservedArchives(
           opengeniHistoricalArchiveRecoveryId: archiveSource.opengeniHistoricalArchiveRecoveryId,
         }
       : {}),
+    ...(archiveSource?.opengeniAutomaticCheckpointRecovery &&
+    typeof archiveSource.opengeniAutomaticCheckpointRecovery === "object"
+      ? {
+          opengeniAutomaticCheckpointRecovery: archiveSource.opengeniAutomaticCheckpointRecovery,
+        }
+      : {}),
     ...(resumeState?.backendId === undefined && archiveSource?.backendId !== undefined
       ? { backendId: archiveSource.backendId }
       : {}),
@@ -45259,6 +45265,12 @@ function archiveOnlyResumeState(
     ...(typeof current?.opengeniHistoricalArchiveRecoveryId === "string"
       ? {
           opengeniHistoricalArchiveRecoveryId: current.opengeniHistoricalArchiveRecoveryId,
+        }
+      : {}),
+    ...(current?.opengeniAutomaticCheckpointRecovery &&
+    typeof current.opengeniAutomaticCheckpointRecovery === "object"
+      ? {
+          opengeniAutomaticCheckpointRecovery: current.opengeniAutomaticCheckpointRecovery,
         }
       : {}),
     opengeniRecovery: recovery,
@@ -46305,6 +46317,21 @@ async function projectPublicSandboxRecovery(
       and provenance = 'native_capture' and source_workspace_generation = ${selection.archiveGeneration}) as valid`,
   );
   if (!artifact?.valid) return unavailable("checkpoint_artifact_invalid", selection);
+  if (await automaticRecoverySelectionTx(tx, row, session)) {
+    const marker = row.resume_state?.opengeniHistoricalArchiveRecoveryId;
+    if (
+      marker == null ||
+      (await authorizedHistoricalArchiveGeneration(tx, row)) === selection.archiveGeneration
+    )
+      return {
+        version: 1,
+        status: "eligible",
+        reason: null,
+        checkpoint: selection,
+        operationId: null,
+        automaticAvailable: true,
+      };
+  }
   const [activation] = await rawRows<{ consent_enabled: boolean }>(
     tx,
     sql`select consent_enabled from opengeni_private.sandbox_recovery_rollout where singleton`,
@@ -46548,6 +46575,14 @@ export async function authorizeAutomaticSandboxCheckpointRecovery(
     )
       return { status: "not_eligible" };
     if (typeof existingOperationId === "string") {
+      const automatic = row.resume_state?.opengeniAutomaticCheckpointRecovery;
+      if (
+        !automatic ||
+        typeof automatic !== "object" ||
+        (automatic as Record<string, unknown>).status !== "accepted" ||
+        (automatic as Record<string, unknown>).operationId !== existingOperationId
+      )
+        return { status: "not_eligible" };
       const [existing] = await rawRows<{ present: boolean }>(
         tx,
         sql`select exists(select 1 from audit_events audit
@@ -46615,8 +46650,11 @@ export async function authorizeAutomaticSandboxCheckpointRecovery(
       initialResult: { operationId, checkpoint: selection },
     });
     await tx.execute(sql`update sandbox_leases set
-      resume_state = jsonb_set(coalesce(resume_state, '{}'::jsonb),
-        '{opengeniHistoricalArchiveRecoveryId}', ${JSON.stringify(operationId)}::jsonb),
+      resume_state = jsonb_set(
+        jsonb_set(coalesce(resume_state, '{}'::jsonb),
+          '{opengeniHistoricalArchiveRecoveryId}', ${JSON.stringify(operationId)}::jsonb),
+        '{opengeniAutomaticCheckpointRecovery}',
+        ${JSON.stringify({ operationId, sessionId: input.sessionId, status: "accepted" })}::jsonb),
       updated_at = now()
       where id = ${row.id} and liveness = 'cold' and lease_epoch = ${selection.leaseEpoch}`);
     return { status: "authorized", selection };
@@ -46825,6 +46863,15 @@ async function authorizedHistoricalArchiveGeneration(
   const archiveGeneration = row.archive_generation === null ? null : Number(row.archive_generation);
   if (receipt?.action === "sandbox.automatic_checkpoint_recovery.authorized") {
     if (publicRecovery || typeof metadata?.sessionId !== "string") return null;
+    const automatic = row.resume_state?.opengeniAutomaticCheckpointRecovery;
+    if (
+      !automatic ||
+      typeof automatic !== "object" ||
+      (automatic as Record<string, unknown>).status !== "accepted" ||
+      (automatic as Record<string, unknown>).operationId !== operationId ||
+      (automatic as Record<string, unknown>).sessionId !== metadata.sessionId
+    )
+      return null;
     const [session] = await db
       .select({
         id: schema.sessions.id,
@@ -46840,6 +46887,24 @@ async function authorizedHistoricalArchiveGeneration(
           eq(schema.sessions.id, metadata.sessionId),
         ),
       );
+    const [context] = await rawRows<{ subject_id: string }>(
+      db,
+      sql`select coalesce(current_setting('opengeni.subject_id', true), '') as subject_id`,
+    );
+    if (
+      !session ||
+      (await completeRecoveryGroupCount(
+        db,
+        {
+          accountId: row.account_id,
+          workspaceId: row.workspace_id,
+          sessionId: session.id,
+          subjectId: context?.subject_id ?? "",
+        },
+        row.sandbox_group_id,
+      )) !== 1
+    )
+      return null;
     return session?.sandboxGroupId === row.sandbox_group_id &&
       session.sandboxBackend === "modal" &&
       (session.activeSandboxId === null || session.activeSandboxId === row.sandbox_group_id) &&
@@ -47654,17 +47719,34 @@ export async function commitWarmingToWarm(
           input.resumeState ?? null,
           row.resume_state,
         );
-        const resumeStateJson = JSON.stringify(
-          resumeStateWithRecovery(
-            {
-              ...(withArchives ?? {}),
-              ...(row.resume_state?.opengeniWarmBilling
-                ? { opengeniWarmBilling: row.resume_state.opengeniWarmBilling }
-                : {}),
-            },
-            recovery,
-          ),
+        const automatic = row.resume_state?.opengeniAutomaticCheckpointRecovery;
+        const automaticVerified =
+          rematerialization !== null &&
+          row.public_recovery === null &&
+          automatic !== null &&
+          typeof automatic === "object" &&
+          (automatic as Record<string, unknown>).status === "accepted" &&
+          (automatic as Record<string, unknown>).operationId ===
+            row.resume_state?.opengeniHistoricalArchiveRecoveryId;
+        const completedResumeState = resumeStateWithRecovery(
+          {
+            ...(withArchives ?? {}),
+            ...(row.resume_state?.opengeniWarmBilling
+              ? { opengeniWarmBilling: row.resume_state.opengeniWarmBilling }
+              : {}),
+            ...(automaticVerified
+              ? {
+                  opengeniAutomaticCheckpointRecovery: {
+                    ...(automatic as Record<string, unknown>),
+                    status: "verified",
+                  },
+                }
+              : {}),
+          },
+          recovery,
         );
+        if (automaticVerified) delete completedResumeState.opengeniHistoricalArchiveRecoveryId;
+        const resumeStateJson = JSON.stringify(completedResumeState);
         const updated = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             liveness          = 'warm',
@@ -51776,6 +51858,29 @@ export async function confirmDrainCold(
           and archive_capture_id is not distinct from ${input.expectedCaptureId ?? null}::uuid
         returning id
       `);
+        if (rows.length > 0 && input.providerMissingBeforeCapture) {
+          await tx.insert(schema.auditEvents).values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                subjectId: "opengeni:sandbox-reaper",
+                action: "sandbox.provider_missing_before_capture",
+                targetType: "sandbox_group",
+                targetId: input.sandboxGroupId,
+                metadata: {
+                  leaseId: row.id,
+                  leaseEpoch: input.expectedEpoch,
+                  workspaceGeneration: Number(row.workspace_generation),
+                  archiveGeneration:
+                    row.archive_generation === null ? null : Number(row.archive_generation),
+                },
+              },
+              "metadata",
+              "metadataCodecVersion",
+            ),
+          );
+        }
         if (rows.length > 0 && row.rotation_requested_at !== null) {
           await wakeSandboxLifecycleWaitersTx(tx, input);
         }
@@ -56187,6 +56292,22 @@ export async function readSandboxRotationBacklog(db: Database): Promise<SandboxR
     directBlocked: Number(row?.direct_blocked ?? 0),
     processBlocked: Number(row?.process_blocked ?? 0),
     interactionBlocked: Number(row?.interaction_blocked ?? 0),
+  };
+}
+
+/** Content-free, cross-workspace operator signal reconstructed from committed
+ * audit receipts. Unlike process-local counters, a worker crash after commit
+ * cannot erase this short-lived warning window. */
+export async function readRecentSandboxRecoveryObservations(
+  db: Database,
+): Promise<{ providerLosses: number; fallbackSelections: number }> {
+  const [row] = await rawRows<{
+    provider_losses: number | string;
+    fallback_selections: number | string;
+  }>(db, sql`select * from opengeni_private.sandbox_recovery_observations()`);
+  return {
+    providerLosses: Number(row?.provider_losses ?? 0),
+    fallbackSelections: Number(row?.fallback_selections ?? 0),
   };
 }
 
@@ -67484,7 +67605,7 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
   );
   await tx.execute(
     sql`select
-      set_config('opengeni.filesystem_discontinuity_protocol_v1', ${version ? "1" : ""}, true),
+      set_config('opengeni.filesystem_discontinuity_protocol_v1', ${version === 1 || version === 2 ? "1" : ""}, true),
       set_config('opengeni.filesystem_discontinuity_protocol_v2', ${version === 2 ? "2" : ""}, true)`,
   );
   let completed = false;

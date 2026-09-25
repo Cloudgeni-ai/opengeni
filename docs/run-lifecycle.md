@@ -1635,11 +1635,17 @@ remain. It records a distinct system-attributed audit and immutable per-session
 receipt before a replacement can be elected. The same attempt reuses that
 selection; stale attempts cannot change it. Retry may admit this narrowly
 recoverable route, but does not itself restore files or replay unknown effects.
+The lease pins group membership, route and CURRENT archive while selection is
+pending; restore admission recounts all group members, including private
+siblings. Only verified warm publication releases that pin.
 
 The existing cold election and native provider/artifact checks still decide
 whether a replacement becomes usable. No archive, uncertain provider, corrupt
 checkpoint, active writer or shared group remains blocked. Newer filesystem
 changes can be unavailable while conversation and external effects remain.
+Provider loss and fallback selection are also committed as audit facts before
+process-local counters; the reaper rebuilds a fresh, release-scoped alert
+inventory from those receipts if a worker exits after the transaction.
 Every agent reconstruction appends the same checkpoint-specific discontinuity
 warning to session instructions, after the stable workspace prompt prefix.
 Maintenance migration 0520 requires warning protocol v2 at attempt claim for

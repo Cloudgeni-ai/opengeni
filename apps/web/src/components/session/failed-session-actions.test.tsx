@@ -278,7 +278,7 @@ test("a viewer who cannot use checkpoint recovery keeps Retry and sees no failed
   expect(container.querySelector("button")).toBeNull();
 });
 
-test.each(["restored", "connected_machine"] as const)(
+test.each(["restored", "connected_machine", "automatic"] as const)(
   "%s projection exposes only explicit compact Retry through the structural banner",
   async (route) => {
     let retries = 0;
@@ -289,10 +289,32 @@ test.each(["restored", "connected_machine"] as const)(
       client: {
         getSandboxRecovery: async () => ({
           version: 1 as const,
-          status: route === "restored" ? ("restored" as const) : ("unsupported" as const),
-          reason: route === "restored" ? null : "connected_machine_selected",
+          status:
+            route === "restored"
+              ? ("restored" as const)
+              : route === "automatic"
+                ? ("eligible" as const)
+                : ("unsupported" as const),
+          reason: route === "connected_machine" ? "connected_machine_selected" : null,
           operationId: route === "restored" ? "durable-operation" : null,
-          checkpoint: null,
+          automaticAvailable: route === "automatic",
+          checkpoint:
+            route === "automatic"
+              ? {
+                  version: 1 as const,
+                  sessionId: "session-a",
+                  sandboxGroupId: "group-a",
+                  leaseId: "lease-a",
+                  routeEpoch: 0,
+                  authorityEpoch: 1,
+                  leaseEpoch: 2,
+                  workspaceGeneration: 12,
+                  archiveGeneration: 7,
+                  artifactId: "artifact-a",
+                  revision: "revision-a",
+                  capturedAt: "2026-09-20T08:00:00.000Z",
+                }
+              : null,
         }),
         recoverSandbox: async () => {
           throw new Error("Current route must not submit consent");
@@ -317,6 +339,8 @@ test.each(["restored", "connected_machine"] as const)(
     expect(retries).toBe(0);
     expect(container.querySelectorAll("button")).toHaveLength(1);
     expect(container.querySelector("button")!.textContent).toBe("Retry");
+    if (route === "automatic")
+      expect(container.textContent).toContain("Newer sandbox files may be unavailable");
     expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
     expect(container.textContent).not.toContain("Choose another model");
     await act(async () =>

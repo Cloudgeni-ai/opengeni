@@ -84,7 +84,11 @@ is usable. Other degraded failures, unverified archives, shared groups, live
 writers and no-checkpoint cases remain blocked. Every affected agent attempt
 reconstructs a deterministic warning after the static instruction prefix;
 unknown command outcomes are never replayed. Operator metrics and alerts
-record the fallback even when the next turn succeeds.
+record the fallback even when the next turn succeeds. A read-only, aggregate
+`opengeni_private.sandbox_recovery_observations()` inventory reconstructs
+the last 30 minutes of provider-loss and fallback decisions from committed
+audit receipts; the partial audit index keeps this fleet scan bounded.
+Normal role provisioning grants its exact EXECUTE capability.
 
 ## Selective Knowledge source discovery (0469)
 

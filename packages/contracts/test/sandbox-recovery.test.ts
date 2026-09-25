@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  SandboxRecoveryProjection,
   SandboxRecoveryRequest,
   automaticSandboxRecoveryDiscontinuity,
   sandboxRecoveryDiscontinuity,
@@ -48,4 +49,16 @@ test("durable model warning is exact and never claims edits counted, external ro
   expect(automatic).toContain("External effects are not undone");
   expect(automatic).toContain("unknown outcomes");
   expect(automatic).not.toContain("human explicitly consented");
+});
+test("recovery projection distinguishes automatic Retry from explicit human consent", () => {
+  expect(
+    SandboxRecoveryProjection.parse({
+      version: 1,
+      status: "eligible",
+      reason: null,
+      checkpoint: selection,
+      operationId: null,
+      automaticAvailable: true,
+    }).automaticAvailable,
+  ).toBe(true);
 });

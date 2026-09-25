@@ -33,6 +33,8 @@ export const SandboxRecoveryProjection = z
     reason: z.string().max(128).nullable(),
     checkpoint: SandboxRecoverySelection.nullable(),
     operationId: z.string().uuid().nullable(),
+    /** Retry may elect a system-selected verified checkpoint; no consent POST. */
+    automaticAvailable: z.boolean().optional(),
   })
   .strict();
 export type SandboxRecoveryProjection = z.infer<typeof SandboxRecoveryProjection>;
