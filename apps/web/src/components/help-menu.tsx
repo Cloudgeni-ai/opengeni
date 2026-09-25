@@ -22,7 +22,8 @@ export type HelpMenuProps = {
 /**
  * The account menu's Help section. It renders nothing when the deployment
  * publishes no documentation link (see documentationLinkFromClientConfig).
- * The always-loaded rail footer imports it lazily to keep it out of the
+ * Both account menus import it statically, so opening a menu never waits on
+ * or fails with a separately fetched chunk. Neither menu is part of the
  * direct-session bundle graph.
  */
 export function HelpMenu({ documentationUrl, itemClassName, leadingSeparator }: HelpMenuProps) {

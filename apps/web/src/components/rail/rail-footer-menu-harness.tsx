@@ -1,6 +1,5 @@
-// Shared happy-dom harness for RailFooter account-menu tests. Each test file
-// runs in its own process, so a file may add its own module mocks (for example
-// a failing Help chunk) before loading this harness.
+// Happy-dom harness for RailFooter account-menu tests. Web test files run in
+// their own process, so these module mocks never leak into another file.
 import { expect, mock } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
@@ -78,10 +77,6 @@ export async function loadRailFooterMenuHarness() {
     document.body.append(container);
     const root = createRoot(container);
     await act(async () => root.render(<RailFooter />));
-    // RailFooter starts the Help chunk on mount; let it settle before opening.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
     const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Account menu"]');
     if (!trigger) throw new Error("Missing account menu trigger");
     await act(async () => {
