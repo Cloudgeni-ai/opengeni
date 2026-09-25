@@ -161,6 +161,9 @@ export async function connectEditableArtifactHintBroker(
     name,
     reconnect: true,
     maxReconnectAttempts: -1,
+    // Same policy as the event bus: a broker or auth-callout restart must not
+    // permanently close this connection after two identical auth errors.
+    ignoreAuthErrorAbort: true,
     reconnectTimeWait: 2_000,
     reconnectJitter: 1_000,
     reconnectJitterTLS: 1_000,

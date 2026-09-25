@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { errorCodeToJSON } from "@opengeni/agent-proto";
 import { SandboxBackend, type SessionEventType } from "@opengeni/contracts";
 import type { SessionEventAppendPhaseObservation } from "@opengeni/db";
-import type { EventLogger } from "@opengeni/events";
+import {
+  natsSubscriptionTerminationCounter,
+  type EventBusOptions,
+  type EventLogger,
+} from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
 import {
@@ -80,6 +84,16 @@ const CONTEXT_COMPACTIONS_METRIC = {
   help: "Total completed context compactions, by trigger.",
 } as const;
 
+/** Logger plus the closed-label subscription-termination counter for NATS connections. */
+export function observabilityEventBusOptions(
+  observability: Observability,
+): Pick<EventBusOptions, "logger" | "onSubscriptionTerminated"> {
+  return {
+    logger: observabilityEventLogger(observability),
+    onSubscriptionTerminated: natsSubscriptionTerminationCounter(observability),
+  };
+}
+
 export function observabilityEventLogger(observability: Observability): EventLogger {
   return {
     debug: (message, attributes) => observability.debug(message, eventAttributes(attributes)),
@@ -154,6 +168,13 @@ export function runtimeMetricsHooksForObservability(
         name: "opengeni_sandbox_warming_timeouts_total",
         help: "Total sandbox warming timeouts.",
         labels: { backend, stage },
+      });
+    },
+    onSandboxReadinessReplacement: ({ backend, outcome }) => {
+      observability.incrementCounter({
+        name: "opengeni_sandbox_readiness_replacements_total",
+        help: "Fresh sandbox command-readiness replacement decisions by backend and outcome.",
+        labels: { backend, outcome },
       });
     },
     onSandboxProviderApiThrottle: ({ backend, operation }) => {

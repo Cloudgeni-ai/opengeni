@@ -43,7 +43,7 @@ import {
 } from "@temporalio/client";
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
 import { createAppComposition, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
-import { observabilityEventLogger } from "./observability";
+import { observabilityEventBusOptions } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
@@ -382,7 +382,7 @@ export async function startApi(
           controlPlaneAuth
             ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
             : undefined,
-          { logger: observabilityEventLogger(observability) },
+          observabilityEventBusOptions(observability),
         ),
       {
         ...retryOptions,

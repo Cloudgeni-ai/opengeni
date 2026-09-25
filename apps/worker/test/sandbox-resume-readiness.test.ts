@@ -5,7 +5,12 @@ import {
   SandboxExecReadinessError,
 } from "@opengeni/runtime";
 import {
+  FRESH_SANDBOX_READINESS_REPLACEMENT_BASE_DELAY_MS,
+  FRESH_SANDBOX_READINESS_REPLACEMENT_JITTER_MS,
+  SandboxExecReadinessTimeoutError,
   SandboxWarmingTimeoutError,
+  freshSandboxReadinessReplacementDelayMs,
+  isReplaceableFreshSandboxReadinessTimeout,
   isRetryableDegradedRestore,
   safeSnapshotError,
   waitForSandboxExecReadiness,
@@ -195,6 +200,49 @@ describe("sandbox exec readiness", () => {
       10,
     );
     expect(called).toBe(false);
+  });
+});
+
+describe("fresh sandbox readiness replacement", () => {
+  test("a readiness timeout alone is not replacement authority", async () => {
+    const timeout = await waitForSandboxExecReadiness(
+      established("modal", () => new Promise<never>(() => undefined)),
+      10,
+    ).catch((caught: unknown) => caught);
+    expect(timeout).toBeInstanceOf(SandboxExecReadinessTimeoutError);
+    // Only the elected spawner may attach the out-of-band proof after it has
+    // terminated the exact unpublished fresh box and released its warming epoch.
+    expect(isReplaceableFreshSandboxReadinessTimeout(timeout)).toBe(false);
+    expect(
+      isReplaceableFreshSandboxReadinessTimeout(
+        new SandboxExecReadinessError("modal", "exec_probe_timeout", 10, null, "sandbox-1"),
+      ),
+    ).toBe(false);
+    expect(isReplaceableFreshSandboxReadinessTimeout(new Error("timeout"))).toBe(false);
+    expect(isReplaceableFreshSandboxReadinessTimeout(null)).toBe(false);
+  });
+
+  test("the replacement pause is jittered within a bounded window", () => {
+    const min = FRESH_SANDBOX_READINESS_REPLACEMENT_BASE_DELAY_MS;
+    const max = min + FRESH_SANDBOX_READINESS_REPLACEMENT_JITTER_MS;
+    expect(freshSandboxReadinessReplacementDelayMs(() => 0)).toBe(min);
+    expect(freshSandboxReadinessReplacementDelayMs(() => 0.5)).toBe(
+      min + FRESH_SANDBOX_READINESS_REPLACEMENT_JITTER_MS / 2,
+    );
+    expect(freshSandboxReadinessReplacementDelayMs(() => 1)).toBeLessThan(max);
+    for (const hostile of [Number.NaN, -1, 2, Number.POSITIVE_INFINITY]) {
+      const delay = freshSandboxReadinessReplacementDelayMs(() => hostile);
+      expect(delay).toBeGreaterThanOrEqual(min);
+      expect(delay).toBeLessThan(max);
+    }
+    const samples = new Set(
+      Array.from({ length: 64 }, () => freshSandboxReadinessReplacementDelayMs()),
+    );
+    expect(samples.size).toBeGreaterThan(1);
+    for (const delay of samples) {
+      expect(delay).toBeGreaterThanOrEqual(min);
+      expect(delay).toBeLessThan(max);
+    }
   });
 });
 

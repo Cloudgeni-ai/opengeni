@@ -418,11 +418,13 @@ export {
   MCP_LIFECYCLE_PHASES,
   MCP_LIFECYCLE_POLICIES,
   MCP_TOOL_CALL_OUTCOMES,
+  SANDBOX_READINESS_REPLACEMENT_OUTCOMES,
   type McpLifecycleOutcome,
   type McpLifecyclePhase,
   type McpLifecyclePolicy,
   type McpToolCallOutcome,
   type RuntimeMetricsHooks,
+  type SandboxReadinessReplacementOutcome,
 } from "./metrics";
 export type {
   ModelPreparationMeasurement,

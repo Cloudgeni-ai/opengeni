@@ -45,7 +45,7 @@ import {
   type ResponderConnection,
 } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
-import { observabilityEventLogger } from "../observability";
+import { observabilityEventBusOptions } from "../observability";
 import { AGENT_CONNECTION_LEASE_MS } from "./connection-authority";
 
 /** The NATS subject nats-server publishes authorization requests on (ADR-26). */
@@ -214,7 +214,7 @@ export async function startAuthCalloutResponder(
     (bytes) => handleAuthorizationRequest(deps, bytes),
     {
       name: "opengeni-auth-callout",
-      ...(deps.observability ? { logger: observabilityEventLogger(deps.observability) } : {}),
+      ...(deps.observability ? observabilityEventBusOptions(deps.observability) : {}),
     },
   );
   deps.observability?.info?.("OpenGeni NATS auth-callout responder started", {
