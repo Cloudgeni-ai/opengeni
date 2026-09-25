@@ -98,6 +98,17 @@ function cookiePairs(response: Response): string {
     .join("; ");
 }
 
+async function authSessionIds(email: string): Promise<string[]> {
+  const rows = await shared!.admin<{ id: string }[]>`
+    select s.id
+    from auth_sessions s
+    join auth_users u on u.id = s.user_id
+    where u.email = ${email}
+    order by s.id
+  `;
+  return rows.map((row) => row.id);
+}
+
 describe("managed sign-up funnel metrics", () => {
   test("email sign-up, verification, sign-in and organization setup are counted with attribution", async () => {
     if (!shared || !client) return;
@@ -153,6 +164,7 @@ describe("managed sign-up funnel metrics", () => {
         method: "email",
       }),
     ).toBe(0);
+    expect(await authSessionIds(email)).toEqual([]);
 
     // A duplicate sign-up for the same address creates no second user.
     const duplicate = await app.request("/v1/auth/sign-up/email", {
@@ -167,6 +179,7 @@ describe("managed sign-up funnel metrics", () => {
         method: "email",
       }),
     ).toBe(1);
+    expect(await authSessionIds(email)).toEqual([]);
 
     const verification = messages.find((message) => message.kind === "email_verification");
     const link = verification?.text.match(/https?:\/\/\S+/)?.[0];
@@ -191,6 +204,18 @@ describe("managed sign-up funnel metrics", () => {
       verified.headers.getSetCookie().some((value) => value.includes("better-auth.session_token=")),
     ).toBe(true);
     const verifiedSession = cookiePairs(verified);
+    // Check durable sessions independently of the metric: this is one real
+    // sign-in, not a duplicate increment or another test's counter.
+    const verificationSessionIds = await authSessionIds(email);
+    expect(verificationSessionIds).toHaveLength(1);
+    const verificationSessionRead = await app.request("/v1/auth/get-session", {
+      headers: requestHeaders(verifiedSession),
+    });
+    expect(verificationSessionRead.status).toBe(200);
+    expect(await verificationSessionRead.json()).toMatchObject({
+      user: { email },
+      session: { id: verificationSessionIds[0] },
+    });
     expect(
       await counter(observability, "opengeni_auth_events_total", {
         event: "sign_in",
@@ -205,6 +230,7 @@ describe("managed sign-up funnel metrics", () => {
     expect(
       replay.headers.getSetCookie().some((value) => value.includes("better-auth.session_token=")),
     ).toBe(false);
+    expect(await authSessionIds(email)).toEqual(verificationSessionIds);
     expect(
       await counter(observability, "opengeni_auth_events_total", {
         event: "email_verified",
@@ -237,6 +263,21 @@ describe("managed sign-up funnel metrics", () => {
       body: JSON.stringify({ email, password, rememberMe: true }),
     });
     expect(signIn.status).toBe(200);
+    const signedInSessionIds = await authSessionIds(email);
+    expect(signedInSessionIds).toHaveLength(2);
+    expect(signedInSessionIds).toContain(verificationSessionIds[0]!);
+    const passwordSessionId = signedInSessionIds.find(
+      (sessionId) => sessionId !== verificationSessionIds[0],
+    );
+    expect(passwordSessionId).toBeDefined();
+    const passwordSessionRead = await app.request("/v1/auth/get-session", {
+      headers: requestHeaders(cookiePairs(signIn)),
+    });
+    expect(passwordSessionRead.status).toBe(200);
+    expect(await passwordSessionRead.json()).toMatchObject({
+      user: { email },
+      session: { id: passwordSessionId },
+    });
     expect(
       await counter(observability, "opengeni_auth_events_total", {
         event: "sign_in",
