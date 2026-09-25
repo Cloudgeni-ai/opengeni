@@ -37,6 +37,9 @@ function runtimeSettings() {
     betterAuthSecret: "signup-funnel-metrics-test-secret-at-least-32-bytes",
     managedAuthGoogleClientId: "google-test",
     managedAuthGoogleClientSecret: "google-secret",
+    // Only the legacy session-set mode signs the user in when the verification
+    // link is followed; pin it so a changed default fails here for that reason.
+    managedAuthSessionSetMode: "legacy",
   });
 }
 
@@ -172,9 +175,8 @@ describe("managed sign-up funnel metrics", () => {
     expect(verificationUrl.searchParams.get("callbackURL")).toBe(
       "/?auth_event=email_verified&utm_source=producthunt",
     );
-    const verified = await app.request(`${verificationUrl.pathname}${verificationUrl.search}`, {
-      headers: requestHeaders(),
-    });
+    const verificationPath = `${verificationUrl.pathname}${verificationUrl.search}`;
+    const verified = await app.request(verificationPath, { headers: requestHeaders() });
     expect(verified.status).toBeLessThan(400);
     expect(
       await counter(observability, "opengeni_auth_events_total", {
@@ -182,7 +184,53 @@ describe("managed sign-up funnel metrics", () => {
         method: "email",
       }),
     ).toBe(1);
+    // In the legacy session-set mode the first successful verification click
+    // signs the new user in, so it is their first `sign_in`: the session it
+    // creates is the one they continue into organization setup with.
+    expect(
+      verified.headers.getSetCookie().some((value) => value.includes("better-auth.session_token=")),
+    ).toBe(true);
+    const verifiedSession = cookiePairs(verified);
+    expect(
+      await counter(observability, "opengeni_auth_events_total", {
+        event: "sign_in",
+        method: "email",
+      }),
+    ).toBe(1);
 
+    // A reused link (or a mail scanner that already followed it) creates no
+    // session and counts neither verification nor sign-in again.
+    const replay = await app.request(verificationPath, { headers: requestHeaders() });
+    expect(replay.status).toBeLessThan(400);
+    expect(
+      replay.headers.getSetCookie().some((value) => value.includes("better-auth.session_token=")),
+    ).toBe(false);
+    expect(
+      await counter(observability, "opengeni_auth_events_total", {
+        event: "email_verified",
+        method: "email",
+      }),
+    ).toBe(1);
+    expect(
+      await counter(observability, "opengeni_auth_events_total", {
+        event: "sign_in",
+        method: "email",
+      }),
+    ).toBe(1);
+
+    // The funnel sign_up -> email_verified -> sign_in -> created completes on
+    // that one verification session, without a separate password sign-in.
+    const setup = await app.request("/v1/auth/organization-onboarding", {
+      method: "POST",
+      headers: requestHeaders(verifiedSession),
+      body: JSON.stringify({ organizationName: "Funnel Org", operationId: crypto.randomUUID() }),
+    });
+    expect(setup.status).toBe(200);
+    expect(
+      await counter(observability, "opengeni_organization_setup_total", { outcome: "created" }),
+    ).toBe(1);
+
+    // A later password sign-in is another session and another `sign_in`.
     const signIn = await app.request("/v1/auth/sign-in/email", {
       method: "POST",
       headers: requestHeaders(),
@@ -194,18 +242,9 @@ describe("managed sign-up funnel metrics", () => {
         event: "sign_in",
         method: "email",
       }),
-    ).toBe(1);
+    ).toBe(2);
 
     const session = cookiePairs(signIn);
-    const setup = await app.request("/v1/auth/organization-onboarding", {
-      method: "POST",
-      headers: requestHeaders(session),
-      body: JSON.stringify({ organizationName: "Funnel Org", operationId: crypto.randomUUID() }),
-    });
-    expect(setup.status).toBe(200);
-    expect(
-      await counter(observability, "opengeni_organization_setup_total", { outcome: "created" }),
-    ).toBe(1);
     const invalid = await app.request("/v1/auth/organization-onboarding", {
       method: "POST",
       headers: requestHeaders(session),

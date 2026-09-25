@@ -26,7 +26,7 @@ const effectiveControl = {
   settlement: null,
 };
 
-type Mode = "questions" | "commands" | "attachments";
+type Mode = "questions" | "commands" | "attachments" | "variables";
 type State = {
   mode: Mode;
   answers: unknown[];
@@ -41,6 +41,7 @@ describe("production session conditional loading", () => {
   let baseUrl: string;
   let panelAsset: string;
   let attachmentAsset: string;
+  let variableSetAsset: string;
   const evidenceDir = `${repoRoot}/.agent/evidence/session-lazy-panels`;
 
   beforeAll(async () => {
@@ -59,8 +60,10 @@ describe("production session conditional loading", () => {
       (entry) => entry.name === "session-conditional-panels",
     )!.file;
     attachmentAsset = manifest["src/components/session/message-resource-attachments.tsx"]!.file;
+    variableSetAsset = manifest["src/components/session/session-variable-set-picker.tsx"]!.file;
     expect(panelAsset).toBeTruthy();
     expect(attachmentAsset).toBeTruthy();
+    expect(variableSetAsset).toBeTruthy();
     const port = await freePort();
     baseUrl = `http://127.0.0.1:${port}`;
     web = await startProcess(
@@ -235,6 +238,96 @@ describe("production session conditional loading", () => {
         }
       }, 45_000);
     }
+  }
+
+  for (const [width, outcome] of [
+    [320, "loaded"],
+    [1280, "loaded"],
+    [1280, "failed"],
+  ] as const) {
+    test(`the composer Variable Set editor is ${outcome} on demand at ${width}px`, async () => {
+      const context = await browser.newContext({
+        viewport: { width, height: 900 },
+        reducedMotion: "reduce",
+      });
+      const page = await context.newPage();
+      const errors: string[] = [];
+      const assets: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.stack ?? error.message));
+      page.on("request", (request) => {
+        if (request.url().includes("/assets/")) assets.push(request.url());
+      });
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route(`${baseUrl}/${variableSetAsset}`, async (route) => {
+        if (outcome === "failed") return route.abort("failed");
+        await blocked;
+        await route.continue();
+      });
+      await installApi(page, baseUrl, {
+        mode: "variables",
+        answers: [],
+        stops: 0,
+        commandReads: 0,
+        fileReads: 0,
+      });
+      try {
+        await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
+        const transcript = page
+          .locator('[data-testid="timeline-user"]')
+          .getByText("Keep this message visible.", { exact: true });
+        await transcript.waitFor({ timeout: 20_000 });
+        // A direct session load does not carry the editor.
+        expect(assets.some((url) => url.endsWith(variableSetAsset))).toBe(false);
+        if (outcome === "failed") {
+          // Preload recovery has already spent its one reload for this build,
+          // so the failed import reaches React instead of reloading the page.
+          await page.evaluate(() =>
+            sessionStorage.setItem(
+              "opengeni:vite-preload-recovery-build",
+              Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="module"][src]'))
+                .map((script) => script.src)
+                .join("|") || document.baseURI,
+            ),
+          );
+        }
+        await page.getByRole("button", { name: "More composer actions", exact: true }).click();
+        await page.getByRole("menuitem", { name: /Variable sets/ }).click();
+        const menu = page.getByRole("menu");
+        if (outcome === "loaded") {
+          await menu.getByText("Loading variable sets…", { exact: true }).waitFor();
+          await menu.getByRole("button", { name: "Back", exact: true }).waitFor();
+          await page.screenshot({ path: `${evidenceDir}/variables-${width}-loading.png` });
+          release();
+          await menu.getByRole("button", { name: "Save", exact: true }).waitFor();
+        } else {
+          // The failure stays inside the menu instead of replacing the route.
+          await menu.getByRole("alert").getByText("Variable sets could not be loaded.").waitFor();
+          expect(await menu.getByRole("button", { name: "Reload", exact: true }).isVisible()).toBe(
+            true,
+          );
+        }
+        expect(assets.some((url) => url.endsWith(variableSetAsset))).toBe(true);
+        expect(await transcript.isVisible()).toBe(true);
+        await page.screenshot({ path: `${evidenceDir}/variables-${width}-${outcome}.png` });
+        await menu.getByRole("button", { name: "Back", exact: true }).click();
+        await menu.getByRole("menuitem", { name: /Variable sets/ }).waitFor();
+        expect(
+          await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
+        ).toBeLessThanOrEqual(1);
+        expect(errors).toEqual([]);
+      } catch (error) {
+        throw new Error(
+          `variables/${outcome}/${width}: ${JSON.stringify({ errors })}\n${await page.locator("body").innerText()}`,
+          { cause: error },
+        );
+      } finally {
+        release();
+        await context.close();
+      }
+    }, 45_000);
   }
 });
 
