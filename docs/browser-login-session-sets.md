@@ -243,6 +243,13 @@ Repository readiness and deployment activation are separate approvals:
 
 No repository test, PR merge, or migration application authorizes step 3 or 4.
 
+Sign-up funnel telemetry changes shape at step 3. The server acquisition counter
+keeps working because the Add window forwards first-touch attribution with the
+social transaction start, but browser `signup_completed` stops for Google/GitHub
+sign-ups made through that window. Compare funnels across the switch with the
+server counters (`opengeni_auth_events_total`, `opengeni_signup_acquisition_total`),
+not PostHog events. See `apps/web/docs/browser-analytics.md`.
+
 ## Self-hosting
 
 Session sets apply only to `OPENGENI_PRODUCT_ACCESS_MODE=managed`. Local and

@@ -26,6 +26,7 @@ import {
   MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
 } from "./managed-auth-rate-limits";
 import { deliverManagedSignInNotification } from "./managed-sign-in-notifications";
+import { createSignupFunnelMetrics } from "./signup-funnel-metrics";
 import {
   currentManagedAuthProviderId,
   currentManagedAuthAttemptId,
@@ -164,6 +165,10 @@ export function createManagedAuth(
   if (settings.productAccessMode !== "managed") {
     return null;
   }
+  // Content-free sign-up funnel counters; recording never fails an auth flow.
+  const funnel = options.observability
+    ? createSignupFunnelMetrics(options.observability)
+    : undefined;
   const requireEmailVerification = managedAuthRequiresEmailVerification(settings);
   const pool = createManagedAuthDatabasePool(settings.databaseUrl, options.observability);
   return betterAuth({
@@ -340,13 +345,10 @@ export function createManagedAuth(
       onExistingUserSignUp: async ({ user }) => {
         if (requireEmailVerification && !user.emailVerified) {
           const url = await verificationUrl(settings, user.email);
-          await sendManagedAuthEmail(managedEmailTransport, {
-            kind: "email_verification",
-            to: user.email,
-            subject: "Verify your OpenGeni email",
-            text: `Verify your OpenGeni email: ${url}`,
-            html: `<p>Verify your OpenGeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p>`,
-          });
+          await sendManagedAuthEmail(
+            managedEmailTransport,
+            emailVerificationMessage(user.email, url),
+          );
         }
       },
       sendResetPassword: async ({ user, url }) => {
@@ -361,16 +363,19 @@ export function createManagedAuth(
     },
     emailVerification: {
       sendOnSignUp: requireEmailVerification,
+      // The first successful verification link click signs the user in (a
+      // reused link creates no session). Only legacy mode: session-set modes
+      // bind sign-in to an isolated browser transaction, and the provider
+      // session this would create is discarded there by design.
+      autoSignInAfterVerification: settings.managedAuthSessionSetMode === "legacy",
       sendVerificationEmail: async ({ user, url }) => {
-        await sendManagedAuthEmail(managedEmailTransport, {
-          kind: "email_verification",
-          to: user.email,
-          subject: "Verify your OpenGeni email",
-          text: `Verify your OpenGeni email: ${url}`,
-          html: `<p>Verify your OpenGeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p>`,
-        });
+        await sendManagedAuthEmail(
+          managedEmailTransport,
+          emailVerificationMessage(user.email, url),
+        );
       },
       afterEmailVerification: async (user) => {
+        funnel?.recordEmailVerified();
         await ensureManagedAccessForUser(db, {
           userId: user.id,
           email: user.email,
@@ -494,6 +499,7 @@ export function createManagedAuth(
             };
           },
           after: async (session) => {
+            funnel?.recordSignIn();
             recordCurrentManagedAuthSession(session.id);
             if (!shouldDiscardCurrentManagedAuthProviderSession()) return;
             await db.execute(sql`delete from auth_sessions where id = ${session.id}`);
@@ -504,7 +510,8 @@ export function createManagedAuth(
         create: {
           before: async (user) =>
             managedAuthUserCreateAdmission(settings, user, currentManagedAuthProviderId()),
-          after: async (user) => {
+          after: async (user, context) => {
+            await funnel?.recordSignUp(context);
             if (!user.emailVerified) return;
             await ensureManagedAccessForUser(db, {
               userId: user.id,
@@ -668,6 +675,19 @@ export async function sendManagedAuthEmail(
 ): Promise<void> {
   const result = await transport.send({ ...input, from: transport.sender });
   if (result.status !== "sent") throw new Error(`managed email ${result.status}`);
+}
+
+// Verification can sign the clicker in (autoSignInAfterVerification), so an
+// unsolicited verification email must say plainly that it can be ignored.
+function emailVerificationMessage(to: string, url: string): Omit<ManagedEmailMessage, "from"> {
+  const ignore = "If you did not create an OpenGeni account, ignore this email.";
+  return {
+    kind: "email_verification",
+    to,
+    subject: "Verify your OpenGeni email",
+    text: `Verify your OpenGeni email: ${url}\n\n${ignore}`,
+    html: `<p>Verify your OpenGeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p><p>${ignore}</p>`,
+  };
 }
 
 async function verificationUrl(settings: Settings, email: string): Promise<string> {

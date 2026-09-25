@@ -14,6 +14,7 @@ import type { NativeConnectRequest } from "@/components/capabilities/native-conn
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { observeSessionTurnEvents } from "@/lib/analytics-observer";
 import { needsSandboxRecoveryCheck } from "@/lib/sandbox-failure";
 import {
   admissionRecheckControl,
@@ -94,7 +95,8 @@ import {
   UserMessageBody,
 } from "@/components/session/banners";
 import { useRail } from "@/components/rail/rail-context";
-import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
+import { CLOUD_SANDBOX_LABEL, machineDisplayName } from "@/components/session/sandbox-switcher";
+import { useBackgroundAttentionTitle } from "@/lib/background-attention-title";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { ArtifactLinkBoundary } from "@/components/session/artifact-link-boundary";
@@ -307,6 +309,9 @@ export function SessionRoute({
     jumpToSequence,
     error: streamError,
   } = useSessionEvents(sessionId);
+  // Consented funnel telemetry: a session this page started reached its first
+  // completed turn. Only event types are inspected.
+  useEffect(() => observeSessionTurnEvents(sessionId, events), [events, sessionId]);
   const sessionDetailReadOwner = useRef<object>({});
   const beginSessionDetailRead = useCallback(
     () =>
@@ -361,6 +366,8 @@ export function SessionRoute({
         : null,
     [queue.effectiveControl, sessionSeed, sessionStatus, sessionStatusSequence],
   );
+  // Background-tab cue: mark the title when this open session settles for the user.
+  useBackgroundAttentionTitle(sessionId, session?.status ?? null);
   // Dispatch retries update their durable ledger without timeline events. Read
   // that evidence only while this visible session is queued, with no overlapping
   // requests, so a moving retry schedule cannot masquerade as active execution.
@@ -1533,8 +1540,8 @@ function SessionChatPane(props: {
     sessionId: props.session.id,
     pollIntervalMs: MACHINES_SESSION_POLL_MS,
   });
-  const computeLabel =
-    fleet.machines.find((machine) => machine.active)?.name ?? CLOUD_SANDBOX_LABEL;
+  const activeMachine = fleet.machines.find((machine) => machine.active);
+  const computeLabel = activeMachine ? machineDisplayName(activeMachine) : CLOUD_SANDBOX_LABEL;
   const loadRetainedScreenshot = useMemo(
     () =>
       createSessionRetainedScreenshotLoader(

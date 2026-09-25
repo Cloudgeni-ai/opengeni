@@ -611,6 +611,26 @@ renaming an existing initial workspace back to `Default workspace`, so a later
 administrator rename is durable. Migration 0314 itself sends no provider
 message; the later 0348 API delivery path below does.
 
+In the default `legacy` session-set mode, the first successful click of an
+email verification link also signs the user in (Better Auth
+`autoSignInAfterVerification`), so a new user lands directly in organization
+setup. A reused link only redirects and never mints another session. `dual` and
+`broker` modes leave it off: there, sign-in belongs to the isolated browser
+transaction (see `docs/browser-login-session-sets.md`).
+
+This is a deliberate trade-off with two known edges. While an unused link is
+live (one hour), whoever holds it gets a session for a brand-new, empty
+account; anyone who can read that mailbox could already reset the password.
+The reverse case is pre-account takeover: someone signs up with another
+person's email and a password they know, and that person clicks the
+unsolicited link. Before auto sign-in the victim met a sign-in wall and had to
+reset the password, which revokes sessions and locks the other party out; now
+the victim is signed in and may start using an account whose password someone
+else holds. Every verification email therefore says to ignore it if the
+recipient did not create an OpenGeni account. Signing in only when the link is
+opened in the browser that signed up would close that edge and remains a
+possible follow-up.
+
 ### Post-sign-in organization setup and one-time invited-user setup (0348)
 
 Migration `0348_named_signup_and_user_setup.sql` makes both onboarding paths

@@ -470,6 +470,13 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Launch sign-up attribution: memory-only first-touch capture at boot and
+    // attributed sign-up/social request bodies in the shared API helper. Base
+    // 23e0a242a measures 2,453,795 raw / 693,297 gzip; this change 2,455,310 /
+    // 693,921 across 33 files (Bun 1.3.14 macOS/arm64). Keep the established
+    // 1.5 KiB headroom; gzip, file-count, initial, per-file, lazy, and CSS caps
+    // stay fixed.
+    wholeKibEnvelope(2_455_310, 1.5 * kib),
     // Artifact link resolution and host message-presentation plumbing: 2,445,478
     // raw / 691,865 gzip on Bun 1.4 macOS/arm64. Media/PDF viewers remain lazy.
     wholeKibEnvelope(2_445_478, 1.5 * kib),
@@ -503,6 +510,14 @@ const effectiveBudgets = {
     // The actual merge with main 5ef34cf500 is 2,370,837 raw / 664,028
     // gzip (32 files); preserve the measured integrated raw envelope too.
     wholeKibEnvelope(2_370_837),
+    // Session polish: plain-language provider failure copy, a compact phone
+    // status badge, neutral compute labels and the background tab-title cue.
+    // Locally (Bun 1.3.14 macOS/arm64) base 6eb431b03 measures 2,451,401 raw.
+    // The first revision measured 2,459,406 raw both locally and in Linux/x64
+    // Bun 1.4 CI (695,083 gzip); the reviewed revision measures 2,454,752 raw /
+    // 693,801 gzip across 33 files locally. Keep the established 1.5 KiB
+    // headroom; gzip, file-count and other caps stay fixed.
+    wholeKibEnvelope(2_454_752, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,

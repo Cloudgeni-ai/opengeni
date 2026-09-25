@@ -226,12 +226,14 @@ export function SessionHeader({
             <WorkstreamControlIndicator session={session} />
           )}
         </div>
-        <span className="sr-only md:hidden">
-          Connection {connectionState}.{" "}
-          {session.effectiveControl.state === "active"
-            ? `Session ${waiting ? "waiting" : status}.`
-            : "Workstream paused."}
-        </span>
+        {/* Phones keep a compact, non-interactive lifecycle indicator; the
+            full badge and connection pill above take over from md. */}
+        <CompactSessionStatus
+          paused={session.effectiveControl.state !== "active"}
+          waiting={Boolean(waiting)}
+          status={status}
+        />
+        <span className="sr-only md:hidden">Connection {connectionState}.</span>
         {keyAuthRequired ? (
           <Button
             type="button"
@@ -261,6 +263,49 @@ export function SessionHeader({
         </Button>
       </div>
     </header>
+  );
+}
+
+/** Small-screen status: dot + short label, sized to wrap inside the header. */
+function CompactSessionStatus({
+  paused,
+  waiting,
+  status,
+}: {
+  paused: boolean;
+  waiting: boolean;
+  status: Session["status"];
+}) {
+  if (paused) {
+    return (
+      <span
+        data-compact-session-status="paused"
+        className="inline-flex shrink-0 items-center gap-1 rounded-full border border-status-waiting/35 bg-status-waiting/10 px-1.5 py-px text-2xs font-medium text-fg md:hidden"
+      >
+        <PauseIcon aria-hidden className="size-2.5 shrink-0 fill-current text-status-waiting" />
+        Paused
+      </span>
+    );
+  }
+  if (waiting) {
+    return (
+      <span
+        data-compact-session-status="waiting"
+        className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-surface-1 px-1.5 py-px text-2xs font-medium text-fg-muted md:hidden"
+      >
+        <span aria-hidden className="size-1 rounded-full bg-current" />
+        Waiting
+      </span>
+    );
+  }
+  return (
+    <span data-compact-session-status={status} className="inline-flex shrink-0 md:hidden">
+      <SessionStatusBadge
+        status={status}
+        size="sm"
+        {...(status === "waiting_capacity" ? { label: "Waiting" } : {})}
+      />
+    </span>
   );
 }
 

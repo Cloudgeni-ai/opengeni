@@ -48,6 +48,16 @@ const og = new OpenGeni({
   organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
 });
 
+// Once per user, when your product admits them to a tenant. Chat requests
+// never grant workspace membership; without it the API answers 403.
+export async function onboard(me: { accountId: string; userId: string }) {
+  const workspaceId = await og.workspaceId({ tenant: me.accountId });
+  await og.client.addExternalWorkspaceMember(workspaceId, {
+    identity: { externalId: me.userId, source: og.source },
+    permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
+  });
+}
+
 // Your endpoint. `resolve` is your auth hook: tenant and user come from the
 // request you authenticated, never from the request body.
 export const POST = createChatHandler(og, {
@@ -58,6 +68,12 @@ export const POST = createChatHandler(og, {
   },
 });
 ```
+
+The four permissions cover the chat routes: open and create conversations,
+read and stream them, and send follow-ups or answer pending decisions. Grant
+more only for features your product exposes. Pass an `operationId` you store
+first to make onboarding retries safe; see
+[external membership operations](external-membership-operations.md).
 
 Or drive it from any server code:
 

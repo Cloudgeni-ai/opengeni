@@ -2250,6 +2250,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0472_usage_events_workspace_recent_index.sql",
     );
     let completeSourceContract = await contractWithoutMigrations([
+      "0519_session_recovery_backlog_excludes_paused.sql",
       "0516_member_connection_read.sql",
       "0517_member_connection_read_backfill_index.sql",
       "0518_member_connection_read_backfill.sql",

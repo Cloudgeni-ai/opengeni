@@ -9,6 +9,13 @@ const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const REVALIDATE_CACHE_CONTROL = "no-cache";
 const SHORT_CACHE_CONTROL = "public, max-age=3600";
 const DEMO_API_PREFIX = "/demo-api";
+// Baseline hardening for every response the shell itself serves. Framing and
+// CSP stay unset on purpose: the console supports embedding (docs/embedding.md).
+// A route-specific value, such as the setup page's no-referrer, wins.
+const SHELL_SECURITY_HEADERS = {
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "strict-origin-when-cross-origin",
+} as const;
 const HOP_BY_HOP_HEADERS = [
   "connection",
   "keep-alive",
@@ -44,6 +51,10 @@ export function createWebHandler(
     if (url.pathname === DEMO_API_PREFIX || url.pathname.startsWith(`${DEMO_API_PREFIX}/`)) {
       return proxyDemoApi(request, url, options.demoApiProxy);
     }
+    return withShellSecurityHeaders(await serveShell(request, url));
+  };
+
+  async function serveShell(request: Request, url: URL): Promise<Response> {
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("Method Not Allowed", {
         status: 405,
@@ -78,7 +89,14 @@ export function createWebHandler(
       return serveFile(request, indexPath, "no-store", SETUP_ACCOUNT_RESPONSE_HEADERS);
     }
     return serveFile(request, indexPath, REVALIDATE_CACHE_CONTROL);
-  };
+  }
+}
+
+function withShellSecurityHeaders(response: Response): Response {
+  for (const [name, value] of Object.entries(SHELL_SECURITY_HEADERS)) {
+    if (!response.headers.has(name)) response.headers.set(name, value);
+  }
+  return response;
 }
 
 async function proxyDemoApi(

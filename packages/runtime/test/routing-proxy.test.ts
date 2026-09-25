@@ -18,6 +18,9 @@
 //       never two active concurrently.
 
 import { describe, expect, test } from "bun:test";
+import { SandboxWorkspaceReadNotFoundError, type SandboxSessionLike } from "@openai/agents/sandbox";
+import { SandboxFilesystemNotFoundError } from "modal";
+import { discoverWorkspaceSkills } from "../src/workspace-skills";
 import {
   ChannelANotFoundError,
   SandboxChannelAService,
@@ -354,6 +357,148 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     });
     await expect(proxy.exec({ cmd: "never-run" })).rejects.toThrow("capture gate rejected");
     expect(called).toBe(true);
+  });
+
+  test("a definite path miss from a read-only first probe is a completed operation", async () => {
+    // Repository skill discovery lists `.agents/skills` first on almost every
+    // turn; a workspace without that directory answers with a path miss, which
+    // the caller treats as "no skills", not as a failed sandbox operation.
+    const observations: Parameters<
+      NonNullable<RoutingSandboxSessionDeps["onFirstOperation"]>
+    >[0][] = [];
+    const operations: Parameters<NonNullable<RoutingSandboxSessionDeps["onOperation"]>>[0][] = [];
+    const backend: RoutableBackendSession = {
+      async listDir() {
+        throw new ChannelANotFoundError("directory path not found: .agents/skills");
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      onFirstOperation: (observation) => observations.push(observation),
+      onOperation: (observation) => operations.push(observation),
+    });
+
+    await expect(proxy.listDir({ path: ".agents/skills" })).rejects.toBeInstanceOf(
+      ChannelANotFoundError,
+    );
+    expect(observations).toHaveLength(1);
+    expect(observations[0]).toMatchObject({
+      op: "listDir",
+      outcome: "completed",
+      phases: {
+        resolution: { outcome: "completed" },
+        providerOperation: { outcome: "completed" },
+      },
+    });
+    expect(operations).toMatchObject([{ op: "listDir", outcome: "not_found" }]);
+
+    // The real first operation of a lazily provisioned turn: skill discovery
+    // over a workspace with neither skill directory still reports completed.
+    const discoveryObservations: typeof observations = [];
+    const discoveryProxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      onFirstOperation: (observation) => discoveryObservations.push(observation),
+    });
+    await expect(
+      discoverWorkspaceSkills(discoveryProxy as unknown as SandboxSessionLike, [
+        { path: ".agents/skills", source: "workspace .agents/skills" },
+        { path: ".claude/skills", source: "workspace .claude/skills" },
+      ]),
+    ).resolves.toEqual([]);
+    expect(discoveryObservations).toMatchObject([{ op: "listDir", outcome: "completed" }]);
+  });
+
+  test("typed SDK path misses from a read-only first probe are completed operations", async () => {
+    for (const miss of [
+      new SandboxWorkspaceReadNotFoundError("path not found: .agents/skills"),
+      new SandboxFilesystemNotFoundError("path not found: .agents/skills"),
+    ]) {
+      const observations: Parameters<
+        NonNullable<RoutingSandboxSessionDeps["onFirstOperation"]>
+      >[0][] = [];
+      const operations: Parameters<NonNullable<RoutingSandboxSessionDeps["onOperation"]>>[0][] = [];
+      const backend: RoutableBackendSession = {
+        async readFile() {
+          throw miss;
+        },
+      };
+      const proxy = new RoutingSandboxSession({
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+        resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+        onFirstOperation: (observation) => observations.push(observation),
+        onOperation: (observation) => operations.push(observation),
+      });
+      await expect(proxy.readFile({ path: ".agents/skills/x/SKILL.md" })).rejects.toBe(miss);
+      expect(observations).toMatchObject([
+        {
+          op: "readFile",
+          outcome: "completed",
+          phases: { providerOperation: { outcome: "completed" } },
+        },
+      ]);
+      expect(operations).toMatchObject([{ op: "readFile", outcome: "not_found" }]);
+    }
+
+    // Untyped "not found" text is not a definite path miss.
+    const observations: Parameters<
+      NonNullable<RoutingSandboxSessionDeps["onFirstOperation"]>
+    >[0][] = [];
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: {
+          async readFile() {
+            throw Object.assign(new Error("404 not found"), { status: 404 });
+          },
+        },
+        sandboxId: null,
+        kind: "modal",
+      }),
+      onFirstOperation: (observation) => observations.push(observation),
+    });
+    await expect(proxy.readFile({ path: "missing.txt" })).rejects.toThrow("not found");
+    expect(observations).toMatchObject([{ outcome: "failed" }]);
+  });
+
+  test("a first-operation provider failure that is not a path miss stays failed", async () => {
+    const observations: Parameters<
+      NonNullable<RoutingSandboxSessionDeps["onFirstOperation"]>
+    >[0][] = [];
+    const backend: RoutableBackendSession = {
+      async listDir() {
+        throw new Error("provider transport reset");
+      },
+      async writeFile() {
+        throw new ChannelANotFoundError("destination parent not found: missing/file.txt");
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      onFirstOperation: (observation) => observations.push(observation),
+    });
+    await expect(proxy.listDir({ path: ".agents/skills" })).rejects.toThrow("transport reset");
+    expect(observations[0]).toMatchObject({
+      outcome: "failed",
+      phases: { providerOperation: { outcome: "failed" } },
+    });
+
+    // A path miss is only an answer for a read-only probe, never for a write.
+    const writeObservations: typeof observations = [];
+    const writer = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      onFirstOperation: (observation) => writeObservations.push(observation),
+    });
+    await expect(writer.writeFile({ path: "missing/file.txt" })).rejects.toBeInstanceOf(
+      ChannelANotFoundError,
+    );
+    expect(writeObservations[0]).toMatchObject({
+      outcome: "failed",
+      phases: { providerOperation: { outcome: "failed" } },
+    });
   });
 
   test("omits first-operation phases that never ran after route resolution fails", async () => {
