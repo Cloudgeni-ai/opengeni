@@ -48,9 +48,14 @@ const PROVIDER_ERROR: KnownFailure = {
   suggestModel: false,
 };
 
-// Worker codes whose recorded text is the provider's own. Every other code
-// already carries authored copy (Codex, SuperGrok, sandbox, MCP, ...).
-const PROVIDER_TEXT_CODES = new Set(["provider_rate_limited", "provider_unavailable"]);
+// Worker codes whose recorded text is the provider's own (or, for an exhausted
+// quota, authored copy plus the provider's text). Every other code already
+// carries authored copy (Codex, SuperGrok, sandbox, MCP, ...).
+const PROVIDER_TEXT_CODES = new Set([
+  "provider_rate_limited",
+  "provider_unavailable",
+  "provider_quota_exhausted",
+]);
 
 /** Classify recorded provider text. Unknown failures return null and keep their wording. */
 export function classifyProviderFailure(
@@ -85,7 +90,7 @@ export function classifyProviderFailure(
   }
   if (
     status === "402" ||
-    /\bpayment required\b|\binsufficient (?:credits|balance|funds)\b|\brequires more credits\b|\bupgrade to a paid account\b/.test(
+    /\bpayment required\b|\binsufficient (?:credits|balance|funds)\b|\brequires more credits\b|\bout of credits\b|\bcredit balance is too low\b|\bupgrade to a paid account\b/.test(
       text,
     )
   ) {
@@ -97,6 +102,8 @@ export function classifyProviderFailure(
   ) {
     return PROVIDER_ACCESS;
   }
+  // The worker stopped retrying because the quota cannot clear in minutes.
+  if (failureCode === "provider_quota_exhausted") return QUOTA;
   if (failureCode === "provider_rate_limited" || status === "429") return RATE_LIMITED;
   if (failureCode === "provider_unavailable") return PROVIDER_ERROR;
   return null;

@@ -143,6 +143,57 @@ test("provider rate limits separate daily limits and quota from transient thrott
   });
 });
 
+test("an exhausted provider quota is terminal copy that points at the model picker", () => {
+  // The worker's turn.failed payload: authored copy in `error`, provider text in `detail`.
+  const exhausted = (error: string, detail: string) => ({
+    ...summary,
+    reason: `${error} ${detail}`,
+    recordedDetail: `${error}\n${detail}`,
+    failureCode: "provider_quota_exhausted",
+  });
+  const daily = exhausted(
+    "This model's daily limit at the model provider has been reached, so automatic retries stopped. Choose another model, or try again after the limit resets.",
+    "429 Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day",
+  );
+  expect(failedSessionCopy(daily, false, false, true)).toEqual({
+    reason: "This model's daily limit has been reached. Choose another model below.",
+    unavailableModel: false,
+    retryUnhelpful: false,
+    detail: daily.recordedDetail,
+  });
+  // Once another model is chosen the hint is dropped; Retry stays available.
+  expect(failedSessionCopy(daily, false, true, true)).toMatchObject({
+    reason: "This model's daily limit has been reached.",
+    retryUnhelpful: false,
+  });
+
+  const monthly = exhausted(
+    "This model's monthly limit at the model provider has been reached, so automatic retries stopped. Choose another model, or try again after the limit resets.",
+    "429 Quota exceeded for this deployment. Please retry after 20 days.",
+  );
+  expect(failedSessionCopy(monthly, false, false, true).reason).toBe(
+    "The model provider's usage quota for this model is used up. Choose another model below.",
+  );
+
+  const credits = exhausted(
+    "The model provider account for this model is out of credits, so automatic retries stopped. Choose another model, or add credits with the provider and try again.",
+    "429 Your team has either used all available credits or reached its monthly spending limit.",
+  );
+  expect(failedSessionCopy(credits, false, false, true)).toMatchObject({
+    reason:
+      "The model provider account for this model is out of credits. Choose another model below.",
+    retryUnhelpful: false,
+  });
+
+  const quota = exhausted(
+    "The model provider's usage quota for this model is used up, so automatic retries stopped. Choose another model, or try again after the quota resets.",
+    "429 You exceeded your current quota, please check your plan and billing details.",
+  );
+  expect(failedSessionCopy(quota, false, false, true).reason).toBe(
+    "The model provider's usage quota for this model is used up. Choose another model below.",
+  );
+});
+
 test("authored worker copy and OpenGeni credit failures keep their own wording", () => {
   const codex = "Your ChatGPT/Codex subscription usage limit has been reached. Access resets soon.";
   expect(

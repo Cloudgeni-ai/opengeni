@@ -789,11 +789,11 @@ state failures remain terminal, and no model, tool, or provider work is replayed
 or converted into a new queue item.
 
 Transient provider recovery is bounded by a durable consecutive-failure streak,
-not lifetime failures accumulated across a long turn. A completed model request
-from the exact current attempt clears the durable streak atomically with its
+not lifetime failures across a long turn. A completed model request
+from the exact current attempt clears the streak atomically with its
 timeline event, and the worker clears its in-memory copy only after that commit;
 late attempt evidence cannot replenish the retry budget. See
-[`run-lifecycle.md`](run-lifecycle.md) for pacing and exhaustion semantics.
+[`run-lifecycle.md`](run-lifecycle.md) for pacing, exhaustion, and quota semantics.
 
 ### 5.3 Goals, schedules, automations, and child work
 
@@ -1646,7 +1646,7 @@ Subsystem routing; complete topic map: [`README.md`](README.md).
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Session workflow, wake delivery, or `continueAsNew` | `apps/worker/src/workflows/session.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
-| Turn claim, execution, settlement, or recovery | `apps/worker/src/activities/agent-turn/` | [`run-lifecycle.md`](run-lifecycle.md) |
+| Turn claim, execution, settlement, or recovery | `apps/worker/src/activities/agent-turn/`, `packages/runtime/src/provider-quota.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Session Debug model-visible context | `packages/runtime/src/model-request-capture.ts`, `packages/runtime/src/model-provider-client.ts`, `packages/runtime/src/model-context-inspector.ts`, `apps/web/src/components/session/model-context-inspector.tsx`, `apps/web/src/components/session/context-text-reader.tsx` | [`run-lifecycle.md`](run-lifecycle.md#debug-context-capture) |
 | Goals and continuations | `apps/worker/src/activities/goals.ts`, `packages/db/src/` | [`goals.md`](goals.md) |
 | Approval or structured human input | `apps/worker/src/activities/agent-turn/stream-attempt.ts`, `apps/api/src/routes/sessions.ts` | [`human-input.md`](human-input.md) |

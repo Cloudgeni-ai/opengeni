@@ -22,6 +22,11 @@ import {
   SandboxMaterializationVerificationError,
   materializationVerificationDiagnostic,
   type MaterializationVerificationDiagnostic,
+  PROVIDER_QUOTA_EXHAUSTED_CODE,
+  type ProviderQuotaExhaustion,
+  type ProviderQuotaScope,
+  classifyProviderQuotaExhaustion,
+  providerQuotaExhaustedMessage,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
 } from "@opengeni/runtime";
@@ -614,6 +619,14 @@ export function compactionFailureReasonFromError(error: unknown): string {
       `the model provider rejected the compaction request (${describeCompactionProviderRejection(rejection)}). Active history was preserved. ${COMPACTION_PROVIDER_REJECTION_GUIDANCE}`,
     );
   }
+  // An exhausted provider quota is not retried (see agentRunFailurePayload),
+  // so name the refusal plainly instead of the raw diagnostic envelope.
+  const quota = classifyProviderQuotaExhaustionError(error);
+  if (quota) {
+    return compactionFailureReason(
+      `${providerQuotaExhaustedMessage(quota.scope)} Active history was preserved.`,
+    );
+  }
   if (
     error instanceof CompactionProviderResponseError ||
     error instanceof EmptyCompactionSummaryError
@@ -846,6 +859,45 @@ export function isTransientProviderError(error: unknown): boolean {
   );
 }
 
+function providerHttpStatus(error: unknown): number | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    const value = current as Record<string, unknown>;
+    const body =
+      value.error && typeof value.error === "object"
+        ? (value.error as Record<string, unknown>)
+        : null;
+    const status = Number(value.status ?? value.statusCode ?? body?.status ?? body?.statusCode);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) return status;
+    current = value.cause;
+  }
+  return null;
+}
+
+/**
+ * Recognize an exhausted API-key provider quota (a daily or monthly allowance,
+ * a free-tier day cap, or an account out of credits) as distinct from an
+ * ordinary per-minute rate limit. Retrying within the bounded same-turn budget
+ * cannot succeed, so the turn fails promptly instead. Subscription transports
+ * own their quota semantics through credential rotation and durable capacity
+ * waits, so a Codex or SuperGrok transport error never classifies here.
+ */
+export function classifyProviderQuotaExhaustionError(
+  error: unknown,
+): ProviderQuotaExhaustion | null {
+  if (isCodexTransportError(error) || isXaiSubscriptionTransportError(error)) return null;
+  try {
+    return classifyProviderQuotaExhaustion({
+      status: providerHttpStatus(error),
+      texts: collectErrorStrings(error),
+      retryAfterMs: providerRetryAfterMs(error),
+    });
+  } catch {
+    // A hostile getter is not quota evidence; keep the existing classification.
+    return null;
+  }
+}
+
 export type XaiCredentialFailure = {
   kind: "auth" | "forbidden" | "rate_limit";
   cooldownMs: number | null;
@@ -952,6 +1004,7 @@ function baseAgentRunFailurePayload(
   historyPersistenceStage?: MandatoryHistoryPersistenceStage;
   mcpTransportDiagnostic?: McpTransportRequestFailureDiagnostic;
   materializationDiagnostic?: MaterializationVerificationDiagnostic;
+  quotaScope?: ProviderQuotaScope;
 } {
   if (error instanceof SandboxMaterializationVerificationError) {
     return {
@@ -1155,6 +1208,20 @@ function baseAgentRunFailurePayload(
         "The model provider ended its response ambiguously. Partial output was not accepted as complete; the same turn will retry from durable history.",
       code: UNKNOWN_MODEL_FINISH_REASON_CODE,
       retryable: true,
+    };
+  }
+  // An exhausted quota also arrives as HTTP 429 (or 402), but no retry within
+  // the finite same-turn budget can succeed. Fail the turn promptly with a
+  // distinct code so the client can offer another model; ordinary short rate
+  // limits fall through to the retryable branch below.
+  const quota = classifyProviderQuotaExhaustionError(error);
+  if (quota) {
+    return {
+      error: providerQuotaExhaustedMessage(quota.scope),
+      code: PROVIDER_QUOTA_EXHAUSTED_CODE,
+      retryable: false,
+      quotaScope: quota.scope,
+      ...(message ? { detail: message } : {}),
     };
   }
   if (

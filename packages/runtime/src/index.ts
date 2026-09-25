@@ -602,6 +602,17 @@ export {
   type HistoryProviderApi,
 } from "./provider-history-adapter";
 
+export {
+  PROVIDER_QUOTA_EXHAUSTED_CODE,
+  classifyProviderQuotaExhaustion,
+  classifyProviderQuotaResponse,
+  providerMessageRetryHintMs,
+  providerQuotaExhaustedMessage,
+  withoutQuotaExhaustedRetries,
+  type ProviderQuotaEvidence,
+  type ProviderQuotaExhaustion,
+  type ProviderQuotaScope,
+} from "./provider-quota";
 // The provider-bound Model classes used by buildModelInstance/resolveTurnModel.
 // Re-exported so callers (and routing tests) can assert which wire API a
 // resolved turn was bound to — OpenAIChatCompletionsModel for registry "chat"
