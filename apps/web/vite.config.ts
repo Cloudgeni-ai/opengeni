@@ -252,7 +252,9 @@ export default defineConfig({
     },
   },
   server: {
-    host: "127.0.0.1",
+    // Loopback unless the local stack deliberately opts in to its network
+    // (`OPENGENI_DEV_BIND_HOST=0.0.0.0`, written to .env.runtime by `bun run dev`).
+    host: process.env.OPENGENI_DEV_BIND_HOST === "0.0.0.0" ? "0.0.0.0" : "127.0.0.1",
     port: 3000,
     // OAuth providers return to the public web origin. Match production's /v1
     // ingress routing so these callbacks reach the API instead of the SPA.
