@@ -1003,6 +1003,26 @@ type OwnedInputProps =
   | "aria-keyshortcuts";
 export type ComposerInputProps = Omit<ComponentPropsWithoutRef<"textarea">, OwnedInputProps>;
 
+const EDITING_FOCUS_SELECTOR =
+  'input, textarea, select, [contenteditable="true"], [role="textbox"]';
+const POPUP_FOCUS_SELECTOR =
+  '[role="menu"], [role="menubar"], [role="listbox"], [role="dialog"], [role="alertdialog"]';
+
+/**
+ * Initial focus is a convenience, not authority to move focus the person has
+ * placed elsewhere. It yields to a field they started editing and to an open
+ * menu, listbox, or dialog that does not contain the composer: moving focus
+ * behind a non-modal popup dismisses it, and a modal surface owns focus until
+ * it closes.
+ */
+function focusBelongsElsewhere(textarea: HTMLTextAreaElement): boolean {
+  const active = textarea.ownerDocument.activeElement;
+  if (!active || active === textarea) return false;
+  if (active.closest(EDITING_FOCUS_SELECTOR)) return true;
+  const popup = active.closest(POPUP_FOCUS_SELECTOR);
+  return popup !== null && !popup.contains(textarea);
+}
+
 export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(function ComposerInput(
   { rows = 1, placeholder, className, "aria-label": ariaLabel, autoFocus = false, ...props },
   forwardedRef,
@@ -1012,22 +1032,17 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
   const paletteOpen =
     controller.paletteEnabled && controller.paletteMounted && controller.palette.open;
 
-  // Native autoFocus loses when the textarea mounts disabled (create-session draft
-  // hydrate). Retry once the controller becomes interactive.
+  // Focus once the controller is interactive. The textarea can mount disabled
+  // (create-session draft hydrate), and the route can finish loading after the
+  // person has already moved on, so this deliberately does not use the native
+  // autoFocus attribute: that would take focus at mount without the guard.
   useEffect(() => {
     if (!autoFocus || controller.disabled || autoFocusedRef.current) return;
     const frame = window.requestAnimationFrame(() => {
       const textarea = controller.textareaRef.current;
       if (!textarea || textarea.disabled) return;
       autoFocusedRef.current = true;
-      // Draft hydration may finish after the user has started editing another
-      // field. Initial focus is a convenience, not authority to take their caret.
-      const active = textarea.ownerDocument.activeElement;
-      if (
-        active !== textarea &&
-        active?.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]')
-      )
-        return;
+      if (focusBelongsElsewhere(textarea)) return;
       textarea.focus();
     });
     return () => window.cancelAnimationFrame(frame);
@@ -1048,7 +1063,6 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
           : (placeholder ?? controller.messages.messagePlaceholder)
       }
       disabled={controller.disabled}
-      autoFocus={autoFocus && !controller.disabled}
       aria-label={ariaLabel ?? controller.messages.inputLabel}
       aria-keyshortcuts="Enter Meta+Enter Control+Enter Shift+Enter"
       aria-autocomplete={

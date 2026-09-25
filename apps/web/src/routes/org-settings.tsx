@@ -17,6 +17,7 @@ import { OrganizationCodexSubscriptions } from "@/components/organization-codex-
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
 import { OrganizationModelProviderConnection } from "@/components/organization-model-provider-connection";
 import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
+import { SettingsSection } from "@/components/settings/settings-layout";
 import { OrganizationUsageDashboard } from "@/components/organization-usage-dashboard";
 import { OrganizationRecoverySection } from "@/components/organization-recovery";
 import { OrganizationIntegrationsSection } from "@/components/organization-integrations-section";
@@ -568,7 +569,7 @@ export function OrgSettingsRoute({
       section={section}
       showModels={canManageOrganizationModels}
     >
-      <section className="grid gap-5 text-left">
+      <div className="grid min-w-0 gap-8 text-left">
         {section === "overview" ? (
           <>
             <OrganizationOverviewSection
@@ -624,16 +625,11 @@ export function OrgSettingsRoute({
         ) : null}
 
         {section === "models" && canManageOrganizationModels ? (
-          <section className="grid gap-2" aria-labelledby="organization-model-connections-heading">
-            <div>
-              <h2 id="organization-model-connections-heading" className="text-sm font-medium">
-                Connections
-              </h2>
-              <p className="mt-1 text-xs leading-5 text-fg-muted">
-                Choose which workspaces and models each connected account can serve. Codex and
-                SuperGrok subscriptions can also be made available to Personal workspaces.
-              </p>
-            </div>
+          <SettingsSection
+            id="organization-model-connections-heading"
+            title="Connections"
+            description="Choose which workspaces and models each connected account can serve. Codex and SuperGrok subscriptions can also be made available to Personal workspaces."
+          >
             <div className="min-w-0">
               <OrganizationCodexSubscriptions
                 key={`${identityKey}:organization-codex`}
@@ -649,7 +645,7 @@ export function OrgSettingsRoute({
                 providerKind="openrouter"
               />
             </div>
-          </section>
+          </SettingsSection>
         ) : null}
 
         {section === "models" && !canManageOrganizationModels ? (
@@ -660,57 +656,62 @@ export function OrgSettingsRoute({
         ) : null}
 
         {section === "knowledge" ? (
-          <section className="grid gap-6">
-            <div>
-              <h2 className="text-sm font-medium">Organization identity</h2>
-              <p className="mt-1 text-xs leading-5 text-fg-muted">
-                A concise answer to who the organization is and why it exists. This is always
-                available to top-level agents, so it should stay small and stable.
-              </p>
-            </div>
-            <OrganizationKnowledgeSummary
-              workspaceId={workspaceId}
-              canManage={canManageOrganizationKnowledge}
-            />
-            {canManageOrganizationKnowledge ? (
-              <>
-                {canManageCompanyProfileAgentPolicy ? (
-                  <OrganizationCompanyProfileAgentPolicy
-                    key={`${identityKey}:company-profile-agent-policy`}
-                    workspaceId={workspaceId}
-                  />
+          <div className="grid min-w-0 gap-8">
+            <SettingsSection
+              id="organization-identity-heading"
+              title="Organization identity"
+              description="A concise answer to who the organization is and why it exists. Always available to top-level agents, it should stay small and stable."
+            >
+              <div className="grid gap-6">
+                <OrganizationKnowledgeSummary
+                  workspaceId={workspaceId}
+                  canManage={canManageOrganizationKnowledge}
+                />
+                {canManageOrganizationKnowledge ? (
+                  <>
+                    {canManageCompanyProfileAgentPolicy ? (
+                      <OrganizationCompanyProfileAgentPolicy
+                        key={`${identityKey}:company-profile-agent-policy`}
+                        workspaceId={workspaceId}
+                      />
+                    ) : (
+                      <p className="border-b border-border pb-6 text-xs leading-5 text-fg-muted">
+                        Agent-managed organization identity is owner-only. Ask an organization owner
+                        to change this mode.
+                      </p>
+                    )}
+                    <OrganizationKnowledgePrompt workspaceId={workspaceId} />
+                  </>
                 ) : (
                   <p className="border-b border-border pb-6 text-xs leading-5 text-fg-muted">
-                    Agent-managed organization identity is owner-only. Ask an organization owner to
-                    change this mode.
+                    Organization identity is read-only for you. An organization owner can update it.
                   </p>
                 )}
-                <OrganizationKnowledgePrompt workspaceId={workspaceId} />
-              </>
-            ) : (
-              <p className="border-b border-border pb-6 text-xs leading-5 text-fg-muted">
-                Organization identity is read-only for you. An organization owner can update it.
-              </p>
-            )}
-            <section className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-6">
-              <div className="max-w-2xl">
-                <h3 className="text-sm font-medium text-fg">Organization documents</h3>
-                <p className="mt-1 text-xs leading-5 text-fg-muted">
-                  Products, customers, goals, constraints, strategy, and changing facts belong in
-                  organization-scoped Documents. Agents retrieve them only when relevant.
-                </p>
               </div>
-              <Link
-                to="/workspaces/$workspaceId/documents"
-                params={{ workspaceId }}
-                search={{ authority: "organization" }}
-                className="inline-flex items-center gap-1.5 text-xs font-medium text-brand hover:underline"
-              >
-                Open documents
-                <ArrowUpRightIcon className="size-3.5" />
-              </Link>
+            </SettingsSection>
+            <section aria-labelledby="organization-documents-heading" className="min-w-0">
+              <div className="flex flex-col gap-3 border-b border-border/70 pb-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <h2 id="organization-documents-heading" className="text-sm font-semibold text-fg">
+                    Organization documents
+                  </h2>
+                  <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
+                    Products, customers, goals, constraints, strategy, and changing facts belong in
+                    organization-scoped Documents. Agents retrieve them only when relevant.
+                  </p>
+                </div>
+                <Link
+                  to="/workspaces/$workspaceId/documents"
+                  params={{ workspaceId }}
+                  search={{ authority: "organization" }}
+                  className="inline-flex min-h-11 shrink-0 items-center gap-1.5 self-start rounded-md text-xs font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                >
+                  Open documents
+                  <ArrowUpRightIcon aria-hidden="true" className="size-3.5" />
+                </Link>
+              </div>
             </section>
-          </section>
+          </div>
         ) : null}
 
         {section === "retention" ? (
@@ -762,7 +763,10 @@ export function OrgSettingsRoute({
         ) : null}
 
         {section === "billing" ? (
-          <section className="grid gap-4 border-b border-border pb-6">
+          <section
+            aria-label="Credits and payments"
+            className="grid gap-5 border-b border-border pb-6"
+          >
             <OrganizationCreditBalance
               billing={visibleBilling}
               canReadBilling={canReadBilling}
@@ -778,12 +782,12 @@ export function OrgSettingsRoute({
               />
             ) : null}
             {visibleBilling?.mode === "stripe" && canManageBilling ? (
-              <div className="grid gap-2">
+              <div className="grid max-w-lg gap-3 border-t border-border/70 pt-4">
                 <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-                  <label className="grid gap-1">
-                    <span className="sr-only">Credit amount</span>
+                  <label className="grid gap-1.5 text-xs font-medium text-fg-muted">
+                    Amount to add (USD)
                     <input
-                      className="h-9 rounded-md border border-border bg-bg px-3 text-sm outline-none transition-colors focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/15"
+                      className="h-9 min-w-0 rounded-md border border-border bg-bg px-3 text-sm text-fg outline-none transition-colors focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/15"
                       type="number"
                       name="credit-amount"
                       autoComplete="off"
@@ -799,6 +803,7 @@ export function OrgSettingsRoute({
                     type="button"
                     variant="secondary"
                     size="sm"
+                    className="self-end"
                     disabled={visibleBusy || !validTopupAmount(topupAmount)}
                     onClick={() => void startCheckout(Number(topupAmount))}
                   >
@@ -859,7 +864,7 @@ export function OrgSettingsRoute({
             enabled={canReadBilling && Boolean(accountId)}
           />
         ) : null}
-      </section>
+      </div>
     </OrganizationSettingsShell>
   );
 }
