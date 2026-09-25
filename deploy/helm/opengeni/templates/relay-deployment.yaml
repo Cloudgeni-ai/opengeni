@@ -1,4 +1,7 @@
 {{- if .Values.relay.enabled }}
+{{- if and .Values.relay.metricsPort (eq (int .Values.relay.metricsPort) (int .Values.relay.containerPort)) }}
+{{- fail "relay.metricsPort must differ from relay.containerPort (the internal metrics listener cannot share the public wss port)" }}
+{{- end }}
 {{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" .Values.relay.priorityClassName "tier" "presentation") }}
 apiVersion: apps/v1
 kind: Deployment
@@ -51,11 +54,21 @@ spec:
           ports:
             - name: wss
               containerPort: {{ .Values.relay.containerPort }}
+            {{- with .Values.relay.metricsPort }}
+            - name: metrics
+              containerPort: {{ . }}
+            {{- end }}
           env:
             {{- include "opengeni.deploymentRevisionEnv" . | nindent 12 }}
             # The wss listener bind. The container port is the single source of truth.
             - name: OPENGENI_RELAY_BIND
               value: {{ printf "0.0.0.0:%d" (int .Values.relay.containerPort) | quote }}
+            {{- with .Values.relay.metricsPort }}
+            # GET /metrics moves to this internal listener and is never served on
+            # the public wss port.
+            - name: OPENGENI_RELAY_METRICS_BIND
+              value: {{ printf "0.0.0.0:%d" (int .) | quote }}
+            {{- end }}
             # The viewer (ogs_) + producer (ogr_) HMAC token secrets the relay
             # verifies connections with. Sourced from the runtime secret (never the
             # Helm-clobbered configmap); a missing key resolves to "" and the relay

@@ -28,9 +28,10 @@ secret:
 networkPolicy:
   enabled: true
   # When NetworkPolicy is enforced, only the bundled collector and these
-  # selectors reach the API's internal metrics port (api.metricsPort). Set
-  # them when a Prometheus outside the release scrapes the API (ServiceMonitor
-  # or scrape annotations), or its API target goes down.
+  # selectors reach the API's internal metrics port (api.metricsPort), and only
+  # these selectors reach the relay's (relay.metricsPort). Set them when a
+  # Prometheus outside the release scrapes the API or relay (ServiceMonitor or
+  # scrape annotations), or its target goes down.
   # monitoring:
   #   namespaceSelector:
   #     matchLabels:

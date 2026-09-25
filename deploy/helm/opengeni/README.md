@@ -61,7 +61,9 @@ helm template opengeni deploy/helm/opengeni -f my-values.yaml
 bun test ./deploy/helm/opengeni/test/extra-volumes.test.ts
 ```
 
-The render cases skip explicitly if Helm is absent. Rendering proves manifest
+The render cases skip explicitly if Helm is absent. CI runs every
+`deploy/**/*.test.ts` file, each in its own process, in the `Deployment
+artifacts` job, where Helm is installed. Rendering proves manifest
 structure, not a live TLS handshake or operational telemetry export. See
 [`docs/deployment.md`](../../../docs/deployment.md) for release and deployment
 guidance.

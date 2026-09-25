@@ -157,6 +157,13 @@ export type RepositoryContextPickerProps = {
   onGitHubAppOpenChange: (open: boolean) => void;
   onOrgChange: (value: string) => void;
   onStartGitHubApp: () => void;
+  /**
+   * Starts workspace App setup. The link is minted on click: `installUrl` only
+   * gates whether this principal may connect, because a page-load link expires.
+   */
+  onConnectWorkspaceApp: () => void;
+  /** Opens one installation's GitHub repository settings through a fresh link. */
+  onConfigureInstallation: (installationId: number) => Promise<void>;
   onDisconnectInstallation: (installationId: number) => Promise<void>;
   /** Repositories already mounted on an additive surface cannot be removed or retargeted. */
   lockedRepoIds?: ReadonlySet<number>;
@@ -228,6 +235,18 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
   const [confirmDisconnectInstallationId, setConfirmDisconnectInstallationId] = useState<
     number | null
   >(null);
+  const [configuringInstallationId, setConfiguringInstallationId] = useState<number | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
+  function configureInstallation(installationId: number) {
+    setConfiguringInstallationId(installationId);
+    setLinkError(null);
+    props
+      .onConfigureInstallation(installationId)
+      .catch((error: unknown) =>
+        setLinkError(error instanceof Error ? error.message : "Couldn't open GitHub. Try again."),
+      )
+      .finally(() => setConfiguringInstallationId(null));
+  }
 
   // Platform deployments expose only installation/connection. Operator
   // deployments additionally expose App registration and environment setup.
@@ -268,11 +287,14 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             </Button>
           ) : null}
           {bindingPresentation.connectUrl ? (
-            <Button asChild type="button" size="sm" className="h-8 text-xs">
-              <a href={bindingPresentation.connectUrl}>
-                <GitPullRequestIcon className="size-3.5" />
-                {bindingPresentation.connectLabel}
-              </a>
+            <Button
+              type="button"
+              size="sm"
+              className="h-8 text-xs"
+              onClick={props.onConnectWorkspaceApp}
+            >
+              <GitPullRequestIcon className="size-3.5" />
+              {bindingPresentation.connectLabel}
             </Button>
           ) : null}
         </div>
@@ -324,11 +346,19 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                 ) : (
                   <div className="flex items-center gap-1">
                     {installation.configureUrl ? (
-                      <Button asChild type="button" variant="ghost" size="xs">
-                        <a href={installation.configureUrl}>
-                          Repositories
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        disabled={configuringInstallationId !== null}
+                        onClick={() => configureInstallation(installation.installationId)}
+                      >
+                        Repositories
+                        {configuringInstallationId === installation.installationId ? (
+                          <Loader2Icon className="size-3 animate-spin" />
+                        ) : (
                           <ExternalLinkIcon className="size-3" />
-                        </a>
+                        )}
                       </Button>
                     ) : null}
                     <Button
@@ -348,6 +378,11 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             );
           })}
         </div>
+      ) : null}
+      {linkError ? (
+        <p className="px-3 text-xs text-status-failed" role="alert">
+          {linkError}
+        </p>
       ) : null}
     </div>
   );

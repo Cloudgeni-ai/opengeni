@@ -2911,10 +2911,13 @@ ingress and secret wiring:
 - **Stream relay** (`opengeni-relay` image): a stateless wss byte-pump that
   splices the agent's producer stream and the viewer's consumer stream for a
   channel (pty/desktop). Enable with `relay.enabled=true`; the chart then renders
-  the relay Deployment, Service, HPA, PodDisruptionBudget, NetworkPolicy, and —
-  when observability is on — a ServiceMonitor. The relay holds no cluster state
-  and makes no cluster egress; both the agent and the viewer dial IN through the
-  ingress.
+  the relay Deployment, Service, HPA, PodDisruptionBudget, NetworkPolicy, and,
+  when observability is on, a ServiceMonitor. With the default
+  `relay.metricsPort` it also renders an internal ClusterIP
+  `<release>-relay-metrics` Service for Prometheus. The relay holds no cluster
+  state and makes no cluster egress; both the agent and the viewer dial IN
+  through the ingress. Route only `/stream` and `/healthz` of the relay host to
+  it.
 - **NATS with auth-callout**: the machine's agent dials a NATS websocket to reach
   the request/reply control plane, authenticated per workspace by a NATS
   auth-callout responder. Use chart-managed NATS with
@@ -2959,7 +2962,9 @@ Non-secret wiring goes in config/values: `OPENGENI_SELFHOSTED_NATS_URL` and
 `OPENGENI_SELFHOSTED_RELAY_URL` (the public wss URLs the agent dials, matching the
 ingress hosts; both are returned to the agent as connect info at enrollment)
 plus the callout account/user names. The relay process itself listens on
-`OPENGENI_RELAY_BIND`. The relay's non-secret tuning
+`OPENGENI_RELAY_BIND`, and serves `GET /metrics` only on
+`OPENGENI_RELAY_METRICS_BIND` when that is set (see Service endpoints below).
+The relay's non-secret tuning
 knobs are `OPENGENI_RELAY_RING_FRAMES`, `OPENGENI_RELAY_SPLICE_BUFFER`,
 `OPENGENI_RELAY_RATE_BURST_BYTES`, `OPENGENI_RELAY_RATE_BYTES_PER_SEC`, and
 `OPENGENI_RELAY_PAIR_TIMEOUT_SECS`. A missing token secret makes the relay reject
@@ -3229,7 +3234,7 @@ Service endpoints:
 
 - API: `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts. `GET /metrics` is served on `OPENGENI_API_METRICS_PORT` when it is set, and then never on `OPENGENI_API_PORT`, so an ingress that forwards every path to the API cannot publish it. Without it, `/metrics` stays on `OPENGENI_API_PORT` (the local and Docker Compose default). The Helm chart sets it from `api.metricsPort` (default `9464`) behind a separate always-ClusterIP `<release>-api-metrics` Service that the ServiceMonitor, scrape annotations, and bundled collector use; do not route it through an Ingress. The ServiceMonitor relabels those series back to the public API Service's `service`/`job` identity, so alerts keyed on `service="<release>-api"` keep matching; annotation-based scrapers see the new Service name. `api.metricsPort: null` restores the legacy single-port layout.
 - Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness requires lifecycle state `ready` plus healthy Postgres, NATS, and Temporal checks. The standalone worker reserves a one-connection Postgres probe pool so ordinary activity-pool saturation cannot create false readiness failures. A draining worker stays live but becomes unready before polling stops.
-- Relay: `GET /metrics` and `GET /healthz` on the relay port when the relay is enabled.
+- Relay: `GET /healthz` on `OPENGENI_RELAY_BIND` (the wss port, default `8443`) when the relay is enabled. `GET /metrics` is served on `OPENGENI_RELAY_METRICS_BIND` (a `host:port`) when it is set, and then never on the wss port, so an ingress that forwards every path of the relay host cannot publish it. Without it, `/metrics` stays on the wss port (the local development default, where the relay binds loopback). The relay refuses to start when both binds share a port. The Helm chart sets it from `relay.metricsPort` (default `9464`) behind a separate always-ClusterIP `<release>-relay-metrics` Service that the relay ServiceMonitor and scrape annotations use; do not route it through an Ingress. The ServiceMonitor relabels those series back to the public relay Service's `service`/`job` identity; annotation-based scrapers see the new `<release>-relay-metrics` Service name. The default needs a relay image from the same release or later; `relay.metricsPort: null` restores the legacy single-port layout, including for an older pinned relay image.
 
 API and worker health responses include the non-fatal warning
 `github_app_bot_identity_unavailable` when that process has partial workspace
@@ -3247,6 +3252,7 @@ Useful settings:
 - `OPENGENI_AUTH_ALLOW_HEALTH=true` allows `/healthz`, `/traffic-readyz`, and `/readyz` through the deployment-key gate.
 - `OPENGENI_AUTH_ALLOW_METRICS=true` allows API `/metrics` through the deployment-key gate for an internal scraper path.
 - `OPENGENI_API_METRICS_PORT=9464` moves API `/metrics` to a dedicated internal listener. That listener serves nothing else and applies the same deployment-key rules.
+- `OPENGENI_RELAY_METRICS_BIND=0.0.0.0:9464` moves relay `/metrics` to a dedicated internal listener that serves nothing else.
 - `OPENGENI_DISABLE_OPENAI_TRACING=true` disables OpenAI Agents SDK tracing; tracing also defaults off when no OTLP endpoint is configured.
 - `OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` to export spans to an OpenTelemetry Collector.
 - `OPENGENI_OTEL_EXPORTER_OTLP_HEADERS=key=value,...` for exporter headers; put this in a secret when it contains credentials.
@@ -3270,7 +3276,15 @@ the ingress-controller rule, whose default empty selectors admit every pod. If
 such a Prometheus (ServiceMonitor or scrape annotations) scrapes the API, set
 `networkPolicy.monitoring` to its namespace and pod selectors before upgrading;
 otherwise the API target goes down and the `up == 0` availability alert fires.
-The managed example values files carry a commented `monitoring` block.
+The relay follows the same rule: with `relay.metricsPort` set, the relay
+NetworkPolicy admits only `networkPolicy.monitoring` to that port, and the wss
+port admits only the ingress controller. A Prometheus that reached the relay's
+wss port through the ingress-controller rule needs `networkPolicy.monitoring`
+too. The default `relay.metricsPort` needs a relay image from the same release
+or later: an older relay binary ignores `OPENGENI_RELAY_METRICS_BIND` and keeps
+`/metrics` on the wss port, so its scrape target goes down. When you pin an older
+relay image, set `relay.metricsPort: null` to keep the legacy layout. The managed
+example values files carry a commented `monitoring` block.
 
 `ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), a model-aware automatic context-compaction start that remains durably pending for 15 minutes, traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, release-owned turn-worker restarts and crash loops, durable worker-death recovery and exhausted recovery, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Compaction start/completion counters initialize at zero for rate diagnostics; a trigger-maintained exact-attempt pending projection and control-worker freshness gauge preserve alert truth across concurrent activities, terminal skips, and turn-worker restarts without exporting tenant identities. Worker-death recovery outcomes are emitted by the fenced control activity after the durable recovery transaction wins, because the process-local metrics registry of the dead turn worker no longer exists. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
 

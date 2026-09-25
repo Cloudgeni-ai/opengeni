@@ -137,6 +137,7 @@ import {
 import {
   completeMcpOAuthCallback,
   integrationBaseUrl,
+  oauthStateFailureReturn,
   startMcpOAuth,
 } from "../integrations/oauth-client";
 import {
@@ -590,7 +591,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       const reason = slackInstallErrorReason(error);
       return c.redirect(
-        slackInstallReturnUrl(baseUrl, state?.returnPath ?? "/integrations", "error", reason),
+        slackInstallReturnUrl(
+          baseUrl,
+          state?.returnPath ?? oauthStateFailureReturn(settings, c.req.query("state")).returnPath,
+          "error",
+          reason,
+        ),
         302,
       );
     }
