@@ -108,7 +108,8 @@ export const MANAGED_AUTH_DATABASE_POOL_OPTIONS = {
  * opens a fresh connection for the next checkout; a checked-out client's
  * in-flight query already rejects to its caller, and the pool discards the
  * dead client on release. An idle client's error also reaches its own
- * listener, so that listener records only while the client is checked out.
+ * listener, so that listener records only while the client is checked out,
+ * and at most once per checkout.
  */
 export function createManagedAuthDatabasePool(
   databaseUrl: string,
@@ -120,7 +121,9 @@ export function createManagedAuthDatabasePool(
   pool.on("release", (_error, client) => checkedOut.delete(client));
   pool.on("connect", (client) => {
     client.on("error", () => {
-      if (checkedOut.has(client)) {
+      // One lost connection can emit twice (the server's termination
+      // message, then the socket end), so count it once.
+      if (checkedOut.delete(client)) {
         recordManagedAuthPoolError(observability, "checked_out_connection_failed");
       }
     });

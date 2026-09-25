@@ -197,11 +197,18 @@ describe("managed auth database pool", () => {
       pool.emit("connect", client);
       pool.emit("acquire", client);
       expect(() => client.emit("error", new Error("terminating connection"))).not.toThrow();
+      // pg follows the server's termination message with a socket-end error.
+      expect(() =>
+        client.emit("error", new Error("Connection terminated unexpectedly")),
+      ).not.toThrow();
       expect(counters).toEqual([{ outcome: "checked_out_connection_failed" }]);
 
       // Released, the client's own error is the pool's idle error; count it once.
-      pool.emit("release", undefined, client);
-      expect(() => client.emit("error", new Error("terminating connection"))).not.toThrow();
+      const idle = new EventEmitter();
+      pool.emit("connect", idle);
+      pool.emit("acquire", idle);
+      pool.emit("release", undefined, idle);
+      expect(() => idle.emit("error", new Error("terminating connection"))).not.toThrow();
       expect(counters).toEqual([{ outcome: "checked_out_connection_failed" }]);
     } finally {
       await pool.end();
