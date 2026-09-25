@@ -82,3 +82,12 @@ opengeni_resolve_dev_bind_host() {
     ;;
   esac
 }
+opengeni_dev_bind_host_notice() {
+  # $1 = resolved bind host, $2 = sandbox backend, $3 = `uname -s`.
+  if [ "$1" = "0.0.0.0" ]; then
+    echo "OPENGENI_DEV_BIND_HOST=0.0.0.0: the unauthenticated API, web app, and infrastructure ports accept connections from your network."
+  elif [ "$2" = "docker" ] && [ "$3" = "Linux" ] && [ -z "${OPENGENI_MCP_URL:-}" ]; then
+    # An explicit OPENGENI_MCP_URL already routes Codemode and the Git broker.
+    echo "Docker sandboxes on Linux reach the API through the Docker bridge, which a loopback-only API refuses, so Codemode and the Git broker are unavailable inside them. Set OPENGENI_DEV_BIND_HOST=0.0.0.0 to allow it."
+  fi
+}

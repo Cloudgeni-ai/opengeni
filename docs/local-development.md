@@ -93,15 +93,17 @@ overlay for `dev:*`/`db:*`). Copied `.env` host-port pins are ignored unless
 `OPENGENI_PIN_PORTS=1`. Native and Docker warm restarts reuse only a healthy
 recorded stack's generated ports.
 
-The local stack is reachable only from this machine. The API, the web app, and
-the published Docker infrastructure ports bind `127.0.0.1`, because the API runs
-in `local` access mode without authentication and the default `local` sandbox
-runs agent commands directly on this computer. A copied `OPENGENI_API_HOST` does
-not change that. Set `OPENGENI_DEV_BIND_HOST=0.0.0.0` only when you deliberately
-want other devices, for example on a private tailnet, to reach the stack; it
-exposes all of those services on every interface. Docker sandboxes on Linux reach
-the API through the Docker bridge, so Codemode and the Git broker inside them
-need that opt-in; Docker Desktop reaches a loopback API without it.
+The API, the web app, and the published Docker infrastructure ports bind
+`127.0.0.1`, because the API runs in `local` access mode without authentication
+and the default `local` sandbox runs agent commands directly on this computer. A
+copied `OPENGENI_API_HOST` does not change that. Loopback keeps other devices
+out; it does not authenticate programs on this computer, so treat the local API
+like any other unauthenticated local service. Set `OPENGENI_DEV_BIND_HOST=0.0.0.0`
+only when you deliberately want other devices, for example on a private tailnet,
+to reach the stack; it exposes all of those services on every interface. Docker
+sandboxes on Linux reach the API through the Docker bridge, so Codemode and the
+Git broker inside them need that opt-in (or an explicit sandbox-reachable
+`OPENGENI_MCP_URL`); Docker Desktop reaches a loopback API without it.
 
 Wait for the aggregate readiness message, then open the printed web URL and
 check that the app renders. If a model is connected, verify an assistant reply
@@ -306,7 +308,13 @@ dashboard (or from the composer's machine picker):
 3. The machine appears in the dashboard with its status, OS/arch, and whether it offers a screen. You can revoke it at any time. Screen control is a separate opt-in granted at approval.
 
 The agent dials **out** to the control plane, so the machine needs no inbound
-network exposure. Operators enable the feature as described in
+network exposure. The local stack binds loopback, so a machine on this computer
+connects as is. A machine on another computer must reach this stack's API, NATS,
+and relay, so it also needs the stack started with `OPENGENI_DEV_BIND_HOST=0.0.0.0`
+(read [Start the full stack](#start-the-full-stack) first) and
+`OPENGENI_SELFHOSTED_NATS_URL` and `OPENGENI_SELFHOSTED_RELAY_URL` (with
+`OPENGENI_RELAY_BIND` for the local relay) pointing at an address it can reach,
+such as a tailnet address. Operators enable the feature as described in
 [`deployment.md` § Connected Machines](deployment.md#connected-machines);
 the SDK-level contract is in [`connected-machines.md`](connected-machines.md).
 

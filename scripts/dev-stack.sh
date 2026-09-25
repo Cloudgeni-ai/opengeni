@@ -52,11 +52,7 @@ if [ "$OPENGENI_DEV_BIND_HOST" = "127.0.0.1" ] && [ -n "${OPENGENI_API_HOST:-}" 
 fi
 OPENGENI_API_HOST="$OPENGENI_DEV_BIND_HOST"
 export OPENGENI_DEV_BIND_HOST OPENGENI_API_HOST
-if [ "$OPENGENI_DEV_BIND_HOST" = "0.0.0.0" ]; then
-  echo "OPENGENI_DEV_BIND_HOST=0.0.0.0: the unauthenticated API, web app, and infrastructure ports accept connections from your network." >&2
-elif [ "$OPENGENI_SANDBOX_BACKEND" = "docker" ] && [ "$(uname -s)" = "Linux" ]; then
-  echo "Docker sandboxes on Linux reach the API through the Docker bridge, which a loopback-only API refuses, so Codemode and the Git broker are unavailable inside them. Set OPENGENI_DEV_BIND_HOST=0.0.0.0 to allow it." >&2
-fi
+opengeni_dev_bind_host_notice "$OPENGENI_DEV_BIND_HOST" "$OPENGENI_SANDBOX_BACKEND" "$(uname -s)" >&2
 
 # Connecting another computer is optional. A basic local stack does not need
 # relay binaries or enrollment credentials. Preserve an existing explicit opt-in.

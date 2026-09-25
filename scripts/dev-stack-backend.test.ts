@@ -175,7 +175,54 @@ async function resolveBindHost(requested: string | undefined) {
   return { exitCode, stdout: stdout.trim(), stderr };
 }
 
+async function bindHostNotice(
+  bindHost: string,
+  sandboxBackend: string,
+  hostOs: string,
+  mcpUrl?: string,
+) {
+  const env: Record<string, string | undefined> = { ...Bun.env };
+  if (mcpUrl === undefined) delete env.OPENGENI_MCP_URL;
+  else env.OPENGENI_MCP_URL = mcpUrl;
+  const child = Bun.spawn(
+    [
+      "bash",
+      "-c",
+      'set -eu; source "$1"; shift; opengeni_dev_bind_host_notice "$@"',
+      "bash",
+      backendPath,
+      bindHost,
+      sandboxBackend,
+      hostOs,
+    ],
+    { env, stdout: "pipe", stderr: "pipe" },
+  );
+  const [exitCode, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+  expect(exitCode).toBe(0);
+  return stdout.trim();
+}
+
 describe("development network exposure", () => {
+  test("warns about network exposure and the Linux Docker sandbox bridge only when relevant", async () => {
+    expect(await bindHostNotice("0.0.0.0", "docker", "Linux")).toContain(
+      "accept connections from your network",
+    );
+    expect(await bindHostNotice("127.0.0.1", "docker", "Linux")).toContain(
+      "Set OPENGENI_DEV_BIND_HOST=0.0.0.0 to allow it",
+    );
+    expect(await bindHostNotice("127.0.0.1", "docker", "Darwin")).toBe("");
+    expect(await bindHostNotice("127.0.0.1", "local", "Linux")).toBe("");
+    // An explicit sandbox-reachable MCP origin already routes Codemode and the Git broker.
+    expect(
+      await bindHostNotice(
+        "127.0.0.1",
+        "docker",
+        "Linux",
+        "https://tunnel.example/v1/workspaces/{workspaceId}/mcp",
+      ),
+    ).toBe("");
+  });
+
   test("binds loopback unless 0.0.0.0 is explicitly requested", async () => {
     expect(await resolveBindHost(undefined)).toMatchObject({ exitCode: 0, stdout: "127.0.0.1" });
     expect(await resolveBindHost("")).toMatchObject({ exitCode: 0, stdout: "127.0.0.1" });
@@ -191,6 +238,9 @@ describe("development network exposure", () => {
     const source = await Bun.file(devStackPath).text();
     expect(source).toContain('OPENGENI_DEV_BIND_HOST="$(opengeni_resolve_dev_bind_host)"');
     expect(source).toContain('OPENGENI_API_HOST="$OPENGENI_DEV_BIND_HOST"');
+    expect(source).toContain(
+      'opengeni_dev_bind_host_notice "$OPENGENI_DEV_BIND_HOST" "$OPENGENI_SANDBOX_BACKEND" "$(uname -s)" >&2',
+    );
     expect(source).toContain('--host "${OPENGENI_DEV_BIND_HOST}"');
     expect(source).not.toContain("--host 0.0.0.0");
     for (const setting of ["OPENGENI_DEV_BIND_HOST", "OPENGENI_API_HOST"])
