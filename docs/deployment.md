@@ -2441,6 +2441,37 @@ The runtime secret must provide values such as:
 
 Do not commit real secret values.
 
+When `OPENGENI_BILLING_MODE=stripe`, point the Stripe webhook endpoint at
+`/v1/webhooks/stripe` and subscribe it to exactly these events (or `*`):
+
+```text
+checkout.session.completed
+checkout.session.async_payment_succeeded
+checkout.session.async_payment_failed
+checkout.session.expired
+payment_intent.succeeded
+payment_intent.payment_failed
+payment_intent.canceled
+charge.refunded
+refund.created
+refund.updated
+refund.failed
+charge.dispute.created
+charge.dispute.funds_withdrawn
+charge.dispute.closed
+charge.dispute.funds_reinstated
+charge.dispute.updated
+customer.created
+customer.updated
+```
+
+Credits are granted only once Stripe reports the Checkout payment `paid`: at
+`checkout.session.completed` for immediate payment methods, or at
+`checkout.session.async_payment_succeeded` for delayed ones. Checkout Sessions
+without OpenGeni metadata (another product sharing the Stripe account) and
+OpenGeni sessions for an account this deployment does not hold (another
+OpenGeni deployment sharing the account) are acknowledged and ignored.
+
 ### MCP OAuth and tool-gateway posture cutover (0404-0405)
 
 The same drained rollout procedure below applies to
