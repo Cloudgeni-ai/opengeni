@@ -1,4 +1,5 @@
 export * from "./artifact-catalog";
+export * from "./workspace-integrations";
 export * from "./session-message-search";
 export * from "./session-goal-reports";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
@@ -2298,6 +2299,13 @@ export type HistoricalMemoryPromptMode = z.infer<typeof HistoricalMemoryPromptMo
 // (future) keys rather than stripping them. memoryEnabled defaults on and the
 // Memory V1 prompt mode is always retrieval-only composition;
 // voiceInput defaults to enabled when the deployment has a provider.
+export const WorkspaceDefaultSandboxImage = z
+  .string()
+  .trim()
+  .min(1)
+  .max(512)
+  .regex(/^[^\s]+$/, "image reference must not contain whitespace");
+
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
@@ -2328,9 +2336,19 @@ export const WorkspaceSettingsSchema = z
     // closed to disabled via resolveWorkspaceSlackOrchestrationNoticeSettings,
     // because an unsolicited Slack post is worse than a missed one.
     slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
+    // Sandbox image for new managed boxes in this workspace. Only images on the
+    // deployment's OPENGENI_SANDBOX_IMAGE_ALLOWLIST are accepted; absent or
+    // null uses the deployment image.
+    defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
+
+/** The workspace sandbox image override, or null for the deployment image. */
+export function resolveWorkspaceDefaultSandboxImage(settings: unknown): string | null {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? (parsed.data.defaultSandboxImage ?? null) : null;
+}
 
 // Resolve the effective memoryEnabled flag from a raw settings bag. Omission
 // defaults on; malformed settings still fail closed so invalid state cannot
@@ -2472,6 +2490,7 @@ export const UpdateWorkspaceSettingsRequest = z
     agentHumanInputEnabled: z.boolean().optional(),
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
     slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
+    defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;

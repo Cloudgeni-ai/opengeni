@@ -5,6 +5,7 @@ export type WorkspaceSettingsSection =
   | "plugins"
   | "models"
   | "api-keys"
+  | "developer"
   | "danger";
 
 const WORKSPACE_PAGE_TARGETS = [
@@ -29,6 +30,7 @@ export function workspaceSettingsSectionFromSearch(value: unknown): WorkspaceSet
     value === "plugins" ||
     value === "models" ||
     value === "api-keys" ||
+    value === "developer" ||
     value === "danger"
     ? value
     : DEFAULT_SETTINGS_SECTION;

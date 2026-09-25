@@ -23,6 +23,7 @@ import {
   ShieldAlertIcon,
   SparklesIcon,
   UsersIcon,
+  WebhookIcon,
 } from "lucide-react";
 import type { ComponentType, ReactNode } from "react";
 
@@ -51,6 +52,7 @@ const SETTINGS_ITEMS: readonly SettingsItem[] = [
   { id: "models", label: "Models", icon: SparklesIcon },
   { id: "plugins", label: "Capabilities", icon: PlugIcon },
   { id: "api-keys", label: "API keys", icon: KeyRoundIcon },
+  { id: "developer", label: "Developer", icon: WebhookIcon },
   { id: "danger", label: "Danger zone", icon: ShieldAlertIcon },
 ];
 
@@ -78,6 +80,10 @@ const SECTION_COPY: Record<WorkspaceSettingsSection, { title: string; descriptio
   "api-keys": {
     title: "API keys",
     description: "Create workspace-scoped credentials for other products.",
+  },
+  developer: {
+    title: "Developer",
+    description: "Webhooks and a credential provider for products built on this workspace.",
   },
   danger: {
     title: "Danger zone",

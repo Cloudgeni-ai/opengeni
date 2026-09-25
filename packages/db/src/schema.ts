@@ -3742,6 +3742,109 @@ export const integrationOauthPendingStates = pgTable(
   }),
 );
 
+export const workspaceCredentialProviders = pgTable(
+  "workspace_credential_providers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    url: text("url").notNull(),
+    secretEncrypted: text("secret_encrypted").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    timeoutMs: integer("timeout_ms").notNull().default(10000),
+    createdBySubjectId: text("created_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_credential_providers_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceUnique: uniqueIndex("workspace_credential_providers_workspace_uq").on(
+      table.workspaceId,
+    ),
+  }),
+);
+
+export const workspaceWebhooks = pgTable(
+  "workspace_webhooks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    url: text("url").notNull(),
+    secretEncrypted: text("secret_encrypted").notNull(),
+    eventTypes: text("event_types").array().notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    description: text("description"),
+    createdBySubjectId: text("created_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_webhooks_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceIdUnique: unique("workspace_webhooks_workspace_id_uq").on(table.workspaceId, table.id),
+    workspaceIndex: index("workspace_webhooks_workspace_idx").on(
+      table.workspaceId,
+      table.createdAt,
+    ),
+  }),
+);
+
+export const workspaceWebhookDeliveries = pgTable(
+  "workspace_webhook_deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    webhookId: uuid("webhook_id").notNull(),
+    eventId: uuid("event_id").notNull(),
+    eventType: text("event_type").notNull(),
+    payload: jsonb("payload").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    failedAt: timestamp("failed_at", { withTimezone: true }),
+    lastStatus: integer("last_status"),
+    lastError: text("last_error"),
+    claimId: uuid("claim_id"),
+    claimUntil: timestamp("claim_until", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_webhook_deliveries_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    webhook: foreignKey({
+      name: "workspace_webhook_deliveries_webhook_fk",
+      columns: [table.workspaceId, table.webhookId],
+      foreignColumns: [workspaceWebhooks.workspaceId, workspaceWebhooks.id],
+    }).onDelete("cascade"),
+    eventUnique: uniqueIndex("workspace_webhook_deliveries_event_uq").on(
+      table.webhookId,
+      table.eventId,
+    ),
+    recent: index("workspace_webhook_deliveries_webhook_recent_idx").on(
+      table.webhookId,
+      table.createdAt,
+    ),
+  }),
+);
+
 export const hostMcpBindings = pgTable(
   "host_mcp_bindings",
   {

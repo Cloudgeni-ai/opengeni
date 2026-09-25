@@ -34,6 +34,19 @@ import type {
   WorkspaceArtifactMutationResponse,
 } from "./workspace-artifacts";
 import type { CreateFeedbackRequest, Feedback, FeedbackSubmissionResponse } from "./feedback";
+import type {
+  CreateWorkspaceWebhookRequest,
+  CreateWorkspaceWebhookResponse,
+  GetWorkspaceCredentialProviderResponse,
+  ListWorkspaceWebhookDeliveriesResponse,
+  ListWorkspaceWebhooksResponse,
+  PutWorkspaceCredentialProviderRequest,
+  PutWorkspaceCredentialProviderResponse,
+  UpdateWorkspaceWebhookRequest,
+  WorkspaceSandboxImages,
+  WorkspaceWebhook,
+  WorkspaceWebhookDelivery,
+} from "./workspace-integrations";
 import {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
@@ -1173,6 +1186,86 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/new-session-draft`,
       request,
     );
+  }
+
+  /** The workspace's HTTP credential provider, or null when none is configured. */
+  async getWorkspaceCredentialProvider(
+    workspaceId: string,
+  ): Promise<GetWorkspaceCredentialProviderResponse> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/credential-provider`);
+  }
+
+  /**
+   * Create or update the workspace credential provider. The signing secret is
+   * returned only when the provider is first created; store it then.
+   */
+  async putWorkspaceCredentialProvider(
+    workspaceId: string,
+    request: PutWorkspaceCredentialProviderRequest,
+  ): Promise<PutWorkspaceCredentialProviderResponse> {
+    return this.requestJson("PUT", `/v1/workspaces/${workspaceId}/credential-provider`, request);
+  }
+
+  async deleteWorkspaceCredentialProvider(workspaceId: string): Promise<void> {
+    await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/credential-provider`);
+  }
+
+  async listWorkspaceWebhooks(workspaceId: string): Promise<ListWorkspaceWebhooksResponse> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/webhooks`);
+  }
+
+  /** Create a webhook. The signing secret is returned only in this response. */
+  async createWorkspaceWebhook(
+    workspaceId: string,
+    request: CreateWorkspaceWebhookRequest,
+  ): Promise<CreateWorkspaceWebhookResponse> {
+    return this.requestJson("POST", `/v1/workspaces/${workspaceId}/webhooks`, request);
+  }
+
+  async updateWorkspaceWebhook(
+    workspaceId: string,
+    webhookId: string,
+    request: UpdateWorkspaceWebhookRequest,
+  ): Promise<WorkspaceWebhook> {
+    return this.requestJson(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/webhooks/${webhookId}`,
+      request,
+    );
+  }
+
+  async deleteWorkspaceWebhook(workspaceId: string, webhookId: string): Promise<void> {
+    await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/webhooks/${webhookId}`);
+  }
+
+  async listWorkspaceWebhookDeliveries(
+    workspaceId: string,
+    webhookId: string,
+    options: { limit?: number } = {},
+  ): Promise<ListWorkspaceWebhookDeliveriesResponse> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/webhooks/${webhookId}/deliveries`,
+      undefined,
+      options.limit !== undefined ? { limit: String(options.limit) } : {},
+    );
+  }
+
+  /** Queue a delivered or failed delivery again with a fresh attempt budget. */
+  async redeliverWorkspaceWebhookDelivery(
+    workspaceId: string,
+    webhookId: string,
+    deliveryId: string,
+  ): Promise<WorkspaceWebhookDelivery> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/webhooks/${webhookId}/deliveries/${deliveryId}/redeliver`,
+    );
+  }
+
+  /** Images this deployment lets a workspace choose as its default sandbox image. */
+  async listWorkspaceSandboxImages(workspaceId: string): Promise<WorkspaceSandboxImages> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/sandbox-images`);
   }
 
   /** Submit general feedback or a session/turn rating. Retain the key when retrying. */

@@ -536,6 +536,16 @@ The model and sandbox receive the tool schema and bounded result, not the
 credential itself. The customer API must still enforce tenant/user scope on
 every call and must not trust a model-supplied tenant id.
 
+### Credentials, completion events, and the sandbox image
+
+A standalone product does not need an in-process host port to give the agent
+short-lived cloud or Git credentials, to learn when a turn finishes, to know
+which turn called its MCP server, or to choose the sandbox image. Configure a
+workspace credential provider, workspace webhooks, and an allowlisted
+`defaultSandboxImage`, and read `_meta.opengeni` on MCP calls. See
+[`docs/workspace-integrations.md`](workspace-integrations.md) for the protocol,
+signature scheme, and SDK helpers.
+
 ### Model and runtime behavior
 
 Use `settings.sessionDefaults` for a workspace's default model and reasoning,

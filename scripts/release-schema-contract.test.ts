@@ -143,14 +143,18 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0518_member_connection_read_backfill.sql",
+          (migration) => migration.path === "0519_workspace_integration_primitives.sql",
         )
-          ? "0518_member_connection_read_backfill.sql"
+          ? "0519_workspace_integration_primitives.sql"
           : sourceContract.migrations.some(
-                (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+                (migration) => migration.path === "0518_member_connection_read_backfill.sql",
               )
-            ? "0515_autonomous_learning_defaults.sql"
-            : "0514_failed_session_variable_set_attach.sql",
+            ? "0518_member_connection_read_backfill.sql"
+            : sourceContract.migrations.some(
+                  (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+                )
+              ? "0515_autonomous_learning_defaults.sql"
+              : "0514_failed_session_variable_set_attach.sql",
       );
       expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
     }
@@ -180,6 +184,9 @@ describe("release schema contract", () => {
     );
     const memberConnectionReadBackfill = completeSourceContract.migrations.some(
       (migration) => migration.path === "0518_member_connection_read_backfill.sql",
+    );
+    const workspaceIntegrationPrimitives = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0519_workspace_integration_primitives.sql",
     );
     const backgroundCommandText = completeSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
@@ -438,6 +445,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (workspaceIntegrationPrimitives ? 1 : 0) +
         (memberConnectionRead ? 1 : 0) +
         (memberConnectionReadBackfillIndex ? 1 : 0) +
         (memberConnectionReadBackfill ? 1 : 0) +
@@ -739,6 +747,9 @@ describe("release schema contract", () => {
       ...(memberConnectionReadBackfill
         ? { latestMigration: "0518_member_connection_read_backfill.sql" }
         : {}),
+      ...(workspaceIntegrationPrimitives
+        ? { latestMigration: "0519_workspace_integration_primitives.sql" }
+        : {}),
     });
     // Keep the historical migration-order probes below scoped to published
     // history after checking the three forward rollout steps above.
@@ -750,6 +761,7 @@ describe("release schema contract", () => {
             "0516_member_connection_read.sql",
             "0517_member_connection_read_backfill_index.sql",
             "0518_member_connection_read_backfill.sql",
+            "0519_workspace_integration_primitives.sql",
           ].includes(migration.path),
       ),
     };
@@ -2217,6 +2229,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0472_usage_events_workspace_recent_index.sql",
     );
     let completeSourceContract = await contractWithoutMigrations([
+      "0519_workspace_integration_primitives.sql",
       "0516_member_connection_read.sql",
       "0517_member_connection_read_backfill_index.sql",
       "0518_member_connection_read_backfill.sql",
@@ -2722,6 +2735,7 @@ describe("release schema contract", () => {
       "0516_member_connection_read.sql",
       "0517_member_connection_read_backfill_index.sql",
       "0518_member_connection_read_backfill.sql",
+      "0519_workspace_integration_primitives.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

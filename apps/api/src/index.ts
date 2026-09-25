@@ -49,6 +49,7 @@ import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-in
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
+import { startWorkspaceWebhookDispatchPump } from "./workspace-webhook-dispatch";
 import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -478,6 +479,11 @@ export async function startApi(
     ? startSlackInteractionPump(routeDeps)
     : undefined;
   const stopMemorySlackPublicationPump = startMemorySlackPublicationPump(routeDeps);
+  const stopWorkspaceWebhookDispatchPump = startWorkspaceWebhookDispatchPump({
+    db: dbClient.db,
+    settings,
+    observability,
+  });
   const stopTemporalScheduleCleanupPump = startTemporalScheduleCleanupPump({
     db: dbClient.db,
     cleanupConnectorAuthorization: async (claim) =>
@@ -550,6 +556,7 @@ export async function startApi(
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();
+      await stopWorkspaceWebhookDispatchPump();
       await Promise.allSettled([
         Promise.resolve(editableArtifactComposition?.close()),
         authCalloutResponder?.close(),

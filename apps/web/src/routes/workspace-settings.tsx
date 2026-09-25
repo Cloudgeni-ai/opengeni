@@ -32,6 +32,10 @@ import {
 import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { WorkspaceCapabilityDefaults } from "@/components/workspace-capability-defaults";
+import {
+  WorkspaceDeveloperSettings,
+  WorkspaceSandboxImageRow,
+} from "@/components/workspace-developer-settings";
 import { LoadErrorState } from "@/components/common";
 import {
   WorkspaceSettingsContent,
@@ -476,11 +480,24 @@ function OperationalWorkspaceSettingsRoute({
                   workspaceId={workspaceId}
                   canManage={canManageSettings}
                 />
+                <WorkspaceSandboxImageRow
+                  client={client}
+                  workspaceId={workspaceId}
+                  canManage={canRename}
+                />
               </div>
             </section>
 
             <NativeIdentityLinkAccounts workspaceId={workspaceId} />
           </>
+        ) : null}
+
+        {section === "developer" ? (
+          <WorkspaceDeveloperSettings
+            client={client}
+            workspaceId={workspaceId}
+            canManage={canRename}
+          />
         ) : null}
 
         {section === "learning" ? (

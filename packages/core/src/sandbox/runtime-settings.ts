@@ -1,11 +1,12 @@
-import type { Settings } from "@opengeni/config";
+import { sandboxImageAllowlist, type Settings } from "@opengeni/config";
 import {
+  resolveWorkspaceDefaultSandboxImage,
   type RigVersion,
   type Session,
   type SandboxBackend,
   type SandboxOs,
 } from "@opengeni/contracts";
-import { getRigVersion, type Database } from "@opengeni/db";
+import { getRigVersion, getWorkspace, type Database } from "@opengeni/db";
 import { resolveModalCheckpointProviderBinding } from "@opengeni/runtime/sandbox";
 import {
   rigProviderImageContentHash,
@@ -65,6 +66,27 @@ export function managedSessionGroupOs(
   sessionOs: SandboxOs,
 ): SandboxOs {
   return sessionBackend === "selfhosted" ? "linux" : sessionOs;
+}
+
+/**
+ * Apply a workspace's selected sandbox image. The deployment keeps authority:
+ * only an image that is on its allowlist right now is used, so removing an
+ * entry returns every workspace that chose it to the deployment image. The
+ * lease treats the image as shared state, so a change rotates a live box
+ * through the normal capture-and-restore path instead of reusing it.
+ */
+export function settingsWithWorkspaceSandboxImage(
+  settings: Settings,
+  workspaceSettings: unknown,
+  backend: SandboxBackend,
+): Settings {
+  const image = resolveWorkspaceDefaultSandboxImage(workspaceSettings);
+  if (!image || !sandboxImageAllowlist(settings).includes(image)) return settings;
+  if (backend === "docker") return { ...settings, dockerImage: image };
+  if (backend === "modal") {
+    return { ...settings, modalImageRef: image, modalImageId: undefined };
+  }
+  return settings;
 }
 
 export function settingsWithRigImage(settings: Settings, rigImage: string | null): Settings {
@@ -230,8 +252,15 @@ export async function resolveSessionSandboxRuntime(
   if (session.rigVersionId && !rigVersion) {
     throw new Error(`Frozen sandbox environment version ${session.rigVersionId} is unavailable`);
   }
-  // Setup and checks always layer on the deployment-owned sandbox image.
-  const logicalSettings = settings;
+  // Setup and checks layer on the deployment image, or on the workspace's
+  // allowlisted selection of one.
+  const logicalSettings = sandboxImageAllowlist(settings).length
+    ? settingsWithWorkspaceSandboxImage(
+        settings,
+        (await getWorkspace(db, session.workspaceId))?.settings,
+        session.sandboxBackend,
+      )
+    : settings;
   return {
     settings: {
       ...logicalSettings,

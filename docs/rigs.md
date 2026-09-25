@@ -64,7 +64,7 @@ A sandbox environment-bound turn's system instructions carry a non-bypassable do
 
 ### Default sandbox environment resolution
 
-A session's sandbox environment binding resolves at create as: the explicit `rigId` on the create payload if given, else the workspace's `default_rig_id` (`workspaces.default_rig_id`), else sandbox environment-less. An explicit unknown/inactive `rigId` is a caller error (422). A stale workspace-default (deleted sandbox environment, or one somehow left with no active version) degrades silently to sandbox environment-less rather than failing the create. There is currently no API or web-console surface to set `default_rig_id` — it is a schema column consumed by session creation with no write path yet.
+A session's sandbox environment binding resolves at create as: the explicit `rigId` on the create payload if given, else the workspace's `default_rig_id` (`workspaces.default_rig_id`), else sandbox environment-less. An explicit unknown/inactive `rigId` is a caller error (422). A stale workspace-default (deleted sandbox environment, or one somehow left with no active version) degrades silently to sandbox environment-less rather than failing the create. A new-session or reusable-session scheduled task that omits `rigId` freezes the workspace default onto the task at create, the same way; an explicit `null` opts out, and existing-session tasks keep matching their target session. There is currently no API or web-console surface to set `default_rig_id` — it is a schema column consumed by session creation with no write path yet.
 
 
 ### Changing setup after a session starts

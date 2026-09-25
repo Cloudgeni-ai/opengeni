@@ -23,7 +23,7 @@ import {
 import { settingsWithResolvedModelContext, type Settings } from "@opengeni/config";
 import { projectReasoningConfigurations, supportsReasoningConfiguration } from "@opengeni/codex";
 import { settingsWithSessionMcpServersForRun } from "../capabilities";
-import { resolveRigProviderImageForRun } from "@opengeni/core";
+import { resolveRigProviderImageForRun, settingsWithWorkspaceSandboxImage } from "@opengeni/core";
 import { createModelHistoryAttachmentProjector } from "../run-input";
 import type {
   TurnActivityServices as ActivityServices,
@@ -276,8 +276,13 @@ export async function prepareGovernanceAndModel(
   } catch {
     // Contribution telemetry must never change model execution semantics.
   }
-  // A Rig is always a setup/check layer over the deployment platform sandbox.
-  const logicalSandboxSettings = capabilitySettings;
+  // A Rig is always a setup/check layer over the deployment platform sandbox,
+  // or over the workspace's allowlisted selection of one.
+  const logicalSandboxSettings = settingsWithWorkspaceSandboxImage(
+    capabilitySettings,
+    workspace.settings,
+    turn.sandboxBackend,
+  );
   const providerImageSelection = await resolveRigProviderImageForRun(
     logicalSandboxSettings,
     rigVersion,

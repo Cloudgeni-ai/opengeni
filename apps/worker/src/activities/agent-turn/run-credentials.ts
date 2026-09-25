@@ -152,6 +152,8 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
       : await waitForTurnOperation(
           bindRunCredentialResolver({
             db,
+            settings,
+            initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
             connectionCredentials: connectionCredentials ?? null,
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -712,6 +714,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
         }),
       write: async (material) => await write(material),
       onSuccess: ({ authNeeded }) => {
+        renewals.runCredentialRenewalOutcome = authNeeded ? "auth_needed" : "completed";
         observability.incrementCounter({
           name: "opengeni_run_credential_renewals_total",
           help: "Host-managed run credential renewal attempts by outcome.",
@@ -719,6 +722,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
         });
       },
       onFailure: ({ retryDelayMs, errorClass }) => {
+        renewals.runCredentialRenewalOutcome = "error";
         observability.incrementCounter({
           name: "opengeni_run_credential_renewals_total",
           help: "Host-managed run credential renewal attempts by outcome.",
