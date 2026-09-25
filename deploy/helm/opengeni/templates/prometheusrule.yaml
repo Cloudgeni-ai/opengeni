@@ -183,7 +183,7 @@ spec:
             severity: critical
           annotations:
             summary: OpenGeni has a durable recovering session with no active attempt for more than 10 minutes
-            description: Inspect the bounded state label. quiescence_missing requires exact Temporal activity-loss and writer-settlement proof; projection_stale is safe to replay through the exact idempotent quiescence receipt transaction.
+            description: Inspect the bounded state label. quiescence_missing requires exact Temporal activity-loss and writer-settlement proof; projection_stale is safe to replay through the exact idempotent quiescence receipt transaction. A session paused by its own, an ancestor, or its workspace control is not counted as projection_stale until it is resumed.
         - alert: OpenGeniSessionRecoveryMonitorStale
           expr: |
             absent(opengeni_session_recovery_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"}) == 1
