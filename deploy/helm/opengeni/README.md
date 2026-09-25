@@ -10,6 +10,15 @@ no explicit entry. Other provider credentials and configuration keep their
 existing precedence. Canary renderers must preserve an already-correct entry's
 position so saved values reproduce the same pod template on later upgrades.
 
+## Service links
+
+Every OpenGeni pod sets `enableServiceLinks: false`. Kubernetes otherwise
+injects `<SERVICE>_PORT=tcp://<ip>:<port>` variables for each Service in the
+namespace. For a Service such as `opengeni-api-metrics` that yields
+`OPENGENI_API_METRICS_PORT`, which collides with an OpenGeni setting and fails
+settings parsing at startup in any pod that does not set it explicitly. Pods
+reach services through DNS.
+
 ## Volumes
 
 The chart accepts native Kubernetes volume and volume-mount lists at:

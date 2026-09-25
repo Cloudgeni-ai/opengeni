@@ -42,6 +42,7 @@ spec:
       hostUsers: {{ $hostUsers }}
       {{- end }}
       serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      enableServiceLinks: false
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       terminationGracePeriodSeconds: {{ $materializer.terminationGracePeriodSeconds }}
       {{- if $priorityClassName }}
