@@ -1,10 +1,14 @@
 /**
  * In-process circuit breaker for Jev. Consecutive JevUnavailableError failures open it for a cooldown, so a
  * Jev outage costs one fast refusal per call instead of a full retry cycle. After the cooldown the breaker is
- * half-open and tryAcquire() admits exactly one trial call at a time: success closes the breaker, another
- * unavailable failure reopens it at once, and any other outcome (recordFailure with another error, or
- * release() when the call never reached Jev) lets the next caller try. Other errors (a rejected request, a
- * workspace failure, an abort) neither count nor reset the streak.
+ * half-open and tryAcquire() admits exactly one trial call at a time.
+ *
+ * Every admitted call gets a lease and settles it exactly once:
+ * - recordSuccess(lease) from any call closes the breaker, because any success proves Jev works.
+ * - recordFailure(unavailable, now, lease) from any call counts, and reopens a half-open breaker at once.
+ * - release(lease) (the call never reached Jev) or recordFailure with another error (a rejected request, a
+ *   workspace failure, an abort) neither counts nor resets the streak. It ends the trial only when that
+ *   lease is the trial, so a call admitted while closed cannot free the slot of a trial running now.
  * isOpen() only says whether the cooldown is running, so a half-open breaker still offers the tool.
  * The worker keeps one breaker per process.
  */
@@ -19,6 +23,13 @@ export interface JevCircuitBreakerOptions {
   authCooldownMs?: number | undefined;
   /** A half-open trial that has not ended after this long no longer blocks the next trial. */
   trialTimeoutMs?: number | undefined;
+}
+
+/** One admitted call. Leases are matched by identity, so only the issued object ends its trial. */
+export interface JevCircuitLease {
+  readonly id: number;
+  /** This call is the half-open trial. */
+  readonly trial: boolean;
 }
 
 export type JevCircuitState = "closed" | "open" | "half_open";
@@ -40,14 +51,18 @@ export class JevCircuitBreaker {
   private readonly trialTimeoutMs: number;
   private consecutiveFailures = 0;
   private openUntil: number | null = null;
-  private trialStartedAt: number | null = null;
+  private trial: { lease: JevCircuitLease; startedAt: number } | null = null;
+  private nextLeaseId = 1;
   private lastFailure: JevCircuitStatus["lastFailure"] = null;
 
   constructor(options: JevCircuitBreakerOptions = {}) {
     this.failureThreshold = Math.max(1, options.failureThreshold ?? 3);
     this.cooldownMs = options.cooldownMs ?? 5 * 60_000;
     this.authCooldownMs = options.authCooldownMs ?? 30 * 60_000;
-    this.trialTimeoutMs = options.trialTimeoutMs ?? 3 * 60_000;
+    // Longer than one Jev retry cycle at the largest allowed request timeout (3 attempts of up to
+    // 120 s, OPENGENI_JEV_REQUEST_TIMEOUT_MS) plus backoff and sandbox recall, so a slow trial is not
+    // mistaken for a stuck one and joined by a second trial.
+    this.trialTimeoutMs = options.trialTimeoutMs ?? 10 * 60_000;
   }
 
   /** True while calls should be refused without contacting Jev (the cooldown is running). */
@@ -56,39 +71,45 @@ export class JevCircuitBreaker {
   }
 
   /**
-   * Admit one call. Closed: always. Open: never. Half-open: only the first caller, as the trial, until it
-   * ends with recordSuccess(), recordFailure() or release(), or until it has run for trialTimeoutMs, so a
-   * trial that never ends cannot block the tool for good.
+   * Admit one call and return its lease, or null when refused. Closed: always. Open: never. Half-open:
+   * only the first caller, as the trial, until its lease is settled or it has run for trialTimeoutMs, so
+   * a trial that never ends cannot block the tool for good.
    */
-  tryAcquire(now: number = Date.now()): boolean {
-    if (this.openUntil === null) return true;
-    if (now < this.openUntil) return false;
-    if (this.trialStartedAt !== null && now - this.trialStartedAt < this.trialTimeoutMs)
-      return false;
-    this.trialStartedAt = now;
-    return true;
+  tryAcquire(now: number = Date.now()): JevCircuitLease | null {
+    if (this.openUntil === null) return this.issue(false);
+    if (now < this.openUntil) return null;
+    if (this.trial !== null && now - this.trial.startedAt < this.trialTimeoutMs) return null;
+    const lease = this.issue(true);
+    this.trial = { lease, startedAt: now };
+    return lease;
   }
 
   /** End an admitted call that did not contact Jev, so its outcome says nothing about Jev. */
-  release(): void {
-    this.trialStartedAt = null;
+  release(lease: JevCircuitLease): void {
+    if (this.trial !== null && this.trial.lease === lease) this.trial = null;
   }
 
-  recordSuccess(): void {
+  /** Any call's success proves Jev works, so the lease does not change the outcome. */
+  recordSuccess(_lease?: JevCircuitLease | null): void {
     this.consecutiveFailures = 0;
     this.openUntil = null;
-    this.trialStartedAt = null;
+    this.trial = null;
   }
 
-  recordFailure(error: unknown, now: number = Date.now()): void {
-    this.trialStartedAt = null;
-    if (!(error instanceof JevUnavailableError)) return;
+  /** Settle a failed call. A failure without a lease counts the same but never ends a trial. */
+  recordFailure(error: unknown, now: number = Date.now(), lease?: JevCircuitLease | null): void {
+    if (!(error instanceof JevUnavailableError)) {
+      if (lease) this.release(lease);
+      return;
+    }
     const halfOpen = this.openUntil !== null && now >= this.openUntil;
     this.consecutiveFailures += 1;
     this.lastFailure = { message: error.message, status: error.status ?? null, at: now };
     if (halfOpen || this.consecutiveFailures >= this.failureThreshold) {
       const auth = error.status === 401 || error.status === 402 || error.status === 403;
       this.openUntil = now + (auth ? this.authCooldownMs : this.cooldownMs);
+      // A new cooldown starts: whatever trial was running no longer blocks the next one.
+      this.trial = null;
     }
   }
 
@@ -101,9 +122,13 @@ export class JevCircuitBreaker {
       openUntil: state === "open" ? this.openUntil : null,
       trialInFlight:
         state === "half_open" &&
-        this.trialStartedAt !== null &&
-        now - this.trialStartedAt < this.trialTimeoutMs,
+        this.trial !== null &&
+        now - this.trial.startedAt < this.trialTimeoutMs,
       lastFailure: this.lastFailure,
     };
+  }
+
+  private issue(trial: boolean): JevCircuitLease {
+    return Object.freeze({ id: this.nextLeaseId++, trial });
   }
 }

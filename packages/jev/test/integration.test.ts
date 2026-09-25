@@ -22,6 +22,9 @@ import {
 } from "./helpers/fixture";
 import { LocalCodeSearchWorkspace } from "./helpers/local-workspace";
 
+// These run the real ripgrep binary; skip them where it is not installed.
+const describeWithRipgrep = Bun.which("rg") ? describe : describe.skip;
+
 const question = "How is the compaction token threshold computed and when does a turn compact?";
 const keywords = [
   "compactionThresholdTokens",
@@ -58,7 +61,7 @@ beforeAll(() => {
   root = repo();
 });
 
-describe("recall on the fixture repo", () => {
+describeWithRipgrep("recall on the fixture repo", () => {
   test("scores by distinct keywords, excludes node_modules/dist, down-weights tests, reports zero-hit keywords", async () => {
     const r = await recall({
       session: session(root),
@@ -185,7 +188,7 @@ describe("recall on the fixture repo", () => {
   });
 });
 
-describe("runCodeSearch end to end with a fake Jev", () => {
+describeWithRipgrep("runCodeSearch end to end with a fake Jev", () => {
   test("selects, verifies, follows a lead, packs under budget and reports status", async () => {
     const log: FakeJevLog = { requests: [] };
     const events: string[] = [];
@@ -318,7 +321,7 @@ describe("runCodeSearch end to end with a fake Jev", () => {
   });
 });
 
-describe("failures", () => {
+describeWithRipgrep("failures", () => {
   test("a Jev outage fails the search with JevUnavailableError (no keyword-only fallback)", async () => {
     const promise = runCodeSearch({
       question,

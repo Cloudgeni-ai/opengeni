@@ -118,6 +118,10 @@
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"
     },
+    "./code-search": {
+      "types": "./src/code-search.ts",
+      "default": "./src/code-search.ts"
+    },
     "./editable-artifacts": {
       "types": "./src/editable-artifacts.ts",
       "default": "./src/editable-artifacts.ts"

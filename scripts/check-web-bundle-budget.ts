@@ -473,6 +473,10 @@ const effectiveBudgets = {
     // 2,449,017 raw bytes (39 files). Preserve the existing 1.5 KiB
     // platform/configuration headroom without relaxing other graph caps.
     wholeKibEnvelope(2_449_017, 1.5 * kib),
+    // Optional code_search: its client-config capability, workspace setting
+    // and instruction-layer id (server-side resolvers stay on a subpath).
+    // Bun 1.4 Linux/x64 CI measures 2,451,531 raw bytes; keep the headroom.
+    wholeKibEnvelope(2_451_531, 1.5 * kib),
     // Main d08dbb6029: 2,374,813 raw / 666,576 gzip, 34 files. The merged
     // Knowledge graph adds receipts, review navigation and learning controls:
     // 2,439,754 raw / 684,860 gzip, 39 files (Bun 1.4, macOS/arm64).

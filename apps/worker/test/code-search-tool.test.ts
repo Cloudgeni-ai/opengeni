@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { JevCircuitBreaker, JevUnavailableError, type CodeSearchWorkspace } from "@opengeni/jev";
 import { createObservability } from "@opengeni/observability";
-import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
+import {
+  ChannelAUnavailableError,
+  SandboxChannelAService,
+  type ChannelASession,
+} from "@opengeni/runtime/sandbox";
 import { testSettings } from "@opengeni/testing";
 import {
   codeSearchToolDefinitions,
@@ -76,8 +80,9 @@ const emptyWorkspace: CodeSearchWorkspace = {
 
 /** A breaker whose cooldown has passed, so it lets one trial call through. */
 function halfOpenBreaker(): JevCircuitBreaker {
-  const breaker = new JevCircuitBreaker({ failureThreshold: 1, cooldownMs: 1 });
-  breaker.recordFailure(new JevUnavailableError("down"), Date.now() - 1_000);
+  // A long cooldown that already ran out: a trial that fails reopens it for a minute.
+  const breaker = new JevCircuitBreaker({ failureThreshold: 1, cooldownMs: 60_000 });
+  breaker.recordFailure(new JevUnavailableError("down"), Date.now() - 120_000);
   expect(breaker.status().state).toBe("half_open");
   return breaker;
 }
@@ -120,6 +125,34 @@ function fakeJevFetch(
 }
 
 const context = { operationId: "op-1", caller: { kind: "model" } } as never;
+
+/** A promise the test opens by hand, to hold a call at a chosen point. */
+function gate() {
+  let open!: () => void;
+  const opened = new Promise<void>((done) => {
+    open = done;
+  });
+  return { open, opened };
+}
+
+const trialArgs = {
+  question: "Where is the GitHub approval policy resolved?",
+  keywords: ["resolveGithubApprovalPolicy", "approvalMode"],
+};
+
+function trialDefinition(
+  breaker: JevCircuitBreaker,
+  overrides: { workspace?: () => Promise<CodeSearchWorkspace>; fetch?: typeof fetch } = {},
+) {
+  return createCodeSearchAttemptToolDefinition({
+    settings: jevSettings,
+    apiKey: jevSettings.jevApiKey,
+    workspace: overrides.workspace ?? (async () => fixtureWorkspace()),
+    observability,
+    breaker,
+    fetch: overrides.fetch ?? fakeJevFetch({ count: 0 }),
+  });
+}
 
 describe("codeSearchToolDefinitions", () => {
   const base = {
@@ -168,7 +201,7 @@ describe("codeSearchToolDefinitions", () => {
       codeSearchToolDefinitions({ ...enabled, machineWorkspaceRoot: "\\\\server\\share\\repo" }),
     ).toEqual([]);
     expect(
-      codeSearchToolDefinitions({ ...enabled, machineWorkspaceRoot: "/home/dev/repo" }),
+      codeSearchToolDefinitions({ ...enabled, machineWorkspaceRoot: "/workspace/repo" }),
     ).toHaveLength(1);
     expect(codeSearchToolDefinitions({ ...enabled, machineWorkspaceRoot: null })).toHaveLength(1);
   });
@@ -312,7 +345,7 @@ describe("code_search tool execution", () => {
     expect(breaker.status().state).toBe("half_open");
     expect(breaker.status().consecutiveFailures).toBe(1);
     // The trial slot was released, so the next call may still be the trial.
-    expect(breaker.tryAcquire(Date.now())).toBe(true);
+    expect(breaker.tryAcquire(Date.now())?.trial).toBe(true);
   });
 
   test("refuses a second call while a half-open trial is in flight", async () => {
@@ -373,5 +406,129 @@ describe("code_search tool execution", () => {
     );
     expect(result.isError).toBe(true);
     expect((result.content[0] as { text: string }).text).toContain("ripgrep");
+  });
+});
+
+describe("a half-open trial ends on every path", () => {
+  test("the workspace cannot be reached: the next call may be the trial", async () => {
+    const breaker = halfOpenBreaker();
+    const result = await trialDefinition(breaker, {
+      workspace: async () => {
+        throw new ChannelAUnavailableError("sandbox is gone");
+      },
+    }).execute(trialArgs, context);
+    expect(result.isError).toBe(true);
+    expect(breaker.status()).toMatchObject({
+      state: "half_open",
+      trialInFlight: false,
+      consecutiveFailures: 1,
+    });
+    expect(breaker.tryAcquire(Date.now())?.trial).toBe(true);
+  });
+
+  test.skipIf(!hasRipgrep)("Jev rejects the request: the next call may be the trial", async () => {
+    const breaker = halfOpenBreaker();
+    const result = await trialDefinition(breaker, {
+      fetch: fakeJevFetch({ count: 0 }, 400),
+    }).execute(trialArgs, context);
+    expect(result.isError).toBe(true);
+    expect(breaker.status()).toMatchObject({
+      state: "half_open",
+      trialInFlight: false,
+      consecutiveFailures: 1,
+    });
+    expect(breaker.tryAcquire(Date.now())?.trial).toBe(true);
+  });
+
+  test("the call is cancelled: the next call may be the trial", async () => {
+    const breaker = halfOpenBreaker();
+    const controller = new AbortController();
+    const cancelling: CodeSearchWorkspace = {
+      ...emptyWorkspace,
+      ripgrep: async (_args, options) => {
+        controller.abort(new Error("turn cancelled"));
+        options.signal?.throwIfAborted();
+        throw new Error("unreachable");
+      },
+    };
+    const call = trialDefinition(breaker, { workspace: async () => cancelling }).execute(
+      trialArgs,
+      { ...(context as object), signal: controller.signal } as never,
+    );
+    await expect(call).rejects.toThrow("turn cancelled");
+    expect(breaker.status()).toMatchObject({
+      state: "half_open",
+      trialInFlight: false,
+      consecutiveFailures: 1,
+    });
+    expect(breaker.tryAcquire(Date.now())?.trial).toBe(true);
+  });
+
+  test.skipIf(!hasRipgrep)("Jev answers: the breaker closes", async () => {
+    const breaker = halfOpenBreaker();
+    const result = await trialDefinition(breaker).execute(trialArgs, context);
+    expect(result.isError).toBe(false);
+    expect(breaker.status()).toMatchObject({
+      state: "closed",
+      trialInFlight: false,
+      consecutiveFailures: 0,
+    });
+  });
+
+  test.skipIf(!hasRipgrep)("Jev is down: the breaker reopens", async () => {
+    const breaker = halfOpenBreaker();
+    const result = await trialDefinition(breaker, {
+      fetch: fakeJevFetch({ count: 0 }, 503),
+    }).execute(trialArgs, context);
+    expect(result.isError).toBe(true);
+    expect(breaker.status()).toMatchObject({
+      state: "open",
+      trialInFlight: false,
+      consecutiveFailures: 2,
+    });
+    expect(breaker.tryAcquire(Date.now())).toBeNull();
+  });
+
+  test("a call admitted while closed does not end a trial that started later", async () => {
+    const breaker = new JevCircuitBreaker({ failureThreshold: 1, cooldownMs: 1 });
+    const early = gate();
+    const noJev = trialDefinition(breaker, {
+      workspace: async () => {
+        await early.opened;
+        return emptyWorkspace;
+      },
+    }).execute(trialArgs, context);
+    const noWorkspace = trialDefinition(breaker, {
+      workspace: async () => {
+        await early.opened;
+        throw new ChannelAUnavailableError("sandbox is gone");
+      },
+    }).execute(trialArgs, context);
+
+    // Another call's outage opens the breaker, and its cooldown passes.
+    breaker.recordFailure(new JevUnavailableError("down"), Date.now() - 1_000);
+    expect(breaker.status().state).toBe("half_open");
+    const late = gate();
+    let trialWorkspaceCalls = 0;
+    const trialTool = trialDefinition(breaker, {
+      workspace: async () => {
+        trialWorkspaceCalls++;
+        await late.opened;
+        return emptyWorkspace;
+      },
+    });
+    const trial = trialTool.execute(trialArgs, context);
+    expect(breaker.status().trialInFlight).toBe(true);
+
+    early.open();
+    expect((await noJev).isError).toBe(false);
+    expect((await noWorkspace).isError).toBe(true);
+    expect(breaker.status()).toMatchObject({ state: "half_open", trialInFlight: true });
+    expect((await trialTool.execute(trialArgs, context)).isError).toBe(true);
+    expect(trialWorkspaceCalls).toBe(1);
+
+    late.open();
+    expect((await trial).isError).toBe(false);
+    expect(breaker.status()).toMatchObject({ state: "half_open", trialInFlight: false });
   });
 });

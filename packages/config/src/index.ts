@@ -20,13 +20,13 @@ import {
   StaticUsageLimits,
   TurnExecutionPolicyV1,
   UsageLimitsMode,
-  type CodeSearchDeploymentPolicy,
   type TurnExecutionLatencyModeSourceV1,
   type TurnExecutionModelSourceV1,
   type TurnExecutionReasoningSourceV1,
   type VideoGenerationResolution,
   type FirstPartyMcpToolName as FirstPartyMcpToolNameType,
 } from "@opengeni/contracts";
+import type { CodeSearchDeploymentPolicy } from "@opengeni/contracts/code-search";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
 import {
   CODEX_FALLBACK_MODEL_SLUGS,

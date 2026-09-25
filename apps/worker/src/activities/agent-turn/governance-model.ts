@@ -48,9 +48,9 @@ import { WorkspaceModelPolicyBlockedError } from "@opengeni/runtime";
 import {
   evaluateWorkspaceModelPolicy,
   resolveWorkspaceAgentHumanInputEnabled,
-  resolveSessionCodeSearchEnabled,
   type MediaGenerationResult,
 } from "@opengeni/contracts";
+import { resolveSessionCodeSearchEnabled } from "@opengeni/contracts/code-search";
 
 import { assertWorkspaceHumanInputAllowed } from "./admission";
 import {

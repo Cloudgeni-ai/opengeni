@@ -3,8 +3,8 @@
 `code_search` is an optional agent tool for questions about the code in a
 session's workspace: where something is implemented, configured or decided.
 The agent gives one question and 6-15 keywords. The tool returns the most
-relevant source passages, verbatim with paths and line numbers, plus a coverage
-status. That replaces a chain of separate searches and file reads, each of
+relevant source passages, verbatim with paths and line numbers, plus an evidence
+rating for those passages. That replaces a chain of separate searches and file reads, each of
 which would otherwise cost a model request.
 
 Ranking uses Jev, TypeSafe's fast judge model. Jev answers many yes/no
@@ -13,10 +13,20 @@ tokens. It never writes text, so the agent still writes the answer.
 
 ## Measured effect
 
-- **Investigation questions.** 26 real code questions from staging, answered
-  twice each by gpt-6-astra and graded blind by two graders. With the tool,
-  cost fell 16% (95% CI 11-22%) and wall time 11% (6-15%), with no measurable
-  quality change. Jev added about $0.006 per question.
+- **Investigation questions, in OpenGeni.** 26 real code questions from
+  staging, answered twice per arm by the OpenGeni agent (gpt-6-astra) on a
+  Connected Machine, with the tool on and off in parallel, graded blind by two
+  graders. With the current wording: cost -6.6% (95% CI 2-12%), wall time -9.1%
+  (5-13%), 1.4 fewer model requests per question, answer quality at parity.
+  Jev added about $0.006 per question.
+- **The wording matters.** An earlier version, which labelled packs
+  `sufficient`/`partial` and said to search further only for reported gaps,
+  saved 15% but lost a few answers to questions like "does anything skip this
+  validation?". Blind re-grading showed the agent stopping at a pack that
+  covered only one side. The current rating wording fixed that.
+- **Stand-alone agent.** The same engine in a plain Codex CLI harness saved 16%
+  cost and 11% time; that harness loads `AGENTS.md` automatically, so fewer
+  requests were left to save.
 - **Bug-fix tasks.** 12 Terminal-Bench and 12 SWE-rebench tasks showed no change
   in pass rate, cost or time. The agent called the tool about 0.4 times per
   task because it reads the failing test and goes straight to the code.
@@ -54,13 +64,14 @@ only read-only commands through `SandboxChannelAService`:
   about 1 MiB per command output. The last fetch deletes the file, and files
   older than 15 minutes are swept on the next call. Up to 8 MiB of compressed
   output is fetched; anything beyond that is cut at a line boundary and
-  reported as partial.
+  reported as partial. If the temporary directory is full, the call fails
+  with a message saying so rather than returning partial results.
 - `codeSearchPathKinds` and `fsRead` check path filters and read the selected
   files.
 
 None of these writes to the workspace (only to the box's temporary directory),
-so none takes workspace mutation admission. The Jev key stays on the server, in the API and worker processes,
-and never reaches a sandbox or Connected Machine. The worker uses it to call
+so none takes workspace mutation admission. The Jev key stays on the server,
+in the API and worker processes, and never reaches a sandbox or Connected Machine. The worker uses it to call
 Jev; the API reads it only to report whether the deployment offers the tool.
 The tool works on every sandbox backend and Connected Machine that has `rg` and
 `bash`; both stock sandbox images include them. Windows Connected Machines do
@@ -73,7 +84,7 @@ not get the tool, because its search commands are POSIX shell scripts.
 | Deployment | `OPENGENI_JEV_API_KEY` | Required. Without a usable key, every Jev feature is off. |
 | Deployment | `OPENGENI_CODE_SEARCH_MODE` | `off` (default) never offers the tool. `opt_in` offers it where the workspace turns it on. `default_on` gives it to every workspace that has not turned it off. `experiment` gives it to a fixed half of sessions in workspaces without their own setting. |
 | Workspace | `settings.codeSearchEnabled` | Settings → Session defaults → **Fast code search**: Default, On or Off. `true` or `false` applies to every session; `null` or absent follows the deployment. The row is hidden when the deployment does not offer the tool. |
-| Worker process | Circuit breaker | Three consecutive Jev outages hide the tool from new turns for 5 minutes, or 30 minutes after an auth or billing error (401/402/403). After the cooldown one trial call runs at a time; others are refused until Jev answers. A search that never needed Jev neither closes nor reopens it. |
+| Worker process | Circuit breaker | Three consecutive Jev outages hide the tool from new turns for 5 minutes, or 30 minutes after an auth or billing error (401/402/403). After the cooldown one trial call runs at a time; others are refused until it ends or has run for 10 minutes. A search that never needed Jev neither closes nor reopens it. |
 
 `OPENGENI_JEV_BASE_URL`, `OPENGENI_JEV_MODEL` and
 `OPENGENI_JEV_REQUEST_TIMEOUT_MS` default to the native TypeSafe API,
@@ -105,7 +116,7 @@ The tool reports problems to the agent instead of degrading silently:
   returns an error telling the agent to search with `exec_command` instead.
   Repeated outages trip the breaker.
 - **Only the final status check fails.** The tool still returns the Jev-scored
-  pack with status `unknown`. An outage there counts toward the breaker.
+  pack with `evidence rating unknown (check failed)`. An outage there counts toward the breaker.
 - **ripgrep is missing** (possible on a Connected Machine). The tool returns an
   error saying so.
 - **Partial search.** A cut or timed-out search is marked partial in the pack

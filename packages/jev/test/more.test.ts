@@ -30,6 +30,9 @@ import {
 import { makeFixtureRepo } from "./helpers/fixture";
 import { LocalCodeSearchWorkspace } from "./helpers/local-workspace";
 
+// These run the real ripgrep binary; skip them where it is not installed.
+const describeWithRipgrep = Bun.which("rg") ? describe : describe.skip;
+
 const cfg = codeSearchConfig();
 
 function ev(
@@ -217,7 +220,7 @@ describe("judge helpers", () => {
   });
 });
 
-describe("definition search on the fixture repo", () => {
+describeWithRipgrep("definition search on the fixture repo", () => {
   let root = "";
   beforeAll(() => {
     root = makeFixtureRepo();

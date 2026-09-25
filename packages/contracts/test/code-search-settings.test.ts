@@ -1,12 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { UpdateWorkspaceSettingsRequest, WorkspaceSettingsSchema } from "../src/index";
 import {
-  UpdateWorkspaceSettingsRequest,
-  WorkspaceSettingsSchema,
   codeSearchSessionInExperiment,
   resolveSessionCodeSearchEnabled,
   resolveWorkspaceCodeSearchMode,
   type CodeSearchDeploymentPolicy,
-} from "../src/index";
+} from "../src/code-search";
 
 const OFF: CodeSearchDeploymentPolicy = { available: false, workspaceDefault: "off" };
 const OPT_IN: CodeSearchDeploymentPolicy = { available: true, workspaceDefault: "off" };

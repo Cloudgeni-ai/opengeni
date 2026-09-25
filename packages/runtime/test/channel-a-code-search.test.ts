@@ -7,6 +7,8 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -68,12 +70,17 @@ function fixtureRepo(): string {
   return root;
 }
 
+/** Add an executable `name` that runs `body` to the fake bin directory `dir`. */
+function addFakeTool(dir: string, name: string, body: string): void {
+  writeFileSync(join(dir, name), `#!/bin/sh\n${body}\n`);
+  chmodSync(join(dir, name), 0o755);
+}
+
 /** A directory holding an executable `rg` that runs `body` and ignores its arguments. */
 function fakeRipgrep(body: string): string {
   const dir = mkdtempSync(join(tmpdir(), "code-search-bin-"));
   roots.push(dir);
-  writeFileSync(join(dir, "rg"), `#!/bin/sh\n${body}\n`);
-  chmodSync(join(dir, "rg"), 0o755);
+  addFakeTool(dir, "rg", body);
   return dir;
 }
 
@@ -235,7 +242,7 @@ describe("SandboxChannelAService.codeSearchRipgrep", () => {
     });
     expect(Date.now() - started).toBeLessThan(8_000);
     expect(result).toMatchObject({ available: true, exitCode: null, timedOut: true });
-    // Some lines reach the results file before the kill; the partial record is dropped.
+    // Lines stored before the stop come back; the partial record is dropped.
     expect(result.stdout).toMatch(/^(line \d{5}\n)+$/);
     const pid = Number.parseInt(readFileSync(pidFile, "utf8"), 10);
     const deadline = Date.now() + 3_000;
@@ -300,11 +307,175 @@ describe("SandboxChannelAService.codeSearchRipgrep", () => {
     expect(readdirSync(tmp)).toEqual([]);
   }, 30_000);
 
+  test("stops fetching when the box returns a short chunk", async () => {
+    const output = incompressibleOutput(20_000);
+    const gz = gzipSync(output);
+    const calls: string[] = [];
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async (args) => {
+          calls.push(args.cmd);
+          // The first call is the search; every later call fetches one byte.
+          const body =
+            calls.length === 1
+              ? gz.subarray(0, CHUNK_BYTES)
+              : gz.subarray(CHUNK_BYTES, CHUNK_BYTES + 1);
+          const trailer =
+            calls.length === 1
+              ? `0:0:${gz.length}:opengeni-code-search.abc123:${output.length}:1`
+              : "0:0:0:-";
+          return {
+            stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${body.toString("base64")}__OPENGENI_CODE_SEARCH_RG_END__${trailer}__`,
+            stderr: "",
+            exitCode: 0,
+          };
+        },
+      },
+    });
+    const result = await svc.codeSearchRipgrep(["-e", "x", "--", "."], {
+      timeoutMs: 5_000,
+      maxBytes: 4 * 1024 * 1024,
+    });
+    expect(calls).toHaveLength(2);
+    expect(result).toMatchObject({ available: true, exitCode: 0, truncated: true });
+    expect(result.stdout.endsWith("\n")).toBe(true);
+    expect(output.startsWith(result.stdout)).toBe(true);
+  });
+
+  test("sweeps stale output through a symlinked temporary directory", async () => {
+    const root = fixtureRepo();
+    const tmp = mkdtempSync(join(tmpdir(), "code-search-tmp-"));
+    roots.push(tmp);
+    // macOS /tmp is a symlink; without a trailing slash find inspects only the link.
+    const link = `${tmp}-link`;
+    symlinkSync(tmp, link);
+    roots.push(link);
+    const stale = join(tmp, "opengeni-code-search.Stale1");
+    writeFileSync(stale, "left by a worker that died mid-transfer");
+    const old = new Date(Date.now() - 30 * 60_000);
+    utimesSync(stale, old, old);
+    const svc = new SandboxChannelAService({
+      session: hostShellSession(root, [], fakeRipgrep("echo match"), { TMPDIR: link }),
+    });
+    const result = await svc.codeSearchRipgrep(["-e", "x", "--", "."], {
+      timeoutMs: 20_000,
+      maxBytes: 1_000,
+    });
+    expect(result).toMatchObject({ available: true, stdout: "match\n", exitCode: 0 });
+    expect(readdirSync(tmp)).toEqual([]);
+  });
+
+  describe("when the box cannot store its output", () => {
+    const realGzip = Bun.which("gzip");
+    const realHead = Bun.which("head");
+
+    /** Search a few thousand records with extra fake tools on PATH. */
+    async function searchWith(tools: Record<string, string>) {
+      const root = fixtureRepo();
+      const tmp = mkdtempSync(join(tmpdir(), "code-search-tmp-"));
+      roots.push(tmp);
+      const outputFile = join(root, "rg-output.txt");
+      writeFileSync(outputFile, incompressibleOutput(2_000));
+      const bin = fakeRipgrep(`exec cat '${outputFile}'`);
+      for (const [name, body] of Object.entries(tools)) addFakeTool(bin, name, body);
+      const svc = new SandboxChannelAService({
+        session: hostShellSession(root, [], bin, { TMPDIR: tmp }),
+      });
+      const search = svc.codeSearchRipgrep(["-e", "x", "--", "."], {
+        timeoutMs: 20_000,
+        maxBytes: 4 * 1024 * 1024,
+      });
+      await expect(search).rejects.toBeInstanceOf(ChannelAUnavailableError);
+      await expect(search).rejects.toThrow(/temporary directory may be full/);
+      expect(readdirSync(tmp)).toEqual([]);
+    }
+
+    // `gzip -dc` is the box's integrity check and stays real.
+    const decompressReal = `case "$1" in -d*) exec '${realGzip}' "$@";; esac`;
+
+    test("fails when gzip writes a prefix and exits 1", async () => {
+      await searchWith({
+        gzip: `${decompressReal}\n'${realGzip}' -c | '${realHead}' -c 4096\nexit 1`,
+      });
+    });
+
+    test("fails when gzip writes a cut member but exits 0", async () => {
+      await searchWith({
+        gzip: `${decompressReal}\n'${realGzip}' -c | '${realHead}' -c 4096\nexit 0`,
+      });
+    });
+
+    test("fails when gzip is missing", async () => {
+      await searchWith({ gzip: "echo 'gzip: command not found' >&2\nexit 127" });
+    });
+
+    test("fails when the head stage fails", async () => {
+      // Only the capped stdin read fails; `head -c N file` for the frame is real.
+      await searchWith({
+        head: `if [ "$#" -gt 2 ]; then exec '${realHead}' "$@"; fi\n'${realHead}' -c 4096\nexit 1`,
+      });
+    });
+  });
+
+  test("fails when the box did not record the search status", async () => {
+    const frame = gzipSync("").toString("base64");
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => ({
+          stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${frame}__OPENGENI_CODE_SEARCH_RG_END__125:0:20:-:0:1__`,
+          stderr: "",
+          exitCode: 0,
+        }),
+      },
+    });
+    await expect(
+      svc.codeSearchRipgrep(["-e", "x", "--", "."], { timeoutMs: 5_000, maxBytes: 1_000 }),
+    ).rejects.toThrow(/did not record its status/);
+  });
+
+  test("reports output shorter than the box's stored size as truncated", async () => {
+    const frame = gzipSync("line a\nline b\npartial").toString("base64");
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => ({
+          stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${frame}__OPENGENI_CODE_SEARCH_RG_END__0:0:40:-:500:1__`,
+          stderr: "",
+          exitCode: 0,
+        }),
+      },
+    });
+    expect(
+      await svc.codeSearchRipgrep(["-e", "x", "--", "."], { timeoutMs: 5_000, maxBytes: 1_000 }),
+    ).toEqual({
+      available: true,
+      stdout: "line a\nline b\n",
+      exitCode: 0,
+      truncated: true,
+      timedOut: false,
+    });
+  });
+
+  test("rejects a trailer without the stored-output check", async () => {
+    const frame = gzipSync("match\n").toString("base64");
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => ({
+          stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${frame}__OPENGENI_CODE_SEARCH_RG_END__0:0__`,
+          stderr: "",
+          exitCode: 0,
+        }),
+      },
+    });
+    await expect(
+      svc.codeSearchRipgrep(["-e", "x", "--", "."], { timeoutMs: 5_000, maxBytes: 1_000 }),
+    ).rejects.toThrow("output trailer is malformed");
+  });
+
   test("rejects a frame longer than one chunk", async () => {
     const svc = new SandboxChannelAService({
       session: {
         exec: async () => ({
-          stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${"A".repeat(CHUNK_BYTES * 2)}__OPENGENI_CODE_SEARCH_RG_END__0:0__`,
+          stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${"A".repeat(CHUNK_BYTES * 2)}__OPENGENI_CODE_SEARCH_RG_END__0:0:${CHUNK_BYTES}:-:10:1__`,
           stderr: "",
           exitCode: 0,
         }),
@@ -312,7 +483,7 @@ describe("SandboxChannelAService.codeSearchRipgrep", () => {
     });
     await expect(
       svc.codeSearchRipgrep(["-e", "x", "--", "."], { timeoutMs: 5_000, maxBytes: 10 }),
-    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    ).rejects.toThrow("output frame is malformed");
   });
 
   test("never passes a malformed output token back to the box", async () => {
@@ -323,7 +494,7 @@ describe("SandboxChannelAService.codeSearchRipgrep", () => {
         exec: async (args) => {
           calls.push(args.cmd);
           return {
-            stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${frame}__OPENGENI_CODE_SEARCH_RG_END__0:0:9999999:..__`,
+            stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${frame}__OPENGENI_CODE_SEARCH_RG_END__0:0:9999999:..:6:1__`,
             stderr: "",
             exitCode: 0,
           };
@@ -332,7 +503,7 @@ describe("SandboxChannelAService.codeSearchRipgrep", () => {
     });
     await expect(
       svc.codeSearchRipgrep(["-e", "x", "--", "."], { timeoutMs: 5_000, maxBytes: 1_000 }),
-    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    ).rejects.toThrow("output frame is malformed");
     expect(calls).toHaveLength(1);
   });
 
@@ -346,7 +517,7 @@ describe("SandboxChannelAService.codeSearchRipgrep", () => {
     const svc = new SandboxChannelAService({
       session: {
         exec: async () => ({
-          stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${frame}__OPENGENI_CODE_SEARCH_RG_END__0:0__`,
+          stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${frame}__OPENGENI_CODE_SEARCH_RG_END__0:0:${CHUNK_BYTES}:-:1001:1__`,
           stderr: "",
           exitCode: 0,
         }),
@@ -367,7 +538,7 @@ describe("SandboxChannelAService.codeSearchRipgrep", () => {
     const svc = new SandboxChannelAService({
       session: {
         exec: async () => ({
-          stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${Buffer.from("not gzip").toString("base64")}__OPENGENI_CODE_SEARCH_RG_END__0:0__`,
+          stdout: `__OPENGENI_CODE_SEARCH_RG_BEGIN__${Buffer.from("not gzip").toString("base64")}__OPENGENI_CODE_SEARCH_RG_END__0:0:8:-:8:1__`,
           stderr: "",
           exitCode: 0,
         }),
@@ -375,7 +546,7 @@ describe("SandboxChannelAService.codeSearchRipgrep", () => {
     });
     await expect(
       svc.codeSearchRipgrep(["-e", "x", "--", "."], { timeoutMs: 5_000, maxBytes: 10 }),
-    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    ).rejects.toThrow("could not be decoded");
   });
 
   test("reports a box without ripgrep as unavailable", async () => {

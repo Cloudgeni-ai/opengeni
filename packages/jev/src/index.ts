@@ -32,6 +32,7 @@ export {
 export {
   JevCircuitBreaker,
   type JevCircuitBreakerOptions,
+  type JevCircuitLease,
   type JevCircuitState,
   type JevCircuitStatus,
 } from "./circuit-breaker";

@@ -341,13 +341,16 @@ const CODE_SEARCH_RG_CHUNK_BYTES = 512 * 1024;
 const CODE_SEARCH_RG_FRAME_CHARS = 768 * 1024;
 /** Compressed bytes fetched per call at most; the rest is reported as a cut. */
 const CODE_SEARCH_RG_MAX_TRANSFER_BYTES = 8 * 1024 * 1024;
-const CODE_SEARCH_RG_TOKEN = /^opengeni-code-search\.[A-Za-z0-9]+\.gz$/;
+const CODE_SEARCH_RG_TOKEN = /^opengeni-code-search\.[A-Za-z0-9]+$/;
 const CODE_SEARCH_RG_BEGIN = "__OPENGENI_CODE_SEARCH_RG_BEGIN__";
 const CODE_SEARCH_RG_END = "__OPENGENI_CODE_SEARCH_RG_END__";
-// status:timedOut[:compressedSize:token]; a missing size means one frame only.
+// Search: status:timedOut:compressedSize:token:rawSize:stored. A box without
+// ripgrep sends only `127:0`, and a chunk fetch sends `0:0:0:-` or `0:0:0:missing`.
 const CODE_SEARCH_RG_TRAILER = new RegExp(
-  `${CODE_SEARCH_RG_END}(\\d+):([01])(?::(\\d+):([A-Za-z0-9._-]+))?__`,
+  `${CODE_SEARCH_RG_END}(\\d+):([01])(?::(\\d+):([A-Za-z0-9._-]+)(?::(\\d+):([01]))?)?__`,
 );
+const CODE_SEARCH_RG_STORE_FAILED =
+  "code search could not store its output on this machine; its temporary directory may be full";
 const CODE_SEARCH_KINDS_BEGIN = "__OPENGENI_CODE_SEARCH_KINDS_BEGIN__";
 const CODE_SEARCH_KINDS_END = "__OPENGENI_CODE_SEARCH_KINDS_END__";
 
@@ -424,11 +427,6 @@ export function validateCodeSearchRipgrepArgs(
   return ["--no-config", ...out];
 }
 
-/**
- * Inflate at most `limit` bytes of box-controlled gzip. A sync flush decodes a
- * cut stream as a prefix, and reading stops once `limit` is reached, so a
- * small hostile frame cannot inflate to hundreds of megabytes in the worker.
- */
 /** The base64 body between the begin marker and the trailer at `trailerIndex`. */
 function decodeCodeSearchChunk(stdout: string, trailerIndex: number): Buffer {
   const begin = stdout.indexOf(CODE_SEARCH_RG_BEGIN);
@@ -445,6 +443,11 @@ function decodeCodeSearchChunk(stdout: string, trailerIndex: number): Buffer {
   return Buffer.from(encoded, "base64");
 }
 
+/**
+ * Inflate at most `limit` bytes of box-controlled gzip. A sync flush decodes a
+ * cut stream as a prefix, and reading stops once `limit` is reached, so a
+ * small hostile frame cannot inflate to hundreds of megabytes in the worker.
+ */
 async function gunzipCodeSearchPrefix(input: Buffer, limit: number): Promise<Buffer> {
   const gunzip = createGunzip({ finishFlush: zlibConstants.Z_SYNC_FLUSH, chunkSize: 64 * 1024 });
   gunzip.end(input);
@@ -2419,7 +2422,9 @@ export class SandboxChannelAService {
    * durable mutation admission. stdout is capped at `maxBytes`, gzip+base64
    * framed so providers that drop newlines or retain limited output cannot
    * corrupt it, and bounded by a wall-clock watchdog (not GNU `timeout`, which
-   * stock macOS lacks). Resolves `available: false` when `rg` is not installed.
+   * stock macOS lacks). Resolves `available: false` when `rg` is not installed,
+   * and throws when the box could not store the output whole (a full
+   * temporary directory) rather than returning a prefix as complete.
    */
   async codeSearchRipgrep(
     args: readonly string[],
@@ -2437,23 +2442,28 @@ export class SandboxChannelAService {
     const seconds = Math.max(1, Math.min(120, Math.ceil(options.timeoutMs / 1_000)));
     const script = [
       // Remove output a previous call could not fetch (worker gone mid-transfer).
-      `find "\${TMPDIR:-/tmp}" -maxdepth 1 -name 'opengeni-code-search.*' -mmin +15 -exec rm -f {} + 2>/dev/null`,
-      'results_file=$(mktemp "${TMPDIR:-/tmp}/opengeni-code-search.XXXXXX") || exit 70',
-      'status_file="${results_file}.status"',
-      'timeout_file="${results_file}.timed-out"',
-      'gz_file="${results_file}.gz"',
+      // The trailing slash makes find enter a symlinked /tmp, as on macOS.
+      `find "\${TMPDIR:-/tmp}/" -maxdepth 1 -name 'opengeni-code-search.*' -mmin +15 -exec rm -f {} + 2>/dev/null`,
+      'gz_file=$(mktemp "${TMPDIR:-/tmp}/opengeni-code-search.XXXXXX") || exit 70',
+      'status_file="${gz_file}.status"',
+      'timeout_file="${gz_file}.timed-out"',
       "keep_gz=",
       "search_pid=",
       "watchdog_pid=",
-      'cleanup() { if [ -n "$search_pid" ]; then kill -TERM -- "-$search_pid" 2>/dev/null || kill "$search_pid" 2>/dev/null || true; fi; if [ -n "$watchdog_pid" ]; then kill "$watchdog_pid" 2>/dev/null || true; fi; rm -f "$results_file" "$status_file" "$timeout_file"; [ -n "$keep_gz" ] || rm -f "$gz_file"; }',
+      'cleanup() { if [ -n "$search_pid" ]; then kill -TERM -- "-$search_pid" 2>/dev/null || kill "$search_pid" 2>/dev/null || true; fi; if [ -n "$watchdog_pid" ]; then kill "$watchdog_pid" 2>/dev/null || true; fi; rm -f "$status_file" "$timeout_file"; [ -n "$keep_gz" ] || rm -f "$gz_file"; }',
       "abort() { trap - EXIT; keep_gz=; cleanup; exit 143; }",
       "trap cleanup EXIT",
       "trap abort HUP INT TERM",
       `if ! command -v rg >/dev/null 2>&1; then printf '${CODE_SEARCH_RG_END}127:0__'; exit 0; fi`,
       // Job control gives the pipeline its own process group, so the watchdog
-      // and cleanup stop ripgrep itself rather than only the subshell.
+      // and cleanup stop ripgrep itself rather than only the subshell. Output is
+      // compressed once, straight into the kept file: providers retain only
+      // about 1 MiB per output stream, and later chunks are fetched by name.
+      // That TERM stops only ripgrep and head. The subshell and gzip ignore it
+      // (bash 3.2 runs a trap before the pipeline ends), so a stopped search
+      // still stores a whole member and records every stage's status.
       "set -m",
-      `( rg ${argv.map(shellQuote).join(" ")} 2>/dev/null | head -c ${maxBytes + 1} > "$results_file"; printf '%s' "\${PIPESTATUS[0]}" > "$status_file" ) </dev/null >/dev/null 2>&1 &`,
+      `( trap '' TERM; ( trap - TERM; exec rg ${argv.map(shellQuote).join(" ")} ) 2>/dev/null | ( trap - TERM; exec head -c ${maxBytes + 1} ) | gzip -c > "$gz_file"; printf '%s %s %s' "\${PIPESTATUS[0]}" "\${PIPESTATUS[1]}" "\${PIPESTATUS[2]}" > "$status_file" ) </dev/null >/dev/null 2>&1 &`,
       "search_pid=$!",
       `(sleeper_pid=; stop_watchdog() { if [ -n "$sleeper_pid" ]; then kill "$sleeper_pid" 2>/dev/null || true; wait "$sleeper_pid" 2>/dev/null || true; fi; exit 0; }; trap stop_watchdog HUP INT TERM; sleep ${seconds} & sleeper_pid=$!; wait "$sleeper_pid"; sleeper_pid=; if kill -TERM -- "-$search_pid" 2>/dev/null; then : > "$timeout_file"; fi) </dev/null >/dev/null 2>&1 &`,
       "watchdog_pid=$!",
@@ -2463,19 +2473,25 @@ export class SandboxChannelAService {
       'wait "$watchdog_pid" 2>/dev/null || true',
       "watchdog_pid=",
       "set +m",
-      'status=$(cat "$status_file" 2>/dev/null)',
-      '[ -n "$status" ] || status=125',
+      "rg_status= head_status= gzip_status=",
+      'if [ -f "$status_file" ]; then read -r rg_status head_status gzip_status < "$status_file"; fi',
+      '[ -n "$rg_status" ] || rg_status=125',
       "timed_out=0",
       'if [ -f "$timeout_file" ]; then timed_out=1; fi',
-      // Compress once on the box and send it in chunks: providers retain only
-      // about 1 MiB per output stream, and later chunks are fetched by name.
-      'gzip -c < "$results_file" > "$gz_file"',
+      // A full temporary directory cuts the member without a word, so decode it
+      // end to end: that yields the raw size and fails on a cut or corrupt member.
+      "stored=0",
+      'if raw_size=$(set -o pipefail; gzip -dc < "$gz_file" 2>/dev/null | wc -c | tr -d \' \') && [ "$head_status" = 0 ] && [ "$gzip_status" = 0 ]; then stored=1; fi',
+      '[ -n "$raw_size" ] || raw_size=0',
       "gz_size=$(wc -c < \"$gz_file\" | tr -d ' ')",
+      '[ -n "$gz_size" ] || gz_size=0',
       "token=-",
-      `if [ "$gz_size" -gt ${CODE_SEARCH_RG_CHUNK_BYTES} ]; then keep_gz=1; token=$(basename "$gz_file"); fi`,
+      // The worker fails an unstored search that did not time out, so only
+      // keep output it will fetch.
+      `if [ "$gz_size" -gt ${CODE_SEARCH_RG_CHUNK_BYTES} ] && { [ "$stored" = 1 ] || [ "$timed_out" = 1 ]; }; then keep_gz=1; token=$(basename "$gz_file"); fi`,
       `printf '${CODE_SEARCH_RG_BEGIN}'`,
       `head -c ${CODE_SEARCH_RG_CHUNK_BYTES} "$gz_file" | base64 | tr -d '\\r\\n'`,
-      `printf '${CODE_SEARCH_RG_END}%s:%s:%s:%s__' "$status" "$timed_out" "$gz_size" "$token"`,
+      `printf '${CODE_SEARCH_RG_END}%s:%s:%s:%s:%s:%s__' "$rg_status" "$timed_out" "$gz_size" "$token" "$raw_size" "$stored"`,
     ].join("\n");
     const { stdout } = await this.runReadOnly({
       cmd: internalBashCommand(script),
@@ -2491,21 +2507,35 @@ export class SandboxChannelAService {
     if (exitCode === 127) {
       return { available: false, stdout: "", exitCode: null, truncated: false, timedOut: false };
     }
+    if (trailer[3] === undefined || trailer[5] === undefined) {
+      throw new ChannelAUnavailableError("code search output trailer is malformed");
+    }
     const timedOut = trailer[2] === "1";
+    // A stopped search keeps the whole lines it stored. Otherwise a lost
+    // status or a failed or corrupt store must not pass as complete output.
+    if (!timedOut && exitCode === 125) {
+      throw new ChannelAUnavailableError(
+        "code search did not record its status on this machine; its temporary directory may be full",
+      );
+    }
+    if (!timedOut && trailer[6] !== "1") {
+      throw new ChannelAUnavailableError(CODE_SEARCH_RG_STORE_FAILED);
+    }
     const first = decodeCodeSearchChunk(stdout, trailer.index);
-    // A box that does not report its size (or lies) never gets more than the
-    // transfer cap fetched from it.
-    const reportedSize = trailer[3] === undefined ? first.length : Number.parseInt(trailer[3], 10);
-    const token = trailer[4] && trailer[4] !== "-" ? trailer[4] : null;
+    const reportedSize = Number.parseInt(trailer[3], 10);
+    const rawSize = Number.parseInt(trailer[5], 10);
+    const token = trailer[4] === "-" ? null : trailer[4]!;
     const parts = [first];
     let fetched = first.length;
-    let transferCut = false;
     if (token !== null && reportedSize > fetched) {
       if (!CODE_SEARCH_RG_TOKEN.test(token)) {
         throw new ChannelAUnavailableError("code search output frame is malformed");
       }
+      // A box that lies about its size never gets more than the transfer cap
+      // fetched from it, nor more calls than that cap needs.
       const target = Math.min(reportedSize, maxTransferBytes);
-      while (fetched < target) {
+      const maxCalls = Math.ceil(maxTransferBytes / CODE_SEARCH_RG_CHUNK_BYTES);
+      for (let call = 0; call < maxCalls && fetched < target; call++) {
         const length = Math.min(CODE_SEARCH_RG_CHUNK_BYTES, target - fetched);
         const chunk = await this.codeSearchRipgrepChunk(
           token,
@@ -2513,12 +2543,15 @@ export class SandboxChannelAService {
           length,
           fetched + length >= target,
         );
-        if (chunk === null || chunk.length === 0) break;
+        if (chunk === null) break;
         parts.push(chunk);
         fetched += chunk.length;
+        // A real box returns every byte asked for; a short chunk ends the
+        // transfer and is reported as a cut.
+        if (chunk.length < length) break;
       }
-      transferCut = fetched < reportedSize;
     }
+    const transferCut = fetched < reportedSize;
     // The box already cut stdout at maxBytes + 1, so more decoded bytes than
     // that come from a broken or hostile box and are dropped as a cut.
     const compressed = Buffer.concat(parts);
@@ -2526,8 +2559,11 @@ export class SandboxChannelAService {
       ? await gunzipCodeSearchPrefix(compressed, maxBytes + 1)
       : Buffer.alloc(0);
     const rawCut = raw.length > maxBytes;
+    // With nothing cut, the output must be exactly what the box verified.
+    const sizeMismatch = !rawCut && !transferCut && !timedOut && raw.length !== rawSize;
+    const truncated = rawCut || transferCut || sizeMismatch;
     let text = (rawCut ? raw.subarray(0, maxBytes) : raw).toString("utf8");
-    if (rawCut || transferCut || timedOut) {
+    if (truncated || timedOut) {
       // Drop the last partial line so every returned record is whole.
       const lastNewline = text.lastIndexOf("\n");
       text = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
@@ -2535,8 +2571,8 @@ export class SandboxChannelAService {
     return {
       available: true,
       stdout: text,
-      exitCode: timedOut || exitCode === 125 ? null : exitCode,
-      truncated: rawCut || transferCut,
+      exitCode: timedOut ? null : exitCode,
+      truncated,
       timedOut,
     };
   }

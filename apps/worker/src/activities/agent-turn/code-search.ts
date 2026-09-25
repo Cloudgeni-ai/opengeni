@@ -15,6 +15,7 @@ import {
   renderCodeSearchError,
   runCodeSearch,
   type CodeSearchWorkspace,
+  type JevCircuitLease,
 } from "@opengeni/jev";
 import type { Observability } from "@opengeni/observability";
 import {
@@ -133,19 +134,20 @@ export function createCodeSearchAttemptToolDefinition(input: {
       let outcome: CodeSearchCallOutcome = "failed";
       let jevRequests = 0;
       let jevCostUsd = 0;
-      // A breaker slot (the single trial while half-open) is settled exactly
-      // once: by what Jev did, or released when Jev was never judged.
-      let holdsBreaker = false;
+      // The breaker lease (the single trial while half-open) is settled exactly
+      // once: by what Jev did, or released when Jev was never judged. Settling
+      // takes it, so the finally block releases only a lease still held.
+      let lease: JevCircuitLease | null = null;
       try {
         const request = parseCodeSearchArguments(args);
-        if (!breaker.tryAcquire(Date.now())) {
+        lease = breaker.tryAcquire(Date.now());
+        if (!lease) {
           outcome = "breaker_open";
           return textResult(
             renderCodeSearchError(new JevUnavailableError("Jev is temporarily unavailable")),
             true,
           );
         }
-        holdsBreaker = true;
         const workspace = await input.workspace();
         const result = await runCodeSearch({
           ...request,
@@ -153,14 +155,15 @@ export function createCodeSearchAttemptToolDefinition(input: {
           jev,
           ...(context.signal ? { signal: context.signal } : {}),
         });
-        holdsBreaker = false;
+        const held = lease;
+        lease = null;
         // A pack whose final status check hit an outage still counts against Jev.
         if (result.statusCheckError instanceof JevUnavailableError) {
-          breaker.recordFailure(result.statusCheckError, Date.now());
+          breaker.recordFailure(result.statusCheckError, Date.now(), held);
         } else if (result.stats.jev.requests > 0) {
-          breaker.recordSuccess();
+          breaker.recordSuccess(held);
         } else {
-          breaker.release();
+          breaker.release(held);
         }
         outcome = "completed";
         jevRequests = result.stats.jev.requests;
@@ -190,8 +193,9 @@ export function createCodeSearchAttemptToolDefinition(input: {
           return textResult(error.message, true);
         }
         if (error instanceof JevUnavailableError) {
-          holdsBreaker = false;
-          breaker.recordFailure(error, Date.now());
+          const held = lease;
+          lease = null;
+          breaker.recordFailure(error, Date.now(), held);
           outcome = "jev_unavailable";
           return textResult(renderCodeSearchError(error), true);
         }
@@ -216,7 +220,7 @@ export function createCodeSearchAttemptToolDefinition(input: {
         }
         throw error;
       } finally {
-        if (holdsBreaker) breaker.release();
+        if (lease) breaker.release(lease);
         recordCodeSearchCall(input.observability, {
           outcome,
           durationSeconds: (performance.now() - startedAt) / 1_000,

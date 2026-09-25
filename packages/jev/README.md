@@ -40,12 +40,19 @@ Retries and errors work like this:
 
 - 3 consecutive `JevUnavailableError`s open it for 5 minutes. If the failure that opens it is a 401,
   402 or 403, it opens for 30 minutes instead.
+- `tryAcquire()` returns a lease (`{id, trial}`) for each admitted call, or `null` when it refuses the
+  call. The caller settles the lease exactly once, with `recordSuccess(lease)`,
+  `recordFailure(error, now, lease)` or `release(lease)` (the call never reached Jev).
 - After the cooldown the breaker is half-open, and `tryAcquire()` admits one trial call at a time.
-  Other callers are refused until the trial ends with `recordSuccess()`, `recordFailure()` or
-  `release()` (the call never reached Jev). One more unavailable failure reopens it at once, and a
-  success closes it.
+  Others are refused until the trial ends or has run for 10 minutes. That is longer than one Jev
+  retry cycle at the largest allowed request timeout (3 attempts of 120 s), plus backoff and sandbox
+  recall, so a slow trial is not mistaken for a stuck one.
+- A success from any call closes the breaker, and an unavailable failure from any call counts. While
+  half-open, one more unavailable failure reopens it at once.
+- `release()` and other errors neither count nor reset the streak. They end the trial only when their
+  lease is the trial's, so a call admitted while closed cannot free the slot of a trial running now.
+  Leases are matched by identity.
 - `isOpen()` is true only while the cooldown runs, so a half-open breaker still offers the tool.
-- Other errors are ignored.
 
 ## code_search
 

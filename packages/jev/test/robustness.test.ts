@@ -30,6 +30,9 @@ import {
 import { FIXTURE_FILES, fakeJevClient, makeFixtureRepo, packPassages } from "./helpers/fixture";
 import { LocalCodeSearchWorkspace } from "./helpers/local-workspace";
 
+// These run the real ripgrep binary; skip them where it is not installed.
+const describeWithRipgrep = Bun.which("rg") ? describe : describe.skip;
+
 const cfg = codeSearchConfig();
 const roots: string[] = [];
 function repo(files: Record<string, string | Uint8Array>): string {
@@ -94,7 +97,7 @@ const LIMIT_FILES: Record<string, string> = {
   ].join("\n"),
 };
 
-describe("lines past the end of the file as read", () => {
+describeWithRipgrep("lines past the end of the file as read", () => {
   test("the window helpers treat out-of-range lines as blank instead of throwing", () => {
     expect(() => definitionWindow([], 4, "sql", cfg)).not.toThrow();
     expect(() => definitionWindow(["-- a", "x"], 9, "brace", cfg)).not.toThrow();
@@ -221,7 +224,7 @@ describe("lines past the end of the file as read", () => {
   });
 });
 
-describe("ripgrep exit 2 without output", () => {
+describeWithRipgrep("ripgrep exit 2 without output", () => {
   test("a search with no match in a workspace with an unreadable directory finds nothing", async () => {
     const root = repo(FIXTURE_FILES);
     const locked = join(root, "locked");
@@ -276,7 +279,7 @@ describe("ripgrep exit 2 without output", () => {
   });
 });
 
-describe("patterns over the adapter's length cap", () => {
+describeWithRipgrep("patterns over the adapter's length cap", () => {
   test("splitAlternation splits only at top-level bars", () => {
     expect(splitAlternation("a|b")).toEqual(["a", "b"]);
     expect(splitAlternation("(?:a|b)|c")).toEqual(["(?:a|b)", "c"]);
