@@ -1,49 +1,46 @@
+// Minimal first-party web-client error beacon.
+//
+// The browser reports only a closed error kind, the matched route PATTERN
+// (never a concrete URL), and its bundle revision. No message, stack, URL,
+// identifier, user content, or credential is accepted, and the route admits
+// anonymous callers so a failure before sign-in is still counted. Each
+// accepted report increments one closed-label counter and writes one bounded
+// structured log line. This is an operational lower bound, not exception
+// capture: blocked requests, closed tabs, and the per-process admission bound
+// all drop reports. Because the route is anonymous, any HTTP client that omits
+// or forges `Origin` can still send reports up to the admission ceiling, so
+// alert on rates and ratios, not on absolute counts.
+import type { Settings } from "@opengeni/config";
+import {
+  CLIENT_ERROR_KINDS,
+  CLIENT_ERROR_REPORT_MAX_BYTES,
+  CLIENT_ERROR_REVISION_PATTERN,
+  CLIENT_ERROR_ROUTE_PATTERN,
+  CLIENT_ERRORS_PATH,
+  type ClientErrorKind,
+} from "@opengeni/contracts/client-error-report";
 import type { Observability } from "@opengeni/observability";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 
-/**
- * Minimal first-party web-client error beacon.
- *
- * The browser reports only a closed error kind, the matched route PATTERN
- * (never a concrete URL), and its bundle revision. No message, stack, URL,
- * identifier, user content, or credential is accepted, and the route admits
- * anonymous callers so a failure before sign-in is still counted. Each
- * accepted report increments one closed-label counter and writes one bounded
- * structured log line. This is an operational lower bound, not exception
- * capture: blocked requests, closed tabs, and the per-process admission bound
- * all drop reports.
- */
-export const CLIENT_ERRORS_PATH = "/v1/client-errors";
+import { isAllowedBrowserOrigin } from "../http/cors";
 
-export const CLIENT_ERROR_KINDS = [
-  "route_error",
-  "unhandled_rejection",
-  "window_error",
-  "chunk_load",
-] as const;
-export type ClientErrorKind = (typeof CLIENT_ERROR_KINDS)[number];
+export {
+  CLIENT_ERROR_KINDS,
+  CLIENT_ERROR_REPORT_MAX_BYTES,
+  CLIENT_ERRORS_PATH,
+  type ClientErrorKind,
+};
 
-const CLIENT_ERROR_REJECTION_REASONS = ["invalid", "too_large", "rate_limited"] as const;
+const CLIENT_ERROR_REJECTION_REASONS = ["invalid", "too_large", "origin", "rate_limited"] as const;
 type ClientErrorRejectionReason = (typeof CLIENT_ERROR_REJECTION_REASONS)[number];
-
-/** Largest accepted report body. A valid report is well under 256 bytes. */
-export const CLIENT_ERROR_REPORT_MAX_BYTES = 512;
-
-/**
- * A route pattern is `/`, `unknown`, or `/`-separated segments that are each
- * either a lowercase literal (`variable-sets`) or a `$param` placeholder. The
- * grammar excludes digits in literals, so a concrete id cannot pass as one.
- */
-const ROUTE_SEGMENT = String.raw`(?:[a-z]+(?:-[a-z]+)*|\$[A-Za-z][A-Za-z0-9]{0,31})`;
-const CLIENT_ROUTE_PATTERN = new RegExp(String.raw`^(?:unknown|/|(?:/${ROUTE_SEGMENT}){1,12})$`);
-const CLIENT_REVISION_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
 export const ClientErrorReport = z
   .object({
     kind: z.enum(CLIENT_ERROR_KINDS),
-    route: z.string().max(160).regex(CLIENT_ROUTE_PATTERN),
-    revision: z.string().regex(CLIENT_REVISION_PATTERN),
+    route: z.string().regex(CLIENT_ERROR_ROUTE_PATTERN),
+    revision: z.string().regex(CLIENT_ERROR_REVISION_PATTERN),
   })
   .strict();
 export type ClientErrorReport = z.infer<typeof ClientErrorReport>;
@@ -54,7 +51,7 @@ const CLIENT_ERRORS_METRIC = {
 } as const;
 const CLIENT_ERROR_REJECTIONS_METRIC = {
   name: "opengeni_client_error_reports_rejected_total",
-  help: "Web client error reports the API refused, by closed reason.",
+  help: 'Web client error reports the API refused, by closed reason and kind ("unknown" when the body was not read or not valid).',
 } as const;
 
 export type ClientErrorAdmission = { admit(kind: ClientErrorKind): boolean };
@@ -101,50 +98,85 @@ export function parseClientErrorReport(body: string | null): ClientErrorReport |
   return parsed.success ? parsed.data : null;
 }
 
+/**
+ * The exact beacon request. The app-wide request-body limit skips it because
+ * the route enforces its own 512-byte limit on the streamed body; the generic
+ * ceiling would otherwise buffer a chunked body of many megabytes on an
+ * anonymous route before this one could refuse it.
+ */
+export function isClientErrorReportRequest(method: string, pathname: string): boolean {
+  return method === "POST" && pathname === CLIENT_ERRORS_PATH;
+}
+
 export function registerClientErrorRoutes(
   app: Hono,
-  deps: { observability: Observability; admission?: ClientErrorAdmission },
+  deps: {
+    observability: Observability;
+    settings: Pick<Settings, "corsAllowOriginRegex" | "publicBaseUrl" | "webBaseUrl">;
+    admission?: ClientErrorAdmission;
+  },
 ): void {
-  const { observability } = deps;
+  const { observability, settings } = deps;
   const admission = deps.admission ?? createClientErrorAdmission();
   // Publish the finite series at zero so the first failure after a deploy is
   // an increase from a baseline rather than a series appearing from nothing.
   for (const kind of CLIENT_ERROR_KINDS) {
     observability.incrementCounter({ ...CLIENT_ERRORS_METRIC, labels: { kind }, amount: 0 });
-  }
-  for (const reason of CLIENT_ERROR_REJECTION_REASONS) {
     observability.incrementCounter({
       ...CLIENT_ERROR_REJECTIONS_METRIC,
-      labels: { reason },
+      labels: { reason: "rate_limited", kind },
       amount: 0,
     });
   }
-  const reject = (reason: ClientErrorRejectionReason) =>
-    observability.incrementCounter({ ...CLIENT_ERROR_REJECTIONS_METRIC, labels: { reason } });
-
-  app.post(CLIENT_ERRORS_PATH, async (c) => {
-    c.header("cache-control", "no-store");
-    const declaredLength = Number(c.req.header("content-length") ?? "0");
-    if (Number.isFinite(declaredLength) && declaredLength > CLIENT_ERROR_REPORT_MAX_BYTES) {
-      reject("too_large");
-      return c.body(null, 413);
-    }
-    const report = parseClientErrorReport(await c.req.text().catch(() => null));
-    if (!report) {
-      reject("invalid");
-      return c.body(null, 400);
-    }
-    if (!admission.admit(report.kind)) {
-      reject("rate_limited");
-      return c.body(null, 429);
-    }
-    observability.incrementCounter({ ...CLIENT_ERRORS_METRIC, labels: { kind: report.kind } });
-    observability.warn("Web client error reported", {
-      surface: "web",
-      reason: report.kind,
-      clientRoute: report.route,
-      clientRevision: report.revision,
+  for (const reason of CLIENT_ERROR_REJECTION_REASONS) {
+    if (reason === "rate_limited") continue;
+    observability.incrementCounter({
+      ...CLIENT_ERROR_REJECTIONS_METRIC,
+      labels: { reason, kind: "unknown" },
+      amount: 0,
     });
-    return c.body(null, 204);
-  });
+  }
+  // A rate-limited refusal keeps its kind, so accepted plus rejected is the
+  // true per-kind arrival rate even while a bucket is empty.
+  const reject = (
+    c: Context,
+    reason: ClientErrorRejectionReason,
+    status: 400 | 403 | 413 | 429,
+    kind: ClientErrorKind | "unknown" = "unknown",
+  ) => {
+    observability.incrementCounter({ ...CLIENT_ERROR_REJECTIONS_METRIC, labels: { reason, kind } });
+    c.header("cache-control", "no-store");
+    return c.body(null, status);
+  };
+
+  app.post(
+    CLIENT_ERRORS_PATH,
+    // Enforced on the streamed body, so a chunked request without a
+    // Content-Length is refused after 512 bytes rather than buffered.
+    bodyLimit({
+      maxSize: CLIENT_ERROR_REPORT_MAX_BYTES,
+      onError: (c) => reject(c, "too_large", 413),
+    }),
+    async (c) => {
+      c.header("cache-control", "no-store");
+      // Browsers always send Origin on this cross- or same-origin POST. A
+      // foreign page therefore cannot spend the admission budget or inflate
+      // the counter through its visitors' browsers.
+      const origin = c.req.header("origin");
+      if (origin !== undefined && !isAllowedBrowserOrigin(origin, settings)) {
+        return reject(c, "origin", 403);
+      }
+      const report = parseClientErrorReport(await c.req.text().catch(() => null));
+      if (!report) return reject(c, "invalid", 400);
+      if (!admission.admit(report.kind)) return reject(c, "rate_limited", 429, report.kind);
+      observability.incrementCounter({ ...CLIENT_ERRORS_METRIC, labels: { kind: report.kind } });
+      observability.warn("Web client error reported", {
+        surface: "web",
+        reason: report.kind,
+        clientRoute: report.route,
+        clientRevision: report.revision,
+      });
+      return c.body(null, 204);
+    },
+  );
 }

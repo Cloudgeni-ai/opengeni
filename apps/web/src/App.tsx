@@ -37,7 +37,7 @@ import {
 import { ProblemPanel } from "@/components/common";
 import { NotFoundPanel, RootRouteErrorPanel, routerErrorOptions } from "@/components/route-error";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
-import { routePatternFromMatches } from "@/lib/client-error-reporting";
+import { routePatternFromMatches, routePatternFromRoutes } from "@/lib/client-error-reporting";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
 import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
@@ -554,6 +554,15 @@ const router = createRouter({
 /** The matched route pattern (for example `/workspaces/$workspaceId/sessions`), never the URL. */
 export function appRoutePattern(): string {
   return routePatternFromMatches(router.state.matches);
+}
+
+/**
+ * The pattern of the route the router is showing or still loading. A lazy
+ * route chunk fails while its navigation is pending, before `state.matches`
+ * names the destination, so the chunk-load report uses the latest location.
+ */
+export function appDestinationRoutePattern(): string {
+  return routePatternFromRoutes(router.getMatchedRoutes(router.latestLocation.pathname)[0]);
 }
 
 declare module "@tanstack/react-router" {

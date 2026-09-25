@@ -66,7 +66,7 @@ describe("web bundle budget policy", () => {
     for (const limit of [
       "initialRaw: 1485 * kib",
       "initialGzip: 405 * kib",
-      "initialFileGzip: wholeKibEnvelope(82_201)",
+      "initialFileGzip: wholeKibEnvelope(82_325)",
       "initialFiles: 17",
       "directSessionRaw: Math.max(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET, wholeKibEnvelope(2_329_400))",
       "directSessionFiles: 31",
@@ -79,11 +79,11 @@ describe("web bundle budget policy", () => {
 
   test("bounds the eager route error boundary and client error beacon in the entry chunk", () => {
     const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
-    expect(source).toContain("initialFileGzip: wholeKibEnvelope(82_201)");
-    expect(source).toContain("wholeKibEnvelope(2_454_860, 1.5 * kib)");
-    expect(wholeKibEnvelope(82_201)).toBe(82 * KIB);
-    expect(wholeKibEnvelope(82_201) - 82_201).toBeGreaterThanOrEqual(KIB);
-    expect(wholeKibEnvelope(2_454_860, 1.5 * KIB) - 2_454_860).toBeGreaterThanOrEqual(1.5 * KIB);
+    expect(source).toContain("initialFileGzip: wholeKibEnvelope(82_325)");
+    expect(source).toContain("wholeKibEnvelope(2_455_346, 1.5 * kib)");
+    expect(wholeKibEnvelope(82_325)).toBe(82 * KIB);
+    expect(wholeKibEnvelope(82_325) - 82_325).toBeGreaterThanOrEqual(KIB);
+    expect(wholeKibEnvelope(2_455_346, 1.5 * KIB) - 2_455_346).toBeGreaterThanOrEqual(1.5 * KIB);
   });
 
   test("retains at least one KiB above the combined personal GitHub and current-main graph", () => {

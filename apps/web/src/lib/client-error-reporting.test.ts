@@ -1,15 +1,28 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import {
+  CLIENT_ERROR_REVISION_PATTERN,
+  CLIENT_ERROR_ROUTE_PATTERN,
+} from "@opengeni/contracts/client-error-report";
 
 import {
   beaconSender,
   clientRevision,
   clientRoutePattern,
   createClientErrorReporter,
+  hasObservedChunkLoadFailure,
   installGlobalClientErrorReporting,
+  installVitePreloadErrorReporting,
   isChunkLoadError,
+  reportCaughtClientError,
+  resetChunkLoadFailureState,
   routePatternFromMatches,
+  routePatternFromRoutes,
   type ClientErrorKind,
 } from "./client-error-reporting";
+
+afterEach(() => {
+  resetChunkLoadFailureState();
+});
 
 describe("client error report projection", () => {
   test("keeps route patterns and drops anything that could be a concrete URL", () => {
@@ -33,6 +46,37 @@ describe("client error report projection", () => {
     ]) {
       expect(clientRoutePattern(concrete)).toBe("unknown");
     }
+  });
+
+  test("a projected route is always one the API admits and the log keeps", () => {
+    // The browser, the API route, and the public log projection share one
+    // grammar; anything the projection emits must satisfy it.
+    for (const fullPath of [
+      "/",
+      "/workspaces/$workspaceId/sessions/$sessionId",
+      "/workspaces/$workspaceId/",
+      "/workspaces/7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      `/${"a".repeat(200)}`,
+      undefined,
+    ]) {
+      expect(CLIENT_ERROR_ROUTE_PATTERN.test(clientRoutePattern(fullPath))).toBe(true);
+    }
+    expect(clientRoutePattern(`/${"a".repeat(200)}`)).toBe("unknown");
+    for (const revision of ["0123456789abcdef", "dev", "rev with spaces", undefined]) {
+      expect(CLIENT_ERROR_REVISION_PATTERN.test(clientRevision(revision))).toBe(true);
+    }
+  });
+
+  test("maps a loading route branch to its leaf pattern", () => {
+    expect(routePatternFromRoutes([{ id: "__root__", fullPath: "/" }])).toBe("unknown");
+    expect(routePatternFromRoutes([])).toBe("unknown");
+    expect(
+      routePatternFromRoutes([
+        { id: "__root__", fullPath: "/" },
+        { id: "/workspaces/$workspaceId", fullPath: "/workspaces/$workspaceId" },
+        { id: "/workspaces/$workspaceId/rigs", fullPath: "/workspaces/$workspaceId/rigs" },
+      ]),
+    ).toBe("/workspaces/$workspaceId/rigs");
   });
 
   test("maps a root-only match (not found) to unknown", () => {
@@ -158,6 +202,8 @@ describe("global error listeners", () => {
     dispatch("unhandledrejection", {
       reason: new TypeError("Failed to fetch dynamically imported module: /assets/a.js"),
     });
+    // The tab now runs a replaced build; what follows is its consequence.
+    dispatch("error", { message: "TypeError: y is undefined", error: new TypeError("y") });
     expect(reports).toEqual([
       ["window_error", "/workspaces/$workspaceId/sessions"],
       ["unhandled_rejection", "/workspaces/$workspaceId/sessions"],
@@ -174,5 +220,67 @@ describe("global error listeners", () => {
     uninstall();
     dispatch("error", { message: "late", error: new Error("late") });
     expect(reports).toEqual([]);
+  });
+});
+
+describe("chunk-load failures", () => {
+  function recorder() {
+    const reports: Array<[ClientErrorKind, string]> = [];
+    return {
+      reports,
+      report: (kind: ClientErrorKind, route: string) => reports.push([kind, route]),
+    };
+  }
+
+  test("a Vite preload error is reported once, whether or not recovery reloads", () => {
+    const target = new EventTarget();
+    const { reports, report } = recorder();
+    const uninstall = installVitePreloadErrorReporting({
+      target,
+      routePattern: () => "/workspaces/$workspaceId/sessions/$sessionId",
+      report,
+    });
+    expect(hasObservedChunkLoadFailure()).toBe(false);
+    // A stylesheet and the module itself can each fail for one import.
+    target.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    target.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    expect(reports).toEqual([["chunk_load", "/workspaces/$workspaceId/sessions/$sessionId"]]);
+    expect(hasObservedChunkLoadFailure()).toBe(true);
+    uninstall();
+    resetChunkLoadFailureState();
+    target.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    expect(reports).toHaveLength(1);
+  });
+
+  test("failures that follow a chunk-load failure are not reported again", () => {
+    const { reports, report } = recorder();
+    const route = () => "/billing";
+    reportCaughtClientError(new TypeError("x is undefined"), "route_error", route, report);
+    expect(reports).toEqual([["route_error", "/billing"]]);
+
+    const target = new EventTarget();
+    installVitePreloadErrorReporting({ target, routePattern: route, report });
+    target.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    // The follow-on of a cancelled Vite preload: the import resolved to undefined.
+    reportCaughtClientError(
+      new TypeError("Cannot read properties of undefined (reading 'default')"),
+      "route_error",
+      route,
+      report,
+    );
+    reportCaughtClientError(new Error("late"), "unhandled_rejection", route, report);
+    expect(reports).toEqual([
+      ["route_error", "/billing"],
+      ["chunk_load", "/billing"],
+    ]);
+  });
+
+  test("a chunk-load error caught without a Vite event is reported once as chunk_load", () => {
+    const { reports, report } = recorder();
+    const stale = new TypeError("Importing a module script failed.");
+    reportCaughtClientError(stale, "route_error", () => "/", report);
+    reportCaughtClientError(stale, "unhandled_rejection", () => "/", report);
+    expect(reports).toEqual([["chunk_load", "/"]]);
+    expect(hasObservedChunkLoadFailure()).toBe(true);
   });
 });

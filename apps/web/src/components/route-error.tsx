@@ -2,7 +2,12 @@ import { Link, type ErrorComponentProps } from "@tanstack/react-router";
 
 import { ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
-import { isChunkLoadError, reportClientError } from "@/lib/client-error-reporting";
+import {
+  hasObservedChunkLoadFailure,
+  isChunkLoadError,
+  reportCaughtClientError,
+  reportClientError,
+} from "@/lib/client-error-reporting";
 
 type RouteErrorPanelProps = Pick<ErrorComponentProps, "error"> & {
   reload?: () => void;
@@ -12,12 +17,15 @@ type RouteErrorPanelProps = Pick<ErrorComponentProps, "error"> & {
  * Styled replacement for TanStack Router's bare "Something went wrong!" page.
  * The raw error text never reaches the page in production: it can contain ids
  * or server detail and is not actionable for the person reading it. A stale
- * lazy chunk after a deploy is presented as an update, with Reload first.
+ * lazy chunk after a deploy is presented as an update, with Reload first. That
+ * includes the follow-on failure after Vite's preload recovery has cancelled
+ * the import error and requested a reload: the router then sees an ordinary
+ * `TypeError`, but the document has already observed the chunk-load failure.
  * Both actions are full document loads so a failed router state cannot trap
  * the tab.
  */
 export function RouteErrorPanel({ error, reload = reloadDocument }: RouteErrorPanelProps) {
-  const updated = isChunkLoadError(error);
+  const updated = hasObservedChunkLoadFailure() || isChunkLoadError(error);
   return (
     <ProblemPanel
       title={updated ? "OpenGeni has been updated" : "Something went wrong"}
@@ -78,7 +86,8 @@ export function NotFoundPanel() {
  * Router options that give every match a styled error boundary and report
  * each caught failure. A failing page therefore keeps the workspace rail
  * instead of replacing the whole app. Not-found signals are routed to the
- * not-found component by TanStack before `onCatch` runs.
+ * not-found component by TanStack before `onCatch` runs. A failure that
+ * follows a chunk-load failure in the same document is not reported again.
  */
 export function routerErrorOptions(
   routePattern: () => string,
@@ -87,7 +96,7 @@ export function routerErrorOptions(
   return {
     defaultErrorComponent: RouteErrorPanel,
     defaultOnCatch: (error: Error) =>
-      report(isChunkLoadError(error) ? "chunk_load" : "route_error", routePattern()),
+      reportCaughtClientError(error, "route_error", routePattern, report),
   } as const;
 }
 

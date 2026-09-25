@@ -74,12 +74,27 @@ most ten reports per ten minutes; the API additionally bounds admission per kind
 and per process. ResizeObserver loop notices, opaque cross-origin
 `Script error.` events and `AbortError` rejections are not reported. Treat the
 counter as a lower bound: blocked requests, closed tabs and both rate limits
-drop reports, and `chunk_load` includes tabs that then recover through the
-automatic one-time reload in `vite-preload-recovery.ts`. It is not exception
-capture; use the route pattern and revision in the API's
-`Web client error reported` log line to locate a failing page and release.
+drop reports. It is not exception capture; use the route pattern and revision in
+the API's `Web client error reported` log line to locate a failing page and
+release.
+
+`chunk_load` counts documents that failed to load a lazy module or stylesheet,
+which after a deploy usually means the tab still references replaced hashed
+assets. The signal is Vite's `vite:preloadError` event
+(`installVitePreloadErrorReporting`), which fires before the recovery listener
+in `vite-preload-recovery.ts` decides whether to reload, so it counts both tabs
+that recover through the automatic one-time reload and tabs that cannot.
+Browser-specific dynamic-import failures that reach a route boundary or a global
+listener without that event are classified as `chunk_load` too. Each document
+reports at most one `chunk_load` and nothing after it until it reloads: when
+recovery cancels the event, Vite resolves the failed import to `undefined` and
+the router fails with an ordinary `TypeError` while the reload is in flight,
+and counting that as `route_error` would raise the route-error rate on every
+deploy. `route_error` therefore excludes stale-chunk failures.
 
 Every router match has a styled error boundary (`src/components/route-error.tsx`),
-so a failing page keeps the workspace rail and offers Reload and Go home. A stale
-chunk after a deploy is presented as an update with Reload first. The raw error
-text is shown only in development builds.
+so a failing page keeps the workspace rail and offers Reload and Go home. Once a
+document has observed a chunk-load failure, any route failure it shows is
+presented as an update with Reload first, including the brief follow-on failure
+while the recovery reload is in flight. The raw error text is shown only in
+development builds.

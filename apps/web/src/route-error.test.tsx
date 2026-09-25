@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
   Outlet,
@@ -7,6 +7,8 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  lazyRouteComponent,
+  type RouteComponent,
 } from "@tanstack/react-router";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -18,7 +20,14 @@ import {
   routerErrorOptions,
 } from "@/components/route-error";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
-import { routePatternFromMatches, type ClientErrorKind } from "@/lib/client-error-reporting";
+import {
+  installVitePreloadErrorReporting,
+  resetChunkLoadFailureState,
+  routePatternFromMatches,
+  routePatternFromRoutes,
+  type ClientErrorKind,
+} from "@/lib/client-error-reporting";
+import { installVitePreloadRecovery } from "@/lib/vite-preload-recovery";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -31,10 +40,23 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
+afterEach(() => {
+  resetChunkLoadFailureState();
+});
+
 const RAW_ERROR_SENTINEL = "ROUTE_ERROR_RAW_TEXT_7c21 workspace 7c9e6679";
 
-async function renderAt(path: string, failure: unknown) {
-  const reports: Array<[ClientErrorKind, string]> = [];
+type Reports = Array<[ClientErrorKind, string]>;
+
+async function renderAt(
+  path: string,
+  failure: unknown,
+  options: {
+    sessionComponent?: RouteComponent;
+    beforeLoad?: (routePattern: () => string, reports: Reports) => void;
+  } = {},
+) {
+  const reports: Reports = [];
   const rootRoute = createRootRoute({
     component: Outlet,
     errorComponent: RootRouteErrorPanel,
@@ -58,9 +80,11 @@ async function renderAt(path: string, failure: unknown) {
   const sessionRoute = createRoute({
     getParentRoute: () => workspaceRoute,
     path: "sessions/$sessionId",
-    component: () => {
-      throw failure;
-    },
+    component:
+      options.sessionComponent ??
+      (() => {
+        throw failure;
+      }),
   });
   const router = createRouter({
     routeTree: rootRoute.addChildren([indexRoute, workspaceRoute.addChildren([sessionRoute])]),
@@ -82,6 +106,10 @@ async function renderAt(path: string, failure: unknown) {
   console.error = () => undefined;
   console.warn = () => undefined;
   try {
+    options.beforeLoad?.(
+      () => routePatternFromRoutes(router.getMatchedRoutes(router.latestLocation.pathname)[0]),
+      reports,
+    );
     await router.load();
     await act(async () => {
       root.render(<RouterProvider router={router} />);
@@ -144,6 +172,115 @@ describe("route error boundaries", () => {
     } finally {
       await view.cleanup();
     }
+  });
+
+  describe("after a deploy replaced the lazy session chunk", () => {
+    const STALE_CHUNK_MESSAGE =
+      "Failed to fetch dynamically imported module: https://app.example.test/assets/session-4f1.js";
+
+    // Mirrors Vite's production `__vitePreload` helper: a failed import
+    // dispatches a cancelable `vite:preloadError` on window, and when a
+    // listener cancels it the helper resolves the import to `undefined`.
+    function vitePreload(baseModule: () => Promise<unknown>): Promise<unknown> {
+      return baseModule().catch((error: unknown) => {
+        const event = Object.assign(new Event("vite:preloadError", { cancelable: true }), {
+          payload: error,
+        });
+        window.dispatchEvent(event);
+        if (!event.defaultPrevented) throw error;
+      });
+    }
+
+    function staleLazySession() {
+      return lazyRouteComponent(
+        () =>
+          vitePreload(() => Promise.reject(new TypeError(STALE_CHUNK_MESSAGE))) as Promise<{
+            default: RouteComponent;
+          }>,
+      );
+    }
+
+    function memoryStorage(initial: Record<string, string> = {}) {
+      const values = new Map(Object.entries(initial));
+      return {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => void values.set(key, value),
+      };
+    }
+
+    async function renderStale(storage: ReturnType<typeof memoryStorage>) {
+      let reloads = 0;
+      const uninstall: Array<() => void> = [];
+      const view = await renderAt("/workspaces/w/sessions/s", null, {
+        sessionComponent: staleLazySession(),
+        beforeLoad: (routePattern, reports) => {
+          // The same order as main.tsx: report first, then recovery.
+          uninstall.push(
+            installVitePreloadErrorReporting({
+              target: window,
+              routePattern,
+              report: (kind, route) => reports.push([kind, route]),
+            }),
+            installVitePreloadRecovery({
+              target: window,
+              storage,
+              buildId: "https://app.example.test/assets/app-old.js",
+              reload: () => {
+                reloads += 1;
+              },
+            }),
+          );
+        },
+      });
+      return {
+        ...view,
+        reloads: () => reloads,
+        cleanup: async () => {
+          for (const remove of uninstall) remove();
+          await view.cleanup();
+        },
+      };
+    }
+
+    test("a recovered tab counts one chunk_load and shows the update panel, not a route error", async () => {
+      const view = await renderStale(memoryStorage());
+      try {
+        // Recovery cancelled the error and requested one reload, so the
+        // router saw the follow-on `undefined.default` TypeError instead.
+        expect(view.reloads()).toBe(1);
+        // The chunk fails while the initial navigation is still loading; the
+        // report names its destination pattern, never the concrete ids.
+        expect(view.reports).toEqual([
+          ["chunk_load", "/workspaces/$workspaceId/sessions/$sessionId"],
+        ]);
+        const text = view.container.textContent ?? "";
+        expect(text).toContain("OpenGeni has been updated");
+        expect(text).not.toContain("Something went wrong");
+        expect(view.container.querySelector("button")?.textContent).toBe("Reload to update");
+      } finally {
+        await view.cleanup();
+      }
+    });
+
+    test("a tab whose one-time reload is used up still counts one chunk_load", async () => {
+      const tanstackReloadKey = `tanstack_router_reload:${STALE_CHUNK_MESSAGE}`;
+      sessionStorage.setItem(tanstackReloadKey, "1");
+      const view = await renderStale(
+        memoryStorage({
+          "opengeni:vite-preload-recovery-build": "https://app.example.test/assets/app-old.js",
+        }),
+      );
+      try {
+        expect(view.reloads()).toBe(0);
+        expect(view.reports).toEqual([
+          ["chunk_load", "/workspaces/$workspaceId/sessions/$sessionId"],
+        ]);
+        expect(view.container.textContent).toContain("OpenGeni has been updated");
+      } finally {
+        sessionStorage.removeItem(tanstackReloadKey);
+        await view.cleanup();
+      }
+    });
   });
 
   test("an unknown URL offers a way home", async () => {

@@ -4,31 +4,25 @@
 // `opengeni_client_errors_total{kind}`. No message, stack, URL, identifier,
 // cookie, or user content leaves the browser, so it is operational telemetry
 // rather than consent-controlled product analytics (see
-// apps/web/docs/browser-analytics.md). Keep the grammar in lockstep with
-// apps/api/src/routes/client-errors.ts.
+// apps/web/docs/browser-analytics.md). The wire grammar is shared with the API
+// route and the public log projection through @opengeni/contracts.
+import {
+  CLIENT_ERROR_REVISION_PATTERN,
+  CLIENT_ERROR_ROUTE_PATTERN,
+  CLIENT_ERRORS_PATH,
+  CLIENT_ERROR_KINDS,
+  type ClientErrorKind,
+  type ClientErrorReport,
+} from "@opengeni/contracts/client-error-report";
 import { rootRouteId } from "@tanstack/react-router";
 
-export const CLIENT_ERRORS_PATH = "/v1/client-errors";
-
-export const CLIENT_ERROR_KINDS = [
-  "route_error",
-  "unhandled_rejection",
-  "window_error",
-  "chunk_load",
-] as const;
-export type ClientErrorKind = (typeof CLIENT_ERROR_KINDS)[number];
-
-export type ClientErrorReport = { kind: ClientErrorKind; route: string; revision: string };
-
-const ROUTE_SEGMENT = String.raw`(?:[a-z]+(?:-[a-z]+)*|\$[A-Za-z][A-Za-z0-9]{0,31})`;
-const CLIENT_ROUTE_PATTERN = new RegExp(String.raw`^(?:unknown|/|(?:/${ROUTE_SEGMENT}){1,12})$`);
-const CLIENT_REVISION_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+export { CLIENT_ERRORS_PATH, CLIENT_ERROR_KINDS, type ClientErrorKind, type ClientErrorReport };
 
 /** Reduce a router `fullPath` to the reportable pattern, or `unknown`. */
 export function clientRoutePattern(fullPath: string | undefined | null): string {
   if (!fullPath) return "unknown";
   const trimmed = fullPath.length > 1 ? fullPath.replace(/\/+$/, "") : fullPath;
-  return CLIENT_ROUTE_PATTERN.test(trimmed) ? trimmed : "unknown";
+  return CLIENT_ERROR_ROUTE_PATTERN.test(trimmed) ? trimmed : "unknown";
 }
 
 /** The leaf route's pattern, or `unknown` when only the root matched (not found). */
@@ -39,8 +33,19 @@ export function routePatternFromMatches(
   return leaf && leaf.routeId !== rootRouteId ? clientRoutePattern(leaf.fullPath) : "unknown";
 }
 
+/**
+ * The leaf pattern of a matched route branch, as `router.getMatchedRoutes`
+ * returns it for a location that may still be loading.
+ */
+export function routePatternFromRoutes(
+  routes: ReadonlyArray<{ id: string; fullPath: string }>,
+): string {
+  const leaf = routes.at(-1);
+  return leaf && leaf.id !== rootRouteId ? clientRoutePattern(leaf.fullPath) : "unknown";
+}
+
 export function clientRevision(value: string | undefined | null): string {
-  return value && CLIENT_REVISION_PATTERN.test(value) ? value : "unknown";
+  return value && CLIENT_ERROR_REVISION_PATTERN.test(value) ? value : "unknown";
 }
 
 const CHUNK_LOAD_MESSAGE_PATTERNS = [
@@ -150,6 +155,74 @@ export function reportClientError(kind: ClientErrorKind, route: string): void {
   defaultReporter?.report(kind, route);
 }
 
+type Report = (kind: ClientErrorKind, route: string) => void;
+
+// Set once this document has failed to load one of its lazy modules. After a
+// deploy that means the tab still references hashed assets that were replaced,
+// so it is running an older build until it reloads.
+let chunkLoadFailureObserved = false;
+
+/** Whether this document has already failed to load a lazy module. */
+export function hasObservedChunkLoadFailure(): boolean {
+  return chunkLoadFailureObserved;
+}
+
+/** Tests only. A real document clears this state by reloading. */
+export function resetChunkLoadFailureState(): void {
+  chunkLoadFailureObserved = false;
+}
+
+/**
+ * Record a lazy-module load failure. The first one in a document is reported
+ * once as `chunk_load`; the document then counts as running a replaced build.
+ */
+export function noteChunkLoadFailure(route: () => string, report: Report = reportClientError) {
+  if (chunkLoadFailureObserved) return;
+  chunkLoadFailureObserved = true;
+  report("chunk_load", route());
+}
+
+/**
+ * Report a failure caught by a route boundary or a global listener. Once the
+ * document has observed a chunk-load failure it reports nothing further: the
+ * `chunk_load` report already counted it, and what follows is its consequence.
+ * In particular, when the recovery listener cancels `vite:preloadError`, Vite
+ * resolves the failed import to `undefined` and the router then fails with an
+ * ordinary `TypeError` while the recovery reload is in flight; counting that
+ * as `route_error` would raise the route-error rate on every deploy.
+ */
+export function reportCaughtClientError(
+  error: unknown,
+  kind: Exclude<ClientErrorKind, "chunk_load">,
+  route: () => string,
+  report: Report = reportClientError,
+): void {
+  if (chunkLoadFailureObserved) return;
+  if (isChunkLoadError(error)) {
+    noteChunkLoadFailure(route, report);
+    return;
+  }
+  report(kind, route());
+}
+
+/**
+ * Vite dispatches `vite:preloadError` for every lazy module or stylesheet it
+ * cannot load, before the import settles and before the recovery listener in
+ * `vite-preload-recovery.ts` decides whether to reload. It is therefore the
+ * one signal that covers both the recovered and the unrecoverable case.
+ * Install it before the recovery listener so the beacon starts before a
+ * reload is requested.
+ */
+export function installVitePreloadErrorReporting(options: {
+  target: Pick<EventTarget, "addEventListener" | "removeEventListener">;
+  routePattern: () => string;
+  report?: Report;
+}): () => void {
+  const onPreloadError = () => noteChunkLoadFailure(options.routePattern, options.report);
+  options.target.addEventListener("vite:preloadError", onPreloadError);
+  return () => options.target.removeEventListener("vite:preloadError", onPreloadError);
+}
+
 function isBenignWindowError(event: ErrorEvent): boolean {
   const message = typeof event.message === "string" ? event.message : "";
   // Layout notifications the browser raises for ResizeObserver callbacks that
@@ -176,21 +249,18 @@ function isAbort(reason: unknown): boolean {
 export function installGlobalClientErrorReporting(options: {
   target: Pick<Window, "addEventListener" | "removeEventListener">;
   routePattern: () => string;
-  report?: (kind: ClientErrorKind, route: string) => void;
+  report?: Report;
 }): () => void {
   const report = options.report ?? reportClientError;
   const onError = (event: Event) => {
     const errorEvent = event as ErrorEvent;
     if (isBenignWindowError(errorEvent)) return;
-    report(
-      isChunkLoadError(errorEvent.error) ? "chunk_load" : "window_error",
-      options.routePattern(),
-    );
+    reportCaughtClientError(errorEvent.error, "window_error", options.routePattern, report);
   };
   const onRejection = (event: Event) => {
     const reason = (event as PromiseRejectionEvent).reason;
     if (isAbort(reason)) return;
-    report(isChunkLoadError(reason) ? "chunk_load" : "unhandled_rejection", options.routePattern());
+    reportCaughtClientError(reason, "unhandled_rejection", options.routePattern, report);
   };
   options.target.addEventListener("error", onError);
   options.target.addEventListener("unhandledrejection", onRejection);

@@ -1,6 +1,10 @@
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import { registerFeedbackRoutes } from "./routes/feedback";
-import { CLIENT_ERRORS_PATH, registerClientErrorRoutes } from "./routes/client-errors";
+import {
+  CLIENT_ERRORS_PATH,
+  isClientErrorReportRequest,
+  registerClientErrorRoutes,
+} from "./routes/client-errors";
 import { codemodeSessionRequest } from "./codemode";
 import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
@@ -517,7 +521,14 @@ export function createAppComposition(deps: AppDependencies): {
     // Git packfiles must stay streaming and can legitimately exceed the JSON
     // request ceiling. The exact closed broker routes apply their own method,
     // content-type, authority, and idle-deadline checks.
-    if (isPersonalGitHubGitBrokerRequest(c.req.method, new URL(c.req.url).pathname)) {
+    const pathname = new URL(c.req.url).pathname;
+    if (isPersonalGitHubGitBrokerRequest(c.req.method, pathname)) {
+      await next();
+      return;
+    }
+    // The anonymous web error beacon enforces its own 512-byte limit on the
+    // streamed body; the generic ceiling would buffer far more first.
+    if (isClientErrorReportRequest(c.req.method, pathname)) {
       await next();
       return;
     }
@@ -905,7 +916,7 @@ export function createAppComposition(deps: AppDependencies): {
 
   registerMcpOAuthRoutes(app, routeDeps);
 
-  registerClientErrorRoutes(app, { observability });
+  registerClientErrorRoutes(app, { observability, settings: deps.settings });
 
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");

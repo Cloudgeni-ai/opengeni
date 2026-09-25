@@ -2,13 +2,14 @@ import "./lib/crypto-random-uuid";
 import { AppearanceProvider } from "./lib/appearance";
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { App, appRoutePattern } from "./App";
+import { App, appDestinationRoutePattern, appRoutePattern } from "./App";
 import { apiBaseUrl, bundleDeploymentRevision } from "./api";
 import {
   CLIENT_ERRORS_PATH,
   beaconSender,
   createClientErrorReporter,
   installGlobalClientErrorReporting,
+  installVitePreloadErrorReporting,
   setClientErrorReporter,
 } from "./lib/client-error-reporting";
 import { retainIdentityLinkContinuation } from "./lib/identity-link-continuation";
@@ -28,6 +29,8 @@ setClientErrorReporter(
   }),
 );
 installGlobalClientErrorReporting({ target: window, routePattern: appRoutePattern });
+// Before the recovery listener, so the report is sent before a reload starts.
+installVitePreloadErrorReporting({ target: window, routePattern: appDestinationRoutePattern });
 const preloadRecoveryStorage = availableSessionStorage(window);
 if (preloadRecoveryStorage) {
   installVitePreloadRecovery({

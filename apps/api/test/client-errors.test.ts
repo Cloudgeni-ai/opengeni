@@ -22,6 +22,11 @@ const observabilitySettings = {
   observabilityOtlpHeaders: "",
 };
 
+const originSettings = {
+  corsAllowOriginRegex: String.raw`^https?://(localhost|127\.0\.0\.1)(:\d+)?$`,
+  publicBaseUrl: "https://app.opengeni.test",
+};
+
 const validReport = {
   kind: "chunk_load",
   route: "/workspaces/$workspaceId/sessions/$sessionId",
@@ -110,7 +115,7 @@ describe("POST /v1/client-errors", () => {
   test("counts an accepted report and logs only its closed fields", async () => {
     const observability = createObservability(observabilitySettings, { component: "api" });
     const app = new Hono();
-    registerClientErrorRoutes(app, { observability });
+    registerClientErrorRoutes(app, { observability, settings: originSettings });
 
     const baseline = await observability.prometheusMetrics();
     for (const kind of CLIENT_ERROR_KINDS) {
@@ -118,7 +123,7 @@ describe("POST /v1/client-errors", () => {
     }
 
     const { result: response, lines } = await captureWarnings(() =>
-      post(app, JSON.stringify(validReport)),
+      post(app, JSON.stringify(validReport), { origin: "https://app.opengeni.test" }),
     );
     expect(response.status).toBe(204);
     expect(response.headers.get("cache-control")).toBe("no-store");
@@ -141,8 +146,17 @@ describe("POST /v1/client-errors", () => {
     const app = new Hono();
     registerClientErrorRoutes(app, {
       observability,
+      settings: originSettings,
       admission: createClientErrorAdmission({ capacity: 1, refillPerSecond: 0, now: () => 0 }),
     });
+    const rejected = "opengeni_client_error_reports_rejected_total";
+    const baseline = await observability.prometheusMetrics();
+    for (const reason of ["invalid", "too_large", "origin"]) {
+      expect(metricValue(baseline, rejected, `kind="unknown",reason="${reason}"`)).toBe(0);
+    }
+    for (const kind of CLIENT_ERROR_KINDS) {
+      expect(metricValue(baseline, rejected, `kind="${kind}",reason="rate_limited"`)).toBe(0);
+    }
 
     const { lines } = await captureWarnings(async () => {
       expect((await post(app, JSON.stringify({ ...validReport, message: "x" }))).status).toBe(400);
@@ -154,16 +168,107 @@ describe("POST /v1/client-errors", () => {
         ).status,
       ).toBe(413);
       expect((await post(app, JSON.stringify(validReport))).status).toBe(204);
-      expect((await post(app, JSON.stringify(validReport))).status).toBe(429);
+      const limited = await post(app, JSON.stringify(validReport));
+      expect(limited.status).toBe(429);
+      expect(limited.headers.get("cache-control")).toBe("no-store");
     });
 
     const metrics = await observability.prometheusMetrics();
     expect(metricValue(metrics, "opengeni_client_errors_total", 'kind="chunk_load"')).toBe(1);
-    const rejected = "opengeni_client_error_reports_rejected_total";
-    expect(metricValue(metrics, rejected, 'reason="invalid"')).toBe(1);
-    expect(metricValue(metrics, rejected, 'reason="too_large"')).toBe(1);
-    expect(metricValue(metrics, rejected, 'reason="rate_limited"')).toBe(1);
+    expect(metricValue(metrics, rejected, 'kind="unknown",reason="invalid"')).toBe(1);
+    expect(metricValue(metrics, rejected, 'kind="unknown",reason="too_large"')).toBe(1);
+    // A rate-limited refusal keeps its kind, so accepted plus refused is the
+    // true per-kind arrival rate while the bucket is empty.
+    expect(metricValue(metrics, rejected, 'kind="chunk_load",reason="rate_limited"')).toBe(1);
+    expect(metricValue(metrics, rejected, 'kind="route_error",reason="rate_limited"')).toBe(0);
     expect(lines).toHaveLength(1);
+  });
+
+  test("refuses a streamed body over the limit without buffering it", async () => {
+    const observability = createObservability(observabilitySettings, { component: "api" });
+    const app = createApp({
+      settings: { ...testSettings(), ...originSettings },
+      db: {} as never,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as never,
+      managedAuth: null,
+      observability,
+    });
+    let pulledChunks = 0;
+    const chunk = new TextEncoder().encode("x".repeat(256));
+    // No Content-Length: the declared-length check cannot see this body.
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulledChunks += 1;
+        if (pulledChunks > 64) controller.close();
+        else controller.enqueue(chunk);
+      },
+    });
+    const { result: response } = await captureWarnings(() =>
+      app.request("/v1/client-errors", {
+        method: "POST",
+        headers: { "content-type": "text/plain;charset=UTF-8" },
+        body,
+        duplex: "half",
+      } as RequestInit),
+    );
+    expect(response.status).toBe(413);
+    // Refused after the third 256-byte chunk, not after reading all 16 KiB.
+    expect(pulledChunks).toBeLessThan(8);
+    const metrics = await observability.prometheusMetrics();
+    expect(
+      metricValue(
+        metrics,
+        "opengeni_client_error_reports_rejected_total",
+        'kind="unknown",reason="too_large"',
+      ),
+    ).toBe(1);
+    expect(metricValue(metrics, "opengeni_client_errors_total", 'kind="chunk_load"')).toBe(0);
+  });
+
+  test("accepts the deployment's own web origins and refuses foreign pages", async () => {
+    const observability = createObservability(observabilitySettings, { component: "api" });
+    const app = new Hono();
+    registerClientErrorRoutes(app, {
+      observability,
+      settings: { ...originSettings, webBaseUrl: "http://127.0.0.1:3000" },
+    });
+    const { result: statuses } = await captureWarnings(async () => {
+      const byOrigin: Record<string, number> = {};
+      for (const origin of [
+        "https://app.opengeni.test",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "https://attacker.example",
+        "https://app.opengeni.test.attacker.example",
+        "null",
+        "not a url",
+      ]) {
+        byOrigin[origin] = (await post(app, JSON.stringify(validReport), { origin })).status;
+      }
+      // Non-browser clients send no Origin; the admission bound still applies.
+      byOrigin["(none)"] = (await post(app, JSON.stringify(validReport))).status;
+      return byOrigin;
+    });
+    expect(statuses).toEqual({
+      "https://app.opengeni.test": 204,
+      "http://127.0.0.1:3000": 204,
+      "http://localhost:5173": 204,
+      "https://attacker.example": 403,
+      "https://app.opengeni.test.attacker.example": 403,
+      null: 403,
+      "not a url": 403,
+      "(none)": 204,
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(
+      metricValue(
+        metrics,
+        "opengeni_client_error_reports_rejected_total",
+        'kind="unknown",reason="origin"',
+      ),
+    ).toBe(4);
+    expect(metricValue(metrics, "opengeni_client_errors_total", 'kind="chunk_load"')).toBe(4);
   });
 
   test("is reachable anonymously behind the deployment key and across API contract changes", async () => {
