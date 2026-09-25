@@ -1190,6 +1190,21 @@ export function recordSandboxDeadlineRotationsRequested(
   });
 }
 
+/** Only call after the exact draining->cold commit reports wentCold. The
+ * backend is validated against the closed contract so provider IDs and other
+ * per-sandbox values can never become metric labels. */
+export function recordSandboxProviderMissingBeforeCapture(
+  observability: Observability,
+  backend: string,
+): void {
+  const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+  observability.incrementCounter({
+    name: "opengeni_sandbox_provider_missing_before_capture_total",
+    help: "Exact sandbox cold commits after definitive provider disappearance before workspace capture.",
+    labels: { backend: safeBackend },
+  });
+}
+
 export function recordSandboxRotationBacklogGauges(
   observability: Observability,
   backlog: {

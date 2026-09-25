@@ -158,6 +158,7 @@ import {
   type SandboxInventoryProjectionDomain,
   recordSandboxLeaseGauges,
   recordSandboxOrphansTerminated,
+  recordSandboxProviderMissingBeforeCapture,
   recordSandboxRotationBacklogGauges,
   recordTurnsQueuedGauge,
   runtimeMetricsHooksForObservability,
@@ -3101,6 +3102,12 @@ async function terminateDrainableBox(
     providerMissingBeforeCapture: providerMissing,
   });
   if (wentCold) {
+    // Only the exact successful cold commit counts provider loss. A missing
+    // probe, a stale capture, a failed commit, or a retried child is not another
+    // observed loss. Keep this outside the best-effort session event writer.
+    if (providerMissing) {
+      recordSandboxProviderMissingBeforeCapture(observability, backend);
+    }
     // Durable termination record (sandbox-file-persistence observability): who
     // ended this box and whether its /workspace was captured first, appended to
     // every session sharing the group's box. Best-effort: attribution must

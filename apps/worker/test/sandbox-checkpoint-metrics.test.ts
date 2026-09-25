@@ -7,6 +7,7 @@ import {
   recordSandboxDeadlineRotationsRequested,
   recordSandboxInventoryProjectionFailure,
   recordSandboxInventoryProjectionSuccess,
+  recordSandboxProviderMissingBeforeCapture,
   recordSandboxRotationBacklogGauges,
   runtimeMetricsHooksForObservability,
 } from "../src/observability-metrics";
@@ -99,6 +100,21 @@ describe("sandbox checkpoint and deadline metrics", () => {
       /opengeni_sandbox_checkpoint_artifact_operations_total\{outcome="deleted"/,
     );
     expect(metrics).toMatch(/opengeni_sandbox_deadline_rotations_requested_total\{[^}]*\} 2\b/);
+  });
+
+  test("provider-before-capture loss has only a bounded backend label", async () => {
+    const observability = workerObservability();
+    recordSandboxProviderMissingBeforeCapture(observability, "modal");
+    recordSandboxProviderMissingBeforeCapture(observability, "opaque-instance-id");
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_provider_missing_before_capture_total\{[^}]*backend="modal"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_provider_missing_before_capture_total\{[^}]*backend="unknown"[^}]*\} 1\b/,
+    );
+    expect(metrics).not.toContain("opaque-instance-id");
   });
 
   test("publishes bounded per-domain projection freshness and failures", async () => {

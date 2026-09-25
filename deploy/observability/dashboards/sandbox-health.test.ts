@@ -2,6 +2,28 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
 describe("sandbox health dashboard", () => {
+  test("shows observed provider loss separately from the deadline backlog", async () => {
+    const dashboard = JSON.parse(
+      await readFile(new URL("./sandbox-health.json", import.meta.url), "utf8"),
+    ) as {
+      panels: Array<{ id: number; title?: string; targets?: Array<{ expr?: string }> }>;
+    };
+    const loss = dashboard.panels.find(
+      (panel) => panel.title === "Provider missing before workspace capture",
+    );
+    const backlog = dashboard.panels.find((panel) => panel.title === "Deadline rotation backlog");
+    expect(loss).toBeDefined();
+    expect(backlog).toBeDefined();
+    expect(dashboard.panels.filter((panel) => panel.id === loss?.id)).toHaveLength(1);
+    expect(loss?.targets?.[0]?.expr).toContain(
+      "opengeni_sandbox_provider_missing_before_capture_total",
+    );
+    expect(loss?.targets?.[0]?.expr).toContain("max by (backend)");
+    expect(loss?.targets?.[0]?.expr).toContain("offset 30m");
+    expect(loss?.targets?.[0]?.expr).not.toContain("sandbox_rotation_backlog");
+    expect(JSON.stringify(loss)).not.toMatch(/workspace_id|session_id|sandbox_group_id/);
+  });
+
   test("separates logical outcomes, internal retries, and unknown failure ratio", async () => {
     const dashboard = JSON.parse(
       await readFile(new URL("./sandbox-health.json", import.meta.url), "utf8"),
