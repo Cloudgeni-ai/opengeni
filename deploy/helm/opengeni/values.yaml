@@ -55,11 +55,12 @@ networkPolicy:
   ingressController:
     namespaceSelector: {}
     podSelector: {}
-  # Optional: allow a metrics scraper (Prometheus) to reach the relay's
-  # GET /metrics on its wss port and the API's internal api.metricsPort. Leave
-  # unset to omit those rules (the relay has no other ingress source than the
-  # ingress controller). When the kube-prometheus ServiceMonitor scrapes from a
-  # separate namespace, set both selectors here.
+  # Optional: allow a metrics scraper (Prometheus) to reach GET /metrics on the
+  # relay's internal relay.metricsPort (its wss port when that is null) and the
+  # API's internal api.metricsPort. Leave unset to omit those rules (the relay
+  # has no other ingress source than the ingress controller). When the
+  # kube-prometheus ServiceMonitor scrapes from a separate namespace, set both
+  # selectors here.
   monitoring: {}
     # namespaceSelector:
     #   matchLabels:
@@ -699,6 +700,15 @@ relay:
   # The wss listener port. The container, service targetPort, and the relay's
   # OPENGENI_RELAY_BIND all derive from this single value.
   containerPort: 8443
+  # Dedicated internal Prometheus listener (OPENGENI_RELAY_METRICS_BIND). GET
+  # /metrics is then served only here, never on containerPort, so an ingress
+  # that forwards every path of the public relay host cannot publish it. It gets
+  # its own ClusterIP Service (never a NodePort) for the ServiceMonitor and
+  # scrape annotations. Must differ from containerPort. Requires a relay image
+  # from this chart's release or later (an older relay ignores the bind and its
+  # scrape target goes down). Set null to keep the legacy /metrics on
+  # containerPort, including when pinning an older relay image.
+  metricsPort: 9464
   # The runtime-secret keys the relay's two HMAC token secrets are read from.
   # The producer (ogr_) secret falls back to the viewer (ogs_) stream-token secret
   # inside the relay when the relay key is absent, so a single OPENGENI_STREAM_TOKEN_SECRET
