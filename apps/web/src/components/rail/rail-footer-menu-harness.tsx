@@ -72,9 +72,7 @@ export async function loadRailFooterMenuHarness() {
 
   const { RailFooter } = await import("./rail-footer");
 
-  async function renderOpenAccountMenu(
-    config: RailFooterMenuConfig,
-  ): Promise<() => Promise<void>> {
+  async function renderOpenAccountMenu(config: RailFooterMenuConfig): Promise<() => Promise<void>> {
     footer = config;
     const container = document.createElement("div");
     document.body.append(container);
@@ -84,9 +82,7 @@ export async function loadRailFooterMenuHarness() {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    const trigger = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Account menu"]',
-    );
+    const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Account menu"]');
     if (!trigger) throw new Error("Missing account menu trigger");
     await act(async () => {
       trigger.dispatchEvent(
