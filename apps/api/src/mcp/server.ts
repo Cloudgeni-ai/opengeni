@@ -584,9 +584,27 @@ export function slackBotFileContentResult(
   result: Awaited<ReturnType<OpenGeniSlackBotClient["fileContent"]>>,
 ) {
   if (!("image" in result)) {
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+      structuredContent: {
+        kind: "text" as const,
+        fileId: result.file.id,
+        contentType: result.contentType,
+        content: result.content,
+        sizeBytes: null,
+        nextOffset: result.nextOffset,
+      },
+    };
   }
   return {
+    structuredContent: {
+      kind: "image" as const,
+      fileId: result.file.id,
+      contentType: result.image.contentType,
+      content: null,
+      sizeBytes: result.image.bytes.byteLength,
+      nextOffset: null,
+    },
     content: [
       {
         type: "text" as const,
@@ -1977,13 +1995,21 @@ function registerSlackBotTools(
     "slack_bot_file_content",
     {
       description:
-        "Read a bounded page of text or view a PNG, JPEG, or WebP image from a Slack file shared with a channel where the workspace-shared OpenGeni bot is already a member. Use the file ID from thread replies to view images in earlier thread messages. Images are returned directly as image content, only in non-shared channels, up to 4 MiB each; offset must be 0. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so OpenGeni can verify the channel-to-canvas-to-transcript chain. Slack may still restrict a huddle transcript body to participants; that returns huddle_transcript_requires_participant_access. Private Slack URLs and credentials are never returned. Continue with nextOffset for truncated text.",
+        "Read a bounded page of text or view a PNG, JPEG, or WebP image from a Slack file shared with a channel where the workspace-shared OpenGeni bot is already a member. Use the file ID from thread replies to view images in earlier thread messages. Images are returned as viewable content, only when directly shared to a non-shared channel, up to 640 KiB; offset must be 0. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so OpenGeni can verify the channel-to-canvas-to-transcript chain. Slack may still restrict a huddle transcript body to participants; that returns huddle_transcript_requires_participant_access. Private Slack URLs and credentials are never returned. Continue with nextOffset for truncated text.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
         fileId: z4.string().min(1).max(64),
         parentFileId: z4.string().min(1).max(64).optional(),
         offset: z4.number().int().min(0).max(4_000_000).optional(),
+      },
+      outputSchema: {
+        kind: z4.enum(["text", "image"]),
+        fileId: z4.string(),
+        contentType: z4.string(),
+        content: z4.string().nullable(),
+        sizeBytes: z4.number().int().nullable(),
+        nextOffset: z4.number().int().nullable(),
       },
     },
     async ({ connectionId, channelId, fileId, parentFileId, offset }) => {

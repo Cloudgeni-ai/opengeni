@@ -43,11 +43,14 @@ import {
   type FetchLike,
 } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
+import sharp from "sharp";
 
 const SLACK_API_BASE = "https://slack.com/api/";
 const SLACK_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
 const SLACK_FILE_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
 export const SLACK_REACTION_IMAGE_MAX_BYTES = 4 * 1024 * 1024;
+// Base64 plus MCP metadata must stay below the runtime's 1 MiB model-result cap.
+export const SLACK_MCP_IMAGE_MAX_BYTES = 640 * 1024;
 const SLACK_FILE_CONTENT_PAGE_CHARS = 50_000;
 const SLACK_TIMEOUT_MS = 10_000;
 const MAX_CHANNEL_PAGE = 200;
@@ -998,6 +1001,15 @@ export class OpenGeniSlackBotClient {
         // A context file is read only on explicit request. Keep the same
         // non-shared channel boundary and byte validation as invocation images.
         await this.requireActiveNonSharedMemberChannel(headers, input.channelId);
+        if (!fileIsSharedToChannel(fileRecord, input.channelId)) {
+          throw new SlackBotProviderError("file_not_shared_to_channel");
+        }
+        if (file.size !== null && (file.size < 1 || file.size > SLACK_REACTION_IMAGE_MAX_BYTES)) {
+          throw new SlackBotProviderError("invalid_file_size");
+        }
+        if (file.size !== null && file.size > SLACK_MCP_IMAGE_MAX_BYTES) {
+          throw new SlackBotProviderError("image_result_too_large");
+        }
         const image = await this.downloadReactionImage({
           fileId: file.id,
           filename: file.name || file.title || file.id,
@@ -1005,6 +1017,10 @@ export class OpenGeniSlackBotClient {
           declaredSizeBytes: file.size,
           downloadUrl: privateSlackFileUrl(fileRecord),
         });
+        if (image.bytes.byteLength > SLACK_MCP_IMAGE_MAX_BYTES) {
+          throw new SlackBotProviderError("image_result_too_large");
+        }
+        await validateSlackMcpImage(image.bytes);
         return { channel: info, file, image };
       }
       const embeddedTranscript = embeddedHuddleTranscription(fileRecord, parentFileRecord);
@@ -1935,6 +1951,15 @@ export class OpenGeniSlackBotClient {
       ...(this.context.sessionId ? { sessionId: this.context.sessionId } : {}),
       ...(this.context.scheduledTaskId ? { scheduledTaskId: this.context.scheduledTaskId } : {}),
     };
+  }
+}
+
+/** Full decode guards the model image block against header-only or corrupt files. */
+export async function validateSlackMcpImage(bytes: Uint8Array): Promise<void> {
+  try {
+    await sharp(bytes, { limitInputPixels: 16_000_000, failOn: "error" }).stats();
+  } catch {
+    throw new SlackBotProviderError("invalid_file_content");
   }
 }
 

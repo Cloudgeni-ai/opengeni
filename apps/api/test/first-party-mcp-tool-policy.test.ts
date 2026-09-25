@@ -85,6 +85,33 @@ test("Slack file content keeps text paginated and sends image bytes as an MCP im
     { type: "image", mimeType: "image/png", data: "AQID" },
   ]);
   expect(image.content[0]).not.toHaveProperty("data");
+  expect(image.structuredContent).toEqual({
+    kind: "image",
+    fileId: "F_IMAGE",
+    contentType: "image/png",
+    content: null,
+    sizeBytes: 3,
+    nextOffset: null,
+  });
+  const maximum = slackBotFileContentResult({
+    ...common,
+    file: { ...common.file, name: "x".repeat(512), title: "y".repeat(512) },
+    image: {
+      fileId: "F_IMAGE",
+      filename: "thread.png",
+      contentType: "image/png",
+      bytes: new Uint8Array(640 * 1024),
+    },
+  } as Result);
+  expect(Buffer.byteLength(JSON.stringify(maximum))).toBeLessThan(1024 * 1024);
+  const server = buildOpenGeniMcpServer(
+    deps(),
+    grant(["connections:read"], ["slack_bot_file_content"]),
+  );
+  expect(
+    (server as { _registeredTools?: Record<string, { outputSchema?: unknown }> })._registeredTools
+      ?.slack_bot_file_content?.outputSchema,
+  ).toBeDefined();
 });
 
 function broadServerTools(tools: readonly FirstPartyMcpToolName[]): FirstPartyMcpToolName[] {

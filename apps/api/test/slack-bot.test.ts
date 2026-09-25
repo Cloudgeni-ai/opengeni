@@ -203,6 +203,7 @@ function fakeSlack(
     transcriptRequiresUserSession?: boolean;
     transcriptInFileInfo?: boolean;
     image?: { bytes: Uint8Array; declaredMime?: string; responseMime?: string; size?: number };
+    imageSharedViaParent?: boolean;
     fileListResponse?: (input: { count: number; page: number }) => Record<string, unknown>;
   } = {},
 ) {
@@ -569,7 +570,7 @@ function fakeSlack(
             filetype: "png",
             mimetype: options.image?.declaredMime ?? "image/png",
             size: options.image?.size ?? (options.image?.bytes ?? fixturePng()).byteLength,
-            channels: ["C_MEMBER"],
+            channels: [options.imageSharedViaParent ? "G_PRIVATE" : "C_MEMBER"],
             url_private_download:
               "https://files.slack.com/files-pri/T_OPEN_GENI-F_IMAGE/download/thread-image.png",
           },
@@ -589,6 +590,7 @@ function fakeSlack(
           size: transcript ? 4567 : 1234,
           channels: transcript ? [] : [fileId === "F_OTHER" ? "G_PRIVATE" : "C_MEMBER"],
           groups: transcript ? ["C_CANVAS"] : [],
+          embedded_file_ids: options.imageSharedViaParent ? ["F_IMAGE"] : undefined,
           canvas_metadata: transcript ? undefined : { originating_huddle_id: "H_FIXTURE" },
           huddle_transcript_file_id: transcript ? undefined : "FTRANSCRIPT",
           huddle_transcription:
@@ -726,10 +728,10 @@ function fakeSlack(
 }
 
 function fixturePng(): Uint8Array {
-  return new Uint8Array([
-    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 73, 69, 78, 68, 0, 0, 0, 0,
-  ]);
+  return Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X9p8AAAAASUVORK5CYII=",
+    "base64",
+  );
 }
 
 describe("Slack files.list pagination adapter", () => {
@@ -2506,7 +2508,7 @@ describe("OpenGeni Slack bot connection", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const slack = fakeSlack();
-    const { bot } = await connectedTestBot(workspace, slack.fetch);
+    const { bot, connection } = await connectedTestBot(workspace, slack.fetch);
     const image = await bot.fileContent({ channelId: "C_MEMBER", fileId: "F_IMAGE" });
     expect("image" in image && image.image).toMatchObject({
       fileId: "F_IMAGE",
@@ -2526,10 +2528,40 @@ describe("OpenGeni Slack bot connection", () => {
       "slack_connect_unsupported",
     );
 
+    const parentSlack = fakeSlack({ imageSharedViaParent: true });
+    const parentBot = createOpenGeniSlackBotClient(
+      { db: client.db, settings, slackFetch: parentSlack.fetch },
+      await resolveSlackBotConnectionForTool({
+        db: client.db,
+        grant: {
+          ...workspace,
+          subjectId: "subject-a",
+          permissions: ["connections:read"],
+          metadata: {},
+        },
+        sessionId: null,
+        requestedConnectionId: connection.id,
+      }),
+    );
+    await expect(
+      parentBot.fileContent({ channelId: "C_MEMBER", fileId: "F_IMAGE", parentFileId: "F_CANVAS" }),
+    ).rejects.toThrow("file_not_shared_to_channel");
+    expect(parentSlack.calls.some((call) => call.method.includes("F_IMAGE"))).toBe(false);
+
     for (const option of [
       { image: { bytes: fixturePng(), responseMime: "text/html" }, code: "unsupported_file_type" },
       { image: { bytes: new TextEncoder().encode("<svg></svg>") }, code: "invalid_file_content" },
       { image: { bytes: fixturePng(), size: 4 * 1024 * 1024 + 1 }, code: "invalid_file_size" },
+      { image: { bytes: fixturePng(), size: 640 * 1024 + 1 }, code: "image_result_too_large" },
+      {
+        image: {
+          bytes: new Uint8Array([
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8,
+            6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 73, 69, 78, 68, 0, 0, 0, 0,
+          ]),
+        },
+        code: "invalid_file_content",
+      },
     ]) {
       const fake = fakeSlack(option);
       const candidate = createOpenGeniSlackBotClient(
@@ -2548,7 +2580,7 @@ describe("OpenGeni Slack bot connection", () => {
       await expect(
         candidate.fileContent({ channelId: "C_MEMBER", fileId: "F_IMAGE" }),
       ).rejects.toThrow(option.code);
-      if (option.code === "invalid_file_size") {
+      if (option.code === "image_result_too_large") {
         expect(
           fake.calls.some((call) => call.method === "files.info" && call.fileId === "F_IMAGE"),
         ).toBe(true);
