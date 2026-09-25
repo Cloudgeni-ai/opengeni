@@ -10,6 +10,7 @@ import {
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
 export type { FailureDiagnosticInput } from "./failure-diagnostic";
+export { createLogThrottle, type LogThrottle } from "./log-throttle";
 export {
   currentTraceContext,
   withTraceContext,
@@ -320,6 +321,7 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "estimatedDeliveredTokens",
   "fullEvidenceAvailable",
   "retainedOutputKind",
+  "suppressedCount",
 ]);
 
 /** Opaque correlation fields require both a reviewed name and a closed value

@@ -28,6 +28,8 @@
 // on its callout timeout). The bearer's `exp` caps the minted credential's life so a
 // revoked/expired enrollment cannot outlive its bearer.
 
+import { createHash } from "node:crypto";
+import { createLogThrottle, type LogThrottle } from "@opengeni/observability";
 import {
   resolveEnrollmentSigningSecret,
   type NatsCalloutConfig,
@@ -57,6 +59,38 @@ export interface AuthCalloutDeps {
   settings: Settings;
   callout: NatsCalloutConfig;
   observability?: Observability;
+  /** Bounds repeated denial warnings; defaults to one process-wide throttle. */
+  denialWarningThrottle?: LogThrottle;
+}
+
+/** A stale or revoked machine re-dials on its reconnect backoff forever, so an
+ * unthrottled denial warning repeats every few seconds per machine. Log each
+ * distinct machine's first denial, then at most once per interval with the
+ * count of denials it hid. The denial decision itself is never throttled. */
+export const AUTH_CALLOUT_DENIAL_WARNING_INTERVAL_MS = 60_000;
+const processDenialWarningThrottle = createLogThrottle({
+  intervalMs: AUTH_CALLOUT_DENIAL_WARNING_INTERVAL_MS,
+  maxKeys: 1_024,
+});
+
+function warnDenial(
+  deps: AuthCalloutDeps,
+  key: string,
+  message: string,
+  attributes: Record<string, string | number> = {},
+): void {
+  const admission = (deps.denialWarningThrottle ?? processDenialWarningThrottle).admit(key);
+  if (!admission) return;
+  deps.observability?.warn?.(message, {
+    ...attributes,
+    ...(admission.suppressedCount > 0 ? { suppressedCount: admission.suppressedCount } : {}),
+  });
+}
+
+/** A process-local dedupe key for a rejected bearer. The digest is never
+ * logged, and the bearer value never leaves this function. */
+function rejectedBearerKey(bearer: string): string {
+  return `invalid-bearer:${createHash("sha256").update(bearer).digest("hex").slice(0, 32)}`;
 }
 
 /**
@@ -108,7 +142,11 @@ export async function handleAuthorizationRequest(
   const claims = await verifyEnrollmentBearer(secret, bearer);
   if (!claims) {
     // Invalid signature / malformed / expired bearer. NEVER log the bearer value.
-    deps.observability?.warn?.("auth-callout: rejected an invalid enrollment bearer", {});
+    warnDenial(
+      deps,
+      rejectedBearerKey(bearer),
+      "auth-callout: rejected an invalid enrollment bearer",
+    );
     return deny("invalid or expired enrollment bearer");
   }
 
@@ -116,10 +154,12 @@ export async function handleAuthorizationRequest(
   // still-unexpired bearer (the revoke path flips status; this re-checks at connect).
   const enrollment = await getEnrollment(deps.db, claims.workspaceId, claims.enrollmentId);
   if (!enrollment || enrollment.status !== "active") {
-    deps.observability?.warn?.("auth-callout: denied a revoked or unknown enrollment", {
-      workspaceId: claims.workspaceId,
-      agentId: claims.agentId,
-    });
+    warnDenial(
+      deps,
+      `inactive:${claims.workspaceId}:${claims.agentId}`,
+      "auth-callout: denied a revoked or unknown enrollment",
+      { workspaceId: claims.workspaceId, agentId: claims.agentId },
+    );
     return deny("enrollment is not active");
   }
 
@@ -151,10 +191,12 @@ export async function handleAuthorizationRequest(
     leaseMs: AGENT_CONNECTION_LEASE_MS,
   });
   if (!claim.claimed) {
-    deps.observability?.warn?.("auth-callout: denied a duplicate live runner", {
-      workspaceId: claims.workspaceId,
-      agentId: claims.agentId,
-    });
+    warnDenial(
+      deps,
+      `duplicate:${claims.workspaceId}:${claims.agentId}`,
+      "auth-callout: denied a duplicate live runner",
+      { workspaceId: claims.workspaceId, agentId: claims.agentId },
+    );
     return deny("another runner instance currently owns this enrollment");
   }
 

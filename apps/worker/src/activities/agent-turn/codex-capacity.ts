@@ -43,6 +43,7 @@ import { recordTurnStartupPhase } from "../../observability-metrics";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { deliverFailedChildTurnToParent } from "../parent-wake";
 import { randomUUID } from "node:crypto";
+import { createLogThrottle, type LogThrottle } from "@opengeni/observability";
 
 import { refreshCappedCodexUsageRows } from "./codex";
 import { codexUsageLimitFailurePayload, CODEX_USAGE_LIMIT_MAX_RESUME_MS } from "./errors";
@@ -55,6 +56,37 @@ import type {
   ProviderTurnState,
   TurnControlState,
 } from "./turn-context";
+
+/** The eligible-pool gauge and `opengeni_codex_pool_low_total` stay per turn;
+ * the warning line is the first observation per workspace pool depth, then at
+ * most one per interval with the count it hid. */
+export const CODEX_POOL_LOW_WARNING_INTERVAL_MS = 10 * 60_000;
+const codexPoolLowWarningThrottle = createLogThrottle({
+  intervalMs: CODEX_POOL_LOW_WARNING_INTERVAL_MS,
+  maxKeys: 1_024,
+});
+
+export function warnCodexPoolLow(
+  observability: Pick<ActivityServices["observability"], "warn">,
+  input: {
+    workspaceKey: string;
+    workspaceId: string;
+    eligibleCount: number;
+    connectedCount: number;
+    depth: "zero" | "one";
+  },
+  throttle: LogThrottle = codexPoolLowWarningThrottle,
+): void {
+  const admission = throttle.admit(`${input.workspaceKey}:${input.depth}`);
+  if (!admission) return;
+  observability.warn("Codex eligible credential pool is low", {
+    workspaceId: input.workspaceId,
+    eligibleCount: input.eligibleCount,
+    connectedCount: input.connectedCount,
+    depth: input.depth,
+    ...(admission.suppressedCount > 0 ? { suppressedCount: admission.suppressedCount } : {}),
+  });
+}
 
 export type CapacityPhaseDeps = {
   input: RunAgentTurnInput;
@@ -402,11 +434,12 @@ export async function selectCodexTurnCapacity(
           help: "Alert signal emitted when the eligible Codex pool is zero or one.",
           labels: { workspace_key: codexWorkspaceKey, depth: poolDepth },
         });
-        observability.warn("Codex eligible credential pool is low", {
+        warnCodexPoolLow(observability, {
+          workspaceKey: codexWorkspaceKey,
           workspaceId: input.workspaceId,
           eligibleCount,
           connectedCount: leased.accounts.length,
-          depth: poolDepth,
+          depth: poolDepth === "zero" ? "zero" : "one",
         });
       }
 

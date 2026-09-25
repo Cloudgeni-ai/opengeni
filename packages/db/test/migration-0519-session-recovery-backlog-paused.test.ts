@@ -55,7 +55,7 @@ async function fixture() {
     model: "scripted-model",
     reasoningEffort: "medium" as const,
     latencyMode: "standard" as const,
-    sandboxBackend: "none",
+    sandboxBackend: "none" as const,
   };
   const root = await createSession(client.db, { ...sessionInput, initialMessage: "root" });
   const child = await createSession(client.db, {
