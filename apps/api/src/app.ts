@@ -1,5 +1,6 @@
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import { registerFeedbackRoutes } from "./routes/feedback";
+import { CLIENT_ERRORS_PATH, registerClientErrorRoutes } from "./routes/client-errors";
 import { codemodeSessionRequest } from "./codemode";
 import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
@@ -903,6 +904,8 @@ export function createAppComposition(deps: AppDependencies): {
   );
 
   registerMcpOAuthRoutes(app, routeDeps);
+
+  registerClientErrorRoutes(app, { observability });
 
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
@@ -1871,6 +1874,7 @@ const routeLabelPatterns: Array<{
   },
   { pattern: /^\/metrics$/, label: "/metrics" },
   { pattern: /^\/v1\/config\/client$/, label: "/v1/config/client" },
+  { pattern: /^\/v1\/client-errors$/, label: "/v1/client-errors" },
   { pattern: /^\/v1\/billing$/, label: "/v1/billing" },
   { pattern: /^\/v1\/billing\/checkout$/, label: "/v1/billing/checkout" },
   { pattern: /^\/v1\/billing\/usage$/, label: "/v1/billing/usage" },
@@ -2680,6 +2684,8 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname === "/v1/integrations/slack/commands" ||
     pathname === "/v1/integrations/slack/interactions" ||
     pathname.startsWith("/v1/github/") ||
+    // A stale tab must still report the error that follows a rollout.
+    pathname === CLIENT_ERRORS_PATH ||
     pathname === "/v1/enrollments/device/start" ||
     pathname === "/v1/enrollments/device/poll" ||
     pathname === "/v1/enrollments/token/exchange"

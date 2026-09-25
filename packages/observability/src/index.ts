@@ -328,6 +328,13 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
 const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["sandboxLeaseKey", /^slk_[0-9a-f]{32}$/],
   ["correlationId", /^[A-Za-z0-9._:-]{1,128}$/],
+  // Web error beacon: a route PATTERN of lowercase literal and `$param`
+  // segments (never a concrete path or id) and the bundle revision token.
+  [
+    "clientRoute",
+    /^(?:unknown|\/|(?:\/(?:[a-z]+(?:-[a-z]+)*|\$[A-Za-z][A-Za-z0-9]{0,31})){1,12})$/,
+  ],
+  ["clientRevision", /^[A-Za-z0-9._-]{1,64}$/],
 ]);
 
 const PUBLIC_CHANNEL_A_OPERATIONS = new Set([

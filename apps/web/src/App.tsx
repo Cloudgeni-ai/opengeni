@@ -35,7 +35,9 @@ import {
   lazyRouteComponent,
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@/components/common";
+import { NotFoundPanel, RootRouteErrorPanel, routerErrorOptions } from "@/components/route-error";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
+import { routePatternFromMatches } from "@/lib/client-error-reporting";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
 import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
@@ -160,7 +162,8 @@ const LazyComposerChromeGalleryRoute = lazyRouteComponent(
 
 const rootRoute = createRootRoute({
   component: RootRouteComponent,
-  notFoundComponent: NotFoundRoute,
+  errorComponent: RootRouteErrorPanel,
+  notFoundComponent: NotFoundPanel,
 });
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -539,7 +542,19 @@ const routeTree = rootRoute.addChildren([
 // component, a cold lazy workspace page suspends through WorkspaceShell and is
 // caught only by the root Outlet, briefly replacing the rail along with the
 // canvas. The leaf boundary keeps the persistent workspace chrome mounted.
-const router = createRouter({ routeTree, ...ROUTER_PENDING_OPTIONS });
+// The default error component likewise gives every match its own styled
+// boundary, so a failing page keeps the workspace rail instead of replacing
+// the whole app; the root route supplies the app canvas for its own failures.
+const router = createRouter({
+  routeTree,
+  ...ROUTER_PENDING_OPTIONS,
+  ...routerErrorOptions(() => appRoutePattern()),
+});
+
+/** The matched route pattern (for example `/workspaces/$workspaceId/sessions`), never the URL. */
+export function appRoutePattern(): string {
+  return routePatternFromMatches(router.state.matches);
+}
 
 declare module "@tanstack/react-router" {
   interface Register {
@@ -827,15 +842,6 @@ function BillingReturnRoute() {
       params={{ workspaceId }}
       search={checkout ? { checkout } : {}}
       replace
-    />
-  );
-}
-
-function NotFoundRoute() {
-  return (
-    <ProblemPanel
-      title="Page not found"
-      description="This page doesn't exist. Open a workspace to continue."
     />
   );
 }

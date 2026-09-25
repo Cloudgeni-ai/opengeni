@@ -85,6 +85,22 @@ five-second caller-configurable maximum. It cannot guarantee delivery on process
 kill or exporter outage. `opengeni_telemetry_exports_total{outcome}` records
 exported, retried, failed and dropped **batches**. No IDs become metric labels.
 
+## Web client errors
+
+The public, anonymous `POST /v1/client-errors` route counts browser failures in
+`opengeni_client_errors_total{kind}` (`route_error`, `unhandled_rejection`,
+`window_error`, `chunk_load`) and refusals in
+`opengeni_client_error_reports_rejected_total{reason}` (`invalid`, `too_large`,
+`rate_limited`); both are published at zero on API start. The strict body is the
+kind, a route pattern and a bundle revision, under 512 bytes. Admission is a
+per-kind token bucket in each API process (burst 30, then one every two
+seconds), so a hostile or looping client cannot inflate the counter or the log
+without bound. Each accepted report writes one `Web client error reported`
+warning whose public fields are `surface`, `reason` (the kind), and the
+grammar-validated opaque `clientRoute` and `clientRevision`. No message, stack or
+URL is accepted. See `apps/web/docs/browser-analytics.md` for the browser side
+and its coverage limits.
+
 ## Protected diagnostics
 
 Set `OPENGENI_OBSERVABILITY_DIAGNOSTICS_ENDPOINT` only to an operator-controlled,

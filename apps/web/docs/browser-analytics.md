@@ -54,3 +54,32 @@ apps/web/test/validate-analytics-browser.ts`. The script intercepts telemetry
 locally and verifies consent, navigation, foreground activity and the visible
 credit notice against the real app. It requires the Vite development server and
 is separate from the default CI browser fixtures.
+
+## Client error beacon
+
+Route render failures, uncaught window errors, unhandled promise rejections and
+stale lazy-chunk loads are reported to `POST /v1/client-errors`
+(`src/lib/client-error-reporting.ts`), which increments
+`opengeni_client_errors_total{kind="route_error|unhandled_rejection|window_error|chunk_load"}`.
+This is operational telemetry, separate from the consent-controlled providers
+above: the body is only the closed `kind`, the matched route pattern (for example
+`/workspaces/$workspaceId/sessions/$sessionId`, or `unknown`), and the bundle
+revision. It never carries an error message, stack, concrete URL, identifier,
+cookie or user content; the request uses `credentials: "omit"`, and the API
+rejects any other field. The route is public so failures before sign-in are
+counted too.
+
+The browser suppresses a repeated kind and route for one minute and sends at
+most ten reports per ten minutes; the API additionally bounds admission per kind
+and per process. ResizeObserver loop notices, opaque cross-origin
+`Script error.` events and `AbortError` rejections are not reported. Treat the
+counter as a lower bound: blocked requests, closed tabs and both rate limits
+drop reports, and `chunk_load` includes tabs that then recover through the
+automatic one-time reload in `vite-preload-recovery.ts`. It is not exception
+capture; use the route pattern and revision in the API's
+`Web client error reported` log line to locate a failing page and release.
+
+Every router match has a styled error boundary (`src/components/route-error.tsx`),
+so a failing page keeps the workspace rail and offers Reload and Go home. A stale
+chunk after a deploy is presented as an update with Reload first. The raw error
+text is shown only in development builds.

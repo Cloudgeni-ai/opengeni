@@ -121,7 +121,11 @@ const budgets = {
   // initial shared chunk at 78,985 gzip bytes. Its 79-KiB envelope preserves
   // 1,911 bytes of platform-skew headroom; the graph totals still bind the
   // aggregate.
-  initialFileGzip: 79 * kib,
+  // Route error boundaries plus the client error beacon, which must stay in
+  // the entry chunk so a failed lazy chunk can still be reported, add 1,432
+  // gzip bytes there: main 6eb431b03 measures 80,769 and the head 82,201 on
+  // Bun 1.3.14 macOS/arm64. Keep the standard whole-KiB headroom.
+  initialFileGzip: wholeKibEnvelope(82_201),
   initialFiles: 17,
   // The OpenSandbox session work on current main measures 2,112,678 bytes in
   // the Linux/x64 CI production build. That change advanced only the
@@ -473,6 +477,10 @@ const effectiveBudgets = {
     // 2,449,017 raw bytes (39 files). Preserve the existing 1.5 KiB
     // platform/configuration headroom without relaxing other graph caps.
     wholeKibEnvelope(2_449_017, 1.5 * kib),
+    // Route error boundaries and the eager client error beacon: main 6eb431b03
+    // measures 2,451,401 raw bytes and the head 2,454,860 across the same 34
+    // files (Bun 1.3.14 macOS/arm64). Keep the existing 1.5 KiB allowance.
+    wholeKibEnvelope(2_454_860, 1.5 * kib),
     // Main d08dbb6029: 2,374,813 raw / 666,576 gzip, 34 files. The merged
     // Knowledge graph adds receipts, review navigation and learning controls:
     // 2,439,754 raw / 684,860 gzip, 39 files (Bun 1.4, macOS/arm64).
