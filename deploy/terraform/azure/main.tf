@@ -30,6 +30,11 @@ locals {
   availability_test_url                 = try(var.observability.availability_test_url, null)
   observability_action_group_short_name = try(var.observability.action_group_short_name, "opengenialrt")
   observability_alert_email_receivers   = try(var.observability.alert_email_receivers, {})
+  postgres_high_availability            = try(var.managed_postgres_availability.high_availability, null)
+  postgres_maintenance_window           = try(var.managed_postgres_availability.maintenance_window, null)
+  postgres_managed_max_connections      = try(var.managed_postgres_capacity.max_connections, null)
+  postgres_alerts_enabled               = var.postgres.mode == "managed" && local.observability_enabled && var.managed_postgres_alerts != null
+  postgres_alert_max_connections        = try(coalesce(var.managed_postgres_alerts.max_connections, local.postgres_managed_max_connections), null)
   aks_auto_scaling_enabled              = var.aks.auto_scaling_enabled
   aks_max_count                         = local.aks_auto_scaling_enabled ? var.aks.max_count : null
   aks_max_pods                          = var.aks.max_pods
@@ -414,6 +419,36 @@ resource "azurerm_postgresql_flexible_server" "this" {
   storage_tier           = var.managed_postgres_capacity != null ? var.managed_postgres_capacity.storage_tier : null
   auto_grow_enabled      = var.managed_postgres_capacity != null ? var.managed_postgres_capacity.auto_grow_enabled : null
   tags                   = local.tags
+
+  dynamic "high_availability" {
+    for_each = local.postgres_high_availability == null ? [] : [local.postgres_high_availability]
+
+    content {
+      mode                      = high_availability.value.mode
+      standby_availability_zone = high_availability.value.standby_availability_zone
+    }
+  }
+
+  dynamic "maintenance_window" {
+    for_each = local.postgres_maintenance_window == null ? [] : [local.postgres_maintenance_window]
+
+    content {
+      day_of_week  = maintenance_window.value.day_of_week
+      start_hour   = maintenance_window.value.start_hour
+      start_minute = maintenance_window.value.start_minute
+    }
+  }
+
+  lifecycle {
+    # With high availability, planned maintenance and unplanned failover swap
+    # the primary and standby zones. Terraform must not plan a failback (or
+    # fail on a zone it cannot change) after Azure moved the primary; use a
+    # planned failover to return the primary to a preferred zone instead.
+    ignore_changes = [
+      zone,
+      high_availability[0].standby_availability_zone,
+    ]
+  }
 }
 
 resource "azurerm_postgresql_flexible_server_database" "opengeni" {
@@ -453,6 +488,68 @@ resource "azurerm_postgresql_flexible_server_configuration" "pgvector" {
   name      = "azure.extensions"
   server_id = azurerm_postgresql_flexible_server.this[0].id
   value     = "PGCRYPTO,VECTOR,BTREE_GIN"
+}
+
+# max_connections is a static parameter. The azurerm provider restarts the
+# server after it first adopts or changes this value, so production automation
+# changes it only inside a reviewed maintenance step.
+resource "azurerm_postgresql_flexible_server_configuration" "max_connections" {
+  count     = var.postgres.mode == "managed" && local.postgres_managed_max_connections != null ? 1 : 0
+  name      = "max_connections"
+  server_id = azurerm_postgresql_flexible_server.this[0].id
+  value     = tostring(local.postgres_managed_max_connections)
+}
+
+resource "azurerm_monitor_metric_alert" "postgres_cpu" {
+  count               = local.postgres_alerts_enabled ? 1 : 0
+  name                = "${local.postgres_name}-cpu"
+  resource_group_name = local.resource_group_name
+  scopes              = [azurerm_postgresql_flexible_server.this[0].id]
+  description         = "Alerts when managed PostgreSQL average CPU stays above ${var.managed_postgres_alerts.cpu_percent}% for 15 minutes."
+  severity            = var.managed_postgres_alerts.severity
+  enabled             = true
+  auto_mitigate       = true
+  frequency           = "PT5M"
+  window_size         = "PT15M"
+  tags                = local.tags
+
+  criteria {
+    metric_namespace = "Microsoft.DBforPostgreSQL/flexibleServers"
+    metric_name      = "cpu_percent"
+    aggregation      = "Average"
+    operator         = "GreaterThan"
+    threshold        = var.managed_postgres_alerts.cpu_percent
+  }
+
+  action {
+    action_group_id = azurerm_monitor_action_group.observability[0].id
+  }
+}
+
+resource "azurerm_monitor_metric_alert" "postgres_connections" {
+  count               = local.postgres_alerts_enabled ? 1 : 0
+  name                = "${local.postgres_name}-connections"
+  resource_group_name = local.resource_group_name
+  scopes              = [azurerm_postgresql_flexible_server.this[0].id]
+  description         = "Alerts when managed PostgreSQL active connections exceed ${var.managed_postgres_alerts.connections_percent}% of max_connections (${local.postgres_alert_max_connections})."
+  severity            = var.managed_postgres_alerts.severity
+  enabled             = true
+  auto_mitigate       = true
+  frequency           = "PT1M"
+  window_size         = "PT5M"
+  tags                = local.tags
+
+  criteria {
+    metric_namespace = "Microsoft.DBforPostgreSQL/flexibleServers"
+    metric_name      = "active_connections"
+    aggregation      = "Maximum"
+    operator         = "GreaterThan"
+    threshold        = floor(local.postgres_alert_max_connections * var.managed_postgres_alerts.connections_percent / 100)
+  }
+
+  action {
+    action_group_id = azurerm_monitor_action_group.observability[0].id
+  }
 }
 
 resource "azurerm_storage_account" "files" {

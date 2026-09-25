@@ -3229,7 +3229,12 @@ It supports:
 - AKS for OpenGeni workloads.
 - ACR for images.
 - Key Vault for runtime secret storage.
-- Managed Azure PostgreSQL when `postgres.mode = "managed"`.
+- Managed Azure PostgreSQL when `postgres.mode = "managed"`, with optional
+  non-secret policies for capacity and `max_connections`
+  (`managed_postgres_capacity`), a high-availability standby and custom
+  maintenance window (`managed_postgres_availability`), and CPU/connection
+  saturation alerts on the observability action group
+  (`managed_postgres_alerts`). See `deploy/terraform/azure/README.md`.
 - Existing customer Postgres when `postgres.mode = "external"`.
 - Existing Temporal endpoint when `temporal.mode = "external"`.
 - Managed Azure Blob storage when `object_storage.mode = "managed"` and `object_storage.api = "azure-blob"`.

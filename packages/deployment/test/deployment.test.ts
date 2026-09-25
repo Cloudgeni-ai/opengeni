@@ -219,6 +219,31 @@ describe("deployment contract", () => {
     expect(outputs).toContain('output "observability"');
   });
 
+  test("Azure Terraform models managed Postgres availability, connection limits, and saturation alerts", () => {
+    const variables = readFileSync(
+      new URL("../../../deploy/terraform/azure/variables.tf", import.meta.url),
+      "utf8",
+    );
+    const main = readFileSync(
+      new URL("../../../deploy/terraform/azure/main.tf", import.meta.url),
+      "utf8",
+    );
+
+    expect(variables).toContain('variable "managed_postgres_availability"');
+    expect(variables).toContain('variable "managed_postgres_alerts"');
+    expect(variables).toContain("max_connections   = optional(number)");
+    expect(main).toContain('dynamic "high_availability"');
+    expect(main).toContain('dynamic "maintenance_window"');
+    expect(main).toContain("high_availability[0].standby_availability_zone");
+    expect(main).toContain(
+      'resource "azurerm_postgresql_flexible_server_configuration" "max_connections"',
+    );
+    expect(main).toContain('resource "azurerm_monitor_metric_alert" "postgres_cpu"');
+    expect(main).toContain('resource "azurerm_monitor_metric_alert" "postgres_connections"');
+    expect(main).toContain('metric_name      = "active_connections"');
+    expect(main).toContain('metric_name      = "cpu_percent"');
+  });
+
   test("models AWS and GCP managed profiles with native object storage", () => {
     const aws = deploymentProfiles["aws-managed"];
     const gcp = deploymentProfiles["gcp-managed"];

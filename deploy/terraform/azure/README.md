@@ -12,6 +12,7 @@ This Terraform root module is the Azure reference substrate for OpenGeni. It is 
 - Azure Database for PostgreSQL Flexible Server when `postgres.mode = "managed"`.
 - `pgcrypto`, `pgvector`, and `btree_gin` enablement for managed Postgres through the `azure.extensions` server configuration. `btree_gin` is required by the upstream Temporal PostgreSQL visibility schema.
 - Optional PostgreSQL firewall rules through `postgres.allow_azure_services` or `postgres.firewall_rules`.
+- Optional managed PostgreSQL high availability, custom maintenance window, pinned `max_connections`, and CPU/connection saturation alerts (see the Managed PostgreSQL sections below).
 - Azure Storage account and private Blob container when `object_storage.mode = "managed"` and `object_storage.api = "azure-blob"`.
 - ACR pull role assignment for AKS kubelet identity.
 - Optional AKS Microsoft Defender attachment to an existing Log Analytics workspace.
@@ -255,6 +256,70 @@ storage. When omitted, the existing `postgres.sku_name` and
 `postgres.storage_mb` behavior is unchanged and provider defaults apply to
 storage tier and autogrow.
 
+`max_connections` is optional. Azure computes the default from the memory of
+the SKU the server was created with and does not change it when compute is
+scaled later, so a server created small keeps a small connection limit after a
+scale-up. When set, Terraform manages the static `max_connections` parameter.
+The azurerm provider restarts the server whenever it first adopts or changes
+that value, so change it only inside a planned maintenance step. When the
+server has read replicas, raise the replica's `max_connections` (and compute)
+first: Azure requires replicas to be at least as large as the primary for
+`max_connections`, `max_worker_processes`, and related parameters.
+
+## Managed PostgreSQL Availability
+
+`managed_postgres_availability` adds a high-availability standby and a custom
+planned-maintenance window without touching the credential-bearing `postgres`
+object:
+
+```hcl
+managed_postgres_availability = {
+  high_availability = {
+    mode = "ZoneRedundant" # or "SameZone"
+  }
+  maintenance_window = {
+    day_of_week  = 3 # 0 = Sunday, UTC
+    start_hour   = 2
+    start_minute = 0
+  }
+}
+```
+
+Null (the default) keeps high availability disabled and lets Azure choose the
+maintenance window. Enabling HA on an existing server is an online operation,
+but it provisions and seeds a standby, so do it while write activity is low.
+Zone-redundant HA needs a General Purpose or Memory Optimized SKU in a region
+with availability zones.
+
+With HA enabled, Azure fails over to the standby for planned maintenance and
+for unplanned outages, which swaps the primary and standby zones. The server
+resource therefore ignores later changes to `zone` and
+`high_availability[0].standby_availability_zone`, so a plan never tries to fail
+back or rejects a zone Azure moved. Use a planned failover when the primary
+should return to a preferred zone.
+
+## Managed PostgreSQL Alerts
+
+`managed_postgres_alerts` creates Azure Monitor metric alerts on the managed
+server and routes them to the `observability` action group, so it requires
+`postgres.mode = "managed"` and `observability.enabled = true`:
+
+```hcl
+managed_postgres_alerts = {
+  max_connections     = 429 # the server's effective max_connections
+  cpu_percent         = 80
+  connections_percent = 80
+  severity            = 2
+}
+```
+
+- CPU: average `cpu_percent` above `cpu_percent` for 15 minutes.
+- Connections: maximum `active_connections` above
+  `floor(max_connections * connections_percent / 100)` over 5 minutes. Azure
+  exposes connections only as an absolute count, so `max_connections` must
+  match the live parameter. It defaults to
+  `managed_postgres_capacity.max_connections` when that is pinned.
+
 ## Resource Records
 
 Before applying this module, decide where the operator will keep exact resource
@@ -285,7 +350,7 @@ tfvars.
 - Object storage defaults to managed Azure Blob for Azure reference deployments with private container access, nested public blob access disabled, blob versioning enabled, and seven-day blob/container delete retention. The sensitive connection string is exposed only as a sensitive Terraform output and should be written to Key Vault or a Kubernetes Secret, not source control.
 - Temporal can be `external` for Temporal Cloud/customer endpoints or `officialChart` for the stack-wrapper managed upstream Temporal chart. The chart still needs durable Postgres persistence prepared outside the OpenGeni app chart.
 - For temporary AKS/Flexible Server smoke tests, `postgres.allow_azure_services = true` can unblock Azure-internal access. Prefer private networking or tightly scoped `postgres.firewall_rules` for long-lived deployments.
-- If a failed Azure PostgreSQL create reserves a server name without leaving an importable resource, set `postgres.name` to a new cleanup-friendly name and rerun the private-state plan. Set `postgres.zone` explicitly after creation if Azure reports a provider drift from an assigned zone.
+- If a failed Azure PostgreSQL create reserves a server name without leaving an importable resource, set `postgres.name` to a new cleanup-friendly name and rerun the private-state plan. Terraform ignores later `zone` changes on the managed server (Azure assigns a zone at create time and HA failover can move it), so `postgres.zone` only affects server creation.
 
 If Terraform cannot create role assignments, ask an operator with sufficient Azure RBAC permissions to run:
 

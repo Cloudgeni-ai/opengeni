@@ -370,12 +370,13 @@ variable "postgres" {
 }
 
 variable "managed_postgres_capacity" {
-  description = "Optional non-secret capacity policy for managed PostgreSQL. Keep this separate from the credential-bearing postgres object so production automation can pin compute and storage without duplicating secrets."
+  description = "Optional non-secret capacity policy for managed PostgreSQL. Keep this separate from the credential-bearing postgres object so production automation can pin compute and storage without duplicating secrets. max_connections is optional: when set, Terraform manages the static max_connections server parameter, and the provider restarts the server whenever that value is first adopted or changed."
   type = object({
     sku_name          = string
     storage_mb        = number
     storage_tier      = string
     auto_grow_enabled = bool
+    max_connections   = optional(number)
   })
   default  = null
   nullable = true
@@ -387,6 +388,97 @@ variable "managed_postgres_capacity" {
       contains(["P4", "P6", "P10", "P15", "P20", "P30", "P40", "P50", "P60", "P70", "P80"], var.managed_postgres_capacity.storage_tier)
     )
     error_message = "managed_postgres_capacity must use a valid Azure PostgreSQL SKU, supported storage size, and supported storage tier."
+  }
+
+  validation {
+    condition = try(var.managed_postgres_capacity.max_connections, null) == null ? true : (
+      var.managed_postgres_capacity.max_connections >= 25 &&
+      var.managed_postgres_capacity.max_connections <= 5000 &&
+      floor(var.managed_postgres_capacity.max_connections) == var.managed_postgres_capacity.max_connections
+    )
+    error_message = "managed_postgres_capacity.max_connections must be a whole number between 25 and 5000."
+  }
+}
+
+variable "managed_postgres_availability" {
+  description = "Optional non-secret availability policy for managed PostgreSQL: a high-availability standby and a custom planned-maintenance window. Null (the default) keeps high availability disabled and lets Azure choose the maintenance window. Maintenance window times are UTC and day_of_week counts from 0 = Sunday."
+  type = object({
+    high_availability = optional(object({
+      mode                      = string
+      standby_availability_zone = optional(string)
+    }))
+    maintenance_window = optional(object({
+      day_of_week  = number
+      start_hour   = number
+      start_minute = optional(number, 0)
+    }))
+  })
+  default  = null
+  nullable = true
+
+  validation {
+    condition = try(var.managed_postgres_availability.high_availability, null) == null ? true : (
+      contains(["ZoneRedundant", "SameZone"], var.managed_postgres_availability.high_availability.mode) &&
+      (
+        var.managed_postgres_availability.high_availability.standby_availability_zone == null ||
+        contains(["1", "2", "3"], coalesce(var.managed_postgres_availability.high_availability.standby_availability_zone, "none"))
+      )
+    )
+    error_message = "managed_postgres_availability.high_availability.mode must be ZoneRedundant or SameZone, and standby_availability_zone may only be Azure availability zone 1, 2, or 3."
+  }
+
+  validation {
+    condition = try(var.managed_postgres_availability.maintenance_window, null) == null ? true : (
+      contains([0, 1, 2, 3, 4, 5, 6], var.managed_postgres_availability.maintenance_window.day_of_week) &&
+      var.managed_postgres_availability.maintenance_window.start_hour >= 0 &&
+      var.managed_postgres_availability.maintenance_window.start_hour <= 23 &&
+      floor(var.managed_postgres_availability.maintenance_window.start_hour) == var.managed_postgres_availability.maintenance_window.start_hour &&
+      var.managed_postgres_availability.maintenance_window.start_minute >= 0 &&
+      var.managed_postgres_availability.maintenance_window.start_minute <= 59 &&
+      floor(var.managed_postgres_availability.maintenance_window.start_minute) == var.managed_postgres_availability.maintenance_window.start_minute
+    )
+    error_message = "managed_postgres_availability.maintenance_window needs day_of_week 0-6 (0 = Sunday), start_hour 0-23, and start_minute 0-59 as whole numbers (UTC)."
+  }
+}
+
+variable "managed_postgres_alerts" {
+  description = "Optional Azure Monitor metric alerts for managed PostgreSQL saturation, routed to the observability action group. Requires postgres.mode = managed and observability.enabled. Azure reports connections only as an absolute count, so the connection alert threshold is connections_percent of max_connections; max_connections defaults to managed_postgres_capacity.max_connections and must match the server's effective max_connections parameter."
+  type = object({
+    max_connections     = optional(number)
+    cpu_percent         = optional(number, 80)
+    connections_percent = optional(number, 80)
+    severity            = optional(number, 2)
+  })
+  default  = null
+  nullable = true
+
+  validation {
+    condition = var.managed_postgres_alerts == null ? true : (
+      var.postgres.mode == "managed" &&
+      try(var.observability.enabled, false)
+    )
+    error_message = "managed_postgres_alerts requires postgres.mode = managed and observability.enabled = true, because the alerts use the observability action group."
+  }
+
+  validation {
+    condition = var.managed_postgres_alerts == null ? true : try(
+      coalesce(var.managed_postgres_alerts.max_connections, try(var.managed_postgres_capacity.max_connections, null)) >= 25 &&
+      coalesce(var.managed_postgres_alerts.max_connections, try(var.managed_postgres_capacity.max_connections, null)) <= 5000 &&
+      floor(coalesce(var.managed_postgres_alerts.max_connections, try(var.managed_postgres_capacity.max_connections, null))) == coalesce(var.managed_postgres_alerts.max_connections, try(var.managed_postgres_capacity.max_connections, null)),
+      false
+    )
+    error_message = "managed_postgres_alerts needs max_connections (or managed_postgres_capacity.max_connections) as a whole number between 25 and 5000."
+  }
+
+  validation {
+    condition = var.managed_postgres_alerts == null ? true : (
+      var.managed_postgres_alerts.cpu_percent > 0 &&
+      var.managed_postgres_alerts.cpu_percent <= 100 &&
+      var.managed_postgres_alerts.connections_percent > 0 &&
+      var.managed_postgres_alerts.connections_percent <= 100 &&
+      contains([0, 1, 2, 3, 4], var.managed_postgres_alerts.severity)
+    )
+    error_message = "managed_postgres_alerts percentages must be within (0, 100] and severity must be 0-4."
   }
 }
 
