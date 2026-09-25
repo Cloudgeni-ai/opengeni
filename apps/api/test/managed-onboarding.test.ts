@@ -13,7 +13,6 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { createEmailVerificationToken } from "better-auth/api";
 import { Hono } from "hono";
 
 import { createApp } from "../src/app";
@@ -487,11 +486,20 @@ describe("managed organization onboarding", () => {
 
   test("the first verification click signs the new user in once, straight into setup", async () => {
     if (!shared || !client) return;
+    const sent: Array<{ kind: string; to: string; text: string }> = [];
     const app = createApp({
       settings,
       db: client.db,
       bus: new MemoryEventBus(),
       workflowClient: {} as never,
+      managedEmailTransport: {
+        sender: "OpenGeni <auth@mail.opengeni.ai>",
+        idempotency: { scope: "test-provider-v1:verify-sign-in", retentionSeconds: 86_400 },
+        send: async (message) => {
+          sent.push({ kind: message.kind, to: message.to, text: message.text });
+          return { status: "sent", providerMessageId: `test-${sent.length}` };
+        },
+      },
     });
     const email = `verify-signin-${crypto.randomUUID()}@example.test`;
     const signup = await app.request("/v1/auth/sign-up/email", {
@@ -504,8 +512,14 @@ describe("managed organization onboarding", () => {
       signup.headers.getSetCookie().some((value) => value.includes("better-auth.session_token=")),
     ).toBe(false);
 
-    const token = await createEmailVerificationToken(settings.betterAuthSecret!, email);
-    const verificationPath = `/v1/auth/verify-email?token=${encodeURIComponent(token)}&callbackURL=%2F`;
+    // Follow the exact link the user receives.
+    const verification = sent.find(
+      (message) => message.kind === "email_verification" && message.to === email,
+    );
+    expect(verification).toBeTruthy();
+    const link = new URL(verification!.text.match(/https?:\/\/\S+/u)![0]);
+    expect(link.pathname).toBe("/v1/auth/verify-email");
+    const verificationPath = `${link.pathname}${link.search}`;
     const verified = await app.request(verificationPath);
     expect(verified.status).toBe(302);
     expect(verified.headers.get("location")).toBe("/");
