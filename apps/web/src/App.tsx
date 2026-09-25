@@ -204,10 +204,6 @@ const billingReturnRoute = createRoute({
   },
   component: BillingReturnRoute,
 });
-// Self-hosted device-flow APPROVE page (design 11 §B). Top-level (sibling of
-// /billing, NOT workspace-scoped): the agent prints `${origin}/device?user_code=…`
-// when it starts an enrollment; the page resolves the owning workspace from the
-// code via `lookupDeviceEnrollment`, so no workspace lives in the URL.
 // Integration callbacks whose state names no workspace land here (see the API's
 // INTEGRATIONS_FALLBACK_PATH); forward them to the current workspace's Plugins.
 const integrationsReturnRoute = createRoute({
@@ -215,6 +211,10 @@ const integrationsReturnRoute = createRoute({
   path: "integrations",
   component: LazyIntegrationsReturnRoute,
 });
+// Self-hosted device-flow APPROVE page (design 11 §B). Top-level (sibling of
+// /billing, NOT workspace-scoped): the agent prints `${origin}/device?user_code=…`
+// when it starts an enrollment; the page resolves the owning workspace from the
+// code via `lookupDeviceEnrollment`, so no workspace lives in the URL.
 const deviceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "device",

@@ -2,6 +2,7 @@ import {
   GitHubActionPoliciesResponse,
   GitHubActionPolicyActorState,
   GitHubAppManifestCreate,
+  OrganizationIntegrationDeniedError,
   UpdateGitHubActionPolicyRequest,
   type AccessGrant,
   type GitHubInstallationBindingCandidate,
@@ -44,6 +45,7 @@ import {
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   githubAppActionPolicyActor,
   hasPermission,
@@ -73,6 +75,7 @@ import {
   assertPersonalConnectionOwnerPrincipal,
   requireLegacyOAuthActor,
 } from "../connection-ownership";
+import { workspaceIntegrationsPathForUntrusted } from "../integrations/oauth-client";
 import { listPersonalGitHubConnections } from "../integrations/personal-github";
 import {
   integrationCommitGrant,
@@ -129,24 +132,28 @@ class GitHubBrowserFailure extends HTTPException {
 export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings, githubStateSecret } = deps;
   // Registered before the routes so it wraps them. The status code is kept, so
-  // automation still sees the same outcome; only the body becomes a page.
+  // automation still sees the same outcome; only the body becomes a page. Every
+  // failure is rendered, not only HTTP ones: an organization policy denial or an
+  // unexpected fault must not reach the browser as the JSON error envelope.
   const browserFailurePage: MiddlewareHandler = async (c, next) => {
     let failure: unknown;
+    let handledStatus: number | undefined;
     try {
       await next();
+      if (!c.error) return;
       failure = c.error;
+      // The app error handler has already answered this failure.
+      handledStatus = c.res.status;
     } catch (error) {
-      if (!(error instanceof HTTPException)) throw error;
       failure = error;
     }
-    if (!(failure instanceof HTTPException)) return;
     c.res = c.html(
       githubConnectFailureHtml(
         githubBrowserFailureKind(failure),
         githubFailureReturnUrl(deps, c),
         githubBrowserFailureDetail(failure),
       ),
-      failure.status,
+      githubBrowserFailureStatus(failure, handledStatus) as ContentfulStatusCode,
     );
   };
   for (const path of GITHUB_BROWSER_ROUTES) app.use(path, browserFailurePage);
@@ -1147,10 +1154,17 @@ function openGeniBaseUrl(settings: ApiRouteDeps["settings"], c: Context): string
   return githubBrowserBaseUrl(settings, new URL(c.req.url).origin);
 }
 
-const GITHUB_WORKSPACE_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+/** The status the app error handler gives this failure; the page keeps it. */
+function githubBrowserFailureStatus(error: unknown, handledStatus: number | undefined): number {
+  if (error instanceof HTTPException) return error.status;
+  if (error instanceof OrganizationIntegrationDeniedError) return 403;
+  // An unexpected fault keeps whatever the error handler answered (500 by default).
+  return handledStatus ?? 500;
+}
 
-function githubBrowserFailureKind(error: HTTPException): GitHubConnectFailure {
+function githubBrowserFailureKind(error: unknown): GitHubConnectFailure {
+  if (error instanceof OrganizationIntegrationDeniedError) return "policy_denied";
+  if (!(error instanceof HTTPException)) return "failed";
   if (error instanceof GitHubBrowserFailure) return error.failure;
   if (error.status === 401) return "signed_out";
   if (error.status === 403) return "forbidden";
@@ -1159,8 +1173,12 @@ function githubBrowserFailureKind(error: HTTPException): GitHubConnectFailure {
   return "failed";
 }
 
-/** Human-authored messages only; configuration errors carry a JSON envelope. */
-function githubBrowserFailureDetail(error: HTTPException): string | null {
+/**
+ * Human-authored HTTP messages only; configuration errors carry a JSON
+ * envelope. Anything else (an unexpected fault) shows no detail.
+ */
+function githubBrowserFailureDetail(error: unknown): string | null {
+  if (!(error instanceof HTTPException)) return null;
   if (error instanceof GitHubBrowserFailure && error.failure === "cancelled") return null;
   try {
     const parsed = JSON.parse(error.message) as { message?: unknown };
@@ -1185,7 +1203,5 @@ function githubFailureReturnUrl(deps: ApiRouteDeps, c: Context): string {
   const candidate =
     c.req.param("workspaceId") ??
     (rawState ? inspectSignedState(rawState, deps.githubStateSecret)?.workspaceId : undefined);
-  return typeof candidate === "string" && GITHUB_WORKSPACE_ID_PATTERN.test(candidate)
-    ? `${baseUrl}/workspaces/${candidate}/plugins`
-    : `${baseUrl}/`;
+  return `${baseUrl}${workspaceIntegrationsPathForUntrusted(candidate) ?? "/"}`;
 }

@@ -247,7 +247,7 @@ export async function completeAtlassianOAuthCallback(
       expiresAt: new Date(state.iat * 1000 + oauthStateTtlMs),
       now: new Date(),
     });
-    if (!consumed) throw new AtlassianCallbackError("state_reused");
+    if (!consumed) throw new AtlassianCallbackError("state_replayed");
     if (operation && (input.error || !input.code)) {
       await finishConnectOperation(deps.db, state, {
         ...operation,
@@ -429,12 +429,15 @@ export async function completeAtlassianOAuthCallback(
     };
   } catch (error) {
     if (exactReturnUrl) return { redirectTo: exactReturnUrl, exactReturn: true };
+    // Reading the state is the first step, so no state means the link itself
+    // was unusable: say whether it expired rather than blame configuration.
+    const failure = state ? null : oauthStateFailureReturn(deps.settings, input.state);
     return {
       redirectTo: returnUrl(
         returnBaseUrl,
-        state?.returnPath ?? oauthStateFailureReturn(deps.settings, input.state).returnPath,
+        state?.returnPath ?? failure!.returnPath,
         "error",
-        errorReason(error),
+        failure?.reason ?? errorReason(error),
       ),
     };
   }

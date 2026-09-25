@@ -23,9 +23,6 @@ import { performCapabilityAction } from "@/components/capabilities/perform-capab
 import { PlugIcon, PlusIcon } from "lucide-react";
 
 import { CapabilitiesLegacyRedirect } from "@/routes/capabilities-legacy-redirect";
-
-// Served from this chunk so `/integrations` adds no route chunk of its own.
-export { IntegrationsReturnRoute } from "@/routes/capabilities-legacy-redirect";
 import {
   Fragment,
   Suspense,
@@ -134,6 +131,9 @@ import type {
   ConnectionOwnership,
   SkillUninstallPreview,
 } from "@/types";
+
+// Served from this chunk so `/integrations` adds no route chunk of its own.
+export { IntegrationsReturnRoute } from "@/routes/capabilities-legacy-redirect";
 
 const PAGE_SIZE = 48;
 
@@ -585,7 +585,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             ? "The Fiken authorization was declined."
             : reason === "no_api_company"
               ? "The Fiken account has API access to no company. Order API module access in Fiken first."
-              : "Try again, or connect with a personal API token instead.",
+              : // An expired or reused link is not a reason to switch to a token.
+                (oauthCallbackReasonMessage(reason) ??
+                "Try again, or connect with a personal API token instead."),
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

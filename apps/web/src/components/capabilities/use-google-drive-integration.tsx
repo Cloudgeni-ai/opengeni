@@ -38,6 +38,7 @@ import {
   type GoogleDriveAccountState,
   type GoogleDriveDisconnectAttempt,
 } from "@/lib/google-drive-connection";
+import { oauthCallbackReasonMessage } from "@/lib/mcp-oauth";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import type {
   ApiIntegrationInstallationSummary,
@@ -597,7 +598,7 @@ export function googleDriveChip(
   }
 }
 
-function googleDriveFailureMessage(reason: string | null): string {
+export function googleDriveFailureMessage(reason: string | null): string {
   if (reason === "provider_denied") return "Google access was not approved.";
   if (reason === "scope_not_granted") return "Google Drive read access was not approved.";
   if (reason === "refresh_token_missing")
@@ -605,7 +606,8 @@ function googleDriveFailureMessage(reason: string | null): string {
   if (reason === "account_mismatch")
     return "Reconnect must use the same Google account. Disconnect first to switch accounts.";
   if (reason === "connection_conflict") return "The connection changed. Start again.";
-  return "Check the local OAuth configuration and try again.";
+  // Expired, reused, and cancelled links are not configuration faults.
+  return oauthCallbackReasonMessage(reason) ?? "Check the local OAuth configuration and try again.";
 }
 
 function googleDriveStateNotice(

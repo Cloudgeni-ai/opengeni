@@ -102,11 +102,23 @@ export function workspaceIntegrationsPath(workspaceId: string): string {
 }
 
 /**
+ * The integrations page for a workspace id read from untrusted input (a URL
+ * parameter or an unverified-age state), or null unless it is a workspace UUID.
+ * A link target only: it grants nothing.
+ */
+export function workspaceIntegrationsPathForUntrusted(candidate: unknown): string | null {
+  return typeof candidate === "string" && WORKSPACE_ID_PATTERN.test(candidate)
+    ? workspaceIntegrationsPath(candidate)
+    : null;
+}
+
+/**
  * Where a callback returns, and why, when its own signed state is unusable.
  *
- * A correctly signed state that is only too old still names its workspace, so
- * the browser returns to that workspace's integrations page and is told the
- * link expired. Anything unsigned, malformed, or not yet valid returns to
+ * A correctly signed state still names its workspace, even when it is too old
+ * or its flow rejected it, so the browser returns to that workspace's
+ * integrations page; an aged one is reported as expired. Anything unsigned,
+ * tampered, or signed with another secret returns to
  * {@link INTEGRATIONS_FALLBACK_PATH}. Display routing only: nothing here
  * authorizes, resumes, or replays the callback.
  */
@@ -123,12 +135,9 @@ export function oauthStateFailureReturn(
   } catch {
     payload = null;
   }
-  const workspaceId =
-    typeof payload?.workspaceId === "string" && WORKSPACE_ID_PATTERN.test(payload.workspaceId)
-      ? payload.workspaceId
-      : null;
   return {
-    returnPath: workspaceId ? workspaceIntegrationsPath(workspaceId) : INTEGRATIONS_FALLBACK_PATH,
+    returnPath:
+      workspaceIntegrationsPathForUntrusted(payload?.workspaceId) ?? INTEGRATIONS_FALLBACK_PATH,
     reason:
       payload !== null && nowMs - payload.iat * 1000 > oauthStateTtlMs
         ? "state_expired"

@@ -111,11 +111,14 @@ The browser-navigation routes (`/github/connect`, `/github/setup`,
 `/github/install/callback`, `/github/oauth/callback`,
 `/github/installations/select`, installation `configure`, and the manifest
 callback) answer failures with a readable page and a **Back to OpenGeni** link to
-the workspace Plugins page, never a JSON body. The HTTP status is unchanged. An
-expired or reused link, GitHub's **Cancel** (`error=access_denied`), a
-non-owner's authority denial, a missing permission, and a signed-out browser
-each get their own explanation. The native Connect callback also renders the
-expired page when its state is stale or unreadable.
+the workspace Plugins page, never a JSON body. The HTTP status is the one the API
+error handler gives that failure. An expired or reused link, GitHub's **Cancel**
+(`error=access_denied`), a non-owner's authority denial, a missing permission, an
+organization integration policy that does not allow GitHub (403), and a
+signed-out browser each get their own explanation. Any other failure, including
+an unexpected server fault, shows a generic page without internal detail. The
+native Connect callback also renders the expired page when its state is stale or
+unreadable.
 
 ## Supported authority matrix
 

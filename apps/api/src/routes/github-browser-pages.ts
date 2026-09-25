@@ -89,6 +89,7 @@ export type GitHubConnectFailure =
   | "cancelled"
   | "not_owner"
   | "forbidden"
+  | "policy_denied"
   | "signed_out"
   | "failed";
 
@@ -108,6 +109,10 @@ const GITHUB_CONNECT_FAILURE_COPY: Record<GitHubConnectFailure, { title: string;
   forbidden: {
     title: "You can't manage GitHub here",
     body: "Your OpenGeni access doesn't allow connecting GitHub for this workspace. Ask a workspace admin to connect it.",
+  },
+  policy_denied: {
+    title: "GitHub is turned off for your organization",
+    body: "Your organization's integration policy doesn't allow connecting GitHub. Ask an organization admin to allow it, then select Connect again.",
   },
   signed_out: {
     title: "Sign in to continue",

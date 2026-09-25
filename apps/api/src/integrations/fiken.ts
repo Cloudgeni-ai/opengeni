@@ -1365,12 +1365,16 @@ export async function completeFikenOAuthCallback(
     };
   } catch (error) {
     if (exactReturnUrl) return { redirectTo: exactReturnUrl, exactReturn: true };
+    // Reading the state is the first step, so no state means the link itself
+    // was unusable: say whether it expired instead of suggesting a token.
+    const failure = state ? null : oauthStateFailureReturn(deps.settings, input.state);
     return {
       redirectTo: fikenReturnUrl(
         returnBaseUrl,
-        state?.returnPath ?? oauthStateFailureReturn(deps.settings, input.state).returnPath,
+        state?.returnPath ?? failure!.returnPath,
         "error",
-        error instanceof FikenOAuthCallbackError ? error.reason : "callback_failed",
+        failure?.reason ??
+          (error instanceof FikenOAuthCallbackError ? error.reason : "callback_failed"),
       ),
     };
   }

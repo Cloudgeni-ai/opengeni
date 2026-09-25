@@ -1422,7 +1422,7 @@ describe("fiken OAuth", () => {
     });
     expect(redirected.searchParams.get("fiken")).toBe("connected");
     const connectionId = redirected.searchParams.get("connectionId")!;
-    expect(redirected.pathname).toBe(`/workspaces/${workspace.workspaceId}/capabilities`);
+    expect(redirected.pathname).toBe(`/workspaces/${workspace.workspaceId}/plugins`);
 
     const tokenCall = provider.calls.find((entry) => entry.url.pathname === "/oauth/token")!;
     expect(tokenCall.headers.get("authorization")).toBe(
@@ -1524,15 +1524,53 @@ describe("fiken OAuth", () => {
     expect(provider.calls.some((entry) => entry.url.pathname === "/oauth/token")).toBe(false);
   });
 
-  test("callback rejects tampered state", async () => {
+  test("callback rejects tampered or foreign state on the workspace-free landing", async () => {
     if (!available) return;
+    const workspace = await freshWorkspace();
     const provider = fakeFiken();
+    const started = await startOAuth(workspace, provider.fetch);
+    const tampered = `${started.state!.slice(0, -1)}${started.state!.endsWith("a") ? "b" : "a"}`;
+    const foreign = createSignedState("another-deployment-secret", {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: "subject-a",
+      returnPath: `/workspaces/${workspace.workspaceId}/plugins`,
+    });
+    for (const state of ["not-a-valid-state", tampered, foreign]) {
+      const redirected = await completeOAuth(provider.fetch, {
+        code: "fixture-auth-code",
+        state,
+      });
+      // A state that is not ours names no trustworthy workspace.
+      expect(redirected.pathname).toBe("/integrations");
+      expect(redirected.searchParams.get("fiken")).toBe("error");
+      expect(redirected.searchParams.get("reason")).toBe("state_invalid");
+    }
+    expect(provider.calls.some((entry) => entry.url.pathname === "/oauth/token")).toBe(false);
+  });
+
+  test("callback with an expired link returns to its workspace and says so", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const provider = fakeFiken();
+    const expired = createSignedState(
+      "fiken-oauth-state-secret-for-tests",
+      {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "subject-a",
+        returnPath: `/workspaces/${workspace.workspaceId}/plugins`,
+      },
+      Math.floor(Date.now() / 1000) - 601,
+    );
     const redirected = await completeOAuth(provider.fetch, {
       code: "fixture-auth-code",
-      state: "not-a-valid-state",
+      state: expired,
     });
+    expect(redirected.pathname).toBe(`/workspaces/${workspace.workspaceId}/plugins`);
     expect(redirected.searchParams.get("fiken")).toBe("error");
-    expect(redirected.searchParams.get("reason")).toBe("invalid_state");
+    expect(redirected.searchParams.get("reason")).toBe("state_expired");
+    expect(provider.calls.some((entry) => entry.url.pathname === "/oauth/token")).toBe(false);
   });
 
   test("re-authorizes an existing token connection in place, preserving its default company", async () => {
