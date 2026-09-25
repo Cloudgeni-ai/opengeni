@@ -37,6 +37,9 @@ function runtimeSettings() {
     betterAuthSecret: "signup-funnel-metrics-test-secret-at-least-32-bytes",
     managedAuthGoogleClientId: "google-test",
     managedAuthGoogleClientSecret: "google-secret",
+    // Only the legacy session-set mode signs the user in when the verification
+    // link is followed; pin it so a changed default fails here for that reason.
+    managedAuthSessionSetMode: "legacy",
   });
 }
 
@@ -187,6 +190,7 @@ describe("managed sign-up funnel metrics", () => {
     expect(
       verified.headers.getSetCookie().some((value) => value.includes("better-auth.session_token=")),
     ).toBe(true);
+    const verifiedSession = cookiePairs(verified);
     expect(
       await counter(observability, "opengeni_auth_events_total", {
         event: "sign_in",
@@ -214,6 +218,18 @@ describe("managed sign-up funnel metrics", () => {
       }),
     ).toBe(1);
 
+    // The funnel sign_up -> email_verified -> sign_in -> created completes on
+    // that one verification session, without a separate password sign-in.
+    const setup = await app.request("/v1/auth/organization-onboarding", {
+      method: "POST",
+      headers: requestHeaders(verifiedSession),
+      body: JSON.stringify({ organizationName: "Funnel Org", operationId: crypto.randomUUID() }),
+    });
+    expect(setup.status).toBe(200);
+    expect(
+      await counter(observability, "opengeni_organization_setup_total", { outcome: "created" }),
+    ).toBe(1);
+
     // A later password sign-in is another session and another `sign_in`.
     const signIn = await app.request("/v1/auth/sign-in/email", {
       method: "POST",
@@ -229,15 +245,6 @@ describe("managed sign-up funnel metrics", () => {
     ).toBe(2);
 
     const session = cookiePairs(signIn);
-    const setup = await app.request("/v1/auth/organization-onboarding", {
-      method: "POST",
-      headers: requestHeaders(session),
-      body: JSON.stringify({ organizationName: "Funnel Org", operationId: crypto.randomUUID() }),
-    });
-    expect(setup.status).toBe(200);
-    expect(
-      await counter(observability, "opengeni_organization_setup_total", { outcome: "created" }),
-    ).toBe(1);
     const invalid = await app.request("/v1/auth/organization-onboarding", {
       method: "POST",
       headers: requestHeaders(session),
