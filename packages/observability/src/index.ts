@@ -394,6 +394,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "GitCredentialRenewalOperationError",
   "HostExportOperationError",
   "HttpOperationError",
+  "KnowledgeIndexOperationError",
   "McpLifecycleError",
   "McpOperationError",
   "MemoryEmbeddingOperationError",
@@ -443,6 +444,10 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "idempotency_conflict",
   "incompatible_exposed_ports",
   "internal_error",
+  "knowledge_index_defer_failed",
+  "knowledge_index_embedding_failed",
+  "knowledge_index_persistence_failed",
+  "knowledge_index_usage_limit_reached",
   "limit_exceeded",
   "mcp_close_failed",
   "mcp_connect_failed",
@@ -1508,6 +1513,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       ...projectPublicChannelADiagnosticAttributes(attributes),
       ...projectApiFatalDiagnosticAttributes(attributes),
       ...projectSnapshotDiagnosticAttributes(attributes),
+      ...projectKnowledgeIndexDiagnosticAttributes(attributes),
       ...projectPublicDiagnosticAttributes(attributes),
     };
   }
@@ -1628,6 +1634,13 @@ function projectSnapshotDiagnosticAttributes(attributes: Attributes): Attributes
   if (typeof epoch === "number" && Number.isSafeInteger(epoch) && epoch >= 0)
     projected.leaseEpoch = epoch;
   return projected;
+}
+
+function projectKnowledgeIndexDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "KnowledgeIndexOperationError") return {};
+  const sqlState = attributes.sqlState;
+  // A SQLSTATE is a five-character protocol code, never message or SQL text.
+  return typeof sqlState === "string" && /^[0-9A-Z]{5}$/.test(sqlState) ? { sqlState } : {};
 }
 
 function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {

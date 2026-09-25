@@ -662,6 +662,51 @@ describe("observability", () => {
       expect(JSON.parse(observed[1]!)).not.toHaveProperty(key);
   });
 
+  test("Knowledge indexing logs keep the reviewed class, code, status, and SQLSTATE only", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    const sentinel = "private-knowledge-value";
+    try {
+      const obs = createObservability(
+        { ...settings, observabilityStructuredLogs: true },
+        { component: "worker-control" },
+      );
+      obs.warn("Knowledge indexing batch deferred", {
+        errorClass: "KnowledgeIndexOperationError",
+        errorCode: "knowledge_index_persistence_failed",
+        origin: "db",
+        sqlState: "40001",
+        revisionId: "0ffbda8c-11c6-49dc-b636-b15a58163753",
+        body: sentinel,
+      });
+      obs.warn("Knowledge indexing batch deferred", {
+        errorClass: "KnowledgeIndexOperationError",
+        errorCode: "knowledge_index_embedding_failed",
+        origin: "worker",
+        status: 503,
+        sqlState: sentinel,
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      errorClass: "KnowledgeIndexOperationError",
+      errorCode: "knowledge_index_persistence_failed",
+      origin: "db",
+      sqlState: "40001",
+    });
+    expect(JSON.parse(observed[1]!)).toMatchObject({
+      errorClass: "KnowledgeIndexOperationError",
+      errorCode: "knowledge_index_embedding_failed",
+      origin: "worker",
+      status: 503,
+    });
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("sqlState");
+    expect(observed.join(" ")).not.toContain(sentinel);
+    expect(observed.join(" ")).not.toContain("0ffbda8c-11c6-49dc-b636-b15a58163753");
+  });
+
   test("keeps safe retry context in structured startup logs", () => {
     const observed: string[] = [];
     const originalWarn = console.warn;

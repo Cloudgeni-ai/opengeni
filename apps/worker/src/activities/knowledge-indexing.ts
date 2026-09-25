@@ -20,6 +20,83 @@ import {
 import type { DocumentServices } from "@opengeni/documents";
 import type { ControlActivityServices } from "./types";
 
+/** The configured monthly indexed-chunk limit, not a provider failure. */
+export class KnowledgeIndexUsageLimitError extends Error {
+  constructor() {
+    super("monthly document indexing limit reached");
+    this.name = "KnowledgeIndexUsageLimitError";
+  }
+}
+
+export type KnowledgeIndexFailureStage = "embedding" | "persistence";
+
+/**
+ * Content-free classification for a deferred Knowledge index batch. Only
+ * protocol constants, an HTTP status, and a PostgreSQL SQLSTATE are retained;
+ * provider messages, bodies, SQL, and identifiers never leave the process.
+ */
+export function knowledgeIndexFailureDiagnostic(
+  stage: KnowledgeIndexFailureStage,
+  error: unknown,
+): {
+  errorClass: "KnowledgeIndexOperationError";
+  errorCode:
+    | "knowledge_index_usage_limit_reached"
+    | "knowledge_index_embedding_failed"
+    | "knowledge_index_persistence_failed";
+  origin: "worker" | "db";
+  status?: number;
+  sqlState?: string;
+} {
+  if (error instanceof KnowledgeIndexUsageLimitError) {
+    return {
+      errorClass: "KnowledgeIndexOperationError",
+      errorCode: "knowledge_index_usage_limit_reached",
+      origin: "worker",
+    };
+  }
+  if (stage === "embedding") {
+    const status = ownValue(error, "status");
+    return {
+      errorClass: "KnowledgeIndexOperationError",
+      errorCode: "knowledge_index_embedding_failed",
+      origin: "worker",
+      ...(typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599
+        ? { status }
+        : {}),
+    };
+  }
+  const sqlState = postgresSqlState(error);
+  return {
+    errorClass: "KnowledgeIndexOperationError",
+    errorCode: "knowledge_index_persistence_failed",
+    origin: "db",
+    ...(sqlState ? { sqlState } : {}),
+  };
+}
+
+function ownValue(value: unknown, key: string): unknown {
+  try {
+    if (!value || typeof value !== "object") return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The SQLSTATE of the nearest PostgreSQL error in a short cause chain. */
+function postgresSqlState(error: unknown): string | undefined {
+  let current = error;
+  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
+    const code = ownValue(current, "code");
+    if (ownValue(current, "name") === "PostgresError")
+      return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? code : undefined;
+    current = ownValue(current, "cause");
+  }
+  return undefined;
+}
+
 export function createKnowledgeIndexingActivities(
   services: () => Promise<ControlActivityServices>,
   resolveDocumentServices?: () => Promise<DocumentServices>,
@@ -52,6 +129,7 @@ export function createKnowledgeIndexingActivities(
         limit: 2,
       });
       for (const claim of claims) {
+        let stage: KnowledgeIndexFailureStage = "persistence";
         try {
           const source = await readKnowledgeIndexSource(db, claim);
           if (!source) {
@@ -126,8 +204,7 @@ export function createKnowledgeIndexingActivities(
                     eventType: "document.indexed",
                     since: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)),
                   });
-                  if (used + chunks.length > limit)
-                    throw new Error("monthly document indexing limit reached");
+                  if (used + chunks.length > limit) throw new KnowledgeIndexUsageLimitError();
                 }
               }
               const inputs = chunks.map((chunk) => chunk.embeddingInput);
@@ -135,9 +212,11 @@ export function createKnowledgeIndexingActivities(
                 (sum, input) => sum + Buffer.byteLength(input, "utf8"),
                 0,
               );
+              stage = "embedding";
               const vectors = await embedder.embedMany(inputs);
               if (vectors.length !== chunks.length)
                 throw new Error("Incomplete Knowledge embeddings");
+              stage = "persistence";
               // A reviewer may have rejected this revision during the provider
               // call. The DB guard holds its publication row through settlement.
               if (paid) {
@@ -239,16 +318,23 @@ export function createKnowledgeIndexingActivities(
               else result.unavailable++;
             }
           });
-        } catch {
+        } catch (error) {
           // Provider failures retain the last completed projection. The durable
           // queue owns retry/backoff; do not retry an entire activity implicitly.
-          await deferKnowledgeIndexJob(db, claim).catch(() => undefined);
-          result.deferred++;
-          observability.warn("Knowledge indexing batch deferred", {
-            accountId: claim.accountId,
-            entryId: claim.entryId,
-            revisionId: claim.revisionId,
+          // The stored reason stays the SQL lifecycle's fixed code; the log
+          // carries the content-free class/code of the actual cause.
+          observability.warn(
+            "Knowledge indexing batch deferred",
+            knowledgeIndexFailureDiagnostic(stage, error),
+          );
+          await deferKnowledgeIndexJob(db, claim).catch((deferError: unknown) => {
+            const deferDiagnostic = knowledgeIndexFailureDiagnostic("persistence", deferError);
+            observability.warn("Knowledge indexing batch deferral failed", {
+              ...deferDiagnostic,
+              errorCode: "knowledge_index_defer_failed",
+            });
           });
+          result.deferred++;
         }
       }
       return result;
