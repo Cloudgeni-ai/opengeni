@@ -1355,6 +1355,15 @@ Browser and desktop controller requests also admit the configured
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_WEB_BASE_URL` origins directly; this
 does not grant those origins credentialed cross-origin responses.
 
+The unauthenticated local development API (`OPENGENI_PRODUCT_ACCESS_MODE=local`
+with the default `OPENGENI_ENVIRONMENT=local`) uses a stricter browser boundary
+instead: no wildcard CORS, browser `Origin`s limited to its web origin, its own
+address, and `OPENGENI_LOCAL_ALLOWED_ORIGINS`, and `Host` limited to this
+computer's names and configured addresses. See
+[local-development.md](local-development.md#start-the-full-stack). Managed and
+configured access modes, and local access mode under any other
+`OPENGENI_ENVIRONMENT` (such as the Helm examples), keep the policy above.
+
 For Azure Blob, the blob-service CORS rule must allow origin `*`, method `PUT`
 (plus `GET`, `HEAD`, and `OPTIONS` for the complete file flow), and all request
 and exposed headers. S3/GCS equivalents must express the same wildcard-origin

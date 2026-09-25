@@ -295,6 +295,8 @@ export function personalGitBrokerOrigin(settings: Settings): string | null {
     (url.hostname === "host.docker.internal" ||
       url.hostname === cachedDockerBridgeGateway ||
       /^[a-z][a-z0-9-]{0,62}$/iu.test(url.hostname));
+  // The `local` and `test` environments accept any origin, which covers the
+  // local launcher's Linux Docker sandbox route on the Compose network gateway.
   const privateExecutionOrigin =
     (url.protocol === "http:" &&
       (url.hostname === "127.0.0.1" || url.hostname === "localhost" || dockerPrivateOrigin)) ||
