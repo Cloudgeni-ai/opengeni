@@ -172,6 +172,7 @@ import {
 import {
   readSessionBrowsePreferences,
   DEFAULT_SESSION_BROWSE_PREFERENCES,
+  sessionBrowsePreferencesCustomized,
   type SessionBrowsePreferences,
   sessionBrowsePreferenceStorageId,
   writeSessionBrowsePreferences,
@@ -1059,11 +1060,7 @@ export function SessionList() {
     }),
     [],
   );
-  const browseControlsActive =
-    browseGroupBy !== "activity" ||
-    browseSortBy !== "updatedAt" ||
-    browseStatus !== "active" ||
-    showEmptyGroups;
+  const browseControlsActive = sessionBrowsePreferencesCustomized(browsePreferences);
   const browseSessions = useMemo(
     () =>
       allSessions.filter((session) => {
@@ -2685,7 +2682,11 @@ export function SessionList() {
               Clear search and filters
             </button>
           </div>
-        ) : browseSessions.length === 0 && !hierarchyMode ? (
+        ) : (browseSessions.length === 0 && !hierarchyMode) ||
+          (!search &&
+            !browseControlsActive &&
+            allSessions.length === 0 &&
+            pinnedNodes.length === 0) ? (
           <EmptySessions />
         ) : (
           <>

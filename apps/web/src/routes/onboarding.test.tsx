@@ -42,6 +42,11 @@ const listSetupInvitations = mock(
     nextCursor: null,
   }),
 );
+const onboardingStatus = mock(
+  async (): Promise<{ state: "required" | "invitation_pending" | "unavailable" | "complete" }> => ({
+    state: "required" as const,
+  }),
+);
 const acceptSetupInvitation = mock(async () => ({
   status: "complete" as const,
 }));
@@ -74,9 +79,7 @@ mock.module("@/api", () => ({
   managedActorMutationBusySnapshot: () => false,
   previewOrganizationUserSetup: previewSetup,
   completeSelfServiceOrganizationSetup: completeSelfServiceSetup,
-  getSelfServiceOrganizationOnboardingStatus: mock(async () => ({
-    state: "required" as const,
-  })),
+  getSelfServiceOrganizationOnboardingStatus: onboardingStatus,
   sendVerificationEmail: resendVerification,
   requestPasswordReset: mock(async () => ({ status: true })),
   subscribeManagedActorInvalidation: () => () => undefined,
@@ -127,6 +130,42 @@ async function enter(input: HTMLInputElement, value: string): Promise<void> {
 async function flush(): Promise<void> {
   await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
 }
+
+const baseModel = {
+  api: "responses",
+  credentialReadiness: {
+    status: "ready",
+    reason: null,
+    basis: "configuration",
+    checkedAt: null,
+  },
+  policyAllowed: true,
+  availability: { status: "available", selectable: true, reason: null, checkedAt: null },
+  capabilities: {
+    reasoning: {
+      upstream: "supported",
+      runnable: true,
+      efforts: ["low"],
+      defaultEffort: "low",
+      required: false,
+    },
+    functionCalling: { upstream: "supported", runnable: true },
+    structuredOutput: { upstream: "supported", runnable: true },
+    hostedTools: {
+      webSearch: { upstream: "unsupported", runnable: false },
+      xSearch: { upstream: "unsupported", runnable: false },
+      codeExecution: { upstream: "unsupported", runnable: false },
+    },
+    inputModalities: ["text"],
+    outputModalities: ["text"],
+    transports: {
+      sse: { upstream: "supported", runnable: true },
+      responsesWebSocket: { upstream: "unsupported", runnable: false },
+      realtimeAudio: { upstream: "unsupported", runnable: false },
+    },
+    latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
+  },
+};
 
 describe("organization onboarding UI", () => {
   test("self-service signup submits only ordinary account fields", async () => {
@@ -525,17 +564,16 @@ describe("organization onboarding UI", () => {
     }
   });
 
-  test("Codex authorization keeps Skip disabled while device login is pending", async () => {
+  test("Codex device login keeps Skip available, explains the ChatGPT setting, and cancels", async () => {
     const codexConnectStart = mock(async () => ({
       state: "state-a",
       userCode: "CODE-1234",
       verificationUri: "https://example.test/authorize",
       intervalSeconds: 60,
     }));
-    const client = {
-      codexConnectStart,
-      codexConnectPoll: mock(async () => ({ status: "pending" as const })),
-    };
+    const codexConnectPoll = mock(async () => ({ status: "pending" as const }));
+    const client = { codexConnectStart, codexConnectPoll };
+    const onComplete = mock(() => undefined);
     const priorOpen = window.open;
     window.open = mock(() => null) as typeof window.open;
     const container = document.createElement("div");
@@ -549,7 +587,7 @@ describe("organization onboarding UI", () => {
             organizationId="organization-a"
             workspaceId="personal-workspace"
             codexEnabled
-            onComplete={() => undefined}
+            onComplete={onComplete}
           />,
         ),
       );
@@ -559,15 +597,510 @@ describe("organization onboarding UI", () => {
       await flush();
       expect(codexConnectStart).toHaveBeenCalledTimes(1);
       expect(container.textContent).toContain("Waiting for authorization");
+      expect(container.textContent).toContain("Settings → Security");
+      expect(container.textContent).toContain("workspace admin");
+      expect(
+        container.querySelector<HTMLAnchorElement>(
+          'a[href="https://chatgpt.com/#settings/Security"]',
+        ),
+      ).not.toBeNull();
       expect(
         Array.from(container.querySelectorAll("button")).find(
           (button) => button.textContent?.trim() === "Skip for now",
         )!.disabled,
-      ).toBe(true);
+      ).toBe(false);
+
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Cancel")!
+          .click(),
+      );
+      expect(container.textContent).not.toContain("Waiting for authorization");
+      expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
+      expect(onComplete).not.toHaveBeenCalled();
+      expect(codexConnectPoll).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
       container.remove();
       window.open = priorOpen;
+    }
+  });
+
+  test("a long device login shows troubleshooting and Skip leaves while it is pending", async () => {
+    const client = {
+      supergrokConnectStart: mock(async () => ({
+        state: "state-a",
+        userCode: "CODE-1234",
+        verificationUri: "https://example.test/authorize",
+        verificationUriComplete: null,
+        intervalSeconds: 60,
+        expiresInSeconds: 600,
+        scope: "user" as const,
+      })),
+      supergrokConnectPoll: mock(async () => ({ status: "pending" as const })),
+    };
+    const onComplete = mock(() => undefined);
+    const priorOpen = window.open;
+    const priorSetTimeout = globalThis.setTimeout;
+    window.open = mock(() => null) as typeof window.open;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      // Fire the troubleshooting timer immediately; leave other timers untouched.
+      globalThis.setTimeout = ((handler: () => void, delay?: number, ...rest: unknown[]) =>
+        priorSetTimeout(handler, delay === 60_000 ? 0 : delay, ...rest)) as typeof setTimeout;
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            supergrokEnabled
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Connect SuperGrok"]')!
+          .click(),
+      );
+      await flush();
+      await flush();
+      expect(container.textContent).toContain("Still waiting?");
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Skip for now")!
+          .click(),
+      );
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.setTimeout = priorSetTimeout;
+      await act(async () => root.unmount());
+      container.remove();
+      window.open = priorOpen;
+    }
+  });
+
+  test("a free deployment default makes starting to chat the primary path", async () => {
+    const onComplete = mock(() => undefined);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={{} as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            billingMode="stripe"
+            codexEnabled
+            supergrokEnabled
+            includedModel={{ id: "free-model", label: "Free Model", free: true }}
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      expect(container.querySelector("h1")!.textContent).toBe("Start chatting for free");
+      expect(container.textContent).toContain("Free Model is set up and free to use");
+      expect(container.textContent).not.toContain("Choose how to power your chats");
+      expect(container.textContent).toContain("Want a more capable model? (optional)");
+      expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
+      expect(container.textContent).toContain("Use OpenGeni credits");
+      const buttons = Array.from(container.querySelectorAll("button"));
+      const start = buttons.find(
+        (button) => button.textContent?.trim() === "Start chatting for free",
+      )!;
+      const buy = buttons.find((button) => button.textContent?.includes("in credits"))!;
+      // The free path precedes every paid option in reading order.
+      expect(start.compareDocumentPosition(buy) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(buy.getAttribute("data-variant") ?? buy.className).not.toContain("bg-primary ");
+      await act(async () => start.click());
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("connecting Codex selects the Codex model, not the free default, for the next chat", async () => {
+    const saveNewSessionDraft = mock(async () => undefined);
+    const client = {
+      codexConnectStart: mock(async () => ({
+        state: "state-a",
+        userCode: "CODE-1234",
+        verificationUri: "https://example.test/authorize",
+        intervalSeconds: 1,
+      })),
+      codexConnectPoll: mock(async () => ({ status: "connected" as const, plan: "Plus" })),
+      getWorkspaceModelCatalog: mock(async () => ({
+        models: [
+          {
+            ...baseModel,
+            id: "free-model",
+            label: "Free Model",
+            provider: "openrouter",
+            providerLabel: "OpenRouter",
+            cost: "free",
+            billing: { upstreamPayer: "deployment", metering: "external" },
+          },
+          {
+            ...baseModel,
+            id: "codex/model",
+            label: "Codex Model",
+            provider: "codex",
+            providerLabel: "Codex",
+            source: "codex",
+            cost: "subscription",
+            billing: { upstreamPayer: "connected_subscription", metering: "external" },
+          },
+        ],
+      })),
+      getNewSessionDraft: mock(async () => ({
+        revision: 1,
+        text: "",
+        resources: [],
+        tools: [],
+        toolsProvided: false,
+        model: "free-model",
+        reasoningEffort: "low",
+        latencyMode: "standard",
+        options: {},
+      })),
+      saveNewSessionDraft,
+    };
+    const onComplete = mock(() => undefined);
+    const priorOpen = window.open;
+    const priorSetTimeout = globalThis.setTimeout;
+    window.open = mock(() => null) as typeof window.open;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      // Skip the provider's minimum two-second polling interval.
+      globalThis.setTimeout = ((handler: () => void, delay?: number, ...rest: unknown[]) =>
+        priorSetTimeout(handler, delay === 2_000 ? 0 : delay, ...rest)) as typeof setTimeout;
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            codexEnabled
+            includedModel={{ id: "free-model", label: "Free Model", free: true }}
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('button[aria-label="Connect Codex"]')!.click(),
+      );
+      await flush();
+      await flush();
+      await flush();
+      expect(saveNewSessionDraft).toHaveBeenCalledTimes(1);
+      expect(
+        (saveNewSessionDraft.mock.calls[0] as unknown as [string, { model: string }])[1].model,
+      ).toBe("codex/model");
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.setTimeout = priorSetTimeout;
+      await act(async () => root.unmount());
+      container.remove();
+      window.open = priorOpen;
+    }
+  });
+
+  test("the included free path waits for the new workspace catalog to confirm the model", async () => {
+    const modelDefaults = {
+      defaultModel: "free-model",
+      models: [{ id: "free-model", label: "Free Model", cost: "free" }],
+    } as never;
+    for (const selectable of [true, false]) {
+      const getWorkspaceModelCatalog = mock(async (_workspaceId: string) => ({
+        models: [
+          {
+            ...baseModel,
+            id: "free-model",
+            label: "Free Model",
+            provider: "openrouter",
+            providerLabel: "OpenRouter",
+            cost: "free",
+            availability: selectable
+              ? { status: "available", selectable: true, reason: null, checkedAt: null }
+              : {
+                  status: "unavailable",
+                  selectable: false,
+                  reason: "missing_credential",
+                  checkedAt: null,
+                },
+          },
+        ],
+      }));
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        await act(async () =>
+          root.render(
+            <OrganizationOnboardingPanel
+              client={{ ...setupClient, getWorkspaceModelCatalog } as never}
+              billingMode="stripe"
+              modelDefaults={modelDefaults}
+              onComplete={() => undefined}
+            />,
+          ),
+        );
+        await flush();
+        await enter(
+          container.querySelector("#organization-onboarding-name")!,
+          "Northwind Research",
+        );
+        await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+        await flush();
+        await flush();
+        const created = (await completeSelfServiceSetup.mock.results.at(-1)!.value) as {
+          personalWorkspaceId: string;
+        };
+        expect(getWorkspaceModelCatalog).toHaveBeenCalledWith(created.personalWorkspaceId);
+        if (selectable) {
+          expect(container.querySelector("h1")!.textContent).toBe("Start chatting for free");
+        } else {
+          // Client config alone never claims a model the workspace cannot use.
+          expect(container.querySelector("h1")!.textContent).toBe("Choose how to power your chats");
+          expect(container.textContent).not.toContain("free to use");
+        }
+      } finally {
+        await act(async () => root.unmount());
+        container.remove();
+      }
+    }
+  });
+
+  test("leaving is held while a connected model is saved for the next chat", async () => {
+    let releaseSave: () => void = () => undefined;
+    const saveNewSessionDraft = mock(
+      () => new Promise<void>((resolve) => (releaseSave = () => resolve())),
+    );
+    const client = {
+      codexConnectStart: mock(async () => ({
+        state: "state-a",
+        userCode: "CODE-1234",
+        verificationUri: "https://example.test/authorize",
+        intervalSeconds: 1,
+      })),
+      codexConnectPoll: mock(async () => ({ status: "connected" as const, plan: "Plus" })),
+      getWorkspaceModelCatalog: mock(async () => ({
+        models: [
+          {
+            ...baseModel,
+            id: "codex/model",
+            label: "Codex Model",
+            provider: "codex",
+            providerLabel: "Codex",
+            source: "codex",
+            cost: "subscription",
+            billing: { upstreamPayer: "connected_subscription", metering: "external" },
+          },
+        ],
+      })),
+      getNewSessionDraft: mock(async () => ({
+        revision: 1,
+        text: "",
+        resources: [],
+        tools: [],
+        toolsProvided: false,
+        model: "free-model",
+        reasoningEffort: "low",
+        latencyMode: "standard",
+        options: {},
+      })),
+      saveNewSessionDraft,
+    };
+    const onComplete = mock(() => undefined);
+    const priorOpen = window.open;
+    const priorSetTimeout = globalThis.setTimeout;
+    window.open = mock(() => null) as typeof window.open;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      globalThis.setTimeout = ((handler: () => void, delay?: number, ...rest: unknown[]) =>
+        priorSetTimeout(handler, delay === 2_000 ? 0 : delay, ...rest)) as typeof setTimeout;
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            codexEnabled
+            includedModel={{ id: "free-model", label: "Free Model", free: true }}
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('button[aria-label="Connect Codex"]')!.click(),
+      );
+      await flush();
+      await flush();
+      await flush();
+      expect(saveNewSessionDraft).toHaveBeenCalledTimes(1);
+      const start = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Start chatting for free",
+      )!;
+      expect(start.disabled).toBe(true);
+      await act(async () => start.click());
+      expect(onComplete).not.toHaveBeenCalled();
+      await act(async () => releaseSave());
+      await flush();
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.setTimeout = priorSetTimeout;
+      await act(async () => root.unmount());
+      container.remove();
+      window.open = priorOpen;
+    }
+  });
+
+  test("an organization-setup status failure offers Retry instead of spinning forever", async () => {
+    onboardingStatus.mockImplementationOnce(async () => {
+      throw new Error("Service unavailable");
+    });
+    const onComplete = mock(() => undefined);
+    const onSignOut = mock(async () => undefined);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            activeEmail="ada@example.test"
+            onSignOut={onSignOut}
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await flush();
+      expect(container.textContent).toContain("We couldn't load your account setup");
+      expect(container.textContent).toContain("Service unavailable");
+      expect(container.textContent).toContain("Signed in as ada@example.test");
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Retry")!
+          .click(),
+      );
+      await flush();
+      expect(container.textContent).toContain("Create your organization");
+      expect(container.textContent).toContain("Signed in as ada@example.test");
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Sign out or use another account")!
+          .click(),
+      );
+      await flush();
+      expect(onSignOut).toHaveBeenCalledTimes(1);
+      expect(onComplete).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("sign in offers account creation without revealing whether an email exists", async () => {
+    const submitted = mock(async () => {
+      throw new TestAuthApiError(401, "INVALID_EMAIL_OR_PASSWORD", null, "Invalid");
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<ManagedAuthPanel onSubmit={submitted} />));
+      expect(container.textContent).toContain("New here?");
+      await enter(container.querySelector("#managed-auth-email")!, "ada@example.test");
+      await enter(container.querySelector("#managed-auth-password")!, "password1234");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(container.textContent).toContain("Email or password is incorrect.");
+      expect(container.textContent).not.toContain("No account");
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Create an account")!
+          .click(),
+      );
+      expect(container.querySelector("#managed-auth-name")).not.toBeNull();
+      expect(container.querySelector('button[type="submit"]')!.textContent?.trim()).toBe(
+        "Create account",
+      );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the page query opens Sign up for marketing links and the resend form for expired links", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAuthPanel
+            search="?mode=signup&utm_source=opengeni.ai&utm_medium=website&utm_campaign=hero"
+            onSubmit={async () => undefined}
+          />,
+        ),
+      );
+      expect(container.querySelector("#managed-auth-name")).not.toBeNull();
+      expect(container.querySelector('button[type="submit"]')!.textContent?.trim()).toBe(
+        "Create account",
+      );
+      await act(async () => root.unmount());
+      const next = createRoot(container);
+      await act(async () =>
+        next.render(
+          <ManagedAuthPanel search="?error=INVALID_TOKEN" onSubmit={async () => undefined} />,
+        ),
+      );
+      expect(container.textContent).toContain("That verification link is no longer valid");
+      expect(container.querySelector("#managed-auth-password")).toBeNull();
+      await act(async () => next.unmount());
+    } finally {
+      container.remove();
+    }
+  });
+
+  test("an expired verification link offers a new link instead of a generic error", async () => {
+    resendVerification.mockClear();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAuthPanel verificationLinkError="expired" onSubmit={async () => undefined} />,
+        ),
+      );
+      expect(container.textContent).toContain("Get a new verification link");
+      expect(container.textContent).toContain("That verification link has expired");
+      expect(container.querySelector("#managed-auth-password")).toBeNull();
+      await enter(container.querySelector("#managed-auth-email")!, "ada@example.test");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(resendVerification).toHaveBeenCalledWith({ email: "ada@example.test" });
+      expect(container.textContent).toContain("If this email still needs verification");
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Back to sign in")!
+          .click(),
+      );
+      expect(container.querySelector("#managed-auth-password")).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
     }
   });
 

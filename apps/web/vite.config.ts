@@ -59,6 +59,17 @@ export default defineConfig({
               priority: 20,
             },
             {
+              // Zod is a dependency-free runtime shared by the contracts schemas
+              // and app modules. Keep it in its own chunk: entry-aware merging
+              // can otherwise co-locate app code that reads contracts constants
+              // at module scope with Zod, creating a chunk cycle in which that
+              // code evaluates before the contracts chunk has initialized.
+              name: "zod-runtime",
+              test: /(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Keep context and its virtual reader in the lazy debug inspector.
               name: "context-inspector",
               test: /(?:components[\\/]session[\\/](?:model-context-inspector|context-text-reader)\.tsx$|@tanstack[\\+/]virtual-core|@tanstack[\\+/]react-virtual)/,

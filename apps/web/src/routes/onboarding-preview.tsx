@@ -117,8 +117,18 @@ function PreviewResult({ view }: { view: string }) {
   );
 }
 
+/** `?included=free|deployment` previews the step when the deployment default model is included. */
+function previewIncludedModel() {
+  const included = new URLSearchParams(window.location.search).get("included");
+  if (included === "free") return { id: "preview-free", label: "Preview Free Model", free: true };
+  if (included === "deployment")
+    return { id: "preview-included", label: "Preview Included Model", free: false };
+  return null;
+}
+
 function ModelPreview({ organization = false }: { organization?: boolean }) {
   const [completed, setCompleted] = useState(false);
+  const includedModel = previewIncludedModel();
   if (completed)
     return (
       <section className="flex flex-1 items-center justify-center px-4">
@@ -142,7 +152,10 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
       billingMode="stripe"
       codexEnabled
       supergrokEnabled
+      includedModel={includedModel}
       previewState="required"
+      activeEmail="preview@example.test"
+      onSignOut={() => window.location.assign("/dev/onboarding")}
       onComplete={() => setCompleted(true)}
     />
   ) : (
@@ -153,6 +166,7 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
       billingMode="stripe"
       codexEnabled
       supergrokEnabled
+      includedModel={includedModel}
       onComplete={() => setCompleted(true)}
     />
   );
@@ -252,5 +266,8 @@ export function OnboardingPreviewRoute() {
   if (view === "credits") return <CreditPromptPreview />;
   if (view === "organization") return <ModelPreview organization />;
   if (view === "models") return <ModelPreview />;
+  if (view === "signin") return <ManagedAuthPanel onSubmit={async () => undefined} />;
+  if (view === "verification-expired")
+    return <ManagedAuthPanel verificationLinkError="expired" onSubmit={async () => undefined} />;
   return <ManagedAuthPanel initialMode="signup" onSubmit={async () => undefined} />;
 }

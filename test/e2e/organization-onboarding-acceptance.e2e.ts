@@ -37,6 +37,11 @@ import {
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
+// The model-access step leads with the included default model when the
+// deployment provides one, otherwise it asks how to power chats.
+const MODEL_ACCESS_HEADING =
+  /^(Choose how to power your chats|Start chatting for free|You’re ready to chat)$/;
+const MODEL_ACCESS_CONTINUE = /^(Skip for now|Start chatting( for free)?)$/;
 const EVIDENCE_DIR =
   process.env.OPENGENI_ONBOARDING_EVIDENCE_DIR ?? "/tmp/opengeni-onboarding-evidence";
 const PASSWORD = "Onboarding-password-1234";
@@ -499,9 +504,9 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     );
     await page.getByRole("button", { name: "Create organization" }).click();
     expect((await setupSettled).ok()).toBe(true);
-    await page.getByRole("heading", { name: "Choose how to power your chats" }).waitFor();
+    await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
     expect(await page.getByLabel("Organization name").count()).toBe(0);
-    await page.getByRole("button", { name: "Skip for now" }).click();
+    await page.getByRole("button", { name: MODEL_ACCESS_CONTINUE }).click();
 
     const ownerCookie = await cookieHeader(context);
     const owner = sdk(ownerCookie);

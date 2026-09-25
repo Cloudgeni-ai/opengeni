@@ -4,9 +4,13 @@ import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
 import {
   applyConnectedModelToNewSessionDraft,
-  isPaymentRequiredError,
+  confirmIncludedModel,
+  creditCheckoutSuccessUrl,
+  creditsModelForCheckout,
+  includedDefaultModel,
   preferredConnectedModelId,
 } from "./model-access-onboarding";
+import { isPaymentRequiredError } from "./model-access";
 
 function catalogModel(
   overrides: Partial<WorkspaceModelCatalogModel> & Pick<WorkspaceModelCatalogModel, "id">,
@@ -120,6 +124,223 @@ describe("preferredConnectedModelId", () => {
   });
 });
 
+const FREE_DEFAULT = catalogModel({
+  id: "free-default",
+  cost: "free",
+  billing: { upstreamPayer: "deployment", metering: "external" },
+});
+const CREDITS_FIRST = catalogModel({ id: "credits-first", label: "Zeta credits" });
+const CREDITS_SECOND = catalogModel({ id: "credits-second", label: "Alpha credits" });
+const CODEX = catalogModel({
+  id: "codex/model",
+  provider: "codex-subscription",
+  providerLabel: "Codex",
+  source: "codex",
+  cost: "subscription",
+  billing: { upstreamPayer: "connected_subscription", metering: "external" },
+});
+const SUPERGROK = catalogModel({
+  id: "supergrok/model",
+  provider: "supergrok",
+  providerLabel: "SuperGrok",
+  source: "supergrok",
+  cost: "subscription",
+  billing: { upstreamPayer: "connected_subscription", metering: "external" },
+});
+const GATEWAY = catalogModel({
+  id: "gateway/model",
+  provider: "workspace-gateway",
+  providerLabel: "Your Gateway",
+  source: "workspace_gateway",
+  cost: "workspace",
+  billing: { upstreamPayer: "workspace", metering: "external" },
+});
+const ORGANIZATION_GATEWAY = catalogModel({
+  id: "organization-gateway/model",
+  provider: "organization-gateway",
+  providerLabel: "Organization Gateway",
+  source: "workspace_gateway",
+  cost: "organization",
+  billing: { upstreamPayer: "organization", metering: "external" },
+});
+const OPENROUTER = catalogModel({
+  id: "openrouter-byok/model",
+  provider: "workspace-openrouter",
+  providerLabel: "Your OpenRouter",
+  source: undefined,
+  cost: "workspace",
+  billing: { upstreamPayer: "workspace", metering: "external" },
+});
+
+describe("preferredConnectedModelId after a specific connect", () => {
+  const catalog = [
+    FREE_DEFAULT,
+    CREDITS_FIRST,
+    CREDITS_SECOND,
+    CODEX,
+    SUPERGROK,
+    GATEWAY,
+    OPENROUTER,
+  ];
+
+  test("the generic order puts any connected service ahead of the free default", () => {
+    expect(preferredConnectedModelId([FREE_DEFAULT, CODEX])).toBe("codex/model");
+    expect(preferredConnectedModelId([FREE_DEFAULT, GATEWAY])).toBe("gateway/model");
+    expect(preferredConnectedModelId([FREE_DEFAULT, CREDITS_FIRST])).toBe("free-default");
+  });
+
+  test("the generic order never moves someone onto organization spend ahead of the free model", () => {
+    expect(preferredConnectedModelId([ORGANIZATION_GATEWAY, FREE_DEFAULT])).toBe("free-default");
+    expect(preferredConnectedModelId([ORGANIZATION_GATEWAY, CREDITS_FIRST])).toBe(
+      "organization-gateway/model",
+    );
+    expect(preferredConnectedModelId([ORGANIZATION_GATEWAY, SUPERGROK, FREE_DEFAULT])).toBe(
+      "supergrok/model",
+    );
+  });
+
+  test("selects the family the person just connected, never the free default", () => {
+    expect(preferredConnectedModelId(catalog, "codex")).toBe("codex/model");
+    expect(preferredConnectedModelId(catalog, "supergrok")).toBe("supergrok/model");
+    expect(preferredConnectedModelId(catalog, "vercel_gateway")).toBe("gateway/model");
+    expect(preferredConnectedModelId(catalog, "openrouter")).toBe("openrouter-byok/model");
+  });
+
+  test("a credit purchase prefers the first operator-ordered credits model", () => {
+    expect(preferredConnectedModelId(catalog, "credits")).toBe("credits-first");
+    expect(preferredConnectedModelId([FREE_DEFAULT], "credits")).toBeNull();
+  });
+
+  test("a family that is not selectable yet returns null instead of another model", () => {
+    expect(preferredConnectedModelId([FREE_DEFAULT, CREDITS_FIRST], "codex")).toBeNull();
+    expect(
+      preferredConnectedModelId(
+        [
+          FREE_DEFAULT,
+          {
+            ...GATEWAY,
+            availability: {
+              status: "unavailable",
+              selectable: false,
+              reason: "missing_credential",
+              checkedAt: null,
+            },
+          } as WorkspaceModelCatalogModel,
+        ],
+        "vercel_gateway",
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("includedDefaultModel", () => {
+  test("offers the free deployment default without hardcoding a model", () => {
+    expect(
+      includedDefaultModel({
+        defaultModel: "free-default",
+        models: [CREDITS_FIRST, FREE_DEFAULT],
+        billingMode: "stripe",
+      }),
+    ).toEqual({ id: "free-default", label: "free-default", free: true });
+  });
+
+  test("treats a deployment-paid default as included when credits are not billed", () => {
+    expect(
+      includedDefaultModel({
+        defaultModel: "credits-first",
+        models: [CREDITS_FIRST],
+        billingMode: "disabled",
+      }),
+    ).toEqual({ id: "credits-first", label: "Zeta credits", free: false });
+  });
+
+  test("offers nothing when the default needs credits or a connection", () => {
+    expect(
+      includedDefaultModel({
+        defaultModel: "credits-first",
+        models: [CREDITS_FIRST],
+        billingMode: "stripe",
+      }),
+    ).toBeNull();
+    expect(
+      includedDefaultModel({
+        defaultModel: "codex/model",
+        models: [CODEX],
+        billingMode: "disabled",
+      }),
+    ).toBeNull();
+    expect(
+      includedDefaultModel({
+        defaultModel: "missing",
+        models: [FREE_DEFAULT],
+        billingMode: "stripe",
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("confirmIncludedModel", () => {
+  const candidate = { id: "free-default", label: "Free Default", free: true };
+
+  test("keeps the included path when the new workspace can select that free model", () => {
+    expect(confirmIncludedModel(candidate, [CODEX, FREE_DEFAULT])).toEqual(candidate);
+    const deploymentPaid = { id: "credits-first", label: "Zeta credits", free: false };
+    expect(confirmIncludedModel(deploymentPaid, [CREDITS_FIRST])).toEqual(deploymentPaid);
+  });
+
+  test("drops the included path when the workspace catalog cannot back the claim", () => {
+    expect(confirmIncludedModel(candidate, [CODEX])).toBeNull();
+    expect(
+      confirmIncludedModel(candidate, [
+        {
+          ...FREE_DEFAULT,
+          availability: {
+            status: "unavailable",
+            selectable: false,
+            reason: "missing_credential",
+            checkedAt: null,
+          },
+        } as WorkspaceModelCatalogModel,
+      ]),
+    ).toBeNull();
+    expect(
+      confirmIncludedModel(candidate, [
+        { ...FREE_DEFAULT, cost: "credits" } as WorkspaceModelCatalogModel,
+      ]),
+    ).toBeNull();
+  });
+});
+
+describe("credit checkout return", () => {
+  test("returns to the new-chat composer with the purchased credits model selected", async () => {
+    const model = await creditsModelForCheckout(
+      {
+        getWorkspaceModelCatalog: async () => ({ models: [FREE_DEFAULT, CREDITS_FIRST] }),
+      } as never,
+      "workspace-a",
+    );
+    expect(model).toEqual({ id: "credits-first", effort: "low" });
+    expect(creditCheckoutSuccessUrl("https://app.example.test", "workspace-a", model)).toBe(
+      "https://app.example.test/workspaces/workspace-a/sessions?model=credits-first&effort=low",
+    );
+  });
+
+  test("a catalog failure still returns to the workspace without a model hint", async () => {
+    const model = await creditsModelForCheckout(
+      {
+        getWorkspaceModelCatalog: async () => {
+          throw new Error("catalog unavailable");
+        },
+      } as never,
+      "workspace-a",
+    );
+    expect(model).toBeNull();
+    expect(creditCheckoutSuccessUrl("https://app.example.test", "workspace-a", null)).toBe(
+      "https://app.example.test/workspaces/workspace-a/sessions",
+    );
+  });
+});
+
 describe("applyConnectedModelToNewSessionDraft", () => {
   test("selects the connected model in the private draft while preserving existing content", async () => {
     const saveNewSessionDraft = mock(async () => undefined);
@@ -157,7 +378,7 @@ describe("applyConnectedModelToNewSessionDraft", () => {
     };
     await expect(
       applyConnectedModelToNewSessionDraft(client as never, "workspace-a"),
-    ).resolves.toBe("codex/gpt-5.6-sol");
+    ).resolves.toEqual({ id: "codex/gpt-5.6-sol", label: "codex/gpt-5.6-sol" });
     expect(saveNewSessionDraft).toHaveBeenCalledWith("workspace-a", {
       text: draft.text,
       resources: draft.resources,
