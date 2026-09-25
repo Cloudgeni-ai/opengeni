@@ -225,6 +225,41 @@ test.each([false, true])(
   },
 );
 
+test("a 403 read after an unconfirmed consent keeps the notice and status checks", async () => {
+  let denied = false;
+  let reads = 0;
+  let writes = 0;
+  const container = await render(
+    {
+      getSandboxRecovery: async () => {
+        reads++;
+        if (denied)
+          throw new OpenGeniApiError(403, JSON.stringify({ error: { message: "denied" } }));
+        return eligible;
+      },
+      recoverSandbox: async () => {
+        writes++;
+        throw new Error("response lost");
+      },
+    },
+    false,
+  );
+  await click("Review checkpoint recovery");
+  await click("Accept and restore checkpoint");
+  expect(container.textContent).toContain("outcome unconfirmed");
+  denied = true;
+  await click("Check recovery status");
+  expect(container.textContent).toContain("outcome unconfirmed");
+  expect(container.querySelector('[role="alert"]')!.textContent).toContain(
+    "Could not check checkpoint recovery",
+  );
+  expect(container.textContent).not.toContain("Try again");
+  const before = reads;
+  await click("Check recovery status");
+  expect(reads).toBe(before + 1);
+  expect(writes).toBe(1);
+});
+
 test("nonstructural unsupported recovery preserves ordinary failure controls", async () => {
   const container = await render(
     {

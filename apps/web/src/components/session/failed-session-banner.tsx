@@ -43,8 +43,9 @@ export function FailedSessionBanner({
     modelChanged,
     canChooseModel && !structuralFailure,
   );
-  // Retrying the same request on the same model cannot fix a missing model,
-  // rejected credentials or provider billing/access; a new model can.
+  // Retrying the same request on the same model cannot fix a missing model or
+  // rejected credentials; a new model can. Billing, access and limit failures
+  // keep Retry because their condition can clear.
   const retryActions =
     actions &&
     !failure.safetyRefusal &&

@@ -1580,7 +1580,9 @@ A browser whose recovery read is refused with 403 (not the canonical managed-hum
 cookie session, or no session control) treats the lane as not applicable, like an
 unsupported projection: no failed-check notice and no polling, while a
 nonstructural failure keeps its ordinary remedies, still fenced by the Retry
-endpoint.
+endpoint. A browser that retains a consent request never takes that shortcut: a
+403 read after consent keeps the fail-closed notice, the retained request, and
+read-only status checks.
 
 Every later agent build reads the durable consent receipt and includes its exact
 filesystem-discontinuity warning in session instructions. This warning is outside
@@ -2191,11 +2193,14 @@ operation replays before mutable model/billing checks, even after work advances.
 The web failure banner is presentation over the stored event, which it never
 rewrites. Uncoded provider failures and `provider_rate_limited` /
 `provider_unavailable` get short plain-language copy (rejected credentials,
-provider billing or access, a used-up daily limit, quota, rate limiting, other
-provider rejections) with the exact recorded text behind a Details toggle. Retry
-stays hidden for the credential, billing, access and daily-limit classes until
-another model is selected, because the same request on the same model cannot
-succeed. Failures with any other worker code keep their authored wording.
+provider billing or access, a used-up daily limit, quota, rate limiting) with the
+exact recorded text behind a Details toggle. A bare leading HTTP status is
+classified only for 401, 402, 403 and 429; any other status keeps its recorded
+wording. Retry stays hidden only for rejected credentials, and only while the
+same model is selected: it stays hidden for that failure on that model even
+after the key is fixed, when a new message re-runs the work. Billing, access,
+daily-limit and quota failures keep Retry, because each condition can clear.
+Failures with any other worker code keep their authored wording.
 
 A genuinely new `user.message` can still transition failed → queued and start a
 new turn from stored history. This is a different intent from Try again, and

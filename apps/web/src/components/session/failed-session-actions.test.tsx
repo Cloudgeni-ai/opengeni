@@ -70,7 +70,7 @@ test("credential failures hide Retry until another model is chosen and keep raw 
   expect(details.querySelector("summary")!.textContent).toBe("Details");
   expect(details.querySelector("p")!.textContent).toBe(raw);
   expect(banner.textContent?.replace(details.textContent ?? "", "")).toBe(
-    "The model provider rejected this model's credentials. Choose another model below.",
+    "The model provider rejected the credentials for this model. Choose another model below.",
   );
   await act(async () =>
     root!.render(
@@ -78,6 +78,27 @@ test("credential failures hide Retry until another model is chosen and keep raw 
     ),
   );
   expect(container.querySelector("button")!.textContent).toBe("Retry");
+});
+
+test("billing and daily-limit failures keep Retry on the same model", async () => {
+  const banner = (raw: string) => (
+    <FailedSessionBanner
+      failure={{ ...failure, reason: raw, recordedDetail: raw }}
+      actions={actions}
+      canChooseModel
+    />
+  );
+  const container = await render(banner("402 Payment Required"));
+  for (const raw of [
+    "402 This request requires more credits. To increase, visit https://openrouter.ai/settings/credits and upgrade to a paid account",
+    "429 Rate limit exceeded: free-models-per-day. Add 10 credits to unlock more.",
+  ]) {
+    await act(async () => root!.render(banner(raw)));
+    const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+    expect(row.textContent).toContain("Choose another model below.");
+    expect(row.querySelectorAll("button")).toHaveLength(1);
+    expect(row.querySelector("button")!.textContent).toBe("Retry");
+  }
 });
 
 test("double clicks and accepted submissions never duplicate recovery", async () => {

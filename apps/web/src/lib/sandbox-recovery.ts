@@ -48,9 +48,10 @@ export type SandboxRecoveryState = {
   uncertain: boolean;
   error: string | null;
   /**
-   * The API refused the read with 403: recovery requires the canonical
-   * managed-human cookie session plus session control, so it cannot apply to
-   * this viewer (local mode, API keys, delegated or read-only principals).
+   * The API refused the read with 403 and no consent request is retained:
+   * recovery requires the canonical managed-human cookie session plus session
+   * control, so it cannot apply to this viewer (local mode, API keys, delegated
+   * or read-only principals).
    */
   notApplicable: boolean;
 };
@@ -64,7 +65,7 @@ export function isRecoveryNotApplicableError(error: unknown): boolean {
 export function sandboxRecoveryBlocker(reason: string): string {
   const messages: Record<string, string> = {
     recovery_not_enabled: "Checkpoint recovery has not been enabled by your operator.",
-    managed_modal_home_required: "Recovery supports only this session's managed Modal home.",
+    managed_modal_home_required: "Recovery supports only this session's managed cloud sandbox.",
     connected_machine_selected:
       "This session now uses a Connected Machine. Check prior execution outcomes before retrying.",
     singleton_required: "This sandbox is shared with another session and cannot be recovered here.",
@@ -136,7 +137,9 @@ export function createSandboxRecoveryController(
       } catch (error) {
         if (revision === startedRevision) {
           // Never leave an old eligible action live after an unavailable read.
-          const notApplicable = isRecoveryNotApplicableError(error);
+          // A retained consent request stays fail-closed: losing read access
+          // after consent is not evidence the lane stopped applying.
+          const notApplicable = isRecoveryNotApplicableError(error) && !state.request;
           update({
             projection: null,
             notApplicable,

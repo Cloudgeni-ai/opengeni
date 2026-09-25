@@ -50,7 +50,7 @@ test("known provider failures get plain copy with the exact recorded text as det
     recordedDetail: openAiKey,
   });
   expect(credentials).toEqual({
-    reason: "The model provider rejected this model's credentials.",
+    reason: "The model provider rejected the credentials for this model.",
     unavailableModel: false,
     retryUnhelpful: true,
     detail: openAiKey,
@@ -62,7 +62,7 @@ test("known provider failures get plain copy with the exact recorded text as det
       false,
       true,
     ).reason,
-  ).toBe("The model provider rejected this model's credentials. Choose another model below.");
+  ).toBe("The model provider rejected the credentials for this model. Choose another model below.");
   expect(
     failedSessionCopy(
       { ...summary, reason: openAiKey, recordedDetail: openAiKey },
@@ -70,19 +70,51 @@ test("known provider failures get plain copy with the exact recorded text as det
       true,
       true,
     ).reason,
-  ).toBe("The model provider rejected this model's credentials.");
+  ).toBe("The model provider rejected the credentials for this model.");
 
-  for (const [recorded, reason, retryUnhelpful] of [
-    [openRouterCredits, "The model provider account for this model is out of credits.", true],
-    [orgVerification, "The model provider denied access to this model.", true],
-    [
-      "400 Invalid 'input[12].name': string too long. See https://platform.openai.com/docs",
-      "The model provider rejected this request.",
-      false,
-    ],
+  // Billing, access and limits can clear (a top-up, verification, a reset), so
+  // they keep Retry and only point at the model picker.
+  for (const [recorded, reason] of [
+    [openRouterCredits, "The model provider account for this model is out of credits."],
+    [orgVerification, "The model provider denied access to this model."],
   ] as const) {
     const copy = failedSessionCopy({ ...summary, reason: recorded, recordedDetail: recorded });
-    expect(copy).toEqual({ reason, unavailableModel: false, retryUnhelpful, detail: recorded });
+    expect(copy).toEqual({
+      reason,
+      unavailableModel: false,
+      retryUnhelpful: false,
+      detail: recorded,
+    });
+    expect(
+      failedSessionCopy(
+        { ...summary, reason: recorded, recordedDetail: recorded },
+        false,
+        false,
+        true,
+      ).reason,
+    ).toBe(`${reason} Choose another model below.`);
+  }
+});
+
+test("a bare HTTP status classifies only 401, 402, 403 and 429", () => {
+  expect(failedSessionCopy({ ...summary, reason: "403 Forbidden" })).toMatchObject({
+    reason: "The model provider denied access to this model.",
+    retryUnhelpful: false,
+  });
+  expect(failedSessionCopy({ ...summary, reason: "429 Too Many Requests" }).reason).toBe(
+    "The model provider is rate limiting requests. Try again in a minute.",
+  );
+  // Other statuses say nothing about the cause, so the recorded text stays.
+  for (const reason of [
+    "400 Invalid 'input[12].name': string too long. See https://platform.openai.com/docs",
+    "404 Not Found",
+    "409 Conflict: the resource changed",
+    "413 Payload Too Large",
+  ]) {
+    expect(failedSessionCopy({ ...summary, reason, recordedDetail: reason })).toEqual({
+      reason,
+      unavailableModel: false,
+    });
   }
 });
 
@@ -97,7 +129,8 @@ test("provider rate limits separate daily limits and quota from transient thrott
     failedSessionCopy(
       coded("429 Rate limit exceeded: free-models-per-day. Add 10 credits to unlock more."),
     ),
-  ).toMatchObject({ reason: "This model's daily limit has been reached.", retryUnhelpful: true });
+  ).toMatchObject({ reason: "This model's daily limit has been reached.", retryUnhelpful: false });
+  // Quota and 402 billing are the same "no budget" state: both keep Retry.
   expect(
     failedSessionCopy(coded("429 You exceeded your current quota, please check your plan.")),
   ).toMatchObject({

@@ -497,10 +497,12 @@ const effectiveBudgets = {
     wholeKibEnvelope(2_370_837),
     // Session polish: plain-language provider failure copy, a compact phone
     // status badge, neutral compute labels and the background tab-title cue.
-    // Base 6eb431b03 measures 2,451,401 raw / 692,833 gzip; this change
-    // 2,459,406 / 695,020 across 34 files (Bun 1.3.14 macOS/arm64). Keep the
-    // established 1.5 KiB headroom; gzip, file-count and other caps stay fixed.
-    wholeKibEnvelope(2_459_406, 1.5 * kib),
+    // Locally (Bun 1.3.14 macOS/arm64) base 6eb431b03 measures 2,451,401 raw.
+    // The first revision measured 2,459,406 raw both locally and in Linux/x64
+    // Bun 1.4 CI (695,083 gzip); the reviewed revision measures 2,454,752 raw /
+    // 693,801 gzip across 33 files locally. Keep the established 1.5 KiB
+    // headroom; gzip, file-count and other caps stay fixed.
+    wholeKibEnvelope(2_454_752, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,

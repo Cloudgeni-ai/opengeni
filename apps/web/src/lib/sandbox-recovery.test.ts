@@ -274,4 +274,33 @@ describe("checkpoint recovery consent", () => {
     expect(controller.getSnapshot().notApplicable).toBe(false);
     expect(controller.getSnapshot().error).toContain("Could not check checkpoint recovery");
   });
+  test("a 403 read after consent keeps the fail-closed notice and the retained request", async () => {
+    let denied = false;
+    const requests: SandboxRecoveryRequest[] = [];
+    const controller = createSandboxRecoveryController(
+      {
+        getSandboxRecovery: async () => {
+          if (denied) throw new OpenGeniApiError(403, JSON.stringify({ error: { message: "x" } }));
+          return projection();
+        },
+        recoverSandbox: async (_workspaceId, _sessionId, request) => {
+          requests.push(request);
+          throw new Error("response lost");
+        },
+      },
+      "workspace",
+      "session",
+    );
+    expect(await controller.consent(selection)).toBe(false);
+    expect(controller.getSnapshot().request).toBe(requests[0]!);
+    denied = true;
+    expect(await controller.refresh()).toBeNull();
+    expect(controller.getSnapshot()).toMatchObject({
+      projection: null,
+      notApplicable: false,
+      request: requests[0]!,
+    });
+    expect(controller.getSnapshot().error).toContain("Could not check checkpoint recovery");
+    expect(requests).toHaveLength(1);
+  });
 });

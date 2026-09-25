@@ -87,6 +87,30 @@ describe("useBackgroundAttentionTitle", () => {
     await hook.unmount();
   });
 
+  test.each([
+    ["window blur (focus moved into a frame)", () => window.dispatchEvent(new Event("blur"))],
+    ["focusin", () => document.body.dispatchEvent(new Event("focusin", { bubbles: true }))],
+    ["pointerdown", () => document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }))],
+  ])("returning through %s clears the mark once the page has focus", async (_label, dispatch) => {
+    document.title = "OpenGeni";
+    const hook = await renderHook(
+      ({ status }: { status: SessionStatus | null }) =>
+        useBackgroundAttentionTitle("session-1", status),
+      { status: "running" },
+    );
+    setPage({ hidden: false, focused: false });
+    await hook.rerender({ status: "idle" });
+    expect(document.title).toBe(`${ATTENTION_TITLE_PREFIX}OpenGeni`);
+    // Still in the background: the event alone does not clear it.
+    await actRun(dispatch);
+    expect(document.title).toBe(`${ATTENTION_TITLE_PREFIX}OpenGeni`);
+    // An embedded frame holding focus makes the parent report hasFocus().
+    setPage({ hidden: false, focused: true });
+    await actRun(dispatch);
+    expect(document.title).toBe("OpenGeni");
+    await hook.unmount();
+  });
+
   test("a foreground tab, a session switch, or an initial load never marks the title", async () => {
     document.title = "OpenGeni";
     const hook = await renderHook(

@@ -64,11 +64,16 @@ export function useBackgroundAttentionTitle(sessionId: string, status: SessionSt
     const clear = () => {
       if (!inBackground(document)) document.title = withoutAttentionPrefix(document.title);
     };
-    window.addEventListener("focus", clear);
-    document.addEventListener("visibilitychange", clear);
+    // Returning by clicking straight into an embedded frame (desktop stream,
+    // Site preview) sends the parent no window "focus"; the frame taking focus
+    // still reaches it as "blur"/"focusin", and any other click as "pointerdown".
+    const windowEvents = ["focus", "blur"] as const;
+    const documentEvents = ["visibilitychange", "focusin", "pointerdown"] as const;
+    for (const type of windowEvents) window.addEventListener(type, clear);
+    for (const type of documentEvents) document.addEventListener(type, clear, true);
     return () => {
-      window.removeEventListener("focus", clear);
-      document.removeEventListener("visibilitychange", clear);
+      for (const type of windowEvents) window.removeEventListener(type, clear);
+      for (const type of documentEvents) document.removeEventListener(type, clear, true);
       document.title = withoutAttentionPrefix(document.title);
     };
   }, []);

@@ -3,43 +3,49 @@ import type { SessionFailureSummary } from "./events";
 /**
  * Known provider failure classes. Presentation only: the stored event keeps the
  * exact recorded text, which the banner offers behind a details toggle.
- * `retryUnhelpful` marks failures that the same request on the same model
- * cannot fix (credentials, provider billing or access, a used-up daily limit);
- * Retry returns once another model is selected.
+ * `suggestModel` points the user at the model picker when another model avoids
+ * the failure. `retryUnhelpful` is reserved for rejected credentials: the same
+ * request on the same model cannot succeed until the key is fixed, so Retry
+ * returns only once another model is selected. Billing, access and limit
+ * failures keep Retry because the condition can clear (a top-up, a verified
+ * organization, a daily reset).
  */
-type KnownFailure = { message: string; retryUnhelpful: boolean };
+type KnownFailure = { message: string; retryUnhelpful: boolean; suggestModel: boolean };
 
 const CREDENTIALS: KnownFailure = {
-  message: "The model provider rejected this model's credentials.",
+  message: "The model provider rejected the credentials for this model.",
   retryUnhelpful: true,
+  suggestModel: true,
 };
 const PROVIDER_BILLING: KnownFailure = {
   message: "The model provider account for this model is out of credits.",
-  retryUnhelpful: true,
+  retryUnhelpful: false,
+  suggestModel: true,
 };
 const PROVIDER_ACCESS: KnownFailure = {
   message: "The model provider denied access to this model.",
-  retryUnhelpful: true,
+  retryUnhelpful: false,
+  suggestModel: true,
 };
 const DAILY_LIMIT: KnownFailure = {
   message: "This model's daily limit has been reached.",
-  retryUnhelpful: true,
+  retryUnhelpful: false,
+  suggestModel: true,
 };
 const QUOTA: KnownFailure = {
   message: "The model provider's usage quota for this model is used up.",
   retryUnhelpful: false,
+  suggestModel: true,
 };
 const RATE_LIMITED: KnownFailure = {
   message: "The model provider is rate limiting requests. Try again in a minute.",
   retryUnhelpful: false,
-};
-const REJECTED_REQUEST: KnownFailure = {
-  message: "The model provider rejected this request.",
-  retryUnhelpful: false,
+  suggestModel: false,
 };
 const PROVIDER_ERROR: KnownFailure = {
   message: "The model provider had a temporary error.",
   retryUnhelpful: false,
+  suggestModel: false,
 };
 
 // Worker codes whose recorded text is the provider's own. Every other code
@@ -55,7 +61,9 @@ export function classifyProviderFailure(
   const text = recorded.toLowerCase();
   // OpenGeni's own credit exhaustion has a dedicated billing remedy upstream.
   if (text.includes("opengeni credits")) return null;
-  // Provider SDKs prefix the HTTP status ("401 Incorrect API key ...").
+  // Provider SDKs prefix the HTTP status ("401 Incorrect API key ..."). A
+  // status alone classifies only 401/402/403/429; any other leading 4xx keeps
+  // its recorded wording because the status says nothing about the cause.
   const status = /^\s*(4\d\d)\b/.exec(recorded)?.[1] ?? null;
   if (
     status === "401" ||
@@ -91,7 +99,6 @@ export function classifyProviderFailure(
   }
   if (failureCode === "provider_rate_limited" || status === "429") return RATE_LIMITED;
   if (failureCode === "provider_unavailable") return PROVIDER_ERROR;
-  if (status?.startsWith("4")) return REJECTED_REQUEST;
   return null;
 }
 
@@ -104,7 +111,7 @@ export function failedSessionCopy(
 ): {
   reason: string;
   unavailableModel: boolean;
-  /** Retry on the same model cannot help; offer it again once the model changes. */
+  /** Rejected credentials: Retry on the same model cannot help; offer it again once the model changes. */
   retryUnhelpful?: boolean;
   /** Exact recorded text for a details toggle, when the headline replaced it. */
   detail?: string;
@@ -124,7 +131,7 @@ export function failedSessionCopy(
     const detail = failure.recordedDetail?.trim() || recorded;
     return {
       reason:
-        known.retryUnhelpful && canChooseModel && !modelChanged
+        known.suggestModel && canChooseModel && !modelChanged
           ? `${known.message} Choose another model below.`
           : known.message,
       unavailableModel: false,
