@@ -571,6 +571,11 @@ const SettingsSchema = z.object({
   // call the public API with bearer credentials, but never receive credentialed
   // CORS responses.
   corsAllowOriginRegex: z.string().default(String.raw`^https?://(localhost|127\.0\.0\.1)(:\d+)?$`),
+  // Local development only (`local` access mode in the `local` environment):
+  // extra exact browser origins, comma-separated, that may call the
+  // unauthenticated API besides this stack's own web origin. The local browser
+  // boundary ignores `corsAllowOriginRegex`.
+  localAllowedOrigins: z.string().optional(),
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
   openaiBaseUrl: z.string().optional(),
@@ -3221,6 +3226,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     opengeniMcpInternalUrl: optional("OPENGENI_MCP_INTERNAL_URL"),
     opengeniMcpUrl: optional("OPENGENI_MCP_URL"),
     corsAllowOriginRegex: optional("OPENGENI_CORS_ALLOW_ORIGIN_REGEX"),
+    localAllowedOrigins: optional("OPENGENI_LOCAL_ALLOWED_ORIGINS"),
     openaiProvider: optional("OPENGENI_OPENAI_PROVIDER"),
     openaiApiKey: optional("OPENGENI_OPENAI_API_KEY") ?? optional("OPENAI_API_KEY"),
     openaiBaseUrl: optional("OPENGENI_OPENAI_BASE_URL") ?? optional("OPENAI_BASE_URL"),
@@ -6795,8 +6801,47 @@ export function trustedProxyCidrEntries(raw: string): TrustedProxyCidr[] {
   return entries;
 }
 
+/**
+ * Parse `OPENGENI_LOCAL_ALLOWED_ORIGINS`: comma-separated exact browser origins
+ * (`http(s)://host[:port]`, no path, query, credentials, or wildcard). Throws on
+ * any malformed entry so a typo can never widen or silently disable the local
+ * browser boundary.
+ */
+export function localAllowedOriginEntries(raw: string | undefined): string[] {
+  const origins: string[] = [];
+  for (const entry of (raw ?? "").split(",")) {
+    const value = entry.trim();
+    if (!value) continue;
+    let url: URL | null = null;
+    try {
+      url = new URL(value);
+    } catch {
+      url = null;
+    }
+    if (
+      !url ||
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      url.username ||
+      url.password ||
+      url.hostname.includes("*") ||
+      url.pathname !== "/" ||
+      url.search ||
+      url.hash ||
+      value.endsWith("?") ||
+      value.endsWith("#")
+    ) {
+      throw new Error(
+        `OPENGENI_LOCAL_ALLOWED_ORIGINS entry "${value.slice(0, 64)}" is not an exact http(s) origin such as http://127.0.0.1:5173`,
+      );
+    }
+    origins.push(url.origin);
+  }
+  return origins;
+}
+
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
+  localAllowedOriginEntries(settings.localAllowedOrigins);
   if (
     settings.organizationUserSetupEmailTokenTransport === "query" &&
     !settings.organizationUserSetupQueryEdgeSanitizationConfirmed

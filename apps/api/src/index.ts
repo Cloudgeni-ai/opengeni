@@ -59,6 +59,10 @@ import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
 import { apiRequestBindingsForTransportPeer } from "./http/request-source";
 import { startApiMetricsListener } from "./http/metrics-listener";
 import {
+  createLocalBrowserBoundary,
+  localBrowserBoundaryResponse,
+} from "./http/local-browser-boundary";
+import {
   createStandaloneEditableArtifactApplication,
   type StandaloneEditableArtifactApplication,
 } from "./editable-artifact-production";
@@ -450,11 +454,16 @@ export async function startApi(
   const interactionFrameProxies = new InteractionFrameProxyTransport(
     resolveFirstPartyDelegationSecret(settings),
   );
+  // WebSocket upgrades below bypass the Hono app, so the local-mode browser
+  // boundary (http/local-browser-boundary.ts) is applied here as well.
+  const localBrowserBoundary = createLocalBrowserBoundary(settings);
   const server = Bun.serve<ApiWebSocketConnection>({
     hostname: settings.apiHost,
     port: settings.apiPort,
     idleTimeout: 255,
     fetch: (request, bunServer) => {
+      const localBrowserRejection = localBrowserBoundary?.rejection(request);
+      if (localBrowserRejection) return localBrowserBoundaryResponse(localBrowserRejection);
       if (interactionFrameProxies.handles(request)) {
         return interactionFrameProxies.upgrade(request, bunServer);
       }
