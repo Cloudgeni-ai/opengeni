@@ -1,6 +1,6 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { GitBranchIcon, MessageSquareIcon, RouteIcon, XIcon } from "lucide-react";
+import { XIcon } from "lucide-react";
 import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
 
 import { AreaChart, UsageMeter } from "@/components/insights/charts";
@@ -35,6 +35,7 @@ import {
   insightsMeasure,
   insightsRange,
   nextInsightsSearch,
+  parseInsightsSearch,
   type InsightsSearch,
 } from "@/components/insights/search";
 import { ContentPage } from "@/components/ui/content-layout";
@@ -107,15 +108,18 @@ export function InsightsRoute({
   onSearchChange,
 }: {
   workspaceId: string;
-  search?: InsightsSearch;
+  search?: Record<string, unknown>;
   onSearchChange?: (next: InsightsSearch) => void;
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((w) => w.id === workspaceId);
   const canRead = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
   const reduceMotion = useReducedMotion();
-  const [localSearch, setLocalSearch] = useState<InsightsSearch>(search ?? {});
-  const selection = onSearchChange ? (search ?? {}) : localSearch;
+  const [localSearch, setLocalSearch] = useState<InsightsSearch>(() =>
+    parseInsightsSearch(search ?? {}),
+  );
+  const routedSelection = useMemo(() => parseInsightsSearch(search ?? {}), [search]);
+  const selection = onSearchChange ? routedSelection : localSearch;
   const range = insightsRange(selection);
   const measure = insightsMeasure(selection);
   const { provider, model, root, session } = selection;
@@ -1389,6 +1393,54 @@ export function InsightsRoute({
         snapshot={snap}
       />
     </ContentPage>
+  );
+}
+
+// Local glyphs: importing these lucide icons here moves modules shared with the
+// session route into new chunks and pushes its direct-load graph over budget.
+function Glyph(props: { className?: string; children: ReactNode }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={props.className}
+    >
+      {props.children}
+    </svg>
+  );
+}
+
+function GitBranchIcon(props: { className?: string }) {
+  return (
+    <Glyph className={props.className}>
+      <line x1="6" x2="6" y1="3" y2="15" />
+      <circle cx="18" cy="6" r="3" />
+      <circle cx="6" cy="18" r="3" />
+      <path d="M18 9a9 9 0 0 1-9 9" />
+    </Glyph>
+  );
+}
+
+function MessageSquareIcon(props: { className?: string }) {
+  return (
+    <Glyph className={props.className}>
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </Glyph>
+  );
+}
+
+function RouteIcon(props: { className?: string }) {
+  return (
+    <Glyph className={props.className}>
+      <circle cx="6" cy="19" r="3" />
+      <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+      <circle cx="18" cy="5" r="3" />
+    </Glyph>
   );
 }
 

@@ -35,7 +35,6 @@ import {
   lazyRouteComponent,
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@/components/common";
-import { parseInsightsSearch } from "@/components/insights/search";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
@@ -323,7 +322,8 @@ const workspaceMachinesRoute = createRoute({
 const workspaceInsightsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "insights",
-  validateSearch: parseInsightsSearch,
+  // The lazy Insights chunk owns parsing so the shell graph stays unchanged.
+  validateSearch: (search: Record<string, unknown>): Record<string, unknown> => search,
   component: Insights,
 });
 const workspacePriorityRoute = createRoute({
