@@ -134,8 +134,18 @@ beforeAll(async () => {
       objects.set(key, { bytes: Buffer.concat(parts), contentType });
       return true;
     },
-    createGetUrl: async ({ key }: { key: string }) => ({
-      url: `https://storage.example.test/${key}`,
+    createGetUrl: async ({
+      key,
+      responseContentDisposition,
+    }: {
+      key: string;
+      responseContentDisposition?: string;
+    }) => ({
+      url: `https://storage.example.test/${key}${
+        responseContentDisposition
+          ? `?response-content-disposition=${encodeURIComponent(responseContentDisposition)}`
+          : ""
+      }`,
       expiresAt: new Date(Date.now() + 60000),
     }),
     putObject: async ({
@@ -233,6 +243,14 @@ test("direct uploads publish large HTML with optional downloadable source and im
       await requestAsCanonicalLocalHuman(`${base}/${result.artifact.id}/downloads`)
     ).json();
     expect(downloads.source === null).toBe(!withSource);
+    // Signed Site HTML downloads from storage instead of rendering there.
+    expect(new URL(downloads.html.url).searchParams.get("response-content-disposition")).toBe(
+      'attachment; filename="site.html"',
+    );
+    if (withSource)
+      expect(
+        new URL(downloads.source.url).searchParams.get("response-content-disposition"),
+      ).toBeNull();
     if (withSource)
       expect(
         JSON.parse(
@@ -259,6 +277,8 @@ test("direct uploads publish large HTML with optional downloadable source and im
     expect(runtime.headers.get("content-security-policy")).toBe("sandbox allow-scripts");
     expect(runtime.headers.get("cross-origin-resource-policy")).toBe("same-origin");
     expect(runtime.headers.get("x-content-type-options")).toBe("nosniff");
+    // Clients fetch this HTML; a raw-URL navigation downloads it.
+    expect(runtime.headers.get("content-disposition")).toBe('attachment; filename="site.html"');
     expect(await runtime.text()).toBe(html);
     for (const endpoint of ["html", "downloads", "content"]) {
       for (const versionId of ["not-a-uuid", ""]) {

@@ -24,7 +24,10 @@
  * navigation downloads the bytes instead of showing attacker-authored markup on
  * the app origin. The console never navigates to these routes: it reads bytes
  * through the SDK and renders them in app-owned elements, so neither header
- * changes an in-app preview.
+ * changes an in-app preview. Signed object-storage GET URLs for active markup
+ * carry the same attachment as a signed response override
+ * (`userContentSignedGetUrlOptions`), because the storage endpoint is not
+ * always a separate site.
  */
 const USER_CONTENT_FETCH_DIRECTIVES =
   "default-src 'none'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'unsafe-inline'";
@@ -62,14 +65,39 @@ export function isActiveUserContentType(contentType: string): boolean {
   );
 }
 
-/** ASCII-only quoted filename that cannot break out of the header parameter. */
-function dispositionFilename(filename: string): string {
-  const safe = filename
-    .replace(/[^A-Za-z0-9._ -]+/g, "_")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 200);
-  return safe || "download";
+const DISPOSITION_FILENAME_MAX_CHARS = 200;
+
+/** RFC 8187 `attr-char` percent-encoding (stricter than `encodeURIComponent`). */
+function encodeExtendedParameterValue(value: string): string {
+  return encodeURIComponent(value).replace(
+    /['()*]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+/**
+ * RFC 6266 filename parameters: an ASCII-only quoted `filename` that cannot
+ * break out of the header, plus an RFC 8187 `filename*` carrying the original
+ * name (for example non-Latin names) whenever the ASCII form had to change it.
+ */
+function dispositionFilenameParameters(filename: string): string {
+  const cleaned = Array.from(
+    filename
+      .replace(/[\u0000-\u001f\u007f/\\]+/g, "_")
+      // Lone surrogates cannot be percent-encoded as UTF-8.
+      .replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "_")
+      .trim(),
+  )
+    .slice(0, DISPOSITION_FILENAME_MAX_CHARS)
+    .join("");
+  const ascii =
+    cleaned
+      .replace(/[^A-Za-z0-9._ -]+/g, "_")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, DISPOSITION_FILENAME_MAX_CHARS) || "download";
+  if (!cleaned || ascii === cleaned) return `filename="${ascii}"`;
+  return `filename="${ascii}"; filename*=UTF-8''${encodeExtendedParameterValue(cleaned)}`;
 }
 
 /** `Content-Disposition: attachment` for active markup; inline types are unchanged. */
@@ -80,9 +108,28 @@ export function userContentDispositionHeaders(
   if (!isActiveUserContentType(contentType)) return {};
   return {
     "Content-Disposition": filename
-      ? `attachment; filename="${dispositionFilename(filename)}"`
+      ? `attachment; ${dispositionFilenameParameters(filename)}`
       : "attachment",
   };
+}
+
+/**
+ * Signed object-storage GET options for one stored object: active markup gets
+ * a signed `attachment` response override, so a browser that opens the URL
+ * downloads the bytes instead of rendering them with their stored type. The
+ * storage endpoint is not always a separate site (local development serves it
+ * from loopback, and a preview may route the bucket path on the app origin),
+ * so a signed URL follows the same rule as the API routes. Spread into
+ * `createGetUrl`; inline types add nothing.
+ */
+export function userContentSignedGetUrlOptions(
+  contentType: string,
+  filename?: string | null,
+): { responseContentDisposition: string } | Record<string, never> {
+  const headers = userContentDispositionHeaders(contentType, filename);
+  return "Content-Disposition" in headers
+    ? { responseContentDisposition: headers["Content-Disposition"] }
+    : {};
 }
 
 /** True for audio and video types the browser plays in a synthesized media document. */

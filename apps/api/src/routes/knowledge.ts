@@ -50,6 +50,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import { ApiHttpError } from "../http/api-error";
+import { userContentSignedGetUrlOptions } from "../http/user-content";
 
 const ReadSettings = z
   .object({
@@ -181,7 +182,10 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         ))
       )
         throw new HTTPException(410, { message: "Original file bytes are unavailable" });
-      const signed = await deps.objectStorage.createGetUrl({ key: file.objectKey });
+      const signed = await deps.objectStorage.createGetUrl({
+        key: file.objectKey,
+        ...userContentSignedGetUrlOptions(file.contentType, file.filename),
+      });
       await recordAuditEvent(deps.db, {
         accountId: context.accountId,
         workspaceId: context.workspaceId,

@@ -79,6 +79,7 @@ function storageFixture() {
   const calls: StorageCall[] = [];
   const existenceCalls: string[] = [];
   const signedGetCalls: string[] = [];
+  const signedGetOptions: Array<Parameters<ObjectStorage["createGetUrl"]>[0]> = [];
   const unavailable = async (): Promise<never> => {
     throw new Error("unexpected object-storage operation");
   };
@@ -87,8 +88,10 @@ function storageFixture() {
     backend: "s3-compatible",
     maxSinglePutSizeBytes: 5_000_000_000,
     createPutUrl: unavailable,
-    async createGetUrl({ key }) {
+    async createGetUrl(args) {
+      const { key } = args;
       signedGetCalls.push(key);
+      signedGetOptions.push(args);
       return {
         url: `https://storage.example.test/${encodeURIComponent(key)}?signature=opaque`,
         expiresAt: new Date("2026-08-10T12:05:00.000Z"),
@@ -109,7 +112,7 @@ function storageFixture() {
     putObject: unavailable,
     deleteObject: unavailable,
   };
-  return { storage, objects, calls, existenceCalls, signedGetCalls };
+  return { storage, objects, calls, existenceCalls, signedGetCalls, signedGetOptions };
 }
 
 function routeApp(objectStorage: ObjectStorage | null, db = client.db): Hono {
@@ -749,6 +752,42 @@ describe("retained artifact metadata and bounded content", () => {
     expect(media.headers.get("cross-origin-resource-policy")).toBe("same-origin");
     expect(media.headers.get("x-content-type-options")).toBe("nosniff");
     expect(media.headers.get("content-disposition")).toBeNull();
+  });
+
+  test("signs active-markup download URLs as attachments and leaves previewable types inline", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const fixture = storageFixture();
+    const html = new TextEncoder().encode("<!doctype html><script>alert(1)</script>");
+    const page = await createArtifact(workspace, {
+      bytes: html,
+      contentType: "text/html",
+      filename: "report.html",
+    });
+    fixture.objects.set(page.objectKey, html);
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const image = await createArtifact(workspace, {
+      bytes: png,
+      contentType: "image/png",
+      filename: "chart.png",
+    });
+    fixture.objects.set(image.objectKey, png);
+    const app = routeApp(fixture.storage);
+
+    for (const fileId of [page.fileId, image.fileId]) {
+      const response = await app.request(
+        `http://x/v1/workspaces/${workspace.workspaceId}/files/${fileId}/download-url`,
+        { method: "POST", headers: { authorization: workspace.authorization } },
+      );
+      expect(response.status).toBe(200);
+    }
+    expect(fixture.signedGetOptions).toEqual([
+      {
+        key: page.objectKey,
+        responseContentDisposition: 'attachment; filename="report.html"',
+      },
+      { key: image.objectKey },
+    ]);
   });
 
   test("rejects malformed, multipart, oversized, and unsatisfiable ranges before storage", async () => {
