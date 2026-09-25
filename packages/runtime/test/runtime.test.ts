@@ -167,6 +167,7 @@ import {
   CODEX_APPS_MCP_URL,
   type CodexTokenSnapshot,
 } from "@opengeni/codex";
+import { hostShellSession } from "./isolated-git-home-fixture";
 
 function makeCodexAppsAuth(overrides: { token?: CodexTokenSnapshot; tokenError?: Error } = {}): {
   clientVersion: string;
@@ -5089,19 +5090,7 @@ describe("runtime event normalization", () => {
     const events: string[] = [];
     const session = {
       state: { manifest: new Manifest({ root: "/workspace" }) },
-      exec: async ({ cmd }: { cmd: string }) => {
-        const process = Bun.spawn(["/bin/sh", "-c", cmd], {
-          cwd: workspace,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        const [stdout, stderr, exitCode] = await Promise.all([
-          new Response(process.stdout).text(),
-          new Response(process.stderr).text(),
-          process.exited,
-        ]);
-        return { stdout, stderr, output: `${stdout}${stderr}`, exitCode };
-      },
+      ...hostShellSession(join(root, "home"), { cwd: workspace }),
     };
     const download = {
       fileId: "file-1",
@@ -6100,27 +6089,9 @@ describe("runtime event normalization", () => {
   test("CODEMODE-BROKER: refresh atomically replaces the stable 0600 token file", async () => {
     const home = mkdtempSync(join(tmpdir(), "opengeni-codemode-refresh-"));
     try {
-      const session = {
-        exec: async (args: { cmd: string }) => {
-          const proc = Bun.spawn(["sh", "-lc", args.cmd], {
-            cwd: home,
-            env: {
-              ...process.env,
-              HOME: home,
-              // Never let the fixture refresh the invoking agent's credential.
-              OPENGENI_CODEMODE_TOKEN_FILE: undefined,
-            },
-            stdout: "pipe",
-            stderr: "pipe",
-          });
-          const [stdout, stderr, exitCode] = await Promise.all([
-            new Response(proc.stdout).text(),
-            new Response(proc.stderr).text(),
-            proc.exited,
-          ]);
-          return { exitCode, stdout, stderr };
-        },
-      };
+      // The fixture session also drops the invoking agent's OPENGENI_CODEMODE_TOKEN_FILE,
+      // so the refresh can never target that agent's own credential.
+      const session = hostShellSession(home);
 
       await refreshCodemodeTokenFile(session as never, "ogd_renewed");
       const tokenDir = join(home, ".opengeni");

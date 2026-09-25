@@ -9,9 +9,12 @@ import {
   gitCredentialBindingHash,
   gitCredentialBindingTokenRefreshCommand,
   gitProviderTokenRefreshCommand,
+  refreshGitCredentialBindingTokenFiles,
+  refreshGitProviderTokenFiles,
   repositoryCloneCommand,
+  runRepositoryCloneHook,
 } from "../src/index";
-import { isolatedGitEnvironment } from "./isolated-git-home-fixture";
+import { hostShellSession, isolatedGitEnvironment } from "./isolated-git-home-fixture";
 
 describe("lifecycle scripts — real sh execution semantics", () => {
   const childProcess = require("node:child_process") as typeof import("node:child_process");
@@ -272,6 +275,90 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(admitted.status).toBe(0);
       expect(readFileSync(join(home, ".gitconfig"), "utf8")).toContain(
         join(home, ".opengeni", "git-credentials", "helper"),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("runtime clone and renewal hooks provision through an unmarked shell session, while the bare builders refuse it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-hook-command-"));
+    try {
+      const origin = makeOrigin(root);
+      const workspace = join(root, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      const remote = "https://github.com/opengeni/hooked-fixture.git";
+      const resources = [
+        { kind: "repository" as const, uri: remote, ref: "main", mountPath: "repos/test/hooked" },
+      ];
+      const bindings = [
+        { credentialBindingId: "hooked", provider: "github" as const, token: "hook-token" },
+      ];
+      const tokenDirectory = (home: string) => join(home, ".opengeni");
+      const bindingTokenFile = (home: string) =>
+        join(
+          tokenDirectory(home),
+          "git-credentials",
+          `${gitCredentialBindingHash("hooked")}-token`,
+        );
+      // A sandbox-shaped session: the virtual /workspace maps onto a temporary
+      // directory, the HTTPS remote resolves to the local origin through
+      // command-scoped Git config, and HOME is an isolated fixture home. Nothing in
+      // its environment carries the sandbox provisioning target, so only the marker
+      // the runtime hooks put in the command text can admit the provisioning scripts.
+      const sandboxSession = (home: string) =>
+        hostShellSession(home, {
+          cwd: workspace,
+          env: {
+            GIT_TERMINAL_PROMPT: "0",
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`,
+            GIT_CONFIG_VALUE_0: remote,
+          },
+          rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
+        });
+
+      // The exact builders the hooks wrap, run on their own through the same kind
+      // of session, stop at the guard and leave their HOME untouched.
+      const bareHome = join(root, "bare-home");
+      const bareSession = sandboxSession(bareHome);
+      for (const command of [
+        repositoryCloneCommand(resources),
+        gitCredentialBindingTokenRefreshCommand(bindings),
+        gitProviderTokenRefreshCommand({ github: "renewed-provider-token" }),
+      ]) {
+        const refused = await bareSession.exec({ cmd: command });
+        expect(refused.exitCode).toBe(78);
+        expect(refused.stderr).toContain("Refusing to provision OpenGeni Git credentials");
+      }
+      expect(readdirSync(bareHome)).toEqual([]);
+      expect(existsSync(join(workspace, "repos"))).toBe(false);
+
+      // The production hooks: repository clone, then both renewal paths.
+      const home = join(root, "sandbox-home");
+      const session = sandboxSession(home);
+      await runRepositoryCloneHook(session as never, resources, {
+        environment: {},
+        gitTokenSeeds: { github: "hook-token" },
+        gitCredentialBindings: bindings,
+      });
+      expect(readFileSync(join(workspace, "repos", "test", "hooked", "README.md"), "utf8")).toBe(
+        "hello\n",
+      );
+      expect(readFileSync(join(home, ".gitconfig"), "utf8")).toContain(
+        join(tokenDirectory(home), "git-credentials", "helper"),
+      );
+      expect(readFileSync(bindingTokenFile(home), "utf8")).toBe("hook-token");
+      expect(readFileSync(join(tokenDirectory(home), "git-token"), "utf8")).toBe("hook-token");
+
+      await refreshGitCredentialBindingTokenFiles(session as never, [
+        { ...bindings[0]!, token: "renewed-binding-token" },
+      ]);
+      expect(readFileSync(bindingTokenFile(home), "utf8")).toBe("renewed-binding-token");
+
+      await refreshGitProviderTokenFiles(session as never, { github: "renewed-provider-token" });
+      expect(readFileSync(join(tokenDirectory(home), "git-token"), "utf8")).toBe(
+        "renewed-provider-token",
       );
     } finally {
       rmSync(root, { recursive: true, force: true });
