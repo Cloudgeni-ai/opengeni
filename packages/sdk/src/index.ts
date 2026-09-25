@@ -543,6 +543,7 @@ export type {
   InsightsLiveWarmLease,
   InsightsFloorSession,
   InsightsScheduleRow,
+  InsightsScope,
   WorkspaceInsightsSnapshot,
   WorkspaceInsightsResponse,
   CapabilityCatalogItem,

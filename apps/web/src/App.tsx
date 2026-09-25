@@ -35,6 +35,7 @@ import {
   lazyRouteComponent,
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@/components/common";
+import { parseInsightsSearch } from "@/components/insights/search";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
@@ -322,6 +323,7 @@ const workspaceMachinesRoute = createRoute({
 const workspaceInsightsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "insights",
+  validateSearch: parseInsightsSearch,
   component: Insights,
 });
 const workspacePriorityRoute = createRoute({
@@ -640,7 +642,15 @@ function Machines() {
 
 function Insights() {
   const { workspaceId } = workspaceInsightsRoute.useParams();
-  return <LazyInsightsRoute workspaceId={workspaceId} />;
+  const search = workspaceInsightsRoute.useSearch();
+  const navigate = workspaceInsightsRoute.useNavigate();
+  return (
+    <LazyInsightsRoute
+      workspaceId={workspaceId}
+      search={search}
+      onSearchChange={(next) => void navigate({ search: next, replace: true })}
+    />
+  );
 }
 
 function Priority() {

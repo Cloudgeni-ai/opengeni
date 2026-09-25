@@ -27,6 +27,8 @@ export type ProviderId = string;
 export type InsightsFilters = {
   provider: ProviderId | "all";
   model: string | "all";
+  rootSessionId?: string | null;
+  sessionId?: string | null;
 };
 
 export type InsightsMeasure = "tokens" | "money";
@@ -140,9 +142,13 @@ export function pctDelta(current: number, prior: number): number | null {
   return Math.round(((current - prior) / prior) * 100);
 }
 
-function hitPct(cached: number, input: number): number {
-  if (input <= 0) return 0;
+function hitPct(cached: number, input: number): number | null {
+  if (input <= 0) return null;
   return Math.min(100, Math.max(0, Math.round((cached / input) * 100)));
+}
+
+export function formatCachePct(value: number | null | undefined): string {
+  return value === null || value === undefined ? "Unknown" : `${value}%`;
 }
 
 export function formatPctDelta(delta: number | null, priorLabel: string): string {
@@ -160,7 +166,7 @@ export type InsightsView = {
     inputTokens: number;
     cachedTokens: number;
     cacheInputTokens: number;
-    cacheHitPct: number;
+    cacheHitPct: number | null;
     creditUsd: number;
     estimatedProviderUsd: number;
     estimatedProviderCostKnownCalls: number;
@@ -181,8 +187,17 @@ export type InsightsView = {
     cacheWriteTokens: number;
     reasoningTokens: number;
     totalTokens: number;
-    cacheHitPct: number;
+    cacheHitPct: number | null;
     cacheCoveragePct: number;
+    creditPaidUsd: number;
+    creditPaidCalls: number;
+    externalEstimatedUsd: number;
+    externalCalls: number;
+    externalPricedCalls: number;
+    /** Input from calls that reported cache detail, minus cache reads and writes. */
+    uncachedInputTokens: number;
+    /** Input from calls that did not report cache detail; its cache split is unknown. */
+    unreportedCacheInputTokens: number;
     tokenCoveragePct: number;
     estimatedProviderUsd: number;
     pricingCoveragePct: number;
@@ -195,7 +210,7 @@ export type InsightsView = {
     equivalentPct: number | null;
     warmPct: number | null;
     tokensPct: number | null;
-    cachePts: number;
+    cachePts: number | null;
   };
   series: InsightsSeriesPoint[];
   availableModels: string[];
@@ -222,11 +237,23 @@ export function buildInsightsView(
   const cacheKnownCalls = models.reduce((n, row) => n + row.cacheKnownCalls, 0);
   const calls = models.reduce((n, row) => n + row.calls, 0);
   const cacheHitPct = hitPct(cachedTokens, cacheInputTokens);
+  const creditRows = models.filter((row) => row.billing === "opengeni_credits");
+  const externalRows = models.filter((row) => row.billing === "external");
+  const creditPaidUsd = creditRows.reduce((n, row) => n + row.creditUsd, 0);
+  const creditPaidCalls = creditRows.reduce((n, row) => n + row.calls, 0);
+  const externalEstimatedUsd = externalRows.reduce((n, row) => n + row.estimatedProviderUsd, 0);
+  const externalCalls = externalRows.reduce((n, row) => n + row.calls, 0);
+  const externalPricedCalls = externalRows.reduce(
+    (n, row) => n + row.estimatedProviderCostKnownCalls,
+    0,
+  );
+  const uncachedInputTokens = Math.max(0, cacheInputTokens - cachedTokens - cacheWriteTokens);
+  const unreportedCacheInputTokens = Math.max(0, inputTokens - cacheInputTokens);
   // Unfiltered headline follows usage_events.model.cost; filtered uses facts.
-  const creditUsd = snap.modelFilterActive ? snap.creditUsd : snap.workspaceCreditUsd;
-  const priorCreditUsd = snap.modelFilterActive
-    ? snap.priorCreditUsd
-    : snap.priorWorkspaceCreditUsd;
+  const scoped =
+    snap.modelFilterActive || Boolean(snap.scope?.rootSessionId || snap.scope?.sessionId);
+  const creditUsd = scoped ? snap.creditUsd : snap.workspaceCreditUsd;
+  const priorCreditUsd = scoped ? snap.priorCreditUsd : snap.priorWorkspaceCreditUsd;
   const estimatedProviderUsd = snap.estimatedProviderUsd;
 
   const byProvider = new Map<
@@ -314,6 +341,13 @@ export function buildInsightsView(
       reasoningTokens,
       totalTokens,
       cacheHitPct,
+      creditPaidUsd,
+      creditPaidCalls,
+      externalEstimatedUsd,
+      externalCalls,
+      externalPricedCalls,
+      uncachedInputTokens,
+      unreportedCacheInputTokens,
       cacheCoveragePct: coveragePct(cacheKnownCalls, calls),
       tokenCoveragePct: coveragePct(tokenKnownCalls, calls),
       estimatedProviderUsd,
@@ -330,10 +364,106 @@ export function buildInsightsView(
       equivalentPct: pctDelta(snap.equivalentCreditUsd, snap.priorEquivalentCreditUsd),
       warmPct: pctDelta(snap.warmSeconds, snap.priorWarmSeconds),
       tokensPct: pctDelta(totalTokens, snap.priorTotalTokens),
-      cachePts: cacheHitPct - snap.priorCacheHitPct,
+      cachePts:
+        cacheHitPct === null || snap.priorCacheHitPct === null
+          ? null
+          : cacheHitPct - snap.priorCacheHitPct,
     },
     series: snap.series,
     availableModels,
     availableProviders,
   };
+}
+
+export type InsightsOutlierCall = {
+  call: InsightsModelCallRow;
+  /** Multiple of the median total across the sampled calls. */
+  ratio: number;
+};
+
+export type InsightsCacheMissCall = {
+  call: InsightsModelCallRow;
+  uncachedInputTokens: number;
+};
+
+export type InsightsDiagnostics = {
+  /** Calls considered; the snapshot carries only the most recent calls. */
+  sampleSize: number;
+  sampleTruncated: boolean;
+  medianTotalTokens: number | null;
+  outliers: InsightsOutlierCall[];
+  cacheMisses: InsightsCacheMissCall[];
+  lowCacheRoots: WorkspaceInsightsSnapshot["drivers"];
+};
+
+export const OUTLIER_MIN_SAMPLE = 5;
+export const OUTLIER_MEDIAN_MULTIPLE = 3;
+export const CACHE_MISS_MIN_INPUT_TOKENS = 8_000;
+export const LOW_CACHE_ROOT_MAX_PCT = 25;
+export const LOW_CACHE_ROOT_MIN_TOKENS = 50_000;
+const DIAGNOSTIC_ROWS = 5;
+
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/**
+ * Outliers and cache misses among the recent calls the snapshot carries, plus
+ * root sessions whose reported cache hit is low. Calls with unreported fields
+ * are skipped rather than treated as zero.
+ */
+export function buildInsightsDiagnostics(snap: WorkspaceInsightsSnapshot): InsightsDiagnostics {
+  const calls = snap.recentCalls;
+  const totals = calls
+    .map((call) => call.totalTokens)
+    .filter((value): value is number => value !== null);
+  const medianTotalTokens = median(totals);
+  const outliers =
+    medianTotalTokens !== null && medianTotalTokens > 0 && totals.length >= OUTLIER_MIN_SAMPLE
+      ? calls
+          .filter(
+            (call) =>
+              call.totalTokens !== null &&
+              call.totalTokens >= medianTotalTokens * OUTLIER_MEDIAN_MULTIPLE,
+          )
+          .map((call) => ({ call, ratio: call.totalTokens! / medianTotalTokens }))
+          .sort((a, b) => b.ratio - a.ratio)
+          .slice(0, DIAGNOSTIC_ROWS)
+      : [];
+  const cacheMisses = calls
+    .filter(
+      (call) => call.inputTokens !== null && call.cachedTokens !== null && call.cachedTokens === 0,
+    )
+    .map((call) => ({
+      call,
+      uncachedInputTokens: Math.max(0, call.inputTokens! - (call.cacheWriteTokens ?? 0)),
+    }))
+    .filter((row) => row.uncachedInputTokens >= CACHE_MISS_MIN_INPUT_TOKENS)
+    .sort((a, b) => b.uncachedInputTokens - a.uncachedInputTokens)
+    .slice(0, DIAGNOSTIC_ROWS);
+  const lowCacheRoots = snap.drivers
+    .filter(
+      (driver) =>
+        driver.cacheHitPct !== null &&
+        driver.cacheHitPct < LOW_CACHE_ROOT_MAX_PCT &&
+        driver.tokens >= LOW_CACHE_ROOT_MIN_TOKENS,
+    )
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, DIAGNOSTIC_ROWS);
+  return {
+    sampleSize: calls.length,
+    sampleTruncated: snap.recentCallsTruncated,
+    medianTotalTokens,
+    outliers,
+    cacheMisses,
+    lowCacheRoots,
+  };
+}
+
+/** Root-session id carried by a `root:<uuid>` driver id, or null for other driver kinds. */
+export function driverRootSessionId(driverId: string): string | null {
+  return driverId.startsWith("root:") ? driverId.slice("root:".length) : null;
 }

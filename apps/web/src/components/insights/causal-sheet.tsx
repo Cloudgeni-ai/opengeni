@@ -12,7 +12,13 @@ import {
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 
-import { formatTokens, formatUsd, type InsightsSnapshot, type TraceTarget } from "./mock-data";
+import {
+  formatCachePct,
+  formatTokens,
+  formatUsd,
+  type InsightsSnapshot,
+  type TraceTarget,
+} from "./mock-data";
 
 const STEPS = ["Window", "Driver", "Act"] as const;
 
@@ -122,7 +128,9 @@ export function CausalSheet(props: {
                       <p className="text-sm font-medium text-fg">{driver.label}</p>
                       <p className="mt-1 font-mono text-xs tabular-nums text-fg-muted">
                         {formatTokens(driver.tokens)} tokens · {driver.pctOfTokens}% of shown
-                        drivers · {driver.tokens === 0 ? "—" : `${driver.cacheHitPct}% cache`} ·{" "}
+                        drivers ·{" "}
+                        {driver.tokens === 0 ? "—" : `${formatCachePct(driver.cacheHitPct)} cache`}{" "}
+                        ·{" "}
                         {driver.estimatedProviderCostKnownCalls > 0
                           ? `${formatUsd(driver.estimatedProviderUsd)} estimated provider USD`
                           : "provider price unknown"}
