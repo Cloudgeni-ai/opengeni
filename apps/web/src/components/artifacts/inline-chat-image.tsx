@@ -16,12 +16,14 @@ type InlineChatImageProps = {
   alt: string;
   /** Non-interactive image for a surrounding catalog link; no nested controls. */
   thumbnail?: boolean;
+  /** Full artifact viewer uses the page width instead of the fixed chat slot. */
+  viewer?: boolean;
   showArtifactLink?: boolean;
   fromSession?: string;
 };
 
 export function InlineChatImage(props: InlineChatImageProps) {
-  if (props.thumbnail) return <InlineChatImageBody {...props} />;
+  if (props.thumbnail || props.viewer) return <InlineChatImageBody {...props} />;
   return (
     <DeferredChatMedia
       key={`${props.workspaceId}:${props.artifactId}`}
@@ -44,6 +46,7 @@ function InlineChatImageBody({
   artifactId,
   alt,
   thumbnail = false,
+  viewer = false,
   showArtifactLink = false,
   fromSession,
 }: InlineChatImageProps) {
@@ -115,6 +118,7 @@ function InlineChatImageBody({
       load={load}
       alt={alt}
       thumbnail={thumbnail}
+      viewer={viewer}
       onRetry={() => setRetry((v) => v + 1)}
     />
   );
@@ -144,12 +148,14 @@ function LoadedImage({
   alt,
   onRetry,
   thumbnail,
+  viewer,
 }: {
   artifact: RetainedArtifactReference;
   load: ReturnType<typeof createWorkspaceRetainedArtifactLoader>;
   alt: string;
   onRetry: () => void;
   thumbnail: boolean;
+  viewer: boolean;
 }) {
   const state = useRetainedImageObjectUrl(artifact, load);
   const lightbox = useLightboxOptional();
@@ -181,7 +187,9 @@ function LoadedImage({
       className={
         thumbnail
           ? "h-full w-full object-contain"
-          : "h-full w-full min-w-0 rounded-md object-contain"
+          : viewer
+            ? "block h-auto max-h-[calc(100dvh-12rem)] w-full min-w-0 rounded-md object-contain"
+            : "h-full w-full min-w-0 rounded-md object-contain"
       }
       onError={() => setFailed(true)}
     />
@@ -190,7 +198,7 @@ function LoadedImage({
     <button
       type="button"
       aria-label={`Expand ${alt || "image"}`}
-      className="block h-full w-full min-w-0 cursor-zoom-in rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
+      className={`block w-full min-w-0 cursor-zoom-in rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2 focus-visible:ring-offset-bg ${viewer ? "" : "h-full"}`}
       onClick={(event) => lightbox.open(state.url, alt, event.currentTarget, "Image")}
     >
       {image}
