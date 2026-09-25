@@ -574,28 +574,36 @@ function OperationalWorkspaceSettingsRoute({
         {section === "api-keys" ? (
           <SettingsSection
             id="workspace-api-keys-heading"
-            title="OpenGeni API keys"
-            description="Workspace-scoped keys for calling OpenGeni from another product."
+            title="Workspace keys"
             action={
-              canManageApiKeys ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={() => {
-                    setSelectedPermissions(
-                      new Set(
-                        [...defaultApiKeyPermissions].filter((permission) =>
-                          delegablePermissions.has(permission),
+              <>
+                <span className="text-xs text-fg-subtle">
+                  {!apiKeysLoaded
+                    ? "Loading…"
+                    : activeApiKeyCount === 0
+                      ? "No active keys"
+                      : `${activeApiKeyCount} active`}
+                </span>
+                {canManageApiKeys ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => {
+                      setSelectedPermissions(
+                        new Set(
+                          [...defaultApiKeyPermissions].filter((permission) =>
+                            delegablePermissions.has(permission),
+                          ),
                         ),
-                      ),
-                    );
-                    setCreateKeyOpen(true);
-                  }}
-                >
-                  <PlusIcon className="size-3.5" />
-                  Create API key
-                </Button>
-              ) : null
+                      );
+                      setCreateKeyOpen(true);
+                    }}
+                  >
+                    <PlusIcon className="size-3.5" />
+                    Create API key
+                  </Button>
+                ) : null}
+              </>
             }
           >
             <div className="grid gap-4">
@@ -617,16 +625,6 @@ function OperationalWorkspaceSettingsRoute({
                   </div>
                 </Notice>
               ) : null}
-              <div className="flex items-center justify-between gap-3">
-                <h3 className="text-xs font-medium text-fg-muted">Keys</h3>
-                <span className="text-2xs text-fg-subtle">
-                  {!apiKeysLoaded
-                    ? "Loading…"
-                    : activeApiKeyCount === 0
-                      ? "No active keys"
-                      : `${activeApiKeyCount} active`}
-                </span>
-              </div>
               <div className="divide-y divide-border/70">
                 {apiKeysError ? (
                   <div>
