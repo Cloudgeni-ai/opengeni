@@ -32,6 +32,13 @@ const og = new OpenGeni({
   source: "acme-product",
 });
 
+// Once per user, when your product admits them to the tenant. Chat requests
+// never grant workspace membership; without it the API answers 403.
+await og.client.addExternalWorkspaceMember(await og.workspaceId({ tenant: "acme" }), {
+  identity: { externalId: "u_42", source: og.source },
+  permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
+});
+
 const chat = await og.chat({
   tenant: "acme",
   user: "u_42",

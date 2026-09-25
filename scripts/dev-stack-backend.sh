@@ -67,3 +67,18 @@ opengeni_resolve_dev_backend() {
     ;;
   esac
 }
+opengeni_resolve_dev_bind_host() {
+  # The local stack serves an unauthenticated API, and the default local sandbox
+  # runs agent commands directly on this machine. Host-facing services therefore
+  # bind loopback unless the developer deliberately exposes them on 0.0.0.0.
+  local requested="${OPENGENI_DEV_BIND_HOST:-127.0.0.1}"
+  case "$requested" in
+  127.0.0.1 | 0.0.0.0)
+    printf '%s\n' "$requested"
+    ;;
+  *)
+    echo "OPENGENI_DEV_BIND_HOST must be 127.0.0.1 (default) or 0.0.0.0." >&2
+    return 1
+    ;;
+  esac
+}

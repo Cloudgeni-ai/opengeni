@@ -81,6 +81,13 @@ const og = new OpenGeni({
   // baseUrl defaults to https://app.opengeni.ai; source (default "app") labels your product.
 });
 
+// Once per user, when your product admits them to the tenant. Chat requests
+// never grant workspace membership; without it the API answers 403.
+await og.client.addExternalWorkspaceMember(await og.workspaceId({ tenant: "acme" }), {
+  identity: { externalId: "u_42", source: og.source },
+  permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
+});
+
 const chat = await og.chat({
   tenant: "acme", // one workspace per customer, created on first use
   user: "u_42", // authenticated product user; onboard workspace membership first

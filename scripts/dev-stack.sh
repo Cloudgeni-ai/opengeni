@@ -42,6 +42,22 @@ fi
 OPENGENI_SANDBOX_BACKEND="${OPENGENI_SANDBOX_BACKEND:-local}"
 export OPENGENI_SANDBOX_BACKEND
 
+# The API, web app, and published Docker infrastructure ports bind loopback
+# unless OPENGENI_DEV_BIND_HOST=0.0.0.0 deliberately exposes them. A copied
+# OPENGENI_API_HOST (older .env.example files carry 0.0.0.0) is not that opt-in.
+OPENGENI_DEV_BIND_HOST="$(opengeni_resolve_dev_bind_host)"
+if [ "$OPENGENI_DEV_BIND_HOST" = "127.0.0.1" ] && [ -n "${OPENGENI_API_HOST:-}" ] &&
+  [ "$OPENGENI_API_HOST" != "127.0.0.1" ] && [ "$OPENGENI_API_HOST" != "localhost" ]; then
+  echo "Ignoring OPENGENI_API_HOST=${OPENGENI_API_HOST}: bun run dev binds 127.0.0.1. Set OPENGENI_DEV_BIND_HOST=0.0.0.0 to expose the stack on your network." >&2
+fi
+OPENGENI_API_HOST="$OPENGENI_DEV_BIND_HOST"
+export OPENGENI_DEV_BIND_HOST OPENGENI_API_HOST
+if [ "$OPENGENI_DEV_BIND_HOST" = "0.0.0.0" ]; then
+  echo "OPENGENI_DEV_BIND_HOST=0.0.0.0: the unauthenticated API, web app, and infrastructure ports accept connections from your network." >&2
+elif [ "$OPENGENI_SANDBOX_BACKEND" = "docker" ] && [ "$(uname -s)" = "Linux" ]; then
+  echo "Docker sandboxes on Linux reach the API through the Docker bridge, which a loopback-only API refuses, so Codemode and the Git broker are unavailable inside them. Set OPENGENI_DEV_BIND_HOST=0.0.0.0 to allow it." >&2
+fi
+
 # Connecting another computer is optional. A basic local stack does not need
 # relay binaries or enrollment credentials. Preserve an existing explicit opt-in.
 if [ -z "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-}" ]; then
@@ -1139,6 +1155,8 @@ fi
       printf 'OPENGENI_GARAGE_RPC_HOST_PORT=%s\n' "${OPENGENI_GARAGE_RPC_HOST_PORT}"
     fi
   fi
+  printf 'OPENGENI_DEV_BIND_HOST=%s\n' "${OPENGENI_DEV_BIND_HOST}"
+  printf 'OPENGENI_API_HOST=%s\n' "${OPENGENI_API_HOST}"
   printf 'OPENGENI_API_PORT=%s\n' "${OPENGENI_API_PORT}"
   printf 'OPENGENI_WORKER_HTTP_PORT=%s\n' "${OPENGENI_WORKER_HTTP_PORT}"
   printf 'OPENGENI_TURN_WORKER_HTTP_PORT=%s\n' "${OPENGENI_TURN_WORKER_HTTP_PORT}"
@@ -1207,7 +1225,7 @@ fi
 } >.env.runtime
 
 echo "OpenGeni worktree stack: project=${COMPOSE_PROJECT_NAME} backend=${OPENGENI_DEV_BACKEND} sandbox=${OPENGENI_SANDBOX_BACKEND}"
-echo "  api=${VITE_API_BASE_URL}  web=http://127.0.0.1:${OPENGENI_WEB_PORT}"
+echo "  api=${VITE_API_BASE_URL}  web=http://127.0.0.1:${OPENGENI_WEB_PORT}  bind=${OPENGENI_DEV_BIND_HOST}"
 echo "  postgres=127.0.0.1:${OPENGENI_POSTGRES_HOST_PORT}  nats=${OPENGENI_NATS_URL}"
 echo "  temporal=${OPENGENI_TEMPORAL_HOST}  object-storage=${OPENGENI_OBJECT_STORAGE_ENDPOINT} (${OPENGENI_OBJECT_STORAGE_FIXTURE})"
 if [ "$OPENGENI_DEV_BACKEND" = "native" ]; then
@@ -1295,7 +1313,7 @@ register_process "$!" "artifact outbox"
 # launcher aligned with apps/web's own dev script and fail before Vite starts if
 # the deterministic extension artifact cannot be produced.
 bun run --cwd apps/browser-extension build
-(cd apps/web && bun x vite dev --port "${OPENGENI_WEB_PORT}" --host 0.0.0.0) &
+(cd apps/web && bun x vite dev --port "${OPENGENI_WEB_PORT}" --host "${OPENGENI_DEV_BIND_HOST}") &
 register_process "$!" "web"
 
 bun scripts/watch-development-schema.ts "$(pwd)" &

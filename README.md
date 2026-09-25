@@ -65,7 +65,7 @@ bun run dev
 
 Open http://127.0.0.1:3000, describe a task, and watch the session run.
 
-`bun run dev` installs dependencies, starts Postgres, NATS, Temporal, and object storage, runs migrations, builds the sandbox image, and starts the API, workers, and web app. See [Local development](docs/local-development.md) for manual startup, configuration, and the native (no Docker) path.
+`bun run dev` installs dependencies, starts Postgres, NATS, Temporal, and object storage, runs migrations, and starts the API, workers, and web app. By default the agent runs commands directly on your machine (the `local` sandbox), not in an isolated container, so the stack listens only on 127.0.0.1. Set `OPENGENI_SANDBOX_BACKEND=docker` to run the agent in the local sandbox image instead. See [Local development](docs/local-development.md) for manual startup, configuration, network exposure, and the native (no Docker) path.
 
 ## Use it from your code and product
 
@@ -78,6 +78,13 @@ const og = new OpenGeni({
   baseUrl: process.env.OPENGENI_API_BASE_URL!,
   apiKey: process.env.OPENGENI_API_KEY!,
   organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+});
+
+// Once per user, when your product admits them to the tenant. Chat requests
+// never grant workspace membership; without it the API answers 403.
+await og.client.addExternalWorkspaceMember(await og.workspaceId({ tenant: "acme" }), {
+  identity: { externalId: "u_42", source: og.source },
+  permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
 });
 
 const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });

@@ -93,6 +93,16 @@ overlay for `dev:*`/`db:*`). Copied `.env` host-port pins are ignored unless
 `OPENGENI_PIN_PORTS=1`. Native and Docker warm restarts reuse only a healthy
 recorded stack's generated ports.
 
+The local stack is reachable only from this machine. The API, the web app, and
+the published Docker infrastructure ports bind `127.0.0.1`, because the API runs
+in `local` access mode without authentication and the default `local` sandbox
+runs agent commands directly on this computer. A copied `OPENGENI_API_HOST` does
+not change that. Set `OPENGENI_DEV_BIND_HOST=0.0.0.0` only when you deliberately
+want other devices, for example on a private tailnet, to reach the stack; it
+exposes all of those services on every interface. Docker sandboxes on Linux reach
+the API through the Docker bridge, so Codemode and the Git broker inside them
+need that opt-in; Docker Desktop reaches a loopback API without it.
+
 Wait for the aggregate readiness message, then open the printed web URL and
 check that the app renders. If a model is connected, verify an assistant reply
 and a harmless command in the default sandbox; a sandbox-free model response

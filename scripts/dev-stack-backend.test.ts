@@ -158,3 +158,57 @@ describe("development infrastructure backend", () => {
     }
   });
 });
+
+async function resolveBindHost(requested: string | undefined) {
+  const env: Record<string, string | undefined> = { ...Bun.env };
+  if (requested === undefined) delete env.OPENGENI_DEV_BIND_HOST;
+  else env.OPENGENI_DEV_BIND_HOST = requested;
+  const child = Bun.spawn(
+    ["bash", "-c", 'set -eu; source "$1"; opengeni_resolve_dev_bind_host', "bash", backendPath],
+    { env, stdout: "pipe", stderr: "pipe" },
+  );
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return { exitCode, stdout: stdout.trim(), stderr };
+}
+
+describe("development network exposure", () => {
+  test("binds loopback unless 0.0.0.0 is explicitly requested", async () => {
+    expect(await resolveBindHost(undefined)).toMatchObject({ exitCode: 0, stdout: "127.0.0.1" });
+    expect(await resolveBindHost("")).toMatchObject({ exitCode: 0, stdout: "127.0.0.1" });
+    expect(await resolveBindHost("0.0.0.0")).toMatchObject({ exitCode: 0, stdout: "0.0.0.0" });
+    const invalid = await resolveBindHost("192.168.1.20");
+    expect(invalid.exitCode).toBe(1);
+    expect(invalid.stderr).toContain(
+      "OPENGENI_DEV_BIND_HOST must be 127.0.0.1 (default) or 0.0.0.0",
+    );
+  });
+
+  test("the API, web app, and published infrastructure ports use that bind host", async () => {
+    const source = await Bun.file(devStackPath).text();
+    expect(source).toContain('OPENGENI_DEV_BIND_HOST="$(opengeni_resolve_dev_bind_host)"');
+    expect(source).toContain('OPENGENI_API_HOST="$OPENGENI_DEV_BIND_HOST"');
+    expect(source).toContain('--host "${OPENGENI_DEV_BIND_HOST}"');
+    expect(source).not.toContain("--host 0.0.0.0");
+    for (const setting of ["OPENGENI_DEV_BIND_HOST", "OPENGENI_API_HOST"])
+      expect(source).toContain(`printf '${setting}=%s\\n'`);
+    expect(source.indexOf("opengeni_resolve_dev_bind_host")).toBeLessThan(
+      source.indexOf("docker compose up -d"),
+    );
+
+    const web = JSON.parse(
+      await Bun.file(new URL("../apps/web/package.json", import.meta.url)).text(),
+    );
+    expect(web.scripts.dev).not.toContain("--host");
+
+    const compose = Bun.YAML.parse(
+      await Bun.file(new URL("../docker-compose.yml", import.meta.url)).text(),
+    ) as { services: Record<string, { ports?: string[] }> };
+    const published = Object.values(compose.services).flatMap((service) => service.ports ?? []);
+    expect(published.length).toBeGreaterThan(0);
+    for (const port of published) expect(port).toStartWith("${OPENGENI_DEV_BIND_HOST:-127.0.0.1}:");
+  });
+});

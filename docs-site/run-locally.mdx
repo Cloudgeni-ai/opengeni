@@ -37,6 +37,8 @@ Connected Machines is off for fresh checkouts. Set `OPENGENI_SANDBOX_SELFHOSTED_
 
 The local stack runs in `local` access mode: a bootstrap account and workspace with a single `dev` user and broad permissions. It is for development only.
 
+By default the agent runs commands directly on your machine through the `local` sandbox, so the API, web app and infrastructure ports listen only on `127.0.0.1`. Set `OPENGENI_SANDBOX_BACKEND=docker` to run the agent in an isolated local container instead. Set `OPENGENI_DEV_BIND_HOST=0.0.0.0` only if other devices must reach the stack; anyone who can reach it can run commands as you.
+
 <Note>
   Ports are chosen per checkout. If a default port is busy, the launcher picks a nearby free one and
   prints the URLs it actually used.
