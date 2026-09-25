@@ -104,11 +104,21 @@ async function actorDefaultModel(
   });
 }
 
+type NewSessionDraftReadOptions = {
+  /**
+   * Project a draft that follows the default onto today's resolved default.
+   * Callers that only reuse a chosen model (Slack defaults) skip the
+   * resolution; session creation resolves the default itself.
+   */
+  projectDefaultModel?: boolean;
+};
+
 async function hydrateNewSessionDraft(
   deps: Pick<NewSessionDraftDependencies, "db" | "settings">,
   grant: AccessGrant,
   workspaceId: string,
   row: Awaited<ReturnType<typeof getNewSessionDraftInTransaction>>,
+  readOptions: NewSessionDraftReadOptions = {},
 ): Promise<NewSessionDraftValue | null> {
   if (!row) return null;
   const stored = mapNewSessionDraft(row);
@@ -118,7 +128,7 @@ async function hydrateNewSessionDraft(
   // model. The stored row is unchanged until the person saves again.
   const modelProvided = draftModelProvided(deps.settings, stored);
   let mapped: NewSessionDraftValue = { ...stored, modelProvided };
-  if (!modelProvided) {
+  if (!modelProvided && readOptions.projectDefaultModel !== false) {
     const resolved = await actorDefaultModel(deps, grant, workspaceId);
     mapped = {
       ...mapped,
@@ -243,6 +253,7 @@ async function getActorNewSessionDraftInFileScope(
   deps: Pick<NewSessionDraftDependencies, "settings" | "db">,
   grant: AccessGrant,
   workspaceId: string,
+  readOptions: NewSessionDraftReadOptions = {},
 ): Promise<NewSessionDraftValue> {
   const row = await withWorkspaceSubjectRls(deps.db, workspaceId, grant.subjectId, (scoped) =>
     getNewSessionDraftInTransaction(scoped, {
@@ -250,9 +261,12 @@ async function getActorNewSessionDraftInFileScope(
       subjectId: grant.subjectId,
     }),
   );
-  const hydrated = await hydrateNewSessionDraft(deps, grant, workspaceId, row);
+  const hydrated = await hydrateNewSessionDraft(deps, grant, workspaceId, row, readOptions);
   if (hydrated) return hydrated;
-  const resolved = await actorDefaultModel(deps, grant, workspaceId);
+  const resolved =
+    readOptions.projectDefaultModel === false
+      ? { model: deps.settings.openaiModel, reasoningEffort: deps.settings.openaiReasoningEffort }
+      : await actorDefaultModel(deps, grant, workspaceId);
   return {
     revision: 0,
     text: "",
@@ -358,7 +372,10 @@ async function saveActorNewSessionDraftInFileScope(
         }),
       ),
     );
-    return mapNewSessionDraft(saved)!;
+    // Report the same model-policy marker a read of this row reports, so the
+    // save response and the next GET agree for old and new clients alike.
+    const mapped = mapNewSessionDraft(saved)!;
+    return { ...mapped, modelProvided: draftModelProvided(deps.settings, mapped) };
   } catch (error) {
     if (error instanceof NewSessionDraftAccessError) {
       throw new HTTPException(403, { message: error.message });
@@ -372,12 +389,13 @@ export async function getActorNewSessionDraft(
   grant: AccessGrant,
   workspaceId: string,
   authorization?: AccessGrantAuthorization,
+  readOptions: NewSessionDraftReadOptions = {},
 ): Promise<NewSessionDraftValue> {
   const actor = authorization
     ? await fileOwnerContextForAccess(deps, authorization, "sessions:read")
     : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
   return withSessionRlsActorContext(actor, () =>
-    getActorNewSessionDraftInFileScope(deps, grant, workspaceId),
+    getActorNewSessionDraftInFileScope(deps, grant, workspaceId, readOptions),
   );
 }
 export async function saveActorNewSessionDraft(
@@ -396,7 +414,11 @@ export async function getActorNewSessionDefaults(
   grant: AccessGrant,
   workspaceId: string,
 ) {
-  const draft = await getActorNewSessionDraft(deps, grant, workspaceId);
+  // The model is reused only when the person chose it, so a draft that follows
+  // the default is not projected here; session creation resolves it once.
+  const draft = await getActorNewSessionDraft(deps, grant, workspaceId, undefined, {
+    projectDefaultModel: false,
+  });
   const options = draft.options;
   return {
     // Only a model the person chose is carried over. A draft that follows the

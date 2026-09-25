@@ -7,11 +7,13 @@ import {
   resolveWorkspaceSessionDefaults,
   type DefaultModelSelection,
   type ReasoningEffort,
+  type ScheduledTask,
   type WorkspaceSessionDefaults,
   type XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import {
-  getBillingBalance,
+  getScheduledTaskXaiProviderAccountAuthoritySnapshot,
+  getSession,
   getWorkspace,
   getWorkspaceConnectionModelRestrictions,
   getWorkspaceModelPolicy,
@@ -22,8 +24,11 @@ import {
   workspaceCodexSubscriptionActive,
   workspaceOpenRouterConnectionActive,
   workspaceVercelAiGatewayConnectionActive,
+  organizationHoldsAddedCredits,
   workspaceXaiSubscriptionActive,
   workspaceXaiSubscriptionActiveForAuthority,
+  XaiAuthorityPoolInactiveError,
+  type ConnectionModelRestrictions,
   type Database,
 } from "@opengeni/db";
 import {
@@ -89,7 +94,11 @@ export type DefaultSessionModelInput = {
   /** This workspace's selection, in operator catalog order. */
   selections: readonly WorkspaceModelSelection[];
   workspaceDefaults: WorkspaceSessionDefaults | null;
-  /** True while the organization holds a positive OpenGeni credit balance. */
+  /**
+   * True while the organization holds a positive OpenGeni credit balance that
+   * it added itself (see `organizationHoldsAddedCredits`): the verified-signup
+   * trial grant alone does not count.
+   */
   creditsAvailable: boolean;
 };
 
@@ -129,13 +138,15 @@ function creditsCandidate(
  * Precedence, first match wins:
  *
  * 1. `workspace`: the saved workspace default (`settings.sessionDefaults`)
- *    while it is selectable in this workspace.
+ *    while it is selectable in this workspace, its saved effort clamped to
+ *    what the model supports today.
  * 2. `subscription`: the first selectable connected-subscription model
  *    (ChatGPT/Codex, then SuperGrok) in operator catalog order. The
  *    deployment default wins inside this step when it is itself a selectable
  *    subscription model.
- * 3. `credits`: while the organization holds an OpenGeni credit balance, the
- *    configured credits default (`OPENGENI_CREDITS_DEFAULT_MODEL`, effort
+ * 3. `credits`: while the organization holds OpenGeni credits it added itself
+ *    (a purchase or grant; the verified-signup trial alone does not count),
+ *    the configured credits default (`OPENGENI_CREDITS_DEFAULT_MODEL`, effort
  *    clamped to what the model supports), or the first selectable
  *    credits-billed model when that one is not selectable. Skipped when the
  *    deployment default is already a selectable credits-billed model, so an
@@ -152,7 +163,11 @@ export function selectDefaultSessionModel(input: DefaultSessionModelInput): Defa
     if (saved?.availability.selectable) {
       return {
         model: saved.model.id,
-        reasoningEffort: input.workspaceDefaults.reasoningEffort,
+        reasoningEffort: clampReasoningEffortForConfiguredModel(
+          saved.model,
+          input.workspaceDefaults.reasoningEffort,
+          fallbackEffort,
+        ),
         source: "workspace",
       };
     }
@@ -186,8 +201,8 @@ export function selectDefaultSessionModel(input: DefaultSessionModelInput): Defa
 }
 
 /**
- * The default this workspace would use once its organization holds an
- * OpenGeni credit balance. Null when the deployment does not bill credits.
+ * The default this workspace would use once its organization adds OpenGeni
+ * credits. Null when the deployment does not bill credits.
  */
 export function creditsDefaultSessionModel(input: {
   settings: Settings;
@@ -205,7 +220,7 @@ export function creditsDefaultSessionModel(input: {
 
 /**
  * Resolve the default for an already-loaded workspace selection. The credit
- * balance is read only when it can change the answer.
+ * ledger is read only when it can change the answer.
  */
 export async function resolveDefaultSessionModelForSelections(
   db: Database,
@@ -229,8 +244,7 @@ export async function resolveDefaultSessionModelForSelections(
   ) {
     return withoutCredits;
   }
-  const balance = await getBillingBalance(db, input.accountId);
-  return balance.balanceMicros > 0
+  return (await organizationHoldsAddedCredits(db, input.accountId))
     ? selectDefaultSessionModel({ ...decision, creditsAvailable: true })
     : withoutCredits;
 }
@@ -252,18 +266,64 @@ export type WorkspaceModelSelectionContext = {
   xaiAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1 | undefined;
 };
 
+/**
+ * Connection restrictions and SuperGrok readiness for the subject. With a
+ * frozen authority (a scheduled task's snapshot), a user pool that no longer
+ * resolves (disconnected, reconnected under a new authority generation, or its
+ * owner left) means SuperGrok is not ready: no SuperGrok model is selectable,
+ * and resolution falls through to credits or the deployment default instead of
+ * failing the occurrence. The frozen authority is never swapped for the
+ * subject's current one; the SuperGrok restriction is closed outright, while
+ * the other providers' restrictions do not depend on SuperGrok authority.
+ */
+async function connectionRestrictionsAndXaiReadiness(
+  db: Database,
+  settings: Settings,
+  context: WorkspaceModelSelectionContext,
+): Promise<{ restrictions: ConnectionModelRestrictions; xaiSubscriptionActive: boolean }> {
+  const { workspaceId, subjectId, xaiAuthoritySnapshot } = context;
+  if (!xaiAuthoritySnapshot) {
+    const [restrictions, xaiSubscriptionActive] = await Promise.all([
+      getWorkspaceConnectionModelRestrictions(db, workspaceId, subjectId),
+      workspaceXaiSubscriptionActive(db, settings, workspaceId, subjectId),
+    ]);
+    return { restrictions, xaiSubscriptionActive };
+  }
+  const frozen = await Promise.allSettled([
+    getWorkspaceConnectionModelRestrictions(db, workspaceId, subjectId, xaiAuthoritySnapshot),
+    workspaceXaiSubscriptionActiveForAuthority(db, settings, {
+      workspaceId,
+      subjectId,
+      authoritySnapshot: xaiAuthoritySnapshot,
+    }),
+  ]);
+  const [restrictions, readiness] = frozen;
+  if (restrictions.status === "fulfilled" && readiness.status === "fulfilled") {
+    return { restrictions: restrictions.value, xaiSubscriptionActive: readiness.value };
+  }
+  for (const result of frozen) {
+    if (result.status === "rejected" && !(result.reason instanceof XaiAuthorityPoolInactiveError)) {
+      throw result.reason;
+    }
+  }
+  const current = await getWorkspaceConnectionModelRestrictions(db, workspaceId, subjectId);
+  return {
+    restrictions: { ...current, "supergrok/": [] },
+    xaiSubscriptionActive: false,
+  };
+}
+
 /** Load the same inputs the workspace model catalog route evaluates. */
 export async function loadWorkspaceModelSelectionInput(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
 ): Promise<WorkspaceModelSelectionInput> {
-  const { accountId, workspaceId, subjectId, xaiAuthoritySnapshot } = context;
+  const { accountId, workspaceId } = context;
   const [
-    connectionModelRestrictions,
+    { restrictions: connectionModelRestrictions, xaiSubscriptionActive },
     policy,
     codexSubscriptionActive,
-    xaiSubscriptionActive,
     workspaceGatewayConnectionActive,
     workspaceGatewayCustomModels,
     openRouterConnectionActive,
@@ -273,16 +333,9 @@ export async function loadWorkspaceModelSelectionInput(
     organizationGatewayCustomModels,
     organizationOpenRouterCustomModels,
   ] = await Promise.all([
-    getWorkspaceConnectionModelRestrictions(db, workspaceId, subjectId, xaiAuthoritySnapshot),
+    connectionRestrictionsAndXaiReadiness(db, settings, context),
     getWorkspaceModelPolicy(db, workspaceId),
     workspaceCodexSubscriptionActive(db, settings, workspaceId),
-    xaiAuthoritySnapshot
-      ? workspaceXaiSubscriptionActiveForAuthority(db, settings, {
-          workspaceId,
-          subjectId,
-          authoritySnapshot: xaiAuthoritySnapshot,
-        })
-      : workspaceXaiSubscriptionActive(db, settings, workspaceId, subjectId),
     workspaceVercelAiGatewayConnectionActive(db, workspaceId),
     listWorkspaceGatewayCustomModels(db, { accountId, workspaceId }),
     workspaceOpenRouterConnectionActive(db, workspaceId),
@@ -348,4 +401,66 @@ export async function resolveDefaultSessionModel(
     workspaceSettings,
     selections: resolveWorkspaceModelSelection(selectionInput),
   });
+}
+
+/**
+ * The default a scheduled occurrence uses when its task names no model and the
+ * occurrence creates its own session: resolved under the task's immutable
+ * execution owner (or its creator for a workspace/service task) and the task's
+ * frozen SuperGrok authority, never another member's. The worker stamps the
+ * result onto the accepted execution, so retries and recovery replay it; the
+ * API's manual-trigger limit check uses the same resolution so it gates the
+ * model that will run.
+ */
+export async function resolveScheduledTaskDefaultModel(
+  db: Database,
+  settings: Settings,
+  task: Pick<ScheduledTask, "id" | "accountId" | "workspaceId" | "ownerSubjectId" | "createdBy">,
+): Promise<DefaultModelSelection> {
+  return await resolveDefaultSessionModel(db, settings, {
+    accountId: task.accountId,
+    workspaceId: task.workspaceId,
+    subjectId: task.ownerSubjectId ?? task.createdBy.subjectId,
+    xaiAuthoritySnapshot: await getScheduledTaskXaiProviderAccountAuthoritySnapshot(
+      db,
+      task.workspaceId,
+      task.id,
+    ),
+  });
+}
+
+/**
+ * The model a manual trigger's limit pre-check evaluates, matching what the
+ * occurrence will run: the task's explicit model, else the target or reusable
+ * session's model when that session exists, else the resolved scheduled
+ * default. The worker still resolves authoritatively at dispatch.
+ */
+export async function resolveScheduledTaskPreflightModel(
+  db: Database,
+  settings: Settings,
+  task: Pick<
+    ScheduledTask,
+    | "id"
+    | "accountId"
+    | "workspaceId"
+    | "ownerSubjectId"
+    | "createdBy"
+    | "agentConfig"
+    | "runMode"
+    | "targetSessionId"
+    | "reusableSessionId"
+  >,
+): Promise<string> {
+  if (task.agentConfig.model) return task.agentConfig.model;
+  const targetSessionId =
+    task.runMode === "existing_session"
+      ? task.targetSessionId
+      : task.runMode === "reusable_session"
+        ? task.reusableSessionId
+        : null;
+  if (targetSessionId) {
+    const session = await getSession(db, task.workspaceId, targetSessionId);
+    if (session) return session.model;
+  }
+  return (await resolveScheduledTaskDefaultModel(db, settings, task)).model;
 }

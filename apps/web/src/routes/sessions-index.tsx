@@ -102,6 +102,7 @@ import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import {
   EMPTY_COMPOSER_LAUNCH,
   composerLaunchSearchKey,
+  modelProvidedAfterLaunch,
   type ComposerLaunchSearch,
 } from "@/lib/composer-launch";
 import {
@@ -1333,6 +1334,7 @@ function SessionsIndexRouteContent({
   const launchEffort = launch.effort;
   const launchLatency = launch.latency;
   const launchRealtime = launch.realtime;
+  const launchFollowDefault = launch.followDefault === true;
   const launchSkillCapabilityId = launch.skillCapabilityId;
   const launchKey = composerLaunchSearchKey(launch);
   const handledLaunchKeyRef = useRef<string | null>(null);
@@ -1342,7 +1344,19 @@ function SessionsIndexRouteContent({
     if (launchModel) setModel(launchModel);
     if (launchEffort) setReasoningEffort(launchEffort);
     if (launchLatency) setLatencyMode(launchLatency);
-    if (launchModel || launchEffort || launchLatency) setModelProvided(true);
+    // A checkout return carries the credits default and keeps following the
+    // default; any other launch policy is the person's choice.
+    setModelProvided((current) =>
+      modelProvidedAfterLaunch(
+        {
+          ...(launchModel ? { model: launchModel } : {}),
+          ...(launchEffort ? { effort: launchEffort } : {}),
+          ...(launchLatency ? { latency: launchLatency } : {}),
+          ...(launchFollowDefault ? { followDefault: true } : {}),
+        },
+        current,
+      ),
+    );
     if (!launchRealtime) {
       handledLaunchKeyRef.current = launchKey;
       void navigate({
@@ -1379,6 +1393,7 @@ function SessionsIndexRouteContent({
     computeReady,
     context.workspaceMcpCatalogReady,
     launchEffort,
+    launchFollowDefault,
     launchLatency,
     launchModel,
     launchRealtime,

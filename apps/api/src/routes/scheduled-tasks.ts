@@ -12,7 +12,11 @@ import {
   requireAccessGrantAuthorization,
   resolveWorkspaceCatalogSettings,
 } from "@opengeni/core";
-import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
+import {
+  recordWorkspaceUsage,
+  requireLimit,
+  resolveScheduledTaskPreflightModel,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   captureScheduledTaskRestoreState,
@@ -249,7 +253,10 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
           workspaceId,
           action: "agent_run:create",
           quantity: 1,
-          model: task.agentConfig.model ?? catalogSettings.openaiModel,
+          // A model-less task is checked against the model its occurrence
+          // will run (a connected subscription, the credits default, or the
+          // deployment default), not always the deployment default.
+          model: await resolveScheduledTaskPreflightModel(db, catalogSettings, task),
         },
       );
     }

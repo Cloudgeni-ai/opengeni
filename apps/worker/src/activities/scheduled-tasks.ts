@@ -20,7 +20,7 @@ import {
   openGeniSlackBotMetadata,
   requireOpenGeniSlackBotConnection,
   resolveWorkspaceCatalogSettings,
-  resolveDefaultSessionModel,
+  resolveScheduledTaskDefaultModel,
   resolveSessionToolPolicy,
   workspaceCustomModelReference,
   lockActiveCustomModelForAdmission,
@@ -442,23 +442,15 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // A task that names no model resolves the new-chat default at each fresh
       // occurrence (saved workspace default, then a usable connected
       // subscription under the task's frozen SuperGrok authority, then the
-      // credits default while the organization holds credits, then the
-      // deployment default). The accepted execution freezes the result, so
+      // credits default while the organization holds added credits, then the
+      // deployment default). A frozen SuperGrok pool that is gone only means
+      // SuperGrok is not ready. The accepted execution freezes the result, so
       // retries and recovery never resolve again. Existing-session runs keep
       // that session's model.
       const resolvedDefault =
         task.agentConfig.model || targetSessionExecutionBase
           ? null
-          : await resolveDefaultSessionModel(db, settings, {
-              accountId: task.accountId,
-              workspaceId: task.workspaceId,
-              subjectId: taskAuthoritySubjectId ?? task.createdBy.subjectId,
-              xaiAuthoritySnapshot: await getScheduledTaskXaiProviderAccountAuthoritySnapshot(
-                db,
-                task.workspaceId,
-                task.id,
-              ),
-            });
+          : await resolveScheduledTaskDefaultModel(db, settings, task);
       const model = task.agentConfig.model ?? resolvedDefault?.model ?? settings.openaiModel;
       const reasoningEffort =
         task.agentConfig.reasoningEffort ??

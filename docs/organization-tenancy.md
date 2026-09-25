@@ -668,7 +668,9 @@ default. A credit purchase returns to the new-chat composer through the
 ordinary `?model=&effort=` launch contract with the server's credits default
 selected (the configured credits model, GPT-6 Luna at extra high reasoning by
 default), unless a connected subscription or saved workspace default would
-still win. Beyond onboarding, a new chat that follows the default moves to a
+still win. `?modelSource=default` keeps that draft following the default, so
+connecting a subscription later still moves it; the verified-signup trial
+credit alone never switches the default. Beyond onboarding, a new chat that follows the default moves to a
 connected subscription, or to the credits default while the organization holds
 credits, on its own; see "Default model for new work" in
 [`model-providers.md`](model-providers.md). When the composer's selected model

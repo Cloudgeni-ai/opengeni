@@ -324,7 +324,7 @@ describe("credit checkout return", () => {
     );
     expect(model).toEqual({ id: "credits-first", effort: "low" });
     expect(creditCheckoutSuccessUrl("https://app.example.test", "workspace-a", model)).toBe(
-      "https://app.example.test/workspaces/workspace-a/sessions?model=credits-first&effort=low",
+      "https://app.example.test/workspaces/workspace-a/sessions?model=credits-first&effort=low&modelSource=default",
     );
   });
 

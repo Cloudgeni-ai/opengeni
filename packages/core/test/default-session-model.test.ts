@@ -4,9 +4,16 @@ import type { AccessGrant, WorkspaceModelPolicyContract } from "@opengeni/contra
 import {
   applyCreditLedgerEntry,
   createDb,
+  createXaiSubscriptionCredential,
+  disconnectXaiSubscriptionCredential,
   encryptEnvironmentValue,
   ensureCodexRotationSettings,
+  ensureXaiRotationSettings,
+  setInitialActiveXaiCredential,
   saveNewSessionDraftInTransaction,
+  VERIFIED_SIGNUP_TRIAL_CREDIT_SOURCE_TYPE,
+  workspaceXaiSubscriptionActiveForAuthority,
+  XaiAuthorityPoolInactiveError,
   updateCodexRotationSettings,
   upsertCodexSubscriptionCredential,
   withWorkspaceSubjectRls,
@@ -174,6 +181,14 @@ describe("default model precedence", () => {
     });
   });
 
+  test("a saved workspace effort the model no longer supports is clamped", () => {
+    expect(
+      decide(hostedSettings({ openaiAllowedReasoningEfforts: "low,medium,high" }), {
+        workspaceDefaults: { model: "gpt-6-sol", reasoningEffort: "xhigh" },
+      }),
+    ).toEqual({ model: "gpt-6-sol", reasoningEffort: "high", source: "workspace" });
+  });
+
   test("an unselectable saved workspace default falls through to the next rule", () => {
     expect(
       decide(hostedSettings(), {
@@ -291,6 +306,56 @@ async function connectCodex(settings: Settings, grant: AccessGrant & { workspace
   });
   await ensureCodexRotationSettings(db, grant.accountId, grant.workspaceId);
   await updateCodexRotationSettings(db, grant.workspaceId, { rotationEnabled: true });
+}
+
+async function addTrialCredit(grant: AccessGrant & { workspaceId: string }) {
+  await applyCreditLedgerEntry(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    type: "grant",
+    amountMicros: 10_000_000,
+    sourceType: VERIFIED_SIGNUP_TRIAL_CREDIT_SOURCE_TYPE,
+    sourceId: grant.subjectId,
+    idempotencyKey: `test:default-model-trial:${grant.workspaceId}`,
+  });
+}
+
+/** Give a subject an active organization membership with its own Personal workspace. */
+async function organizationMember(accountId: string, subjectId: string) {
+  const [personal] = await shared!.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name)
+    values (${accountId}, ${`personal ${subjectId}`}) returning id`;
+  await shared!.admin`
+    insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+    values (${accountId}, ${subjectId}, 'active', ${personal!.id})`;
+}
+
+async function connectPersonalSupergrok(
+  settings: Settings,
+  grant: AccessGrant & { workspaceId: string },
+) {
+  // The same steps the SuperGrok connect route takes.
+  const created = await createXaiSubscriptionCredential(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+    scope: "user",
+    encryptionKey: Buffer.from(settings.environmentsEncryptionKey!, "base64"),
+    secret: { version: 1, accessToken: `default-model-${crypto.randomUUID()}` },
+    providerAccountId: `default-model-${crypto.randomUUID()}`,
+    label: "personal SuperGrok",
+  });
+  const authority = {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+    authoritySnapshot: created.authoritySnapshot,
+  };
+  const rotation = await ensureXaiRotationSettings(db, authority);
+  if (rotation.activeCredentialId === null) {
+    await setInitialActiveXaiCredential(db, { ...authority, credentialId: created.account.id });
+  }
+  return created;
 }
 
 function routeDeps(settings: Settings): ApiRouteDeps {
@@ -503,5 +568,217 @@ describe("server-side default model resolution", () => {
         modelProvided: true,
       },
     );
+  }, 180_000);
+
+  test("the verified-signup trial credit alone keeps the free default", async () => {
+    if (!available) return;
+    const settings = hostedSettings();
+    const grant = await workspaceFixture();
+    const context = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+    };
+    await addTrialCredit(grant);
+    expect(await resolveDefaultSessionModel(db, settings, context)).toMatchObject({
+      model: DEFAULT_OPENROUTER_MODEL_ID,
+      source: "deployment",
+    });
+    // Buying (or being granted) credits on top of the trial switches it.
+    await addCredits(grant);
+    expect(await resolveDefaultSessionModel(db, settings, context)).toEqual({
+      model: "gpt-6-luna",
+      reasoningEffort: "xhigh",
+      source: "credits",
+    });
+  }, 180_000);
+
+  test("one member's personal SuperGrok is never another member's default", async () => {
+    if (!available) return;
+    const settings = hostedSettings();
+    const owner = await workspaceFixture();
+    const other = { ...owner, subjectId: `user:default-model-${crypto.randomUUID()}` };
+    await shared!.admin`
+      insert into workspace_memberships (workspace_id, account_id, subject_id, role)
+      values (${owner.workspaceId}, ${owner.accountId}, ${other.subjectId}, 'member')`;
+    await organizationMember(owner.accountId, owner.subjectId);
+    await organizationMember(owner.accountId, other.subjectId);
+    await connectPersonalSupergrok(settings, owner);
+    const contextFor = (grant: typeof owner) => ({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+    });
+
+    expect(await resolveDefaultSessionModel(db, settings, contextFor(owner))).toMatchObject({
+      model: "supergrok/grok-4.7",
+      source: "subscription",
+    });
+    expect(await resolveDefaultSessionModel(db, settings, contextFor(other))).toMatchObject({
+      model: DEFAULT_OPENROUTER_MODEL_ID,
+      source: "deployment",
+    });
+    await addCredits(owner);
+    expect(await resolveDefaultSessionModel(db, settings, contextFor(other))).toMatchObject({
+      model: "gpt-6-luna",
+      source: "credits",
+    });
+
+    // Direct creates and draft projections use the caller's own authority.
+    const draftDeps = { db, settings, objectStorage: null };
+    expect(await getActorNewSessionDraft(draftDeps, other, other.workspaceId)).toMatchObject({
+      model: "gpt-6-luna",
+      modelProvided: false,
+    });
+    const created = await createSessionForRequest(routeDeps(settings), other, other.workspaceId, {
+      initialMessage: "daily report",
+      visibility: "workspace",
+      resources: [],
+      tools: [],
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(created.model).toBe("gpt-6-luna");
+  }, 180_000);
+
+  test("a stale frozen SuperGrok snapshot means SuperGrok is not ready", async () => {
+    if (!available) return;
+    const settings = hostedSettings();
+    const grant = await workspaceFixture();
+    await organizationMember(grant.accountId, grant.subjectId);
+    const personal = await connectPersonalSupergrok(settings, grant);
+    const frozen = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      xaiAuthoritySnapshot: personal.authoritySnapshot,
+    };
+    expect(await resolveDefaultSessionModel(db, settings, frozen)).toMatchObject({
+      model: "supergrok/grok-4.7",
+      source: "subscription",
+    });
+    await disconnectXaiSubscriptionCredential(db, {
+      ...grant,
+      credentialId: personal.account.id,
+      authoritySnapshot: personal.authoritySnapshot,
+    });
+    // The frozen pool no longer resolves: execution paths still fail closed.
+    await expect(
+      workspaceXaiSubscriptionActiveForAuthority(db, settings, {
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        authoritySnapshot: personal.authoritySnapshot,
+      }),
+    ).rejects.toBeInstanceOf(XaiAuthorityPoolInactiveError);
+    expect(await resolveDefaultSessionModel(db, settings, frozen)).toMatchObject({
+      model: DEFAULT_OPENROUTER_MODEL_ID,
+      source: "deployment",
+    });
+    await addCredits(grant);
+    expect(await resolveDefaultSessionModel(db, settings, frozen)).toMatchObject({
+      model: "gpt-6-luna",
+      source: "credits",
+    });
+    // Reconnecting the same personal pool makes the frozen authority ready again.
+    await connectPersonalSupergrok(settings, grant);
+    expect(await resolveDefaultSessionModel(db, settings, frozen)).toMatchObject({
+      model: "supergrok/grok-4.7",
+      source: "subscription",
+    });
+  }, 180_000);
+
+  test("a keyed retry of an uninitialized shell keeps the shell's model", async () => {
+    if (!available) return;
+    const settings = hostedSettings();
+    const grant = await workspaceFixture();
+    const deps = routeDeps(settings);
+    const idempotencyKey = crypto.randomUUID();
+    const request = {
+      initialMessage: "daily report",
+      visibility: "workspace" as const,
+      resources: [],
+      tools: [],
+      idempotencyKey,
+    };
+    const trigger = `fail_default_model_${crypto.randomUUID().replaceAll("-", "")}`;
+    // Fail initial-event acceptance after the separately committed shell.
+    await shared!.admin.unsafe(
+      `CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.workspace_id = '${grant.workspaceId}'::uuid AND NEW.type = 'user.message' THEN RAISE EXCEPTION 'injected initialization failure'; END IF; RETURN NEW; END $$`,
+    );
+    await shared!.admin.unsafe(
+      `CREATE TRIGGER ${trigger} BEFORE INSERT ON session_events FOR EACH ROW EXECUTE FUNCTION ${trigger}()`,
+    );
+    try {
+      await expect(
+        createSessionForRequest(deps, grant, grant.workspaceId, request),
+      ).rejects.toThrow();
+    } finally {
+      await shared!.admin.unsafe(`DROP TRIGGER ${trigger} ON session_events`);
+      await shared!.admin.unsafe(`DROP FUNCTION ${trigger}()`);
+    }
+    const shells = await shared!.admin<{ model: string }[]>`
+      select model from sessions where workspace_id = ${grant.workspaceId}`;
+    expect(shells).toEqual([{ model: DEFAULT_OPENROUTER_MODEL_ID }]);
+
+    // Credits arrive before the retry; the shell's resolved default still wins.
+    await addCredits(grant);
+    const retried = await createSessionForRequest(deps, grant, grant.workspaceId, request);
+    expect(retried.model).toBe(DEFAULT_OPENROUTER_MODEL_ID);
+    expect(retried.reasoningEffort).toBe(settings.openaiReasoningEffort);
+    // A fresh create without a key resolves again.
+    const fresh = await createSessionForRequest(deps, grant, grant.workspaceId, {
+      ...request,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(fresh.model).toBe("gpt-6-luna");
+  }, 180_000);
+
+  test("a draft following the credits default moves to a later subscription", async () => {
+    if (!available) return;
+    const settings = hostedSettings();
+    const grant = await workspaceFixture();
+    const draftDeps = { db, settings, objectStorage: null };
+    await addCredits(grant);
+    // A credit-purchase return saves the credits default while following it.
+    const saved = await saveActorNewSessionDraft(draftDeps, grant, grant.workspaceId, {
+      expectedRevision: 0,
+      text: "",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "gpt-6-luna",
+      reasoningEffort: "xhigh",
+      latencyMode: "standard",
+      modelProvided: false,
+      options: {},
+    });
+    expect(saved).toMatchObject({ model: "gpt-6-luna", modelProvided: false });
+    await connectCodex(settings, grant);
+    expect(await getActorNewSessionDraft(draftDeps, grant, grant.workspaceId)).toMatchObject({
+      revision: saved.revision,
+      model: "codex/gpt-6-astra",
+      reasoningEffort: "high",
+      modelProvided: false,
+    });
+  }, 180_000);
+
+  test("the save response reports the same model marker as the next read", async () => {
+    if (!available) return;
+    const settings = hostedSettings();
+    const grant = await workspaceFixture();
+    const draftDeps = { db, settings, objectStorage: null };
+    // An older client sends no marker; a non-default policy is a choice.
+    const saved = await saveActorNewSessionDraft(draftDeps, grant, grant.workspaceId, {
+      expectedRevision: 0,
+      text: "report",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "gpt-6-sol",
+      reasoningEffort: "xhigh",
+      latencyMode: "standard",
+      options: {},
+    });
+    expect(saved.modelProvided).toBe(true);
+    expect(await getActorNewSessionDraft(draftDeps, grant, grant.workspaceId)).toEqual(saved);
   }, 180_000);
 });

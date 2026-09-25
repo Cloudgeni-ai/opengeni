@@ -145,7 +145,10 @@ export async function applyConnectedModelToNewSessionDraft(
 /**
  * Stripe success return for an onboarding credit purchase. It reuses the
  * sessions composer launch contract (`?model=&effort=`), so the next chat uses
- * the purchased credits instead of the free default model.
+ * the purchased credits instead of the free default model even before the
+ * payment webhook lands. `modelSource=default` marks that policy as the
+ * resolved default rather than the person's choice, so the draft keeps
+ * following the default and a later subscription connect still replaces it.
  */
 export function creditCheckoutSuccessUrl(
   origin: string,
@@ -156,6 +159,7 @@ export function creditCheckoutSuccessUrl(
   if (model) {
     url.searchParams.set("model", model.id);
     url.searchParams.set("effort", model.effort);
+    url.searchParams.set("modelSource", "default");
   }
   return url.toString();
 }

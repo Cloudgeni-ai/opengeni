@@ -7458,6 +7458,27 @@ export function validateModelCatalogSettings(
       `The default model ${settings.openaiModel} is not executable in the resolved model catalog`,
     );
   }
+  // An operator-set credits default must name a credits-billed model in the
+  // env catalog; a typo would otherwise fall back silently to the first
+  // selectable credits model. Only an explicit value in code catalog mode is
+  // checked: the built-in gpt-6-luna may be absent from a custom catalog, and
+  // a database catalog is edited independently of this env value, so both keep
+  // the documented fallback (docs/model-providers.md) instead of failing
+  // every catalog read.
+  const explicitCreditsDefault = source.OPENGENI_CREDITS_DEFAULT_MODEL?.trim();
+  if (
+    explicitCreditsDefault &&
+    settings.modelCatalogSource === "code" &&
+    settings.billingMode === "stripe"
+  ) {
+    const creditsDefaultId = canonicalizeConfiguredModelId(settings, settings.creditsDefaultModel);
+    const creditsDefault = models.find((model) => model.id === creditsDefaultId);
+    if (creditsDefault?.cost !== "credits") {
+      throw new Error(
+        `OPENGENI_CREDITS_DEFAULT_MODEL ${settings.creditsDefaultModel} is not a credits-billed model in the resolved model catalog`,
+      );
+    }
+  }
 
   const deploymentProductIds = new Set(
     models.filter((model) => model.credentialSource.kind === "deployment").map((model) => model.id),

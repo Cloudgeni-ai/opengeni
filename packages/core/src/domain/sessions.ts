@@ -2425,6 +2425,7 @@ async function createSessionForRequestInFileScope(
             accountId: grant.accountId,
             workspaceId,
             subjectId: grant.subjectId,
+            workspaceSettings: workspace.settings,
           });
   const inheritedModel =
     parentCallingTurn?.model ??

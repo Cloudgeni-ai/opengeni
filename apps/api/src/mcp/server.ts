@@ -187,7 +187,12 @@ import {
   searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
-import { recordWorkspaceUsage, requireLimit, workflowIdForSession } from "@opengeni/core";
+import {
+  recordWorkspaceUsage,
+  requireLimit,
+  resolveScheduledTaskPreflightModel,
+  workflowIdForSession,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   githubBindingStatus,
@@ -1598,7 +1603,7 @@ export function buildOpenGeniMcpServer(
             workspaceId: grant.workspaceId,
             action: "agent_run:create",
             quantity: 1,
-            model: task.agentConfig.model ?? deps.settings.openaiModel,
+            model: await resolveScheduledTaskPreflightModel(deps.db, catalogSettings, task),
           });
         }
         const triggerToken = scheduledTaskTriggerToken(triggerId);
