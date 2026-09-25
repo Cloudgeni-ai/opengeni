@@ -2611,7 +2611,11 @@ timestamp. Their labels are limited to the closed provider/backend/outcome and,
 where applicable, phase/count/cache vocabularies; session, turn, request,
 credential, and content values remain only in authenticated durable events.
 Operation durations can nest and overlap; summing them does not produce a
-critical path. `runtime_stream_initialization` measures the enclosing runtime
+critical path. A definite path miss answering a read-only first routed sandbox
+operation (usually repository skill discovery listing an absent
+`.agents/skills`) records the `model_prepare_sandbox_first_routed_*` phases as
+completed; the per-operation sandbox metric keeps its separate `not_found`
+outcome, and writes never qualify. `runtime_stream_initialization` measures the enclosing runtime
 entry, not provider network dispatch. Background MCP connection/catalog work
 starts immediately but does not gate the first request; its measurements use
 `opengeni_tool_background_preparation_duration_seconds` instead of startup

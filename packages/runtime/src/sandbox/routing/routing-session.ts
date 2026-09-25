@@ -374,6 +374,15 @@ export type RoutingSandboxFirstOperationObserver = (
 
 type RoutingSandboxFirstOperationTiming = Pick<RoutingSandboxFirstOperationObservation, "phases">;
 
+const READ_ONLY_PATH_PROBE_OPERATIONS = new Set(["readFile", "listDir", "pathExists", "viewImage"]);
+
+/** A definite path miss is the provider's authoritative answer to a read-only
+ * probe (repository skill discovery lists absent `.agents/skills` on almost
+ * every turn), not a failed provider operation. Writes never qualify. */
+function isReadOnlyPathProbeMiss(op: string, error: unknown): boolean {
+  return READ_ONLY_PATH_PROBE_OPERATIONS.has(op) && isDefinitePathNotFoundError(error);
+}
+
 function recordFirstOperationPhase(
   timing: RoutingSandboxFirstOperationTiming | undefined,
   phase: RoutingSandboxFirstOperationPhase,
@@ -1485,6 +1494,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       );
       outcome = "completed";
       return result;
+    } catch (error) {
+      if (isReadOnlyPathProbeMiss(op, error)) outcome = "completed";
+      throw error;
     } finally {
       try {
         firstOperationObserver({
@@ -1677,6 +1689,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
             },
           );
           providerOutcome = "completed";
+        } catch (error) {
+          if (isReadOnlyPathProbeMiss(op, error)) providerOutcome = "completed";
+          throw error;
         } finally {
           recordFirstOperationPhase(
             firstOperationTiming,
@@ -1944,10 +1959,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       return result;
     } catch (error) {
       materializationFailureReason = materializationVerificationDiagnostic(error)?.reason;
-      if (
-        (op === "readFile" || op === "listDir" || op === "pathExists" || op === "viewImage") &&
-        isDefinitePathNotFoundError(error)
-      ) {
+      if (isReadOnlyPathProbeMiss(op, error)) {
         outcome = "not_found";
       }
       throw error;
