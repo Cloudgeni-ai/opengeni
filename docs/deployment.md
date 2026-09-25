@@ -65,6 +65,32 @@ This adds canonical-human consent for singleton managed-home Modal recovery only
 It does not enable automatic rollback, shared-group recovery, command replay,
 empty reset, or a new cancellation/reaper protocol. See [run lifecycle](run-lifecycle.md).
 
+## Automatic checkpoint continuity (0520)
+
+`0520_automatic_checkpoint_discontinuity.sql` is maintenance-only. Stop old
+API/control/turn workers, migrate and provision roles, then start only the
+matching binaries. A pre-0520 worker does not reconstruct a system-selected
+filesystem warning. The replacement claim guard requires the worker's
+transaction-local warning protocol v2 for sessions with an automatic receipt;
+human-consented sessions still require v1. Never put either declaration in a
+role default, pool configuration or deployment environment.
+
+The worker may automatically select only the registered CURRENT native Modal
+checkpoint of a singleton home when definitive provider loss made its archive
+generation older than the workspace generation. Selection is a separate
+system-attributed durable receipt, not human consent or proof of restore. The
+ordinary provider snapshot and artifact verification must finish before the box
+is usable. Other degraded failures, unverified archives, shared groups, live
+writers and no-checkpoint cases remain blocked. Every affected agent attempt
+reconstructs a deterministic warning after the static instruction prefix;
+unknown command outcomes are never replayed. Operator metrics and alerts
+record the fallback even when the next turn succeeds. A read-only, aggregate
+`opengeni_private.sandbox_recovery_observations()` inventory reconstructs
+the last 30 minutes of provider-loss and fallback decisions from a small
+indexed private ledger, committed with their RLS-verified source audit events.
+The ledger stores only event IDs and fixed kinds, not tenant or provider data;
+normal role provisioning grants exact EXECUTE-only capabilities, not table reads.
+
 ## Selective Knowledge source discovery (0469)
 
 `0469_knowledge_source_discovery.sql` requires maintenance. Stop every API,

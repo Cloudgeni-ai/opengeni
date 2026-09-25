@@ -1054,6 +1054,7 @@ export function recordOpenSandboxKubernetesInventoryGauges(
 export const SANDBOX_INVENTORY_PROJECTION_DOMAINS = [
   "leases",
   "checkpoint_artifacts",
+  "recovery_observations",
   "rotation_backlog",
   "retained_processes",
   "expired_drains",
@@ -1188,6 +1189,38 @@ export function recordSandboxDeadlineRotationsRequested(
     help: "Total finite-lifetime sandbox rotations requested before provider deadline.",
     amount: count,
   });
+}
+
+/** Only call after the exact draining->cold commit reports wentCold. The
+ * backend is validated against the closed contract so provider IDs and other
+ * per-sandbox values can never become metric labels. */
+export function recordSandboxProviderMissingBeforeCapture(
+  observability: Observability,
+  backend: string,
+): void {
+  const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+  observability.incrementCounter({
+    name: "opengeni_sandbox_provider_missing_before_capture_total",
+    help: "Exact sandbox cold commits after definitive provider disappearance before workspace capture.",
+    labels: { backend: safeBackend },
+  });
+}
+
+export function recordSandboxRecoveryObservationGauges(
+  observability: Observability,
+  observations: { providerLosses: number; fallbackSelections: number },
+): void {
+  for (const [kind, value] of [
+    ["provider_missing_before_capture", observations.providerLosses],
+    ["checkpoint_fallback_selected", observations.fallbackSelections],
+  ] as const) {
+    observability.setGauge({
+      name: "opengeni_sandbox_recovery_observations_recent",
+      help: "Committed sandbox recovery observations in the last 30 minutes by fixed kind.",
+      labels: { kind },
+      value,
+    });
+  }
 }
 
 export function recordSandboxRotationBacklogGauges(

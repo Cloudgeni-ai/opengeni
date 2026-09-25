@@ -124,6 +124,72 @@ describe("turn-capacity Prometheus alerts", () => {
     expect(idleTimeout).not.toContain("requestId");
   });
 
+  test("alerts on exact Modal provider loss even without an overdue backlog", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const expression = alertExpression(template, "OpenGeniModalProviderMissingBeforeCapture");
+    expect(expression).toContain("opengeni_sandbox_provider_missing_before_capture_total");
+    expect(expression).toContain('backend="modal"');
+    expect(expression).toContain("increase(");
+    expect(expression).toContain("[30m]) > 0");
+    expect(expression).toContain("unless");
+    expect(expression).toContain("offset 30m");
+    expect(expression).toContain(
+      `opengeni:sandbox_recovery_observations_recent:fresh_max{${DEPLOYMENT_SCOPE},kind="provider_missing_before_capture"}`,
+    );
+    expect(expression).not.toContain("opengeni:sandbox_rotation_backlog:fresh_max");
+    for (const selector of metricSelectors(expression)) {
+      expect(selector).toContain(DEPLOYMENT_SCOPE);
+      expect(selector).not.toMatch(/workspace_id|session_id|sandbox_group_id|instance_id/);
+    }
+  });
+
+  test("warns before provider expiry when a deadline rotation remains process-blocked", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const alert = template.slice(
+      template.indexOf("        - alert: OpenGeniSandboxDeadlineProcessBlocked\n"),
+      template.indexOf("        - alert: OpenGeniModalProviderMissingBeforeCapture\n"),
+    );
+    expect(alert).toContain(
+      'opengeni:sandbox_rotation_backlog:fresh_max{kind="process_blocked"} > 0',
+    );
+    expect(alert).toContain("for: 10m");
+    expect(alert).toContain("severity: warning");
+    expect(alert).not.toContain("session_id");
+  });
+
+  test("warns on authorized Modal checkpoint fallback selection, not inferred restore success", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const expression = alertExpression(template, "OpenGeniModalCheckpointFallbackSelected");
+    expect(expression).toContain("opengeni_sandbox_checkpoint_fallback_total");
+    expect(expression).toContain('backend="modal",outcome="selected"');
+    expect(expression).toContain("[30m]) > 0");
+    expect(expression).toContain("unless");
+    expect(expression).toContain("offset 30m");
+    expect(expression).toContain(
+      `opengeni:sandbox_recovery_observations_recent:fresh_max{${DEPLOYMENT_SCOPE},kind="checkpoint_fallback_selected"}`,
+    );
+    expect(expression).not.toContain("opengeni:sandbox_rotation_backlog:fresh_max");
+    for (const selector of metricSelectors(expression)) {
+      expect(selector).toContain(DEPLOYMENT_SCOPE);
+      expect(selector).not.toMatch(/workspace_id|session_id|sandbox_group_id|instance_id/);
+    }
+    const alert = template.slice(
+      template.indexOf("        - alert: OpenGeniModalCheckpointFallbackSelected\n"),
+      template.indexOf("        - alert: OpenGeniSandboxCheckpointDeletionFailed\n"),
+    );
+    expect(alert).toContain("severity: warning");
+    expect(alert).toContain("Selection does not prove restoration succeeded.");
+  });
+
   test("alerts on bounded runtime, tool, lifecycle, API, and recovery failures", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),

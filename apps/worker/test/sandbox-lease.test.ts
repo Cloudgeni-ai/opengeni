@@ -75,6 +75,7 @@ import {
   releaseWorkspaceArchiveCapture,
   replaceWorkspaceArchiveCaptureAfterProof,
   readLease,
+  readRecentSandboxRecoveryObservations,
   reconcileColdLostLeaseInstanceBlockers,
   retainWorkspaceMutationProcess,
   retainedProcessSettlementIdentity,
@@ -1173,6 +1174,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
   test("(1b-recovery) published capture resumes teardown immediately without recapture or claim replacement", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
+    const observability = createObservability(REAPER_SETTINGS, { component: "worker-test" });
     const epoch = 12;
     const instanceId = "box-published-recovery";
     const operationId = crypto.randomUUID();
@@ -1234,9 +1236,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       persistCalls += 0;
       return { terminated: true, providerMissingBeforeCapture: false };
     };
-    const { drainSandboxLease } = createSandboxLeaseActivities(reaperServices(), {
-      terminateBox,
-    });
+    const { drainSandboxLease } = createSandboxLeaseActivities(
+      reaperServices(REAPER_SETTINGS, observability),
+      { terminateBox },
+    );
     const result = await drainSandboxLease({
       target: {
         workspaceId: ids.workspaceId,
@@ -1254,6 +1257,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(observedDisposition).toBe("archive_published");
     expect(persistCalls).toBe(0);
     expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
+    expect(await observability.prometheusMetrics()).not.toContain(
+      "opengeni_sandbox_provider_missing_before_capture_total",
+    );
   }, 60_000);
 
   test("(1b-recovery-replay) a replay-safe Modal capture replaces a dead unexpired activity immediately", async () => {
@@ -3871,9 +3877,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       await admin`update session_turn_attempts set quiesced_at = null, closed_at = now() - interval '2 minutes'
       where id in (${sibling.attemptId}, ${attempt.attemptId})`;
       if (stoppingErrors) {
-        // Explicit cancellation cannot substitute for physical owner quiescence.
+        // A failed owner cannot inherit the completed owner's closed-at proof.
+        await admin`update session_turn_attempts set outcome = 'failed'
+          where id = ${attempt.attemptId}`;
         expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
-        await admin`update session_turn_attempts set quiesced_at = now() - interval '2 minutes'
+        await admin`update session_turn_attempts set outcome = 'completed'
           where id = ${attempt.attemptId}`;
       }
       await verifyPendingQuiescenceBlocks(ids, sibling, async () => {
@@ -4168,7 +4176,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
     await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'turn'`;
     await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
-      closed_at = now() - interval '3 minutes', quiesced_at = now() - interval '3 minutes'
+      closed_at = now() - interval '3 minutes', quiesced_at = null
       where id = ${attempt.attemptId}`;
     // The command itself still gets the full stop window.
     expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
@@ -4182,6 +4190,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       where id = ${secondProcessId}`;
     await admin`update sandbox_retained_processes
       set started_at = now() - interval '3 minutes' where id in (${processId}, ${secondProcessId})`;
+    // A closed failure has no physical-quiescence receipt: unlike an ordinary
+    // completed attempt, it cannot license a potentially lossy capture.
+    await admin`update session_turn_attempts set outcome = 'failed'
+      where id = ${attempt.attemptId}`;
+    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+    await admin`update session_turn_attempts set outcome = 'completed'
+      where id = ${attempt.attemptId}`;
     const strandedProcess = await getRetainedProcess(db, {
       workspaceId: ids.workspaceId,
       sessionId: attempt.sessionId,
@@ -6375,6 +6390,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     if (!available) return;
 
     const ws = await freshWorkspace();
+    const observability = createObservability(REAPER_SETTINGS, { component: "worker-test" });
     const attempt = await freshWarmSnapshotAttempt(ws);
     ws.groupId = attempt.sandboxGroupId;
     const leaseId = await insertLease(ws, {
@@ -6421,23 +6437,53 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
 
     let probes = 0;
     let terminations = 0;
-    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
-      probeDrainableProvider: async (_settings, lease) => {
-        probes += 1;
-        expect(lease.id).toBe(leaseId);
-        expect(lease.instanceId).toBe("sb-missing-with-stale-admission");
-        return "missing";
+    const { reapSandboxLeases, drainSandboxLease } = createSandboxLeaseActivities(
+      reaperServices(REAPER_SETTINGS, observability),
+      {
+        probeDrainableProvider: async (_settings, lease) => {
+          probes += 1;
+          expect(lease.id).toBe(leaseId);
+          expect(lease.instanceId).toBe("sb-missing-with-stale-admission");
+          return "missing";
+        },
+        terminateBox: async () => {
+          terminations += 1;
+          throw new Error("A definitively missing provider must not be terminated again");
+        },
       },
-      terminateBox: async () => {
-        terminations += 1;
-        throw new Error("A definitively missing provider must not be terminated again");
-      },
-    });
+    );
+    expect(await observability.prometheusMetrics()).not.toContain(
+      "opengeni_sandbox_provider_missing_before_capture_total",
+    );
     const result = await reapSandboxLeases();
 
     expect(probes).toBe(1);
     expect(terminations).toBe(0);
     expect(result.terminated).toBeGreaterThanOrEqual(1);
+    expect(await observability.prometheusMetrics()).toMatch(
+      /opengeni_sandbox_provider_missing_before_capture_total\{[^}]*backend="modal"[^}]*\} 1\b/,
+    );
+    expect((await readRecentSandboxRecoveryObservations(db)).providerLosses).toBeGreaterThanOrEqual(
+      1,
+    );
+    // A duplicate child delivery has no cold transition to commit.
+    expect(
+      await drainSandboxLease({
+        target: {
+          workspaceId: ws.workspaceId,
+          sandboxGroupId: ws.groupId,
+          instanceId: "sb-missing-with-stale-admission",
+          leaseEpoch: 15,
+        },
+        timeoutClass: "fast",
+        snapshotTimeoutMs: 60_000,
+        captureTimeoutMs: 120_000,
+        operationId: crypto.randomUUID(),
+      }),
+    ).toEqual({ status: "skipped" });
+    expect(await observability.prometheusMetrics()).toMatch(
+      /opengeni_sandbox_provider_missing_before_capture_total\{[^}]*backend="modal"[^}]*\} 1\b/,
+    );
     const lease = await readLease(db, ws.workspaceId, ws.groupId);
     expect(lease).toMatchObject({
       liveness: "cold",
@@ -6455,6 +6501,70 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       where id = ${admission.id}`;
     expect(settled?.provider_outcome).toBe("rejected");
     expect(settled?.settled_at).not.toBeNull();
+  }, 60_000);
+
+  test("(5b) a failed exact cold commit does not count a provider loss", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const epoch = 16;
+    const instanceId = "sb-missing-but-replaced";
+    const leaseId = await insertLease(ws, {
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: epoch,
+      expiresInMs: -1_000,
+      instanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: instanceId } },
+      },
+    });
+    const observability = createObservability(REAPER_SETTINGS, { component: "worker-test" });
+    const { drainSandboxLease } = createSandboxLeaseActivities(
+      reaperServices(REAPER_SETTINGS, observability),
+      {
+        terminateBox: async (_settings, lease) => {
+          // Simulate loss of exact capture ownership after the provider
+          // outcome. The cold commit's capture-id fence must then miss.
+          const captureId = (await readLease(db, ws.workspaceId, ws.groupId))?.archiveCapture?.id;
+          expect(captureId).toBeTruthy();
+          expect(
+            await releaseWorkspaceArchiveCapture(db, {
+              accountId: ws.accountId,
+              workspaceId: ws.workspaceId,
+              sandboxGroupId: ws.groupId,
+              captureId: captureId!,
+              expectedEpoch: epoch,
+              expectedInstanceId: lease.instanceId!,
+            }),
+          ).toBe(true);
+          return { terminated: true, providerMissingBeforeCapture: true };
+        },
+      },
+    );
+    expect(
+      await drainSandboxLease({
+        target: {
+          workspaceId: ws.workspaceId,
+          sandboxGroupId: ws.groupId,
+          instanceId,
+          leaseEpoch: epoch,
+        },
+        timeoutClass: "fast",
+        snapshotTimeoutMs: 60_000,
+        captureTimeoutMs: 120_000,
+        operationId: crypto.randomUUID(),
+      }),
+    ).toEqual({ status: "skipped" });
+    expect((await readLease(db, ws.workspaceId, ws.groupId))?.liveness).toBe("draining");
+    expect(await observability.prometheusMetrics()).not.toContain(
+      "opengeni_sandbox_provider_missing_before_capture_total",
+    );
+    // This deliberately failed cold commit leaves a drainable row. Do not let
+    // the next global reaper test terminate this fixture as a second sandbox.
+    await admin`delete from sandbox_leases where id = ${leaseId}`;
   }, 60_000);
 
   // ── FINDING 1: even a test/legacy no-archive termination seam must remain
