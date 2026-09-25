@@ -8,11 +8,8 @@ export async function recoveryAwareSessionInstructions(
   db: Database,
   workspaceId: string,
   session: { id: string; instructions?: string | null },
+  readDiscontinuity: typeof getSandboxRecoveryDiscontinuity = getSandboxRecoveryDiscontinuity,
 ): Promise<string> {
-  const filesystemDiscontinuity = await getSandboxRecoveryDiscontinuity(
-    db,
-    workspaceId,
-    session.id,
-  );
+  const filesystemDiscontinuity = await readDiscontinuity(db, workspaceId, session.id);
   return [session.instructions, filesystemDiscontinuity].filter(Boolean).join("\n\n");
 }

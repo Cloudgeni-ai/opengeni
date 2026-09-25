@@ -46022,7 +46022,11 @@ export async function sessionEffectiveSandboxRecoveryBlocked(
   // A failed turn may be explicitly retried into the worker's verified,
   // system-selected fallback. No archive is restored or command replayed by
   // Retry itself; the next claimed attempt must recheck the exact selection.
-  if (await automaticRecoverySelectionTx(tx, row, session)) {
+  if (
+    (await automaticRecoverySelectionTx(tx, row, session)) &&
+    (row.resume_state?.opengeniHistoricalArchiveRecoveryId == null ||
+      (await authorizedHistoricalArchiveGeneration(tx, row)) !== null)
+  ) {
     const [blockers] = await rawRows<{ present: boolean }>(
       tx,
       sql`select
@@ -46520,6 +46524,8 @@ export async function authorizeAutomaticSandboxCheckpointRecovery(
           where lease_id = ${row.id} and state = 'active')
         or exists(select 1 from session_pending_tool_calls
           where workspace_id = ${input.workspaceId} and session_id = ${input.sessionId})
+        or exists(select 1 from session_attempt_interruptions
+          where workspace_id = ${input.workspaceId} and attempt_id = ${input.attemptId})
         or exists(select 1 from session_turn_attempts other
           join sessions member on member.id = other.session_id
             and member.workspace_id = other.workspace_id
@@ -46531,11 +46537,35 @@ export async function authorizeAutomaticSandboxCheckpointRecovery(
                 where attempt_id = other.id)))) as present`,
     );
     if (blockers?.present) return { status: "not_eligible" };
+    const existingOperationId = row.resume_state?.opengeniHistoricalArchiveRecoveryId;
     if (
-      (await authorizedHistoricalArchiveGeneration(tx, row)) === selection.archiveGeneration &&
-      row.resume_state?.opengeniHistoricalArchiveRecoveryId
+      existingOperationId !== undefined &&
+      existingOperationId !== null &&
+      (typeof existingOperationId !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          existingOperationId,
+        ))
     )
-      return { status: "already_authorized", selection };
+      return { status: "not_eligible" };
+    if (typeof existingOperationId === "string") {
+      const [existing] = await rawRows<{ present: boolean }>(
+        tx,
+        sql`select exists(select 1 from audit_events audit
+          join session_command_receipts receipt on receipt.account_id = audit.account_id
+            and receipt.workspace_id = audit.workspace_id
+            and receipt.result->>'operationId' = audit.id::text
+          where audit.id = ${existingOperationId}::uuid
+            and audit.account_id = ${input.accountId}
+            and audit.workspace_id = ${input.workspaceId}
+            and audit.action = 'sandbox.automatic_checkpoint_recovery.authorized'
+            and receipt.action = 'sandbox.recovery.automatic'
+            and receipt.target_session_id = ${input.sessionId}) as present`,
+      );
+      return existing?.present &&
+        (await authorizedHistoricalArchiveGeneration(tx, row)) === selection.archiveGeneration
+        ? { status: "already_authorized", selection }
+        : { status: "not_eligible" };
+    }
 
     const operationId = crypto.randomUUID();
     const metadata = {

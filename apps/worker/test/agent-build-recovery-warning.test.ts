@@ -58,7 +58,8 @@ test("both worker claim and same-attempt attachment opt into the warning-aware m
     new URL("../src/activities/agent-turn/recovery-warning.ts", import.meta.url),
     "utf8",
   );
-  expect(warning).toContain("await getSandboxRecoveryDiscontinuity(");
+  expect(warning).toContain("getSandboxRecoveryDiscontinuity");
+  expect(warning).toContain("await readDiscontinuity(");
   expect(warning).toContain("[session.instructions, filesystemDiscontinuity]");
   const database = readFileSync(
     new URL("../../../packages/db/src/database.ts", import.meta.url),

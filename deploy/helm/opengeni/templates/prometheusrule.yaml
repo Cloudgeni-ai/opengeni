@@ -644,6 +644,14 @@ spec:
           annotations:
             summary: OpenGeni has a sandbox past its provider deadline
             description: A finite-lifetime sandbox has remained past its precomputed provider deadline for 10m. Check turn, direct-operation, and retained-process blockers, checkpoint capture, reaper health, and Modal API errors before the provider kills it.
+        - alert: OpenGeniSandboxDeadlineProcessBlocked
+          expr: opengeni:sandbox_rotation_backlog:fresh_max{kind="process_blocked"} > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: A retained command is delaying sandbox deadline rotation
+            description: A provider-deadline rotation has been process-blocked for 10m. Inspect the current process, owner settlement, deadline cancellation and checkpoint capture while the provider is still available.
         - alert: OpenGeniModalProviderMissingBeforeCapture
           # A newly created counter may have only one sample after its first
           # loss, so increase() alone would miss that first observation. The

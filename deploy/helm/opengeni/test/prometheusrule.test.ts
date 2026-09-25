@@ -143,6 +143,23 @@ describe("turn-capacity Prometheus alerts", () => {
     }
   });
 
+  test("warns before provider expiry when a deadline rotation remains process-blocked", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const alert = template.slice(
+      template.indexOf("        - alert: OpenGeniSandboxDeadlineProcessBlocked\n"),
+      template.indexOf("        - alert: OpenGeniModalProviderMissingBeforeCapture\n"),
+    );
+    expect(alert).toContain(
+      'opengeni:sandbox_rotation_backlog:fresh_max{kind="process_blocked"} > 0',
+    );
+    expect(alert).toContain("for: 10m");
+    expect(alert).toContain("severity: warning");
+    expect(alert).not.toContain("session_id");
+  });
+
   test("warns on authorized Modal checkpoint fallback selection, not inferred restore success", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),

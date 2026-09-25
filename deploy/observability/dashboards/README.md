@@ -168,6 +168,9 @@ workspace/session identifiers are metric labels. Deadline-specific
 legacy-process-blocked inventory is not exposed by the current backlog
 projection; a separate DB projection is needed before an alert can distinguish
 that condition from the existing `process_blocked` count.
+`OpenGeniSandboxDeadlineProcessBlocked` warns on that general count after ten
+minutes while the provider is still available; it does not claim the blocker
+is a legacy command or that the rotation has already failed.
 
 The Modal checkpoint fallback panel and
 `OpenGeniModalCheckpointFallbackSelected` warning read the separate
