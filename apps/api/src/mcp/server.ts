@@ -312,6 +312,7 @@ import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../san
 import {
   createOpenGeniSlackBotClient,
   resolveSlackBotConnectionForTool,
+  type OpenGeniSlackBotClient,
 } from "../integrations/slack-bot";
 import { createFikenClient, resolveFikenConnectionForTool } from "../integrations/fiken";
 import {
@@ -577,6 +578,51 @@ class PolicyMcpServer extends McpServer {
       )
       .disable();
   }
+}
+
+export function slackBotFileContentResult(
+  result: Awaited<ReturnType<OpenGeniSlackBotClient["fileContent"]>>,
+) {
+  if (!("image" in result)) {
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+      structuredContent: {
+        kind: "text" as const,
+        fileId: result.file.id,
+        contentType: result.contentType,
+        content: result.content,
+        sizeBytes: null,
+        nextOffset: result.nextOffset,
+      },
+    };
+  }
+  return {
+    structuredContent: {
+      kind: "image" as const,
+      fileId: result.file.id,
+      contentType: result.image.contentType,
+      content: null,
+      sizeBytes: result.image.bytes.byteLength,
+      nextOffset: null,
+    },
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({
+          channel: result.channel,
+          file: result.file,
+          contentType: result.image.contentType,
+          sizeBytes: result.image.bytes.byteLength,
+          receipt: result.receipt,
+        }),
+      },
+      {
+        type: "image" as const,
+        mimeType: result.image.contentType,
+        data: Buffer.from(result.image.bytes).toString("base64"),
+      },
+    ],
+  };
 }
 
 export function buildOpenGeniMcpServer(
@@ -1949,7 +1995,7 @@ function registerSlackBotTools(
     "slack_bot_file_content",
     {
       description:
-        "Read a bounded page of UTF-8 text from a Slack file or canvas shared with a channel where the workspace-shared OpenGeni bot is already a member. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so OpenGeni can verify the channel-to-canvas-to-transcript chain. Slack may still restrict a huddle transcript body to participants; that returns huddle_transcript_requires_participant_access. Private Slack URLs and credentials are never returned. Continue with nextOffset when truncated is true.",
+        "Read a bounded page of text or view a PNG, JPEG, or WebP image from a Slack file shared with a channel where the workspace-shared OpenGeni bot is already a member. Use the file ID from thread replies to view images in earlier thread messages. Images are returned as viewable content, only when directly shared to a non-shared channel, up to 640 KiB; offset must be 0. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so OpenGeni can verify the channel-to-canvas-to-transcript chain. Slack may still restrict a huddle transcript body to participants; that returns huddle_transcript_requires_participant_access. Private Slack URLs and credentials are never returned. Continue with nextOffset for truncated text.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -1957,18 +2003,26 @@ function registerSlackBotTools(
         parentFileId: z4.string().min(1).max(64).optional(),
         offset: z4.number().int().min(0).max(4_000_000).optional(),
       },
+      outputSchema: {
+        kind: z4.enum(["text", "image"]),
+        fileId: z4.string(),
+        contentType: z4.string(),
+        content: z4.string().nullable(),
+        sizeBytes: z4.number().int().nullable(),
+        nextOffset: z4.number().int().nullable(),
+      },
     },
-    async ({ connectionId, channelId, fileId, parentFileId, offset }) =>
-      json(
-        await (
-          await clientFor(connectionId)
-        ).fileContent({
-          channelId,
-          fileId,
-          ...(parentFileId ? { parentFileId } : {}),
-          ...(offset !== undefined ? { offset } : {}),
-        }),
-      ),
+    async ({ connectionId, channelId, fileId, parentFileId, offset }) => {
+      const result = await (
+        await clientFor(connectionId)
+      ).fileContent({
+        channelId,
+        fileId,
+        ...(parentFileId ? { parentFileId } : {}),
+        ...(offset !== undefined ? { offset } : {}),
+      });
+      return slackBotFileContentResult(result);
+    },
   );
 
   server.registerTool(
