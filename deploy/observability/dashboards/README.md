@@ -169,6 +169,15 @@ legacy-process-blocked inventory is not exposed by the current backlog
 projection; a separate DB projection is needed before an alert can distinguish
 that condition from the existing `process_blocked` count.
 
+The Modal checkpoint fallback panel and
+`OpenGeniModalCheckpointFallbackSelected` warning read the separate
+`opengeni_sandbox_checkpoint_fallback_total{backend="modal",outcome="selected"}`
+counter. A selection is recorded after a durable authorization receipt and
+before restore; it remains an operator signal even if the session later
+continues successfully. It is not proof of restore success or of complete
+file recovery. The warning covers the first scrape sample of a newly created
+counter without using session or provider identifiers as metric labels.
+
 > `machine.link.*` and `machine.op.*` are session-scoped **timeline events**, not
 > Prometheus series — a machine's link history lives in the session timeline (which
 > carries the workspace/session context Prometheus omits). The Connected Machines

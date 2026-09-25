@@ -24,6 +24,30 @@ describe("sandbox health dashboard", () => {
     expect(JSON.stringify(loss)).not.toMatch(/workspace_id|session_id|sandbox_group_id/);
   });
 
+  test("shows authorized Modal fallback selection without treating it as restore success", async () => {
+    const dashboard = JSON.parse(
+      await readFile(new URL("./sandbox-health.json", import.meta.url), "utf8"),
+    ) as {
+      panels: Array<{
+        id: number;
+        title?: string;
+        description?: string;
+        targets?: Array<{ expr?: string }>;
+      }>;
+    };
+    const fallback = dashboard.panels.find(
+      (panel) => panel.title === "Modal checkpoint fallback selected",
+    );
+    expect(fallback).toBeDefined();
+    expect(dashboard.panels.filter((panel) => panel.id === fallback?.id)).toHaveLength(1);
+    expect(fallback?.targets?.[0]?.expr).toContain(
+      'opengeni_sandbox_checkpoint_fallback_total{backend="modal",outcome="selected"}',
+    );
+    expect(fallback?.targets?.[0]?.expr).toContain("offset 30m");
+    expect(fallback?.description).toContain("does not prove the subsequent restore succeeded");
+    expect(JSON.stringify(fallback)).not.toMatch(/workspace_id|session_id|sandbox_group_id/);
+  });
+
   test("separates logical outcomes, internal retries, and unknown failure ratio", async () => {
     const dashboard = JSON.parse(
       await readFile(new URL("./sandbox-health.json", import.meta.url), "utf8"),
