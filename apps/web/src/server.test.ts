@@ -67,6 +67,37 @@ describe("production web handler", () => {
     expect(tlsTerminatedShell.headers.get("location")).toBeNull();
   });
 
+  test("sends baseline content-type and referrer hardening on every shell response", async () => {
+    const root = await fixture();
+    const handler = createWebHandler(root);
+    const responses = await Promise.all(
+      [
+        new Request("https://example.test/"),
+        new Request("https://example.test/workspaces/ws/sessions/id"),
+        new Request("https://example.test/assets/app-abc123.js"),
+        new Request("https://example.test/assets/missing.js"),
+        new Request("https://example.test/%2e%2e%2fsecret"),
+        new Request("https://example.test/", { method: "POST" }),
+        new Request("https://example.test/react-demo"),
+        new Request("https://example.test/", { method: "HEAD" }),
+      ].map(handler),
+    );
+    for (const response of responses) {
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(response.headers.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
+      // Embedding is supported, so the shell never forbids framing.
+      expect(response.headers.get("x-frame-options")).toBeNull();
+      expect(response.headers.get("content-security-policy")).toBeNull();
+    }
+
+    // The setup page keeps its stricter policy so the bearer never leaks.
+    const setup = await handler(
+      new Request(`https://example.test/setup-account?token=${VALID_SETUP_TOKEN}`),
+    );
+    expect(setup.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(setup.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
   test("does not turn missing assets or path traversal into the SPA shell", async () => {
     const root = await fixture();
     const handler = createWebHandler(root);

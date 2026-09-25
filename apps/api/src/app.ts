@@ -154,6 +154,10 @@ import {
   BrowserControlTransportError,
 } from "@opengeni/runtime/sandbox";
 import { requireAccessKey } from "./http/auth";
+import {
+  publicListenerServesMetrics,
+  registerPrometheusMetricsRoute,
+} from "./http/metrics-listener";
 import { allowedCorsOrigin } from "./http/cors";
 import { withAccessGrantSessionRlsContext } from "./access-grant-rls";
 import { registerCapabilityRoutes } from "./routes/capabilities";
@@ -923,11 +927,9 @@ export function createAppComposition(deps: AppDependencies): {
     return c.json(result, result.ok ? 200 : 503);
   });
 
-  app.get("/metrics", async (c) =>
-    c.text(await observability.prometheusMetrics(), 200, {
-      "content-type": "text/plain; version=0.0.4; charset=utf-8",
-    }),
-  );
+  if (publicListenerServesMetrics(deps.settings)) {
+    registerPrometheusMetricsRoute(app, observability);
+  }
 
   registerMcpOAuthRoutes(app, routeDeps);
 

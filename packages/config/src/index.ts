@@ -558,6 +558,9 @@ const SettingsSchema = z.object({
   authAllowMetrics: EnvBoolean.default(false),
   apiHost: z.string().default("0.0.0.0"),
   apiPort: z.coerce.number().int().positive().default(8000),
+  // When set, GET /metrics is served only on this dedicated internal listener
+  // and never on the public API port that an ingress forwards to.
+  apiMetricsPort: z.coerce.number().int().positive().optional(),
   workerHttpPort: z.coerce.number().int().positive().default(8001),
   // Worker-side first-party MCP traffic stays on the deployment's internal
   // network. OPENGENI_MCP_URL remains the sandbox/external route used by
@@ -3175,6 +3178,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     authAllowMetrics: optional("OPENGENI_AUTH_ALLOW_METRICS"),
     apiHost: optional("OPENGENI_API_HOST"),
     apiPort: optional("OPENGENI_API_PORT"),
+    apiMetricsPort: optional("OPENGENI_API_METRICS_PORT"),
     workerHttpPort: optional("OPENGENI_WORKER_HTTP_PORT"),
     opengeniMcpInternalUrl: optional("OPENGENI_MCP_INTERNAL_URL"),
     opengeniMcpUrl: optional("OPENGENI_MCP_URL"),

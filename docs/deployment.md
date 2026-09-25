@@ -449,7 +449,7 @@ The NATS client/monitor ports and Garage RPC/admin/web ports are not exposed. On
 bind NodePorts to loopback with
 `--kube-proxy-arg=nodeport-addresses=127.0.0.0/8`, then publish only the five
 loopback listeners through a private edge such as Tailscale Serve. Route `/` to
-web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`, `/metrics`,
+web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`,
 `/install.sh`, `/install.ps1`, `/uninstall.sh`,
 `/opengeni-agent-minisign.pub`, and `/agent` to the API. Give the NATS
 websocket, relay, and Garage S3 API their own private TLS ports. Set
@@ -1572,8 +1572,13 @@ filesystems even though Docker accepts the mount.
 The production web image serves the built SPA through the repository-owned Bun
 server, not Vite's preview server. The build precompresses text assets;
 content-hashed `/assets/*` responses are served with immutable one-year caching,
-while the HTML shell revalidates. The API compresses JSON responses and leaves
-SSE and other streaming transports uncompressed.
+while the HTML shell revalidates. Every shell response carries
+`X-Content-Type-Options: nosniff` and `Referrer-Policy:
+strict-origin-when-cross-origin` (the setup-account page keeps its stricter
+`no-referrer`). The server deliberately sets no `X-Frame-Options`,
+`frame-ancestors`, or other CSP, because the console supports embedding. The
+API compresses JSON responses and leaves SSE and other streaming transports
+uncompressed.
 
 Web assets, the React demo, and the server bundle compile once on BuildKit's
 native build platform. The amd64 and arm64 web images copy those portable
@@ -3213,7 +3218,7 @@ and storage objects, so it proves deeper behavior but is not a liveness probe.
 
 Service endpoints:
 
-- API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts.
+- API: `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts. `GET /metrics` is served on `OPENGENI_API_METRICS_PORT` when it is set, and then never on `OPENGENI_API_PORT`, so an ingress that forwards every path to the API cannot publish it. Without it, `/metrics` stays on `OPENGENI_API_PORT` (the local and Docker Compose default). The Helm chart sets it from `api.metricsPort` (default `9464`) behind a separate always-ClusterIP `<release>-api-metrics` Service that the ServiceMonitor, scrape annotations, and bundled collector use; do not route it through an Ingress. The ServiceMonitor relabels those series back to the public API Service's `service`/`job` identity, so alerts keyed on `service="<release>-api"` keep matching; annotation-based scrapers see the new Service name. `api.metricsPort: null` restores the legacy single-port layout.
 - Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness requires lifecycle state `ready` plus healthy Postgres, NATS, and Temporal checks. The standalone worker reserves a one-connection Postgres probe pool so ordinary activity-pool saturation cannot create false readiness failures. A draining worker stays live but becomes unready before polling stops.
 - Relay: `GET /metrics` and `GET /healthz` on the relay port when the relay is enabled.
 
@@ -3232,6 +3237,7 @@ Useful settings:
 - `OPENGENI_WORKER_HTTP_PORT=8001` for the worker metrics/health listener.
 - `OPENGENI_AUTH_ALLOW_HEALTH=true` allows `/healthz`, `/traffic-readyz`, and `/readyz` through the deployment-key gate.
 - `OPENGENI_AUTH_ALLOW_METRICS=true` allows API `/metrics` through the deployment-key gate for an internal scraper path.
+- `OPENGENI_API_METRICS_PORT=9464` moves API `/metrics` to a dedicated internal listener. That listener serves nothing else and applies the same deployment-key rules.
 - `OPENGENI_DISABLE_OPENAI_TRACING=true` disables OpenAI Agents SDK tracing; tracing also defaults off when no OTLP endpoint is configured.
 - `OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` to export spans to an OpenTelemetry Collector.
 - `OPENGENI_OTEL_EXPORTER_OTLP_HEADERS=key=value,...` for exporter headers; put this in a secret when it contains credentials.
@@ -3245,6 +3251,17 @@ helm upgrade --install opengeni deploy/helm/opengeni \
   --set observability.prometheusRule.enabled=true \
   --set secret.existingSecret=opengeni-runtime
 ```
+
+Upgrade note for clusters that enforce NetworkPolicy: with
+`networkPolicy.enabled=true`, the API NetworkPolicy admits only the bundled
+collector and `networkPolicy.monitoring` to `api.metricsPort`, never the
+`networkPolicy.ingressController` peers. Before the dedicated listener, a
+Prometheus outside the release could scrape the API on its public port through
+the ingress-controller rule, whose default empty selectors admit every pod. If
+such a Prometheus (ServiceMonitor or scrape annotations) scrapes the API, set
+`networkPolicy.monitoring` to its namespace and pod selectors before upgrading;
+otherwise the API target goes down and the `up == 0` availability alert fires.
+The managed example values files carry a commented `monitoring` block.
 
 `ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), a model-aware automatic context-compaction start that remains durably pending for 15 minutes, traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, release-owned turn-worker restarts and crash loops, durable worker-death recovery and exhausted recovery, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Compaction start/completion counters initialize at zero for rate diagnostics; a trigger-maintained exact-attempt pending projection and control-worker freshness gauge preserve alert truth across concurrent activities, terminal skips, and turn-worker restarts without exporting tenant identities. Worker-death recovery outcomes are emitted by the fenced control activity after the durable recovery transaction wins, because the process-local metrics registry of the dead turn worker no longer exists. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
 
