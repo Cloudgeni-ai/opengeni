@@ -48,8 +48,10 @@ import {
 } from "../connection-ownership";
 import {
   integrationBaseUrl,
+  oauthStateFailureReturn,
   oauthStateTtlMs,
   requireIntegrationsStateSecret,
+  workspaceIntegrationsPath,
 } from "./oauth-client";
 
 const PERSONAL_GITHUB_OAUTH_STATE_KIND = "personal_github_oauth";
@@ -536,7 +538,7 @@ export async function completePersonalGitHubOAuthCallback(
     return {
       redirectTo: personalGitHubCallbackReturnUrl(
         returnBaseUrl,
-        state?.returnPath ?? "/integrations",
+        state?.returnPath ?? oauthStateFailureReturn(deps.settings, input.state).returnPath,
         "error",
         { reason: personalGitHubFailureReason(error) },
       ),
@@ -752,7 +754,7 @@ function parseGitHubScopes(raw: string | null): string[] {
 }
 
 function personalGitHubReturnPath(workspaceId: string, raw?: string): string {
-  const fallback = `/workspaces/${workspaceId}/capabilities`;
+  const fallback = workspaceIntegrationsPath(workspaceId);
   if (!raw) return fallback;
   let parsed: URL;
   try {

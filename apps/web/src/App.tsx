@@ -13,6 +13,7 @@
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
 
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
+//   /integrations?…                          → workspace-less OAuth callback → current workspace /plugins
 //   /workspaces/:id/schedules                → scheduled tasks + run history
 //   /workspaces/:id/documents                → document bases + search
 //   /workspaces/:id/memory                   → durable workspace memory
@@ -75,6 +76,10 @@ export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from 
 const LazyCapabilitiesRoute = lazyRouteComponent(
   () => import("@/routes/capabilities"),
   "CapabilitiesRoute",
+);
+const LazyIntegrationsReturnRoute = lazyRouteComponent(
+  () => import("@/routes/capabilities"),
+  "IntegrationsReturnRoute",
 );
 const LazyAgentsRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentsRoute");
 const LazyAgentTopologyPreviewRoute = lazyRouteComponent(
@@ -198,6 +203,13 @@ const billingReturnRoute = createRoute({
     return checkout ? { checkout } : {};
   },
   component: BillingReturnRoute,
+});
+// Integration callbacks whose state names no workspace land here (see the API's
+// INTEGRATIONS_FALLBACK_PATH); forward them to the current workspace's Plugins.
+const integrationsReturnRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "integrations",
+  component: LazyIntegrationsReturnRoute,
 });
 // Self-hosted device-flow APPROVE page (design 11 §B). Top-level (sibling of
 // /billing, NOT workspace-scoped): the agent prints `${origin}/device?user_code=…`
@@ -501,6 +513,7 @@ const routeTree = rootRoute.addChildren([
   indexRoute,
   sessionDeepLinkRoute,
   billingReturnRoute,
+  integrationsReturnRoute,
   deviceRoute,
   resetPasswordRoute,
   identityLinkRoute,

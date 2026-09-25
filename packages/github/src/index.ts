@@ -446,6 +446,20 @@ export function readSignedState(
   secret: string,
   now = Math.floor(Date.now() / 1000),
 ): GitHubSignedStatePayload | null {
+  const payload = inspectSignedState(state, secret);
+  if (!payload) return null;
+  const age = now - payload.iat;
+  return age >= 0 && age <= stateMaxAgeSeconds ? payload : null;
+}
+
+/**
+ * Verifies a signed state's signature and shape without its age limit.
+ *
+ * Only for explaining a failed callback (for example "this link expired" and
+ * which workspace page to return to). An aged payload is never authority: every
+ * authorizing read uses {@link readSignedState} or its own stricter lifetime.
+ */
+export function inspectSignedState(state: string, secret: string): GitHubSignedStatePayload | null {
   const [encoded, signature] = state.split(".", 2);
   if (!encoded || !signature) {
     return null;
@@ -468,8 +482,7 @@ export function readSignedState(
   ) {
     return null;
   }
-  const age = now - (payload as { iat: number }).iat;
-  return age >= 0 && age <= stateMaxAgeSeconds ? (payload as GitHubSignedStatePayload) : null;
+  return payload as GitHubSignedStatePayload;
 }
 
 export function verifySignedState(
