@@ -92,6 +92,19 @@ output "observability" {
   }
 }
 
+output "aks_container_insights" {
+  description = "Namespace-scoped AKS Container Insights collection created when aks_container_insights.enabled is true."
+  value = {
+    enabled                  = local.container_insights_enabled
+    data_collection_rule_id  = try(azurerm_monitor_data_collection_rule.container_insights[0].id, null)
+    daily_cap_alert_id       = try(azurerm_monitor_scheduled_query_rules_alert_v2.container_insights_daily_cap[0].id, null)
+    no_data_alert_id         = try(azurerm_monitor_scheduled_query_rules_alert_v2.container_insights_no_data[0].id, null)
+    namespaces               = local.container_insights_enabled ? var.aks_container_insights.namespaces : []
+    streams                  = local.container_insights_enabled ? var.aks_container_insights.streams : []
+    workspace_daily_quota_gb = local.container_insights_enabled ? var.aks_container_insights.workspace_daily_quota_gb : null
+  }
+}
+
 output "postgres_host" {
   description = "Postgres host to use for OPENGENI_DATABASE_URL."
   value       = var.postgres.mode == "managed" ? azurerm_postgresql_flexible_server.this[0].fqdn : var.postgres.existing_host

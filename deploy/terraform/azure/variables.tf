@@ -330,6 +330,82 @@ variable "observability" {
   }
 }
 
+variable "aks_container_insights" {
+  description = "Optional AKS Container Insights collection of container stdout/stderr (ContainerLogV2) and Kubernetes events/pod inventory into the observability Log Analytics workspace. Collection is limited to the listed namespaces and the workspace receives a mandatory daily ingestion cap. container_log_transform_kql optionally applies an ingestion-time KQL transformation to ContainerLogV2 only, for example to redact request query strings."
+  type = object({
+    enabled                     = optional(bool, false)
+    namespaces                  = optional(list(string), [])
+    streams                     = optional(list(string), ["Microsoft-ContainerLogV2", "Microsoft-KubeEvents", "Microsoft-KubePodInventory"])
+    data_collection_interval    = optional(string, "5m")
+    workspace_daily_quota_gb    = optional(number)
+    container_log_transform_kql = optional(string)
+  })
+  default = {}
+
+  validation {
+    condition     = !var.aks_container_insights.enabled || try(var.observability.enabled, false)
+    error_message = "aks_container_insights.enabled requires observability.enabled so the Log Analytics workspace exists."
+  }
+
+  validation {
+    condition = !var.aks_container_insights.enabled || (
+      length(var.aks_container_insights.namespaces) > 0 &&
+      length(var.aks_container_insights.namespaces) == length(distinct(var.aks_container_insights.namespaces)) &&
+      alltrue([
+        for namespace in var.aks_container_insights.namespaces :
+        can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", namespace))
+      ])
+    )
+    error_message = "aks_container_insights.namespaces must list at least one distinct Kubernetes namespace when enabled; collection is namespace-scoped by design."
+  }
+
+  validation {
+    condition = (
+      length(var.aks_container_insights.streams) > 0 &&
+      contains(var.aks_container_insights.streams, "Microsoft-ContainerLogV2") &&
+      length(var.aks_container_insights.streams) == length(distinct(var.aks_container_insights.streams)) &&
+      alltrue([
+        for stream in var.aks_container_insights.streams : contains([
+          "Microsoft-ContainerLogV2",
+          "Microsoft-KubeEvents",
+          "Microsoft-KubePodInventory",
+          "Microsoft-KubeNodeInventory",
+          "Microsoft-KubeServices",
+          "Microsoft-KubePVInventory",
+          "Microsoft-KubeMonAgentEvents",
+          "Microsoft-ContainerInventory",
+          "Microsoft-ContainerNodeInventory",
+          "Microsoft-InsightsMetrics",
+          "Microsoft-Perf",
+        ], stream)
+      ])
+    )
+    error_message = "aks_container_insights.streams must include Microsoft-ContainerLogV2 and contain only distinct Container Insights streams; the legacy ContainerLog stream is not supported."
+  }
+
+  validation {
+    condition     = can(regex("^([1-9]|[12][0-9]|30)m$", var.aks_container_insights.data_collection_interval))
+    error_message = "aks_container_insights.data_collection_interval must be a whole number of minutes between 1m and 30m."
+  }
+
+  validation {
+    condition = !var.aks_container_insights.enabled || try(
+      var.aks_container_insights.workspace_daily_quota_gb >= 0.1 &&
+      var.aks_container_insights.workspace_daily_quota_gb <= 100,
+      false
+    )
+    error_message = "aks_container_insights.workspace_daily_quota_gb is required when enabled and must be between 0.1 and 100 GB so container log cost stays bounded."
+  }
+
+  validation {
+    condition = (
+      var.aks_container_insights.container_log_transform_kql == null ||
+      can(regex("^source(\\s|$)", trimspace(var.aks_container_insights.container_log_transform_kql)))
+    )
+    error_message = "aks_container_insights.container_log_transform_kql must be null or a KQL transformation that starts with `source`."
+  }
+}
+
 variable "postgres" {
   description = "Postgres mode. Use managed to create Azure Database for PostgreSQL Flexible Server or external to connect an existing compatible server."
   type = object({

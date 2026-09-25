@@ -3310,6 +3310,21 @@ It supports:
 Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
 upload files to signed Blob URLs without per-application registration.
 
+Pod stdout/stderr lives only as long as each pod. To retain it, enable the
+optional `aks_container_insights` object together with `observability.enabled`.
+It installs the AKS monitoring addon with managed-identity ingestion, one data
+collection rule scoped to the listed namespaces (`ContainerLogV2`, Kubernetes
+events, and pod inventory by default), and a mandatory daily ingestion cap on
+the observability Log Analytics workspace, whose retention stays 30 days.
+The cap is shared with Application Insights data in that workspace, so size it
+well above normal ingestion; reaching it pauses ingestion until the daily reset.
+Two log search alerts notify the observability action group when the cap is
+reached or when collection stops. An optional `container_log_transform_kql`
+redacts container log content, such as ingress query strings, before it is
+retained.
+The addon adds a DaemonSet with CPU and memory requests on every node, so check
+node headroom first. See `deploy/terraform/azure/README.md`.
+
 Before applying anything in Azure:
 
 1. Keep provider resource names and cleanup notes in private operator-controlled storage outside the repository.
