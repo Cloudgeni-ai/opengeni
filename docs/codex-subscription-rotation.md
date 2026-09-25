@@ -452,6 +452,18 @@ waiter so Resume can reconstruct it. Steer, cancellation, or another semantic
 fence change supersedes the waiter/blocked turn rather than letting a stale wake
 run. Reset/boost entitlement redemption is never automatic.
 
+Capacity wakes are spread, not simultaneous. Every waiter of one exhausted pool
+learns the same authoritative reset time, and one capacity mutation (such as the
+bounded refresh that verifies a quota reset) wakes every waiter at once through
+both the typed signal and the generic durable workflow wake. The session
+workflow (Codex and xAI alike) therefore delays each reconciliation by a
+replay-deterministic jitter behind the `session-capacity-wake-jitter-v1` patch:
+up to 60 seconds past a scheduled reset timer and up to 30 seconds after a
+capacity or queue wake. Later wakes do not shorten the pause; only Pause, Steer
+or Cancel interrupt it. The jitter only delays the same reconciliation activity:
+the waiter row stays authoritative, and nothing is enqueued, synthesized, or
+run twice.
+
 Only a **definitive credential/account refusal** can move the same durable turn to
 another credential:
 

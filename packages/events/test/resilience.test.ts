@@ -122,6 +122,8 @@ function expectInfiniteReconnect(opts: Record<string, unknown>): void {
   expect(opts.reconnectJitter).toBe(1_000);
   expect(opts.reconnectJitterTLS).toBe(1_000);
   expect(opts.waitOnFirstConnect).toBe(true);
+  // A broker/auth-callout restart briefly rejects auth; nats.js must keep retrying.
+  expect(opts.ignoreAuthErrorAbort).toBe(true);
   expect(typeof opts.pingInterval).toBe("number");
 }
 
@@ -195,6 +197,182 @@ describe("long-lived NATS connections survive an indefinite broker outage", () =
     expect(() =>
       requireSessionEventDurableFanoutCapability({ publish: async () => undefined }),
     ).toThrow("sessionEventDurableFanout v1");
+  });
+});
+
+type FakeMsg = {
+  data: Uint8Array;
+  subject: string;
+  reply?: string;
+  respond?: (data: Uint8Array) => boolean;
+};
+
+/** An async-iterable subscription fed by a script; `fail` ends it like nats.js
+ *  does for a subscription permissions violation. */
+function scriptedSubscription(subject: string) {
+  const queued: Array<{ message?: FakeMsg; error?: unknown }> = [];
+  const waiters: Array<() => void> = [];
+  const wake = () => waiters.splice(0).forEach((resolve) => resolve());
+  const iterable = {
+    unsubscribe() {},
+    async *[Symbol.asyncIterator]() {
+      for (;;) {
+        const next = queued.shift();
+        if (!next) {
+          await new Promise<void>((resolve) => waiters.push(resolve));
+          continue;
+        }
+        if (next.error !== undefined) throw next.error;
+        yield next.message!;
+      }
+    },
+  };
+  return {
+    iterable,
+    push: (data: Uint8Array, extra: Partial<FakeMsg> = {}) => {
+      queued.push({ message: { data, subject, ...extra } });
+      wake();
+    },
+    fail: (error: unknown) => {
+      queued.push({ error });
+      wake();
+    },
+  };
+}
+
+function permissionsViolation(): Error {
+  return Object.assign(new Error('Permissions Violation for Subscription to "x"'), {
+    name: "NatsError",
+    code: "PERMISSIONS_VIOLATION",
+  });
+}
+
+async function withUnhandledRejectionProbe<T>(
+  run: (rejections: unknown[]) => Promise<T>,
+): Promise<T> {
+  const rejections: unknown[] = [];
+  const listener = (reason: unknown) => {
+    rejections.push(reason);
+  };
+  process.on("unhandledRejection", listener);
+  try {
+    return await run(rejections);
+  } finally {
+    process.off("unhandledRejection", listener);
+  }
+}
+
+describe("detached NATS subscription loops never reject the process", () => {
+  test("session subscriptions isolate poison messages and survive a subscription error", async () => {
+    await withUnhandledRejectionProbe(async (rejections) => {
+      const scripted = scriptedSubscription("session");
+      const warnings: Array<{ message: string; attributes?: Record<string, unknown> }> = [];
+      const bus = await createNatsEventBus("nats://subscription.test:4222", undefined, {
+        logger: { warn: (message, attributes) => warnings.push({ message, attributes }) },
+        connect: async () =>
+          ({
+            ...(fakeNatsConnection() as Record<string, unknown>),
+            subscribe: () => scripted.iterable,
+          }) as never,
+      });
+      const delivered: number[] = [];
+      let throwOnce = true;
+      await bus.subscribe(SENTINEL_WS, "00000000-0000-4000-8000-000000000001", (events) => {
+        if (throwOnce) {
+          throwOnce = false;
+          throw new Error("consumer failed");
+        }
+        delivered.push(...events.map((event) => event.sequence));
+      });
+      const event = (sequence: number) =>
+        new TextEncoder().encode(
+          JSON.stringify({
+            workspaceId: SENTINEL_WS,
+            sessionId: "00000000-0000-4000-8000-000000000001",
+            events: [
+              {
+                id: `00000000-0000-4000-8000-00000000010${sequence}`,
+                workspaceId: SENTINEL_WS,
+                sessionId: "00000000-0000-4000-8000-000000000001",
+                sequence,
+                type: "session.title_set",
+                payload: { title: "t", source: "agent" },
+                occurredAt: "2026-09-25T00:00:00.000Z",
+                clientEventId: null,
+                turnId: null,
+              },
+            ],
+          }),
+        );
+      scripted.push(new TextEncoder().encode("{not json"));
+      scripted.push(event(1));
+      scripted.push(event(2));
+      await waitFor(() => delivered.length === 1);
+      expect(delivered).toEqual([2]);
+      scripted.fail(permissionsViolation());
+      await waitFor(() =>
+        warnings.some((warning) => warning.message === "NATS subscription ended with an error"),
+      );
+      await Bun.sleep(5);
+      expect(rejections).toEqual([]);
+      expect(warnings.map((warning) => warning.message)).toEqual([
+        "NATS subscription message dropped",
+        "NATS subscription message dropped",
+        "NATS subscription ended with an error",
+      ]);
+      expect(warnings[2]!.attributes).toMatchObject({
+        label: "session-events",
+        errorName: "NatsError",
+        errorCode: "PERMISSIONS_VIOLATION",
+      });
+      // Logs never carry the payload bytes.
+      expect(JSON.stringify(warnings)).not.toContain("not json");
+      await bus.close();
+    });
+  });
+
+  test("workspace-control, request, agent-event and auth-callout loops survive subscription errors", async () => {
+    await withUnhandledRejectionProbe(async (rejections) => {
+      const subscriptions: Array<ReturnType<typeof scriptedSubscription>> = [];
+      const connectWithScriptedSubscriptions = async () =>
+        ({
+          ...(fakeNatsConnection() as Record<string, unknown>),
+          subscribe: (subject: string) => {
+            const scripted = scriptedSubscription(subject);
+            subscriptions.push(scripted);
+            return scripted.iterable;
+          },
+        }) as never;
+      const warnings: string[] = [];
+      const logger = { warn: (message: string) => warnings.push(message) };
+      const bus = await createNatsEventBus("nats://subscription.test:4222", undefined, {
+        logger,
+        connect: connectWithScriptedSubscriptions,
+      });
+      await bus.subscribeWorkspaceControl(SENTINEL_WS, () => undefined);
+      bus.subscribeRequests("agent.*.*.connection.*.rpc", () => new Uint8Array());
+      bus.subscribeAgentEvents("agent.*.*.connection.*.events", () => undefined);
+      const responder = await createResponderConnection(
+        SENTINEL_URL,
+        { kind: "anonymous" },
+        "$SYS.REQ.USER.AUTH",
+        () => new Uint8Array(),
+        { logger, connect: connectWithScriptedSubscriptions },
+      );
+      expect(subscriptions).toHaveLength(4);
+      subscriptions[0]!.push(new TextEncoder().encode("{not json"));
+      for (const scripted of subscriptions) scripted.fail(permissionsViolation());
+      await waitFor(
+        () =>
+          warnings.filter((message) => message === "NATS subscription ended with an error")
+            .length === 4,
+      );
+      await Bun.sleep(5);
+      expect(rejections).toEqual([]);
+      expect(warnings).toContain("NATS subscription message dropped");
+      await responder.close();
+      await bus.close();
+    });
   });
 });
 

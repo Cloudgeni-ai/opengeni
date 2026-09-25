@@ -52,13 +52,16 @@ import {
 import {
   captureVerifiedWorkspaceArchive,
   establishSandboxSessionFromEnvelope,
+  SandboxExecReadinessError,
   SandboxResumeStateUnavailableError,
+  type EstablishedSandboxSession,
 } from "@opengeni/runtime";
 import { WorkspaceArchiveIntegrityError } from "@opengeni/runtime/sandbox";
 import type { ObjectStorage } from "@opengeni/storage";
 import {
   resumeBoxForTurn,
   sandboxLeaseHolderIdForAttempt,
+  SandboxExecReadinessTimeoutError,
   SandboxLeaseInstanceLostError,
   SandboxWarmingTimeoutError,
 } from "../src/sandbox-resume";
@@ -238,6 +241,217 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     const drained = await readRow(workspaceId, groupId);
     expect(drained?.liveness).toBe("draining");
     expect(drained?.refcount).toBe(0);
+  }, 60_000);
+
+  test("(1r) a fresh box that misses command readiness is terminated, rolled back, and replaced exactly once", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const holderId = sandboxLeaseHolderIdForAttempt("activity-readiness-replace");
+    const probed: EstablishedSandboxSession[] = [];
+    const epochsAtProbe: Array<{ liveness: string; epoch: number; instanceId: string | null }> = [];
+    const warnings: string[] = [];
+
+    const resumed = await resumeBoxForTurn(
+      {
+        db,
+        settings,
+        observability: {
+          info: () => undefined,
+          warn: (message: string) => {
+            warnings.push(message);
+          },
+        },
+        freshSandboxReadinessReplacementDelayMs: () => 0,
+        verifySpawnedSandboxReadiness: async (established, identity) => {
+          probed.push(established);
+          const row = await readRow(workspaceId, groupId);
+          epochsAtProbe.push({
+            liveness: row!.liveness,
+            epoch: row!.lease_epoch,
+            instanceId: row!.instance_id,
+          });
+          if (probed.length === 1) {
+            throw new SandboxExecReadinessTimeoutError(established.backendId, 60_000, {
+              sandboxGroupId: identity.sandboxGroupId,
+              instanceId: established.instanceId,
+            });
+          }
+        },
+      },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        sessionId: groupId,
+        backend: "local",
+      },
+      "turn",
+      holderId,
+    );
+    try {
+      expect(probed).toHaveLength(2);
+      expect(probed[0]!.origin).toBe("created");
+      expect(probed[1]!.origin).toBe("created");
+      expect(probed[1]!.instanceId).not.toBe(probed[0]!.instanceId);
+      expect(resumed.established.instanceId).toBe(probed[1]!.instanceId);
+      // Each probe ran on a warming lease that already recorded its own exact
+      // provider instance, and the replacement ran under a newer epoch: the
+      // failed warming epoch was rolled back to cold (epoch++) before the second
+      // admission won cold->warming again.
+      expect(epochsAtProbe[0]).toMatchObject({
+        liveness: "warming",
+        instanceId: probed[0]!.instanceId,
+      });
+      expect(epochsAtProbe[1]).toMatchObject({
+        liveness: "warming",
+        instanceId: probed[1]!.instanceId,
+      });
+      expect(epochsAtProbe[1]!.epoch).toBeGreaterThan(epochsAtProbe[0]!.epoch);
+      const warm = await readRow(workspaceId, groupId);
+      expect(warm).toMatchObject({
+        liveness: "warm",
+        refcount: 1,
+        turn_holders: 1,
+        instance_id: probed[1]!.instanceId,
+        lease_epoch: resumed.leaseEpoch,
+      });
+      expect(await holderCount(workspaceId, groupId, holderId)).toBe(1);
+      expect(warnings).toEqual([
+        "sandbox command-readiness timed out on a fresh box; replacing it once after jitter",
+      ]);
+    } finally {
+      await resumed.release();
+      await dropSession(resumed.established);
+    }
+  }, 60_000);
+
+  test("(1s) a replacement that also misses readiness fails the turn with no warm lease or holder", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const holderId = sandboxLeaseHolderIdForAttempt("activity-readiness-twice");
+    const probed: string[] = [];
+
+    const error = await resumeBoxForTurn(
+      {
+        db,
+        settings,
+        freshSandboxReadinessReplacementDelayMs: () => 0,
+        verifySpawnedSandboxReadiness: async (established, identity) => {
+          probed.push(established.instanceId);
+          throw new SandboxExecReadinessTimeoutError(established.backendId, 60_000, {
+            sandboxGroupId: identity.sandboxGroupId,
+            instanceId: established.instanceId,
+          });
+        },
+      },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        sessionId: groupId,
+        backend: "local",
+      },
+      "turn",
+      holderId,
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(SandboxExecReadinessTimeoutError);
+    expect((error as SandboxExecReadinessTimeoutError).instanceId).toBe(probed[1]!);
+    expect(probed).toHaveLength(2);
+    expect(new Set(probed).size).toBe(2);
+    expect(await readRow(workspaceId, groupId)).toMatchObject({
+      liveness: "cold",
+      refcount: 0,
+      turn_holders: 0,
+      instance_id: null,
+    });
+    expect(await holderCount(workspaceId, groupId, holderId)).toBe(0);
+  }, 60_000);
+
+  test("(1t) other readiness failures and a cancelled replacement pause never create a second box", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+
+    // A definitive (non-timeout) probe failure is not a slow cold start.
+    {
+      const { accountId, workspaceId, groupId } = await freshWorkspace();
+      let probes = 0;
+      const error = await resumeBoxForTurn(
+        {
+          db,
+          settings,
+          freshSandboxReadinessReplacementDelayMs: () => 0,
+          verifySpawnedSandboxReadiness: async (established) => {
+            probes += 1;
+            throw new SandboxExecReadinessError(
+              established.backendId,
+              "exec_probe_failed",
+              60_000,
+              1,
+              established.instanceId,
+            );
+          },
+        },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: "local",
+        },
+        "turn",
+        sandboxLeaseHolderIdForAttempt("activity-readiness-failed"),
+      ).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(SandboxExecReadinessError);
+      expect(probes).toBe(1);
+      expect((await readRow(workspaceId, groupId))?.liveness).toBe("cold");
+    }
+
+    // Cancellation during the jittered pause owns the turn boundary.
+    {
+      const { accountId, workspaceId, groupId } = await freshWorkspace();
+      const holderId = sandboxLeaseHolderIdForAttempt("activity-readiness-cancelled");
+      const controller = new AbortController();
+      let probes = 0;
+      const error = await resumeBoxForTurn(
+        {
+          db,
+          settings,
+          cancellationSignal: controller.signal,
+          observability: {
+            info: () => undefined,
+            warn: () => controller.abort(new Error("STEER")),
+          },
+          freshSandboxReadinessReplacementDelayMs: () => 60_000,
+          verifySpawnedSandboxReadiness: async (established, identity) => {
+            probes += 1;
+            throw new SandboxExecReadinessTimeoutError(established.backendId, 60_000, {
+              sandboxGroupId: identity.sandboxGroupId,
+              instanceId: established.instanceId,
+            });
+          },
+        },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: "local",
+        },
+        "turn",
+        holderId,
+      ).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(SandboxExecReadinessTimeoutError);
+      expect(probes).toBe(1);
+      expect(await readRow(workspaceId, groupId)).toMatchObject({
+        liveness: "cold",
+        turn_holders: 0,
+        instance_id: null,
+      });
+      expect(await holderCount(workspaceId, groupId, holderId)).toBe(0);
+    }
   }, 60_000);
 
   test("(1a) an eager cancellation release can be followed by the exact writer-drained settlement", async () => {

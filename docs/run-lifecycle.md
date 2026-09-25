@@ -1447,10 +1447,19 @@ provider instance as soon as create/restore returns, then gives Modal's command
 router a separate 60-second readiness budget before publishing the lease warm.
 The two failures retain different typed stages, group and instance identities,
 and truthful durations; a command-readiness failure is never rewritten as a
-600-second provider-capacity failure. It terminates the unpublished instance,
-rolls only the exact warming epoch back to cold, and fails the turn rather than
-rapidly creating sibling boxes. Any later display/setup failure follows the same
-owned cleanup path.
+600-second provider-capacity failure. It terminates the unpublished instance
+and rolls only the exact warming epoch back to cold. When that instance was
+freshly created by the elected spawner (not an attached, resumed, or
+provider-continuity box) and the provider confirmed its termination, the same
+turn re-enters ordinary lease admission exactly once after a jittered 2 to 10
+second pause, because boxes created in one burst tend to miss readiness together
+and their replacements must not re-synchronize. The replacement goes through the
+normal epoch-fenced cold->warming CAS (or attaches to a sibling that won it),
+records its own provider instance before readiness, and replays nothing: no
+model- or tool-visible work ran on the discarded box. A second readiness miss,
+an unconfirmed termination, or cancellation during the pause fails the turn
+rather than rapidly creating sibling boxes. Any later display/setup failure
+follows the same owned cleanup path.
 
 After a managed lease is warm, immutable Sandbox Environment setup has a second, setup-specific
 single-flight boundary. One worker claims the exact `(lease epoch, provider
