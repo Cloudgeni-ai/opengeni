@@ -1164,7 +1164,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     // Radix modal's aria-hidden background as inactive, and it drops fixed
     // layers such as the 50% backdrop from its contrast stack, so a scan that
     // overlaps that fade reports covered, unreachable text as low contrast.
-    await expectNoAxeViolations(alternatePage, '[role="dialog"]');
+    await expectNoAxeViolations(alternatePage, '[role="dialog"][data-slot="dialog-content"]');
     await alternatePage.screenshot({
       path: `${EVIDENCE_DIR}/onboarding-existing-account-invitations-desktop-1024.png`,
       fullPage: true,
@@ -1253,6 +1253,34 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
         })}`,
       );
     }
+    // The post-reset landing is the new-session page. Its starter suggestions
+    // mount disabled while the new-session draft loads and then fade from 50%
+    // to full opacity, so audit the settled page rather than a scan that
+    // overlaps that fade.
+    const postResetStarters = registeredPage.locator(
+      'section[aria-label="Starter suggestions"] button',
+    );
+    let postResetStarterStates: boolean[] = [];
+    await waitFor(
+      async () => {
+        postResetStarterStates = await postResetStarters.evaluateAll((buttons) =>
+          buttons.map((button) => (button as HTMLButtonElement).disabled),
+        );
+        return (
+          postResetStarterStates.length > 0 && postResetStarterStates.every((disabled) => !disabled)
+        );
+      },
+      {
+        timeoutMs: 20_000,
+        intervalMs: 50,
+        describe: () =>
+          JSON.stringify({
+            starterDisabledStates: postResetStarterStates,
+            url: registeredPage.url(),
+          }),
+      },
+    );
+    await settleDocumentAnimations(registeredPage);
     expect(
       await registeredPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
     ).toBe(true);
