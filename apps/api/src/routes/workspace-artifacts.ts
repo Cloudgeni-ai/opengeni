@@ -322,7 +322,11 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "private, no-store",
+          // A Site runs its own scripts, but only inside an opaque origin: no
+          // same-origin access to the console, and no cross-site embedding.
           "Content-Security-Policy": "sandbox allow-scripts",
+          "Cross-Origin-Resource-Policy": "same-origin",
+          "X-Content-Type-Options": "nosniff",
         },
       },
     );

@@ -58,6 +58,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import { retryWhileMissing } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { buildFilesMcpServer } from "../mcp/files";
+import { userContentResponseHeaders } from "../http/user-content";
 import { mcpOAuthAuthenticateHeader, resolveMcpOAuthRouteAccess } from "../mcp-oauth";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import {
@@ -685,12 +686,15 @@ async function serveRetainedArtifactContent(
     );
   }
 
+  // Stored bytes and their content type are user- or agent-chosen; this origin
+  // also serves the console, so the response is a sandboxed, non-embeddable
+  // document and active markup downloads instead of rendering.
   const headers = {
     "Accept-Ranges": range.acceptRanges,
     "Cache-Control": "private, no-store",
     "Content-Length": String(range.length),
     "Content-Type": metadata.contentType,
-    "X-Content-Type-Options": "nosniff",
+    ...userContentResponseHeaders(metadata.contentType, file.safeFilename),
     ...(range.contentRange ? { "Content-Range": range.contentRange } : {}),
   };
   if (range.kind === "empty") {

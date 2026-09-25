@@ -117,6 +117,7 @@ import {
   observeLifecycleResult,
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
+import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 
 type ComputerPlacement = {
   placement: InteractionPlacement;
@@ -494,6 +495,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           "cache-control": "no-store",
           "content-type": frame.mediaType,
           "x-opengeni-computer-frame": frame.metadataHeader,
+          ...USER_CONTENT_SECURITY_HEADERS,
         },
       });
     },

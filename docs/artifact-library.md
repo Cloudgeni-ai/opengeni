@@ -113,6 +113,29 @@ content scrolls inside the preview or opens with the full-screen control. Late
 content resize messages do not resize the conversation. Loading, failure, and
 retry states retain the same chat slot.
 
+## Serving user content from the API origin
+
+Every API response that streams user- or agent-controlled bytes (retained
+file/image/video and screenshot `/content` ranges, browser and computer frames,
+editable-artifact export downloads, and the Company Brain and workspace-state
+exports) uses the shared headers in `apps/api/src/http/user-content.ts`:
+
+- `Content-Security-Policy: default-src 'none'; ...; sandbox`, so a directly
+  opened file is a sandboxed document with no script, form, popup, or network
+  capability. Audio and video use `sandbox allow-same-origin` (never
+  `allow-scripts`) so the browser's media player can re-fetch its own URL.
+- `Cross-Origin-Resource-Policy: same-origin` and `X-Content-Type-Options: nosniff`.
+- `Content-Disposition: attachment` only for active markup types (HTML, XML
+  dialects including SVG, multipart), so opening one downloads it instead of
+  rendering attacker-authored markup on the app origin. Images, media, PDF and
+  text stay inline.
+
+The console never navigates to these routes; its previews read bytes through
+the SDK and render them in app-owned elements, so the headers do not change
+in-app viewing. Site `/html` responses keep their own `sandbox allow-scripts`
+policy (an opaque origin) and add the same CORP and `nosniff` headers. A new
+route that returns stored bytes must use the same helper.
+
 ## Boundaries and compatibility
 
 - No new image storage provider or second HTML execution path.

@@ -25,6 +25,7 @@ import {
 import { Hono } from "hono";
 import postgres from "postgres";
 
+import { USER_CONTENT_SECURITY_POLICY } from "../src/http/user-content";
 import { registerWorkspaceStateRoutes } from "../src/routes/workspace-state";
 
 const DELEGATION_SIGNING_FIXTURE = ["workspace", "state", "test", "signing", "fixture"].join("-");
@@ -143,6 +144,9 @@ describe("workspace state API authorization", () => {
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(response.headers.get("content-type")).toContain("application/json");
     expect(response.headers.get("content-disposition")).toContain("sanitized.json");
+    expect(response.headers.get("content-security-policy")).toBe(USER_CONTENT_SECURITY_POLICY);
+    expect(response.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     const serialized = await response.text();
     const exported = WorkspaceStateExportResponse.parse(JSON.parse(serialized));
     expect(exported.state.knowledge).toEqual({

@@ -256,6 +256,9 @@ test("direct uploads publish large HTML with optional downloadable source and im
     });
     expect(mismatchedReplay.status).toBe(409);
     const runtime = await requestAsCanonicalLocalHuman(`${base}/${result.artifact.id}/html`);
+    expect(runtime.headers.get("content-security-policy")).toBe("sandbox allow-scripts");
+    expect(runtime.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect(runtime.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await runtime.text()).toBe(html);
     for (const endpoint of ["html", "downloads", "content"]) {
       for (const versionId of ["not-a-uuid", ""]) {
