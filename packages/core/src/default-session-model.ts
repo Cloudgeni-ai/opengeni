@@ -24,7 +24,7 @@ import {
   workspaceCodexSubscriptionActive,
   workspaceOpenRouterConnectionActive,
   workspaceVercelAiGatewayConnectionActive,
-  organizationHoldsAddedCredits,
+  organizationHoldsCredits,
   workspaceXaiSubscriptionActive,
   workspaceXaiSubscriptionActiveForAuthority,
   XaiAuthorityPoolInactiveError,
@@ -95,9 +95,9 @@ export type DefaultSessionModelInput = {
   selections: readonly WorkspaceModelSelection[];
   workspaceDefaults: WorkspaceSessionDefaults | null;
   /**
-   * True while the organization holds a positive OpenGeni credit balance that
-   * it added itself (see `organizationHoldsAddedCredits`): the verified-signup
-   * trial grant alone does not count.
+   * True while the organization holds a positive OpenGeni credit balance from
+   * any source, the verified-signup trial grant included (see
+   * `organizationHoldsCredits`).
    */
   creditsAvailable: boolean;
 };
@@ -144,9 +144,9 @@ function creditsCandidate(
  *    (ChatGPT/Codex, then SuperGrok) in operator catalog order. The
  *    deployment default wins inside this step when it is itself a selectable
  *    subscription model.
- * 3. `credits`: while the organization holds OpenGeni credits it added itself
- *    (a purchase or grant; the verified-signup trial alone does not count),
- *    the configured credits default (`OPENGENI_CREDITS_DEFAULT_MODEL`, effort
+ * 3. `credits`: while the organization holds a positive OpenGeni credit
+ *    balance (a purchase, a grant, or the verified-signup trial grant), the
+ *    configured credits default (`OPENGENI_CREDITS_DEFAULT_MODEL`, effort
  *    clamped to what the model supports), or the first selectable
  *    credits-billed model when that one is not selectable. Skipped when the
  *    deployment default is already a selectable credits-billed model, so an
@@ -201,8 +201,9 @@ export function selectDefaultSessionModel(input: DefaultSessionModelInput): Defa
 }
 
 /**
- * The default this workspace would use once its organization adds OpenGeni
- * credits. Null when the deployment does not bill credits.
+ * The default this workspace would use while its organization holds a
+ * positive OpenGeni credit balance. Null when the deployment does not bill
+ * credits.
  */
 export function creditsDefaultSessionModel(input: {
   settings: Settings;
@@ -244,7 +245,7 @@ export async function resolveDefaultSessionModelForSelections(
   ) {
     return withoutCredits;
   }
-  return (await organizationHoldsAddedCredits(db, input.accountId))
+  return (await organizationHoldsCredits(db, input.accountId))
     ? selectDefaultSessionModel({ ...decision, creditsAvailable: true })
     : withoutCredits;
 }
