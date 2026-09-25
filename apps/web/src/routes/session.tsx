@@ -117,7 +117,7 @@ import {
   oauthConnectionRef,
   catalogConnectionAccountSelection,
 } from "@/lib/capabilities";
-import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
+import { mcpOAuthCallbackFailureMessage, startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
@@ -170,6 +170,7 @@ import {
   sessionPolicyPickerIds,
 } from "@/lib/session-tools";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
+import { useGitHubAppConnectLauncher } from "@/components/github-app-connect-launcher";
 import {
   useFixedResourceScopes,
   usePersonalResourceAttachment,
@@ -721,7 +722,7 @@ export function SessionRoute({
     const capabilityId = params.get("capability_auth");
     if (outcome !== "success") {
       toast.error("Reconnect failed", {
-        description: params.get("reason") ?? undefined,
+        description: mcpOAuthCallbackFailureMessage(params.get("stage"), params.get("reason")),
       });
       return;
     }
@@ -1708,7 +1709,10 @@ function SessionChatPane(props: {
         ? "personal"
         : "workspace",
   });
-  const repositories = useFollowUpRepositories(props.session);
+  // Hosted outside the repository menu: the menu closes when GitHub's
+  // authorization popup takes focus, which would unmount setup with it.
+  const githubAppConnect = useGitHubAppConnectLauncher(props.session.workspaceId);
+  const repositories = useFollowUpRepositories(props.session, githubAppConnect.open);
   const firstPartyToolOptions = firstPartySessionToolOptionsFor(
     clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
   );
@@ -2499,6 +2503,7 @@ function SessionChatPane(props: {
       enabled={!terminal && context.clientConfig.fileUploads.enabled === true}
       onFiles={attachments.addFiles}
     >
+      {githubAppConnect.element}
       <div className="flex shrink-0 justify-end px-3 py-1">
         <Button
           ref={findButton}

@@ -4406,7 +4406,7 @@ describe("connections routes", () => {
     }
   });
 
-  test("oauth callback rejects replayed and expired state", async () => {
+  test("oauth callback rejects replayed and expired state and reports provider denial", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const as = startFakeAuthorizationServer();
@@ -4480,6 +4480,26 @@ describe("connections routes", () => {
       expect(expiredReferenceCallback.headers.get("location")).toContain("reason=state_invalid");
       expect(as.tokenRequests).toHaveLength(0);
 
+      // Cancel at the provider is a refusal, not an expired attempt. It lands on
+      // the workspace integrations page (the default return path) and leaves the
+      // single-use state unconsumed so the same attempt can still complete.
+      const denied = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?error=access_denied&error_description=${encodeURIComponent("<b>nope</b>")}&state=${encodeURIComponent(body.state)}`,
+      );
+      expect(denied.status).toBe(302);
+      const deniedLocation = new URL(denied.headers.get("location")!, "https://web.test");
+      expect(deniedLocation.pathname).toBe(`/workspaces/${workspace.workspaceId}/plugins`);
+      expect(Object.fromEntries(deniedLocation.searchParams)).toEqual({
+        integration_oauth: "error",
+        stage: "authorize",
+        reason: "access_denied",
+      });
+      const providerError = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?error=server_error&state=${encodeURIComponent(body.state)}`,
+      );
+      expect(providerError.headers.get("location")).toContain("reason=provider_error");
+      expect(as.tokenRequests).toHaveLength(0);
+
       const first = await publicApp(client.db).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );
@@ -4515,7 +4535,19 @@ describe("connections routes", () => {
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(expiredState)}`,
       );
       expect(expired.status).toBe(302);
-      expect(expired.headers.get("location")).toContain("reason=state_invalid");
+      // An authentic but aged state still names its workspace: return there and
+      // say it expired, instead of the workspace-less fallback.
+      const expiredLocation = new URL(expired.headers.get("location")!, "https://web.test");
+      expect(expiredLocation.pathname).toBe(`/workspaces/${workspace.workspaceId}/plugins`);
+      expect(expiredLocation.searchParams.get("reason")).toBe("state_expired");
+
+      const unsigned = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(`${expiredState}x`)}`,
+      );
+      const unsignedLocation = new URL(unsigned.headers.get("location")!, "https://web.test");
+      expect(unsignedLocation.pathname).toBe("/integrations");
+      expect(unsignedLocation.searchParams.get("reason")).toBe("state_invalid");
+      expect(as.tokenRequests).toHaveLength(1);
     } finally {
       mcp.close();
       as.close();

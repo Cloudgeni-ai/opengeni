@@ -6,6 +6,7 @@ import {
 import { useCallback, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { openGitHubInstallationSettings } from "@/components/github-app-connect-launcher";
 import type { RepositoryContextPickerProps } from "@/components/repository-picker";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
@@ -117,7 +118,11 @@ function manualResourceSignature(resource: RepositoryResource): string {
  * resources are additive, so accepted resources become locked while only the
  * not-yet-sent selection remains editable.
  */
-export function useFollowUpRepositories(session: Session): {
+export function useFollowUpRepositories(
+  session: Session,
+  /** Starts workspace App setup from a click; the caller hosts the dialog. */
+  onConnectWorkspaceApp: () => void,
+): {
   pendingResources: ResourceRef[];
   error: string | null;
   selectionCount: number;
@@ -584,12 +589,16 @@ export function useFollowUpRepositories(session: Session): {
       onGitHubAppOpenChange: context.setGithubAppOpen,
       onOrgChange: context.setGithubOrg,
       onStartGitHubApp: () => void context.startGitHubAppManifestFlow(session.workspaceId),
+      onConnectWorkspaceApp,
+      onConfigureInstallation: (installationId: number) =>
+        openGitHubInstallationSettings(context.client, session.workspaceId, installationId),
       onDisconnectInstallation: disconnectRepositoryInstallation,
     }),
     [
       catalogRefresh,
       context,
       disconnectRepositoryInstallation,
+      onConnectWorkspaceApp,
       lockedManualRepoIds,
       manualReposOpen,
       mountedManualRepos,

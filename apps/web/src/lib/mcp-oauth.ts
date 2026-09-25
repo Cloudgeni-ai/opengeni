@@ -47,10 +47,39 @@ export async function startMcpOAuthWithTimeout(
   }
 }
 
+const RETRY = " Select Connect to try again.";
+const STALE_LINK = "This connection link is no longer valid or was already used.";
+
+/**
+ * Plain-language copy for the callback reasons every integration flow shares:
+ * the user cancelling at the provider, and a stale or reused callback link.
+ * Returns null for anything flow-specific so callers keep their own wording.
+ */
+export function oauthCallbackReasonMessage(reason: string | null): string | null {
+  switch (reason) {
+    case "access_denied":
+    case "provider_denied":
+      return `You cancelled at the provider, so nothing was connected.${RETRY}`;
+    case "provider_error":
+      return `The provider didn't approve the connection.${RETRY}`;
+    case "missing_code":
+      return `The provider didn't finish authorization.${RETRY}`;
+    case "state_expired":
+      return `This connection link expired. Links last 10 minutes.${RETRY}`;
+    case "state_invalid":
+    case "state_replayed":
+      return `${STALE_LINK}${RETRY}`;
+    default:
+      return null;
+  }
+}
+
 export function mcpOAuthCallbackFailureMessage(
   stage: string | null,
   reason: string | null,
 ): string {
+  const shared = oauthCallbackReasonMessage(reason);
+  if (shared) return shared;
   if (stage === "state_verify") {
     return "This connection attempt expired or was already used. Try connecting again.";
   }

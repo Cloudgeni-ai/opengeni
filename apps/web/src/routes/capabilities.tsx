@@ -23,6 +23,9 @@ import { performCapabilityAction } from "@/components/capabilities/perform-capab
 import { PlugIcon, PlusIcon } from "lucide-react";
 
 import { CapabilitiesLegacyRedirect } from "@/routes/capabilities-legacy-redirect";
+
+// Served from this chunk so `/integrations` adds no route chunk of its own.
+export { IntegrationsReturnRoute } from "@/routes/capabilities-legacy-redirect";
 import {
   Fragment,
   Suspense,
@@ -76,6 +79,7 @@ import {
 import { PageHeader } from "@/components/common";
 import { PrReviewSetupCard } from "@/components/capabilities/pr-review-setup-card";
 import { Button } from "@/components/ui/button";
+import { Notice } from "@/components/ui/notice";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
 import {
@@ -98,7 +102,7 @@ import {
   type ConnectionHealth,
   type SheetSelection,
 } from "@/lib/capabilities";
-import { mcpOAuthCallbackFailureMessage } from "@/lib/mcp-oauth";
+import { mcpOAuthCallbackFailureMessage, oauthCallbackReasonMessage } from "@/lib/mcp-oauth";
 import {
   personalGitHubOAuthFailureMessage,
   personalGitHubOAuthReturn,
@@ -240,6 +244,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     [catalogActionTarget, searchingAll, activeTab],
   );
   const [sheetError, setSheetError] = useState<string | null>(null);
+  // A callback outcome that names no catalog item (for example a stale link
+  // forwarded from `/integrations`) stays on the page until dismissed, so the
+  // explanation and the way to retry don't vanish with a toast.
+  const [callbackNotice, setCallbackNotice] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   // Which integration's detail sheet is open (one sheet, one open id).
   const [openIntegration, setOpenIntegration] = useState<string | null>(() => {
@@ -971,10 +979,11 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     }
     const reason = params.get("reason");
     const item = itemId ? (items.find((candidate) => candidate.id === itemId) ?? null) : null;
+    const message =
+      oauthCallbackReasonMessage(reason) ??
+      (reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.");
     if (item) {
-      setSheetError(
-        reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.",
-      );
+      setSheetError(message);
       setSelected({
         id: item.id,
         registry: false,
@@ -982,7 +991,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         snapshot: item,
       });
     } else {
-      toast.error("Connection failed", { description: reason ?? undefined });
+      setCallbackNotice(message);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, items, setQuery]);
@@ -1027,7 +1036,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           snapshot: item,
         });
       } else {
-        toast.error("Connection failed", { description: message });
+        setCallbackNotice(message);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1273,6 +1282,34 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             !hasWorkspacePermission(context.accessContext, workspaceId, "connections:read"))) && (
           <ConnectionAccessNotice />
         )}
+
+        {callbackNotice ? (
+          <Notice tone="failed" title="Couldn't finish connecting" className="mt-4">
+            <p role="alert">{callbackNotice}</p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setCallbackNotice(null);
+                  setQuery("");
+                  setActiveTab("connections");
+                }}
+              >
+                Show connections
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => setCallbackNotice(null)}
+              >
+                Dismiss
+              </Button>
+            </div>
+          </Notice>
+        ) : null}
 
         <PluginSearch query={query} onQueryChange={setQuery} scope={activeTab} />
         <CatalogActionContext.Provider value={catalogToolbar}>

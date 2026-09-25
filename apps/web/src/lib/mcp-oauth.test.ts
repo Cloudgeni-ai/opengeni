@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
-import { mcpOAuthCallbackFailureMessage, startMcpOAuthWithTimeout } from "./mcp-oauth";
+import {
+  mcpOAuthCallbackFailureMessage,
+  oauthCallbackReasonMessage,
+  startMcpOAuthWithTimeout,
+} from "./mcp-oauth";
 
 const request = {
   mcpUrl: "https://mcp.linear.app/mcp",
@@ -82,6 +86,32 @@ describe("mcpOAuthCallbackFailureMessage", () => {
 
   test("makes rollback-safe persistence failures explicit", () => {
     expect(mcpOAuthCallbackFailureMessage("persist", "timeout")).toContain("Nothing was committed");
+  });
+
+  test("a provider Cancel is a refusal, not an expired attempt", () => {
+    for (const reason of ["access_denied", "provider_denied"]) {
+      const message = mcpOAuthCallbackFailureMessage("authorize", reason);
+      expect(message).toBe(
+        "You cancelled at the provider, so nothing was connected. Select Connect to try again.",
+      );
+      expect(message).not.toContain("expired");
+    }
+  });
+
+  test("tells an expired link apart from an invalid or reused one, with a retry step", () => {
+    expect(mcpOAuthCallbackFailureMessage("state_verify", "state_expired")).toBe(
+      "This connection link expired. Links last 10 minutes. Select Connect to try again.",
+    );
+    const invalid = mcpOAuthCallbackFailureMessage("state_verify", "state_invalid");
+    expect(invalid).toContain("no longer valid or was already used");
+    expect(invalid).toContain("Select Connect to try again.");
+    expect(oauthCallbackReasonMessage("state_replayed")).toBe(invalid);
+  });
+
+  test("leaves flow-specific reasons to each caller", () => {
+    expect(oauthCallbackReasonMessage("scope_not_granted")).toBeNull();
+    expect(oauthCallbackReasonMessage(null)).toBeNull();
+    expect(oauthCallbackReasonMessage("constructor")).toBeNull();
   });
 
   test("turns an invalid client response into administrator-actionable guidance", () => {

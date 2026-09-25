@@ -116,6 +116,7 @@ import {
 } from "../connection-ownership";
 import {
   integrationBaseUrl,
+  oauthStateFailureReturn,
   oauthStateTtlMs,
   requireIntegrationsStateSecret,
 } from "./oauth-client";
@@ -632,7 +633,7 @@ export async function completeGoogleDriveOAuthCallback(
     return {
       redirectTo: googleDriveReturnUrl(
         returnBaseUrl,
-        state?.returnPath ?? "/integrations",
+        state?.returnPath ?? oauthStateFailureReturn(deps.settings, input.state).returnPath,
         "error",
         googleDriveErrorReason(error),
       ),

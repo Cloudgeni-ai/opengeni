@@ -95,6 +95,28 @@ cookie, then repeats exact OAuth authority proof before updating the binding.
 This keeps repository reconfiguration working even if GitHub omits `state` from
 its update redirect.
 
+### Links are minted on click
+
+The `installUrl`, `linkUrl`, and per-installation `configureUrl` values in the
+status response carry that ten-minute signed state, so a copy captured when a
+page loaded goes stale. The new-session and follow-up repository pickers treat
+`installUrl` only as "this principal may connect": **Connect workspace App**
+opens the same native Connect dialog as the Plugins page GitHub card, which
+starts a durable attempt and mints the authorization link at that moment, and
+**Repositories** fetches a fresh `configureUrl` before navigating. The dialog
+host lives outside the repository menu, because the menu closes when the
+authorization popup takes focus.
+
+The browser-navigation routes (`/github/connect`, `/github/setup`,
+`/github/install/callback`, `/github/oauth/callback`,
+`/github/installations/select`, installation `configure`, and the manifest
+callback) answer failures with a readable page and a **Back to OpenGeni** link to
+the workspace Plugins page, never a JSON body. The HTTP status is unchanged. An
+expired or reused link, GitHub's **Cancel** (`error=access_denied`), a
+non-owner's authority denial, a missing permission, and a signed-out browser
+each get their own explanation. The native Connect callback also renders the
+expired page when its state is stale or unreadable.
+
 ## Supported authority matrix
 
 | GitHub case | Self-service binding | Evidence / result |

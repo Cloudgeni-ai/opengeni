@@ -652,6 +652,98 @@ describe("GitHub owner-authority binding routes", () => {
     }
   });
 
+  test("browser failures render a page with a way back, never raw JSON", async () => {
+    const app = appWithProvider({}, undefined, databaseMustNotBeConsulted());
+    const expectPage = async (response: Response, status: number, title: string) => {
+      expect(response.status).toBe(status);
+      expect(response.headers.get("content-type")).toContain("text/html");
+      const html = await response.text();
+      expect(html).toContain(title);
+      expect(html).toContain("Back to OpenGeni");
+      expect(html).not.toContain('{"error"');
+      return html;
+    };
+
+    // A connect link minted at page load and opened after its lifetime.
+    const stale = managerState({}, Math.floor(Date.now() / 1_000) - 11 * 60);
+    const staleHtml = await expectPage(
+      await app.request(
+        `http://test/v1/workspaces/${workspaceId}/github/connect?state=${encodeURIComponent(stale)}`,
+      ),
+      400,
+      "This GitHub link expired",
+    );
+    expect(staleHtml).toContain(`/workspaces/${workspaceId}/plugins`);
+
+    // Cancel on GitHub's authorization screen.
+    const discovery = createSignedState(stateSecret, {
+      accountId,
+      workspaceId,
+      intent: "installation_authority_discovery",
+    });
+    const cancelled = await expectPage(
+      await app.request(
+        `http://test/v1/github/oauth/callback?error=access_denied&error_description=${encodeURIComponent("<script>x</script>")}&state=${encodeURIComponent(discovery)}`,
+      ),
+      400,
+      "GitHub connection cancelled",
+    );
+    expect(cancelled).toContain(`/workspaces/${workspaceId}/plugins`);
+    expect(cancelled).not.toContain("<script>x</script>");
+
+    // Unsigned state names no workspace, so the way back is the app home.
+    const tampered = await expectPage(
+      await app.request("http://test/v1/github/oauth/callback?code=fresh&state=tampered"),
+      400,
+      "This GitHub link expired",
+    );
+    expect(tampered).not.toContain("/plugins");
+
+    // An expired native Connect callback (usually in the popup) also gets a page.
+    const expiredConnect = createSignedState(
+      stateSecret,
+      {
+        kind: "github_app_connect",
+        accountId,
+        workspaceId,
+        subjectId,
+        personalOwnerVerified: false,
+        connectAttemptId: crypto.randomUUID(),
+        phase: "discover",
+        providerId: "github-app",
+      },
+      Math.floor(Date.now() / 1_000) - 11 * 60,
+    );
+    await expectPage(
+      await app.request(
+        `http://test/v1/github/oauth/callback?code=fresh&state=${encodeURIComponent(expiredConnect)}`,
+      ),
+      400,
+      "This GitHub link expired",
+    );
+  });
+
+  test("a non-owner sees who must connect the account", async () => {
+    const app = appWithProvider({
+      authorizeInstallationBinding: async () => {
+        throw new GitHubInstallationAuthorityError(
+          "authority_denied",
+          "Only a GitHub personal-account owner or organization owner may bind an installation",
+        );
+      },
+    });
+    const oauth = await startOAuth(app);
+    const response = await app.request(
+      `http://test/v1/github/oauth/callback?code=fresh&state=${encodeURIComponent(oauth.state)}`,
+      { headers: { cookie: oauth.browserHeader } },
+    );
+    expect(response.status).toBe(403);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    const html = await response.text();
+    expect(html).toContain("An owner needs to connect this account");
+    expect(html).toContain(`/workspaces/${workspaceId}/plugins`);
+  });
+
   test("legacy PR #518 chooser remains disabled with authenticated state validation", async () => {
     const app = appWithProvider({}, undefined, databaseMustNotBeConsulted());
     const state = managerState();

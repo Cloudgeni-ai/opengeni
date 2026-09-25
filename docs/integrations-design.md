@@ -232,6 +232,16 @@ The PKCE verifier remains encrypted inside the full signed context, which is enc
 
 The callback route must NOT call `requireAccessGrant` — a browser redirect carries only `code`+`state`. It trusts exclusively the verified, unexpired state minted by the authenticated start route and the matching scoped pending record.
 
+### 5.2.0 Callback failure landing
+
+Every integration callback returns the browser to a real page with a plain-language outcome:
+
+- The start route defaults the signed return path to the workspace Plugins page (`/workspaces/:id/plugins`). The legacy `/capabilities` default is retired because its redirect used to drop callback parameters.
+- A provider `error` (the user clicked **Cancel**) is a refusal, not an expired attempt: MCP OAuth reports `stage=authorize` with `reason=access_denied` (or `provider_error` for any other code) and leaves the single-use nonce unconsumed. The provider's own text is never reflected.
+- When the state itself is unusable, `oauthStateFailureReturn` decides where to go. A correctly signed state that is only too old still names its workspace, so the browser returns to that workspace's Plugins page with `reason=state_expired`. An unsigned, tampered, or foreign state returns to `/integrations` with `reason=state_invalid`. This is display routing only; an aged payload never authorizes, resumes, or replays anything. MCP OAuth, Integration Definition OAuth, Atlassian, Google Drive, Fiken, personal GitHub, social OAuth, and the Slack bot install share it.
+- The web app serves `/integrations` from the Capabilities route chunk: it resolves the viewer's current workspace and replaces the URL with that workspace's Plugins page, keeping only an allowlist of callback outcome parameters (bearer-shaped values such as `slack_link` are dropped). The legacy `/capabilities` redirect forwards the same allowlist.
+- The Plugins page maps shared reasons (`access_denied`, `provider_denied`, `provider_error`, `missing_code`, `state_expired`, `state_invalid`, `state_replayed`) to copy with a retry step. An outcome that names a catalog item reopens its sheet with the message; one that names none shows a persistent notice with **Show connections**.
+
 ### 5.2.1 Authorization-server clients
 
 DCR-minted OAuth clients are deployment-wide authorization-server identity, not per-workspace user credentials. They live in `integration_oauth_clients`, keyed by AS issuer, with `client_secret` encrypted under the variable-sets key when present. This keeps one DCR client reusable across many workspace connections to the same AS, while the actual access/refresh tokens remain in workspace-scoped `connections.credential_encrypted`. Operator pre-registered clients are read from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` and are not copied into Postgres.

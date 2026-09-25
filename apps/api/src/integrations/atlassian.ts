@@ -92,6 +92,7 @@ import {
 } from "../connection-ownership";
 import {
   integrationBaseUrl,
+  oauthStateFailureReturn,
   oauthStateTtlMs,
   requireIntegrationsStateSecret,
 } from "./oauth-client";
@@ -431,7 +432,7 @@ export async function completeAtlassianOAuthCallback(
     return {
       redirectTo: returnUrl(
         returnBaseUrl,
-        state?.returnPath ?? "/integrations",
+        state?.returnPath ?? oauthStateFailureReturn(deps.settings, input.state).returnPath,
         "error",
         errorReason(error),
       ),
