@@ -46,7 +46,12 @@ export type SignupFunnelMetrics = {
   recordSignUp(authContext: unknown): Promise<void>;
   /** A managed user verified their email address. */
   recordEmailVerified(): void;
-  /** A provider session was created that is not an internally discarded one. */
+  /**
+   * A provider session was created that is not an internally discarded one.
+   * In the legacy session-set mode this includes the session the first
+   * successful email-verification click creates: that is the new user's first
+   * sign-in, so it is counted rather than folded into `email_verified`.
+   */
   recordSignIn(): void;
 };
 

@@ -167,6 +167,17 @@ export default defineConfig({
               priority: 20,
             },
             {
+              // The Agent learning editor is reached only from lazy surfaces:
+              // the schedules route, learning administration, and the mobile
+              // composer's on-demand learning sheet. Entry-aware settings
+              // grouping otherwise folds it into a shared chunk that a direct
+              // session load imports, so pin it to its own lazy unit.
+              name: "agent-learning-settings",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]knowledge[\\/]agent-learning-settings\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
               // The session workbench is the primary interactive route. Keep
               // its static graph route-aware, but coalesce tiny shared groups
               // so a cold navigation does not fan out into dozens of requests.
