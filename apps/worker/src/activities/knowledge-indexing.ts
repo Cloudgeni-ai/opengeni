@@ -28,12 +28,14 @@ export class KnowledgeIndexUsageLimitError extends Error {
   }
 }
 
-export type KnowledgeIndexFailureStage = "embedding" | "persistence";
+export type KnowledgeIndexFailureStage = "embedding" | "processing";
 
 /**
  * Content-free classification for a deferred Knowledge index batch. Only
  * protocol constants, an HTTP status, and a PostgreSQL SQLSTATE are retained;
  * provider messages, bodies, SQL, and identifiers never leave the process.
+ * Outside the embedding call, only a PostgreSQL error in the cause chain is
+ * attributed to the database; any other failure stays a worker failure.
  */
 export function knowledgeIndexFailureDiagnostic(
   stage: KnowledgeIndexFailureStage,
@@ -43,7 +45,8 @@ export function knowledgeIndexFailureDiagnostic(
   errorCode:
     | "knowledge_index_usage_limit_reached"
     | "knowledge_index_embedding_failed"
-    | "knowledge_index_persistence_failed";
+    | "knowledge_index_persistence_failed"
+    | "knowledge_index_failed";
   origin: "worker" | "db";
   status?: number;
   sqlState?: string;
@@ -66,12 +69,19 @@ export function knowledgeIndexFailureDiagnostic(
         : {}),
     };
   }
-  const sqlState = postgresSqlState(error);
+  const postgres = postgresErrorState(error);
+  if (!postgres) {
+    return {
+      errorClass: "KnowledgeIndexOperationError",
+      errorCode: "knowledge_index_failed",
+      origin: "worker",
+    };
+  }
   return {
     errorClass: "KnowledgeIndexOperationError",
     errorCode: "knowledge_index_persistence_failed",
     origin: "db",
-    ...(sqlState ? { sqlState } : {}),
+    ...(postgres.sqlState ? { sqlState: postgres.sqlState } : {}),
   };
 }
 
@@ -85,13 +95,15 @@ function ownValue(value: unknown, key: string): unknown {
   }
 }
 
-/** The SQLSTATE of the nearest PostgreSQL error in a short cause chain. */
-function postgresSqlState(error: unknown): string | undefined {
+/** The nearest PostgreSQL error in a short cause chain, with its SQLSTATE
+ * when that is a well-formed five-character code. */
+function postgresErrorState(error: unknown): { sqlState?: string } | undefined {
   let current = error;
   for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
-    const code = ownValue(current, "code");
-    if (ownValue(current, "name") === "PostgresError")
-      return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? code : undefined;
+    if (ownValue(current, "name") === "PostgresError") {
+      const code = ownValue(current, "code");
+      return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? { sqlState: code } : {};
+    }
     current = ownValue(current, "cause");
   }
   return undefined;
@@ -129,7 +141,7 @@ export function createKnowledgeIndexingActivities(
         limit: 2,
       });
       for (const claim of claims) {
-        let stage: KnowledgeIndexFailureStage = "persistence";
+        let stage: KnowledgeIndexFailureStage = "processing";
         try {
           const source = await readKnowledgeIndexSource(db, claim);
           if (!source) {
@@ -216,7 +228,7 @@ export function createKnowledgeIndexingActivities(
               const vectors = await embedder.embedMany(inputs);
               if (vectors.length !== chunks.length)
                 throw new Error("Incomplete Knowledge embeddings");
-              stage = "persistence";
+              stage = "processing";
               // A reviewer may have rejected this revision during the provider
               // call. The DB guard holds its publication row through settlement.
               if (paid) {
@@ -328,7 +340,7 @@ export function createKnowledgeIndexingActivities(
             knowledgeIndexFailureDiagnostic(stage, error),
           );
           await deferKnowledgeIndexJob(db, claim).catch((deferError: unknown) => {
-            const deferDiagnostic = knowledgeIndexFailureDiagnostic("persistence", deferError);
+            const deferDiagnostic = knowledgeIndexFailureDiagnostic("processing", deferError);
             observability.warn("Knowledge indexing batch deferral failed", {
               ...deferDiagnostic,
               errorCode: "knowledge_index_defer_failed",

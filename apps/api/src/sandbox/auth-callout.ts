@@ -73,9 +73,14 @@ const processDenialWarningThrottle = createLogThrottle({
   maxKeys: 1_024,
 });
 
+/** Closed denial vocabulary. The public log projection drops identifiers, so
+ * `reason` is what tells an operator which throttle key a count belongs to. */
+type AuthCalloutDenialReason = "invalid_bearer" | "inactive_enrollment" | "duplicate_runner";
+
 function warnDenial(
   deps: AuthCalloutDeps,
   key: string,
+  reason: AuthCalloutDenialReason,
   message: string,
   attributes: Record<string, string | number> = {},
 ): void {
@@ -83,6 +88,7 @@ function warnDenial(
   if (!admission) return;
   deps.observability?.warn?.(message, {
     ...attributes,
+    reason,
     ...(admission.suppressedCount > 0 ? { suppressedCount: admission.suppressedCount } : {}),
   });
 }
@@ -145,6 +151,7 @@ export async function handleAuthorizationRequest(
     warnDenial(
       deps,
       rejectedBearerKey(bearer),
+      "invalid_bearer",
       "auth-callout: rejected an invalid enrollment bearer",
     );
     return deny("invalid or expired enrollment bearer");
@@ -157,6 +164,7 @@ export async function handleAuthorizationRequest(
     warnDenial(
       deps,
       `inactive:${claims.workspaceId}:${claims.agentId}`,
+      "inactive_enrollment",
       "auth-callout: denied a revoked or unknown enrollment",
       { workspaceId: claims.workspaceId, agentId: claims.agentId },
     );
@@ -194,6 +202,7 @@ export async function handleAuthorizationRequest(
     warnDenial(
       deps,
       `duplicate:${claims.workspaceId}:${claims.agentId}`,
+      "duplicate_runner",
       "auth-callout: denied a duplicate live runner",
       { workspaceId: claims.workspaceId, agentId: claims.agentId },
     );

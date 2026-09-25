@@ -211,11 +211,17 @@ describe("handleAuthorizationRequest", () => {
     now += 1_000;
     await handleAuthorizationRequest(throttled, authRequest(staleBearer));
     expect(warnings).toEqual([
-      { message: "auth-callout: rejected an invalid enrollment bearer", attributes: {} },
-      { message: "auth-callout: rejected an invalid enrollment bearer", attributes: {} },
       {
         message: "auth-callout: rejected an invalid enrollment bearer",
-        attributes: { suppressedCount: 59 },
+        attributes: { reason: "invalid_bearer" },
+      },
+      {
+        message: "auth-callout: rejected an invalid enrollment bearer",
+        attributes: { reason: "invalid_bearer" },
+      },
+      {
+        message: "auth-callout: rejected an invalid enrollment bearer",
+        attributes: { reason: "invalid_bearer", suppressedCount: 59 },
       },
     ]);
     expect(JSON.stringify(warnings)).not.toContain("stale-machine");

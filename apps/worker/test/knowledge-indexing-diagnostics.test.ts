@@ -6,7 +6,7 @@ import {
 
 const sentinel = "private-knowledge-content-8c1f";
 
-test("classifies provider, persistence, and limit failures without their content", () => {
+test("classifies provider, persistence, worker, and limit failures without their content", () => {
   const provider = Object.assign(new Error(`rate limited ${sentinel}`), {
     status: 429,
     code: sentinel,
@@ -29,7 +29,7 @@ test("classifies provider, persistence, and limit failures without their content
     name: "DrizzleQueryError",
     cause: postgres,
   });
-  expect(knowledgeIndexFailureDiagnostic("persistence", wrapped)).toEqual({
+  expect(knowledgeIndexFailureDiagnostic("processing", wrapped)).toEqual({
     errorClass: "KnowledgeIndexOperationError",
     errorCode: "knowledge_index_persistence_failed",
     origin: "db",
@@ -37,7 +37,7 @@ test("classifies provider, persistence, and limit failures without their content
   });
   expect(
     knowledgeIndexFailureDiagnostic(
-      "persistence",
+      "processing",
       Object.assign(new Error("x"), { name: "PostgresError", code: sentinel }),
     ),
   ).toEqual({
@@ -46,8 +46,19 @@ test("classifies provider, persistence, and limit failures without their content
     origin: "db",
   });
 
+  // Only a PostgreSQL error in the cause chain is attributed to the database.
+  const chunking = Object.assign(new Error(`chunk ${sentinel}`), {
+    code: "22001",
+    cause: new Error(sentinel),
+  });
+  expect(knowledgeIndexFailureDiagnostic("processing", chunking)).toEqual({
+    errorClass: "KnowledgeIndexOperationError",
+    errorCode: "knowledge_index_failed",
+    origin: "worker",
+  });
+
   expect(
-    knowledgeIndexFailureDiagnostic("persistence", new KnowledgeIndexUsageLimitError()),
+    knowledgeIndexFailureDiagnostic("processing", new KnowledgeIndexUsageLimitError()),
   ).toEqual({
     errorClass: "KnowledgeIndexOperationError",
     errorCode: "knowledge_index_usage_limit_reached",
@@ -79,12 +90,14 @@ test("a hostile error cannot break classification", () => {
     errorCode: "knowledge_index_embedding_failed",
     origin: "worker",
   });
-  expect(knowledgeIndexFailureDiagnostic("persistence", hostile)).toEqual({
+  expect(knowledgeIndexFailureDiagnostic("processing", hostile)).toEqual({
     errorClass: "KnowledgeIndexOperationError",
-    errorCode: "knowledge_index_persistence_failed",
-    origin: "db",
+    errorCode: "knowledge_index_failed",
+    origin: "worker",
   });
-  expect(knowledgeIndexFailureDiagnostic("persistence", null).errorCode).toBe(
-    "knowledge_index_persistence_failed",
-  );
+  expect(knowledgeIndexFailureDiagnostic("processing", null)).toEqual({
+    errorClass: "KnowledgeIndexOperationError",
+    errorCode: "knowledge_index_failed",
+    origin: "worker",
+  });
 });

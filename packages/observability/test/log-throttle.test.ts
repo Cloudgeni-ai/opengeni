@@ -40,7 +40,7 @@ test("the key set is bounded by forgetting the least recently admitted key", () 
   expect(throttle.admit("a")).toEqual({ suppressedCount: 0 });
 });
 
-test("suppressedCount survives the public structured-log projection", () => {
+test("suppressedCount and the closed reason survive the public structured-log projection", () => {
   const observed: string[] = [];
   const originalWarn = console.warn;
   console.warn = (message?: unknown) => observed.push(String(message));
@@ -53,9 +53,17 @@ test("suppressedCount survives the public structured-log projection", () => {
         observabilityMetricsEnabled: false,
       },
       { component: "api" },
-    ).warn("auth-callout: rejected an invalid enrollment bearer", { suppressedCount: 59 });
+    ).warn("auth-callout: denied a revoked or unknown enrollment", {
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      agentId: "agent-identifier",
+      reason: "inactive_enrollment",
+      suppressedCount: 59,
+    });
   } finally {
     console.warn = originalWarn;
   }
-  expect(JSON.parse(observed[0]!)).toMatchObject({ suppressedCount: 59 });
+  const line = JSON.parse(observed[0]!);
+  expect(line).toMatchObject({ reason: "inactive_enrollment", suppressedCount: 59 });
+  expect(line).not.toHaveProperty("workspaceId");
+  expect(line).not.toHaveProperty("agentId");
 });

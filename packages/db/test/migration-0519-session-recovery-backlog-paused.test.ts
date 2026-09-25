@@ -137,6 +137,7 @@ async function recoverAndQuiesce(value: Fixture, sessionId: string) {
       .where(eq(schema.sessions.id, sessionId)),
   );
   expect(session).toEqual({ status: "recovering", activeTurnId: turn.id });
+  return turn.id;
 }
 
 async function quiesce(value: Fixture, sessionId: string, attemptId: string) {
@@ -150,6 +151,18 @@ async function quiesce(value: Fixture, sessionId: string, attemptId: string) {
 
 async function backlog() {
   return await countSessionRecoveryBacklog(client.db);
+}
+
+/** The durable workflow-wake revision the dispatcher delivers to the session
+ * workflow, which then re-peeks and claims the recovering turn. */
+async function wakeRevision(value: Fixture, sessionId: string) {
+  const [row] = await withWorkspaceRls(client.db, value.workspaceId, (db) =>
+    db
+      .select({ wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision })
+      .from(schema.sessionWorkflowWakeOutbox)
+      .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, sessionId)),
+  );
+  return row?.wakeRevision ?? 0;
 }
 
 describe("session recovery backlog excludes effectively paused sessions (migration 0519)", () => {
@@ -171,7 +184,7 @@ describe("session recovery backlog excludes effectively paused sessions (migrati
 
     // Direct session Pause.
     const direct = await fixture();
-    await recoverAndQuiesce(direct, direct.root.id);
+    const directTurnId = await recoverAndQuiesce(direct, direct.root.id);
     expect(await backlog()).toEqual({ quiescence_missing: 1, projection_stale: 1 });
     await sessionControl(direct, direct.root.id, "pause");
     expect(await backlog()).toEqual({ quiescence_missing: 1, projection_stale: 0 });
@@ -190,14 +203,21 @@ describe("session recovery backlog excludes effectively paused sessions (migrati
     await workspaceControl(workspace, "pause");
     expect(await backlog()).toEqual({ quiescence_missing: 1, projection_stale: 0 });
 
-    // Resume makes each unclaimed recovering turn stale again.
+    // Resume makes each unclaimed recovering turn stale again, and commits a
+    // fresh durable workflow wake so the workflow re-claims it.
+    const directWake = await wakeRevision(direct, direct.root.id);
     await sessionControl(direct, direct.root.id, "resume");
+    expect(await wakeRevision(direct, direct.root.id)).toBeGreaterThan(directWake);
     expect(await backlog()).toEqual({ quiescence_missing: 1, projection_stale: 1 });
     // A selected Resume of the child defeats the older ancestor pause while
     // the root itself stays paused.
+    const childWake = await wakeRevision(ancestor, ancestor.child.id);
     await sessionControl(ancestor, ancestor.child.id, "resume");
+    expect(await wakeRevision(ancestor, ancestor.child.id)).toBeGreaterThan(childWake);
     expect(await backlog()).toEqual({ quiescence_missing: 1, projection_stale: 2 });
+    const workspaceWake = await wakeRevision(workspace, workspace.root.id);
     await workspaceControl(workspace, "resume");
+    expect(await wakeRevision(workspace, workspace.root.id)).toBeGreaterThan(workspaceWake);
     expect(await backlog()).toEqual({ quiescence_missing: 1, projection_stale: 3 });
 
     // A newer Pause on the root hides the child again (the child's override is
@@ -206,8 +226,10 @@ describe("session recovery backlog excludes effectively paused sessions (migrati
     await sessionControl(ancestor, ancestor.root.id, "pause");
     expect(await backlog()).toEqual({ quiescence_missing: 1, projection_stale: 2 });
 
-    // A real re-claim clears the obligation.
-    await claim(direct, direct.root.id, false);
+    // The woken workflow's claim recovers the same logical turn and clears
+    // the obligation.
+    const reclaimed = await claim(direct, direct.root.id, false);
+    expect(reclaimed.turn.id).toBe(directTurnId);
     expect(await backlog()).toEqual({ quiescence_missing: 1, projection_stale: 1 });
   }, 180_000);
 

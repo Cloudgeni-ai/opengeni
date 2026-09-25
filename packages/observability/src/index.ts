@@ -448,6 +448,7 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "internal_error",
   "knowledge_index_defer_failed",
   "knowledge_index_embedding_failed",
+  "knowledge_index_failed",
   "knowledge_index_persistence_failed",
   "knowledge_index_usage_limit_reached",
   "limit_exceeded",

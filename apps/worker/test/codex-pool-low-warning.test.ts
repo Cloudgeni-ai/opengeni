@@ -39,16 +39,17 @@ test("the low Codex pool warning is logged once per workspace depth per interval
   now = CODEX_POOL_LOW_WARNING_INTERVAL_MS;
   observe("a", "one");
 
+  const one = { eligibleCount: 1, connectedCount: 2, depth: "one", reason: "eligible_pool_one" };
   expect(warnings).toEqual([
-    { workspaceId: "workspace-a", eligibleCount: 1, connectedCount: 2, depth: "one" },
-    { workspaceId: "workspace-a", eligibleCount: 0, connectedCount: 2, depth: "zero" },
-    { workspaceId: "workspace-b", eligibleCount: 1, connectedCount: 2, depth: "one" },
+    { workspaceId: "workspace-a", ...one },
     {
       workspaceId: "workspace-a",
-      eligibleCount: 1,
+      eligibleCount: 0,
       connectedCount: 2,
-      depth: "one",
-      suppressedCount: 29,
+      depth: "zero",
+      reason: "eligible_pool_zero",
     },
+    { workspaceId: "workspace-b", ...one },
+    { workspaceId: "workspace-a", ...one, suppressedCount: 29 },
   ]);
 });

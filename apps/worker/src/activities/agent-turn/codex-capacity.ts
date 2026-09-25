@@ -59,7 +59,8 @@ import type {
 
 /** The eligible-pool gauge and `opengeni_codex_pool_low_total` stay per turn;
  * the warning line is the first observation per workspace pool depth, then at
- * most one per interval with the count it hid. */
+ * most one per interval with the count it hid. The public log projection drops
+ * the identifiers and counts, so the closed `reason` keeps the depth visible. */
 export const CODEX_POOL_LOW_WARNING_INTERVAL_MS = 10 * 60_000;
 const codexPoolLowWarningThrottle = createLogThrottle({
   intervalMs: CODEX_POOL_LOW_WARNING_INTERVAL_MS,
@@ -84,6 +85,7 @@ export function warnCodexPoolLow(
     eligibleCount: input.eligibleCount,
     connectedCount: input.connectedCount,
     depth: input.depth,
+    reason: input.depth === "zero" ? "eligible_pool_zero" : "eligible_pool_one",
     ...(admission.suppressedCount > 0 ? { suppressedCount: admission.suppressedCount } : {}),
   });
 }

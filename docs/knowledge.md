@@ -58,8 +58,9 @@ A failed vector-index batch keeps its last completed projection and the durable
 queue retries it with backoff. The stored job reason stays the SQL lifecycle's
 fixed `embedding_unavailable` code; the worker warning carries only the
 content-free cause: `knowledge_index_embedding_failed` with the provider HTTP
-status, `knowledge_index_persistence_failed` with the SQLSTATE, or
-`knowledge_index_usage_limit_reached`.
+status, `knowledge_index_persistence_failed` with the SQLSTATE when a
+PostgreSQL error caused it, `knowledge_index_usage_limit_reached`, or
+`knowledge_index_failed` for any other worker-side failure.
 
 Review-first source content and findings belong to the same run's review batch.
 The source tool may read that run's pending content so the agent can finish its

@@ -18,7 +18,8 @@
 //       never two active concurrently.
 
 import { describe, expect, test } from "bun:test";
-import type { SandboxSessionLike } from "@openai/agents/sandbox";
+import { SandboxWorkspaceReadNotFoundError, type SandboxSessionLike } from "@openai/agents/sandbox";
+import { SandboxFilesystemNotFoundError } from "modal";
 import { discoverWorkspaceSkills } from "../src/workspace-skills";
 import {
   ChannelANotFoundError,
@@ -407,6 +408,58 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       ]),
     ).resolves.toEqual([]);
     expect(discoveryObservations).toMatchObject([{ op: "listDir", outcome: "completed" }]);
+  });
+
+  test("typed SDK path misses from a read-only first probe are completed operations", async () => {
+    for (const miss of [
+      new SandboxWorkspaceReadNotFoundError("path not found: .agents/skills"),
+      new SandboxFilesystemNotFoundError("path not found: .agents/skills"),
+    ]) {
+      const observations: Parameters<
+        NonNullable<RoutingSandboxSessionDeps["onFirstOperation"]>
+      >[0][] = [];
+      const operations: Parameters<NonNullable<RoutingSandboxSessionDeps["onOperation"]>>[0][] = [];
+      const backend: RoutableBackendSession = {
+        async readFile() {
+          throw miss;
+        },
+      };
+      const proxy = new RoutingSandboxSession({
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+        resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+        onFirstOperation: (observation) => observations.push(observation),
+        onOperation: (observation) => operations.push(observation),
+      });
+      await expect(proxy.readFile({ path: ".agents/skills/x/SKILL.md" })).rejects.toBe(miss);
+      expect(observations).toMatchObject([
+        {
+          op: "readFile",
+          outcome: "completed",
+          phases: { providerOperation: { outcome: "completed" } },
+        },
+      ]);
+      expect(operations).toMatchObject([{ op: "readFile", outcome: "not_found" }]);
+    }
+
+    // Untyped "not found" text is not a definite path miss.
+    const observations: Parameters<
+      NonNullable<RoutingSandboxSessionDeps["onFirstOperation"]>
+    >[0][] = [];
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: {
+          async readFile() {
+            throw Object.assign(new Error("404 not found"), { status: 404 });
+          },
+        },
+        sandboxId: null,
+        kind: "modal",
+      }),
+      onFirstOperation: (observation) => observations.push(observation),
+    });
+    await expect(proxy.readFile({ path: "missing.txt" })).rejects.toThrow("not found");
+    expect(observations).toMatchObject([{ outcome: "failed" }]);
   });
 
   test("a first-operation provider failure that is not a path miss stays failed", async () => {
