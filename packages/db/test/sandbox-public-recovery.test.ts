@@ -4,6 +4,7 @@ import { sql } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   acquireLease,
+  authorizeAutomaticSandboxCheckpointRecovery,
   beginSandboxRematerialization,
   bootstrapWorkspace,
   claimSandboxCheckpointArtifactsForGc,
@@ -284,7 +285,7 @@ describe("explicit singleton checkpoint recovery", () => {
     await rejectsWithSqlState(
       claimSessionWorkForAttempt(client.db, f.workspaceId, {
         ...input,
-        filesystemDiscontinuityProtocol: 2 as 1,
+        filesystemDiscontinuityProtocol: 3 as 1 | 2,
       }),
     );
     expect(
@@ -357,6 +358,106 @@ describe("explicit singleton checkpoint recovery", () => {
     } finally {
       await returned.close();
     }
+  });
+
+  test("provider loss selects a verified older checkpoint once and fences workers without the automatic warning", async () => {
+    const f = await fixture();
+    await enqueue(f);
+    const input = claimInput(f);
+    expect(
+      await claimSessionWorkForAttempt(client.db, f.workspaceId, {
+        ...input,
+        filesystemDiscontinuityProtocol: 2,
+      }),
+    ).toMatchObject({ action: "claimed" });
+    const scope = {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      sessionId: f.session.id,
+      attemptId: input.attemptId,
+    };
+    const first = await authorizeAutomaticSandboxCheckpointRecovery(client.db, scope);
+    expect(first).toMatchObject({
+      status: "authorized",
+      selection: {
+        sessionId: f.session.id,
+        archiveGeneration: 10,
+        workspaceGeneration: 44,
+        artifactId: f.artifact.id,
+      },
+    });
+    expect(await authorizeAutomaticSandboxCheckpointRecovery(client.db, scope)).toMatchObject({
+      status: "already_authorized",
+    });
+    const [count] = await shared.admin<{ n: number }[]>`select count(*)::int as n
+      from session_command_receipts where target_session_id = ${f.session.id}
+        and action = 'sandbox.recovery.automatic'`;
+    expect(count?.n).toBe(1);
+    const warning = await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id);
+    expect(warning).toContain(f.request.selection.capturedAt);
+    expect(warning).toContain("automatically");
+    expect(warning).not.toContain("human explicitly consented");
+    await rejectsWithSqlState(
+      claimSessionWorkForAttempt(client.db, f.workspaceId, {
+        ...input,
+        filesystemDiscontinuityProtocol: 1,
+      }),
+    );
+    expect(
+      await claimSessionWorkForAttempt(client.db, f.workspaceId, {
+        ...input,
+        filesystemDiscontinuityProtocol: 2,
+      }),
+    ).toMatchObject({ action: "claimed" });
+    const elected = await acquireLease(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      sandboxGroupId: f.session.sandboxGroupId,
+      kind: "viewer",
+      holderId: "automatic-fallback",
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    expect(elected.role).toBe("spawner");
+    expect(elected.lease.historicalRecoveryAuthorized).toBe(true);
+    expect(
+      await beginSandboxRematerialization(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sandboxGroupId: f.session.sandboxGroupId,
+        expectedEpoch: elected.lease.leaseEpoch,
+        rematerializationId: crypto.randomUUID(),
+      }),
+    ).toMatchObject({ status: "started" });
+    expect(await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id)).toBe(
+      warning,
+    );
+  });
+
+  test("automatic fallback refuses an archive without definitive provider-loss truth", async () => {
+    const f = await fixture();
+    await shared.admin`update sandbox_leases set resume_state =
+      jsonb_set(resume_state, '{opengeniRecovery,provider,status}', '"unknown"'::jsonb)
+      where id = ${f.leaseId}`;
+    await enqueue(f);
+    const input = claimInput(f);
+    expect(
+      await claimSessionWorkForAttempt(client.db, f.workspaceId, {
+        ...input,
+        filesystemDiscontinuityProtocol: 2,
+      }),
+    ).toMatchObject({ action: "claimed" });
+    expect(
+      await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: f.session.id,
+        attemptId: input.attemptId,
+      }),
+    ).toEqual({ status: "not_eligible" });
+    expect(
+      await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id),
+    ).toBeNull();
   });
 
   test("consent requirement survives disable and lease deletion; receipt identity cannot be erased", async () => {

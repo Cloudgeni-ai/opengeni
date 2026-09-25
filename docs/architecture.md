@@ -433,12 +433,16 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
-Historical CURRENT recovery requires same-session managed-human consent,
-checkpoint/generation CAS, singleton fencing and durable model warnings; never replay.
-Authority: `packages/core/src/application/sandbox-recovery.ts`; lifecycle:
-`packages/db/src/index.ts`; membership/GC/protocol guards: migration 0495.
-Rolling activation defaults off; permanent worker-protocol fencing applies.
-Retry checks effective routes. See [run lifecycle](run-lifecycle.md).
+Historical CURRENT recovery has two distinct authorities: explicit same-session
+managed-human consent and automatic continuity after a proved missing Modal
+provider. Both retain checkpoint/generation CAS, singleton and unresolved-writer
+fences, native artifact verification and durable model warnings; neither replays
+commands or creates an empty replacement for an unavailable archive. Authority:
+`packages/core/src/application/sandbox-recovery.ts` for human consent and
+`packages/db/src/index.ts` for exact-attempt automatic selection. Migration 0495
+keeps human consent owner-activated; maintenance migration 0519 fences automatic
+receipts behind the warning-aware worker v2. Retry checks effective routes. See
+[run lifecycle](run-lifecycle.md).
 
 Home-compute selection proves establishment authority; invalid pointers reconcile
 visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture

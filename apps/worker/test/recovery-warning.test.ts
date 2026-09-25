@@ -12,7 +12,7 @@ const { recoveryAwareSessionInstructions, FILESYSTEM_DISCONTINUITY_PROTOCOL } =
   await import("../src/activities/agent-turn/recovery-warning");
 
 test("the compatible worker module reconstructs the warning independently of transcript context", async () => {
-  expect(FILESYSTEM_DISCONTINUITY_PROTOCOL).toBe(1);
+  expect(FILESYSTEM_DISCONTINUITY_PROTOCOL).toBe(2);
   for (const instructions of [
     null,
     "After compaction",

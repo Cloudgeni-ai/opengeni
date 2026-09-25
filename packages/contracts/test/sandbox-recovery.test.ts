@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { SandboxRecoveryRequest, sandboxRecoveryDiscontinuity } from "../src/sandbox-recovery";
+import {
+  SandboxRecoveryRequest,
+  automaticSandboxRecoveryDiscontinuity,
+  sandboxRecoveryDiscontinuity,
+} from "../src/sandbox-recovery";
 const selection = {
   version: 1 as const,
   sessionId: crypto.randomUUID(),
@@ -37,4 +41,11 @@ test("durable model warning is exact and never claims edits counted, external ro
   expect(text).toContain("External effects are not undone");
   expect(text).toContain("unknown outcomes");
   expect(text).toContain("Consent alone is not proof");
+  const automatic = automaticSandboxRecoveryDiscontinuity(selection);
+  expect(automatic).toContain(selection.capturedAt);
+  expect(automatic).toContain("automatically");
+  expect(automatic).toContain("not a count of lost files");
+  expect(automatic).toContain("External effects are not undone");
+  expect(automatic).toContain("unknown outcomes");
+  expect(automatic).not.toContain("human explicitly consented");
 });

@@ -1,8 +1,8 @@
 import { getSandboxRecoveryDiscontinuity, type Database } from "@opengeni/db";
 
-/** Opt-in belongs to this warning-aware worker implementation, not the DB
- * client, role defaults or deployment configuration. Claim stamps it locally. */
-export const FILESYSTEM_DISCONTINUITY_PROTOCOL = 1 as const;
+/** v2 also recognizes system-selected checkpoint fallback receipts. A pre-v2
+ * worker cannot claim a session whose filesystem has automatically diverged. */
+export const FILESYSTEM_DISCONTINUITY_PROTOCOL = 2 as const;
 
 export async function recoveryAwareSessionInstructions(
   db: Database,

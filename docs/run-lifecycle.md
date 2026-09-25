@@ -1617,6 +1617,29 @@ compatible workers. Pause/Cancel and settlement remain available. This public ga
 does not retrofit operator historical recovery that has no public consent receipt.
 No cancellation/reaper protocol changes are included.
 
+### Automatic continuity after a missing managed provider
+
+This is separate from human consent. Before agent construction (including
+on-demand sandbox turns), an exact live attempt may select the singleton
+session's registered CURRENT native Modal checkpoint only when the provider is
+definitively missing, the cold lease has an archive-generation mismatch, and
+no other holders, processes, mutations, pending tools or competing attempts
+remain. It records a distinct system-attributed audit and immutable per-session
+receipt before a replacement can be elected. The same attempt reuses that
+selection; stale attempts cannot change it. Retry may admit this narrowly
+recoverable route, but does not itself restore files or replay unknown effects.
+
+The existing cold election and native provider/artifact checks still decide
+whether a replacement becomes usable. No archive, uncertain provider, corrupt
+checkpoint, active writer or shared group remains blocked. Newer filesystem
+changes can be unavailable while conversation and external effects remain.
+Every agent reconstruction appends the same checkpoint-specific discontinuity
+warning to session instructions, after the stable workspace prompt prefix.
+Maintenance migration 0519 requires warning protocol v2 at attempt claim for
+every session with an automatic receipt, including after failed restoration or
+lease churn; old workers fail closed. Human-consented recovery keeps its
+independent v1 gate.
+
 New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected sandbox environment/base
 image instead of replacing the whole machine. Existing serialized sessions keep
@@ -1917,7 +1940,8 @@ For scheduled provider-deadline rotation, legacy commands have a separate
 two-minute cancellation grace. A PTY receives one Ctrl-C; non-PTY stdin is not
 a signal, so the worker records cancellation intent without writing Ctrl-C
 bytes. After that grace, exact process holders may be enrolled even without
-exit proof if the owner is closed and quiesced (or its direct request returned),
+exit proof if the owner has an explicit quiescence receipt or is normally
+completed and closed (or its direct request returned),
 and no unrelated holder or mutation admission remains. An outstanding
 reconciliation claim does not grant writer authority or block this deadline
 capture. The provider is terminated only after the current workspace generation
@@ -1927,8 +1951,9 @@ starts its own grace. This path does not apply to idle or operator rotation.
 
 The same containment path covers an explicitly stopping managed command after
 at least five provider-error observations. Its cancellation request and owner
-quiescence must both predate idle grace; an absent quiescence receipt is not
-accepted for this path. Provider errors alone never enroll a running command.
+quiescence (or normal completion and closed timestamp) must both predate idle
+grace. A failed/interrupted owner without a quiescence receipt stays blocked;
+provider errors alone never enroll a running command.
 All sandbox-group activity, other-holder and child-admission exclusions remain
 in force, and only verified provider termination settles an unknown result as
 lost. A failed checkpoint leaves the provider and holders intact for retry.

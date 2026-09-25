@@ -10,6 +10,7 @@ import {
   SKILL_CATALOG_CONTEXT_PREFIX,
   SandboxRecoverySelection,
   SandboxRecoveryResponse,
+  automaticSandboxRecoveryDiscontinuity,
   sandboxRecoveryDiscontinuity,
   type SandboxRecoveryProjection,
   type SandboxRecoveryRequest,
@@ -46018,6 +46019,21 @@ export async function sessionEffectiveSandboxRecoveryBlocked(
   if (!row) return false;
   if ((row.public_recovery as Record<string, unknown> | null)?.status === "accepted") return true;
   if (row.liveness !== "cold") return false;
+  // A failed turn may be explicitly retried into the worker's verified,
+  // system-selected fallback. No archive is restored or command replayed by
+  // Retry itself; the next claimed attempt must recheck the exact selection.
+  if (await automaticRecoverySelectionTx(tx, row, session)) {
+    const [blockers] = await rawRows<{ present: boolean }>(
+      tx,
+      sql`select
+        exists(select 1 from sandbox_lease_holders where lease_id = ${row.id})
+        or exists(select 1 from sandbox_workspace_mutation_admissions
+          where lease_id = ${row.id} and settled_at is null)
+        or exists(select 1 from sandbox_retained_processes
+          where lease_id = ${row.id} and state = 'active') as present`,
+    );
+    if (!blockers?.present) return false;
+  }
   const recovery = recoveryStateFromLeaseRow(row);
   return (
     recovery.restore.status === "unrecoverable" ||
@@ -46049,8 +46065,85 @@ async function completeRecoveryGroupCount(
     );
     return Number(row?.count ?? 0);
   } finally {
-    await setSubjectRlsContext(tx, input.subjectId);
+    if (input.subjectId.trim()) await setSubjectRlsContext(tx, input.subjectId);
+    else await tx.execute(sql`select set_config('opengeni.subject_id', '', true)`);
   }
+}
+
+/** A system fallback is narrower than human consent: only a provider-proven
+ * missing singleton Modal box with a registered, older native checkpoint. The
+ * restore path independently verifies the opaque bytes and provider binding. */
+async function automaticRecoverySelectionTx(
+  tx: Database,
+  row: LeaseRow,
+  session: typeof schema.sessions.$inferSelect,
+): Promise<import("@opengeni/contracts").SandboxRecoverySelection | null> {
+  const recovery = recoveryStateFromLeaseRow(row);
+  const descriptor = recovery.archive.current;
+  if (
+    session.sandboxBackend !== "modal" ||
+    session.sandboxGroupId !== row.sandbox_group_id ||
+    (session.activeSandboxId !== null && session.activeSandboxId !== row.sandbox_group_id) ||
+    row.backend !== "modal" ||
+    row.liveness !== "cold" ||
+    row.instance_id !== null ||
+    Number(row.refcount) !== 0 ||
+    row.archive_capture_id !== null ||
+    row.public_recovery !== null ||
+    recovery.provider.status !== "missing" ||
+    recovery.restore.status !== "degraded" ||
+    recovery.restore.failureCode !== "archive_generation_mismatch" ||
+    recovery.archive.status !== "available" ||
+    descriptor?.version !== 2 ||
+    row.current_checkpoint_artifact_id === null ||
+    row.archive_generation === null ||
+    Number(row.archive_generation) >= Number(row.workspace_generation)
+  )
+    return null;
+  const [context] = await rawRows<{ subject_id: string }>(
+    tx,
+    sql`select coalesce(current_setting('opengeni.subject_id', true), '') as subject_id`,
+  );
+  if (
+    (await completeRecoveryGroupCount(
+      tx,
+      {
+        accountId: session.accountId,
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+        subjectId: context?.subject_id ?? "",
+      },
+      row.sandbox_group_id,
+    )) !== 1
+  )
+    return null;
+  const [artifact] = await rawRows<{ valid: boolean }>(
+    tx,
+    sql`select exists(select 1 from sandbox_checkpoint_artifacts
+      where id = ${row.current_checkpoint_artifact_id}
+        and account_id = ${session.accountId} and workspace_id = ${session.workspaceId}
+        and sandbox_group_id = ${row.sandbox_group_id} and source_lease_id = ${row.id}
+        and state = 'current' and provider_backend = 'modal'
+        and provenance = 'native_capture'
+        and source_workspace_generation = ${Number(row.archive_generation)}
+        and descriptor_revision = ${descriptor.revision}
+        and (descriptor->>'capturedAt') = ${descriptor.capturedAt}) as valid`,
+  );
+  if (!artifact?.valid) return null;
+  return SandboxRecoverySelection.parse({
+    version: 1,
+    sessionId: session.id,
+    sandboxGroupId: row.sandbox_group_id,
+    leaseId: row.id,
+    routeEpoch: session.activeEpoch,
+    authorityEpoch: session.authorityEpoch,
+    leaseEpoch: Number(row.lease_epoch),
+    workspaceGeneration: Number(row.workspace_generation),
+    archiveGeneration: Number(row.archive_generation),
+    artifactId: row.current_checkpoint_artifact_id,
+    revision: descriptor.revision,
+    capturedAt: descriptor.capturedAt,
+  });
 }
 
 async function projectPublicSandboxRecovery(
@@ -46340,6 +46433,166 @@ export async function consentPublicSandboxRecovery(
   );
 }
 
+/** Turn-start-only continuity after definitive managed-provider loss. This is
+ * system policy, never a fabricated human consent or permission to replay an
+ * operation. No replacement box is created here; rematerialization rechecks
+ * the exact checkpoint before publishing a usable sandbox. */
+export async function authorizeAutomaticSandboxCheckpointRecovery(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    attemptId: string;
+  },
+): Promise<
+  | { status: "not_eligible" }
+  | {
+      status: "authorized" | "already_authorized";
+      selection: import("@opengeni/contracts").SandboxRecoverySelection;
+    }
+> {
+  return withRlsContext(db, input, async (tx) => {
+    // Healthy turns must not acquire a workspace-wide inference or session
+    // write lock just to discover that no fallback is needed.
+    const [candidate] = await rawRows<{ present: boolean }>(
+      tx,
+      sql`select exists(select 1 from sessions session
+        join sandbox_leases lease on lease.workspace_id = session.workspace_id
+          and lease.sandbox_group_id = session.sandbox_group_id
+        where session.account_id = ${input.accountId}
+          and session.workspace_id = ${input.workspaceId}
+          and session.id = ${input.sessionId}
+          and lease.liveness = 'cold'
+          and lease.resume_state #>> '{opengeniRecovery,provider,status}' = 'missing'
+          and lease.resume_state #>> '{opengeniRecovery,restore,failureCode}' =
+            'archive_generation_mismatch') as present`,
+    );
+    if (!candidate?.present) return { status: "not_eligible" };
+    await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+    const [session] = await tx
+      .select()
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.accountId, input.accountId),
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .for("update");
+    if (!session) return { status: "not_eligible" };
+    const [attempt] = await tx
+      .select()
+      .from(schema.sessionTurnAttempts)
+      .where(
+        and(
+          eq(schema.sessionTurnAttempts.accountId, input.accountId),
+          eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+          eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+          eq(schema.sessionTurnAttempts.id, input.attemptId),
+        ),
+      );
+    if (
+      !attempt ||
+      !["claimed", "running"].includes(attempt.state) ||
+      attempt.quiescedAt !== null ||
+      session.activeTurnId !== attempt.turnId ||
+      session.authorityEpoch !== attempt.authorityEpoch ||
+      session.visibility !== attempt.authorityVisibility ||
+      session.ownerOrganizationMembershipId !== attempt.authorityOwnerOrganizationMembershipId
+    )
+      return { status: "not_eligible" };
+    await lockSandboxLeaseAdmission(tx, input.workspaceId, session.sandboxGroupId);
+    const [row] = await tx.execute<LeaseRow>(sql`select * from sandbox_leases
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${session.sandboxGroupId}
+      for update`);
+    if (!row) return { status: "not_eligible" };
+    const selection = await automaticRecoverySelectionTx(tx, row, session);
+    if (!selection) return { status: "not_eligible" };
+    const [blockers] = await rawRows<{ present: boolean }>(
+      tx,
+      sql`select
+        exists(select 1 from sandbox_lease_holders where lease_id = ${row.id})
+        or exists(select 1 from sandbox_workspace_mutation_admissions
+          where lease_id = ${row.id} and settled_at is null)
+        or exists(select 1 from sandbox_retained_processes
+          where lease_id = ${row.id} and state = 'active')
+        or exists(select 1 from session_pending_tool_calls
+          where workspace_id = ${input.workspaceId} and session_id = ${input.sessionId})
+        or exists(select 1 from session_turn_attempts other
+          join sessions member on member.id = other.session_id
+            and member.workspace_id = other.workspace_id
+          where member.workspace_id = ${input.workspaceId}
+            and member.sandbox_group_id = ${row.sandbox_group_id}
+            and other.id <> ${input.attemptId}
+            and (other.state <> 'closed' or
+              (other.quiesced_at is null and exists(select 1 from session_attempt_interruptions
+                where attempt_id = other.id)))) as present`,
+    );
+    if (blockers?.present) return { status: "not_eligible" };
+    if (
+      (await authorizedHistoricalArchiveGeneration(tx, row)) === selection.archiveGeneration &&
+      row.resume_state?.opengeniHistoricalArchiveRecoveryId
+    )
+      return { status: "already_authorized", selection };
+
+    const operationId = crypto.randomUUID();
+    const metadata = {
+      version: 1,
+      leaseId: row.id,
+      leaseEpoch: selection.leaseEpoch,
+      workspaceGeneration: selection.workspaceGeneration,
+      archiveGeneration: selection.archiveGeneration,
+      selectedRevision: selection.revision,
+      artifactId: selection.artifactId,
+      sessionId: input.sessionId,
+      attemptId: input.attemptId,
+      automaticHistoricalCheckpoint: true,
+      providerMissingBeforeCapture: true,
+    };
+    await tx.insert(schema.auditEvents).values(
+      withLosslessContentWriteVersion(
+        {
+          id: operationId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: "opengeni:automatic-checkpoint-recovery",
+          action: "sandbox.automatic_checkpoint_recovery.authorized",
+          targetType: "sandbox_group",
+          targetId: row.sandbox_group_id,
+          metadata,
+        },
+        "metadata",
+        "metadataCodecVersion",
+      ),
+    );
+    await reserveSessionCommandReceipt(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      targetSessionId: input.sessionId,
+      targetTurnId: null,
+      actor: {
+        type: "agent_attempt",
+        attemptId: input.attemptId,
+        sessionId: input.sessionId,
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+      },
+      action: "sandbox.recovery.automatic",
+      operationKey: operationId,
+      canonicalRequestHash: canonicalSessionCommandHash(selection),
+      initialResult: { operationId, checkpoint: selection },
+    });
+    await tx.execute(sql`update sandbox_leases set
+      resume_state = jsonb_set(coalesce(resume_state, '{}'::jsonb),
+        '{opengeniHistoricalArchiveRecoveryId}', ${JSON.stringify(operationId)}::jsonb),
+      updated_at = now()
+      where id = ${row.id} and liveness = 'cold' and lease_epoch = ${selection.leaseEpoch}`);
+    return { status: "authorized", selection };
+  });
+}
+
 /** These warnings are outside compactable history and survive ordinary context
  * reconstruction. Receipts describe consent, never unverified restore success. */
 export async function getSandboxRecoveryDiscontinuity(
@@ -46349,18 +46602,28 @@ export async function getSandboxRecoveryDiscontinuity(
 ): Promise<string | null> {
   return withWorkspaceRls(db, workspaceId, async (tx) => {
     const rows = await tx
-      .select({ result: schema.sessionCommandReceipts.result })
+      .select({
+        action: schema.sessionCommandReceipts.action,
+        result: schema.sessionCommandReceipts.result,
+      })
       .from(schema.sessionCommandReceipts)
       .where(
         and(
           eq(schema.sessionCommandReceipts.workspaceId, workspaceId),
           eq(schema.sessionCommandReceipts.targetSessionId, sessionId),
-          eq(schema.sessionCommandReceipts.action, "sandbox.recovery.consent"),
+          inArray(schema.sessionCommandReceipts.action, [
+            "sandbox.recovery.consent",
+            "sandbox.recovery.automatic",
+          ]),
         ),
       )
       .orderBy(desc(schema.sessionCommandReceipts.createdAt))
       .limit(1);
     if (!rows[0]) return null;
+    if (rows[0].action === "sandbox.recovery.automatic") {
+      const selection = SandboxRecoverySelection.parse(rows[0].result.checkpoint);
+      return automaticSandboxRecoveryDiscontinuity(selection);
+    }
     const receipt = SandboxRecoveryResponse.parse(rows[0].result);
     return receipt.recovery.checkpoint
       ? sandboxRecoveryDiscontinuity(receipt.recovery.checkpoint)
@@ -46510,7 +46773,11 @@ async function authorizedHistoricalArchiveGeneration(
   )
     return null;
   const [receipt] = await db
-    .select({ metadata: schema.auditEvents.metadata, subjectId: schema.auditEvents.subjectId })
+    .select({
+      action: schema.auditEvents.action,
+      metadata: schema.auditEvents.metadata,
+      subjectId: schema.auditEvents.subjectId,
+    })
     .from(schema.auditEvents)
     .where(
       and(
@@ -46518,11 +46785,48 @@ async function authorizedHistoricalArchiveGeneration(
         eq(schema.auditEvents.accountId, row.account_id),
         eq(schema.auditEvents.workspaceId, row.workspace_id),
         eq(schema.auditEvents.targetId, row.sandbox_group_id),
-        eq(schema.auditEvents.action, "sandbox.historical_checkpoint_recovery.authorized"),
+        inArray(schema.auditEvents.action, [
+          "sandbox.historical_checkpoint_recovery.authorized",
+          "sandbox.automatic_checkpoint_recovery.authorized",
+        ]),
       ),
     );
   const metadata = receipt?.metadata;
   const archiveGeneration = row.archive_generation === null ? null : Number(row.archive_generation);
+  if (receipt?.action === "sandbox.automatic_checkpoint_recovery.authorized") {
+    if (publicRecovery || typeof metadata?.sessionId !== "string") return null;
+    const [session] = await db
+      .select({
+        id: schema.sessions.id,
+        sandboxGroupId: schema.sessions.sandboxGroupId,
+        sandboxBackend: schema.sessions.sandboxBackend,
+        activeSandboxId: schema.sessions.activeSandboxId,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.accountId, row.account_id),
+          eq(schema.sessions.workspaceId, row.workspace_id),
+          eq(schema.sessions.id, metadata.sessionId),
+        ),
+      );
+    return session?.sandboxGroupId === row.sandbox_group_id &&
+      session.sandboxBackend === "modal" &&
+      (session.activeSandboxId === null || session.activeSandboxId === row.sandbox_group_id) &&
+      metadata?.version === 1 &&
+      metadata.automaticHistoricalCheckpoint === true &&
+      metadata.providerMissingBeforeCapture === true &&
+      metadata.leaseId === row.id &&
+      metadata.leaseEpoch === Number(row.lease_epoch) &&
+      metadata.workspaceGeneration === Number(row.workspace_generation) &&
+      metadata.archiveGeneration === archiveGeneration &&
+      metadata.artifactId === row.current_checkpoint_artifact_id &&
+      archiveGeneration !== null &&
+      archiveGeneration < Number(row.workspace_generation) &&
+      metadata.selectedRevision === recoveryStateFromLeaseRow(row).archive.current?.revision
+      ? archiveGeneration
+      : null;
+  }
   return (!publicRecovery || receipt?.subjectId === publicRecovery.subjectId) &&
     metadata?.version === 1 &&
     metadata.acceptedHistoricalCheckpoint === true &&
@@ -66472,7 +66776,7 @@ function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(
 export type ClaimSessionWorkForAttemptInput = {
   /** Internal worker-build declaration, never request-derived or universally
    * stamped by createDb. Only builds that always reconstruct the warning opt in. */
-  filesystemDiscontinuityProtocol?: 1;
+  filesystemDiscontinuityProtocol?: 1 | 2;
   sessionId: string;
   workflowId: string;
   workflowRunId: string;
@@ -67139,15 +67443,19 @@ async function acknowledgeConsumedChildSequencesInTransaction(
 /** Scope the worker-build declaration to registration, including nested claims. */
 async function withSandboxRecoveryWarningClaimProtocol<T>(
   tx: Database,
-  version: 1 | undefined,
+  version: 1 | 2 | undefined,
   register: () => Promise<T>,
 ): Promise<T> {
-  const [prior] = await rawRows<{ protocol: string }>(
+  const [prior] = await rawRows<{ consent_protocol: string; automatic_protocol: string }>(
     tx,
-    sql`select coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v1', true), '') as protocol`,
+    sql`select
+      coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v1', true), '') as consent_protocol,
+      coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v2', true), '') as automatic_protocol`,
   );
   await tx.execute(
-    sql`select set_config('opengeni.filesystem_discontinuity_protocol_v1', ${version === 1 ? "1" : ""}, true)`,
+    sql`select
+      set_config('opengeni.filesystem_discontinuity_protocol_v1', ${version ? "1" : ""}, true),
+      set_config('opengeni.filesystem_discontinuity_protocol_v2', ${version === 2 ? "2" : ""}, true)`,
   );
   let completed = false;
   try {
@@ -67156,7 +67464,9 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
     return result;
   } finally {
     const restore = tx.execute(
-      sql`select set_config('opengeni.filesystem_discontinuity_protocol_v1', ${prior?.protocol ?? ""}, true)`,
+      sql`select
+        set_config('opengeni.filesystem_discontinuity_protocol_v1', ${prior?.consent_protocol ?? ""}, true),
+        set_config('opengeni.filesystem_discontinuity_protocol_v2', ${prior?.automatic_protocol ?? ""}, true)`,
     );
     if (completed) await restore;
     else await restore.catch(() => undefined); // Claim savepoint rolls back a rejected INSERT.

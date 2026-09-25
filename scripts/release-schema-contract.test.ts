@@ -137,16 +137,33 @@ describe("release schema contract", () => {
 
   test("registers forward migrations in order after published history", async () => {
     const sourceContract = await buildCompleteSchemaContract();
-    const failedSessionVariableSetAttach = sourceContract.migrations.find(
+    const automaticCheckpointDiscontinuity = sourceContract.migrations.find(
+      (migration) => migration.path === "0519_automatic_checkpoint_discontinuity.sql",
+    );
+    if (automaticCheckpointDiscontinuity) {
+      expect(sourceContract.latestMigration).toBe("0519_automatic_checkpoint_discontinuity.sql");
+      expect(automaticCheckpointDiscontinuity.deploymentMode).toBe("maintenance");
+    }
+    const sourceBeforeAutomatic = automaticCheckpointDiscontinuity
+      ? {
+          ...sourceContract,
+          fileCount: sourceContract.fileCount - 1,
+          latestMigration: "0518_member_connection_read_backfill.sql",
+          migrations: sourceContract.migrations.filter(
+            (migration) => migration.path !== "0519_automatic_checkpoint_discontinuity.sql",
+          ),
+        }
+      : sourceContract;
+    const failedSessionVariableSetAttach = sourceBeforeAutomatic.migrations.find(
       (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
     );
     if (failedSessionVariableSetAttach) {
-      expect(sourceContract.latestMigration).toBe(
-        sourceContract.migrations.some(
+      expect(sourceBeforeAutomatic.latestMigration).toBe(
+        sourceBeforeAutomatic.migrations.some(
           (migration) => migration.path === "0518_member_connection_read_backfill.sql",
         )
           ? "0518_member_connection_read_backfill.sql"
-          : sourceContract.migrations.some(
+          : sourceBeforeAutomatic.migrations.some(
                 (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
               )
             ? "0515_autonomous_learning_defaults.sql"
@@ -158,17 +175,17 @@ describe("release schema contract", () => {
     // migration range; the new forward migration is checked explicitly above.
     let completeSourceContract = failedSessionVariableSetAttach
       ? {
-          ...sourceContract,
-          fileCount: sourceContract.fileCount - 1,
+          ...sourceBeforeAutomatic,
+          fileCount: sourceBeforeAutomatic.fileCount - 1,
           latestMigration:
-            sourceContract.latestMigration === "0514_failed_session_variable_set_attach.sql"
+            sourceBeforeAutomatic.latestMigration === "0514_failed_session_variable_set_attach.sql"
               ? "0513_message_fork_prefix_compaction.sql"
-              : sourceContract.latestMigration,
-          migrations: sourceContract.migrations.filter(
+              : sourceBeforeAutomatic.latestMigration,
+          migrations: sourceBeforeAutomatic.migrations.filter(
             (migration) => migration.path !== "0514_failed_session_variable_set_attach.sql",
           ),
         }
-      : sourceContract;
+      : sourceBeforeAutomatic;
     const autonomousLearningDefaults = completeSourceContract.migrations.some(
       (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
     );
@@ -2220,6 +2237,7 @@ describe("release schema contract", () => {
       "0516_member_connection_read.sql",
       "0517_member_connection_read_backfill_index.sql",
       "0518_member_connection_read_backfill.sql",
+      "0519_automatic_checkpoint_discontinuity.sql",
       "0463_host_mcp_resolver_registration.sql",
       "0461_unified_knowledge.sql",
       "0460_host_export_message_attribution.sql",
@@ -2722,6 +2740,7 @@ describe("release schema contract", () => {
       "0516_member_connection_read.sql",
       "0517_member_connection_read_backfill_index.sql",
       "0518_member_connection_read_backfill.sql",
+      "0519_automatic_checkpoint_discontinuity.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
