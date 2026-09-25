@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { GitBranchIcon, MessageSquareIcon, RouteIcon, XIcon } from "lucide-react";
 import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
 
-import { AreaChart, DonutChart, UsageMeter, donutTone } from "@/components/insights/charts";
+import { AreaChart, UsageMeter } from "@/components/insights/charts";
 import { CausalSheet } from "@/components/insights/causal-sheet";
 import { CountUp } from "@/components/insights/count-up";
 import {
@@ -605,67 +605,66 @@ export function InsightsRoute({
         ) : null}
       </Section>
 
-      <Section title="By model">
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.6fr)]">
-          <div className="rounded-lg border border-border bg-surface/35 p-4">
-            <h3 className="text-sm font-medium text-fg">Token share</h3>
-            <p className="mt-0.5 text-2xs text-fg-subtle">Click a model to filter</p>
-            <DonutChart
-              key={`model-donut-${range}-${filters.provider}-${filters.model}-${filters.rootSessionId}-${filters.sessionId}`}
-              className="mt-3"
-              centerLabel="total tokens"
-              centerValue={formatTokens(totals.totalTokens)}
-              formatValue={formatTokens}
-              onSelect={(id) => {
-                const row = models.find((m) => m.id === id);
-                if (row) update({ provider: row.provider, model: row.model });
-              }}
-              slices={models.map((row, i) => ({
-                id: row.id,
-                label: row.model,
-                value: row.totalTokens,
-                toneClass: donutTone(i),
-              }))}
-            />
-          </div>
-
-          <div className="overflow-x-auto rounded-lg border border-border">
-            <table className="min-w-full text-left text-xs">
-              <thead className="border-b border-border bg-surface/50 text-fg-subtle">
-                <tr>
-                  {[
-                    "Model",
-                    "Billing",
-                    "Calls",
-                    "Tokens",
-                    "Cache read",
-                    "Uncached input",
-                    "Cache write",
-                    "Output",
-                    "Cost",
-                  ].map((h) => (
-                    <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {models.map((row) => (
+      <Section
+        title="By model"
+        aside={<p>Click a row to filter · credit-paid rows show charged credits</p>}
+      >
+        <div className="overflow-x-auto rounded-lg border border-border">
+          <table className="min-w-full text-left text-xs">
+            <thead className="border-b border-border bg-surface/50 text-fg-subtle">
+              <tr>
+                {[
+                  "Model",
+                  "Billing",
+                  "Calls",
+                  "Tokens",
+                  "Cache read",
+                  "Uncached input",
+                  "Cache write",
+                  "Output",
+                  "Cost",
+                ].map((h) => (
+                  <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {models.map((row, index) => {
+                const share = totals.totalTokens > 0 ? row.totalTokens / totals.totalTokens : 0;
+                return (
                   <tr
                     key={row.id}
                     className="cursor-pointer border-b border-border/70 last:border-0 hover:bg-surface-2/60"
                     onClick={() => update({ provider: row.provider, model: row.model })}
                   >
-                    <td className="px-3 py-2.5">
+                    <td className="whitespace-nowrap px-3 py-2.5">
                       <p className="font-medium text-fg">{row.model}</p>
                       <p className="text-2xs text-fg-subtle">{providerLabel(row.provider)}</p>
                     </td>
-                    <td className="px-3 py-2.5">
+                    <td className="whitespace-nowrap px-3 py-2.5">
                       <BillingPill billing={row.billing} />
                     </td>
                     <Num>{row.calls.toLocaleString()}</Num>
-                    <Num>{formatTokens(row.totalTokens)}</Num>
+                    <td className="whitespace-nowrap px-3 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <span className="w-12 font-mono tabular-nums text-fg">
+                          {formatTokens(row.totalTokens)}
+                        </span>
+                        <span className="h-1.5 w-20 overflow-hidden rounded-full bg-surface-2">
+                          <motion.span
+                            className="block h-full rounded-full bg-brand"
+                            initial={reduceMotion ? false : { width: 0 }}
+                            animate={{ width: `${Math.max(2, share * 100)}%` }}
+                            transition={{ delay: index * 0.04, duration: 0.4 }}
+                          />
+                        </span>
+                        <span className="w-8 text-right font-mono text-2xs tabular-nums text-fg-subtle">
+                          {Math.round(share * 100)}%
+                        </span>
+                      </div>
+                    </td>
                     <Num>
                       {row.cacheKnownCalls === 0
                         ? "Unknown"
@@ -685,17 +684,17 @@ export function InsightsRoute({
                     <Num>{formatTokens(row.outputTokens)}</Num>
                     <Num>{costLabel(row)}</Num>
                   </tr>
-                ))}
-                {models.length === 0 ? (
-                  <tr>
-                    <td colSpan={9} className="px-3 py-8 text-center text-fg-subtle">
-                      No model calls match this window and filter.
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
+                );
+              })}
+              {models.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="px-3 py-8 text-center text-fg-subtle">
+                    No model calls match this window and filter.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
         </div>
 
         {providers.length > 1 ? (
@@ -1410,7 +1409,7 @@ function ScopeChip(props: { icon: ReactNode; kind: string; label: string; onRemo
   return (
     <span className="inline-flex h-8 max-w-72 items-center gap-1.5 rounded-md border border-brand/30 bg-brand/5 pl-2 pr-1 text-xs text-fg">
       <span className="text-brand">{props.icon}</span>
-      <span className="text-fg-subtle">{props.kind}</span>
+      <span className="whitespace-nowrap text-fg-subtle">{props.kind}</span>
       <span className="truncate font-medium">{props.label}</span>
       <button
         type="button"

@@ -88,7 +88,7 @@ export function AreaChart(props: {
   const active = pointerActive ?? keyboardActive;
   const height = props.height ?? 220;
   const width = 720;
-  const padL = 36;
+  const padL = 52;
   const padR = 12;
   const padTop = 16;
   const padBottom = 6;
@@ -379,7 +379,7 @@ export function AreaChart(props: {
         ) : null}
       </svg>
 
-      <div className="mt-1 flex justify-between pl-9 pr-1">
+      <div className="mt-1 flex justify-between pl-[7.2%] pr-1">
         {visibleLabels.map(({ label, index }) => (
           <button
             key={`${label}-${index}`}

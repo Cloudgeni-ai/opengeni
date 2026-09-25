@@ -4,6 +4,7 @@ import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
 import {
   buildInsightsDiagnostics,
   buildInsightsView,
+  formatDeltaUsd,
   formatPctDelta,
   formatUsd,
   formatUtcTimestamp,
@@ -240,6 +241,12 @@ describe("buildInsightsView", () => {
       { provider: "all", model: "all" },
     );
     expect(view.totals.creditUsd).toBe(2.5);
+  });
+
+  test("formats signed USD deltas with the sign before the currency", () => {
+    expect(formatDeltaUsd(-0.1754)).toBe("\u2212$0.1754");
+    expect(formatDeltaUsd(1.17)).toBe("+$1.17");
+    expect(formatDeltaUsd(0)).toBe("$0.00");
   });
 
   test("formatWarmHours stays in hours", () => {

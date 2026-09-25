@@ -99,8 +99,8 @@ export function formatUsd(value: number, digits?: number): string {
 }
 
 export function formatDeltaUsd(value: number): string {
-  const sign = value > 0 ? "+" : "";
-  return `${sign}${formatUsd(value)}`;
+  if (value === 0) return formatUsd(0);
+  return `${value > 0 ? "+" : "−"}${formatUsd(Math.abs(value))}`;
 }
 
 export function formatTokens(value: number): string {
