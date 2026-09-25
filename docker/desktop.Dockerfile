@@ -260,6 +260,8 @@ FROM debian:13-slim
 ARG TERRAFORM_VERSION=1.13.3
 ARG GLAB_VERSION=1.109.0
 ARG CHECKOV_VERSION=3.2.526
+ARG UV_VERSION=0.12.18
+ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1"
 ARG NOVNC_REF=v1.5.0
 ARG WEBSOCKIFY_REF=v0.12.0
 ARG TTYD_VERSION=1.7.7
@@ -458,6 +460,39 @@ RUN set -eux; \
     /opt/checkov/bin/pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"; \
     ln -s /opt/checkov/bin/checkov /usr/local/bin/checkov; \
     checkov --version
+# Agent Python toolchain, identical in docker/sandbox.Dockerfile and
+# docker/desktop.Dockerfile. A distro Python (the desktop image's Debian 13
+# python3) is PEP 668 "externally managed", so a bare `pip install` is refused.
+# This is a disposable single-tenant box, so pip and uv may install into the
+# system interpreter. Both write under /usr/local, and uv puts the whole
+# preinstalled closure there (it ignores Debian's /usr/lib/python3), so a later
+# upgrade never has to touch a distro-owned copy. Neither install command passes
+# an override flag, which proves the pip.conf and uv.toml settings.
+RUN set -eux; \
+    printf '[global]\nbreak-system-packages = true\nroot-user-action = ignore\n' > /etc/pip.conf; \
+    install -d -m 0755 /etc/uv; \
+    printf '[pip]\nbreak-system-packages = true\n' > /etc/uv/uv.toml; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "${arch}" in \
+      amd64) uv_arch="x86_64"; expected="89eadd7c76fc063887959510d5ba0ab1264dfd5f1143b925ddb73021a40acf16" ;; \
+      arm64|aarch64) uv_arch="aarch64"; expected="afb6291f3f0a6b4521fc67b947822506c41dde5b60d2189dd8f3695b2ac8c9e7" ;; \
+      *) echo "unsupported architecture=${arch}" >&2; exit 1 ;; \
+    esac; \
+    uv_dir="uv-${uv_arch}-unknown-linux-gnu"; \
+    archive="/tmp/${uv_dir}.tar.gz"; \
+    curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL \
+      "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${uv_dir}.tar.gz" \
+      -o "$archive"; \
+    echo "$expected  $archive" | sha256sum -c -; \
+    tar -xzf "$archive" -C /tmp; \
+    install -m 0755 "/tmp/${uv_dir}/uv" "/tmp/${uv_dir}/uvx" /usr/local/bin/; \
+    rm -rf "$archive" "/tmp/${uv_dir}"; \
+    test "$(uv --version | cut -d' ' -f2)" = "${UV_VERSION}"; \
+    uv pip install --system --no-cache --compile-bytecode --only-binary :all: ${OPENGENI_PYTHON_PACKAGES}; \
+    python3 -m pip install --no-cache-dir --no-index --dry-run ${OPENGENI_PYTHON_PACKAGES}; \
+    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, pytest, requests'; \
+    pytest --version; \
+    rm -rf /root/.cache
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
     install -d -m 0755 /etc/apt/keyrings; \
