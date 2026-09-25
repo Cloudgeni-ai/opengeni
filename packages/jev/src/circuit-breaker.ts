@@ -9,7 +9,8 @@
  * - release(lease) (the call never reached Jev) or recordFailure with another error (a rejected request, a
  *   workspace failure, an abort) neither counts nor resets the streak. It ends the trial only when that
  *   lease is the trial, so a call admitted while closed cannot free the slot of a trial running now.
- * isOpen() only says whether the cooldown is running, so a half-open breaker still offers the tool.
+ * isOpen() and status() are for metrics and diagnostics. Do not use them to decide which tools a turn is
+ * offered: that list is part of the model's cached prompt prefix and must not change with transient health.
  * The worker keeps one breaker per process.
  */
 import { JevUnavailableError } from "./client";

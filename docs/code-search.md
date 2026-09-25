@@ -83,27 +83,50 @@ not get the tool, because its search commands are POSIX shell scripts.
 | --- | --- | --- |
 | Deployment | `OPENGENI_JEV_API_KEY` | Required. Without a usable key, every Jev feature is off. |
 | Deployment | `OPENGENI_CODE_SEARCH_MODE` | `off` (default) never offers the tool. `opt_in` offers it where the workspace turns it on. `default_on` gives it to every workspace that has not turned it off. `experiment` gives it to a fixed half of sessions in workspaces without their own setting. |
-| Workspace | `settings.codeSearchEnabled` | Settings → Session defaults → **Fast code search**: Default, On or Off. `true` or `false` applies to every session; `null` or absent follows the deployment. The row is hidden when the deployment does not offer the tool. |
-| Worker process | Circuit breaker | Three consecutive Jev outages hide the tool from new turns for 5 minutes, or 30 minutes after an auth or billing error (401/402/403). After the cooldown one trial call runs at a time; others are refused until it ends or has run for 10 minutes. A search that never needed Jev neither closes nor reopens it. |
+| Workspace | `settings.codeSearchEnabled` | Settings → Session defaults → **Fast code search**: Default, On or Off. `true` or `false` overrides the deployment default for new sessions; `null` or absent follows it. `false` also switches the tool off in running sessions. The row is hidden when the deployment does not offer the tool. |
+| Worker process | Circuit breaker | Three consecutive Jev outages make `code_search` calls on that worker fail at once for 5 minutes, or 30 minutes after an auth or billing error (401/402/403). After the cooldown one trial call runs at a time; others are refused until it ends or has run for 10 minutes. A search that never needed Jev neither closes nor reopens it. The breaker never hides the tool. |
 
 `OPENGENI_JEV_BASE_URL`, `OPENGENI_JEV_MODEL` and
 `OPENGENI_JEV_REQUEST_TIMEOUT_MS` default to the native TypeSafe API,
 `jev-latest` and 10 s.
 
-The decision is made when each turn attempt starts, so a change applies from
-the next turn of every session. A session without compute (`backend: none`)
-never gets the tool, and neither does a turn on a Windows Connected Machine.
+### The decision is frozen per session
+
+The tool's schema and its instruction line are part of the start of every
+model request, so adding or removing them makes the provider's prompt cache
+miss for the whole conversation. To keep a session's prompt stable:
+
+- A root session decides once, when it is created, from the deployment mode,
+  the workspace setting and (in `experiment` mode) its id. The decision is
+  stored in `sessions.code_search_enabled` (migration 0520). A child session
+  keeps its parent's decision, so one session tree stays in one arm. A fork
+  and every session created before 0520 are off.
+- Later changes never turn the tool on for a running session: turning the
+  mode on, adding the key, switching a workspace to On, or moving from
+  `experiment` to `default_on` affect new sessions only.
+- Three deliberate switch-offs still reach running sessions on their next
+  turn, because they stop repository content going to Jev: mode `off`,
+  removing the key, and a workspace Off. Each costs every affected running
+  session one prompt-cache miss. Change the mode or key in one rollout; while
+  old and new workers overlap, sessions can alternate between them.
+- Transient Jev health never changes the tool list. The breaker is per worker
+  process, and sessions move between workers, so it only refuses calls.
+
+A session without compute (`backend: none`) never gets the tool, and neither
+does a turn on a Windows Connected Machine. Moving a session to such a route,
+or back, is a deliberate route change that also changes its other tools.
 
 ### Measuring it on real work
 
-In `experiment` mode the half is chosen from the session id
-(`codeSearchSessionInExperiment` in `@opengeni/contracts`: 32-bit FNV-1a, low
-bit 0 gets the tool). A session keeps its half for its whole life, so its
-prompt prefix stays cache-stable, and analysis can recompute the half from the
-id alone. Each attempt's persisted tool catalog
-(`session_attempt_tool_catalogs`) also shows whether `code_search` was offered.
-Compare cost, wall time and model requests per session between the halves, and
-grade a sample of answers for quality.
+In `experiment` mode a root session's half is chosen from its id
+(`codeSearchSessionInExperiment` in `@opengeni/contracts/code-search`: 32-bit
+FNV-1a, low bit 0 gets the tool), and its children share it. The stored
+`sessions.code_search_enabled` (also `codeSearchEnabled` on the session API
+object) says which half a session is in, and each attempt's persisted tool
+catalog (`session_attempt_tool_catalogs`) shows whether `code_search` was
+offered on that attempt. Compare cost, wall time, model requests and prompt
+cache hit rate per session tree between the halves, and grade a sample of
+answers for quality.
 
 A typical path: run `experiment` in staging, check the result, then set
 `default_on` in production. Any workspace can still choose Off.
@@ -114,7 +137,8 @@ The tool reports problems to the agent instead of degrading silently:
 
 - **Jev is down, rate-limited, out of credit or rejects a request.** The tool
   returns an error telling the agent to search with `exec_command` instead.
-  Repeated outages trip the breaker.
+  Repeated outages trip the breaker, and calls on that worker then fail at once
+  with the same advice.
 - **Only the final status check fails.** The tool still returns the Jev-scored
   pack with `evidence rating unknown (check failed)`. An outage there counts toward the breaker.
 - **ripgrep is missing** (possible on a Connected Machine). The tool returns an

@@ -50,7 +50,7 @@ import {
   resolveWorkspaceAgentHumanInputEnabled,
   type MediaGenerationResult,
 } from "@opengeni/contracts";
-import { resolveSessionCodeSearchEnabled } from "@opengeni/contracts/code-search";
+import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
 
 import { assertWorkspaceHumanInputAllowed } from "./admission";
 import {
@@ -237,10 +237,12 @@ export async function prepareGovernanceAndModel(
   workspaceRefs.rigVersionId = session.rigVersionId ?? "";
   if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
   const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
-  const codeSearchEnabled = resolveSessionCodeSearchEnabled(
+  // The session's decision was frozen when it was created, so only a
+  // deliberate switch-off (deployment or workspace Off) changes its tool list.
+  const codeSearchEnabled = codeSearchEnabledForTurn(
+    session.codeSearchEnabled,
     workspace.settings,
     codeSearchDeploymentPolicy(capabilitySettings),
-    input.sessionId,
   );
   const contextSelection = await resolveCompanyBrainContextSelection(db, governanceClaims);
   const workspaceAgentInstructions = contextSelection.legacyWorkspaceInstructions;

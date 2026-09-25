@@ -55,7 +55,10 @@ Provider-specific status tools remain read-only and do not synthesize cards.
 
 Progressive discovery uses the same authorized deferred pool on Codex-native,
 OpenAI-native, and generic-dispatch transports. Keyword search is ranked, not
-exhaustive. `tool_list` is a query-independent fallback: it returns compact
+exhaustive. Tools whose exact name (with an underscore) appears in the query
+come first, before the keyword ranking, and the result grows to include all of
+them. Past search results are stored as they were returned and never re-run,
+so this ordering changes new searches only, not any cached prompt. `tool_list` is a query-independent fallback: it returns compact
 names and description previews, with a default page of 20, a maximum of 40,
 and a 16 KiB response budget. Follow `nextCursor` until null, preserving the
 optional literal `namePrefix` filter. An invalid cursor requires restarting

@@ -1303,8 +1303,9 @@ function CodexCompactionPreferenceRow({
 /**
  * Jev-backed code_search agent tool. Shown only when the deployment offers it.
  * "Default" follows the deployment (which may give the tool to half of all
- * sessions during an experiment); On and Off apply to every session. A change
- * takes effect on the next turn.
+ * sessions during an experiment). Each session keeps the choice it was created
+ * with, so its cached prompt never changes; only Off also reaches running
+ * sessions, on their next turn.
  */
 function CodeSearchPreferenceRow({
   workspaceId,
@@ -1353,8 +1354,8 @@ function CodeSearchPreferenceRow({
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium">Fast code search</div>
         <p className="truncate text-2xs text-fg-subtle">
-          Agents find code in one step with TypeSafe Jev. Faster and cheaper for questions about a
-          codebase.
+          Agents find code in one step with TypeSafe Jev. Applies to new sessions; Off also stops it
+          in running ones.
         </p>
       </div>
       {saving ? <Loader2Icon className="size-3.5 shrink-0 animate-spin text-fg-subtle" /> : null}

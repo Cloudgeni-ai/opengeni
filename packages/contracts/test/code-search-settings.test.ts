@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { UpdateWorkspaceSettingsRequest, WorkspaceSettingsSchema } from "../src/index";
 import {
+  codeSearchEnabledForTurn,
   codeSearchSessionInExperiment,
   resolveSessionCodeSearchEnabled,
   resolveWorkspaceCodeSearchMode,
@@ -96,5 +97,32 @@ describe("code_search per-session experiment", () => {
     );
     expect(resolveSessionCodeSearchEnabled({}, DEFAULT_ON, off)).toBe(true);
     expect(resolveSessionCodeSearchEnabled({}, OPT_IN, on)).toBe(false);
+  });
+});
+
+describe("code_search per-turn gate over the frozen session decision", () => {
+  test("only a session frozen on gets the tool", () => {
+    expect(codeSearchEnabledForTurn(true, {}, DEFAULT_ON)).toBe(true);
+    expect(codeSearchEnabledForTurn(false, {}, DEFAULT_ON)).toBe(false);
+    // Rows created before the column existed stay off, so turning the mode on
+    // never changes the prompt of a session that is already running.
+    expect(codeSearchEnabledForTurn(null, {}, DEFAULT_ON)).toBe(false);
+    expect(codeSearchEnabledForTurn(undefined, { codeSearchEnabled: true }, DEFAULT_ON)).toBe(
+      false,
+    );
+  });
+
+  test("turning it on later never adds it to a running session", () => {
+    expect(codeSearchEnabledForTurn(false, { codeSearchEnabled: true }, DEFAULT_ON)).toBe(false);
+    expect(codeSearchEnabledForTurn(false, {}, EXPERIMENT)).toBe(false);
+  });
+
+  test("the deployment and an explicit workspace Off still switch it off", () => {
+    expect(codeSearchEnabledForTurn(true, {}, OFF)).toBe(false);
+    expect(codeSearchEnabledForTurn(true, { codeSearchEnabled: false }, DEFAULT_ON)).toBe(false);
+    // Moving between on, split and opt-in keeps running sessions as they were.
+    expect(codeSearchEnabledForTurn(true, {}, OPT_IN)).toBe(true);
+    expect(codeSearchEnabledForTurn(true, { codeSearchEnabled: null }, EXPERIMENT)).toBe(true);
+    expect(codeSearchEnabledForTurn(true, { codeSearchEnabled: "yes" }, OPT_IN)).toBe(true);
   });
 });

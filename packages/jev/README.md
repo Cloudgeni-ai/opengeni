@@ -52,7 +52,9 @@ Retries and errors work like this:
 - `release()` and other errors neither count nor reset the streak. They end the trial only when their
   lease is the trial's, so a call admitted while closed cannot free the slot of a trial running now.
   Leases are matched by identity.
-- `isOpen()` is true only while the cooldown runs, so a half-open breaker still offers the tool.
+- `isOpen()` and `status()` are for metrics and diagnostics. Never use them to decide which tools a
+  turn is offered: the tool list is part of the model's cached prompt prefix, and a breaker is
+  per process, so tools that come and go with it break the provider's prompt cache.
 
 ## code_search
 

@@ -570,6 +570,8 @@ import {
   childWaitingCapacityDedupeKey,
   childWaitingCapacitySummary,
 } from "./child-lifecycle-notices";
+import { codeSearchDeploymentPolicyForCreate } from "./code-search-policy";
+import { resolveSessionCodeSearchEnabled } from "@opengeni/contracts/code-search";
 import {
   autoResumeGoalPausedByCapInTransaction,
   SESSION_GOAL_CAP_PAUSED_REASON,
@@ -606,6 +608,7 @@ import {
 
 export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
+export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
 export * from "./session-control";
 export * from "./session-queue-commands";
 export * from "./session-realtime";
@@ -32705,6 +32708,21 @@ function mapSessionSpawnDenial(
   };
 }
 
+async function parentSessionCodeSearchEnabled(
+  tx: Database,
+  workspaceId: string,
+  parentSessionId: string,
+): Promise<boolean> {
+  const [parent] = await tx
+    .select({ codeSearchEnabled: schema.sessions.codeSearchEnabled })
+    .from(schema.sessions)
+    .where(
+      and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, parentSessionId)),
+    )
+    .limit(1);
+  return parent?.codeSearchEnabled === true;
+}
+
 async function resolveSessionDepthDecision(
   tx: Database,
   input: SessionCreateInput,
@@ -33186,6 +33204,15 @@ async function createSessionInTransaction(
       ? input.createdByActor.turnId
       : null
     : null;
+  // Frozen once (migration 0520). A child keeps its parent's decision, so one
+  // session tree stays in one experiment arm; a root session decides its own.
+  const codeSearchEnabled = input.parentSessionId
+    ? await parentSessionCodeSearchEnabled(tx, input.workspaceId, input.parentSessionId)
+    : resolveSessionCodeSearchEnabled(
+        workspace.settings,
+        codeSearchDeploymentPolicyForCreate(),
+        id,
+      );
   let insertedRows: (typeof schema.sessions.$inferSelect)[];
   let privateCreateCapabilityId: string | null = null;
   let privateCreateOwnerMembershipId: string | null = null;
@@ -33333,6 +33360,7 @@ async function createSessionInTransaction(
               (isCodexBilledModel(input.model)
                 ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
                 : "portable"),
+            codeSearchEnabled,
             status: "queued",
           },
           "initialMessage",
@@ -80689,6 +80717,7 @@ function mapSession(
       row.codexCompactionMode === "remote_v2" || row.codexCompactionMode === "portable"
         ? row.codexCompactionMode
         : "portable",
+    codeSearchEnabled: row.codeSearchEnabled === true,
     ...pin,
     ...attention,
     ...archive,

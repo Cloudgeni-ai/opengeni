@@ -162,7 +162,7 @@ describe("codeSearchToolDefinitions", () => {
     workspace: async () => fixtureWorkspace(),
   };
 
-  test("offers the tool only when enabled, keyed, with compute, and the breaker is closed", () => {
+  test("offers the tool only when enabled, keyed, and with compute", () => {
     expect(codeSearchToolDefinitions({ ...base, enabled: false })).toEqual([]);
     expect(
       codeSearchToolDefinitions({
@@ -173,12 +173,6 @@ describe("codeSearchToolDefinitions", () => {
     ).toEqual([]);
     expect(codeSearchToolDefinitions({ ...base, enabled: true, backend: "none" })).toEqual([]);
 
-    const tripped = new JevCircuitBreaker({ failureThreshold: 1 });
-    tripped.recordFailure(new JevUnavailableError("down"), 1_000);
-    expect(
-      codeSearchToolDefinitions({ ...base, enabled: true, breaker: tripped, now: () => 1_001 }),
-    ).toEqual([]);
-
     const [definition] = codeSearchToolDefinitions({
       ...base,
       enabled: true,
@@ -187,6 +181,46 @@ describe("codeSearchToolDefinitions", () => {
     expect(definition?.modelName).toBe("code_search");
     expect(definition?.annotations?.readOnlyHint).toBe(true);
     expect(definition?.approval).toBe("none");
+  });
+
+  test("a tripped breaker keeps the tool and its schema, and refuses calls at once", async () => {
+    // The tool list is the start of the model's cached prompt, and sessions move
+    // between workers whose breakers disagree, so Jev health must not change it.
+    const closed = codeSearchToolDefinitions({
+      ...base,
+      enabled: true,
+      breaker: new JevCircuitBreaker(),
+    });
+    const tripped = new JevCircuitBreaker({ failureThreshold: 1, cooldownMs: 60_000 });
+    tripped.recordFailure(new JevUnavailableError("down"), Date.now());
+    expect(tripped.isOpen(Date.now())).toBe(true);
+    const calls = { workspace: 0, jev: 0 };
+    const whileOpen = codeSearchToolDefinitions({
+      ...base,
+      enabled: true,
+      breaker: tripped,
+      workspace: async () => {
+        calls.workspace += 1;
+        return fixtureWorkspace();
+      },
+    });
+    expect(whileOpen).toHaveLength(1);
+    const shape = (definitions: typeof closed) =>
+      definitions.map((definition) => ({
+        identity: definition.identity,
+        modelName: definition.modelName,
+        title: definition.title,
+        description: definition.description,
+        inputSchema: definition.inputSchema,
+        annotations: definition.annotations,
+        approval: definition.approval,
+      }));
+    expect(JSON.stringify(shape(whileOpen))).toBe(JSON.stringify(shape(closed)));
+
+    const result = await whileOpen[0]!.execute(trialArgs, context);
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("unavailable right now");
+    expect(calls.workspace).toBe(0);
   });
 
   test("is not offered on a Windows Connected Machine, whose shell cannot run the search", () => {

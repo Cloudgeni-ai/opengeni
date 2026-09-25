@@ -143,18 +143,23 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0519_session_recovery_backlog_excludes_paused.sql",
+          (migration) => migration.path === "0520_session_code_search_frozen.sql",
         )
-          ? "0519_session_recovery_backlog_excludes_paused.sql"
+          ? "0520_session_code_search_frozen.sql"
           : sourceContract.migrations.some(
-                (migration) => migration.path === "0518_member_connection_read_backfill.sql",
+                (migration) =>
+                  migration.path === "0519_session_recovery_backlog_excludes_paused.sql",
               )
-            ? "0518_member_connection_read_backfill.sql"
+            ? "0519_session_recovery_backlog_excludes_paused.sql"
             : sourceContract.migrations.some(
-                  (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+                  (migration) => migration.path === "0518_member_connection_read_backfill.sql",
                 )
-              ? "0515_autonomous_learning_defaults.sql"
-              : "0514_failed_session_variable_set_attach.sql",
+              ? "0518_member_connection_read_backfill.sql"
+              : sourceContract.migrations.some(
+                    (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+                  )
+                ? "0515_autonomous_learning_defaults.sql"
+                : "0514_failed_session_variable_set_attach.sql",
       );
       expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
     }
@@ -187,6 +192,9 @@ describe("release schema contract", () => {
     );
     const sessionRecoveryBacklogExcludesPaused = completeSourceContract.migrations.some(
       (migration) => migration.path === "0519_session_recovery_backlog_excludes_paused.sql",
+    );
+    const sessionCodeSearchFrozen = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0520_session_code_search_frozen.sql",
     );
     const backgroundCommandText = completeSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
@@ -445,6 +453,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (sessionCodeSearchFrozen ? 1 : 0) +
         (sessionRecoveryBacklogExcludesPaused ? 1 : 0) +
         (memberConnectionRead ? 1 : 0) +
         (memberConnectionReadBackfillIndex ? 1 : 0) +
@@ -750,6 +759,9 @@ describe("release schema contract", () => {
       ...(sessionRecoveryBacklogExcludesPaused
         ? { latestMigration: "0519_session_recovery_backlog_excludes_paused.sql" }
         : {}),
+      ...(sessionCodeSearchFrozen
+        ? { latestMigration: "0520_session_code_search_frozen.sql" }
+        : {}),
     });
     // Keep the historical migration-order probes below scoped to published
     // history after checking the three forward rollout steps above.
@@ -762,6 +774,7 @@ describe("release schema contract", () => {
             "0517_member_connection_read_backfill_index.sql",
             "0518_member_connection_read_backfill.sql",
             "0519_session_recovery_backlog_excludes_paused.sql",
+            "0520_session_code_search_frozen.sql",
           ].includes(migration.path),
       ),
     };
@@ -2229,6 +2242,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0472_usage_events_workspace_recent_index.sql",
     );
     let completeSourceContract = await contractWithoutMigrations([
+      "0520_session_code_search_frozen.sql",
       "0519_session_recovery_backlog_excludes_paused.sql",
       "0516_member_connection_read.sql",
       "0517_member_connection_read_backfill_index.sql",
@@ -2736,6 +2750,7 @@ describe("release schema contract", () => {
       "0517_member_connection_read_backfill_index.sql",
       "0518_member_connection_read_backfill.sql",
       "0519_session_recovery_backlog_excludes_paused.sql",
+      "0520_session_code_search_frozen.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

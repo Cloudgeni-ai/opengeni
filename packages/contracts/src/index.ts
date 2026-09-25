@@ -12331,6 +12331,8 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // model admission for the life of the session; portable ⇒ plaintext compaction
     // and free mid-session provider switching (today's behavior).
     codexCompactionMode: CodexCompactionMode,
+    /** Frozen at create: whether the optional `code_search` tool is offered. */
+    codeSearchEnabled: z.boolean().default(false),
     /** Personal (authenticated subject) workspace pin state, never workspace-global. */
     pinned: z.boolean().default(false),
     /** Stable pin ordering key; null when this subject has not pinned the session. */

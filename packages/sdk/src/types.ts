@@ -1505,6 +1505,8 @@ export type Session = {
    * admission; `portable` ⇒ plaintext compaction and free provider switching.
    */
   codexCompactionMode: "remote_v2" | "portable";
+  /** Frozen at create: whether the optional `code_search` tool is offered. */
+  codeSearchEnabled?: boolean;
   /** Personal (authenticated subject) workspace pin state, never workspace-global. */
   pinned?: boolean;
   /** Stable pin ordering key; null when this subject has not pinned the session. */

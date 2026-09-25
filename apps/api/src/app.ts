@@ -50,6 +50,7 @@ import {
   ConnectAttemptConflictError,
   ConnectAttemptNotFoundError,
   configureChildLifecycleNotices,
+  configureCodeSearchDeploymentPolicy,
   configureWorkspaceControlRequestLockTimeoutMs,
   dbSql,
   getManagedAuthSessionSetSnapshot,
@@ -314,6 +315,9 @@ export function createAppComposition(deps: AppDependencies): {
   // Pause) run inside API-originated db commands; install the boot-validated
   // rollout flag once for this process.
   configureChildLifecycleNotices({ enabled: deps.settings.childLifecycleNoticesEnabled });
+  // Sessions created by this process freeze their code_search decision from
+  // the boot-parsed deployment policy.
+  configureCodeSearchDeploymentPolicy(codeSearchDeploymentPolicy(deps.settings));
   const managedEmailTransport =
     deps.managedEmailTransport ?? createManagedEmailTransport(deps.settings);
   assertManagedEmailTransportMetadata(managedEmailTransport);

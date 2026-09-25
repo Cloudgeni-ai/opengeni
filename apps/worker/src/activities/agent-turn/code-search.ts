@@ -30,8 +30,11 @@ import { recordCodeSearchCall, type CodeSearchCallOutcome } from "../../observab
 
 /**
  * One breaker per worker process. Repeated Jev outages (including an exhausted
- * account) hide `code_search` from new turns for a cooldown instead of letting
- * every turn discover the outage through a failed call.
+ * account) make `code_search` calls on this worker fail at once for a cooldown
+ * instead of each running a full retry cycle. The breaker never changes which
+ * tools a turn is offered: the tool list and instructions are the start of the
+ * model's cached prompt, and sessions move between workers whose breakers
+ * disagree.
  */
 export const codeSearchCircuitBreaker = new JevCircuitBreaker();
 
@@ -144,7 +147,9 @@ export function createCodeSearchAttemptToolDefinition(input: {
         if (!lease) {
           outcome = "breaker_open";
           return textResult(
-            renderCodeSearchError(new JevUnavailableError("Jev is temporarily unavailable")),
+            renderCodeSearchError(
+              new JevUnavailableError("Jev is not responding; calls are paused for a few minutes"),
+            ),
             true,
           );
         }
@@ -234,10 +239,11 @@ export function createCodeSearchAttemptToolDefinition(input: {
 
 /**
  * The `code_search` definition for one turn, or none. It is offered only when
- * the deployment and workspace enable it, a usable Jev key exists, the turn
- * has compute that can run its POSIX shell commands (not a Windows Connected
- * Machine), and recent Jev calls from this worker have not tripped the
- * breaker. The decision is made once per attempt.
+ * the session's frozen decision and the deployment enable it, a usable Jev key
+ * exists, and the turn has compute that can run its POSIX shell commands (not
+ * a Windows Connected Machine). Every input is durable, so the tool list stays
+ * the same from turn to turn and on every worker. Transient Jev health never
+ * hides the tool; the breaker only refuses calls.
  */
 export function codeSearchToolDefinitions(input: {
   enabled: boolean;
@@ -249,7 +255,6 @@ export function codeSearchToolDefinitions(input: {
   workspace: () => Promise<CodeSearchWorkspace>;
   recordUsage?: (usage: CodeSearchUsage) => Promise<void>;
   breaker?: JevCircuitBreaker;
-  now?: () => number;
 }): AttemptToolDefinition[] {
   const apiKey = usableJevApiKey(input.settings);
   const breaker = input.breaker ?? codeSearchCircuitBreaker;
@@ -257,7 +262,6 @@ export function codeSearchToolDefinitions(input: {
   if (input.machineWorkspaceRoot && isWindowsConnectedMachinePath(input.machineWorkspaceRoot)) {
     return [];
   }
-  if (breaker.isOpen((input.now ?? Date.now)())) return [];
   return [
     createCodeSearchAttemptToolDefinition({
       settings: input.settings,

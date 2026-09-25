@@ -24,20 +24,25 @@ export function resolveWorkspaceCodeSearchMode(
   deployment: CodeSearchDeploymentPolicy,
 ): CodeSearchWorkspaceDefault {
   if (!deployment.available) return "off";
-  const explicit =
-    typeof settings === "object" && settings !== null
-      ? (settings as { codeSearchEnabled?: unknown }).codeSearchEnabled
-      : undefined;
+  const explicit = explicitWorkspaceCodeSearchSetting(settings);
   if (explicit === true) return "on";
   if (explicit === false) return "off";
   return deployment.workspaceDefault;
 }
 
+function explicitWorkspaceCodeSearchSetting(settings: unknown): boolean | undefined {
+  const explicit =
+    typeof settings === "object" && settings !== null
+      ? (settings as { codeSearchEnabled?: unknown }).codeSearchEnabled
+      : undefined;
+  return typeof explicit === "boolean" ? explicit : undefined;
+}
+
 /**
  * Fixed per-session half for the `split` experiment: 32-bit FNV-1a of the
  * session id, low bit 0 gets the tool. Deterministic and dependency-free, so
- * the arm never changes within a session (keeping the prompt prefix stable)
- * and analysis can recompute it from the id alone.
+ * a root session's arm can be recomputed from its id. Child sessions inherit
+ * their parent's decision instead.
  */
 export function codeSearchSessionInExperiment(sessionId: string): boolean {
   let hash = 0x811c9dc5;
@@ -48,7 +53,11 @@ export function codeSearchSessionInExperiment(sessionId: string): boolean {
   return (hash & 1) === 0;
 }
 
-/** Whether this session's turns get the Jev-backed `code_search` tool. */
+/**
+ * The decision frozen on a new root session when it is created. Later changes
+ * to the workspace setting or the deployment mode never turn the tool on for a
+ * session that already exists.
+ */
 export function resolveSessionCodeSearchEnabled(
   settings: unknown,
   deployment: CodeSearchDeploymentPolicy,
@@ -56,4 +65,24 @@ export function resolveSessionCodeSearchEnabled(
 ): boolean {
   const mode = resolveWorkspaceCodeSearchMode(settings, deployment);
   return mode === "on" || (mode === "split" && codeSearchSessionInExperiment(sessionId));
+}
+
+/**
+ * Whether a turn of this session gets `code_search`. Only a session frozen on
+ * at creation can have it. The deployment (mode off or no usable key) and an
+ * explicit workspace Off still switch it off for running sessions, because
+ * they stop repository content going to Jev. That costs each running session
+ * one prompt-cache miss, which is accepted for a deliberate switch-off. Nothing
+ * else changes the tool list of a running session.
+ */
+export function codeSearchEnabledForTurn(
+  frozen: boolean | null | undefined,
+  settings: unknown,
+  deployment: CodeSearchDeploymentPolicy,
+): boolean {
+  return (
+    frozen === true &&
+    deployment.available &&
+    explicitWorkspaceCodeSearchSetting(settings) !== false
+  );
 }
