@@ -1635,7 +1635,7 @@ checkpoint, active writer or shared group remains blocked. Newer filesystem
 changes can be unavailable while conversation and external effects remain.
 Every agent reconstruction appends the same checkpoint-specific discontinuity
 warning to session instructions, after the stable workspace prompt prefix.
-Maintenance migration 0519 requires warning protocol v2 at attempt claim for
+Maintenance migration 0520 requires warning protocol v2 at attempt claim for
 every session with an automatic receipt, including after failed restoration or
 lease churn; old workers fail closed. Human-consented recovery keeps its
 independent v1 gate.

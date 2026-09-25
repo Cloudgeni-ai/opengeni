@@ -138,19 +138,23 @@ describe("release schema contract", () => {
   test("registers forward migrations in order after published history", async () => {
     const sourceContract = await buildCompleteSchemaContract();
     const automaticCheckpointDiscontinuity = sourceContract.migrations.find(
-      (migration) => migration.path === "0519_automatic_checkpoint_discontinuity.sql",
+      (migration) => migration.path === "0520_automatic_checkpoint_discontinuity.sql",
     );
     if (automaticCheckpointDiscontinuity) {
-      expect(sourceContract.latestMigration).toBe("0519_automatic_checkpoint_discontinuity.sql");
+      expect(sourceContract.latestMigration).toBe("0520_automatic_checkpoint_discontinuity.sql");
       expect(automaticCheckpointDiscontinuity.deploymentMode).toBe("maintenance");
     }
     const sourceBeforeAutomatic = automaticCheckpointDiscontinuity
       ? {
           ...sourceContract,
           fileCount: sourceContract.fileCount - 1,
-          latestMigration: "0518_member_connection_read_backfill.sql",
+          latestMigration: sourceContract.migrations.some(
+            (migration) => migration.path === "0519_session_recovery_backlog_excludes_paused.sql",
+          )
+            ? "0519_session_recovery_backlog_excludes_paused.sql"
+            : "0518_member_connection_read_backfill.sql",
           migrations: sourceContract.migrations.filter(
-            (migration) => migration.path !== "0519_automatic_checkpoint_discontinuity.sql",
+            (migration) => migration.path !== "0520_automatic_checkpoint_discontinuity.sql",
           ),
         }
       : sourceContract;
@@ -160,14 +164,18 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceBeforeAutomatic.latestMigration).toBe(
         sourceBeforeAutomatic.migrations.some(
-          (migration) => migration.path === "0518_member_connection_read_backfill.sql",
+          (migration) => migration.path === "0519_session_recovery_backlog_excludes_paused.sql",
         )
-          ? "0518_member_connection_read_backfill.sql"
+          ? "0519_session_recovery_backlog_excludes_paused.sql"
           : sourceBeforeAutomatic.migrations.some(
-                (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+                (migration) => migration.path === "0518_member_connection_read_backfill.sql",
               )
-            ? "0515_autonomous_learning_defaults.sql"
-            : "0514_failed_session_variable_set_attach.sql",
+            ? "0518_member_connection_read_backfill.sql"
+            : sourceBeforeAutomatic.migrations.some(
+                  (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+                )
+              ? "0515_autonomous_learning_defaults.sql"
+              : "0514_failed_session_variable_set_attach.sql",
       );
       expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
     }
@@ -197,6 +205,9 @@ describe("release schema contract", () => {
     );
     const memberConnectionReadBackfill = completeSourceContract.migrations.some(
       (migration) => migration.path === "0518_member_connection_read_backfill.sql",
+    );
+    const sessionRecoveryBacklogExcludesPaused = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0519_session_recovery_backlog_excludes_paused.sql",
     );
     const backgroundCommandText = completeSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
@@ -455,6 +466,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (sessionRecoveryBacklogExcludesPaused ? 1 : 0) +
         (memberConnectionRead ? 1 : 0) +
         (memberConnectionReadBackfillIndex ? 1 : 0) +
         (memberConnectionReadBackfill ? 1 : 0) +
@@ -756,6 +768,9 @@ describe("release schema contract", () => {
       ...(memberConnectionReadBackfill
         ? { latestMigration: "0518_member_connection_read_backfill.sql" }
         : {}),
+      ...(sessionRecoveryBacklogExcludesPaused
+        ? { latestMigration: "0519_session_recovery_backlog_excludes_paused.sql" }
+        : {}),
     });
     // Keep the historical migration-order probes below scoped to published
     // history after checking the three forward rollout steps above.
@@ -767,6 +782,7 @@ describe("release schema contract", () => {
             "0516_member_connection_read.sql",
             "0517_member_connection_read_backfill_index.sql",
             "0518_member_connection_read_backfill.sql",
+            "0519_session_recovery_backlog_excludes_paused.sql",
           ].includes(migration.path),
       ),
     };
@@ -2237,7 +2253,8 @@ describe("release schema contract", () => {
       "0516_member_connection_read.sql",
       "0517_member_connection_read_backfill_index.sql",
       "0518_member_connection_read_backfill.sql",
-      "0519_automatic_checkpoint_discontinuity.sql",
+      "0519_session_recovery_backlog_excludes_paused.sql",
+      "0520_automatic_checkpoint_discontinuity.sql",
       "0463_host_mcp_resolver_registration.sql",
       "0461_unified_knowledge.sql",
       "0460_host_export_message_attribution.sql",
@@ -2740,7 +2757,8 @@ describe("release schema contract", () => {
       "0516_member_connection_read.sql",
       "0517_member_connection_read_backfill_index.sql",
       "0518_member_connection_read_backfill.sql",
-      "0519_automatic_checkpoint_discontinuity.sql",
+      "0519_session_recovery_backlog_excludes_paused.sql",
+      "0520_automatic_checkpoint_discontinuity.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

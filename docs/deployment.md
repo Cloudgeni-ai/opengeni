@@ -65,11 +65,11 @@ This adds canonical-human consent for singleton managed-home Modal recovery only
 It does not enable automatic rollback, shared-group recovery, command replay,
 empty reset, or a new cancellation/reaper protocol. See [run lifecycle](run-lifecycle.md).
 
-## Automatic checkpoint continuity (0519)
+## Automatic checkpoint continuity (0520)
 
-`0519_automatic_checkpoint_discontinuity.sql` is maintenance-only. Stop old
+`0520_automatic_checkpoint_discontinuity.sql` is maintenance-only. Stop old
 API/control/turn workers, migrate and provision roles, then start only the
-matching binaries. A pre-0519 worker does not reconstruct a system-selected
+matching binaries. A pre-0520 worker does not reconstruct a system-selected
 filesystem warning. The replacement claim guard requires the worker's
 transaction-local warning protocol v2 for sessions with an automatic receipt;
 human-consented sessions still require v1. Never put either declaration in a

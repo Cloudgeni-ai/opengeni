@@ -440,7 +440,7 @@ fences, native artifact verification and durable model warnings; neither replays
 commands or creates an empty replacement for an unavailable archive. Authority:
 `packages/core/src/application/sandbox-recovery.ts` for human consent and
 `packages/db/src/index.ts` for exact-attempt automatic selection. Migration 0495
-keeps human consent owner-activated; maintenance migration 0519 fences automatic
+keeps human consent owner-activated; maintenance migration 0520 fences automatic
 receipts behind the warning-aware worker v2. Retry checks effective routes. See
 [run lifecycle](run-lifecycle.md).
 
