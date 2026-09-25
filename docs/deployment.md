@@ -1580,6 +1580,25 @@ strict-origin-when-cross-origin` (the setup-account page keeps its stricter
 API compresses JSON responses and leaves SSE and other streaming transports
 uncompressed.
 
+The shell carries a meta description plus Open Graph and Twitter card tags so
+shared console links unfurl with the bundled 1200x630 `/og-image.png`. Link
+preview crawlers need an absolute image URL, and the static shell cannot know
+its own origin, so the web server rewrites root-relative `og:image` and
+`twitter:image` URLs against `OPENGENI_WEB_BASE_URL`, or
+`OPENGENI_PUBLIC_BASE_URL` when the console and API share an origin. The Helm
+chart already hands the web pod the shared config map, so no extra setting is
+needed. Without either value the URL stays relative: browsers accept it, but
+some crawlers then show a preview without an image. The origin is never taken
+from request headers. Top-level icon files (`/favicon.ico`, `/favicon.svg`,
+`/apple-touch-icon.png`) ship with the shell, and any other missing top-level
+file such as `/robots.txt` answers 404 instead of the SPA HTML.
+
+The console's account menu links to product documentation under Help. The API
+advertises the link in `/v1/config/client` as `documentationUrl`, defaulting to
+the public OpenGeni docs at `https://docs.opengeni.ai`. Set
+`OPENGENI_DOCUMENTATION_URL` on the API to an absolute http(s) URL for your own
+documentation, or to `none` to hide the entry; any other value fails startup.
+
 Web assets, the React demo, and the server bundle compile once on BuildKit's
 native build platform. The amd64 and arm64 web images copy those portable
 outputs into their respective Bun runtime images without executing target

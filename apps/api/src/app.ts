@@ -1000,6 +1000,7 @@ export function createAppComposition(deps: AppDependencies): {
         billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(deps.settings),
+        documentationUrl: deps.settings.documentationUrl,
         analytics: clientAnalyticsConfig(deps.settings),
         // Channel-A structured services (P4.4) ride exec/readFile/createEditor,
         // available on every real backend; `none` has no box so they are all off.

@@ -393,6 +393,37 @@ describe("browser analytics configuration", () => {
   });
 });
 
+describe("console documentation link configuration", () => {
+  test("defaults to the public OpenGeni docs", () => {
+    expect(withEnv({}, () => getSettings()).documentationUrl).toBe("https://docs.opengeni.ai");
+  });
+
+  test("accepts an operator-owned http(s) documentation URL", () => {
+    expect(
+      withEnv({ OPENGENI_DOCUMENTATION_URL: " https://docs.example.test/opengeni " }, () =>
+        getSettings(),
+      ).documentationUrl,
+    ).toBe("https://docs.example.test/opengeni");
+  });
+
+  test("hides the link when set to none", () => {
+    expect(
+      withEnv({ OPENGENI_DOCUMENTATION_URL: "none" }, () => getSettings()).documentationUrl,
+    ).toBeNull();
+    expect(
+      withEnv({ OPENGENI_DOCUMENTATION_URL: " None " }, () => getSettings()).documentationUrl,
+    ).toBeNull();
+  });
+
+  test("rejects values a browser link must not follow", () => {
+    for (const value of ["javascript:alert(1)", "ftp://docs.example.test", "docs", "false"]) {
+      expect(() => withEnv({ OPENGENI_DOCUMENTATION_URL: value }, () => getSettings())).toThrow(
+        "must be an absolute http(s) URL or none",
+      );
+    }
+  });
+});
+
 describe("remote browser placement configuration", () => {
   test("keeps provider credentials optional and parses bounded launch policy", () => {
     const defaults = withEnv({}, () => getSettings());

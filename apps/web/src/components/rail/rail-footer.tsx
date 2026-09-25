@@ -43,6 +43,10 @@ const FeedbackDialog = lazy(() =>
   import("@/components/feedback").then((module) => ({ default: module.FeedbackDialog })),
 );
 
+const HelpMenu = lazy(() =>
+  import("@/components/help-menu").then((module) => ({ default: module.HelpMenu })),
+);
+
 const BrowserAccountMenu = lazy(() =>
   import("@/components/browser-account-menu").then((module) => ({
     default: module.BrowserAccountMenu,
@@ -179,6 +183,12 @@ export function RailFooter() {
                     Analytics preferences
                   </DropdownMenuItem>
                 ) : null}
+                <Suspense fallback={null}>
+                  <HelpMenu
+                    documentationUrl={context.clientConfig.documentationUrl}
+                    itemClassName="min-h-11"
+                  />
+                </Suspense>
                 {managed ? (
                   <DropdownMenuItem
                     variant="destructive"

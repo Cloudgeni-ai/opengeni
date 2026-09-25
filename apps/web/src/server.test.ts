@@ -3,7 +3,12 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createWebHandler, demoApiProxyFromEnvironment } from "./server";
+import {
+  createWebHandler,
+  demoApiProxyFromEnvironment,
+  publicWebOriginFromEnvironment,
+  withAbsoluteLinkPreviewUrls,
+} from "./server";
 
 const roots: string[] = [];
 const VALID_SETUP_TOKEN = "A".repeat(43);
@@ -103,6 +108,147 @@ describe("production web handler", () => {
     const handler = createWebHandler(root);
     expect((await handler(new Request("https://example.test/assets/missing.js"))).status).toBe(404);
     expect((await handler(new Request("https://example.test/%2e%2e%2fsecret"))).status).toBe(400);
+  });
+
+  test("answers missing top-level static files with 404 instead of the SPA shell", async () => {
+    const root = await fixture();
+    await Bun.write(join(root, "favicon.ico"), new Uint8Array([0, 0, 1, 0]));
+    const handler = createWebHandler(root);
+
+    const icon = await handler(new Request("https://example.test/favicon.ico"));
+    expect(icon.status).toBe(200);
+    expect(icon.headers.get("content-type")).toBe("image/x-icon");
+    for (const path of ["/apple-touch-icon-precomposed.png", "/robots.txt", "/site.webmanifest"]) {
+      const missing = await handler(new Request(`https://example.test${path}`));
+      expect(missing.status).toBe(404);
+      expect(await missing.text()).toBe("Not Found");
+    }
+    // Only top-level file names are static; HTML names and app routes keep the shell.
+    for (const path of ["/missing.html", "/workspaces/ws/files/report.pdf", "/setup-account"]) {
+      expect((await handler(new Request(`https://example.test${path}`))).status).toBe(200);
+    }
+  });
+
+  test("links every head icon and preview image to a shipped public file", async () => {
+    const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
+    const referenced = [
+      ...html.matchAll(/<link\s+rel="(?:icon|apple-touch-icon)"[^>]*\shref="([^"]+)"/gu),
+      ...html.matchAll(/<meta\s+property="og:image"\s+content="([^"]+)"/gu),
+    ].map((match) => match[1]!);
+    expect(referenced).toEqual([
+      "/favicon.ico",
+      "/favicon.svg",
+      "/apple-touch-icon.png",
+      "/og-image.png",
+    ]);
+    for (const path of referenced) {
+      expect(await Bun.file(new URL(`../public${path}`, import.meta.url)).exists()).toBe(true);
+    }
+    const ogImage = new Uint8Array(
+      await Bun.file(new URL("../public/og-image.png", import.meta.url)).arrayBuffer(),
+    );
+    const view = new DataView(ogImage.buffer);
+    // PNG IHDR width and height, matching the declared og:image dimensions.
+    expect([view.getUint32(16), view.getUint32(20)]).toEqual([1200, 630]);
+    expect(html).toContain('<meta property="og:image:width" content="1200" />');
+    expect(html).toContain('<meta property="og:image:height" content="630" />');
+    expect(html).toContain('<meta name="twitter:card" content="summary_large_image" />');
+    expect(html).toMatch(/<meta\s+name="description"\s+content="[^"]+"/u);
+  });
+
+  test("serves an absolute preview image URL from the configured public origin", async () => {
+    const root = await fixture();
+    const handler = createWebHandler(root, {
+      publicOrigin: "https://console.example.test/ignored",
+    });
+    const absolute =
+      '<meta property="og:image" content="https://console.example.test/og-image.png"';
+
+    const plain = await handler(new Request("https://internal:3000/workspaces/ws/sessions/id"));
+    expect(plain.status).toBe(200);
+    expect(plain.headers.get("cache-control")).toBe("no-cache");
+    expect(plain.headers.get("content-type")).toBe("text/html;charset=utf-8");
+    expect(plain.headers.get("content-encoding")).toBeNull();
+    const plainHtml = await plain.text();
+    expect(plainHtml).toContain(absolute);
+    expect(plainHtml).not.toContain('content="/og-image.png"');
+
+    const compressed = await handler(
+      new Request("https://internal:3000/", { headers: { "accept-encoding": "gzip" } }),
+    );
+    expect(compressed.headers.get("content-encoding")).toBe("gzip");
+    expect(compressed.headers.get("vary")).toBe("Accept-Encoding");
+    expect(
+      await new Response(compressed.body!.pipeThrough(new DecompressionStream("gzip"))).text(),
+    ).toBe(plainHtml);
+
+    const direct = await handler(new Request("https://internal:3000/index.html"));
+    expect(await direct.text()).toBe(plainHtml);
+
+    const head = await handler(new Request("https://internal:3000/", { method: "HEAD" }));
+    expect(head.headers.get("content-length")).toBe(
+      String(new TextEncoder().encode(plainHtml).byteLength),
+    );
+    expect(await head.text()).toBe("");
+
+    const setup = await handler(
+      new Request(`https://internal:3000/setup-account?token=${VALID_SETUP_TOKEN}`),
+    );
+    expect(setup.headers.get("cache-control")).toBe("no-store");
+    expect(setup.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(await setup.text()).toContain(absolute);
+  });
+
+  test("keeps preview URLs relative without a configured public origin", async () => {
+    const handler = createWebHandler(await fixture());
+    const html = await (await handler(new Request("https://attacker.example.test/"))).text();
+    expect(html).toContain('<meta property="og:image" content="/og-image.png"');
+    expect(html).not.toContain("attacker.example.test");
+  });
+
+  test("rewrites only root-relative preview URLs", () => {
+    expect(
+      withAbsoluteLinkPreviewUrls(
+        [
+          '<meta property="og:image" content="/og-image.png" />',
+          '<meta name="twitter:image" content="/card.png" />',
+          '<meta property="og:image" content="//cdn.example.test/og.png" />',
+          '<meta property="og:image" content="https://cdn.example.test/og.png" />',
+          '<link rel="icon" href="/favicon.svg" />',
+        ].join(""),
+        "https://console.example.test",
+      ),
+    ).toBe(
+      [
+        '<meta property="og:image" content="https://console.example.test/og-image.png" />',
+        '<meta name="twitter:image" content="https://console.example.test/card.png" />',
+        '<meta property="og:image" content="//cdn.example.test/og.png" />',
+        '<meta property="og:image" content="https://cdn.example.test/og.png" />',
+        '<link rel="icon" href="/favicon.svg" />',
+      ].join(""),
+    );
+  });
+
+  test("derives the public console origin from deployment configuration only", () => {
+    expect(publicWebOriginFromEnvironment({})).toBeUndefined();
+    expect(
+      publicWebOriginFromEnvironment({ OPENGENI_PUBLIC_BASE_URL: "https://app.example.test/api/" }),
+    ).toBe("https://app.example.test");
+    expect(
+      publicWebOriginFromEnvironment({
+        OPENGENI_WEB_BASE_URL: " http://127.0.0.1:3000 ",
+        OPENGENI_PUBLIC_BASE_URL: "https://api.example.test",
+      }),
+    ).toBe("http://127.0.0.1:3000");
+    expect(
+      publicWebOriginFromEnvironment({ OPENGENI_PUBLIC_BASE_URL: "not a url" }),
+    ).toBeUndefined();
+    expect(
+      publicWebOriginFromEnvironment({ OPENGENI_PUBLIC_BASE_URL: "javascript:alert(1)" }),
+    ).toBeUndefined();
+    expect(() => createWebHandler("/nonexistent", { publicOrigin: "file:///etc" })).toThrow(
+      "publicOrigin must be an absolute http(s) URL",
+    );
   });
 
   test("serves the deployed public React demo without falling through to the app shell", async () => {

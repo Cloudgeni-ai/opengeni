@@ -1,4 +1,5 @@
 import { AppearanceMenu } from "@/components/appearance-menu";
+import { HelpMenu } from "@/components/help-menu";
 import { Link } from "@tanstack/react-router";
 import { useBrowserAccounts } from "@opengeni/react/accounts";
 import type { ManagedAuthSessionSetProjection } from "@opengeni/sdk/accounts";
@@ -333,6 +334,10 @@ export function BrowserAccountMenu() {
               Analytics preferences
             </DropdownMenuItem>
           ) : null}
+          <HelpMenu
+            documentationUrl={context.clientConfig.documentationUrl}
+            itemClassName="min-h-11"
+          />
           <DropdownMenuItem
             className="min-h-11 forced-colors:text-[CanvasText]!"
             variant="destructive"
