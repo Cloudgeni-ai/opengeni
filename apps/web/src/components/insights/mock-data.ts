@@ -136,6 +136,10 @@ export function formatWarmHours(seconds: number): string {
   return `${hours.toFixed(2)}h`;
 }
 
+function roundMicros(usd: number): number {
+  return Math.round(usd * 1_000_000) / 1_000_000;
+}
+
 /** Null when prior is empty so the UI can show "—" instead of a fake +100%. */
 export function pctDelta(current: number, prior: number): number | null {
   if (prior === 0) return current === 0 ? 0 : null;
@@ -191,6 +195,11 @@ export type InsightsView = {
     cacheCoveragePct: number;
     creditPaidUsd: number;
     creditPaidCalls: number;
+    /**
+     * Charged ledger credits minus the credits the per-call breakdown accounts
+     * for. Null when a filter or scope makes the headline itself fact-based.
+     */
+    ledgerGapUsd: number | null;
     externalEstimatedUsd: number;
     externalCalls: number;
     externalPricedCalls: number;
@@ -343,6 +352,7 @@ export function buildInsightsView(
       cacheHitPct,
       creditPaidUsd,
       creditPaidCalls,
+      ledgerGapUsd: scoped ? null : roundMicros(snap.workspaceCreditUsd - creditPaidUsd),
       externalEstimatedUsd,
       externalCalls,
       externalPricedCalls,

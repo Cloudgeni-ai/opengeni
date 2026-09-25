@@ -20,6 +20,7 @@ import {
   INSIGHTS_RECENT_CALL_LIMIT,
   INSIGHTS_ROOT_DRIVER_LIMIT,
   readWorkspaceInsightsModelBundle,
+  reconcileModelCallFacts,
   registerDbBinding,
   transitionSessionVisibility,
   updateOrganizationPrivateSessionSettings,
@@ -708,6 +709,103 @@ describe("Workspace Insights model bundle", () => {
         totalTokens: 300,
       },
     ]);
+  });
+
+  test("reconciler rebuilds exactly the charged ledger calls that lack a fact", async () => {
+    if (!shared || !client) return;
+    const seeded = await fixture();
+    const occurredAt = new Date("2026-08-15T10:00:00.000Z");
+    const calls = ["with-event", "without-event", "already-faceted"].map((label, index) => ({
+      label,
+      turnId: crypto.randomUUID(),
+      sourceKey: `reconcile-${label}-${crypto.randomUUID()}`,
+      costMicros: [1200, 800, 500][index]!,
+      position: index + 1,
+    }));
+    for (const call of calls) {
+      await shared.admin`
+        insert into session_turns (
+          id, account_id, workspace_id, session_id, trigger_event_id,
+          temporal_workflow_id, status, position, prompt, model,
+          reasoning_effort, latency_mode, sandbox_backend, resources, tools,
+          metadata, started_at, finished_at
+        ) values (
+          ${call.turnId}, ${seeded.accountId}, ${seeded.workspaceId}, ${seeded.sharedSessionId},
+          ${crypto.randomUUID()}, ${`session-${seeded.sharedSessionId}`}, 'completed',
+          ${100 + call.position}, 'reconcile fixture', 'gpt-bundle',
+          'medium', 'standard', 'none', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+          ${occurredAt}, ${occurredAt}
+        )`;
+      const sourceResourceId = `${call.turnId}:${call.sourceKey}`;
+      await shared.admin`
+        insert into usage_events (
+          account_id, workspace_id, event_type, quantity, unit,
+          source_resource_type, source_resource_id, session_id, turn_id,
+          idempotency_key, occurred_at
+        ) values (
+          ${seeded.accountId}, ${seeded.workspaceId}, 'model.cost', ${call.costMicros}, 'usd_micros',
+          'model_response', ${sourceResourceId}, ${seeded.sharedSessionId}, ${call.turnId},
+          ${`usage:model.cost:${sourceResourceId}`},
+          ${occurredAt}::timestamptz + ${`${call.position} minutes`}::interval
+        )`;
+    }
+    for (const call of [calls[0]!, calls[2]!]) {
+      await shared.admin`
+        insert into session_events (
+          account_id, workspace_id, session_id, turn_id, turn_association,
+          sequence, type, payload, occurred_at
+        ) values (
+          ${seeded.accountId}, ${seeded.workspaceId}, ${seeded.sharedSessionId}, ${call.turnId},
+          'current',
+          (
+            select coalesce(max(sequence), 0) + 1
+            from session_events
+            where workspace_id = ${seeded.workspaceId}
+              and session_id = ${seeded.sharedSessionId}
+          ),
+          'agent.model.usage',
+          ${shared.admin.json({
+            sourceKey: call.sourceKey,
+            provider: "openai",
+            providerApi: "responses",
+            model: "gpt-bundle",
+            billingPath: "opengeni_credits",
+            inputTokens: 100,
+            outputTokens: 20,
+          })},
+          ${occurredAt}
+        )`;
+    }
+    await shared.admin`
+      insert into model_call_facts (
+        account_id, workspace_id, session_id, turn_id, source_key, provider,
+        provider_api, model, billing_path, priced_cost_micros, occurred_at
+      ) values (
+        ${seeded.accountId}, ${seeded.workspaceId}, ${seeded.sharedSessionId}, ${calls[2]!.turnId},
+        ${calls[2]!.sourceKey}, 'openai', 'responses', 'gpt-bundle', 'opengeni_credits', 500,
+        ${occurredAt}::timestamptz + interval '3 milliseconds'
+      )`;
+    const window = {
+      workspaceId: seeded.workspaceId,
+      since: new Date("2026-08-15T00:00:00.000Z"),
+      until: new Date("2026-08-16T00:00:00.000Z"),
+    };
+
+    const bounded = await reconcileModelCallFacts(client.db, { ...window, limit: 1 });
+    expect(bounded).toEqual({ missing: 1, repaired: 1, unrepaired: 0, truncated: true });
+
+    const first = await reconcileModelCallFacts(client.db, window);
+    expect(first).toEqual({ missing: 1, repaired: 0, unrepaired: 1, truncated: false });
+    const rebuilt = await shared.admin`
+      select priced_cost_micros::text, billing_path, total_tokens::text
+      from model_call_facts
+      where workspace_id = ${seeded.workspaceId} and turn_id = ${calls[0]!.turnId}`;
+    expect([...rebuilt]).toEqual([
+      { priced_cost_micros: "1200", billing_path: "opengeni_credits", total_tokens: "120" },
+    ]);
+
+    const again = await reconcileModelCallFacts(client.db, window);
+    expect(again).toEqual({ missing: 1, repaired: 0, unrepaired: 1, truncated: false });
   });
 
   test("reduces model sources from nine legacy reads to two by default and three with filtered facets", async () => {

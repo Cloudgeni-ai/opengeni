@@ -437,6 +437,16 @@ export function InsightsRoute({
             tone={totals.cacheHitPct !== null && totals.cacheHitPct >= 60 ? "good" : "neutral"}
           />
         </div>
+        {totals.ledgerGapUsd !== null && Math.abs(totals.ledgerGapUsd) >= 0.01 ? (
+          <p
+            className="rounded-md border border-status-waiting/30 bg-status-waiting/5 px-3 py-2 text-2xs leading-5 text-fg-muted"
+            data-insights-ledger-gap
+          >
+            {totals.ledgerGapUsd > 0
+              ? `Per-model breakdowns cover ${formatUsd(totals.creditPaidUsd)} of the ${formatUsd(totals.creditUsd)} charged. ${formatUsd(totals.ledgerGapUsd)} has no per-call record yet; recent gaps are rebuilt automatically from each call's usage event.`
+              : `Per-call records exceed the ${formatUsd(totals.creditUsd)} charged in this window by ${formatUsd(-totals.ledgerGapUsd)}.`}
+          </p>
+        ) : null}
         {filtered ? (
           <p className="text-2xs text-fg-subtle">
             Filters narrow model usage, spend, and diagnostics. Sandbox time, live sessions, caps,

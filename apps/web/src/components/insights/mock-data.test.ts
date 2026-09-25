@@ -233,6 +233,16 @@ describe("buildInsightsView", () => {
     expect(view.deltas.cachePts).toBeNull();
   });
 
+  test("reports how much of the charged ledger the per-call breakdown covers", () => {
+    const unscoped = buildInsightsView(snapshot(), { provider: "all", model: "all" });
+    expect(unscoped.totals.ledgerGapUsd).toBe(0.5);
+    const scoped = buildInsightsView(snapshot({ modelFilterActive: true }), {
+      provider: "openai",
+      model: "all",
+    });
+    expect(scoped.totals.ledgerGapUsd).toBeNull();
+  });
+
   test("uses the scoped fact total instead of the workspace ledger for a session scope", () => {
     const view = buildInsightsView(
       snapshot({
