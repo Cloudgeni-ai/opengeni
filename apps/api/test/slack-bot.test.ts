@@ -2514,8 +2514,8 @@ describe("OpenGeni Slack bot connection", () => {
       fileId: "F_IMAGE",
       filename: "thread-image.png",
       contentType: "image/png",
-      bytes: fixturePng(),
     });
+    expect("image" in image && [...image.image.bytes]).toEqual([...fixturePng()]);
     expect(JSON.stringify(image)).not.toContain("files.slack.com");
     await expect(bot.fileContent({ channelId: "G_PRIVATE", fileId: "F_IMAGE" })).rejects.toThrow(
       "not_in_channel",
