@@ -352,11 +352,12 @@ before changing `free`/`credits`. Database `codexModels` overrides membership,
 not credentials; retirement preserves only exact accepted execution.
 
 Documentation explains contracts without duplicating drift-prone lists.
-Cross-boundary enums are additive within major releases unless the whole release
+Cross-boundary enums are additive within major releases unless the release
 train breaks compatibility. Contract-parity tests pin intentional client/deployment mirrors.
 
 Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
-`packages/core/src/model-catalog.ts`, [`model-providers.md`](model-providers.md),
+`packages/core/src/model-catalog.ts`, `packages/core/src/default-session-model.ts`,
+[`model-providers.md`](model-providers.md),
 [`model-connection-access.md`](model-connection-access.md),
 and `packages/sdk/test/contract-parity.test.ts`.
 

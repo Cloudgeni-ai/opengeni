@@ -755,6 +755,24 @@ const SettingsSchema = z.object({
   reasoningConfigurationUpdatesEnabled: EnvBoolean.default(false),
   openaiReasoningEffort: ReasoningEffort.default("low"),
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh,max"),
+  // Default for new chats and scheduled tasks when the workspace has an
+  // OpenGeni credit balance, no saved workspace default, and no usable
+  // connected subscription, and the deployment default is not already a
+  // credits-billed model. Selected only when this model is selectable in the
+  // workspace catalog; otherwise the first selectable credits model is used.
+  // OPENGENI_CREDITS_DEFAULT_MODEL / OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT.
+  creditsDefaultModel: z
+    .string()
+    .trim()
+    .min(1)
+    .max(256)
+    .refine((value) => !/[\u000A\u000D|]/u.test(value), {
+      message: "credits default model must not contain newlines or the | field separator",
+    })
+    .default("gpt-6-luna"),
+  // Preferred effort for the credits default. Clamped to the highest effort
+  // the selected model supports at or below this value.
+  creditsDefaultReasoningEffort: ReasoningEffort.default("xhigh"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
   // Provider-assigned item ids (rs_/msg_/fc_…) in Responses API input are
   // resolved against the provider's server-side response store. That store is
@@ -3250,6 +3268,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ),
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),
     openaiAllowedReasoningEfforts: optional("OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"),
+    creditsDefaultModel: optional("OPENGENI_CREDITS_DEFAULT_MODEL"),
+    creditsDefaultReasoningEffort: optional("OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT"),
     openaiResponsesTransport: optional("OPENGENI_OPENAI_RESPONSES_TRANSPORT"),
     openaiProviderItemIds: optional("OPENGENI_OPENAI_PROVIDER_ITEM_IDS"),
     openaiReasoningEncryptedContent: optional("OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT"),

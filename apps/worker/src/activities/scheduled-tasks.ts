@@ -20,6 +20,7 @@ import {
   openGeniSlackBotMetadata,
   requireOpenGeniSlackBotConnection,
   resolveWorkspaceCatalogSettings,
+  resolveDefaultSessionModel,
   resolveSessionToolPolicy,
   workspaceCustomModelReference,
   lockActiveCustomModelForAdmission,
@@ -438,8 +439,31 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           )
         : null;
       const settings = await settingsForTask(task, targetSessionExecutionBase?.model);
-      const model = task.agentConfig.model ?? settings.openaiModel;
-      const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;
+      // A task that names no model resolves the new-chat default at each fresh
+      // occurrence (saved workspace default, then a usable connected
+      // subscription under the task's frozen SuperGrok authority, then the
+      // credits default while the organization holds credits, then the
+      // deployment default). The accepted execution freezes the result, so
+      // retries and recovery never resolve again. Existing-session runs keep
+      // that session's model.
+      const resolvedDefault =
+        task.agentConfig.model || targetSessionExecutionBase
+          ? null
+          : await resolveDefaultSessionModel(db, settings, {
+              accountId: task.accountId,
+              workspaceId: task.workspaceId,
+              subjectId: taskAuthoritySubjectId ?? task.createdBy.subjectId,
+              xaiAuthoritySnapshot: await getScheduledTaskXaiProviderAccountAuthoritySnapshot(
+                db,
+                task.workspaceId,
+                task.id,
+              ),
+            });
+      const model = task.agentConfig.model ?? resolvedDefault?.model ?? settings.openaiModel;
+      const reasoningEffort =
+        task.agentConfig.reasoningEffort ??
+        resolvedDefault?.reasoningEffort ??
+        settings.openaiReasoningEffort;
       let sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
       let sandboxOs: "linux" | "macos" | "windows" = "linux";
       const taskTools = withFirstPartyTools(settings, task.agentConfig.tools);

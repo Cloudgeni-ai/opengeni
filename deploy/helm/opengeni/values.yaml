@@ -139,6 +139,10 @@ config:
   # Optional non-secret JSON values may be supplied here:
   # OPENGENI_MODEL_COST_POLICY_JSON: '{"model-id":"free"}'
   # OPENGENI_MODEL_NOTES_JSON: '{"model-id":"One-line agent guidance."}'
+  # Default for new work while an organization holds OpenGeni credits and has
+  # no connected subscription (see docs/model-providers.md):
+  # OPENGENI_CREDITS_DEFAULT_MODEL: gpt-6-luna
+  # OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT: xhigh
   OPENGENI_STATIC_ENTITLEMENTS_JSON: "{}"
   OPENGENI_STATIC_USAGE_LIMITS_JSON: "{}"
   OPENGENI_OBJECT_STORAGE_BACKEND: s3-compatible

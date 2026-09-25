@@ -13,6 +13,7 @@ import {
   getSandbox,
   getVariableSet,
   NewSessionDraftAccessError,
+  newSessionDraftModelProvided,
   newSessionDraftSelectedProjectChannelId,
   newSessionDraftToolsProvided,
   newSessionSelectionHistory,
@@ -38,6 +39,8 @@ import {
   type AccessGrantAuthorization,
 } from "../access";
 import { assertConfiguredModel, assertWorkspaceModelPolicyAllows } from "../domain/sessions";
+import { resolveDefaultSessionModel } from "../default-session-model";
+import { canonicalizeConfiguredModelId, type Settings } from "@opengeni/config";
 
 type NewSessionDraftDependencies = Pick<AppDependencies, "settings" | "db" | "objectStorage">;
 
@@ -59,10 +62,45 @@ function mapNewSessionDraft(
     model: row.model,
     reasoningEffort: row.reasoningEffort,
     latencyMode: row.latencyMode,
+    ...(newSessionDraftModelProvided(row) !== undefined
+      ? { modelProvided: newSessionDraftModelProvided(row) }
+      : {}),
     ...(selectedProjectChannelId !== undefined ? { selectedProjectChannelId } : {}),
     options: publicNewSessionDraftOptions(row),
     selectionHistory: newSessionSelectionHistory(row),
     updatedAt: row.updatedAt.toISOString(),
+  });
+}
+
+/**
+ * Whether a stored draft's model policy was the person's choice. A row written
+ * before the marker existed (or by an older client) counts as a choice unless
+ * it is exactly the deployment default policy (model, reasoning, standard
+ * speed), which is what an untouched composer used to save.
+ */
+export function draftModelProvided(
+  settings: Settings,
+  draft: Pick<NewSessionDraftValue, "model" | "reasoningEffort" | "latencyMode" | "modelProvided">,
+): boolean {
+  if (draft.modelProvided !== undefined) return draft.modelProvided;
+  return !(
+    canonicalizeConfiguredModelId(settings, draft.model) ===
+      canonicalizeConfiguredModelId(settings, settings.openaiModel) &&
+    draft.reasoningEffort === settings.openaiReasoningEffort &&
+    draft.latencyMode === "standard"
+  );
+}
+
+/** The resolved new-chat default for this actor and workspace. */
+async function actorDefaultModel(
+  deps: Pick<NewSessionDraftDependencies, "db" | "settings">,
+  grant: AccessGrant,
+  workspaceId: string,
+) {
+  return await resolveDefaultSessionModel(deps.db, deps.settings, {
+    accountId: grant.accountId,
+    workspaceId,
+    subjectId: grant.subjectId,
   });
 }
 
@@ -73,8 +111,22 @@ async function hydrateNewSessionDraft(
   row: Awaited<ReturnType<typeof getNewSessionDraftInTransaction>>,
 ): Promise<NewSessionDraftValue | null> {
   if (!row) return null;
-  const mapped = mapNewSessionDraft(row);
-  if (!mapped) return null;
+  const stored = mapNewSessionDraft(row);
+  if (!stored) return null;
+  // A draft that follows the default is projected onto today's default, so a
+  // later subscription connect or credit purchase replaces an untouched free
+  // model. The stored row is unchanged until the person saves again.
+  const modelProvided = draftModelProvided(deps.settings, stored);
+  let mapped: NewSessionDraftValue = { ...stored, modelProvided };
+  if (!modelProvided) {
+    const resolved = await actorDefaultModel(deps, grant, workspaceId);
+    mapped = {
+      ...mapped,
+      model: resolved.model,
+      reasoningEffort: resolved.reasoningEffort,
+      latencyMode: resolved.model === stored.model ? stored.latencyMode : "standard",
+    };
+  }
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
     deps.db,
     workspaceId,
@@ -198,21 +250,23 @@ async function getActorNewSessionDraftInFileScope(
       subjectId: grant.subjectId,
     }),
   );
-  return (
-    (await hydrateNewSessionDraft(deps, grant, workspaceId, row)) ?? {
-      revision: 0,
-      text: "",
-      resources: [],
-      tools: [],
-      toolsProvided: false,
-      model: deps.settings.openaiModel,
-      reasoningEffort: deps.settings.openaiReasoningEffort,
-      latencyMode: "standard",
-      options: {},
-      selectionHistory: { projects: [] },
-      updatedAt: null,
-    }
-  );
+  const hydrated = await hydrateNewSessionDraft(deps, grant, workspaceId, row);
+  if (hydrated) return hydrated;
+  const resolved = await actorDefaultModel(deps, grant, workspaceId);
+  return {
+    revision: 0,
+    text: "",
+    resources: [],
+    tools: [],
+    toolsProvided: false,
+    model: resolved.model,
+    reasoningEffort: resolved.reasoningEffort,
+    latencyMode: "standard",
+    modelProvided: false,
+    options: {},
+    selectionHistory: { projects: [] },
+    updatedAt: null,
+  };
 }
 
 /**
@@ -284,6 +338,7 @@ async function saveActorNewSessionDraftInFileScope(
           model: input.model,
           reasoningEffort: input.reasoningEffort,
           latencyMode: input.latencyMode,
+          ...(input.modelProvided !== undefined ? { modelProvided: input.modelProvided } : {}),
           ...(input.selectedProjectChannelId !== undefined
             ? { selectedProjectChannelId: input.selectedProjectChannelId }
             : {}),
@@ -344,8 +399,10 @@ export async function getActorNewSessionDefaults(
   const draft = await getActorNewSessionDraft(deps, grant, workspaceId);
   const options = draft.options;
   return {
-    // Revision zero is a synthetic empty form, not a user's model preference.
-    ...(draft.revision > 0
+    // Only a model the person chose is carried over. A draft that follows the
+    // default (including the synthetic revision-zero form) leaves the model
+    // out, so session creation resolves the same default itself.
+    ...(draft.revision > 0 && draft.modelProvided === true
       ? {
           model: draft.model,
           reasoningEffort: draft.reasoningEffort,
