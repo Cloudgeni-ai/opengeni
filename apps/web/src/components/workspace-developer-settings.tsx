@@ -16,7 +16,6 @@ import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { LoadErrorState } from "@/components/common";
-import { PreferenceToggleRow } from "@/components/transcription-settings";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -25,7 +24,22 @@ import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useAppContext } from "@/context";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+
+type IntegrationsClient = Pick<
+  OpenGeniBrowserClient,
+  | "listWorkspaceWebhooks"
+  | "createWorkspaceWebhook"
+  | "updateWorkspaceWebhook"
+  | "deleteWorkspaceWebhook"
+  | "listWorkspaceWebhookDeliveries"
+  | "redeliverWorkspaceWebhookDelivery"
+  | "getWorkspaceCredentialProvider"
+  | "putWorkspaceCredentialProvider"
+  | "deleteWorkspaceCredentialProvider"
+  | "listWorkspaceSandboxImages"
+  | "updateWorkspaceSettings"
+>;
 
 const EVENT_OPTIONS: ReadonlyArray<{ type: WorkspaceWebhookEventType; label: string }> = [
   { type: "turn.completed", label: "Turn completed" },
@@ -63,8 +77,15 @@ function SecretNotice({ label, secret }: { label: string; secret: string }) {
   );
 }
 
-function DeliveryList({ workspaceId, webhookId }: { workspaceId: string; webhookId: string }) {
-  const { client } = useAppContext();
+function DeliveryList({
+  client,
+  workspaceId,
+  webhookId,
+}: {
+  client: IntegrationsClient;
+  workspaceId: string;
+  webhookId: string;
+}) {
   const [deliveries, setDeliveries] = useState<WorkspaceWebhookDelivery[] | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const load = useCallback(async () => {
@@ -131,8 +152,15 @@ function DeliveryList({ workspaceId, webhookId }: { workspaceId: string; webhook
   );
 }
 
-function WebhooksSection({ workspaceId, canManage }: { workspaceId: string; canManage: boolean }) {
-  const { client } = useAppContext();
+function WebhooksSection({
+  client,
+  workspaceId,
+  canManage,
+}: {
+  client: IntegrationsClient;
+  workspaceId: string;
+  canManage: boolean;
+}) {
   const [webhooks, setWebhooks] = useState<WorkspaceWebhook[] | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [adding, setAdding] = useState(false);
@@ -315,7 +343,7 @@ function WebhooksSection({ workspaceId, canManage }: { workspaceId: string; canM
                 ) : null}
               </div>
               {expanded === webhook.id ? (
-                <DeliveryList workspaceId={workspaceId} webhookId={webhook.id} />
+                <DeliveryList client={client} workspaceId={workspaceId} webhookId={webhook.id} />
               ) : null}
             </div>
           ))
@@ -339,13 +367,14 @@ function WebhooksSection({ workspaceId, canManage }: { workspaceId: string; canM
 }
 
 function CredentialProviderSection({
+  client,
   workspaceId,
   canManage,
 }: {
+  client: IntegrationsClient;
   workspaceId: string;
   canManage: boolean;
 }) {
-  const { client } = useAppContext();
   const [provider, setProvider] = useState<WorkspaceCredentialProvider | null | undefined>(
     undefined,
   );
@@ -442,24 +471,27 @@ function CredentialProviderSection({
             </div>
           </div>
           {provider ? (
-            <div className="flex items-center gap-2">
-              <div className="min-w-0 flex-1">
-                <PreferenceToggleRow
-                  label="Use for new runs"
-                  description={
-                    provider.enabled
-                      ? "Runs in this workspace request credentials from this endpoint."
-                      : "Paused. Runs use the deployment's credentials."
-                  }
-                  checked={provider.enabled}
-                  disabled={!canManage || busy}
-                  onToggle={() => void save(!provider.enabled)}
-                />
-              </div>
+            <div className="flex items-center gap-3">
+              <p className="min-w-0 flex-1 text-2xs text-fg-subtle">
+                {provider.enabled
+                  ? "Runs in this workspace request credentials from this endpoint."
+                  : "Paused. Runs use the deployment's credentials."}
+              </p>
               {canManage ? (
-                <Button type="button" variant="ghost" size="sm" onClick={() => setRemoving(true)}>
-                  Remove
-                </Button>
+                <>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => void save(!provider.enabled)}
+                  >
+                    {provider.enabled ? "Pause" : "Resume"}
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" onClick={() => setRemoving(true)}>
+                    Remove
+                  </Button>
+                </>
               ) : null}
             </div>
           ) : null}
@@ -483,29 +515,32 @@ function CredentialProviderSection({
 }
 
 export function WorkspaceDeveloperSettings({
+  client,
   workspaceId,
   canManage,
 }: {
+  client: IntegrationsClient;
   workspaceId: string;
   canManage: boolean;
 }) {
   return (
     <div className="grid gap-8">
-      <WebhooksSection workspaceId={workspaceId} canManage={canManage} />
-      <CredentialProviderSection workspaceId={workspaceId} canManage={canManage} />
+      <WebhooksSection client={client} workspaceId={workspaceId} canManage={canManage} />
+      <CredentialProviderSection client={client} workspaceId={workspaceId} canManage={canManage} />
     </div>
   );
 }
 
 /** Hidden unless the deployment allowlists images a workspace may pick. */
 export function WorkspaceSandboxImageRow({
+  client,
   workspaceId,
   canManage,
 }: {
+  client: IntegrationsClient;
   workspaceId: string;
   canManage: boolean;
 }) {
-  const { client } = useAppContext();
   const [images, setImages] = useState<string[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);

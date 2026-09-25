@@ -480,7 +480,11 @@ function OperationalWorkspaceSettingsRoute({
                   workspaceId={workspaceId}
                   canManage={canManageSettings}
                 />
-                <WorkspaceSandboxImageRow workspaceId={workspaceId} canManage={canRename} />
+                <WorkspaceSandboxImageRow
+                  client={client}
+                  workspaceId={workspaceId}
+                  canManage={canRename}
+                />
               </div>
             </section>
 
@@ -489,7 +493,11 @@ function OperationalWorkspaceSettingsRoute({
         ) : null}
 
         {section === "developer" ? (
-          <WorkspaceDeveloperSettings workspaceId={workspaceId} canManage={canRename} />
+          <WorkspaceDeveloperSettings
+            client={client}
+            workspaceId={workspaceId}
+            canManage={canRename}
+          />
         ) : null}
 
         {section === "learning" ? (

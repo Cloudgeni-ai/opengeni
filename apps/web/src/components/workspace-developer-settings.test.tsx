@@ -1,37 +1,7 @@
-import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
-import { createRoot } from "react-dom/client";
-import * as SonnerPackage from "sonner";
-
-mock.module("sonner", () => ({
-  ...SonnerPackage,
-  toast: Object.assign(
-    mock((_message: string) => undefined),
-    {
-      success: mock((_message: string) => undefined),
-      error: mock((_message: string) => undefined),
-    },
-  ),
-}));
-
-mock.module("@/components/ui/confirm-dialog", () => ({
-  ConfirmDialog: ({
-    open,
-    confirmLabel,
-    onConfirm,
-  }: {
-    open: boolean;
-    confirmLabel: string;
-    onConfirm: () => unknown;
-    children?: ReactNode;
-  }) =>
-    open ? (
-      <button type="button" onClick={() => void onConfirm()}>
-        {`confirm ${confirmLabel}`}
-      </button>
-    ) : null,
-}));
+import { createRoot, type Root } from "react-dom/client";
 
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const timestamp = "2026-09-24T10:00:00.000Z";
@@ -91,7 +61,11 @@ const client = {
   })),
   updateWorkspaceSettings: mock(async () => ({})),
 };
-mock.module("@/context", () => ({ useAppContext: () => ({ client }) }));
+
+// UI primitives read DOM globals at module load, so register Happy DOM first.
+GlobalRegistrator.register();
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
 
 const { WorkspaceDeveloperSettings, WorkspaceSandboxImageRow } =
   await import("./workspace-developer-settings");
@@ -125,22 +99,24 @@ async function type(input: HTMLInputElement, value: string) {
   });
 }
 
-beforeAll(() => {
-  GlobalRegistrator.register();
-  (
-    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
-  ).IS_REACT_ACT_ENVIRONMENT = true;
+afterAll(() => {
+  GlobalRegistrator.unregister();
 });
 
-afterAll(() => {
-  mock.restore();
-  GlobalRegistrator.unregister();
+const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+
+afterEach(async () => {
+  for (const { root, container } of mounted.splice(0)) {
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });
 
 async function render(node: ReactNode) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
+  mounted.push({ root, container });
   await act(async () => root.render(node));
   await flush();
   return container;
@@ -149,7 +125,7 @@ async function render(node: ReactNode) {
 describe("workspace developer settings", () => {
   test("adds a webhook, shows its secret once, and lists delivery history", async () => {
     const container = await render(
-      <WorkspaceDeveloperSettings workspaceId={workspaceId} canManage />,
+      <WorkspaceDeveloperSettings client={client as never} workspaceId={workspaceId} canManage />,
     );
     expect(container.textContent).toContain("https://receiver.example/events");
     expect(container.textContent).toContain("Turn completed");
@@ -189,7 +165,7 @@ describe("workspace developer settings", () => {
 
   test("connects a credential provider and keeps read-only viewers out", async () => {
     const container = await render(
-      <WorkspaceDeveloperSettings workspaceId={workspaceId} canManage />,
+      <WorkspaceDeveloperSettings client={client as never} workspaceId={workspaceId} canManage />,
     );
     await type(
       container.querySelector<HTMLInputElement>("#credential-provider-url")!,
@@ -204,7 +180,11 @@ describe("workspace developer settings", () => {
     expect(container.textContent).toContain("ogcp_one_time_value");
 
     const readOnly = await render(
-      <WorkspaceDeveloperSettings workspaceId={workspaceId} canManage={false} />,
+      <WorkspaceDeveloperSettings
+        client={client as never}
+        workspaceId={workspaceId}
+        canManage={false}
+      />,
     );
     expect(readOnly.textContent).not.toContain("Add webhook");
     expect(readOnly.querySelector<HTMLInputElement>("#credential-provider-url")!.disabled).toBe(
@@ -214,7 +194,7 @@ describe("workspace developer settings", () => {
 
   test("offers only allowlisted sandbox images", async () => {
     const container = await render(
-      <WorkspaceSandboxImageRow workspaceId={workspaceId} canManage />,
+      <WorkspaceSandboxImageRow client={client as never} workspaceId={workspaceId} canManage />,
     );
     const select = container.querySelector<HTMLSelectElement>("#workspace-sandbox-image")!;
     expect(Array.from(select.options).map((option) => option.value)).toEqual([
@@ -234,7 +214,9 @@ describe("workspace developer settings", () => {
       images: [],
       selected: null,
     }));
-    const hidden = await render(<WorkspaceSandboxImageRow workspaceId={workspaceId} canManage />);
+    const hidden = await render(
+      <WorkspaceSandboxImageRow client={client as never} workspaceId={workspaceId} canManage />,
+    );
     expect(hidden.textContent).toBe("");
   });
 });
