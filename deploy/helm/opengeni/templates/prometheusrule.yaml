@@ -664,6 +664,25 @@ spec:
           annotations:
             summary: A Modal sandbox disappeared before its workspace could be captured
             description: The exact draining-to-cold commit recorded providerMissingBeforeCapture. Inspect the sandbox.box.terminated event and the current archive/recovery state; a prior checkpoint may still be restorable. This is observed loss, independent of overdue rotation backlog.
+        - alert: OpenGeniModalCheckpointFallbackSelected
+          # A newly created counter may have only one scrape sample. The offset
+          # arm retains that first positive observation for the alert window.
+          expr: |
+            sum(
+              increase(opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="selected"}[30m]) > 0
+              or
+              (
+                opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="selected"}
+                unless
+                opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="selected"} offset 30m
+              )
+            ) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: Modal workspace recovery selected a fallback checkpoint
+            description: A prior checkpoint was selected after a durable authorization receipt. This is an operator signal even if the session later continues successfully; inspect archive selection and restore state. Selection does not prove restoration succeeded.
         - alert: OpenGeniSandboxCheckpointDeletionFailed
           expr: opengeni:sandbox_checkpoint_artifacts:fresh_max{state="delete_failed"} > 0
           for: 15m

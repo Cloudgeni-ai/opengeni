@@ -143,6 +143,30 @@ describe("turn-capacity Prometheus alerts", () => {
     }
   });
 
+  test("warns on authorized Modal checkpoint fallback selection, not inferred restore success", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const expression = alertExpression(template, "OpenGeniModalCheckpointFallbackSelected");
+    expect(expression).toContain("opengeni_sandbox_checkpoint_fallback_total");
+    expect(expression).toContain('backend="modal",outcome="selected"');
+    expect(expression).toContain("[30m]) > 0");
+    expect(expression).toContain("unless");
+    expect(expression).toContain("offset 30m");
+    expect(expression).not.toContain("opengeni:sandbox_rotation_backlog:fresh_max");
+    for (const selector of metricSelectors(expression)) {
+      expect(selector).toContain(DEPLOYMENT_SCOPE);
+      expect(selector).not.toMatch(/workspace_id|session_id|sandbox_group_id|instance_id/);
+    }
+    const alert = template.slice(
+      template.indexOf("        - alert: OpenGeniModalCheckpointFallbackSelected\n"),
+      template.indexOf("        - alert: OpenGeniSandboxCheckpointDeletionFailed\n"),
+    );
+    expect(alert).toContain("severity: warning");
+    expect(alert).toContain("Selection does not prove restoration succeeded.");
+  });
+
   test("alerts on bounded runtime, tool, lifecycle, API, and recovery failures", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
