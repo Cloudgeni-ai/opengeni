@@ -5996,12 +5996,24 @@ describe("runtime event normalization", () => {
 
     expect(created[0]!.diff).toBe("+oggh1.renewed-secret-bearer");
     expect(commands).toHaveLength(1);
+    expect(commands[0]!.startsWith("set +x\nOPENGENI_GIT_PROVISIONING_TARGET=sandbox\n")).toBe(
+      true,
+    );
     expect(commands[0]).not.toContain("oggh1.renewed-secret-bearer");
     expect(commands[0]).toContain(created[0]!.path);
   });
 
-  test("TOKEN-BROKER (B1): with NO seed the clone hook command is byte-for-byte the un-prefixed clone (no-op on selfhosted)", async () => {
+  test("TOKEN-BROKER (B1): with NO seed the clone hook command is the clone script behind only the sandbox provisioning target", async () => {
     const calls: Array<Record<string, unknown>> = [];
+    const resources = [
+      {
+        kind: "repository" as const,
+        uri: "https://github.com/acme/private.git",
+        ref: "main",
+        githubInstallationId: 123,
+        githubRepositoryId: 456,
+      },
+    ];
     await runRepositoryCloneHook(
       {
         exec: async (args: Record<string, unknown>) => {
@@ -6015,15 +6027,7 @@ describe("runtime event normalization", () => {
           };
         },
       } as any,
-      [
-        {
-          kind: "repository",
-          uri: "https://github.com/acme/private.git",
-          ref: "main",
-          githubInstallationId: 123,
-          githubRepositoryId: 456,
-        },
-      ],
+      resources,
       {
         environment: { HOME: "/workspace" },
       },
@@ -6031,7 +6035,17 @@ describe("runtime event normalization", () => {
 
     expect(calls).toHaveLength(1);
     expect(String(calls[0]?.cmd)).not.toContain("export OPENGENI_GIT_TOKEN_SEED=");
-    expect(String(calls[0]?.cmd).startsWith("set +x\nset -eu")).toBe(true);
+    // The only prefix is the sandbox target that admits the provisioning guard;
+    // the exported builder alone refuses to run on a host.
+    expect(String(calls[0]?.cmd)).toBe(
+      `set +x\nOPENGENI_GIT_PROVISIONING_TARGET=sandbox\n${repositoryCloneCommand(resources)}`,
+    );
+    expect(repositoryCloneCommand(resources)).not.toContain(
+      "OPENGENI_GIT_PROVISIONING_TARGET=sandbox\n",
+    );
+    expect(repositoryCloneCommand(resources)).toContain(
+      'if [ "${OPENGENI_GIT_PROVISIONING_TARGET:-}" != sandbox ]; then',
+    );
   });
 
   test("CODEMODE-BROKER: seed hook writes the delegated token file from a per-exec prefix only", async () => {

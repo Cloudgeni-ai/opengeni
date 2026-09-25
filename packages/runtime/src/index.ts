@@ -10270,6 +10270,34 @@ function gitAskpassHostProviderCaseLines(
   ];
 }
 
+/**
+ * Git credential provisioning writes `$HOME/.opengeni` and rewrites the executing
+ * user's global Git configuration (`credential.helper`, `credential.useHttpPath`,
+ * `include.path`). Inside a managed sandbox HOME is the sandbox's own home, so that
+ * is the intended setup. Anywhere else it is destructive: executed on a developer
+ * or host machine, the empty `credential.helper` reset silently removes the user's
+ * own credential helpers. The generated scripts therefore refuse to run unless the
+ * command explicitly targets a sandbox, and only the sandbox lifecycle hooks below
+ * add that target. It is a plain, unexported shell assignment in the command text:
+ * it never enters the manifest environment and child processes never inherit it.
+ */
+const SANDBOX_GIT_PROVISIONING_TARGET_ASSIGNMENT = "OPENGENI_GIT_PROVISIONING_TARGET=sandbox";
+
+function sandboxGitProvisioningGuardLines(): string[] {
+  return [
+    'if [ "${OPENGENI_GIT_PROVISIONING_TARGET:-}" != sandbox ]; then',
+    '  echo "Refusing to provision OpenGeni Git credentials into HOME=${HOME:-unset} and its global Git config: this script only runs as an OpenGeni sandbox lifecycle command (OPENGENI_GIT_PROVISIONING_TARGET=sandbox)." >&2',
+    "  exit 78",
+    "fi",
+  ];
+}
+
+/** Marks a Git provisioning script as a sandbox lifecycle command. Every caller runs
+ *  the result through a sandbox session's exec, never on the host. */
+function sandboxGitProvisioningCommand(command: string): string {
+  return ["set +x", SANDBOX_GIT_PROVISIONING_TARGET_ASSIGNMENT, command].join("\n");
+}
+
 function gitCredentialTokenWriterCommandLines(
   bindings: GitCredentialBindingSeed[] = [],
   stagedSeeds: StagedGitCredentialBindingSeed[] = [],
@@ -10689,6 +10717,7 @@ export function gitProviderTokenRefreshCommand(seeds: GitTokenSeeds): string {
     "set +x",
     seedPrefix,
     "set -eu",
+    ...sandboxGitProvisioningGuardLines(),
     'export HOME="${HOME:-/workspace}"',
     ...gitCredentialTokenWriterCommandLines(),
   ].join("\n");
@@ -10704,6 +10733,7 @@ export function gitCredentialBindingTokenRefreshCommand(
     "set +x",
     seedPrefix,
     "set -eu",
+    ...sandboxGitProvisioningGuardLines(),
     'export HOME="${HOME:-/workspace}"',
     ...gitCredentialTokenWriterCommandLines(bindings, stagedSeeds),
   ].join("\n");
@@ -10722,7 +10752,7 @@ export async function refreshGitProviderTokenFiles(
     return;
   }
   const args = {
-    cmd: command,
+    cmd: sandboxGitProvisioningCommand(command),
     workdir: "/workspace",
     ...(options.runAs ? { runAs: options.runAs } : {}),
     yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
@@ -10747,7 +10777,7 @@ export async function refreshGitCredentialBindingTokenFiles(
     const command = gitCredentialBindingTokenRefreshCommand(bindings, staged);
     if (!command) return;
     const args = {
-      cmd: command,
+      cmd: sandboxGitProvisioningCommand(command),
       workdir: "/workspace",
       ...(options.runAs ? { runAs: options.runAs } : {}),
       yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
@@ -10772,6 +10802,7 @@ export function repositoryCloneCommand(
   const commands = [
     "set +x",
     "set -eu",
+    ...sandboxGitProvisioningGuardLines(),
     'export HOME="${HOME:-/workspace}"',
     'export GIT_TERMINAL_PROMPT="${GIT_TERMINAL_PROMPT:-0}"',
     "ensure_git() {",
@@ -11442,7 +11473,9 @@ export async function runRepositoryCloneHook(
       gitCredentialBindings,
       stagedBrokerSeeds.staged,
     );
-    const command = seedPrefix ? `set +x\n${seedPrefix}\n${cloneCommand}` : cloneCommand;
+    const command = sandboxGitProvisioningCommand(
+      seedPrefix ? `${seedPrefix}\n${cloneCommand}` : cloneCommand,
+    );
     const result = await runSandboxLifecycleCommand(
       session,
       {

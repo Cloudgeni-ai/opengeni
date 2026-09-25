@@ -3,7 +3,7 @@
 // connect-failure tests leak retrying rejections that bun would attribute to
 // whatever slow test is running — cross-file isolation contains that flake.
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   azureCliLoginCommand,
   gitCredentialBindingHash,
@@ -11,9 +11,10 @@ import {
   gitProviderTokenRefreshCommand,
   repositoryCloneCommand,
 } from "../src/index";
+import { isolatedGitEnvironment } from "./isolated-git-home-fixture";
 
 describe("lifecycle scripts — real sh execution semantics", () => {
-  const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
+  const childProcess = require("node:child_process") as typeof import("node:child_process");
   const {
     mkdtempSync,
     mkdirSync,
@@ -27,14 +28,44 @@ describe("lifecycle scripts — real sh execution semantics", () => {
   const { tmpdir } = require("node:os") as typeof import("node:os");
   const { join } = require("node:path") as typeof import("node:path");
 
-  function isolatedProcessEnv(): NodeJS.ProcessEnv {
-    const env = { ...process.env };
-    delete env.GIT_ASKPASS;
-    delete env.SSH_ASKPASS;
-    delete env.OPENGENI_GIT_TOKEN_FILE;
-    delete env.OPENGENI_GIT_CREDENTIALS_DIR;
-    delete env.OPENGENI_GIT_CLI_WRAPPER_DIR;
-    return env;
+  // These scripts rewrite `$HOME/.opengeni` and the global Git config of whoever
+  // runs them. Every child process below therefore runs against an isolated
+  // temporary HOME (with GIT_CONFIG_GLOBAL and XDG_CONFIG_HOME pinned inside it),
+  // never the developer's: a test that omits HOME gets this harness home.
+  let harnessHome = "";
+  beforeAll(() => {
+    harnessHome = mkdtempSync(join(tmpdir(), "opengeni-lifecycle-home-"));
+  });
+  afterAll(() => {
+    if (harnessHome) rmSync(harnessHome, { recursive: true, force: true });
+  });
+
+  type ChildEnvironment = Record<string, string | undefined>;
+
+  /** A sandbox-like environment: isolated HOME plus the sandbox provisioning
+   *  target the runtime's lifecycle hooks set. `undefined` removes a name. */
+  function isolatedProcessEnv(overrides: ChildEnvironment = {}): NodeJS.ProcessEnv {
+    return isolatedGitEnvironment(
+      { HOME: harnessHome, ...overrides },
+      { sandboxGitProvisioning: true },
+    );
+  }
+
+  /** `execFileSync` for every git/sh/wrapper invocation in this file: always an
+   *  isolated environment, always UTF-8 output. */
+  function execFileSync(
+    file: string,
+    args: readonly string[],
+    options: Omit<import("node:child_process").ExecFileSyncOptions, "env" | "encoding"> & {
+      env?: ChildEnvironment;
+      encoding?: "utf8";
+    } = {},
+  ): string {
+    return childProcess.execFileSync(file, args, {
+      ...options,
+      env: isolatedProcessEnv(options.env),
+      encoding: "utf8",
+    });
   }
 
   /** The generated clone script minus the /workspace-hardcoded invocations, plus a
@@ -83,7 +114,6 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     execFileSync("git", ["init", "-b", "main", origin]);
     writeFileSync(join(origin, "README.md"), "hello\n");
     const gitEnv = {
-      ...isolatedProcessEnv(),
       GIT_AUTHOR_NAME: "t",
       GIT_AUTHOR_EMAIL: "t@t",
       GIT_COMMITTER_NAME: "t",
@@ -98,14 +128,11 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     return origin;
   }
 
-  function runScript(
-    script: string,
-    env: Record<string, string>,
-  ): { status: number; output: string } {
+  function runScript(script: string, env: ChildEnvironment): { status: number; output: string } {
     try {
       // merge stderr into stdout so diagnostics like "Re-materializing..." are visible
-      const output = execFileSync("sh", ["-c", `{\n${script}\n} 2>&1`], {
-        env: { ...isolatedProcessEnv(), ...env },
+      const output = childProcess.execFileSync("sh", ["-c", `{\n${script}\n} 2>&1`], {
+        env: isolatedProcessEnv(env),
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -175,6 +202,77 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           encoding: "utf8",
         }).trim(),
       ).toBe(actual);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("Git credential provisioning leaves a host HOME and its global Git config untouched unless a sandbox lifecycle command targets it", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-host-home-guard-"));
+    try {
+      const origin = makeOrigin(root);
+      // A developer-like HOME whose credential helpers the provisioning must not replace.
+      const home = join(root, "developer-home");
+      const gitconfig =
+        '[credential "https://github.com"]\n\thelper = \n\thelper = !gh auth git-credential\n';
+      const xdgConfig = "[user]\n\tname = Developer\n";
+      mkdirSync(join(home, ".config", "git"), { recursive: true });
+      writeFileSync(join(home, ".gitconfig"), gitconfig);
+      writeFileSync(join(home, ".config", "git", "config"), xdgConfig);
+      const target = join(root, "workspace", "repo");
+      const resource = {
+        kind: "repository" as const,
+        uri: "https://github.com/opengeni/exact-head-fixture.git",
+        ref: "main",
+        provider: "github" as const,
+        credentialBindingId: "host-guard",
+      };
+      const bindings = [
+        { credentialBindingId: "host-guard", provider: "github" as const, token: "host-token" },
+      ];
+      const scripts = {
+        clone: cloneScriptWithTarget(target, `file://${origin}`, resource),
+        providerRefresh: gitProviderTokenRefreshCommand({ github: "host-token" }),
+        bindingRefresh: gitCredentialBindingTokenRefreshCommand(bindings),
+      };
+      // Exactly how a developer or a careless test would run an exported builder:
+      // on the host, without the sandbox lifecycle target.
+      const hostEnvironment = isolatedGitEnvironment({ HOME: home, GIT_TERMINAL_PROMPT: "0" });
+      expect(hostEnvironment.OPENGENI_GIT_PROVISIONING_TARGET).toBeUndefined();
+      for (const [name, script] of Object.entries(scripts)) {
+        let status = 0;
+        let output = "";
+        try {
+          childProcess.execFileSync("sh", ["-c", `{\n${script}\n} 2>&1`], {
+            env: {
+              ...hostEnvironment,
+              OPENGENI_GIT_TOKEN_SEED: "host-token",
+              [`OPENGENI_GIT_BINDING_${gitCredentialBindingHash("host-guard").toUpperCase()}_TOKEN_SEED`]:
+                "host-token",
+            },
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+        } catch (error) {
+          const failure = error as { status?: number; stdout?: string };
+          status = failure.status ?? 1;
+          output = failure.stdout ?? "";
+        }
+        expect({ name, status }).toEqual({ name, status: 78 });
+        expect(output).toContain("Refusing to provision OpenGeni Git credentials");
+        expect(readFileSync(join(home, ".gitconfig"), "utf8")).toBe(gitconfig);
+        expect(readFileSync(join(home, ".config", "git", "config"), "utf8")).toBe(xdgConfig);
+        expect(existsSync(join(home, ".opengeni"))).toBe(false);
+        expect(existsSync(target)).toBe(false);
+      }
+
+      // The same clone script provisions once a sandbox lifecycle command targets
+      // it, so the refusal above came from the guard and not a broken script.
+      const admitted = runScript(scripts.clone, { HOME: home });
+      expect(admitted.status).toBe(0);
+      expect(readFileSync(join(home, ".gitconfig"), "utf8")).toContain(
+        join(home, ".opengeni", "git-credentials", "helper"),
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -295,17 +393,17 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       ).toEqual([]);
       // the askpass Password branch reads the token file
       const askOut = execFileSync("sh", [askpass, "Password for host"], {
-        env: { ...isolatedProcessEnv(), HOME: home },
+        env: { HOME: home },
         encoding: "utf8",
       });
       expect(askOut).toBe("tok-atomic-123");
       const gitlabOut = execFileSync("sh", [askpass, "Password for https://gitlab.com"], {
-        env: { ...isolatedProcessEnv(), HOME: home },
+        env: { HOME: home },
         encoding: "utf8",
       });
       expect(gitlabOut).toBe("glpat-atomic-456");
       const azureOut = execFileSync("sh", [askpass, "Password for https://dev.azure.com/acme"], {
-        env: { ...isolatedProcessEnv(), HOME: home },
+        env: { HOME: home },
         encoding: "utf8",
       });
       expect(azureOut).toBe("azdo-atomic-789");
@@ -414,7 +512,6 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const fill = (path: string) =>
         execFileSync("git", ["credential", "fill"], {
           env: {
-            ...isolatedProcessEnv(),
             HOME: home,
             GIT_TERMINAL_PROMPT: "0",
             GIT_ASKPASS: join(home, ".opengeni", "askpass"),
@@ -497,14 +594,13 @@ describe("lifecycle scripts — real sh execution semantics", () => {
 
       expect(
         execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
-          env: { ...isolatedProcessEnv(), HOME: home },
+          env: { HOME: home },
           encoding: "utf8",
         }).trim(),
       ).toBe("https://broker.example.test/git/session/binding/private.git");
       const fill = (host = "broker.example.test", path = "git/session/binding/private.git") =>
         execFileSync("git", ["credential", "fill"], {
           env: {
-            ...isolatedProcessEnv(),
             HOME: home,
             GIT_TERMINAL_PROMPT: "0",
             GIT_ASKPASS: join(home, ".opengeni", "askpass"),
@@ -522,7 +618,6 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         execFileSync("glab", [], {
           cwd: repo,
           env: {
-            ...isolatedProcessEnv(),
             HOME: home,
             GITLAB_TOKEN: "ambient-token-must-not-pass",
             PATH: `${join(home, ".opengeni", "bin")}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
@@ -551,7 +646,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(fill()).toContain("password=broker-bearer-two");
       expect(
         execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
-          env: { ...isolatedProcessEnv(), HOME: home },
+          env: { HOME: home },
           encoding: "utf8",
         }).trim(),
       ).toBe("https://broker.example.test/git/session/binding/private.git");
@@ -572,7 +667,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       ).toBe(0);
       expect(
         execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
-          env: { ...isolatedProcessEnv(), HOME: home },
+          env: { HOME: home },
           encoding: "utf8",
         }).trim(),
       ).toBe("https://gitlab.com/acme/private.git");
@@ -681,7 +776,6 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const fill = (host: string, path: string) =>
         execFileSync("git", ["credential", "fill"], {
           env: {
-            ...isolatedProcessEnv(),
             HOME: home,
             GIT_TERMINAL_PROMPT: "0",
             GIT_ASKPASS: join(home, ".opengeni", "askpass"),
@@ -696,7 +790,6 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(existsSync(join(home, ".opengeni", "git-credentials", "gitlab-token"))).toBe(false);
 
       const env = {
-        ...isolatedProcessEnv(),
         HOME: home,
         GITLAB_TOKEN: "ambient-token-must-not-win",
         PATH: `${join(home, ".opengeni", "bin")}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
@@ -767,7 +860,6 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const fill = (host: string) =>
         execFileSync("git", ["credential", "fill"], {
           env: {
-            ...isolatedProcessEnv(),
             HOME: home,
             GIT_TERMINAL_PROMPT: "0",
             GIT_ASKPASS: join(home, ".opengeni", "askpass"),
@@ -843,11 +935,10 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         ).status,
       ).toBe(0);
       const env = {
-        ...isolatedProcessEnv(),
         HOME: home,
         PATH: `${join(home, ".opengeni", "bin")}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+        GH_TOKEN: undefined,
       };
-      delete env.GH_TOKEN;
       expect(execFileSync("gh", [], { cwd: repoOne, env, encoding: "utf8" })).toBe("GH=gh-one\n");
       expect(
         execFileSync("gh", [], {
@@ -937,7 +1028,6 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(
         execFileSync("az", [], {
           env: {
-            ...isolatedProcessEnv(),
             HOME: home,
             AZURE_DEVOPS_EXT_PAT: "ambient-pat-must-not-win",
             PATH: `${join(home, ".opengeni", "bin")}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
@@ -971,7 +1061,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(run.status).toBe(0);
 
       const askpass = join(home, ".opengeni", "askpass");
-      const askEnv = { ...isolatedProcessEnv(), HOME: home };
+      const askEnv = { HOME: home };
       expect(
         execFileSync("sh", [askpass, "Username for 'https://git.company.com':"], {
           env: askEnv,
@@ -1049,13 +1139,12 @@ describe("lifecycle scripts — real sh execution semantics", () => {
 
       const wrapperPath = join(home, ".opengeni", "bin");
       const wrapperEnv = {
-        ...isolatedProcessEnv(),
         HOME: home,
         PATH: `${wrapperPath}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+        GH_TOKEN: undefined,
+        GITLAB_TOKEN: undefined,
+        AZURE_DEVOPS_EXT_PAT: undefined,
       };
-      delete wrapperEnv.GH_TOKEN;
-      delete wrapperEnv.GITLAB_TOKEN;
-      delete wrapperEnv.AZURE_DEVOPS_EXT_PAT;
       expect(execFileSync("gh", [], { env: wrapperEnv, encoding: "utf8" })).toBe(
         "GH=ghs-wrapper-1\n",
       );
