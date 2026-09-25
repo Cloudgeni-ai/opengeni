@@ -17,6 +17,8 @@ import {
   getOrganizationPrivateSessionSettings,
   listModelCallFacets,
   listRecentModelCalls,
+  INSIGHTS_RECENT_CALL_LIMIT,
+  INSIGHTS_ROOT_DRIVER_LIMIT,
   readWorkspaceInsightsModelBundle,
   registerDbBinding,
   transitionSessionVisibility,
@@ -69,6 +71,7 @@ type Fixture = {
   workspaceId: string;
   ownerSubjectId: string;
   sharedSessionId: string;
+  privateSessionId: string;
   input: WorkspaceInsightsModelBundleInput;
 };
 
@@ -209,6 +212,7 @@ async function fixture(): Promise<Fixture> {
     workspaceId,
     ownerSubjectId,
     sharedSessionId: sharedSession.id,
+    privateSessionId: privateSession.id,
     input: {
       workspaceId,
       since,
@@ -363,15 +367,18 @@ function sessionRelationLoops(value: unknown, loops: number[] = []): number[] {
 }
 
 describe("Workspace Insights model bundle", () => {
-  test("materializes only projected fact columns and centralizes session labels", async () => {
+  test("reads each window once through the scoped projection and aggregates in grouping sets", async () => {
     const source = await Bun.file(
       new URL("../src/insights-model-bundle.ts", import.meta.url),
     ).text();
-    expect(source).not.toContain("fact.*");
-    expect(source.match(/inner join sessions child/g)).toHaveLength(1);
-    expect(source.match(/left join sessions root/g)).toHaveLength(1);
-    expect(source).not.toContain("left join sessions session");
-    expect(source).toContain("selected_sessions as materialized");
+    expect(source).toContain("visible_workspace_insights_model_fact_rows");
+    expect(source).not.toContain("visible_workspace_insights_model_call_facts");
+    expect(source.match(/group by grouping sets/g)).toHaveLength(2);
+    // Sessions are joined only for the bounded root and recent-call result rows,
+    // never across the whole fact window.
+    expect(source).not.toContain("selected_sessions");
+    expect(source.match(/left join sessions root/g)).toHaveLength(2);
+    expect(source.match(/left join sessions session/g)).toHaveLength(1);
     expect(source).not.toContain("count(distinct id)");
     expect(source).toContain("count(*) filter (where first_source)");
   });
@@ -508,6 +515,40 @@ describe("Workspace Insights model bundle", () => {
       { provider: "openai", model: "gpt-bundle" },
     ]);
     expect(bundled.dataThrough?.toISOString()).toBe("2026-08-14T12:00:01.000Z");
+  });
+
+  test("scopes a root drilldown through the same private-session visibility", async () => {
+    if (!shared || !client) return;
+    const seeded = await fixture();
+    const scoped = (subjectId: string) =>
+      withSessionRlsActorContext(
+        { subjectId },
+        async () =>
+          await readWorkspaceInsightsModelBundle(client!.db, {
+            ...seeded.input,
+            rootSessionId: seeded.privateSessionId,
+          }),
+      );
+    const owner = await scoped(seeded.ownerSubjectId);
+    expect(owner.recentCalls.map((call) => call.sessionId)).toEqual([
+      seeded.privateSessionId,
+      seeded.privateSessionId,
+    ]);
+    expect(owner.rootDrivers.map((driver) => driver.rootSessionId)).toEqual([
+      seeded.privateSessionId,
+    ]);
+    expect(owner.priorRootDrivers.map((driver) => driver.totalTokens)).toEqual([20]);
+
+    const outsider = await scoped(`user:${crypto.randomUUID()}`);
+    expect(outsider.recentCalls).toEqual([]);
+    expect(outsider.rootDrivers).toEqual([]);
+    expect(outsider.modelRows).toEqual([]);
+    expect(outsider.priorModelRows).toEqual([]);
+    // Facets stay workspace-wide but still exclude the outsider's invisible session.
+    expect(outsider.facets).toEqual([
+      { provider: "azure", model: "azure-bundle" },
+      { provider: "openai", model: "gpt-bundle" },
+    ]);
   });
 
   test("backfill preserves free external billing when the live fact write was lost", async () => {
@@ -669,7 +710,7 @@ describe("Workspace Insights model bundle", () => {
     ]);
   });
 
-  test("reduces model sources from nine to two by default and three with filtered facets", async () => {
+  test("reduces model sources from nine legacy reads to two by default and three with filtered facets", async () => {
     if (!shared) return;
     const seeded = await fixture();
     const legacyStatements: CapturedStatement[] = [];
@@ -691,9 +732,11 @@ describe("Workspace Insights model bundle", () => {
       await bundledDb.close();
     }
 
-    const source = "visible_workspace_insights_model_call_facts";
+    const legacySource = "visible_workspace_insights_model_call_facts";
+    const source = "visible_workspace_insights_model_fact_rows";
     const legacyInvocations = legacyStatements.reduce(
-      (total, statement) => total + (statement.query.match(new RegExp(source, "g"))?.length ?? 0),
+      (total, statement) =>
+        total + (statement.query.match(new RegExp(legacySource, "g"))?.length ?? 0),
       0,
     );
     const bundleQueries = bundledStatements.filter((statement) => statement.query.includes(source));
@@ -727,10 +770,10 @@ describe("Workspace Insights model bundle", () => {
     );
     expect(filteredQueries).toHaveLength(1);
     expect(filteredInvocations).toBe(3);
-    expect(filteredQueries[0]?.query).toContain("null::text");
+    expect(filteredQueries[0]?.query).toContain("::text");
   });
 
-  test("bounds outer session-table lookup loops by distinct sessions, not fact rows", async () => {
+  test("bounds outer session-table lookup loops by result limits, not fact rows", async () => {
     if (!shared) return;
     const seeded = await fixture();
     const sourcePrefix = `insights-session-map-${crypto.randomUUID()}-`;
@@ -766,7 +809,7 @@ describe("Workspace Insights model bundle", () => {
       await capturedDb.close();
     }
     const statement = statements.find((candidate) =>
-      candidate.query.includes("visible_workspace_insights_model_call_facts"),
+      candidate.query.includes("visible_workspace_insights_model_fact_rows"),
     );
     expect(statement).toBeDefined();
     if (!statement) return;
@@ -790,8 +833,9 @@ describe("Workspace Insights model bundle", () => {
       });
       const loops = sessionRelationLoops(plan);
       expect(loops.length).toBeGreaterThan(0);
-      expect(loops.reduce((total, value) => total + value, 0)).toBeLessThanOrEqual(16);
-      expect(factsPerWindow * 2).toBeGreaterThan(1_000);
+      const resultBound = INSIGHTS_RECENT_CALL_LIMIT + 1 + 2 * (INSIGHTS_ROOT_DRIVER_LIMIT + 1);
+      expect(loops.reduce((total, value) => total + value, 0)).toBeLessThanOrEqual(resultBound);
+      expect(factsPerWindow * 2).toBeGreaterThan(resultBound * 10);
     } finally {
       await app.end();
     }

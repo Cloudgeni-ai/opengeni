@@ -85,42 +85,59 @@ function stringValue(row: JsonRecord, key: string): string {
 /**
  * One read for the three existing usage windows. The event-type arrays are
  * deliberately closed so the authority function can keep selective predicates
- * inside its scan while all rollup math remains outside the billing path.
- * Only the reused current window needs a second materialization: aggregate the
- * single-use prior/month SRFs directly, since their volatile calls prevent CTE
- * inlining even without an explicit MATERIALIZED keyword.
+ * inside its scan while all rollup math remains outside the billing path. The
+ * current window feeds one grouping-sets pass (UTC buckets and warm groups), and
+ * its totals are the sum of the bucket rows, so no window is materialized.
  */
 export async function readWorkspaceInsightsUsageBundle(
   db: Database,
   input: WorkspaceInsightsUsageBundleInput,
 ): Promise<WorkspaceInsightsUsageBundle> {
   const context = await rlsContextForWorkspace(db, input.workspaceId);
-  const bucket =
+  // Group on the truncated timestamp; format only the grouped buckets.
+  const unit = input.granularity === "hour" ? sql`'hour'` : sql`'day'`;
+  const bucket = sql`date_trunc(${unit}, usage_row.occurred_at at time zone 'UTC')`;
+  const bucketLabel =
     input.granularity === "hour"
-      ? sql`to_char(date_trunc('hour', usage_row.occurred_at at time zone 'UTC'), 'YYYY-MM-DD"T"HH24:00')`
-      : sql`to_char(date_trunc('day', usage_row.occurred_at at time zone 'UTC'), 'YYYY-MM-DD')`;
+      ? sql`to_char(bucket, 'YYYY-MM-DD"T"HH24:00')`
+      : sql`to_char(bucket, 'YYYY-MM-DD')`;
   const warmGroupLimit = Math.max(1, Math.min(input.warmGroupLimit ?? 24, 100));
 
   return await withRlsContext(db, context, async (scopedDb) => {
     const [row] = await scopedDb.execute<RawUsageBundleRow>(sql`
-      with current_visible as materialized (
-        select usage_row.event_type, usage_row.quantity, usage_row.occurred_at,
-          usage_row.source_resource_id
-        from opengeni_private.visible_workspace_insights_usage_projection(
-          ${input.workspaceId},
-          ${input.since.toISOString()}::timestamp with time zone,
-          ${input.until.toISOString()}::timestamp with time zone,
-          array['model.cost', 'sandbox.warm_seconds']::text[]
-        ) usage_row
-      ), current_totals as (
+      with current_grouped as (
         select
-          coalesce(sum(usage_row.quantity) filter (
+          grouping(usage_row.bucket) = 0 as by_bucket,
+          usage_row.bucket,
+          usage_row.warm_group_id,
+          sum(usage_row.quantity) filter (
             where usage_row.event_type = 'model.cost'
-          ), 0) as workspace_credit_micros,
+          ) as cost_micros,
           coalesce(sum(usage_row.quantity) filter (
             where usage_row.event_type = 'sandbox.warm_seconds'
           ), 0) as warm_seconds
-        from current_visible usage_row
+        from (
+          select
+            usage_row.event_type,
+            usage_row.quantity,
+            ${bucket} as bucket,
+            case when usage_row.event_type = 'sandbox.warm_seconds'
+              then split_part(usage_row.source_resource_id, ':', 1)
+            end as warm_group_id
+          from opengeni_private.visible_workspace_insights_usage_projection(
+            ${input.workspaceId},
+            ${input.since.toISOString()}::timestamp with time zone,
+            ${input.until.toISOString()}::timestamp with time zone,
+            array['model.cost', 'sandbox.warm_seconds']::text[]
+          ) usage_row
+        ) usage_row
+        group by grouping sets ((usage_row.bucket), (usage_row.warm_group_id))
+      ), current_totals as (
+        select
+          coalesce(sum(cost_micros), 0) as workspace_credit_micros,
+          coalesce(sum(warm_seconds), 0) as warm_seconds
+        from current_grouped
+        where by_bucket
       ), prior_totals as (
         select
           coalesce(sum(usage_row.quantity) filter (
@@ -152,25 +169,14 @@ export async function readWorkspaceInsightsUsageBundle(
           array['model.tokens', 'agent_run.created']::text[]
         ) usage_row
       ), bucket_rows as (
-        select
-          ${bucket} as bucket,
-          sum(usage_row.quantity) filter (
-            where usage_row.event_type = 'model.cost'
-          ) as cost_micros,
-          coalesce(sum(usage_row.quantity) filter (
-            where usage_row.event_type = 'sandbox.warm_seconds'
-          ), 0) as warm_seconds
-        from current_visible usage_row
-        group by ${bucket}
+        select bucket, cost_micros, warm_seconds
+        from current_grouped
+        where by_bucket
       ), warm_group_rows as (
-        select
-          split_part(usage_row.source_resource_id, ':', 1) as group_id,
-          coalesce(sum(usage_row.quantity), 0) as warm_seconds
-        from current_visible usage_row
-        where usage_row.event_type = 'sandbox.warm_seconds'
-          and usage_row.source_resource_id is not null
-        group by split_part(usage_row.source_resource_id, ':', 1)
-        order by coalesce(sum(usage_row.quantity), 0) desc
+        select warm_group_id as group_id, warm_seconds
+        from current_grouped
+        where not by_bucket and warm_group_id is not null
+        order by warm_seconds desc
         limit ${Math.max(warmGroupLimit * 4, warmGroupLimit)}
       )
       select
@@ -182,7 +188,7 @@ export async function readWorkspaceInsightsUsageBundle(
         month_totals.agent_runs_used,
         coalesce((
           select jsonb_agg(jsonb_build_object(
-            'bucket', bucket,
+            'bucket', ${bucketLabel},
             'costMicros', cost_micros,
             'warmSeconds', warm_seconds
           ) order by bucket)

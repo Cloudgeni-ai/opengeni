@@ -982,8 +982,9 @@ credits-path price and is zero for externally billed calls.
 
 Insights usage uses a four-column projection (0484), preserving full-row readers
 and tenant/actor/visibility checks. Transaction-capability writes still
-require a writable database.
-Canonical: `packages/db/src/insights-usage-bundle.ts`.
+require a writable database. Model-fact drilldowns (0519) seek by session index.
+Canonical: `packages/db/src/insights-usage-bundle.ts`,
+`packages/db/src/insights-model-bundle.ts`.
 
 Codex and SuperGrok pools own credentials and capacity without changing logical
 turns. Shared and Personal workspaces inherit same-organization pools; each
