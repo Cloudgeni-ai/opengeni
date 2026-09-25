@@ -95,7 +95,11 @@ tool and permission policy permits `set_session_title`, the production runtime
 removes that operation from the model-visible catalog for the attempt and starts
 one bounded, tool-less title request beside the ordinary response stream. The
 sidecar uses the same resolved provider and credential authority, receives only
-a bounded conversation opener, and is metered as its own model call. The main
+a bounded conversation opener, and is metered as its own model call. It requests
+the model's lowest runnable reasoning effort with a 512-token output budget, so
+reasoning cannot consume the visible title, and a response stopped by that limit
+keeps only whole words. Chat-completions providers use one direct request
+outside the agent runner, as the compaction summarizer does. The main
 agent does not wait for a title tool result or make a title follow-up model call.
 When the main stream reaches normal settlement, the worker waits for the
 already-running bounded sidecar and joins it without cancelling. Exceptional or

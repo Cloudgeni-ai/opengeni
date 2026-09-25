@@ -126,7 +126,7 @@ import {
   recordModelUsageAndDebitCredits,
   recordAuthoritativeModelCallFact,
 } from "./model-usage";
-import { startParallelSessionTitleGeneration } from "./session-title";
+import { sessionTitleReasoningEffort, startParallelSessionTitleGeneration } from "./session-title";
 import {
   assertAgentStreamNotCancelled,
   assertSuccessfulAgentStreamCompletion,
@@ -1782,6 +1782,9 @@ export async function runTurnStreamAttempt(
       turnExecutionPolicy.providerId,
       turnExecutionPolicy.latencyMode,
     );
+    const titleReasoningEffort = sessionTitleReasoningEffort(
+      resolvedModel?.configured.capabilities,
+    );
     parallelSessionTitle = startParallelSessionTitleGeneration({
       signal: runtimeCancellationSignal,
       generate: async (signal) =>
@@ -1796,6 +1799,7 @@ export async function runTurnStreamAttempt(
               : {}),
             modelName: turnExecutionPolicy.upstreamModelId,
             ...(serviceTier ? { serviceTier } : {}),
+            ...(titleReasoningEffort ? { reasoningEffort: titleReasoningEffort } : {}),
             signal,
           }),
         ),

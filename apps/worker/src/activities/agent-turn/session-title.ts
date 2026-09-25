@@ -1,9 +1,11 @@
 import { hasPermission } from "@opengeni/core";
 import type { AttemptToolDefinition } from "@opengeni/codemode";
+import type { ModelCapabilitiesV1 } from "@opengeni/config";
 import type { GeneratedSessionTitle } from "@opengeni/runtime";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  ReasoningEffort,
   type FirstPartyMcpToolName,
   type Permission,
   type ToolRef,
@@ -56,6 +58,26 @@ export function sessionTitleToolPlan(input: {
 }
 
 export const PARALLEL_SESSION_TITLE_TIMEOUT_MS = 15_000;
+
+/**
+ * The lowest reasoning effort the resolved model can run, for the auxiliary
+ * title request only. A title needs no deliberation, and a provider default
+ * effort can spend the whole output budget before any visible text. Returns
+ * undefined when the model declares no runnable reasoning control, so the
+ * request carries no reasoning parameter.
+ */
+export function sessionTitleReasoningEffort(
+  capabilities: Pick<ModelCapabilitiesV1, "reasoning"> | undefined,
+): ReasoningEffort | undefined {
+  const reasoning = capabilities?.reasoning;
+  if (!reasoning?.runnable) return undefined;
+  const order = ReasoningEffort.options;
+  let lowest: ReasoningEffort | undefined;
+  for (const effort of reasoning.efforts) {
+    if (!lowest || order.indexOf(effort) < order.indexOf(lowest)) lowest = effort;
+  }
+  return lowest;
+}
 
 export type ParallelSessionTitleGeneration = {
   finish: () => Promise<GeneratedSessionTitle | null>;

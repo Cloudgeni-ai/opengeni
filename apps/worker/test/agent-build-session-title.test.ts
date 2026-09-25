@@ -7,6 +7,7 @@ import {
 import {
   createSessionTitleAttemptToolDefinition,
   SESSION_TITLE_MODEL_TOOL_NAME,
+  sessionTitleReasoningEffort,
   sessionTitleToolPlan,
   shouldRequestMissingSessionTitle,
   startParallelSessionTitleGeneration,
@@ -252,5 +253,34 @@ describe("createSessionTitleAttemptToolDefinition", () => {
       updated: true,
       title: "Normalized topic",
     });
+  });
+});
+
+describe("sessionTitleReasoningEffort", () => {
+  const reasoning = (
+    runnable: boolean,
+    efforts: Array<"none" | "minimal" | "low" | "medium" | "high" | "xhigh">,
+  ) => ({
+    reasoning: {
+      upstream: "supported" as const,
+      runnable,
+      efforts,
+      defaultEffort: efforts.at(-1) ?? null,
+      required: false,
+    },
+  });
+
+  test("uses the lowest runnable effort regardless of declaration order", () => {
+    expect(sessionTitleReasoningEffort(reasoning(true, ["medium", "low"]))).toBe("low");
+    expect(sessionTitleReasoningEffort(reasoning(true, ["high", "minimal", "low"]))).toBe(
+      "minimal",
+    );
+    expect(sessionTitleReasoningEffort(reasoning(true, ["xhigh", "none", "medium"]))).toBe("none");
+  });
+
+  test("sends no reasoning parameter without a runnable reasoning control", () => {
+    expect(sessionTitleReasoningEffort(undefined)).toBeUndefined();
+    expect(sessionTitleReasoningEffort(reasoning(false, ["low", "medium"]))).toBeUndefined();
+    expect(sessionTitleReasoningEffort(reasoning(true, []))).toBeUndefined();
   });
 });
