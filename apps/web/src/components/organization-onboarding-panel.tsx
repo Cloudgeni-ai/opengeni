@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
+import type { ClientModel } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import {
@@ -24,6 +25,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { includedDefaultModel } from "@/lib/model-access-onboarding";
 import {
   clearOrganizationInvitationContinuation,
   storeOrganizationInvitationContinuation,
@@ -37,7 +39,8 @@ export function OrganizationOnboardingPanel({
   billingMode = "disabled",
   codexEnabled = false,
   supergrokEnabled = false,
-  includedModel = null,
+  includedModel,
+  modelDefaults = null,
   previewState,
   activeEmail = null,
   invitation = null,
@@ -51,6 +54,8 @@ export function OrganizationOnboardingPanel({
   codexEnabled?: boolean;
   supergrokEnabled?: boolean;
   includedModel?: IncludedOnboardingModel | null;
+  /** Client-config model defaults; the included model is derived from them when not given. */
+  modelDefaults?: { defaultModel: string; models: readonly ClientModel[] } | null;
   previewState?: SelfServiceOrganizationOnboardingState;
   activeEmail?: string | null;
   invitation?: OrganizationInvitationContinuation | null;
@@ -358,7 +363,13 @@ export function OrganizationOnboardingPanel({
         billingMode={billingMode}
         codexEnabled={codexEnabled}
         supergrokEnabled={supergrokEnabled}
-        includedModel={includedModel}
+        includedModel={
+          includedModel !== undefined
+            ? includedModel
+            : modelDefaults
+              ? includedDefaultModel({ ...modelDefaults, billingMode })
+              : null
+        }
         onComplete={onComplete}
       />,
     );

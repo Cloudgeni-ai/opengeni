@@ -1,4 +1,4 @@
-import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { ClientModel, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import {
   defaultEffortForModel,
@@ -73,12 +73,6 @@ export function preferredConnectedModelId(
   );
 }
 
-export function isPaymentRequiredError(error: unknown): error is OpenGeniApiError {
-  return (
-    error instanceof OpenGeniApiError && error.status === 402 && error.code === "payment_required"
-  );
-}
-
 /** Select the connected model in the actor-private draft without workspace administration. */
 export async function applyConnectedModelToNewSessionDraft(
   client: OpenGeniBrowserClient,
@@ -105,30 +99,6 @@ export async function applyConnectedModelToNewSessionDraft(
     expectedRevision: draft.revision,
   });
   return { id: modelId, label: model?.label ?? modelId };
-}
-
-/**
- * The deployment default model a new person can use without connecting
- * anything: an explicitly free model, or (when this deployment does not bill
- * for credits) a model the deployment itself pays for. Read from client
- * config; never assume a particular model id.
- */
-export function includedDefaultModel(config: {
-  defaultModel: string;
-  models: readonly ClientModel[];
-  billingMode?: "disabled" | "stripe" | undefined;
-}): { id: string; label: string; free: boolean } | null {
-  const model = config.models.find((candidate) => candidate.id === config.defaultModel);
-  if (!model) return null;
-  if (model.cost === "free") return { id: model.id, label: model.label, free: true };
-  if (
-    (config.billingMode ?? "disabled") !== "stripe" &&
-    (model.cost === undefined || model.cost === "credits") &&
-    (model.billing === undefined || model.billing.upstreamPayer === "deployment")
-  ) {
-    return { id: model.id, label: model.label, free: false };
-  }
-  return null;
 }
 
 /**
@@ -162,4 +132,28 @@ export async function creditsModelForCheckout(
   } catch {
     return null;
   }
+}
+
+/**
+ * The deployment default model a new person can use without connecting
+ * anything: an explicitly free model, or (when this deployment does not bill
+ * for credits) a model the deployment itself pays for. Read from client
+ * config; never assume a particular model id.
+ */
+export function includedDefaultModel(config: {
+  defaultModel: string;
+  models: readonly ClientModel[];
+  billingMode?: "disabled" | "stripe" | undefined;
+}): { id: string; label: string; free: boolean } | null {
+  const model = config.models.find((candidate) => candidate.id === config.defaultModel);
+  if (!model) return null;
+  if (model.cost === "free") return { id: model.id, label: model.label, free: true };
+  if (
+    (config.billingMode ?? "disabled") !== "stripe" &&
+    (model.cost === undefined || model.cost === "credits") &&
+    (model.billing === undefined || model.billing.upstreamPayer === "deployment")
+  ) {
+    return { id: model.id, label: model.label, free: false };
+  }
+  return null;
 }

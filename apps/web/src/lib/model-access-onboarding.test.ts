@@ -7,9 +7,9 @@ import {
   creditCheckoutSuccessUrl,
   creditsModelForCheckout,
   includedDefaultModel,
-  isPaymentRequiredError,
   preferredConnectedModelId,
 } from "./model-access-onboarding";
+import { isPaymentRequiredError } from "./model-access";
 
 function catalogModel(
   overrides: Partial<WorkspaceModelCatalogModel> & Pick<WorkspaceModelCatalogModel, "id">,

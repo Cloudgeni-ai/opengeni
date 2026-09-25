@@ -17,8 +17,12 @@ import {
   type ManagedAuthField,
   type ManagedAuthFormErrors,
   type ManagedAuthMode,
-  type VerificationLinkError,
 } from "@/lib/managed-auth-form";
+import {
+  managedAuthModeFromSearch,
+  verificationLinkErrorFromSearch,
+  type VerificationLinkError,
+} from "@/lib/managed-auth-url";
 
 export function ManagedAuthPanel(props: {
   initialMode?: ManagedAuthMode;
@@ -26,6 +30,12 @@ export function ManagedAuthPanel(props: {
   emailVerificationRequired?: boolean;
   /** An expired or invalid email-verification link returned the person here. */
   verificationLinkError?: VerificationLinkError | null;
+  /**
+   * The page query string. `?mode=signup` opens Sign up and a Better Auth
+   * verification-link error opens the resend form, unless the explicit
+   * `initialMode` / `verificationLinkError` props say otherwise.
+   */
+  search?: string;
   presentation?: "card" | "embedded";
   invitation?: { organizationName: string; targetEmail: string } | null;
   onDismissInvitation?: () => void;
@@ -37,10 +47,17 @@ export function ManagedAuthPanel(props: {
   ) => Promise<void>;
 }) {
   const allowedModes = props.allowedModes ?? (["signin", "signup"] as const);
+  const [verificationLinkError] = useState(
+    () =>
+      props.verificationLinkError ??
+      (props.search === undefined ? null : verificationLinkErrorFromSearch(props.search)),
+  );
   // A returning verification-link failure always starts from the Sign in side.
-  const requestedInitialMode = props.verificationLinkError
+  const requestedInitialMode = verificationLinkError
     ? "signin"
-    : (props.initialMode ?? "signin");
+    : (props.initialMode ??
+      (props.search === undefined ? undefined : managedAuthModeFromSearch(props.search)) ??
+      "signin");
   const [mode, setMode] = useState<ManagedAuthMode>(
     allowedModes.includes(requestedInitialMode)
       ? requestedInitialMode
@@ -56,7 +73,7 @@ export function ManagedAuthPanel(props: {
   const [resetMode, setResetMode] = useState(false);
   // Offer a fresh link right away when an old verification link brought the person back.
   const [linkResendMode, setLinkResendMode] = useState(
-    () => emailVerificationRequired && Boolean(props.verificationLinkError),
+    () => emailVerificationRequired && Boolean(verificationLinkError),
   );
   const emailOnlyMode = resetMode || linkResendMode;
   const [busy, setBusy] = useState(false);
@@ -264,7 +281,7 @@ export function ManagedAuthPanel(props: {
             </Heading>
             <p className="text-sm text-fg-subtle">
               {linkResendMode
-                ? props.verificationLinkError === "expired"
+                ? verificationLinkError === "expired"
                   ? "That verification link has expired. Enter your email and we'll send a new one."
                   : "That verification link is no longer valid. Enter your email and we'll send a new one."
                 : resetMode

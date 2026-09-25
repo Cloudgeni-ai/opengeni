@@ -4,6 +4,7 @@ import {
   useBrowserAccounts,
   type BrowserAccountTransition,
 } from "@opengeni/react/accounts";
+import type { ClientModel } from "@opengeni/sdk";
 import { createBrowserAccountsClient } from "@opengeni/sdk/accounts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Loader2Icon, UserRoundPlusIcon } from "lucide-react";
@@ -18,7 +19,6 @@ import {
 } from "@/api";
 import { Button } from "@/components/ui/button";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
-import type { IncludedOnboardingModel } from "@/components/model-access-onboarding";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
 import {
@@ -303,7 +303,7 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
   supergrokEnabled?: boolean;
-  includedModel?: IncludedOnboardingModel | null;
+  modelDefaults?: { defaultModel: string; models: readonly ClientModel[] } | null;
   activeEmail: string | null;
   invitation: OrganizationInvitationContinuation | null;
   onComplete: () => void;
@@ -353,7 +353,7 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
       billingMode={props.billingMode}
       codexEnabled={props.codexEnabled}
       supergrokEnabled={props.supergrokEnabled}
-      includedModel={props.includedModel ?? null}
+      modelDefaults={props.modelDefaults ?? null}
       activeEmail={props.activeEmail}
       invitation={props.invitation}
       onUseInvitedAccount={useInvitedAccount}

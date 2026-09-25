@@ -4,10 +4,9 @@ import { AuthApiError } from "@/api";
 import {
   ManagedAuthSessionUnavailableError,
   managedAuthFailure,
-  managedAuthModeFromSearch,
   validateManagedAuthInput,
-  verificationLinkErrorFromSearch,
 } from "./managed-auth-form";
+import { managedAuthModeFromSearch, verificationLinkErrorFromSearch } from "./managed-auth-url";
 
 describe("managed auth form", () => {
   test("returns specific signup field guidance", () => {

@@ -888,6 +888,38 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("the page query opens Sign up for marketing links and the resend form for expired links", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAuthPanel
+            search="?mode=signup&utm_source=opengeni.ai&utm_medium=website&utm_campaign=hero"
+            onSubmit={async () => undefined}
+          />,
+        ),
+      );
+      expect(container.querySelector("#managed-auth-name")).not.toBeNull();
+      expect(container.querySelector('button[type="submit"]')!.textContent?.trim()).toBe(
+        "Create account",
+      );
+      await act(async () => root.unmount());
+      const next = createRoot(container);
+      await act(async () =>
+        next.render(
+          <ManagedAuthPanel search="?error=INVALID_TOKEN" onSubmit={async () => undefined} />,
+        ),
+      );
+      expect(container.textContent).toContain("That verification link is no longer valid");
+      expect(container.querySelector("#managed-auth-password")).toBeNull();
+      await act(async () => next.unmount());
+    } finally {
+      container.remove();
+    }
+  });
+
   test("an expired verification link offers a new link instead of a generic error", async () => {
     resendVerification.mockClear();
     const container = document.createElement("div");

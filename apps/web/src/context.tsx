@@ -65,11 +65,7 @@ import { Toaster } from "@/components/ui/sonner";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import { bootstrapErrorPresentation, type BootstrapErrorPresentation } from "@/lib/bootstrap-error";
 import { readBootstrap } from "@/lib/bootstrap-read";
-import {
-  ManagedAuthSessionUnavailableError,
-  managedAuthModeFromSearch,
-  verificationLinkErrorFromSearch,
-} from "@/lib/managed-auth-form";
+import { ManagedAuthSessionUnavailableError } from "@/lib/managed-auth-form";
 import { signOutWithAuthoritativeReconciliation } from "@/lib/managed-auth-transition";
 import { unlinkGitHubInstallationWithReconciliation } from "@/lib/github-installation-unlink";
 import {
@@ -91,7 +87,7 @@ import {
   retainCreateSessionAttemptAfterFailure,
   type PendingCreateAttempt,
 } from "@/lib/session-create";
-import { includedDefaultModel, isPaymentRequiredError } from "@/lib/model-access-onboarding";
+import { isPaymentRequiredError } from "@/lib/model-access";
 import { hasAccountPermission } from "@/lib/permissions";
 import {
   applySessionPinProjection,
@@ -2809,8 +2805,7 @@ export function RootRouteComponent() {
         ) : (
           <ManagedAuthPanel
             presentation="embedded"
-            initialMode={managedAuthModeFromSearch(window.location.search)}
-            verificationLinkError={verificationLinkErrorFromSearch(window.location.search)}
+            search={window.location.search}
             invitation={organizationInvitationContinuation}
             onDismissInvitation={clearOrganizationInvitationContinuation}
             onSubmit={handleManagedAuth}
@@ -2870,7 +2865,7 @@ export function RootRouteComponent() {
         supergrokEnabled={clientConfig.models.some(
           (catalogModel) => catalogModel.source === "supergrok",
         )}
-        includedModel={includedDefaultModel(clientConfig)}
+        modelDefaults={clientConfig}
         activeEmail={authSession?.user.email ?? null}
         invitation={organizationInvitationContinuation}
         onComplete={revalidatePrincipalAccess}
@@ -2884,7 +2879,7 @@ export function RootRouteComponent() {
           supergrokEnabled={clientConfig.models.some(
             (catalogModel) => catalogModel.source === "supergrok",
           )}
-          includedModel={includedDefaultModel(clientConfig)}
+          modelDefaults={clientConfig}
           activeEmail={authSession?.user.email ?? null}
           invitation={organizationInvitationContinuation}
           onUseInvitedAccount={() => {

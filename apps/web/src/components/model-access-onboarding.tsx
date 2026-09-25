@@ -1,7 +1,7 @@
 import { pollDeviceAuthorization } from "@opengeni/connect";
 import type { CodexConnectPoll } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { ArrowRightIcon, ArrowUpRightIcon, ChevronRightIcon, Loader2Icon } from "lucide-react";
+import { ArrowUpRightIcon, ChevronRightIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -513,7 +513,6 @@ export function ModelAccessOnboardingPanel({
             onClick={leaveOnboarding}
           >
             {includedModel.free ? "Start chatting for free" : "Start chatting"}
-            <ArrowRightIcon className="size-4" />
           </Button>
 
           <div className="mt-8 border-t border-border pt-6">
