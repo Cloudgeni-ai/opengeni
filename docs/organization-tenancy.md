@@ -654,9 +654,17 @@ because granting owner there would be a privilege event rather than a repair.
 No migration-time backfill over a FORCE-RLS table is needed.
 
 The stock web console may then show a skippable product step to connect a
-model or buy OpenGeni credits. Connecting selects the model in the human’s
-actor-private new-session draft with its expected revision, preserving the
-other draft fields. It never writes workspace settings or requires
+model or buy OpenGeni credits. When the deployment's client-config default
+model is free (or deployment-paid on a deployment that does not bill credits),
+the step leads with starting to chat on that model and presents every
+connection or purchase as an optional upgrade; it never hardcodes a model id.
+Connecting selects a model from the connected family (Codex, SuperGrok, or the
+provider key) in the human’s actor-private new-session draft with its expected
+revision, preserving the other draft fields, and never falls back to the free
+default. A credit purchase returns to the new-chat composer through the
+ordinary `?model=&effort=` launch contract with a credits model selected.
+Device-code logins can be cancelled, explain ChatGPT's device-code setting,
+and never block leaving the step. It never writes workspace settings or requires
 `workspace:admin`, which Personal workspace owners deliberately do not hold. Skip and invitation
 accept still complete immediately. The step does not widen
 `POST /v1/auth/organization-onboarding`, invitation accept, or any worker

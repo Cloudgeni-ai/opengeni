@@ -1,5 +1,14 @@
-import { Building2Icon, CheckIcon, LockKeyholeIcon, Loader2Icon, MailIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import {
+  Building2Icon,
+  CheckIcon,
+  CircleAlertIcon,
+  LockKeyholeIcon,
+  Loader2Icon,
+  LogOutIcon,
+  MailIcon,
+  RefreshCwIcon,
+} from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
@@ -8,7 +17,10 @@ import {
   getSelfServiceOrganizationOnboardingStatus,
   type SelfServiceOrganizationOnboardingState,
 } from "@/api";
-import { ModelAccessOnboardingPanel } from "@/components/model-access-onboarding";
+import {
+  ModelAccessOnboardingPanel,
+  type IncludedOnboardingModel,
+} from "@/components/model-access-onboarding";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -25,24 +37,34 @@ export function OrganizationOnboardingPanel({
   billingMode = "disabled",
   codexEnabled = false,
   supergrokEnabled = false,
+  includedModel = null,
   previewState,
   activeEmail = null,
   invitation = null,
   onUseInvitedAccount,
+  onSignOut,
+  onUseAnotherAccount,
 }: {
   onComplete: () => void;
   client?: OpenGeniBrowserClient;
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
   supergrokEnabled?: boolean;
+  includedModel?: IncludedOnboardingModel | null;
   previewState?: SelfServiceOrganizationOnboardingState;
   activeEmail?: string | null;
   invitation?: OrganizationInvitationContinuation | null;
   onUseInvitedAccount?: (targetEmail: string) => void;
+  /** Leaves onboarding for the signed-out page, so the person can pick another account. */
+  onSignOut?: () => Promise<void> | void;
+  /** Adds or selects a different browser account without signing this one out. */
+  onUseAnotherAccount?: () => void;
 }) {
   const [state, setState] = useState<SelfServiceOrganizationOnboardingState | null>(
     previewState ?? null,
   );
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [statusRequest, setStatusRequest] = useState(0);
   const [organizationName, setOrganizationName] = useState("");
   const [busy, setBusy] = useState(false);
   const [invitations, setInvitations] = useState<OrganizationInvitation[]>([]);
@@ -63,6 +85,7 @@ export function OrganizationOnboardingPanel({
     if (previewState) return;
     if (createdSetup) return;
     let active = true;
+    setStatusError(null);
     void getSelfServiceOrganizationOnboardingStatus()
       .then((result) => {
         if (!active) return;
@@ -74,14 +97,12 @@ export function OrganizationOnboardingPanel({
       })
       .catch((error) => {
         if (!active) return;
-        toast.error("Could not check organization setup", {
-          description: error instanceof Error ? error.message : String(error),
-        });
+        setStatusError(error instanceof Error ? error.message : String(error));
       });
     return () => {
       active = false;
     };
-  }, [createdSetup, previewState, onComplete]);
+  }, [createdSetup, previewState, onComplete, statusRequest]);
 
   useEffect(() => {
     if ((state !== "invitation_pending" && !invitation) || !client) return;
@@ -179,11 +200,51 @@ export function OrganizationOnboardingPanel({
     }
   }
 
+  const frame = (content: ReactNode) => (
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+      <OnboardingAccountHeader
+        email={activeEmail}
+        onSignOut={onSignOut}
+        onUseAnotherAccount={onUseAnotherAccount}
+      />
+      {content}
+    </div>
+  );
+
+  if (state === null && statusError) {
+    return frame(
+      <section className="flex flex-1 items-center justify-center px-4">
+        <div
+          role="alert"
+          className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
+        >
+          <span className="mb-4 flex size-9 items-center justify-center rounded-md bg-status-failed/15 text-status-failed">
+            <CircleAlertIcon className="size-4" />
+          </span>
+          <h1 className="text-base font-semibold">We couldn't load your account setup</h1>
+          <p className="mt-2 text-sm leading-5 text-fg-subtle">
+            Your account is signed in, but checking its organization setup failed. This is usually
+            temporary. {statusError}
+          </p>
+          <Button
+            type="button"
+            className="mt-4 w-full"
+            onClick={() => setStatusRequest((request) => request + 1)}
+          >
+            <RefreshCwIcon className="size-4" />
+            Retry
+          </Button>
+        </div>
+      </section>,
+    );
+  }
+
   if (state === null) {
-    return (
-      <section className="flex flex-1 items-center justify-center">
+    return frame(
+      <section className="flex flex-1 items-center justify-center" role="status">
         <Loader2Icon className="size-5 animate-spin text-fg-subtle" />
-      </section>
+        <span className="sr-only">Checking your account setup</span>
+      </section>,
     );
   }
 
@@ -191,7 +252,7 @@ export function OrganizationOnboardingPanel({
     const wrongAccount = invitationResolution === "wrong_account";
     const unavailable = invitationResolution === "unavailable";
     const focusedInvitation = invitationResolution === "matched" ? invitations[0] : null;
-    return (
+    return frame(
       <section className="flex flex-1 items-center justify-center px-4">
         <div className="w-full max-w-lg rounded-lg border border-border bg-surface p-5 shadow-sm">
           <span className="mb-4 flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
@@ -284,12 +345,12 @@ export function OrganizationOnboardingPanel({
             </div>
           )}
         </div>
-      </section>
+      </section>,
     );
   }
 
   if (createdSetup) {
-    return (
+    return frame(
       <ModelAccessOnboardingPanel
         client={client}
         organizationId={createdSetup.organizationId}
@@ -297,13 +358,14 @@ export function OrganizationOnboardingPanel({
         billingMode={billingMode}
         codexEnabled={codexEnabled}
         supergrokEnabled={supergrokEnabled}
+        includedModel={includedModel}
         onComplete={onComplete}
-      />
+      />,
     );
   }
 
   if (state === "unavailable") {
-    return (
+    return frame(
       <section className="flex flex-1 items-center justify-center px-4">
         <div className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm">
           <span className="mb-4 flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
@@ -315,11 +377,11 @@ export function OrganizationOnboardingPanel({
             for a new invitation before continuing.
           </p>
         </div>
-      </section>
+      </section>,
     );
   }
 
-  return (
+  return frame(
     <section className="flex flex-1 items-center justify-center px-4">
       <form
         className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
@@ -358,7 +420,61 @@ export function OrganizationOnboardingPanel({
           Create organization
         </Button>
       </form>
-    </section>
+    </section>,
+  );
+}
+
+/** Who is signed in during onboarding, with a way out to another account. */
+export function OnboardingAccountHeader({
+  email,
+  onSignOut,
+  onUseAnotherAccount,
+}: {
+  email: string | null;
+  onSignOut?: (() => Promise<void> | void) | undefined;
+  onUseAnotherAccount?: (() => void) | undefined;
+}) {
+  const [signingOut, setSigningOut] = useState(false);
+  if (!email && !onSignOut && !onUseAnotherAccount) return null;
+  return (
+    <header className="flex shrink-0 flex-wrap items-center justify-end gap-x-3 gap-y-1 px-4 pt-3 text-xs text-fg-muted">
+      {email ? (
+        <span className="min-w-0 truncate">
+          Signed in as <span className="font-medium text-fg">{email}</span>
+        </span>
+      ) : null}
+      {onUseAnotherAccount ? (
+        <Button type="button" variant="ghost" size="sm" onClick={onUseAnotherAccount}>
+          Use another account
+        </Button>
+      ) : null}
+      {onSignOut ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={signingOut}
+          onClick={() => {
+            setSigningOut(true);
+            void Promise.resolve()
+              .then(onSignOut)
+              .catch((error) =>
+                toast.error("Sign out failed", {
+                  description: error instanceof Error ? error.message : String(error),
+                }),
+              )
+              .finally(() => setSigningOut(false));
+          }}
+        >
+          {signingOut ? (
+            <Loader2Icon className="size-3.5 animate-spin" />
+          ) : (
+            <LogOutIcon className="size-3.5" />
+          )}
+          {onUseAnotherAccount ? "Sign out" : "Sign out or use another account"}
+        </Button>
+      ) : null}
+    </header>
   );
 }
 

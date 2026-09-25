@@ -18,6 +18,7 @@ import {
 } from "@/api";
 import { Button } from "@/components/ui/button";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
+import type { IncludedOnboardingModel } from "@/components/model-access-onboarding";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
 import {
@@ -302,6 +303,7 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
   supergrokEnabled?: boolean;
+  includedModel?: IncludedOnboardingModel | null;
   activeEmail: string | null;
   invitation: OrganizationInvitationContinuation | null;
   onComplete: () => void;
@@ -335,15 +337,28 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
       .catch((error) => toast.error("Couldn't switch accounts", { description: String(error) }));
   }
 
+  async function signOutSelectedAccount(): Promise<void> {
+    const projection = accounts.projection;
+    const selectedSlotId = projection?.selectedSlotId;
+    if (!selectedSlotId) return;
+    const replacement =
+      projection.slots.find((slot) => slot.id !== selectedSlotId && slot.state === "active")?.id ??
+      null;
+    await accounts.logoutSlot(selectedSlotId, replacement);
+  }
+
   return (
     <OrganizationOnboardingPanel
       client={props.client}
       billingMode={props.billingMode}
       codexEnabled={props.codexEnabled}
       supergrokEnabled={props.supergrokEnabled}
+      includedModel={props.includedModel ?? null}
       activeEmail={props.activeEmail}
       invitation={props.invitation}
       onUseInvitedAccount={useInvitedAccount}
+      onUseAnotherAccount={() => authenticate("add")}
+      onSignOut={signOutSelectedAccount}
       onComplete={props.onComplete}
     />
   );

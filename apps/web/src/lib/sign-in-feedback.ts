@@ -14,6 +14,9 @@ export function signInCallbackError(code: string | null | undefined): string | n
     case "account_already_linked":
     case "identity_conflict":
       return "This provider account is already connected to another OpenGeni account. Use a different provider account; accounts are not merged.";
+    case "token_expired":
+    case "invalid_token":
+      return "This email verification link has expired or is no longer valid. Request a new verification email to finish setting up your account.";
     case "state_mismatch":
     case "state_not_found":
     case "invalid_state":

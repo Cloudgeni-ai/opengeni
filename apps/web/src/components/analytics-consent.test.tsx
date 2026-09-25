@@ -44,11 +44,54 @@ describe("analytics consent accessibility", () => {
       });
       await act(async () => openAnalyticsPreferences());
 
-      const copy = container.querySelector<HTMLElement>(
-        'section[aria-label="Analytics preferences"] > p.mt-1',
+      const section = container.querySelector<HTMLElement>(
+        'section[aria-label="Analytics preferences"]',
       );
-      expect(copy).not.toBeNull();
-      expect(copy!.hasAttribute("data-contrast-audited")).toBe(true);
+      expect(section).not.toBeNull();
+      const copy = section!.querySelectorAll<HTMLElement>("p.text-fg-muted, details p");
+      expect(copy.length).toBeGreaterThan(0);
+      for (const paragraph of copy) {
+        expect(paragraph.hasAttribute("data-contrast-audited")).toBe(true);
+      }
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      window.localStorage.clear();
+    }
+  });
+
+  test("docks in normal flow instead of floating over sign-in or onboarding controls", async () => {
+    window.localStorage.clear();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          <AnalyticsManager
+            config={{
+              consentRequired: true,
+              providers: { posthog: { projectKey: "phc_test", host: "https://example.com" } },
+            }}
+            hasSearchParameters={false}
+            isPublicAuthRoute={false}
+            pathname="/"
+            analyticsAccountId={null}
+            analyticsUserId={null}
+          />,
+        );
+      });
+
+      const section = container.querySelector<HTMLElement>(
+        'section[aria-label="Analytics preferences"]',
+      );
+      expect(section).not.toBeNull();
+      expect(section!.className).not.toContain("fixed");
+      expect(section!.className).toContain("order-last");
+      expect(section!.className).toContain("shrink-0");
+      expect(container.textContent).toContain("Allow analytics");
+      expect(container.textContent).toContain("Decline");
     } finally {
       await act(async () => root.unmount());
       container.remove();
