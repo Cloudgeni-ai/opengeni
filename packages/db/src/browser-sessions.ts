@@ -399,6 +399,7 @@ function requestDigest(value: Record<string, unknown>): string {
 }
 
 export function browserSessionCreateRequestDigest(input: PrepareBrowserSessionCreateInput): string {
+  const capabilities = normalizedBrowserCapabilities(input);
   const revisionSelection = input.identityId
     ? input.resolveDefaultRevision
       ? { kind: "identity_default" as const }
@@ -419,7 +420,11 @@ export function browserSessionCreateRequestDigest(input: PrepareBrowserSessionCr
     networkRouteId: input.networkRouteId ?? null,
     linkedComputerSessionId: input.linkedComputerSessionId ?? null,
     revisionSelection,
-    capabilities: normalizedBrowserCapabilities(input),
+    // Version 4 included the engine-derived screenshot bit. Preserve its
+    // original Lightpanda value only in the digest so an existing create
+    // operation remains replayable after correcting advertised capabilities.
+    capabilities:
+      input.engine === "lightpanda" ? { ...capabilities, screenshots: true } : capabilities,
     actorSubjectId: input.actorSubjectId,
   });
 }
