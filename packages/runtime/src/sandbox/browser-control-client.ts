@@ -300,7 +300,7 @@ export type PlacementBrowserNetworkRoute = {
 };
 
 export type PlacementBrowserTransport =
-  | { kind: "managed"; engine?: "chromium" | "lightpanda" }
+  | { kind: "managed"; engine?: "chromium" | "lightpanda"; ephemeralPartition?: string }
   | {
       kind: "external_provider";
       providerId: "browserbase" | "kernel";
@@ -2369,7 +2369,13 @@ function placementBrowserTransport(input: PlacementBrowserTransport): PlacementB
     ) {
       throw new BrowserControlProtocolError("managed browser engine is invalid");
     }
-    return { kind: "managed", engine: input.engine ?? "chromium" };
+    if (input.ephemeralPartition !== undefined && !SHA256_PATTERN.test(input.ephemeralPartition))
+      throw new Error("ephemeral browser partition is invalid");
+    return {
+      kind: "managed",
+      engine: input.engine ?? "chromium",
+      ...(input.ephemeralPartition ? { ephemeralPartition: input.ephemeralPartition } : {}),
+    };
   }
   if (input.kind === "external_provider") {
     if (input.providerId !== "browserbase" && input.providerId !== "kernel") {

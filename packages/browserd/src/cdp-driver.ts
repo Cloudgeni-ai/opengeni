@@ -140,6 +140,7 @@ export type BrowserExternalAuthDispatchResult = {
 };
 
 export type BrowserCdpConnection = {
+  onDisconnect?: (listener: () => void) => () => void;
   send<T = Record<string, unknown>>(
     method: string,
     params?: Readonly<Record<string, unknown>>,

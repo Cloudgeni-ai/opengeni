@@ -1,5 +1,6 @@
+import { EphemeralChromiumContextPool } from "./chromium-context-pool";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, rename, rm } from "node:fs/promises";
+import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type {
@@ -133,7 +134,7 @@ export type BrowserSupervisorNetworkRoute = {
 };
 
 export type BrowserSupervisorTransport =
-  | { kind: "managed"; engine?: "chromium" | "lightpanda" }
+  | { kind: "managed"; engine?: "chromium" | "lightpanda"; ephemeralPartition?: string }
   | {
       kind: "external_provider";
       providerId: "browserbase" | "kernel";
@@ -212,6 +213,7 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
    * failure. Managed Chromium implements it; unsupported providers fail
    * honestly without implicit recovery. */
   isAvailable?(): Promise<boolean>;
+  isTerminal?(): boolean;
   close(): Promise<void>;
 };
 
@@ -239,6 +241,7 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
 };
 
 export type BrowserSupervisorOptions = {
+  ephemeralContextPoolEnabled?: boolean;
   rootDirectory: string;
   socketRootDirectory?: string;
   maxSessions?: number;
@@ -300,6 +303,8 @@ export class BrowserSupervisor {
   readonly rootDirectory: string;
   readonly socketRootDirectory: string;
   private readonly maxSessions: number;
+  private readonly ephemeralContextPoolEnabled: boolean;
+  private readonly contextPools = new Map<string, EphemeralChromiumContextPool>();
   private readonly createDriver: (
     context: BrowserSupervisorDriverContext,
   ) => Promise<BrowserSupervisorDriver>;
@@ -326,6 +331,7 @@ export class BrowserSupervisor {
         sessionName: `b${"0".repeat(16)}`,
       });
     }
+    this.ephemeralContextPoolEnabled = options.ephemeralContextPoolEnabled === true;
     this.maxSessions = boundedPositiveInteger(
       options.maxSessions ?? DEFAULT_MAX_SESSIONS,
       "maxSessions",
@@ -333,9 +339,75 @@ export class BrowserSupervisor {
     this.createDriver =
       options.createDriver ??
       (async (context) =>
-        await createBrowserDriver(context, options.agentBrowserBinary, options.lightpandaBinary));
+        await (context.transport.kind === "managed" && context.transport.ephemeralPartition
+          ? this.createEphemeralDriver(context, options)
+          : createBrowserDriver(context, options.agentBrowserBinary, options.lightpandaBinary)));
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
     this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
+  }
+
+  private async createEphemeralDriver(
+    context: BrowserSupervisorDriverContext,
+    options: BrowserSupervisorOptions,
+  ): Promise<BrowserSupervisorDriver> {
+    if (
+      !options.ephemeralContextPoolEnabled ||
+      context.transport.kind !== "managed" ||
+      !context.transport.ephemeralPartition
+    ) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "ephemeral browser contexts are disabled by the operator",
+      );
+    }
+    const key = createHash("sha256")
+      .update(
+        JSON.stringify([
+          context.transport.ephemeralPartition,
+          context.browserExecutablePath ?? "default",
+          "headless-default-egress-v1",
+        ]),
+      )
+      .digest("hex");
+    let pool = this.contextPools.get(key);
+    if (!pool || pool.isTerminal()) {
+      const poolDirectory = join(this.rootDirectory, "sessions", randomUUID());
+      const poolSocketDirectory = join(this.socketRootDirectory, shortDigest(poolDirectory));
+      pool = new EphemeralChromiumContextPool({
+        authorityKey: key,
+        launch: async () => {
+          const runner = await AgentBrowserJsonRunner.create({
+            namespace: "og",
+            sessionName: `e${randomUUID().replaceAll("-", "").slice(0, 16)}`,
+            socketDirectory: poolSocketDirectory,
+            profileDirectory: join(poolDirectory, "profile"),
+            downloadDirectory: join(poolDirectory, "downloads"),
+            screenshotDirectory: join(poolDirectory, "screenshots"),
+            headed: false,
+            ...(context.browserExecutablePath
+              ? { browserExecutablePath: context.browserExecutablePath }
+              : {}),
+            ...(options.agentBrowserBinary ? { binary: options.agentBrowserBinary } : {}),
+          });
+          return {
+            run: runner.run.bind(runner),
+            terminate: async () => {
+              await runner.terminate();
+              await rm(poolDirectory, { recursive: true, force: true });
+              await rm(poolSocketDirectory, { recursive: true, force: true });
+            },
+          };
+        },
+      });
+      this.contextPools.set(key, pool);
+    }
+    return await pool.createDriver(key, {
+      browserSessionId: context.browserSessionId,
+      controllerGeneration: context.controllerGeneration,
+      resolveWorkspaceFiles: context.resolveWorkspaceFiles,
+      downloadDirectory: context.downloadDirectory,
+      ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
+    });
   }
 
   static async open(options: BrowserSupervisorOptions): Promise<BrowserSupervisor> {
@@ -361,6 +433,16 @@ export class BrowserSupervisor {
   ): Promise<BrowserSupervisorSession> {
     this.assertOpen();
     const options = validateSessionOptions(optionsInput);
+    if (
+      options.transport.kind === "managed" &&
+      options.transport.ephemeralPartition &&
+      !this.ephemeralContextPoolEnabled
+    ) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "ephemeral browser contexts are disabled by the operator",
+      );
+    }
     try {
       const active = this.sessions.get(options.browserSessionId);
       if (active) {
@@ -417,7 +499,11 @@ export class BrowserSupervisor {
 
   listSessions(): BrowserSessionReference[] {
     return [...this.sessions.values()]
-      .filter((runtime) => runtime.lifecycle === "active" || runtime.lifecycle === "recovering")
+      .filter(
+        (runtime) =>
+          (runtime.lifecycle === "active" || runtime.lifecycle === "recovering") &&
+          !runtime.driver.isTerminal?.(),
+      )
       .map(binding);
   }
 
@@ -717,6 +803,8 @@ export class BrowserSupervisor {
     await Promise.allSettled(
       active.map(async (runtime) => await this.endSession(binding(runtime))),
     );
+    await Promise.all([...this.contextPools.values()].map((pool) => pool.close()));
+    this.contextPools.clear();
   }
 
   private async buildRuntime(options: ValidatedBrowserSupervisorSessionOptions): Promise<Runtime> {
@@ -742,6 +830,25 @@ export class BrowserSupervisor {
     ]) {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await chmod(directory, 0o700);
+    }
+    if (options.transport.kind === "managed" && options.transport.ephemeralPartition) {
+      try {
+        await writeFile(
+          join(sessionDirectory, "ephemeral-generation.json"),
+          JSON.stringify({
+            controllerGeneration: options.controllerGeneration,
+            partition: options.transport.ephemeralPartition,
+          }),
+          { flag: "wx", mode: 0o600 },
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        throw new InteractionControllerError(
+          "controller_lost",
+          "ephemeral context generation already issued; create a new session",
+          false,
+        );
+      }
     }
     let restoredManifest: BrowserProfileManifest | null = null;
     let restoredProfileMaterialized = false;
@@ -935,7 +1042,8 @@ export class BrowserSupervisor {
     if (
       runtime.options.transport.kind === "attached_chrome" ||
       runtime.options.transport.kind === "external_provider" ||
-      runtime.options.transport.engine === "lightpanda"
+      runtime.options.transport.engine === "lightpanda" ||
+      Boolean(runtime.options.transport.ephemeralPartition)
     ) {
       throw new InteractionControllerError(
         "unsupported",
@@ -1069,6 +1177,13 @@ export class BrowserSupervisor {
     runtime: Runtime,
     command: BrowserExternalAuthCommand,
   ): Promise<BrowserExternalAuthResultValue> {
+    if (runtime.driver.isTerminal?.()) {
+      throw new InteractionControllerError(
+        "controller_lost",
+        "ephemeral browser process generation ended; create a new session",
+        false,
+      );
+    }
     if (runtime.lifecycle !== "active") {
       throw new InteractionControllerError(
         "resource_unavailable",
@@ -1136,7 +1251,8 @@ export class BrowserSupervisor {
     if (
       runtime.options.transport.kind === "attached_chrome" ||
       (runtime.options.transport.kind === "managed" &&
-        runtime.options.transport.engine === "lightpanda") ||
+        (runtime.options.transport.engine === "lightpanda" ||
+          runtime.options.transport.ephemeralPartition)) ||
       !runtime.driver.isAvailable
     )
       return false;
@@ -1324,6 +1440,13 @@ export class BrowserSupervisor {
 
   private requireActive(reference: BrowserSessionReference): Runtime {
     const runtime = this.requireBound(reference);
+    if (runtime.driver.isTerminal?.()) {
+      throw new InteractionControllerError(
+        "controller_lost",
+        "ephemeral browser process generation ended; create a new session",
+        false,
+      );
+    }
     if (runtime.lifecycle !== "active") {
       throw new InteractionControllerError(
         "resource_unavailable",
@@ -1595,6 +1718,20 @@ function validateSessionOptions(
     throw new Error("initialUrl exceeds its byte envelope");
   }
   const transport = validateBrowserTransport(options.transport ?? { kind: "managed" });
+  if (
+    transport.kind === "managed" &&
+    transport.ephemeralPartition &&
+    (options.headed ||
+      options.restore ||
+      options.linkedComputer ||
+      options.networkRoute ||
+      options.launchEnvironment)
+  ) {
+    throw new InteractionControllerError(
+      "unsupported",
+      "ephemeral contexts cannot use a profile, desktop, restore or network route",
+    );
+  }
   const networkRoute = options.networkRoute
     ? validateBrowserNetworkRoute(options.networkRoute, transport)
     : undefined;
@@ -1687,7 +1824,18 @@ function validateBrowserTransport(input: BrowserSupervisorTransport): BrowserSup
     ) {
       throw new Error("managed browser engine is unsupported");
     }
-    return { kind: "managed", engine: input.engine ?? "chromium" };
+    if (
+      input.ephemeralPartition !== undefined &&
+      (!/^[0-9a-f]{64}$/u.test(input.ephemeralPartition) ||
+        (input.engine !== undefined && input.engine !== "chromium"))
+    ) {
+      throw new Error("ephemeral browser partition is invalid");
+    }
+    return {
+      kind: "managed",
+      engine: input.engine ?? "chromium",
+      ...(input.ephemeralPartition ? { ephemeralPartition: input.ephemeralPartition } : {}),
+    };
   }
   if (input.kind === "external_provider") {
     if (input.providerId !== "browserbase" && input.providerId !== "kernel") {

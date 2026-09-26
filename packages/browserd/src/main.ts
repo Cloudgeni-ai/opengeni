@@ -34,6 +34,7 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
     rootDirectory: config.rootDirectory,
     ...(config.socketRootDirectory ? { socketRootDirectory: config.socketRootDirectory } : {}),
     maxSessions: config.maxSessions,
+    ephemeralContextPoolEnabled: environment.OPENGENI_BROWSERD_EPHEMERAL_CONTEXT_POOL === "1",
     ...(agentBrowserBinary ? { agentBrowserBinary } : {}),
     ...(lightpandaBinary ? { lightpandaBinary } : {}),
   });

@@ -1,8 +1,10 @@
 # Experimental ephemeral Chromium context pool
 
-Status: construction-only experiment. No API, worker, native-agent or browserd
-supervisor selects it. Dedicated managed browsers remain the default. This is
-not a production rollout or a durable BrowserSession storage mode.
+Status: experimental pool with an operator-disabled sandbox API integration.
+Dedicated managed browsers remain the default. See the
+[ephemeral BrowserSession contract](../architecture/ephemeral-browser-sessions.md)
+for explicit admission and terminal-loss behavior. This is not a production
+rollout or a durable BrowserSession storage mode.
 
 `EphemeralChromiumContextPool` in `packages/browserd/src/chromium-context-pool.ts`
 lets a trusted experiment own one freshly launched headless Chromium process
