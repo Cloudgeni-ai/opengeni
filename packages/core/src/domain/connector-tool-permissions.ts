@@ -175,30 +175,39 @@ async function listTools(
       timeout: 15_000,
       maxTotalTimeout: 15_000,
     });
-    const tools: ListedTool[] = [];
-    const cursors = new Set<string>();
-    let cursor: string | undefined;
-    do {
-      const page = await client.listTools(cursor ? { cursor } : undefined, {
-        timeout: 15_000,
-        maxTotalTimeout: 15_000,
-        signal: deadline,
-      });
-      tools.push(...page.tools);
-      assertMcpToolListWithinBounds(tools);
-      if (new Set(tools.map((tool) => tool.name)).size !== tools.length)
-        throw new Error("The connector returned duplicate tool names.");
-      cursor = page.nextCursor;
-      if (tools.length > 2048 || (cursor && cursors.has(cursor)))
-        throw new Error("The connector returned an invalid or oversized tool catalog.");
-      if (cursor) cursors.add(cursor);
-    } while (cursor);
+    const tools = await collectConnectorToolPages(client, deadline);
     return tools.filter(
       (tool) => !target.server.allowedTools || target.server.allowedTools.includes(tool.name),
     );
   } finally {
     await client.close().catch(() => undefined);
   }
+}
+
+/** Collect discovery pages without changing the caller's connection or authority. */
+export async function collectConnectorToolPages(
+  client: Pick<Client, "listTools">,
+  deadline: AbortSignal,
+): Promise<ListedTool[]> {
+  const tools: ListedTool[] = [];
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const page = await client.listTools(cursor ? { cursor } : undefined, {
+      timeout: 15_000,
+      maxTotalTimeout: 15_000,
+      signal: deadline,
+    });
+    tools.push(...page.tools);
+    assertMcpToolListWithinBounds(tools);
+    if (new Set(tools.map((tool) => tool.name)).size !== tools.length)
+      throw new Error("The connector returned duplicate tool names.");
+    cursor = page.nextCursor;
+    if (cursor && cursors.has(cursor))
+      throw new Error("The connector returned an invalid or oversized tool catalog.");
+    if (cursor) cursors.add(cursor);
+  } while (cursor);
+  return tools;
 }
 
 export async function getConnectorToolPermissions(

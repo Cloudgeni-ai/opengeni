@@ -15,6 +15,9 @@ and the aggregate to 16 MiB. It does not truncate an oversized list or silently
 select a subset. A best-effort provider whose discovery fails contributes no
 tools for that turn; successful authentication alone does not prove that its
 catalog was admitted.
+Connector-permissions discovery and explicit tool-name updates use the same
+count allowance, so an admitted catalog can be managed without a lower cutoff.
+Duplicate names and repeated pagination cursors remain rejected.
 
 ## Attached accounts
 

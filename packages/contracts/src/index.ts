@@ -17094,5 +17094,6 @@ export type { PluginDiscoveryItem, PluginDiscoveryPage } from "./plugin-discover
 export { mcpEndpointIdentity } from "./mcp-endpoint";
 export { pluginMcpUnavailableReason } from "./mcp-endpoint";
 export * from "./connector-tool-permissions";
+export * from "./mcp-catalog-limits";
 export * from "./skill-catalog-context";
 export * from "./sandbox-recovery";
