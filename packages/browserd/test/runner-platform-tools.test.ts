@@ -8,11 +8,12 @@ test.skipIf(process.platform !== "linux")(
       [process.execPath, "-e", fixture, new URL("../src/runner.ts", import.meta.url).href],
       { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
     );
+    const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
     const [stdout, stderr, exit] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
       child.exited,
-    ]);
+    ]).finally(() => clearTimeout(timer));
     expect({ stdout: stdout.trim(), stderr: stderr.trim(), exit }).toEqual({
       stdout: "PATH utilities launched Chrome and drained stderr",
       stderr: "",
@@ -63,8 +64,15 @@ try {
   const wrapper = await runner.run(["get", "cdp-url"]);
   assert.ok((await original.readFile(wrapper, "utf8")).includes(join(bin, "tail")));
   const browser = Bun.spawn([wrapper], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  assert.equal(await browser.exited, 0);
-  assert.equal(await new Response(browser.stdout).text(), "chrome launched\\n");
+  const timer = setTimeout(() => browser.kill("SIGKILL"), 3_000);
+  try {
+    assert.equal(await browser.exited, 0);
+    assert.equal(await new Response(browser.stdout).text(), "chrome launched\\n");
+  } finally {
+    clearTimeout(timer);
+    if (browser.exitCode === null) browser.kill("SIGKILL");
+    await browser.exited;
+  }
   const log = join(root, "chrome-launch", "chrome-stderr.log");
   let content = "";
   for (let attempt = 0; attempt < 50; attempt++) {
