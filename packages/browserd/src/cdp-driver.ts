@@ -1081,7 +1081,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           this.assertProtectedAuthGenerations(command, state);
           for (const field of resolvedFields) {
             await this.focusNode(state, field.backendDOMNodeId);
-            await this.selectAllAndDelete(state);
+            await this.selectAllAndDelete(state, field.backendDOMNodeId);
             await this.sendActionTarget(state, "Input.insertText", {
               text: field.value,
             });
@@ -2472,8 +2472,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "fill": {
         const node = await this.resolveLocator(state, action.locator);
         await this.focusNode(state, node.backendDOMNodeId);
-        await this.selectAllAndDelete(state);
-        if (action.value)
+        await this.selectAllAndDelete(state, node.backendDOMNodeId);
+        if (action.value || this.engine === "lightpanda")
           await this.sendActionTarget(state, "Input.insertText", {
             text: action.value,
           });
@@ -2969,7 +2969,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
   }
 
-  private async selectAllAndDelete(state: TargetState): Promise<void> {
+  private async selectAllAndDelete(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+  ): Promise<void> {
+    if (this.engine === "lightpanda") {
+      // Pinned Lightpanda ignores rawKeyDown and has no select-all/backspace
+      // editing defaults. Clear through the native setter, then let insertText
+      // emit the native input event (also for an empty replacement). Bypassing
+      // framework-owned setters preserves controlled-input change tracking.
+      const cleared = await this.callOnNode(
+        state,
+        backendDOMNodeId,
+        LIGHTPANDA_CLEAR_EDITABLE_FUNCTION,
+        [],
+      );
+      if (cleared !== true) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "Lightpanda fill requires an editable text input or textarea",
+        );
+      }
+      return;
+    }
     const meta = /Macintosh|Mac OS/u.test(this.userAgent);
     const modifiers = meta ? 4 : 2;
     await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
@@ -4028,6 +4050,19 @@ const CLEAR_PROTECTED_VALUE_FUNCTION = `function() {
   if (tag === "input" || tag === "textarea") this.value = "";
   else if (this.isContentEditable === true) this.textContent = "";
   else return false;
+  return true;
+}`;
+
+const LIGHTPANDA_CLEAR_EDITABLE_FUNCTION = `function() {
+  if (!(this instanceof Element) || !this.isConnected || document.activeElement !== this) return false;
+  const tag = String(this.tagName || "").toLowerCase();
+  if (tag !== "input" && tag !== "textarea") return false;
+  if (this.disabled || this.readOnly) return false;
+  if (tag === "input" && !["text", "search", "url", "tel", "password", "email", "number"].includes(this.type)) return false;
+  const prototype = tag === "textarea" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+  if (typeof setter !== "function") return false;
+  setter.call(this, "");
   return true;
 }`;
 
