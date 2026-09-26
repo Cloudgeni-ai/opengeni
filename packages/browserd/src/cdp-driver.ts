@@ -2128,22 +2128,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (result.exceptionDetails || !isRecord(value)) {
       return null;
     }
-    const { width, height, visualWidth, visualHeight, deviceScaleFactor, maxTouchPoints } = value;
-    if (
-      ![width, height, visualWidth, visualHeight, deviceScaleFactor, maxTouchPoints].every(
-        (part) => typeof part === "number" && Number.isFinite(part),
-      )
-    ) {
-      return null;
-    }
-    return {
-      width: Number(width),
-      height: Number(height),
-      visualWidth: Number(visualWidth),
-      visualHeight: Number(visualHeight),
-      deviceScaleFactor: Number(deviceScaleFactor),
-      maxTouchPoints: Number(maxTouchPoints),
-    };
+    // A newly mapped headed window may report zero dimensions before layout.
+    // Keep the semantic observation usable without inventing viewport geometry.
+    const viewport = BrowserObservation.shape.viewport.safeParse(value);
+    return viewport.success ? (viewport.data ?? null) : null;
   }
 
   private imageFrame(options: {

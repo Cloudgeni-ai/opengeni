@@ -14,6 +14,58 @@ const jpeg = Buffer.from([
   0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 2, 0, 3, 1, 1, 0x11, 0, 0xff, 0xd9,
 ]).toString("base64");
 
+const validViewport = {
+  width: 1440,
+  height: 900,
+  visualWidth: 719.5,
+  visualHeight: 449.5,
+  deviceScaleFactor: 2,
+  maxTouchPoints: 0,
+};
+
+test.each([
+  { width: 0, height: 0, visualWidth: 0, visualHeight: 0 },
+  { width: -1 },
+  { width: 1440.5 },
+  { height: 0 },
+  { visualWidth: 0 },
+  { visualHeight: -1 },
+  { deviceScaleFactor: 0 },
+  { maxTouchPoints: -1 },
+  { maxTouchPoints: 0.5 },
+])(
+  "unavailable viewport sample %j preserves semantic observation and later valid geometry",
+  async (invalid) => {
+    const fixture = await captureFixture();
+    try {
+      fixture.setViewport({ ...validViewport, ...invalid });
+      await fixture.driver.start();
+      const observation = await fixture.driver.observe("target-1");
+      expect(observation.viewport).toBeNull();
+      expect(observation.semantic?.kind).toBe("snapshot");
+      fixture.setViewport(validViewport);
+      expect((await fixture.driver.observe("target-1")).viewport).toEqual(validViewport);
+    } finally {
+      await fixture.driver.close();
+    }
+  },
+);
+
+test("viewport protocol failures remain errors rather than unavailable metrics", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.failViewport();
+    await expect(fixture.driver.observe("target-1")).rejects.toMatchObject({
+      method: "Runtime.evaluate",
+      code: -32000,
+      message: "synthetic viewport failure",
+    });
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
 test("bounded mobile frames keep one scale across rounded raster captures and viewport changes", async () => {
   const fixture = await captureFixture();
   let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
@@ -309,6 +361,8 @@ async function captureFixture(
     params?: Record<string, any>;
   }> = [];
   let raster: { width: number; height: number; density: number } | null = null;
+  let viewport: unknown = "complete";
+  let viewportFailure = false;
   let stalledMethod: string | null = null;
   let stalled: { id: number; method: string; sessionId?: string } | null = null;
   let reachedStall = () => {};
@@ -344,7 +398,24 @@ async function captureFixture(
         frameTree: { frame: { id: "frame-1", loaderId: "loader-1", url: "about:blank" } },
       };
     }
-    if (command.method === "Runtime.evaluate") result = { result: { value: "complete" } };
+    if (command.method === "Runtime.evaluate") {
+      if (String(command.params?.expression).startsWith("({width:innerWidth")) {
+        if (viewportFailure) {
+          queueMicrotask(() =>
+            socket.dispatchEvent(
+              new MessageEvent("message", {
+                data: JSON.stringify({
+                  id: command.id,
+                  error: { code: -32000, message: "synthetic viewport failure" },
+                }),
+              }),
+            ),
+          );
+          return;
+        }
+        result = { result: { value: viewport } };
+      } else result = { result: { value: "complete" } };
+    }
     if (command.method === "Accessibility.getFullAXTree") result = { nodes: [] };
     if (command.method === "Page.getLayoutMetrics") {
       result = {
@@ -421,6 +492,12 @@ async function captureFixture(
     calls,
     setRaster(value: NonNullable<typeof raster>) {
       raster = value;
+    },
+    setViewport(value: unknown) {
+      viewport = value;
+    },
+    failViewport() {
+      viewportFailure = true;
     },
     disconnect: () => socket.close(),
     delayNext(method: string, delayMs: number) {
