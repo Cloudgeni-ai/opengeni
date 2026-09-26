@@ -152,7 +152,7 @@ including its marker: a longer answer keeps its head and tail around an
 explicit omitted-bytes marker, never splits a character, and `nextAction`
 names the exact `session_events` `view: "results"` read of the full answer.
 The complete answer stays only in the child's own durable event. No answer is
-copied when the child's newest turn outcome is a failure or its answer row is
+copied when the child's newest turn ended failed, cancelled, or superseded, or its answer row is
 itself a retained preview. The worker's goal enrichment merges onto the
 committed payload rather than replacing it, so an immediately delivered row and
 a reaper-delivered row carry the same answer. The field is optional, so older

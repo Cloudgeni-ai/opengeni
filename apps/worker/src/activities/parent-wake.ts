@@ -68,11 +68,13 @@ export async function notifyParentOfChildIdle(
     // The idle settlement committed this row with the child's frozen final
     // answer. Enrichment adds the goal facts on top of that content; it never
     // replaces what the producing transaction froze.
+    // An unreadable committed row must not block delivery; enrich from scratch
+    // as before.
     const committed = await getSessionSystemUpdateOutboxByDedupeKey(svc.db, {
       accountId: child.accountId,
       workspaceId,
       dedupeKey: clientEventId,
-    });
+    }).catch(() => null);
     const payload = childCompletionPayload(
       child,
       goal,

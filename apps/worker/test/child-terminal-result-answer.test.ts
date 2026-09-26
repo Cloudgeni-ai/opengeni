@@ -286,4 +286,27 @@ describe("child_terminal_result carries the child's final answer", () => {
     // A truncated answer is not proof that the parent consumed the whole result.
     expect(await acknowledgedSequence(grant.subjectId, child.session.id)).toBeNull();
   });
+
+  test("an older answer behind a newer unanswered turn is not reported as the result", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "Check the deploy." });
+    const child = await startSession(grant, { message: "Watch it.", parent });
+    await completeTurn(grant, child, "The first deploy is green.");
+    const [row] = await shared.admin<Array<{ last: number }>>`
+      select max(sequence)::int as last from session_events where session_id = ${child.session.id}`;
+    await shared.admin`
+      insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+      values (${grant.accountId}, ${grant.workspaceId}, ${child.session.id}, ${row!.last + 1},
+        'turn.superseded', '{}'::jsonb)`;
+
+    await markChildIdle(grant, child);
+
+    const [pending] = await listOutstandingSessionSystemUpdates(
+      client.db,
+      grant.workspaceId,
+      parent.session.id,
+    );
+    expect(pending?.kind).toBe("child_terminal_result");
+    expect(pending?.payload).not.toHaveProperty("finalAnswer");
+  });
 });

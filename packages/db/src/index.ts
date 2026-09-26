@@ -66990,6 +66990,28 @@ export async function supersedeConsumedChildTerminalResults(
     .filter((child) => UUID_PATTERN.test(child.sessionId) && child.sequences.length > 0)
     .sort((a, b) => a.sessionId.localeCompare(b.sessionId));
   if (children.length === 0) return { supersededUpdateIds: [], events: [] };
+  // Most complete reads find nothing to consume. Probe without the canonical
+  // write prefix first so they never contend with the caller's own writer.
+  const candidate = await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const [row] = await tx
+      .select({ id: schema.sessionSystemUpdates.id })
+      .from(schema.sessionSystemUpdates)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+          eq(schema.sessionSystemUpdates.kind, "child_terminal_result"),
+          eq(schema.sessionSystemUpdates.state, "pending"),
+          inArray(
+            schema.sessionSystemUpdates.sourceId,
+            children.map((child) => child.sessionId),
+          ),
+        ),
+      )
+      .limit(1);
+    return row;
+  });
+  if (!candidate) return { supersededUpdateIds: [], events: [] };
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -73270,7 +73292,7 @@ export async function settleSessionIdleWithParentOutbox(
 
 /**
  * The child's current final answer for its idle terminal result. Null when its
- * newest turn outcome is a failure, when it has no answer text, or when the
+ * newest turn ended without an answer, when it has no answer text, or when the
  * stored answer row is itself only a retained preview: the parent then reads
  * the child's events instead of receiving a partial copy presented as whole.
  */

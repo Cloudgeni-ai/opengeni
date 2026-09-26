@@ -75,21 +75,22 @@ export function meaningfulSessionSequenceSql(
     ), 0)`;
 }
 
-/** The child's newest meaningful turn outcome: a result-bearing final answer or
- * a failure. Only a `turn.completed` row here is the child's current answer; an
- * older answer behind a newer failure is never reported as the result. The
- * index probe is bounded before the type filter, and only the one selected row's
- * payload is read. */
+/** The child's newest ordinary turn outcome. Only a result-bearing
+ * `turn.completed` here is the child's current answer: an older answer behind a
+ * newer failed, cancelled, or superseded turn is never reported as the result.
+ * Maintenance and continuation-segment settlements are not outcomes. Each type
+ * probe walks the (workspace, session, type, sequence) index backwards, and only
+ * the one selected row's payload is returned. */
 export function childLatestTurnOutcomeSql(workspaceId: SQLWrapper, sessionId: SQLWrapper): SQL {
-  return sql`with recent as materialized (
-    select meaningful.sequence, meaningful.type from session_events meaningful
-    where meaningful.workspace_id = ${workspaceId} and meaningful.session_id = ${sessionId}
-      and ${meaningfulSessionEventSql("meaningful")}
-    order by meaningful.sequence desc limit 64
-  ), latest as (
-    select recent.sequence, recent.type from recent
-    where recent.type in ('turn.completed', 'turn.failed')
-    order by recent.sequence desc limit 1
+  return sql`with latest as (
+    select outcome.sequence from session_events outcome
+    where outcome.workspace_id = ${workspaceId} and outcome.session_id = ${sessionId}
+      and outcome.type in ('turn.completed', 'turn.failed', 'turn.cancelled', 'turn.superseded')
+      and outcome.duplicate_of_event_id is null
+      and (outcome.turn_association is null or outcome.turn_association = 'current')
+      and (outcome.type <> 'turn.completed'
+        or not (outcome.payload ?| array['maintenance', 'segmentLimit']))
+    order by outcome.sequence desc limit 1
   )
   select outcome.sequence, outcome.type, outcome.payload,
     outcome.payload_codec_version as "payloadCodecVersion"
