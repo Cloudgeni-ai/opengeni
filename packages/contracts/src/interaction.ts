@@ -203,14 +203,9 @@ export const BrowserSessionCapabilities = z
 export type BrowserSessionCapabilities = z.infer<typeof BrowserSessionCapabilities>;
 
 /** Versioned persistent discriminator for experimental disposable contexts. */
-export const EPHEMERAL_CHROMIUM_DRIVER_ID = "opengeni.cdp.ephemeral-context.v1" as const;
+export { EPHEMERAL_CHROMIUM_DRIVER_ID, browserSessionStorageMode } from "./browser-storage";
 export const BrowserStorageMode = z.enum(["private_profile", "ephemeral_context"]);
 export type BrowserStorageMode = z.infer<typeof BrowserStorageMode>;
-export function browserSessionStorageMode(session: { driverId: string }): BrowserStorageMode {
-  return session.driverId === EPHEMERAL_CHROMIUM_DRIVER_ID
-    ? "ephemeral_context"
-    : "private_profile";
-}
 
 export const BrowserSession = z
   .object({

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { EPHEMERAL_CHROMIUM_DRIVER_ID } from "@opengeni/contracts/browser-storage";
 import {
   OpenGeniClient,
   OpenGeniApiError,
@@ -232,6 +233,52 @@ function computerSession(overrides: Partial<ComputerSession> = {}): ComputerSess
 }
 
 describe("BrowserSession SDK", () => {
+  test("currentOrOpen never reuses a browser across storage modes", async () => {
+    for (const mode of ["private_profile", "ephemeral_context"] as const) {
+      const operationId = crypto.randomUUID();
+      const old = browserSession({
+        driverId: mode === "private_profile" ? EPHEMERAL_CHROMIUM_DRIVER_ID : "opengeni.cdp.v1",
+      });
+      const fresh = browserSession({
+        id: crypto.randomUUID(),
+        driverId: mode === "ephemeral_context" ? EPHEMERAL_CHROMIUM_DRIVER_ID : "opengeni.cdp.v1",
+      });
+      const bodies: Array<Record<string, unknown>> = [];
+      const client = new OpenGeniClient({
+        baseUrl: "https://api.example.test",
+        fetch: async (_input, init) => {
+          if (!init?.method || init.method === "GET") return json({ revision: 0, sessions: [old] });
+          bodies.push(JSON.parse(String(init.body)));
+          return json({
+            session: fresh,
+            operation: {
+              operationId,
+              resourceKind: "browser_session",
+              resourceId: fresh.id,
+              kind: "create",
+              state: "completed",
+              replayed: false,
+              error: null,
+              createdAt: fresh.createdAt,
+              dispatchedAt: fresh.createdAt,
+              settledAt: fresh.createdAt,
+            },
+          });
+        },
+      });
+      const resource = await client.interaction.browsers.currentOrOpen({
+        workspaceId: WORKSPACE_ID,
+        associationSessionId: SOURCE_SESSION_ID,
+        operationId,
+        headless: true,
+        ...(mode === "ephemeral_context" ? { storageMode: mode } : {}),
+      });
+      expect(resource.id).toBe(fresh.id);
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]?.storageMode).toBe(mode === "ephemeral_context" ? mode : undefined);
+    }
+  });
+
   test("reads the exact private browser clipboard as a scoped resource", async () => {
     const clipboard = {
       browserSessionId: BROWSER_SESSION_ID,

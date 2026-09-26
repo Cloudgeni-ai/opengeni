@@ -4,6 +4,7 @@
 "@opengeni/db": patch
 "@opengeni/browserd": minor
 "@opengeni/runtime": minor
+"@opengeni/sdk": minor
 "@opengeni/api-router": minor
 ---
 
