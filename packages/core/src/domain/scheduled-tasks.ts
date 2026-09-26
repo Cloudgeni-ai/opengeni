@@ -1172,6 +1172,29 @@ export async function validatedScheduledTaskUpdate(input: {
       rigId: input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId,
       agentConfig: nextAgentConfig,
     });
+    const nextConnectionTools = await scheduledConnectionTools(
+      input.db,
+      input.grant.workspaceId,
+      runtimeSettings,
+      nextTarget,
+      nextAgentConfig.tools,
+      ownerSubjectId ?? undefined,
+    );
+    const priorMcpIds = new Set(
+      input.existing.agentConfig.tools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id),
+    );
+    const nextMcpIds = new Set(
+      nextConnectionTools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id),
+    );
+    // Removing a selected tool also removes its inherited account choice.
+    // Keep explicit caller selections subject to normal validation, and never
+    // reset accounts for retained tools or dedicated first-party surfaces.
+    const authoritySelections = (nextAgentConfig.connectionAccounts ?? []).filter(
+      (selection) =>
+        input.payload.connectionAccounts !== undefined ||
+        !priorMcpIds.has(selection.serverId) ||
+        nextMcpIds.has(selection.serverId),
+    );
     const acceptedConnections = await freezeConnectionAccounts({
       db: input.db,
       accountId: input.grant.accountId,
@@ -1179,19 +1202,12 @@ export async function validatedScheduledTaskUpdate(input: {
       settings: nextTarget
         ? settingsWithSessionMcpServerMetadata(runtimeSettings, nextTarget.mcpServers)
         : runtimeSettings,
-      tools: await scheduledConnectionTools(
-        input.db,
-        input.grant.workspaceId,
-        runtimeSettings,
-        nextTarget,
-        nextAgentConfig.tools,
-        ownerSubjectId ?? undefined,
-      ),
+      tools: nextConnectionTools,
       resources: nextTarget?.resources ?? nextAgentConfig.resources,
       source: ownerSubjectId
         ? { kind: "subject", subjectId: ownerSubjectId, accountId: input.existing.accountId }
         : { kind: "none" },
-      authoritySelections: nextAgentConfig.connectionAccounts ?? [],
+      authoritySelections,
       authoritySelectionsFrozen:
         input.payload.connectionAccounts === undefined &&
         input.existing.agentConfig.connectionAccountsFrozen === true,
