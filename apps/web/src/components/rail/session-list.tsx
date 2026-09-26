@@ -1,6 +1,6 @@
-// The session list — the rail's home. Reuses the same useWorkspaceSessions
-// hook the old sessions index used, groups by recency (running pinned on top),
-// and supports ArrowUp/Down + Enter keyboard navigation. Each row is a status
+// The session list — the rail's home. Uses workspace discovery for search and
+// independently paged project folders for browsing, with pins above the tree.
+// Supports ArrowUp/Down + Enter keyboard navigation. Each row is a status
 // dot + single-line truncated title + relative time (visible at rest). The
 // active session (from the URL) is highlighted with an accent bar.
 import { useChannels, useSessionLineage, useWorkspaceSessions } from "@opengeni/react";
@@ -92,6 +92,7 @@ import {
 import {
   sessionMatchesPaginationGroup,
   sessionPaginationGroupQuery,
+  sessionPaginationProjectGroup,
   type SessionPaginationBrowseFilter,
   type SessionPaginationGroup,
 } from "@/lib/session-group-pagination";
@@ -1279,6 +1280,13 @@ export function SessionList() {
   // workstreams. A workspace with no created workstreams should not fall back
   // to a completely different recency UI.
   const channelMode = browseGroupBy === "project";
+  const projectPaginationGroups = useMemo(
+    () => [
+      ...channels.map((channel) => sessionPaginationProjectGroup(channel.id, channel.name)),
+      sessionPaginationProjectGroup(null, "Default"),
+    ],
+    [channels],
+  );
   const channelSections = useMemo(
     () =>
       channelMode
@@ -1289,9 +1297,28 @@ export function SessionList() {
                 compareSessionBrowse(a.session, b.session, browseSortBy),
               ),
             }))
-            .filter((section) => showEmptyGroups || section.sessions.length > 0)
+            .filter((section) => {
+              if (showEmptyGroups || section.sessions.length > 0) return true;
+              const key = sessionPaginationProjectGroup(section.channelId, section.name).key;
+              const continuation = activeSessionContinuation(
+                groupContinuations.get(key) ?? emptySessionContinuation(pageGeneration),
+                pageGeneration,
+              );
+              // An off-page project still needs a visible retry when its first
+              // independent read fails (and a loading state while it starts).
+              return continuation.failed || groupLoadingGenerations.get(key) === pageGeneration;
+            })
         : [],
-    [channelMode, forest, channels, browseSortBy, showEmptyGroups],
+    [
+      channelMode,
+      forest,
+      channels,
+      browseSortBy,
+      showEmptyGroups,
+      groupContinuations,
+      groupLoadingGenerations,
+      pageGeneration,
+    ],
   );
   // Workstreams open on first paint. A user collapse is local interaction
   // state; new or newly loaded sections therefore remain open by default.
@@ -2117,10 +2144,9 @@ export function SessionList() {
       const listPage = async (pageCursor?: string) => {
         const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
         const page = await context.client.listSessionPage(rail.workspaceId, {
-          // Page one overlaps at most the shared 50-row discovery page. Asking
-          // for 100 guarantees progress for every exact server-filtered group
-          // without a hidden multi-request scan.
-          limit: 100,
+          // Projects own 50-row pages. Other groups overlap the shared 50-row
+          // discovery page, so 100 guarantees progress without a hidden scan.
+          limit: group.kind === "channel" ? 50 : 100,
           ...(pageCursor ? { cursor: pageCursor } : {}),
           ...(group.kind !== "archived" && search ? { search } : {}),
           ...(group.kind === "archived" || hierarchyMode ? { parentSessionId: null } : {}),
@@ -2294,6 +2320,19 @@ export function SessionList() {
     ],
   );
 
+  useEffect(() => {
+    if (!channelMode || search) return;
+    for (const group of projectPaginationGroups) {
+      const continuation = activeSessionContinuation(
+        groupContinuationsRef.current.get(group.key) ?? emptySessionContinuation(pageGeneration),
+        pageGeneration,
+      );
+      if (continuation.nextCursor === undefined && !continuation.failed) {
+        void loadMoreInGroup(group);
+      }
+    }
+  }, [channelMode, loadMoreInGroup, pageGeneration, projectPaginationGroups, search]);
+
   const refreshGroupWindow = useRef(loadMoreInGroup);
   refreshGroupWindow.current = loadMoreInGroup;
   useEffect(() => {
@@ -2310,6 +2349,7 @@ export function SessionList() {
   const paginationForGroup = (
     group: SessionPaginationGroup,
     initialNextCursor: string | null,
+    independentlyPaged = false,
   ): SessionGroupPaginationProps | undefined => {
     const continuation = activeSessionContinuation(
       groupContinuations.get(group.key) ?? emptySessionContinuation(pageGeneration),
@@ -2318,7 +2358,7 @@ export function SessionList() {
     const groupLoading = groupLoadingGenerations.get(group.key) === pageGeneration;
     const hasMore =
       continuation.nextCursor === undefined
-        ? initialNextCursor !== null
+        ? independentlyPaged || initialNextCursor !== null
         : continuation.nextCursor !== null;
     if (!hasMore && !continuation.failed && !groupLoading) return undefined;
     return {
@@ -2754,6 +2794,15 @@ export function SessionList() {
                   sectionExpanded={!collapsedChannelSections.has(section.key)}
                   onToggleSection={() => toggleChannelSection(section.key)}
                   nodes={section.sessions}
+                  pagination={
+                    search
+                      ? undefined
+                      : paginationForGroup(
+                          sessionPaginationProjectGroup(section.channelId, section.name),
+                          null,
+                          true,
+                        )
+                  }
                   localDeliveryAttention={localDeliveryAttention}
                   flat={flat}
                   activeSessionId={activeSessionId}
@@ -2863,7 +2912,7 @@ export function SessionList() {
                 ) : null}
               </>
             )}
-            {browseGroupBy !== "none" && workspacePagination ? (
+            {browseGroupBy !== "none" && (!channelMode || search) && workspacePagination ? (
               <SessionGroupPaginationControl {...workspacePagination} />
             ) : null}
           </>
