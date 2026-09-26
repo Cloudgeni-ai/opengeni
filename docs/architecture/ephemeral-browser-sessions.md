@@ -8,6 +8,8 @@ A caller requests `storageMode: "ephemeral_context"` together with `headless: tr
 
 Omitting `storageMode` means `private_profile`, including when `identityId` is null. Existing private profiles retain their normal dedicated process and checkpoint behavior. Agent browser reuse matches storage mode, so opting into an ephemeral session never selects an existing private profile. An explicit existing session cannot have its storage mode changed.
 
+Managed Chromium disables its on-device AI model feature so independent profiles do not each download multi-gigabyte model weights. This does not affect OpenGeni's model provider. Private checkpoints omit the reconstructible root `OptGuideOnDeviceModel` component directory while retaining website cookies, storage and IndexedDB. For already-running Linux fleets, Chromium's `GenAILocalFoundationalModelSettings: 1` managed policy disables those downloads with dynamic policy refresh; launch arguments apply to newly started browsers.
+
 The persisted discriminator is the versioned driver ID `opengeni.cdp.ephemeral-context.v1`, exposed through the existing BrowserSession response. `browserSessionStorageMode()` projects it to the public request enum. The create-operation digest includes that driver ID; a replay cannot change storage modes. No database migration or reinterpretation of existing rows is required.
 
 ## Partition and lifecycle
