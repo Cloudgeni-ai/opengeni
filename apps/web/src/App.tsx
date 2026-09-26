@@ -27,6 +27,7 @@
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
 //   /dev/agent-topology                      → DEV-only agent tree preview (mocked)
 //   /dev/onboarding                          → DEV-only production onboarding components
+//   /dev/ui-kit                              → DEV-only component studio (src/dev/ui-kit)
 import {
   Navigate,
   RouterProvider,
@@ -272,6 +273,15 @@ const onboardingPreviewRoute = createRoute({
   path: "dev/onboarding",
   component: LazyOnboardingPreviewRoute,
 });
+// DEV-only component studio. Created only in development so the kit chunk is
+// never emitted into a production build.
+const uiKitRoute = import.meta.env.DEV
+  ? createRoute({
+      getParentRoute: () => rootRoute,
+      path: "dev/ui-kit",
+      component: lazyRouteComponent(() => import("@/dev/ui-kit"), "UiKitRoute"),
+    })
+  : null;
 const workspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "workspaces/$workspaceId",
@@ -523,6 +533,7 @@ const routeTree = rootRoute.addChildren([
   ...(import.meta.env.DEV
     ? [composerChromeGalleryRoute, agentTopologyPreviewRoute, onboardingPreviewRoute]
     : []),
+  ...(import.meta.env.DEV && uiKitRoute ? [uiKitRoute] : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
