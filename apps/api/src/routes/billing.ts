@@ -3,12 +3,12 @@ import {
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
-  OrganizationModelUsageQuery,
   OrganizationUsageQuery,
   OrganizationUsageWorkspacePageQuery,
   type AccessContext,
   type Permission,
 } from "@opengeni/contracts";
+import { OrganizationModelUsageQuery } from "@opengeni/contracts/organization-model-usage";
 import { configuredEntitlements } from "@opengeni/config";
 import {
   applyCreditLedgerEntry,

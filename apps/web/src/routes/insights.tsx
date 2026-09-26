@@ -79,7 +79,7 @@ function costLabel(row: CostRow): string {
   if (row.estimatedProviderCostKnownCalls === 0) return "Unknown";
   const estimate = `~${formatUsd(row.estimatedProviderUsd)} est.`;
   return row.estimatedProviderCostKnownCalls < row.calls
-    ? `${estimate} · ${row.estimatedProviderCostKnownCalls}/${row.calls} priced`
+    ? `${estimate} · ${row.estimatedProviderCostKnownCalls.toLocaleString()}/${row.calls.toLocaleString()} priced`
     : estimate;
 }
 

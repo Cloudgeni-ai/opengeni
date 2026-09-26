@@ -1,6 +1,8 @@
 import {
   OrganizationModelUsage,
   OrganizationModelUsageQuery,
+} from "@opengeni/contracts/organization-model-usage";
+import {
   OrganizationUsageQuery,
   OrganizationUsageSummary,
   OrganizationUsageWorkspacePage,

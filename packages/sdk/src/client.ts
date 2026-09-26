@@ -8028,7 +8028,7 @@ export class OpenGeniClient {
       afterWorkspaceId?: string;
     },
     requestOptions: OpenGeniRequestOptions = {},
-  ): Promise<import("@opengeni/contracts").OrganizationModelUsage> {
+  ): Promise<import("@opengeni/contracts/organization-model-usage").OrganizationModelUsage> {
     return await this.requestJson(
       "GET",
       "/v1/billing/usage-models",
