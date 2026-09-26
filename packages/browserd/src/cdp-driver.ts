@@ -33,6 +33,7 @@ import {
   type BrowserTarget as BrowserTargetValue,
 } from "@opengeni/contracts";
 import {
+  InteractionControllerError,
   InteractionDefiniteDriverError,
   InteractionOutcomeUnknownDriverError,
   type BrowserInteractionDriver,
@@ -44,7 +45,13 @@ import {
   type CdpAccessibilitySnapshot,
   type CdpAxNode,
 } from "./cdp-accessibility";
-import { CdpConnection, CdpProtocolError, CdpTransportError, type CdpEvent } from "./cdp";
+import {
+  CdpCommandTimeoutError,
+  CdpConnection,
+  CdpProtocolError,
+  CdpTransportError,
+  type CdpEvent,
+} from "./cdp";
 import {
   LatestBrowserFrameSubscription,
   assertImageDimensions,
@@ -73,6 +80,9 @@ const TARGET_CREATION_SETTLE_TIMEOUT_MS = 5_000;
 // background target never produces screencast events.
 const FRAME_FALLBACK_INTERVAL_MS = 100;
 const FRAME_CAPTURE_TIMEOUT_MS = 2_000;
+// Still captures share the target/input queue. Bound the whole read phase so
+// a renderer that stops producing pixels cannot hold it for successive CDP deadlines.
+const SCREENSHOT_CAPTURE_TIMEOUT_MS = 10_000;
 const FRAME_CAPTURE_FAILURE_LIMIT = 3;
 const MAX_FRAME_PROFILES_PER_TARGET = 4;
 const MAX_FRAME_SUBSCRIPTIONS_PER_TARGET = 32;
@@ -772,8 +782,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "browser screenshot is unavailable during protected authentication",
           );
         }
-        await this.refreshFrame(state);
-        const metrics = await this.layoutMetrics(state);
+        const deadline = Date.now() + SCREENSHOT_CAPTURE_TIMEOUT_MS;
+        await this.screenshotRead(
+          "Page.getFrameTree",
+          deadline,
+          async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
+        );
+        const metrics = await this.screenshotRead(
+          "Page.getLayoutMetrics",
+          deadline,
+          async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+        );
         const capture: Record<string, unknown> = {
           format: normalized.format,
           fromSurface: true,
@@ -798,10 +817,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             scale: 1,
           };
         }
-        const response = await this.sendTarget<{ data?: unknown }>(
-          state,
+        const response = await this.screenshotRead(
           "Page.captureScreenshot",
-          capture,
+          deadline,
+          async (timeoutMs) =>
+            await this.sendTarget<{ data?: unknown }>(state, "Page.captureScreenshot", capture, {
+              timeoutMs,
+            }),
         );
         const data = decodeBoundedBase64Image(response.data);
         if (this.protectedAuthQuiet(state)) {
@@ -1880,8 +1902,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     );
   }
 
-  private async refreshFrame(state: TargetState): Promise<void> {
-    const frame = await this.mainFrame(state.sessionId);
+  private async refreshFrame(state: TargetState, timeoutMs?: number): Promise<void> {
+    const frame = await this.mainFrame(state.sessionId, timeoutMs);
     if (frame.loaderId !== state.frame.loaderId || frame.id !== state.frame.id) {
       state.frame = frame;
       state.documentGeneration = documentGeneration(
@@ -1902,21 +1924,49 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
-  private async mainFrame(sessionId: string): Promise<MainFrame> {
-    return (await this.frameTree(sessionId)).frame;
+  private async mainFrame(sessionId: string, timeoutMs?: number): Promise<MainFrame> {
+    return (await this.frameTree(sessionId, timeoutMs)).frame;
   }
 
-  private async frameTree(sessionId: string): Promise<PageFrameTree> {
+  private async frameTree(sessionId: string, timeoutMs?: number): Promise<PageFrameTree> {
     const connection = await this.ensureConnection();
     const response = await connection.send<{ frameTree?: unknown }>(
       "Page.getFrameTree",
       {},
-      { sessionId },
+      { sessionId, ...(timeoutMs ? { timeoutMs } : {}) },
     );
     if (!isRecord(response.frameTree) || !isRecord(response.frameTree.frame)) {
       throw new Error("CDP returned an invalid frame tree");
     }
     return parseFrameTree(response.frameTree);
+  }
+
+  private async screenshotRead<T>(
+    stage: string,
+    deadline: number,
+    read: (timeoutMs: number) => Promise<T>,
+  ): Promise<T> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new InteractionControllerError(
+        "timeout",
+        `browser screenshot timed out during ${stage}`,
+        true,
+      );
+    }
+    try {
+      return await read(remaining);
+    } catch (error) {
+      if (!(error instanceof CdpTransportError)) throw error;
+      const timeout = error instanceof CdpCommandTimeoutError;
+      const failure = new InteractionControllerError(
+        timeout ? "timeout" : "resource_unavailable",
+        `browser screenshot ${timeout ? "timed out" : "unavailable"} during ${stage}`,
+        true,
+      );
+      failure.cause = error;
+      throw failure;
+    }
   }
 
   private async layoutMetrics(
