@@ -3397,3 +3397,88 @@ test("native option input keeps its captured frame fence and rejects a changed t
     await hook.unmount();
   }
 });
+
+for (const switchTarget of [false, true]) {
+  test(`queued input releases old image buffers (${switchTarget ? "target switch" : "ordered drain"})`, async () => {
+    const canvasMock = mockBrowserCanvas();
+    const imageBuffers: WeakRef<Uint8Array>[] = [];
+    const originalSlice = Uint8Array.prototype.slice;
+    // The viewer copies PNG bytes into its decode Blob. Observe the original
+    // byte array weakly; neither the test nor mock decoder may keep it alive.
+    // A mock spy records its receivers strongly, invalidating this GC probe.
+    // oxlint-disable-next-line no-extend-native -- Scoped weak observer, restored in finally.
+    Uint8Array.prototype.slice = function (start?: number, end?: number) {
+      if (start === undefined && this.length === 68 && this[0] === 137 && this[1] === 80) {
+        imageBuffers.push(new WeakRef(this));
+      }
+      return originalSlice.call(this, start, end);
+    };
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    let unmount: (() => Promise<void>) | undefined;
+    try {
+      const fixture = await renderViewerInputFixture(async (request, current) => {
+        if (++calls === 1) await blocked;
+        return receipt(current, request.operationId);
+      }, true);
+      unmount = () => fixture.rendered.unmount();
+      for (let index = 1; index <= 24; index++) {
+        await fixture.frame(index, { frameId: "stable-main-frame" });
+        await actRun(() =>
+          fixture.canvas.dispatchEvent(
+            new MouseEvent("contextmenu", {
+              bubbles: true,
+              clientX: index,
+              clientY: 20,
+            }),
+          ),
+        );
+      }
+      expect(fixture.actions).toHaveLength(1);
+      expect(imageBuffers).toHaveLength(24);
+      // WeakRef targets survive their current job. Cross turns before each GC.
+      for (let index = 0; index < 4; index++) {
+        await Bun.sleep(0);
+        Bun.gc(true);
+      }
+      // Current, previous React render, and the in-flight action may remain.
+      // The other queued inputs must not each own their earlier screenshot.
+      expect(imageBuffers.filter((reference) => reference.deref()).length).toBeLessThanOrEqual(4);
+      if (switchTarget) {
+        await actRun(() =>
+          [...fixture.rendered.container.querySelectorAll("button")]
+            .find((button) => button.textContent?.trim() === "Second tab")!
+            .click(),
+        );
+        await flush();
+      }
+      release();
+      await flush(100);
+      expect(fixture.actions).toHaveLength(switchTarget ? 1 : 24);
+      expect(fixture.actions.map((request) => request.action)).toEqual(
+        Array.from({ length: switchTarget ? 1 : 24 }, (_, index) => ({
+          type: "pointer",
+          action: "click",
+          x: (index + 1) / 100,
+          y: 0.2,
+          button: "right",
+        })),
+      );
+      expect(new Set(fixture.actions.map((request) => request.operationId)).size).toBe(
+        fixture.actions.length,
+      );
+      expect(
+        fixture.actions.every((request) => request.expectedFrameId === "stable-main-frame"),
+      ).toBe(true);
+    } finally {
+      release();
+      await unmount?.();
+      // oxlint-disable-next-line no-extend-native -- Restore the original built-in after the probe.
+      Uint8Array.prototype.slice = originalSlice;
+      canvasMock.restore();
+    }
+  });
+}

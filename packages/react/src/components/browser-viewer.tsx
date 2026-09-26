@@ -63,7 +63,7 @@ import {
 import { useAttachedBrowsers } from "../hooks/use-attached-browsers";
 import { useBrowserIdentities } from "../hooks/use-browser-identities";
 import { useBrowserDownloads } from "../hooks/use-browser-downloads";
-import { useBrowserSession } from "../hooks/use-browser-session";
+import { useBrowserSession, type BrowserFrameInputFence } from "../hooks/use-browser-session";
 import { useBrowserSessions } from "../hooks/use-browser-sessions";
 import { useInteractionInterventions } from "../hooks/use-interaction-interventions";
 import { useSiteAuthConnections } from "../hooks/use-site-auth-connections";
@@ -1874,7 +1874,7 @@ function BrowserViewport(props: {
   activityLabel?: string | undefined;
   onAction: (
     action: BrowserAction | BrowserActionBatch,
-    frame: BrowserFrame | null,
+    frame: BrowserFrameInputFence | null,
   ) => Promise<BrowserActionReceipt>;
   onReadClipboard: () => Promise<{ text: string }>;
   onObserveForInput: () => Promise<BrowserObservation>;
@@ -1917,7 +1917,7 @@ function BrowserViewport(props: {
   const actionQueueEpochRef = useRef(0);
   const queuedTypingRef = useRef<{
     actions: BrowserAction[];
-    frame: BrowserFrame;
+    frame: BrowserFrameInputFence;
     epoch: number;
   } | null>(null);
   const queuedFrameRef = useRef<BrowserFrame | null>(null);
@@ -2046,11 +2046,21 @@ function BrowserViewport(props: {
   const enqueue = useCallback(
     (
       action: BrowserAction,
-      frame: BrowserFrame | null,
+      frame: BrowserFrameInputFence | null,
       after?: (receipt: BrowserActionReceipt) => Promise<void>,
     ) => {
+      // Detach image bytes even when the caller supplied a complete painted frame.
+      frame = frame
+        ? {
+            browserSessionId: frame.browserSessionId,
+            controllerGeneration: frame.controllerGeneration,
+            targetId: frame.targetId,
+            targetGeneration: frame.targetGeneration,
+            documentGeneration: frame.documentGeneration,
+            frameId: frame.frameId,
+          }
+        : null;
       const epoch = actionQueueEpochRef.current;
-      const dispatch = actionRef.current;
       const attachment = props.inputBatchAttachment;
       const canBatchTyping =
         action.type === "type" &&
@@ -2064,6 +2074,7 @@ function BrowserViewport(props: {
       const previous = queuedTypingRef.current;
       if (
         canBatchTyping &&
+        frame &&
         previous &&
         previous.epoch === epoch &&
         sameFrameFence(previous.frame, frame) &&
@@ -2073,7 +2084,7 @@ function BrowserViewport(props: {
         previous.actions.push(action);
         return;
       }
-      const typing = canBatchTyping ? { actions: [action], frame, epoch } : null;
+      const typing = canBatchTyping && frame ? { actions: [action], frame, epoch } : null;
       // Every non-typing action is an ordering barrier, including keys and paste.
       queuedTypingRef.current = typing;
       actionTailRef.current = actionTailRef.current
@@ -2085,7 +2096,9 @@ function BrowserViewport(props: {
             typing && typing.actions.length > 1
               ? { type: "batch" as const, actions: typing.actions, fenceEachAction: true as const }
               : action;
-          const receipt = await dispatch(dispatchedAction, frame);
+          // Read after the epoch guard: a queued render callback can retain every
+          // frame from that render even when its input fence contains no bytes.
+          const receipt = await actionRef.current(dispatchedAction, frame);
           if (!mountedRef.current || epoch !== actionQueueEpochRef.current) return;
           await after?.(receipt);
         })
@@ -2256,21 +2269,22 @@ function BrowserViewport(props: {
     enqueue({ type: "press", key }, paintedFrameRef.current);
   };
 
+  const finishCopy = useCallback(async () => {
+    const clipboard = await readClipboardRef.current();
+    if (!mountedRef.current) return;
+    if (clipboard.text.length === 0) return;
+    if (!(await copyTextToClipboard(clipboard.text))) {
+      throw new Error("Browser text could not be copied to the local clipboard");
+    }
+  }, []);
+
   const copy = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     if (!props.clipboardEnabled) return;
     event.preventDefault();
     flushPendingWheel();
     flushPendingText();
     flushPendingClick();
-    const readClipboard = readClipboardRef.current;
-    enqueue({ type: "clipboard", operation: "copy" }, paintedFrameRef.current, async () => {
-      const clipboard = await readClipboard();
-      if (!mountedRef.current) return;
-      if (clipboard.text.length === 0) return;
-      if (!(await copyTextToClipboard(clipboard.text))) {
-        throw new Error("Browser text could not be copied to the local clipboard");
-      }
-    });
+    enqueue({ type: "clipboard", operation: "copy" }, paintedFrameRef.current, finishCopy);
   };
 
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -3081,11 +3095,11 @@ function frameMatchesSelectedTarget(
   );
 }
 
-function sameFrameFence(left: BrowserFrame, right: BrowserFrame): boolean {
+function sameFrameFence(left: BrowserFrameInputFence, right: BrowserFrameInputFence): boolean {
   return sameBrowserDocument(left, right) && left.frameId === right.frameId;
 }
 
-function sameBrowserDocument(left: BrowserFrame, right: BrowserFrame): boolean {
+function sameBrowserDocument(left: BrowserFrameInputFence, right: BrowserFrameInputFence): boolean {
   return (
     left.browserSessionId === right.browserSessionId &&
     left.controllerGeneration === right.controllerGeneration &&

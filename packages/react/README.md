@@ -548,6 +548,8 @@ request per action. Only queued text actions share a request (at most 16), with
 each text/input event preserved. Keys, pointer input and clipboard operations
 remain ordering barriers. A failed or uncertain action discards the queued suffix
 without replay.
+Queued inputs retain only immutable frame fences, not screenshot bytes or prior
+render callbacks. Replacing the selected viewer invalidates its queued suffix.
 
 ```tsx
 import { OpenGeniProvider } from "@opengeni/react";

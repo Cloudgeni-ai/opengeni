@@ -19,6 +19,17 @@ import {
 import { isNonRetryableInteractionError } from "../lib/interaction-errors";
 import { usePageLiveActivity } from "./internal";
 
+/** Immutable input fence; queued actions never need the encoded screenshot. */
+export type BrowserFrameInputFence = Pick<
+  BrowserFrame,
+  | "browserSessionId"
+  | "controllerGeneration"
+  | "targetId"
+  | "targetGeneration"
+  | "documentGeneration"
+  | "frameId"
+>;
+
 export type UseBrowserSessionOptions = EmbeddedBrowserInteractionClientOverride & {
   browserSessionId: string | null;
   enabled?: boolean | undefined;
@@ -53,7 +64,7 @@ export type UseBrowserSessionResult = {
    *  the controller fence instead of targeting a newer page. */
   actFromFrame: (
     action: BrowserAction | BrowserActionBatch,
-    frame: BrowserFrame,
+    frame: BrowserFrameInputFence,
     operationId?: string,
   ) => Promise<BrowserActionReceipt>;
   readClipboard: () => Promise<BrowserClipboard>;
@@ -558,7 +569,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
   const actFromFrame = useCallback(
     async (
       action: BrowserAction | BrowserActionBatch,
-      frame: BrowserFrame,
+      frame: BrowserFrameInputFence,
       operationId: string = crypto.randomUUID(),
     ): Promise<BrowserActionReceipt> => await dispatchAction(action, operationId, frame),
     [dispatchAction],
