@@ -3174,3 +3174,57 @@ function frameMessage(
   message.set(png, 4 + encodedMetadata.byteLength);
   return message;
 }
+
+test("native option input keeps its captured frame fence and rejects a changed target", async () => {
+  let currentTarget = target();
+  const requests: BrowserActionRequest[] = [];
+  const observed = observation(BROWSER_SESSION_ID, currentTarget);
+  const client = fakeClient({
+    getBrowserSession: async () => browserSession(),
+    listBrowserTargets: async () => ({
+      browserSessionId: BROWSER_SESSION_ID,
+      controllerGeneration: "controller-1",
+      targets: [currentTarget],
+    }),
+    observeBrowserTarget: async () => observation(BROWSER_SESSION_ID, currentTarget),
+    actInBrowser: async (_workspace, _browser, request) => {
+      requests.push(request);
+      return receipt(observed, request.operationId);
+    },
+  });
+  const hook = await renderHook(
+    () =>
+      useBrowserSession({
+        client,
+        workspaceId: WORKSPACE_ID,
+        browserSessionId: BROWSER_SESSION_ID,
+      }),
+    undefined,
+  );
+  try {
+    await flush();
+    const captured = await hook.result.current.observeForInput();
+    const action = {
+      type: "select",
+      locator: { kind: "ref", ref: "select-1" },
+      values: ["high"],
+    } as const;
+    await actRun(() =>
+      hook.result.current.actFromObservation({ ...action, values: [...action.values] }, captured),
+    );
+    expect(requests[0]).toMatchObject({
+      targetId: captured.target.id,
+      expectedTargetGeneration: captured.target.targetGeneration,
+      expectedDocumentGeneration: captured.target.documentGeneration,
+      expectedFrameId: captured.frameId,
+    });
+    currentTarget = { ...currentTarget, documentGeneration: "new-document" };
+    await actRun(() => hook.result.current.refresh());
+    await expect(
+      hook.result.current.actFromObservation({ ...action, values: [...action.values] }, captured),
+    ).rejects.toThrow("page changed");
+    expect(requests).toHaveLength(1);
+  } finally {
+    await hook.unmount();
+  }
+});

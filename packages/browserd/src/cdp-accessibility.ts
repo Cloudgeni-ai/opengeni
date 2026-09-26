@@ -141,7 +141,9 @@ export function normalizeCdpAccessibilityTree(options: {
     if (nodeCount > INTERACTION_MAX_SEMANTIC_NODES) {
       throw new Error("CDP accessibility tree exceeds its semantic-node bound");
     }
-    if (entry.states.includes("focused")) focusedRef = entry.ref;
+    // Children are visited first. Chromium marks the document AND its focused
+    // control focused; a later ancestor must not replace that exact control.
+    if (entry.states.includes("focused") && focusedRef === null) focusedRef = entry.ref;
     const description = accessibleStringValue(raw.description);
     const semantic: InteractionSemanticNodeValue = {
       ref: entry.ref,

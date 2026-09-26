@@ -818,3 +818,108 @@ async function frameAfter(
   }
   throw new Error("browser frame did not advance");
 }
+
+headedE2e(
+  "reads real native select options without rewriting the page and preserves selection events",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-select-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: "sel_" + randomUUID().slice(0, 8),
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: true,
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+      foregroundManagedTabs: true,
+    });
+    const focused = (view: BrowserObservation): InteractionSemanticNodeValue | undefined => {
+      const queue = view.semantic?.kind === "snapshot" ? [...view.semantic.roots] : [];
+      while (queue.length) {
+        const node = queue.pop()!;
+        if (node.ref === view.focusedRef) return node;
+        if (node.children) queue.push(...node.children);
+      }
+    };
+    try {
+      let view = await driver.start(
+        dataUrl(
+          '<label>Priority<select id="priority" oninput="document.querySelector(\'p\').textContent += \' input:\' + this.value" onchange="document.querySelector(\'p\').textContent += \' change:\' + this.value"><option value="low">Low</option><optgroup label="More"><option value="high">High</option><option value="blocked" disabled>Blocked</option></optgroup></select></label><p>Events</p>',
+        ),
+      );
+      view = await driver.dispatch(
+        command(view, { type: "click", locator: { kind: "label", text: "Priority" } }),
+      );
+      expect(focused(view)?.native?.data).toEqual({
+        kind: "native-select",
+        multiple: false,
+        disabled: false,
+        options: [
+          { value: "low", label: "Low", selected: true, disabled: false },
+          { value: "high", label: "High", selected: false, disabled: false },
+          { value: "blocked", label: "Blocked", selected: false, disabled: true },
+        ],
+      });
+      const ref = view.focusedRef!;
+      await expect(
+        driver.dispatch(
+          command(view, {
+            type: "select",
+            locator: { kind: "ref", ref },
+            values: ["blocked"],
+          }),
+        ),
+      ).rejects.toThrow("not a selectable control");
+      view = await driver.dispatch(
+        command(view, { type: "select", locator: { kind: "ref", ref }, values: ["high"] }),
+      );
+      expect(names(view)).toContain("Events input:high change:high");
+      expect(
+        (
+          await driver.readDom(view.target.id, {
+            kind: "count",
+            selector: "select",
+            expectedTargetGeneration: view.target.targetGeneration,
+            expectedDocumentGeneration: view.target.documentGeneration!,
+            expectedFrameId: view.frameId!,
+          })
+        ).count,
+      ).toBe(1);
+      view = await driver.dispatch(
+        command(view, {
+          type: "navigate",
+          url: dataUrl(
+            "<div data-private><label>Private<select><option>Private option</option></select></label></div>",
+          ),
+        }),
+      );
+      view = await driver.dispatch(
+        command(view, { type: "click", locator: { kind: "label", text: "Private" } }),
+      );
+      expect(focused(view)?.native).toBeUndefined();
+      view = await driver.dispatch(
+        command(view, {
+          type: "navigate",
+          url: dataUrl(
+            "<label>Many<select>" +
+              Array.from({ length: 201 }, (_, i) => "<option>" + i + "</option>").join("") +
+              "</select></label>",
+          ),
+        }),
+      );
+      view = await driver.dispatch(
+        command(view, { type: "click", locator: { kind: "label", text: "Many" } }),
+      );
+      expect(focused(view)?.native).toBeUndefined();
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60000,
+);

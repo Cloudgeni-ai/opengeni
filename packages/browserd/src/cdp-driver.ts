@@ -35,6 +35,7 @@ import {
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
   type BrowserProtectedAuthObservation as BrowserProtectedAuthObservationValue,
   type BrowserTarget as BrowserTargetValue,
+  type InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import {
   InteractionControllerError,
@@ -1886,6 +1887,39 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         : state.dialog
           ? emptyAccessibilitySnapshot()
           : await this.refreshAccessibility(state);
+    const focused = accessibility.focusedRef
+      ? accessibility.entriesByRef.get(accessibility.focusedRef)
+      : null;
+    if (!state.dialog && focused?.actions.includes("select") && focused.frameId) {
+      // Native popup windows are absent from page screenshots. Expose only the
+      // focused control, through the same isolated-world redaction and budget
+      // as focused DOM reads; never alter the page to draw a fake popup.
+      const read = await this.callOnNode(
+        state,
+        focused.backendDOMNodeId,
+        DOM_READ_FUNCTION,
+        [{ value: 16_384 }, { value: [] }, { value: true }],
+        { isolatedFrameId: focused.frameId },
+      );
+      if (
+        isRecord(read) &&
+        read.redacted === null &&
+        read.truncated === false &&
+        isRecord(read.select)
+      ) {
+        const visit = (nodes: typeof accessibility.roots): void => {
+          for (const node of nodes) {
+            if (node.ref === focused.ref)
+              node.native = {
+                platform: "dom",
+                data: read.select as NonNullable<InteractionSemanticNodeValue["native"]>["data"],
+              };
+            if (node.children) visit(node.children);
+          }
+        };
+        visit(accessibility.roots);
+      }
+    }
     return BrowserObservation.parse({
       protocolVersion: INTERACTION_PROTOCOL_VERSION,
       observationId: `observation-${this.createId()}`,
@@ -3969,8 +4003,11 @@ const CHECKED_FUNCTION = `function() {
 }`;
 
 const SELECT_OPTIONS_FUNCTION = `function(values) {
-  if (!(this instanceof HTMLSelectElement)) return false;
+  if (!(this instanceof HTMLSelectElement) || this.matches(":disabled")) return false;
   const selected = new Set(values.map(String));
+  const choices = Array.from(this.options).filter(option => selected.has(option.value) || selected.has(option.label));
+  if (values.some(value => !choices.some(option => option.value === String(value) || option.label === String(value)))) return false;
+  if ((!this.multiple && choices.length > 1) || choices.some(option => !option.selected && (option.disabled || option.closest("optgroup[disabled]")))) return false;
   for (const option of this.options) option.selected = selected.has(option.value) || selected.has(option.label);
   this.dispatchEvent(new Event("input", { bubbles: true }));
   this.dispatchEvent(new Event("change", { bubbles: true }));
@@ -3984,7 +4021,7 @@ const SCROLL_FUNCTION = `function(deltaX, deltaY) {
 
 /** Fixed browser-side projection. Every field shares one character budget, so
  * a huge page cannot turn a focused query into an unbounded CDP payload. */
-const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes) {
+const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect) {
   const element = this && this.nodeType === 1 ? this : this?.parentElement;
   if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false };
   const privateSelector = "[data-private], [data-sensitive], [data-opengeni-private]";
@@ -4029,7 +4066,15 @@ const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes) {
   for (const attribute of requestedAttributes) {
     if (allowed.has(attribute)) attributes[attribute] = bounded(element.getAttribute(attribute));
   }
-  return { ok: true, text, value, attributes, redacted: null, truncated };
+  let select = null;
+  if (includeSelect && element instanceof HTMLSelectElement && element.options.length <= 200) {
+    select = { kind: "native-select", multiple: element.multiple, disabled: element.matches(":disabled"),
+      options: Array.from(element.options, (option) => ({
+        value: bounded(option.value), label: bounded(option.label), selected: option.selected,
+        disabled: option.disabled || Boolean(option.closest("optgroup[disabled]"))
+      })) };
+  }
+  return { ok: true, text, value, attributes, redacted: null, truncated, select };
 }`;
 
 /** Attribute and pseudo selectors would turn count/not-found into a secret-value oracle. */
