@@ -146,6 +146,8 @@ export function failedSessionCopy(
   retryUnhelpful?: boolean;
   /** Exact recorded text for a details toggle, when the headline replaced it. */
   detail?: string;
+  /** A daily allowance is spent; the banner may name the deployment's free model. */
+  dailyLimit?: true;
 } {
   const recorded = failure.reason?.replace(/\s+/g, " ").trim();
   // Require an explicit claim about the model itself, not e.g. its connection
@@ -172,6 +174,7 @@ export function failedSessionCopy(
       unavailableModel: false,
       retryUnhelpful: known.retryUnhelpful,
       ...(detail && detail !== known.message ? { detail } : {}),
+      ...(known === DAILY_LIMIT ? { dailyLimit: true as const } : {}),
     };
   }
   const reason = creditExhausted

@@ -1,3 +1,7 @@
+import {
+  navigateBrowserMetadataDocument,
+  navigateToInterceptedMetadataDocument,
+} from "./browser-metadata";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
 import {
@@ -71,6 +75,12 @@ import type {
   BrowserDownloadProgressResult,
 } from "./downloads";
 import type { AgentBrowserJsonCommand } from "./runner";
+import {
+  captureHeadlessSessionCookies,
+  restoreHeadlessSessionCookies,
+  validateHeadlessSessionCookies,
+  type HeadlessSessionCookies,
+} from "./headless-session-cookies";
 
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 const BROWSER_START_TIMEOUT_MS = 30_000;
@@ -274,6 +284,12 @@ export type AgentBrowserDriverOptions = {
   permissionControl?: boolean;
   /** Experimental ephemeral context lease. Never a durable browser profile. */
   browserContextId?: string;
+  /** Headless shell has no chrome://version page. Read its real Client Hints
+   * from a controller-intercepted secure-origin document instead. */
+  userAgentMetadataSource?: "chrome_internal" | "intercepted_local";
+  /** Set only by the verified, dedicated managed headless-shell launcher. */
+  preserveHeadlessSessionCookies?: boolean;
+  headlessSessionCookies?: HeadlessSessionCookies;
 };
 
 export type BrowserSessionEmulation = {
@@ -337,6 +353,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly permissionControl: boolean;
   private readonly browserContextId: string | undefined;
   private readonly ownedDownloads = new Set<string>();
+  private readonly userAgentMetadataSource: "chrome_internal" | "intercepted_local";
   private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
   private readonly resolveWorkspaceFiles:
     | ((operationId: string, workspaceFileIds: readonly string[]) => Promise<readonly string[]>)
@@ -363,6 +380,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     { digest: string; result: BrowserExternalAuthResultValue }
   >();
   private started = false;
+  private readonly preserveHeadlessSessionCookies: boolean;
+  private headlessSessionCookies: HeadlessSessionCookies | null;
 
   constructor(options: AgentBrowserDriverOptions) {
     if (
@@ -385,12 +404,25 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.createId = options.createId ?? randomUUID;
     this.physicalGeneration = randomUUID();
     this.engine = options.engine ?? "chromium";
+    this.preserveHeadlessSessionCookies = options.preserveHeadlessSessionCookies ?? false;
+    if (
+      (this.preserveHeadlessSessionCookies || options.headlessSessionCookies) &&
+      (this.engine !== "chromium" || (options.targetLifecycle ?? "runner") !== "runner")
+    ) {
+      throw new Error("Headless cookie state requires its dedicated managed launcher");
+    }
+    if (options.headlessSessionCookies && !this.preserveHeadlessSessionCookies)
+      throw new Error("Headless cookie state requires its verified shell launcher");
+    this.headlessSessionCookies = options.headlessSessionCookies
+      ? validateHeadlessSessionCookies(options.headlessSessionCookies)
+      : null;
     this.targetLifecycle = options.targetLifecycle ?? "runner";
     this.tabControl = options.tabControl ?? true;
     this.foregroundManagedTabs = options.foregroundManagedTabs ?? false;
     this.frameStreaming = options.frameStreaming ?? true;
     this.emulation = hasBrowserEmulation(options.emulation) ? options.emulation : null;
     this.permissionControl = options.permissionControl ?? true;
+    this.userAgentMetadataSource = options.userAgentMetadataSource ?? "chrome_internal";
     this.resolveWorkspaceFiles = options.resolveWorkspaceFiles;
     this.downloadDirectory = options.downloadDirectory
       ? resolvePath(options.downloadDirectory)
@@ -424,6 +456,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       };
     } else {
       connection = await this.ensureConnection();
+      if (this.headlessSessionCookies) {
+        await restoreHeadlessSessionCookies(connection, this.headlessSessionCookies);
+        this.headlessSessionCookies = null;
+      }
       let page = visiblePageTargets(await this.targetInfos(connection))[0];
       if (!page) {
         const created = await connection.send<{ targetId?: unknown }>(
@@ -456,23 +492,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return await this.observe(target.targetId);
   }
 
-  /** Bounded liveness probe for the supervisor's recovery path. It never
-   * starts or repairs the browser, preserving one recovery authority. */
+  /** Bounded browser liveness probe for the supervisor's recovery path.
+   * Renderer stalls and command deadlines do not prove browser loss: replacing
+   * a live browser would discard document state that URL restoration cannot recover. */
   async isAvailable(): Promise<boolean> {
     if (!this.started || !this.connection) return false;
     try {
       await this.connection.send("Browser.getVersion", {}, { timeoutMs: 2_000 });
-      const selected = this.selectedTargetId ? this.states.get(this.selectedTargetId) : null;
-      if (selected) {
-        await this.connection.send(
-          "Page.getFrameTree",
-          {},
-          { sessionId: selected.sessionId, timeoutMs: 2_000 },
-        );
-      }
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      return error instanceof CdpCommandTimeoutError || !(error instanceof CdpTransportError);
     }
   }
 
@@ -597,6 +626,22 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const engineVersion =
       rawVersion.length > 0 && Buffer.byteLength(rawVersion) <= 256 ? rawVersion : null;
     return { engine: this.engine, engineVersion, tabs };
+  }
+
+  /** Supervisor-only read after both action controllers have quiesced. Never
+   * exposed through the public browser observation/tool surface. */
+  async captureSessionCookies(): Promise<HeadlessSessionCookies | null> {
+    if (!this.preserveHeadlessSessionCookies) return null;
+    if (!this.started || !this.connection)
+      throw new Error("Headless cookie capture requires its active physical browser");
+    return await captureHeadlessSessionCookies(this.connection, {
+      browserSessionId: this.browserSessionId,
+      controllerGeneration: this.controllerGeneration,
+    });
+  }
+
+  get requiresExplicitProfileRestore(): boolean {
+    return this.preserveHeadlessSessionCookies;
   }
 
   async target(targetId: string): Promise<BrowserTargetValue | null> {
@@ -1114,7 +1159,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           this.assertProtectedAuthGenerations(command, state);
           for (const field of resolvedFields) {
             await this.focusNode(state, field.backendDOMNodeId);
-            await this.selectAllAndDelete(state);
+            await this.selectAllAndDelete(state, field.backendDOMNodeId);
             await this.sendActionTarget(state, "Input.insertText", {
               text: field.value,
             });
@@ -1773,7 +1818,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         connection.send("Page.enable", {}, { sessionId: attached.sessionId }),
         connection.send("Runtime.enable", {}, { sessionId: attached.sessionId }),
       ]);
-      await this.navigateForUserAgentMetadata(connection, attached.sessionId, "chrome://version/");
+      if (this.userAgentMetadataSource === "intercepted_local") {
+        await navigateToInterceptedMetadataDocument(connection, attached.sessionId);
+      } else {
+        await navigateBrowserMetadataDocument(connection, attached.sessionId, "chrome://version/");
+      }
       const evaluated = await connection.send<{
         result?: unknown;
         exceptionDetails?: unknown;
@@ -1814,29 +1863,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (closeError) throw closeError;
     if (!metadata) throw new Error("browser returned no User-Agent metadata");
     return metadata;
-  }
-
-  private async navigateForUserAgentMetadata(
-    connection: BrowserCdpConnection,
-    sessionId: string,
-    url: string,
-  ): Promise<void> {
-    const loaded = connection.waitForEvent("Page.loadEventFired", {
-      sessionId,
-      timeoutMs: 5_000,
-    });
-    let navigation: { errorText?: unknown };
-    try {
-      navigation = await connection.send("Page.navigate", { url }, { sessionId });
-    } catch (error) {
-      await loaded.catch(() => undefined);
-      throw error;
-    }
-    if (typeof navigation.errorText === "string" && navigation.errorText) {
-      await loaded.catch(() => undefined);
-      throw new Error(`browser metadata navigation failed: ${navigation.errorText}`);
-    }
-    await loaded;
   }
 
   private async observeUnlocked(
@@ -2517,8 +2543,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "fill": {
         const node = await this.resolveLocator(state, action.locator);
         await this.focusNode(state, node.backendDOMNodeId);
-        await this.selectAllAndDelete(state);
-        if (action.value)
+        await this.selectAllAndDelete(state, node.backendDOMNodeId);
+        if (action.value || this.engine === "lightpanda")
           await this.sendActionTarget(state, "Input.insertText", {
             text: action.value,
           });
@@ -3015,7 +3041,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
   }
 
-  private async selectAllAndDelete(state: TargetState): Promise<void> {
+  private async selectAllAndDelete(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+  ): Promise<void> {
+    if (this.engine === "lightpanda") {
+      // Pinned Lightpanda ignores rawKeyDown and has no select-all/backspace
+      // editing defaults. Clear through the native setter, then let insertText
+      // emit the native input event (also for an empty replacement). Bypassing
+      // framework-owned setters preserves controlled-input change tracking.
+      const cleared = await this.callOnNode(
+        state,
+        backendDOMNodeId,
+        LIGHTPANDA_CLEAR_EDITABLE_FUNCTION,
+        [],
+      );
+      if (cleared !== true) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "Lightpanda fill requires an editable text input or textarea",
+        );
+      }
+      return;
+    }
     const meta = /Macintosh|Mac OS/u.test(this.userAgent);
     const modifiers = meta ? 4 : 2;
     await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
@@ -4084,6 +4132,19 @@ const CLEAR_PROTECTED_VALUE_FUNCTION = `function() {
   if (tag === "input" || tag === "textarea") this.value = "";
   else if (this.isContentEditable === true) this.textContent = "";
   else return false;
+  return true;
+}`;
+
+const LIGHTPANDA_CLEAR_EDITABLE_FUNCTION = `function() {
+  if (!(this instanceof Element) || !this.isConnected || document.activeElement !== this) return false;
+  const tag = String(this.tagName || "").toLowerCase();
+  if (tag !== "input" && tag !== "textarea") return false;
+  if (this.disabled || this.readOnly) return false;
+  if (tag === "input" && !["text", "search", "url", "tel", "password", "email", "number"].includes(this.type)) return false;
+  const prototype = tag === "textarea" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+  if (typeof setter !== "function") return false;
+  setter.call(this, "");
   return true;
 }`;
 

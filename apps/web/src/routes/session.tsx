@@ -131,6 +131,7 @@ import {
   composerLaunchSearchKey,
   type ComposerLaunchSearch,
 } from "@/lib/composer-launch";
+import { connectableSubscriptions, isDeploymentFreeModel } from "@/lib/deployment-free-model";
 import {
   effortOptionsForModel,
   findPickerRow,
@@ -2115,6 +2116,9 @@ function SessionChatPane(props: {
   const modelPickerDisabled =
     composer.sending || composer.draftLoading || !hasComposerPolicy || Boolean(pendingRetryInput);
   const canChooseRecoveryModel = !modelPickerDisabled;
+  // Shown while the banner chunk loads or if it fails. On the free model the
+  // generic daily-limit line then gives way to the free-model copy; that brief
+  // text change keeps the free-model copy out of the direct session bundle.
   const failureFallback = props.failure ? (
     <div role="alert" className="mx-auto my-2 w-full max-w-3xl px-4 text-sm text-fg-muted sm:px-6">
       {
@@ -2435,6 +2439,9 @@ function SessionChatPane(props: {
             key={props.session.id}
             failure={props.failure}
             canChooseModel={canChooseRecoveryModel}
+            hasModelPicker={hasComposerPolicy}
+            freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}
+            subscriptions={connectableSubscriptions(context.clientConfig.models)}
             modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
             creditExhausted={props.creditExhausted}
             workspaceId={props.session.workspaceId}
