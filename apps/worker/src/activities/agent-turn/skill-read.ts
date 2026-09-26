@@ -1,3 +1,4 @@
+import { boundModelToolOutputItem } from "@opengeni/codex";
 import type { AttemptToolDefinition } from "@opengeni/codemode";
 import type { AttemptToolResult } from "@opengeni/contracts";
 import {
@@ -20,17 +21,26 @@ export type SkillReadContent = Readonly<{
 
 type SkillReadIdentity = Partial<Omit<SkillReadContent, "files">>;
 
+export type SkillReadActiveHistory = Readonly<{
+  /** Earlier skill_read results still in this session's active model history. */
+  readResults: () => Promise<ReadonlyArray<Record<string, unknown>>>;
+  /**
+   * This turn's model tool-output bound. Rows are bounded when stored, but a
+   * later model with a lower bound receives a shorter copy than the row holds.
+   */
+  toolOutputTruncationTokens: () => number;
+  /** The lookup only saves tokens, so a failure returns the full text. */
+  onLookupFailed?: (error: unknown) => void;
+}>;
+
 const IDENTITY_KEYS = ["skillId", "revisionId", "scopeVersion", "installationVersion"] as const;
 
 /** A first-party gateway definition, not a sandbox capability or second backend. */
 export function createSkillReadAttemptToolDefinition(input: {
   authorize: () => Promise<void>;
   load: (skill: string) => Promise<readonly SkillTextFile[] | SkillReadContent>;
-  /**
-   * Earlier skill_read results still in this session's active model history.
-   * Without it every read returns full text.
-   */
-  activeReadResults?: () => Promise<ReadonlyArray<Record<string, unknown>>>;
+  /** Without it every read returns full text. */
+  activeHistory?: SkillReadActiveHistory;
 }): AttemptToolDefinition {
   return {
     identity: { serverId: "opengeni", toolName: SKILL_READ_TOOL_NAME },
@@ -100,10 +110,8 @@ export function createSkillReadAttemptToolDefinition(input: {
       if (
         args.paths === undefined &&
         context.caller.kind === "model" &&
-        input.activeReadResults &&
-        (await input.activeReadResults()).some((item) =>
-          returnedFile(item, identity, selected.files[0]!),
-        )
+        input.activeHistory &&
+        (await inActiveHistory(input.activeHistory, identity, selected.files[0]!))
       ) {
         return textResult({
           ...identity,
@@ -124,6 +132,25 @@ function textResult(
     content: [{ type: "text", text: JSON.stringify(output) }],
     structuredContent: output,
   };
+}
+
+async function inActiveHistory(
+  history: SkillReadActiveHistory,
+  identity: SkillReadIdentity,
+  file: SkillTextFile,
+): Promise<boolean> {
+  let results: ReadonlyArray<Record<string, unknown>>;
+  try {
+    results = await history.readResults();
+  } catch (error) {
+    history.onLookupFailed?.(error);
+    return false;
+  }
+  const tokens = history.toolOutputTruncationTokens();
+  // Judge the copy this turn's model receives, not the stored row.
+  return results.some((item) =>
+    returnedFile(boundModelToolOutputItem(item, tokens), identity, file),
+  );
 }
 
 /**

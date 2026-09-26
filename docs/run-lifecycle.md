@@ -1017,8 +1017,11 @@ reads use the selected attempt's artifacts. Read outputs enter ordinary tool-cal
 history. A repeated default `SKILL.md` read by the model returns a short
 `alreadyInContext` receipt with the current revision identity instead of the text
 when an active, call-paired `skill_read` result in this session already holds the
-same identity and exact text. Compaction marks those rows inactive, so the next read
-after compaction returns full text; a truncated or spilled result never counts.
+same identity and exact text. The check judges each result as the current model
+receives it, after this turn's tool-output bound, so a result truncated when stored,
+truncated by a lower bound of the current model, or spilled never counts. Compaction
+marks those rows inactive, so the next read after compaction returns full text. The
+lookup only saves tokens: when it fails, the read returns full text.
 Explicit `paths` (the fresh-copy request, including `["SKILL.md"]`), `listFiles`,
 and Codemode callers always receive content. The check reads only the acting
 session's active history and leaves the tool schema, instructions, and Skill index

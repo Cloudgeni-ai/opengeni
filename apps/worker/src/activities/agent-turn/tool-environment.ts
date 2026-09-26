@@ -674,6 +674,13 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       executionGeneration: attempt.executionGeneration,
     },
     selected: selectedSkills,
+    modelToolOutputTruncationTokens: () =>
+      eventing.modelRunSettings.modelToolOutputTruncationTokens,
+    onSkillReadHistoryLookupFailed: () =>
+      observability.warn("skill_read history lookup failed; returning the full Skill text", {
+        errorCode: "skill_read_history_lookup_failed",
+        origin: "worker",
+      }),
     filesystem: async () => {
       throwIfWorkerShuttingDown();
       throwIfTurnCancelled();

@@ -2,6 +2,10 @@ import { buildOpenGeniAgent } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import { Capability, Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
 import { describe, expect, test } from "bun:test";
+import {
+  boundModelToolOutputItem,
+  DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+} from "@opengeni/codex";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { createSkillReadAttemptToolDefinition } from "../src/activities/agent-turn/skill-read";
 import { loadConfiguredBundledSkills } from "../src/activities/agent-turn/skill-selection";
@@ -364,14 +368,25 @@ describe("skill_read gateway definition", () => {
     function historyReader(
       load: Parameters<typeof createSkillReadAttemptToolDefinition>[0]["load"],
       history: Record<string, unknown>[],
+      options: {
+        toolOutputTruncationTokens?: () => number;
+        readResults?: () => Promise<Record<string, unknown>[]>;
+        onLookupFailed?: (error: unknown) => void;
+      } = {},
     ) {
       let lookups = 0;
       const definition = createSkillReadAttemptToolDefinition({
         authorize: async () => {},
         load,
-        activeReadResults: async () => {
-          lookups++;
-          return history;
+        activeHistory: {
+          readResults: async () => {
+            lookups++;
+            return options.readResults ? await options.readResults() : history;
+          },
+          toolOutputTruncationTokens:
+            options.toolOutputTruncationTokens ??
+            (() => DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS),
+          ...(options.onLookupFailed ? { onLookupFailed: options.onLookupFailed } : {}),
         },
       });
       const environment = createAttemptToolEnvironment({
@@ -453,6 +468,45 @@ describe("skill_read gateway definition", () => {
             'Already in context: SKILL.md of "deploy" revision revision-1 was returned earlier in this conversation and is unchanged. Use that copy. Re-read only if you need a fresh copy: call skill_read with paths ["SKILL.md"].',
         });
       }
+    });
+
+    test("a copy this turn's model receives truncated is not in context", async () => {
+      // Stored complete under the default bound, as the history sink does.
+      const large = {
+        path: "SKILL.md",
+        content: `# Deploy\n${"Run the release checklist.\n".repeat(900)}`,
+      };
+      const entry = { ...identity, files: [large] };
+      const stored = boundModelToolOutputItem(historyResult(entry));
+      expect(JSON.parse((stored.output as Array<{ text: string }>)[0]!.text)).toEqual(entry);
+      let tokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS;
+      const skill = historyReader(async () => ({ ...identity, files: [large] }), [stored], {
+        toolOutputTruncationTokens: () => tokens,
+      });
+      expect(await skill.read({})).toEqual({
+        ...identity,
+        alreadyInContext: true,
+        message:
+          'Already in context: SKILL.md of "deploy" revision revision-1 was returned earlier in this conversation and is unchanged. Use that copy. Re-read only if you need a fresh copy: call skill_read with paths ["SKILL.md"].',
+      });
+      // A model with a lower bound received only a middle-truncated copy.
+      tokens = 2_000;
+      const seen = boundModelToolOutputItem(stored, tokens);
+      expect((seen.output as Array<{ text: string }>)[0]!.text).toContain("tokens truncated");
+      expect(await skill.read({})).toEqual(entry);
+    });
+
+    test("a failed history lookup returns the full text", async () => {
+      const failures: unknown[] = [];
+      const lookupError = new Error("statement timeout");
+      const skill = historyReader(async () => files, [], {
+        readResults: async () => {
+          throw lookupError;
+        },
+        onLookupFailed: (error) => failures.push(error),
+      });
+      expect(await skill.read({})).toEqual({ files: [files[0]] });
+      expect(failures).toEqual([lookupError]);
     });
 
     test("a Codemode program always receives the text and never reads model history", async () => {

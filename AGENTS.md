@@ -103,7 +103,8 @@ turn-attempt preparation; unchanged catalogs add nothing and retries reuse the
 same snapshot. The eager `skill_read` reads text without sandbox setup, and lazy
 `skill_checkout` copies files only on demand. A repeated default `skill_read`
 returns a short `alreadyInContext` receipt only while an active, call-paired
-result in the session's own history holds the same identity and exact text;
+result in the session's own history holds the same identity and exact text as
+the current model receives it (after this turn's tool-output bound);
 compacted-away reads count as absent and explicit `paths` always return content.
 Preserve repository-file discovery independently; it still uses the sandbox SDK
 instruction source.

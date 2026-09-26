@@ -152,6 +152,9 @@ test("skill_read returns a short receipt while the same revision is in active mo
   await appendUserMessage("How many users signed up today?");
 
   const settings = testSettings({ sandboxBackend: "none", mcpServers: [] });
+  // The resolved model's bound for model requests, which may be lower than
+  // the one the stored rows were bounded with.
+  let toolOutputTokens = settings.modelToolOutputTruncationTokens;
   const skillRead = createWorkspaceSkillTools({
     db,
     settings,
@@ -162,6 +165,7 @@ test("skill_read returns a short receipt while the same revision is in active mo
     filesystem: async () => {
       throw new Error("skill_read must not need a sandbox");
     },
+    modelToolOutputTruncationTokens: () => toolOutputTokens,
   }).find((definition) => definition.modelName === "skill_read")!;
   const prepared = await prepareAgentTools(settings, [], {
     accountId,
@@ -315,6 +319,18 @@ test("skill_read returns a short receipt while the same revision is in active mo
       { ...updated, files: [{ path: "SKILL.md", content: secondMarkdown }] },
       { ...updated, alreadyInContext: true, message: receipt(skillId, second.revisionId) },
     ]);
+
+    // A model with a lower tool-output bound receives only a truncated copy
+    // of the stored read, so that copy is not in context.
+    toolOutputTokens = 16;
+    await appendUserMessage("Switch to the smaller model and check again.");
+    const updatedRead = { ...updated, files: [{ path: "SKILL.md", content: secondMarkdown }] };
+    expect(
+      await run([
+        { output: [functionCall("skill_read", { skill: skillId }, "read-10")] },
+        { output: [assistantMessage("Checked.")] },
+      ]),
+    ).toEqual([updatedRead]);
   } finally {
     await prepared.close();
   }

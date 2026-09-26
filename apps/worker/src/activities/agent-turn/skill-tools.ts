@@ -54,6 +54,9 @@ export function createWorkspaceSkillTools(input: {
   filesystem: () => Promise<
     Pick<SandboxChannelAService, "fsList" | "fsRead" | "fsWrite" | "fsMkdir">
   >;
+  /** The resolved model's bound, which `settings` does not carry. */
+  modelToolOutputTruncationTokens: () => number;
+  onSkillReadHistoryLookupFailed?: (error: unknown) => void;
 }) {
   const context = {
     accountId: input.accountId,
@@ -139,14 +142,20 @@ export function createWorkspaceSkillTools(input: {
     createSkillReadAttemptToolDefinition({
       authorize,
       load,
-      activeReadResults: async () =>
-        (
-          await getActiveSessionFunctionToolResults(input.db, {
-            workspaceId: input.workspaceId,
-            sessionId: input.actor.sessionId,
-            toolName: SKILL_READ_TOOL_NAME,
-          })
-        ).map((row) => row.item),
+      activeHistory: {
+        readResults: async () =>
+          (
+            await getActiveSessionFunctionToolResults(input.db, {
+              workspaceId: input.workspaceId,
+              sessionId: input.actor.sessionId,
+              toolName: SKILL_READ_TOOL_NAME,
+            })
+          ).map((row) => row.item),
+        toolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
+        ...(input.onSkillReadHistoryLookupFailed
+          ? { onLookupFailed: input.onSkillReadHistoryLookupFailed }
+          : {}),
+      },
     }),
     createSkillSearchAttemptToolDefinition({
       authorize,
