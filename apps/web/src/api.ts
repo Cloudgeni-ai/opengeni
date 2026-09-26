@@ -454,7 +454,15 @@ export async function managedActorFetch(
 /** HTTP/1 browsers cap all same-origin SSE connections across every tab at six. */
 export function shouldBoundBrowserSseForProtocol(protocol: string | null | undefined): boolean {
   const normalized = protocol?.trim().toLowerCase();
-  return normalized === "http/1.0" || normalized === "http/1.1";
+  // Cross-origin ResourceTiming hides the protocol without Timing-Allow-Origin;
+  // startup can also precede the first completed timing entry. Reserve HTTP/1
+  // capacity until a multiplexed transport is positively observed.
+  return !(
+    normalized === "h2" ||
+    normalized === "h2c" ||
+    normalized === "h3" ||
+    normalized?.startsWith("h3-")
+  );
 }
 
 function browserSseTransportInput(
@@ -463,6 +471,7 @@ function browserSseTransportInput(
   headers: Headers,
 ): readonly [input: string | URL | Request, cleanCloseDelayMs: number, nativeLifetimeMs: number] {
   if (
+    typeof window === "undefined" ||
     requestMethod(input, init) !== "GET" ||
     !headers.get("accept")?.toLowerCase().includes("text/event-stream") ||
     (typeof Request !== "undefined" && input instanceof Request) ||

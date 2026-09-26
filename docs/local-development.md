@@ -415,5 +415,6 @@ request needs.
 
 - Public clients should treat the API as the source of truth.
 - Browser streaming uses `GET /v1/workspaces/:workspaceId/sessions/:id/events/stream`.
+- The console uses finite event batches until HTTP/2 or HTTP/3 is observed. Cross-origin APIs can hide the protocol from ResourceTiming, so missing timing information retains the bounded fallback and prevents several local tabs from exhausting HTTP/1 connections needed by browser controls.
 - Agent activities are side-effectful. Do not add automatic Temporal retries around full agent turns unless each model, tool, and sandbox boundary has been made idempotent.
 - Read [`../AGENTS.md`](../AGENTS.md) before changing the session workflow, the agent turn activity, or memory; [`run-lifecycle.md`](run-lifecycle.md) is the canonical lifecycle reference.
