@@ -300,6 +300,72 @@ describe("compact exchange rows", () => {
     }
   });
 
+  test("a note streaming as recorded today keeps the row working", async () => {
+    sequence = 0;
+    const working = [
+      event("user.message", { text: "Check the config" }, null),
+      event("turn.started", {}),
+      ...tool("read", "exec_command"),
+      // Identified deltas without a phase, exactly as the runtime records them.
+      event("agent.message.delta", {
+        text: "Checking `OPENGENI_SANDBOX_BACKEND` ",
+        messageId: "n1",
+      }),
+      event("agent.message.delta", {
+        text: "in user_accounts_table and **the** _env_.",
+        messageId: "n1",
+      }),
+    ];
+    const r = await renderComponent(
+      <MessageTimeline events={working} turnSummary={{ rolling: true }} />,
+    );
+    try {
+      await flush();
+      expect(statusTrigger(r.container).textContent).toMatch(/^Working · /);
+      expect(
+        r.container
+          .querySelector("[data-og-exchange-status]")
+          ?.getAttribute("data-og-exchange-status"),
+      ).toBe("working");
+      expect(r.container.querySelector("[data-og-exchange-note]")?.textContent).toBe(
+        "Checking OPENGENI_SANDBOX_BACKEND in user_accounts_table and the env.",
+      );
+      expect(topLevelMessages(r.container)).toEqual([]);
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("the worked time stays the same when the streaming answer completes", async () => {
+    sequence = 0;
+    const long = "Signups come from three sources that need reconciling. ".repeat(24);
+    const streaming = [
+      event("user.message", { text: "Explain the signups" }, null),
+      event("turn.started", {}),
+      ...tool("read", "exec_command"),
+      ...tool("query", "exec_command"),
+      event("agent.message.delta", { text: long, messageId: "a1" }),
+    ];
+    const done = [
+      event("agent.message.completed", { text: long }),
+      event("turn.completed", { output: long }),
+    ];
+    const timeline = (events: SessionEvent[]) => (
+      <MessageTimeline events={events} turnSummary={{ rolling: true }} />
+    );
+    const r = await renderComponent(timeline(streaming));
+    try {
+      await flush();
+      const live = statusTrigger(r.container).textContent ?? "";
+      expect(live).toMatch(/^Worked for 20s · 2 steps/);
+      await r.rerender(timeline([...streaming, ...done]));
+      await flush();
+      expect(statusTrigger(r.container).textContent).toMatch(/^Worked for 20s · 2 steps/);
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("the classic grouping keeps every note and wait as its own row", async () => {
     const { first, resumed, answer } = exchange();
     const r = await renderComponent(<MessageTimeline events={[...first, ...resumed, ...answer]} />);

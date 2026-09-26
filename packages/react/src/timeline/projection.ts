@@ -157,8 +157,10 @@ export function buildTimeline(
       .filter(Boolean),
   );
   // Delegated workers that have not reported back yet, so a recorded agent wait
-  // can say how many agents it is waiting for. Best effort: a bounded replay
-  // only knows the spawns and results inside its window.
+  // can say how many agents it is waiting for. Only a session's own workers
+  // report back, so a message to any other session is never awaited. Best
+  // effort: a bounded replay only knows the spawns and results inside its window.
+  const workerSessions = new Set<string>();
   const pendingWorkerSessions = new Set<string>();
   let openWaitNotice: NoticeItem | null = null;
   const queuedAtByTurn = new Map<string, string>();
@@ -322,9 +324,13 @@ export function buildTimeline(
       openWaitNotice &&
       (event.type === "user.message" ||
         event.type === "system.update.delivered" ||
-        event.type === "turn.started")
+        event.type === "turn.started" ||
+        event.type === "session.control.paused" ||
+        (event.type === "session.status.changed" &&
+          (payload.status === "cancelled" || payload.status === "failed")))
     ) {
-      // New input ends a recorded wait; the notice keeps its wait span.
+      // New input, a pause, or the end of the session ends a recorded wait; the
+      // notice keeps its wait span.
       openWaitNotice.waitEndedAt = event.occurredAt;
       openWaitNotice = null;
     }
@@ -377,6 +383,7 @@ export function buildTimeline(
         closeStreamingTail();
         const childCompletion = workerCompletionPayload(payload.childCompletion);
         if (childCompletion) {
+          workerSessions.add(childCompletion.childSessionId);
           pendingWorkerSessions.delete(childCompletion.childSessionId);
           items.push({
             kind: "worker-completion",
@@ -433,7 +440,10 @@ export function buildTimeline(
       case "system.update.delivered": {
         const inputs = machineInputMembers(payload.members);
         for (const input of inputs) {
-          if (input.kind === "child_terminal_result") pendingWorkerSessions.delete(input.sourceId);
+          if (input.kind === "child_terminal_result") {
+            workerSessions.add(input.sourceId);
+            pendingWorkerSessions.delete(input.sourceId);
+          }
         }
         if (inputs.length === 0) break;
         // Goal continuations already land as `goal.continuation` GoalRows.
@@ -467,8 +477,8 @@ export function buildTimeline(
           if (messageKey) incompleteMessageKeys.add(messageKey);
           break;
         }
-        // A provider phase on the stream classifies commentary before the
-        // message completes, so a note never streams as an answer first.
+        // A provider phase on the stream classifies the message while it
+        // streams instead of when it completes.
         const deltaPhase = assistantMessagePhase(payload.phase);
         const identified = messageKey ? identifiedMessages.get(messageKey) : undefined;
         if (identified) {
@@ -559,12 +569,15 @@ export function buildTimeline(
           if (!open.text || (text && (messageKey || text.startsWith(open.text)))) {
             open.text = text || open.text;
           }
-          open.streaming = false;
           // A phase-less settlement mirror (the worker's final-output receipt)
           // must not erase the provider-declared phase captured by the SDK item.
           if (phase) open.phase = phase;
-          // Completion time is what the footer shows ("finished at"); keep the
-          // first-delta stamp only until this event arrives.
+          // Completion time is what the footer shows ("finished at"); the
+          // first-delta stamp stays as the stream's start.
+          if (open.startedAt === undefined && open.occurredAt !== event.occurredAt) {
+            open.startedAt = open.occurredAt;
+          }
+          open.streaming = false;
           open.occurredAt = event.occurredAt;
           open.annotationSource =
             text && open.text === text
@@ -724,7 +737,10 @@ export function buildTimeline(
           target.failure = target.status === "failed" ? workerFailure(payload.output) : null;
           // A spawned or re-messaged worker owes this session a result.
           if (target.status === "complete" && target.workerSessionId) {
-            pendingWorkerSessions.add(target.workerSessionId);
+            if (target.action === "spawn") workerSessions.add(target.workerSessionId);
+            if (workerSessions.has(target.workerSessionId)) {
+              pendingWorkerSessions.add(target.workerSessionId);
+            }
           }
           break;
         }
@@ -1159,6 +1175,12 @@ export function buildTimeline(
           ) {
             latestAgentResponse.item.text = finalOutput;
             latestAgentResponse.item.streaming = false;
+            if (
+              latestAgentResponse.item.startedAt === undefined &&
+              latestAgentResponse.item.occurredAt !== event.occurredAt
+            ) {
+              latestAgentResponse.item.startedAt = latestAgentResponse.item.occurredAt;
+            }
             latestAgentResponse.item.occurredAt = event.occurredAt;
             const responseIndex = items.indexOf(latestAgentResponse.item);
             if (responseIndex >= 0 && responseIndex < items.length - 1) {
@@ -1705,16 +1727,31 @@ export function groupTimeline(
 }
 
 /**
+ * A phase-less message of the running turn reads as a progress note until it
+ * grows past this length. Recorded notes rarely do (99% stay under about 800
+ * characters), while more than half of recorded answers do, so a long answer
+ * still streams in place instead of waiting for its turn to end.
+ */
+const LIVE_NOTE_MAX_CHARS = 1000;
+
+/**
  * Assistant messages that narrate work rather than answer. A provider-declared
  * phase is authoritative. A phase-less message is commentary when its own turn
- * produced more work or prose after it, so the latest message of a still
- * running turn stays an answer candidate until activity follows it.
+ * produced more work or prose after it. The latest message of the running turn
+ * cannot be told apart from a note while it streams, so it stays one until the
+ * turn ends or it outgrows {@link LIVE_NOTE_MAX_CHARS}.
  */
 function commentaryMessageIds(items: readonly TimelineItem[]): Set<string> {
   const commentary = new Set<string>();
   const laterOutput = new Set<string | null>();
+  // The newest turn when it has not ended. Only one turn runs at a time, and a
+  // superseded turn never receives a turn end of its own.
+  let runningTurnId: string | null | undefined;
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index]!;
+    if (runningTurnId === undefined && "turnId" in item && item.turnId !== null) {
+      runningTurnId = item.kind === "turn-end" ? null : item.turnId;
+    }
     if (item.kind === "turn-end") {
       laterOutput.delete(item.turnId);
     } else if (item.kind === "user-message") {
@@ -1723,7 +1760,11 @@ function commentaryMessageIds(items: readonly TimelineItem[]): Set<string> {
     } else if (item.kind === "agent-message") {
       if (
         item.phase === "commentary" ||
-        (item.phase === undefined && laterOutput.has(item.turnId))
+        (item.phase === undefined &&
+          (laterOutput.has(item.turnId) ||
+            (item.turnId !== null &&
+              item.turnId === runningTurnId &&
+              item.text.length <= LIVE_NOTE_MAX_CHARS)))
       ) {
         commentary.add(item.id);
       }

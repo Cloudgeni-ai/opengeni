@@ -94,6 +94,12 @@ export type AgentMessageItem = {
   /** Still receiving deltas (no completed/turn-end seen yet). */
   streaming: boolean;
   occurredAt: string;
+  /**
+   * When the first streamed text arrived, kept once completion moves
+   * `occurredAt` to the completion time. Absent for a message that never
+   * streamed.
+   */
+  startedAt?: string | undefined;
   /** Available only after the canonical completed event lands. */
   annotationSource?: TimelineAnnotationSourceDescriptor | undefined;
 };

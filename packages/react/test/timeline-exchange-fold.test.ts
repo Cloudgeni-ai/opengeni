@@ -48,8 +48,24 @@ function note(text: string, turnId: string, phase?: "commentary") {
 
 function answer(text: string, turnId: string, phase?: "final_answer") {
   return [
-    event("agent.message.delta", { text }, { turnId }),
+    event("agent.message.delta", { text, ...(phase ? { phase } : {}) }, { turnId }),
     event("agent.message.completed", { text, ...(phase ? { phase } : {}) }, { turnId }),
+  ];
+}
+
+/**
+ * A message as the runtime records it today: identified deltas without a
+ * phase. The only completion is the phase-less final output receipt that the
+ * worker writes together with `turn.completed`.
+ */
+function recordedDelta(text: string, messageId: string, turnId = "turn-1"): SessionEvent {
+  return event("agent.message.delta", { text, messageId }, { turnId });
+}
+
+function recordedTurnEnd(output: string, turnId = "turn-1"): SessionEvent[] {
+  return [
+    event("agent.message.completed", { text: output }, { turnId }),
+    event("turn.completed", { output }, { turnId }),
   ];
 }
 
@@ -193,16 +209,84 @@ describe("exchange fold", () => {
     ]);
   });
 
-  test("a phase-less message stays an answer candidate until activity follows it", () => {
+  test("a phase-less message of the running turn streams as a note, never as the answer", () => {
     sequence = 0;
+    const prompt = event("user.message", { text: "how many users?" }, { turnId: null });
+    const working = [
+      prompt,
+      event("turn.started", { triggerEventId: prompt.id }),
+      ...tool("read", "exec_command", "turn-1"),
+      recordedDelta("Checking the users table ", "note-1"),
+      recordedDelta("next.", "note-1"),
+    ];
+    const live = fold(working);
+    expect(kinds(live)).toEqual(["user-message", "activity"]);
+    const row = live[1];
+    expect(row?.kind === "activity" ? row.items.at(-1) : null).toMatchObject({
+      kind: "agent-message",
+      text: "Checking the users table next.",
+    });
+    // The final answer is indistinguishable from a note until the turn ends.
+    const answering = [
+      ...working,
+      ...tool("query", "exec_command", "turn-1"),
+      recordedDelta("312 users signed up.", "answer-1"),
+    ];
+    expect(kinds(fold(answering))).toEqual(["user-message", "activity"]);
+    const settled = fold([...answering, ...recordedTurnEnd("312 users signed up.")]);
+    expect(kinds(settled)).toEqual(["user-message", "turn", "agent-message"]);
+    expect(settled[2]?.kind === "item" ? settled[2].item : null).toMatchObject({
+      kind: "agent-message",
+      text: "312 users signed up.",
+    });
+  });
+
+  test("a phase-less message that outgrows a note streams as the answer", () => {
+    sequence = 0;
+    const long = "The signup table has three sources to reconcile. ".repeat(24);
     const streaming = [
+      event("user.message", { text: "explain the signups" }, { turnId: null }),
       event("turn.started", {}),
       ...tool("read", "exec_command", "turn-1"),
-      event("agent.message.delta", { text: "Checking the next file" }),
+      recordedDelta(long.slice(0, 600), "answer-1"),
     ];
-    expect(kinds(fold(streaming))).toEqual(["activity", "agent-message"]);
-    const followed = [...streaming, ...tool("next", "exec_command", "turn-1")];
-    expect(kinds(fold(followed))).toEqual(["activity"]);
+    expect(kinds(fold(streaming))).toEqual(["user-message", "activity"]);
+    const grown = [...streaming, recordedDelta(long.slice(600), "answer-1")];
+    expect(kinds(fold(grown))).toEqual(["user-message", "activity", "agent-message"]);
+    // More work after it still makes it a note.
+    const followed = [...grown, ...tool("next", "exec_command", "turn-1")];
+    expect(kinds(fold(followed))).toEqual(["user-message", "activity"]);
+  });
+
+  test("only the running turn keeps its latest message as a note", () => {
+    sequence = 0;
+    const prompt = event("user.message", { text: "check prod" }, { turnId: null });
+    const first = [
+      prompt,
+      event("turn.started", { triggerEventId: prompt.id }),
+      ...tool("read", "exec_command", "turn-1"),
+      recordedDelta("Prod looks healthy so far.", "note-1"),
+    ];
+    const steer = event(
+      "user.message",
+      { text: "stop, check staging instead", delivery: "steer" },
+      { turnId: null },
+    );
+    const groups = fold([
+      ...first,
+      steer,
+      // A steered turn is superseded without a turn end of its own.
+      event("turn.superseded", {}),
+      event("turn.started", { triggerEventId: steer.id }, { turnId: "turn-2" }),
+      ...tool("staging", "exec_command", "turn-2"),
+    ]);
+    expect(kinds(groups)).toEqual([
+      "user-message",
+      "activity",
+      "agent-message",
+      "user-message",
+      "activity",
+    ]);
   });
 
   test("a stream that declares commentary joins the cluster while it streams", () => {
@@ -392,6 +476,52 @@ describe("exchange fold", () => {
       "agent-message",
     ]);
     expect(groups[1]?.kind === "turn" ? groups[1].outcome : null).toBe("failed");
+  });
+
+  test("a recorded wait counts only this session's workers", () => {
+    sequence = 0;
+    const worker = "8a5b0c2e-1111-4222-8333-944455556666";
+    const peer = "3c9d1e2f-2222-4333-8444-a55566667777";
+    const groups = fold([
+      event("user.message", { text: "count users" }, { turnId: null }),
+      event("turn.started", {}),
+      event("agent.toolCall.created", {
+        id: "spawn",
+        name: "opengeni__session_create",
+        arguments: { initialMessage: "Count" },
+      }),
+      event("agent.toolCall.output", { id: "spawn", output: { sessionId: worker } }),
+      // A peer session is told about the work; it never reports back here.
+      event("agent.toolCall.created", {
+        id: "tell",
+        name: "opengeni__session_send_message",
+        arguments: { sessionId: peer, message: "FYI" },
+      }),
+      event("agent.toolCall.output", { id: "tell", output: { sessionId: peer } }),
+      event("session.wait.started", { actor: "agent", reason: "Worker running." }),
+      event("turn.completed", { output: "" }),
+    ]);
+    const row = groups[1];
+    const wait = row?.kind === "turn" ? row.groups.at(-1) : undefined;
+    expect(wait?.kind === "item" ? wait.item : null).toMatchObject({
+      kind: "notice",
+      recordedOutcome: true,
+      waitingAgents: 1,
+    });
+  });
+
+  test("a wait ends when its session is cancelled", () => {
+    const exchange = delegatedExchange();
+    const cancelled = event("session.status.changed", { status: "cancelled" }, { turnId: null });
+    const groups = fold([exchange.prompt, ...exchange.first, cancelled]);
+    const row = groups[1];
+    const wait =
+      row?.kind === "turn"
+        ? row.groups.find((group) => group.kind === "item" && group.item.kind === "notice")
+        : undefined;
+    expect(
+      wait?.kind === "item" && wait.item.kind === "notice" ? wait.item.waitEndedAt : null,
+    ).toBe(cancelled.occurredAt);
   });
 
   test("a later human prompt ends the fold and starts a new exchange", () => {

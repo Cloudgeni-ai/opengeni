@@ -491,16 +491,6 @@ function exchangeAnswerAnchor(
   };
 }
 
-function latestPromptGroupKey(groups: readonly { group: TimelineGroup; key: string }[]) {
-  for (let index = groups.length - 1; index >= 0; index -= 1) {
-    const group = groups[index]!.group;
-    if (group.kind === "item" && group.item.kind === "user-message") {
-      return groups[index]!.key;
-    }
-  }
-  return null;
-}
-
 /** Escape a value for use inside a CSS attribute selector. */
 function cssEscapeAttribute(value: string): string {
   if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
@@ -721,14 +711,15 @@ export function MessageTimeline({
   // Compact presentation: when an answer starts while following the tip, keep
   // following only until the question (or, when it had already scrolled away,
   // the status row or the answer itself) reaches the top. Then stop, so the
-  // question and the start of its answer stay on screen together.
+  // question and the start of its answer stay on screen together. Both the
+  // stop and a stop already made apply only while that answer is the newest
+  // row; a reader who has not moved since returns to the tip afterwards.
   const answerAnchorRef = useRef<{
     answerKey: string;
     anchorKey: string | null;
-    /** Where following stopped, until the reader moves or asks again. */
+    /** Where following stopped for this answer. */
     releasedAt?: number | undefined;
   } | null>(null);
-  const latestPromptKeyRef = useRef<string | null | undefined>(undefined);
   const questionNavFrameRef = useRef<number | null>(null);
   const [questionNav, setQuestionNav] = useState<QuestionNav | null>(null);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
@@ -1548,25 +1539,30 @@ export function MessageTimeline({
         }
       }
     };
-    const latestPromptKey = foldExchanges ? latestPromptGroupKey(groups) : null;
-    const releasedAt = answerAnchorRef.current?.releasedAt;
-    if (
-      latestPromptKey &&
-      latestPromptKeyRef.current !== undefined &&
-      latestPromptKey !== latestPromptKeyRef.current &&
-      releasedAt !== undefined &&
-      Math.abs(node.scrollTop - releasedAt) <= 2 &&
-      autoFollow &&
-      !pinnedRef.current &&
-      !hasNewer
-    ) {
-      // Following stopped for the last answer and the reader has not moved
-      // since; asking the next question returns them to the tip.
-      answerAnchorRef.current!.releasedAt = undefined;
-      clearPendingReaderLeave();
-      applyPinned(true);
+    const anchorState = answerAnchorRef.current;
+    if (anchorState && answerAnchor?.answerKey !== anchorState.answerKey) {
+      // The anchored answer is no longer the newest row: a question, more
+      // work, or the answer turning out to be a note followed it. Its stop no
+      // longer applies. (Loading older history never changes the newest row.)
+      const releasedAt = anchorState.releasedAt;
+      anchorState.anchorKey = null;
+      anchorState.releasedAt = undefined;
+      if (
+        releasedAt !== undefined &&
+        // Still where following stopped, or at the tip because the answer
+        // folding away shrank the content under the reader.
+        (Math.abs(node.scrollTop - releasedAt) <= 2 ||
+          maxScrollOf(node) - node.scrollTop <= PIN_THRESHOLD_PX) &&
+        autoFollow &&
+        !pinnedRef.current &&
+        !hasNewer
+      ) {
+        // Following stopped for that answer and the reader has not moved
+        // since, so they return to the tip.
+        clearPendingReaderLeave();
+        applyPinned(true);
+      }
     }
-    latestPromptKeyRef.current = latestPromptKey;
     if (pendingJumpToStartRef.current && firstItemChanged) {
       // The oldest window landed — jump against the NEW DOM, and skip the
       // prepend correction (it would shift the reader away from the top).
@@ -1802,7 +1798,6 @@ export function MessageTimeline({
     foldMemoryRef.current.clear();
     userMessageDisclosureMemoryRef.current.clear();
     answerAnchorRef.current = null;
-    latestPromptKeyRef.current = undefined;
     disclosureKeepsUnpinnedRef.current = false;
     clearReaderIntent();
     contentShrinkBaselineRef.current = null;
@@ -2865,7 +2860,10 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
         exchangeNextAt={
           group.kind === "item" || nextGroup?.kind !== "item"
             ? undefined
-            : nextGroup.item.occurredAt
+            : nextGroup.item.kind === "agent-message"
+              ? // The answer's start, which completion does not move.
+                (nextGroup.item.startedAt ?? nextGroup.item.occurredAt)
+              : nextGroup.item.occurredAt
         }
       />
     </ActivityNoteTextContext.Provider>
@@ -3304,7 +3302,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
           exchangeNext === "end" &&
           lastChild?.kind === "item" &&
           lastChild.item.kind === "notice" &&
-          lastChild.item.recordedOutcome
+          lastChild.item.recordedOutcome &&
+          !lastChild.item.waitEndedAt
             ? lastChild.item
             : undefined;
         // Delivered input at the tail means the agent is picking the work back up.
@@ -3313,11 +3312,16 @@ const TimelineGroupView = memo(function TimelineGroupView({
           lastChild?.kind === "item" &&
           lastChild.item.kind === "machine-input-batch";
         const note = exchangeNext === "answer" ? undefined : latestNotePreview(group.groups);
+        // Worked until the answer started, as the live row said while it streamed.
+        const workedMs =
+          exchangeNext === "answer" && exchangeNextAt
+            ? (durationBetween(group.startedAt, exchangeNextAt) ?? durationMs)
+            : durationMs;
         status = parkedWait
           ? { kind: "waiting", label: waitingLabel(parkedWait), since: parkedWait.occurredAt, note }
           : resuming
             ? { kind: "working", since: group.startedAt, note }
-            : { kind: "worked", durationMs, note };
+            : { kind: "worked", durationMs: workedMs, note };
         if (foldMemory && group.id.startsWith("exchange-") && group.groups[0]) {
           inheritFoldRestingState(foldMemory, group.id, [timelineGroupFoldId(group.groups[0])]);
         }
@@ -3486,14 +3490,18 @@ function latestNoteText(groups: readonly TimelineGroup[]): string | undefined {
   return undefined;
 }
 
-/** Markdown reduced to readable text for a two-line clamp. */
+/**
+ * Markdown reduced to readable text for a two-line clamp. Underscores mark
+ * emphasis only at word edges, so snake_case names survive.
+ */
 function plainNotePreview(text: string): string {
   return text
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
     .replace(/`([^`]*)`/g, "$1")
-    .replace(/(\*\*|__|\*|_|~~)(?=\S)([^*_~]+?)\1/g, "$2")
+    .replace(/(\*\*|\*|~~)(?=\S)([^*~]*?\S)\1/g, "$2")
+    .replace(/(^|\W)(__?)(?=\S)([^_]*?\S)\2(?!\w)/g, "$1$3")
     .replace(/^\s{0,3}(#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)/gm, "")
     .replace(/\s+/g, " ")
     .trim();

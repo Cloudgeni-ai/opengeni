@@ -79,8 +79,11 @@ the web app enables. It groups with `groupTimeline(items, { foldExchanges: true 
 - **Commentary is activity.** Assistant prose that narrates work joins its activity
   cluster instead of splitting it: a provider-declared `commentary` phase, or, for
   phase-less events, a message that more work or prose followed in the same turn.
-  The latest message of a running turn stays an answer candidate until activity
-  follows it.
+  The runtime does not yet record a phase, and while it streams the latest message
+  of the running turn cannot be told apart from a note, so it stays the live note
+  until its turn ends or it grows past 1,000 characters (a length recorded notes
+  rarely reach); a declared `final_answer` phase is an answer at once. A long
+  message that turns out to be a note folds back once work follows it.
 - **One row per exchange.** Everything between two human boundaries folds behind
   one status row. Only human messages, structured human input, and input notices
   start a new exchange. Routine machine inputs (child results and progress, agent
@@ -93,21 +96,25 @@ the web app enables. It groups with `groupTimeline(items, { foldExchanges: true 
   latest progress note is previewed muted and clamped to two lines, replaced when a
   newer note arrives, and the fixed-height rolling reel shows the current step even
   when there is no note. A parked exchange reads "Waiting for 2 agents · 3m" using
-  the agents that had not reported back when the wait began; an approval wait reads
-  "Waiting for approval". Opening the row shows every earlier turn, note, input,
-  and wait on one rail.
+  the delegated workers (sessions this session spawned) that had not reported back
+  when the wait began; a pending approval or question reads "Waiting for you".
+  Opening the row shows every earlier turn, note, input, and wait on one rail.
 - **Answer.** The answer renders below a "Worked for 4m 10s" separator that carries
-  the remaining facets. A turn that ends without an answer still lifts its latest
-  note as the visible reply, unless it parked in a wait.
+  the remaining facets; the time runs until the answer started, so it does not
+  change when the answer completes. A turn that ends without an answer still lifts
+  its latest note as the visible reply, unless it parked in a wait.
 
-The recorded wait itself reads "Waited for 1 agent · 3m 5s" once later input ended
-it, or "Waiting · since 10:32" while it is still open, in both presentations.
+The recorded wait itself reads "Waited for 1 agent · 3m 5s" once later input, a
+pause, or the session failing or being cancelled ended it, or "Waiting · since
+10:32" while it is still open, in both presentations.
 
 Following the tip stops once an answer pushes its question to the top of the
 viewport (or, when the question had already scrolled away, the status row or the
-answer itself). A reader who has not moved since returns to the tip with their
-next question. When the question of the exchange being read has scrolled away, a
-"Your question" control returns to it, with previous and next question buttons.
+answer itself). The stop applies only while that answer is the newest row: once a
+question, more work, or the answer folding back into a note follows it, a reader
+who has not moved since returns to the tip. When the question of the exchange
+being read has scrolled away, a "Your question" control returns to it, with
+previous and next question buttons.
 
 Tool labels reuse `ActivityDisclosure` through its compact presentation context;
 reasoning keeps a stable Thinking label with a live text preview. Step changes roll
@@ -116,6 +123,10 @@ seconds. Reduced motion disables both animations.
 
 `/exchange-fold.html` in the React demo replays a delegated question through every
 stage (working, waiting, resumed, answering, done, follow-up) with a compact or
-classic toggle and light/dark themes; `/rolling-steps.html` loops sample commands.
-Neither needs model calls. `test/e2e/timeline-exchange-fold.browser.e2e.ts` covers
-the answer anchoring and question navigation in Chromium.
+classic toggle and light/dark themes; `?scenario=follow-up`, `notes`, and `history`
+replay messages streamed the way the runtime records them today (identified,
+phase-less deltas). `/rolling-steps.html` loops sample commands. Neither needs
+model calls. `test/e2e/timeline-exchange-fold.browser.e2e.ts` covers, in the
+compact presentation and in Chromium, the answer anchoring, a short answer
+followed by a new question, phase-less progress notes, loading older history
+inside an exchange, and question navigation.

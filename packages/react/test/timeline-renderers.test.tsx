@@ -887,8 +887,11 @@ describe("published file presentation", () => {
     const r = await renderComponent(timeline(prepared));
     try {
       await flush();
-      // Narration after the work reads as the answer below a settled row.
-      expect(turnSummaryTrigger(r.container)?.textContent).toContain("Worked for");
+      // Phase-less narration of the running turn is its live note.
+      expect(turnSummaryTrigger(r.container)?.textContent).toMatch(/^Working · /);
+      expect(r.container.querySelector("[data-og-exchange-note]")?.textContent).toBe(
+        "The project is ready.",
+      );
       const published = [
         ...prepared,
         timelineEvent("agent.toolCall.created", {
