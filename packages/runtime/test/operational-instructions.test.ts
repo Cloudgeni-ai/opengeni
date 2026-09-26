@@ -277,7 +277,7 @@ describe("provider-neutral operational instructions", () => {
     // Any turn may end with a wait instead of a final response, so a turn that
     // starts long work and waits still has a compliant ending.
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "A turn that ends with `wait_for_input` has no final response; its reason is the user-visible status.",
+      "a turn that ends with `wait_for_input` has none, and its reason is the user-visible status.",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
       "unchanged-wait `wait_for_input` continuation",
