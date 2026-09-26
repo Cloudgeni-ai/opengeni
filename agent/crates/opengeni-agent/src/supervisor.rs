@@ -371,6 +371,9 @@ struct WorkspaceLink<P: Platform> {
     bulk_tx: BulkLane,
     /// Upload identity is local to this exact connection/process instance.
     uploads: Arc<std::sync::Mutex<crate::uploads::Uploads>>,
+    /// Display sleep/wake and permission changes must not require a reconnect.
+    /// OS probing runs off-loop; heartbeats only clone the last completed sample.
+    desktop_status: std::sync::RwLock<Option<v1::DesktopStatus>>,
 }
 
 impl<P: Platform> WorkspaceLink<P> {
@@ -385,6 +388,7 @@ impl<P: Platform> WorkspaceLink<P> {
             shutdown: ShutdownSignal::default(),
             bulk_tx: Arc::new(std::sync::RwLock::new(None)),
             uploads: Arc::new(std::sync::Mutex::new(crate::uploads::Uploads::default())),
+            desktop_status: std::sync::RwLock::new(None),
         }
     }
 
@@ -638,8 +642,24 @@ impl<P: Platform + 'static> Supervisor<P> {
 
     async fn run_owned_link(&self, link: Arc<WorkspaceLink<P>>) -> String {
         let id = link.connection_id.clone();
-        self.run_link(&link).await;
+        // Poll the sampler alongside the connection lifecycle, without spawning
+        // orphan tasks. Dropping this branch stops future probes when the link ends.
+        tokio::select! {
+            () = self.run_link(&link) => {},
+            () = self.refresh_desktop_status(&link) => {},
+        }
         id
+    }
+
+    async fn refresh_desktop_status(&self, link: &WorkspaceLink<P>) {
+        loop {
+            let capabilities = self.capabilities(link).await;
+            *link.desktop_status.write().expect("desktop status lock") = Some(v1::DesktopStatus {
+                available: capabilities.desktop,
+                unavailable_reason: capabilities.desktop_unavailable_reason,
+            });
+            tokio::time::sleep(DEFAULT_HEARTBEAT).await;
+        }
     }
 
     /// Runs one workspace link's dial → serve → reconnect loop until a clean
@@ -1731,6 +1751,11 @@ impl<P: Platform + 'static> Supervisor<P> {
                     .browser_bridge
                     .as_ref()
                     .map(BrowserBridgeInventory::snapshot),
+                desktop_status: link
+                    .desktop_status
+                    .read()
+                    .expect("desktop status lock")
+                    .clone(),
             })),
         };
         client
@@ -2341,6 +2366,130 @@ mod tests {
     use super::*;
 
     const TEST_CONNECTION_INSTANCE_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::too_many_lines)] // One fixture covers off-loop sampling and sleep/wake.
+    async fn desktop_sampler_recovers_without_reconnect_or_blocking_the_runtime() {
+        use opengeni_agent_platform::{DesktopBackend, NativePlatform, PlatformResult};
+        use opengeni_agent_stream::{RelayHub, RelayHubConfig};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct WakeableDesktop {
+            awake: Arc<AtomicBool>,
+            entered: Arc<AtomicBool>,
+            stalled: Arc<AtomicBool>,
+            gate: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        }
+        #[async_trait::async_trait]
+        impl DesktopBackend for WakeableDesktop {
+            fn probe(&self) -> Option<v1::Display> {
+                // An OS probe must not stall the control runtime.
+                if let Some(gate) = self.gate.lock().unwrap().take() {
+                    self.entered.store(true, Ordering::SeqCst);
+                    self.stalled.store(
+                        gate.recv_timeout(Duration::from_secs(2)).is_err(),
+                        Ordering::SeqCst,
+                    );
+                }
+                self.awake.load(Ordering::SeqCst).then(|| v1::Display {
+                    id: "fixture".into(),
+                    width: 800,
+                    height: 600,
+                    r#virtual: false,
+                })
+            }
+            fn capture_blocked_reason(&self) -> Option<String> {
+                (!self.awake.load(Ordering::SeqCst)).then(|| "Display asleep".into())
+            }
+            async fn capture(&self) -> PlatformResult<opengeni_agent_platform::CapturedFrame> {
+                unreachable!("capability sampling must never capture a frame")
+            }
+            async fn inject(&self, _: &v1::DesktopInput) -> PlatformResult<()> {
+                unreachable!("capability sampling must never inject input")
+            }
+        }
+        let awake = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(AtomicBool::new(false));
+        let stalled = Arc::new(AtomicBool::new(false));
+        let (release, gate) = std::sync::mpsc::channel();
+        let platform = Arc::new(
+            NativePlatform::new()
+                .with_desktop(Arc::new(WakeableDesktop {
+                    awake: awake.clone(),
+                    entered: entered.clone(),
+                    stalled: stalled.clone(),
+                    gate: std::sync::Mutex::new(Some(gate)),
+                }))
+                .with_stream_registry(Arc::new(RelayHub::new(RelayHubConfig {
+                    workspace_id: "fixture".into(),
+                    agent_id: "fixture".into(),
+                    relay_url: "ws://127.0.0.1:1".into(),
+                    agent_token: "unused".into(),
+                    allow_screen_control: false,
+                }))),
+        );
+        let definition = SupervisorLink::new(
+            "fixture",
+            platform,
+            it::test_credentials("nats://127.0.0.1:1"),
+        );
+        let supervisor = Supervisor::new_links(&[definition.clone()], "test");
+        let link = WorkspaceLink::from_definition(definition);
+        link.epoch.store(42);
+        let sample = supervisor.refresh_desktop_status(&link);
+        tokio::pin!(sample);
+        let assertions = async {
+            while !entered.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(!stalled.load(Ordering::SeqCst), "OS probe blocked runtime");
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while link.desktop_status.read().unwrap().is_none() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                link.desktop_status
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .unavailable_reason,
+                "Display asleep"
+            );
+            awake.store(true, Ordering::SeqCst);
+            tokio::time::timeout(Duration::from_secs(7), async {
+                while !link
+                    .desktop_status
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .available
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(link
+                .desktop_status
+                .read()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .unavailable_reason
+                .is_empty());
+            assert_eq!(link.epoch.load(), 42);
+        };
+        tokio::select! {
+            () = &mut sample => panic!("sampler unexpectedly ended"),
+            () = assertions => {},
+        }
+    }
 
     #[test]
     fn epoch_cell_round_trips() {

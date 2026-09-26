@@ -314,6 +314,14 @@ stale/missing heartbeat is offline. The list therefore does not emit
 negotiation, and fleet tools still ping when they need to know whether a
 responder is answering now.
 
+Runners also sample desktop availability off the control loop and include the
+latest completed sample in heartbeats. Display sleep/wake, Mac lock/unlock, and
+Screen Recording permission changes refresh the desktop state without restarting
+the runner or changing its connection generation. A blocked snapshot disables
+desktop access and supplies the reason; it never grants screen-control consent.
+Older runners omit this optional field and retain their connect-time Hello state.
+An unchanged snapshot does not rewrite capabilities or release/update metadata.
+
 ```ts
 const res = await client.listMachines(workspaceId, { sessionId });
 // res.activeSandboxId — the session's currently-active sandbox (null ⇒ the

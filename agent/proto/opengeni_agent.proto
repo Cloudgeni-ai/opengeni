@@ -751,6 +751,14 @@ message Heartbeat {
   AdmissionTelemetry admission = 7;
   // Full live browser-profile inventory, when this runner has a browser bridge.
   AttachedBrowserInventorySnapshot attached_browser_inventory = 8;
+  // Optional live snapshot, sampled off the control loop. Absence means an
+  // older runner; never erase its Hello-derived state. Does not renew consent.
+  DesktopStatus desktop_status = 9;
+}
+
+message DesktopStatus {
+  bool available = 1;
+  string unavailable_reason = 2;
 }
 
 // A point-in-time host-capacity sample: the impure sampler's reading of
