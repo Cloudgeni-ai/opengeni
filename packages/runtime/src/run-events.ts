@@ -47,6 +47,28 @@ const CLIENT_TOOL_CALL_ITEM_TYPES: ReadonlySet<string> = new Set([
   "apply_patch_call",
 ]);
 
+/** Protocol and Responses wire items share these type names. */
+function isClientToolWork(item: unknown): boolean {
+  if (!item || typeof item !== "object") return false;
+  const record = item as {
+    type?: unknown;
+    execution?: unknown;
+    providerData?: { execution?: unknown } | null;
+  };
+  if (record.type === "tool_search_call") {
+    // A client tool search runs again with the SDK-generated output; only a
+    // search the provider executed itself leaves the response final.
+    return (record.execution ?? record.providerData?.execution) !== "server";
+  }
+  return CLIENT_TOOL_CALL_ITEM_TYPES.has(String(record.type));
+}
+
+function isAssistantMessageItem(item: unknown): boolean {
+  if (!item || typeof item !== "object") return false;
+  const record = item as { type?: unknown; role?: unknown };
+  return record.type === "message" && (record.role === undefined || record.role === "assistant");
+}
+
 function declaredAssistantMessagePhase(item: unknown): AssistantMessagePhase | undefined {
   if (!item || typeof item !== "object") return undefined;
   const record = item as { phase?: unknown; providerData?: { phase?: unknown } | null };
@@ -59,43 +81,71 @@ function providerMessageId(item: unknown): string | undefined {
   return typeof id === "string" && id && id !== PLACEHOLDER_MESSAGE_ID ? id : undefined;
 }
 
+function assistantMessageCompleted(
+  text: string,
+  messageId: string | undefined,
+  phase: AssistantMessagePhase | undefined,
+): NormalizedRuntimeEvent {
+  return {
+    type: "agent.message.completed",
+    payload: {
+      text,
+      ...(messageId ? { messageId } : {}),
+      ...(phase ? { phase } : {}),
+    },
+  };
+}
+
 /**
- * Remembers assistant message phases across one SDK stream. Text deltas carry
- * only the provider item id, so the phase a Responses provider declares when it
- * announces the item (`response.output_item.added`) is stamped onto them here.
- * Providers that declare no phase get the SDK's own rule instead: a message in
- * a response that also asks for client tool work is commentary, because that
- * response never becomes the final output. Anything else stays undeclared.
+ * Per-stream memory for assistant messages.
+ *
+ * Phase: a Responses provider may declare it when it announces the item
+ * (`response.output_item.added`); deltas carry only the item id, so that phase
+ * is stamped onto them here. An undeclared message gets the SDK's own rule once
+ * its response is known: it is `commentary` when the response asks for client
+ * tool work or ends with a later message (the SDK then never returns it as the
+ * final output), and `final_answer` when it is the message the SDK returns.
+ * Every completion the stream emits therefore carries a phase, which is how
+ * consumers tell it from the phase-less settlement copy.
+ *
+ * Order: the SDK reports message run items only after the whole response, so
+ * a response with a note and then an answer would stream both texts before
+ * either completion. A Responses message instead completes at its own
+ * `response.output_item.done`, before the next message streams, and the later
+ * run-item copy is skipped. An undeclared message waits only until its phase is
+ * known: the next message or tool call, or the end of its response.
  */
 export class AssistantMessagePhaseTracker {
   private readonly phases = new Map<string, AssistantMessagePhase>();
+  /** Resolved phases of the latest response's id-less messages, in output order. */
+  private anonymousPhases: AssistantMessagePhase[] = [];
+  /** Messages already completed in provider order; their run-item copy is skipped. */
+  private readonly completedInOrder = new Set<string>();
+  private responseAsksForToolWork = false;
+  private held: { messageId: string; text: string } | null = null;
 
-  observe(event: RunStreamEvent): void {
+  /**
+   * Observe one SDK stream event before it is normalized. Returns the message
+   * completions that are due at this point, in provider order.
+   */
+  observe(event: RunStreamEvent): NormalizedRuntimeEvent[] {
     if (isOpenAIResponsesRawModelStreamEvent(event)) {
       const raw = (event as any).data?.event;
-      if (raw?.type !== "response.output_item.added" || raw.item?.type !== "message") return;
-      const id = providerMessageId(raw.item);
-      const phase = declaredAssistantMessagePhase(raw.item);
-      if (id && phase) this.phases.set(id, phase);
-      return;
+      if (raw?.type === "response.output_item.added") return this.itemAdded(raw.item);
+      if (raw?.type === "response.output_item.done") return this.itemDone(raw.item);
+      return [];
     }
-    if (event.type !== "raw_model_stream_event") return;
+    if (event.type !== "raw_model_stream_event") return [];
     const data = (event as any).data;
-    if (data?.type !== "response_done" || !Array.isArray(data.response?.output)) return;
-    const output: unknown[] = data.response.output;
-    const continues = output.some(
-      (item) =>
-        !!item &&
-        typeof item === "object" &&
-        CLIENT_TOOL_CALL_ITEM_TYPES.has(String((item as { type?: unknown }).type)),
-    );
-    for (const item of output) {
-      if ((item as { type?: unknown } | null)?.type !== "message") continue;
-      const id = providerMessageId(item);
-      if (!id) continue;
-      const phase = declaredAssistantMessagePhase(item) ?? (continues ? "commentary" : undefined);
-      if (phase) this.phases.set(id, phase);
+    if (data?.type === "response_started") {
+      // A response that failed mid-stream never completes its held message.
+      this.held = null;
+      this.responseAsksForToolWork = false;
+      this.anonymousPhases = [];
+      return [];
     }
+    if (data?.type !== "response_done" || !Array.isArray(data.response?.output)) return [];
+    return this.responseDone(data.response.output);
   }
 
   /** Phase for a streamed text delta, when the provider already declared it. */
@@ -103,12 +153,97 @@ export class AssistantMessagePhaseTracker {
     return messageId ? this.phases.get(messageId) : undefined;
   }
 
-  /** Phase for a completed message; the entry is released once it completes. */
-  completedPhase(rawItem: unknown): AssistantMessagePhase | undefined {
+  /**
+   * Phase for the SDK's run-item copy of a message, or `null` when that
+   * message already completed in provider order.
+   */
+  messageItemPhase(rawItem: unknown): AssistantMessagePhase | undefined | null {
     const id = providerMessageId(rawItem);
-    const remembered = id ? this.phases.get(id) : undefined;
+    if (id && this.completedInOrder.delete(id)) return null;
+    const remembered = id ? this.phases.get(id) : this.anonymousPhases.shift();
     if (id) this.phases.delete(id);
     return declaredAssistantMessagePhase(rawItem) ?? remembered;
+  }
+
+  private itemAdded(item: unknown): NormalizedRuntimeEvent[] {
+    const due: NormalizedRuntimeEvent[] = [];
+    const toolWork = isClientToolWork(item);
+    if (toolWork) this.responseAsksForToolWork = true;
+    // A later message or tool call means the held message is not the final output.
+    if (toolWork || isAssistantMessageItem(item)) due.push(...this.releaseHeld("commentary"));
+    if (isAssistantMessageItem(item)) {
+      const id = providerMessageId(item);
+      const phase = declaredAssistantMessagePhase(item);
+      if (id && phase) this.phases.set(id, phase);
+    }
+    return due;
+  }
+
+  private itemDone(item: unknown): NormalizedRuntimeEvent[] {
+    if (isClientToolWork(item)) {
+      this.responseAsksForToolWork = true;
+      return this.releaseHeld("commentary");
+    }
+    if (!isAssistantMessageItem(item)) return [];
+    const id = providerMessageId(item);
+    const text = assistantMessageText(item);
+    // Without identity or text the run-item copy stays authoritative.
+    if (!id || !text) return [];
+    const due = this.releaseHeld("commentary");
+    const phase =
+      declaredAssistantMessagePhase(item) ??
+      this.phases.get(id) ??
+      (this.responseAsksForToolWork ? "commentary" : undefined);
+    if (phase) {
+      due.push(this.completeInOrder(id, text, phase));
+    } else {
+      this.held = { messageId: id, text };
+    }
+    return due;
+  }
+
+  private responseDone(output: unknown[]): NormalizedRuntimeEvent[] {
+    const asksForToolWork = output.some(isClientToolWork);
+    const messages = output.filter(isAssistantMessageItem);
+    const finalMessage = asksForToolWork ? undefined : messages.at(-1);
+    this.anonymousPhases = [];
+    for (const item of messages) {
+      const id = providerMessageId(item);
+      const phase =
+        declaredAssistantMessagePhase(item) ??
+        (id ? this.phases.get(id) : undefined) ??
+        (item === finalMessage ? "final_answer" : "commentary");
+      if (!id) this.anonymousPhases.push(phase);
+      else if (!this.completedInOrder.has(id)) this.phases.set(id, phase);
+    }
+    const held = this.held;
+    this.responseAsksForToolWork = false;
+    if (!held) return [];
+    this.held = null;
+    return [
+      this.completeInOrder(
+        held.messageId,
+        held.text,
+        this.phases.get(held.messageId) ?? "commentary",
+      ),
+    ];
+  }
+
+  private releaseHeld(phase: AssistantMessagePhase): NormalizedRuntimeEvent[] {
+    const held = this.held;
+    if (!held) return [];
+    this.held = null;
+    return [this.completeInOrder(held.messageId, held.text, phase)];
+  }
+
+  private completeInOrder(
+    messageId: string,
+    text: string,
+    phase: AssistantMessagePhase,
+  ): NormalizedRuntimeEvent {
+    this.phases.delete(messageId);
+    this.completedInOrder.add(messageId);
+    return assistantMessageCompleted(text, messageId, phase);
   }
 }
 
@@ -366,7 +501,8 @@ export function normalizeSdkEvent(
   const pushProtocolEvent = (normalized: NormalizedRuntimeEvent): void => {
     out.push(normalizeProtocolJsonValue(normalized, '$["event"]'));
   };
-  options.messagePhases?.observe(event);
+  // Message completions that are due in provider order come first.
+  out.push(...(options.messagePhases?.observe(event) ?? []));
   if (event.type === "raw_model_stream_event") {
     const data = (event as any).data;
     if (data?.type === "output_text_delta" && typeof data.delta === "string") {
@@ -482,20 +618,13 @@ export function normalizeSdkEvent(
   } else if (item.type === "message_output_item") {
     // `RunMessageOutputItem` carries the provider item as `rawItem`; its text is
     // the joined `output_text` parts (the SDK's own `content` getter).
-    const text = assistantMessageText(item.rawItem);
     const phase = options.messagePhases
-      ? options.messagePhases.completedPhase(item.rawItem)
+      ? options.messagePhases.messageItemPhase(item.rawItem)
       : declaredAssistantMessagePhase(item.rawItem);
-    if (text) {
-      const messageId = providerMessageId(item.rawItem);
-      out.push({
-        type: "agent.message.completed",
-        payload: {
-          text,
-          ...(messageId ? { messageId } : {}),
-          ...(phase ? { phase } : {}),
-        },
-      });
+    const text = assistantMessageText(item.rawItem);
+    // `null`: the message already completed in provider order.
+    if (text && phase !== null) {
+      out.push(assistantMessageCompleted(text, providerMessageId(item.rawItem), phase));
     }
   }
   return out;

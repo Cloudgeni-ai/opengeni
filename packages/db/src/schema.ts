@@ -8858,7 +8858,8 @@ export const sessionEvents = pgTable(
       table.type,
       table.sequence,
     ),
-    // Pre-0522 attention probes (which still counted commentary) during a rolling deploy.
+    // Pre-0522 attention probes (which still counted commentary) during a rolling
+    // deploy. Drop it in a later rolling migration once no pre-0522 API can run.
     meaningfulAttention: index("session_events_meaningful_attention_idx")
       .on(table.workspaceId, table.sessionId, table.sequence)
       .where(commentaryInclusiveMeaningfulSessionEventSql("session_events")),

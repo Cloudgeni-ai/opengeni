@@ -2450,13 +2450,17 @@ audit reads may return it, so it is never a secret boundary.
    independently bounded cross-session monitoring projection as ordinary tool
    output; that does not turn audit events into conversation truth.
    `packages/runtime/src/run-events.ts` emits one `agent.message.completed` per
-   provider message, with its `messageId` and `phase`: `commentary` or
-   `final_answer` as a Responses provider declares it (deltas carry the phase
-   declared in `response.output_item.added`), or `commentary` when the model
-   asked for tool work in the same response, since the SDK never returns such a
-   message as the final output. The worker publishes the phase-less settlement
-   copy with `turn.completed` only when the stream did not already complete the
-   final text. Commentary is activity, not an answer: it creates no unread
+   provider message, with its `messageId` (when the provider sent one) and
+   `phase`: `commentary` or `final_answer` as a Responses provider declares it
+   (deltas carry the phase declared in `response.output_item.added`), or else
+   the SDK's own rule: `commentary` when the same response asks for client tool
+   work or ends with a later message, since the SDK never returns such a message
+   as the final output, and `final_answer` for the message it returns. A
+   Responses message completes at its own `response.output_item.done`, before
+   the next message streams, rather than with the SDK's run items after the
+   whole response; an undeclared one waits only until its phase is known. The
+   worker publishes the phase-less settlement copy with `turn.completed` only
+   when the stream did not already complete the final text. Commentary is activity, not an answer: it creates no unread
    attention, never wakes `session_wait` change mode or becomes a Slack post, and
    stays out of the SDK chat reply. `assistantMessagePhase` and
    `isStreamedAssistantMessageCompletion` in `@opengeni/contracts` are the shared

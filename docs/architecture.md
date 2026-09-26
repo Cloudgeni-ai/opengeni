@@ -1412,8 +1412,8 @@ partial-message row IDs. `timeline-anchor.tsx` captures pre-mutation position;
 tip-follow. Upward input loads bounded older pages despite collapsed rows.
 Underfill preserves tails, offers explicit earlier navigation at limits, never
 auto-pages forward; Jump to latest restores live tails. Normalization
-joins chunks by provider identity; each message completes once with `messageId`
-and `phase` (see `docs/run-lifecycle.md`).
+joins chunks by provider identity; each message completes once, in order, with
+`phase` (see `docs/run-lifecycle.md`).
 Pre-transfer metadata planning bounds database batches to 256 events and the
 default 1 MiB full-payload page budget.
 

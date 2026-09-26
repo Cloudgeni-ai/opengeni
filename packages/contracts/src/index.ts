@@ -12708,9 +12708,11 @@ export type SessionEventType = z.infer<typeof SessionEventType>;
 
 /**
  * The assistant channel on `agent.message.delta` / `agent.message.completed`:
- * the provider-declared Responses phase, or `commentary` when the model asked
- * for tool work in the same response (the SDK never returns such a message as
- * the final output). Absent on legacy events and undeclared final messages.
+ * the provider-declared Responses phase, or else the Agents SDK's own rule once
+ * the response is known: `commentary` when the same response asks for tool work
+ * or ends with a later message (the SDK never returns it as the final output),
+ * `final_answer` for the message it returns. Deltas carry only a declared
+ * phase. Absent on legacy events and on the settlement copy.
  */
 export type AssistantMessagePhase = "commentary" | "final_answer";
 
@@ -12726,12 +12728,13 @@ export function assistantMessagePhase(payload: unknown): AssistantMessagePhase |
 }
 
 /**
- * A completion the worker streamed for one provider message (it carries the
- * provider `messageId` or a `phase`). The phase-less, id-less shape is the
- * settlement copy published with `turn.completed` by older workers, or when a
- * stream did not complete the final text itself. A streamed final message is
- * followed by its `turn.completed` with the same output, so consumers that act
- * on settled answers (Slack, `session_wait` change mode) wait for that instead.
+ * A completion the worker streamed for one provider message: it always carries
+ * a `phase`, and the provider `messageId` when the provider sent one. The
+ * phase-less, id-less shape is the settlement copy published with
+ * `turn.completed` by older workers, or when a stream did not complete the
+ * final text itself. A streamed final message is followed by its
+ * `turn.completed` with the same output, so consumers that act on settled
+ * answers (Slack, `session_wait` change mode) wait for that instead.
  */
 export function isStreamedAssistantMessageCompletion(event: {
   type: string;
