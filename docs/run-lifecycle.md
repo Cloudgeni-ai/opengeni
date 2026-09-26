@@ -1966,7 +1966,8 @@ For scheduled provider-deadline rotation, legacy commands have a separate
 two-minute cancellation grace. A PTY receives one Ctrl-C; non-PTY stdin is not
 a signal, so the worker records cancellation intent without writing Ctrl-C
 bytes. After that grace, exact process holders may be enrolled even without
-exit proof if the owner is closed and quiesced (or its direct request returned),
+exit proof if the owner has a quiescence receipt or is normally completed and
+closed (or its direct request returned),
 and no unrelated holder or mutation admission remains. An outstanding
 reconciliation claim does not grant writer authority or block this deadline
 capture. The provider is terminated only after the current workspace generation
@@ -1976,8 +1977,9 @@ starts its own grace. This path does not apply to idle or operator rotation.
 
 The same containment path covers an explicitly stopping managed command after
 at least five provider-error observations. Its cancellation request and owner
-quiescence must both predate idle grace; an absent quiescence receipt is not
-accepted for this path. Provider errors alone never enroll a running command.
+quiescence (or normal completion and closed timestamp) must both predate idle
+grace. A failed/interrupted owner without a quiescence receipt remains blocked;
+provider errors alone never enroll a running command.
 All sandbox-group activity, other-holder and child-admission exclusions remain
 in force, and only verified provider termination settles an unknown result as
 lost. A failed checkpoint leaves the provider and holders intact for retry.
