@@ -3418,11 +3418,13 @@ for (const switchTarget of [false, true]) {
       release = resolve;
     });
     let calls = 0;
-    const fixture = await renderViewerInputFixture(async (request, current) => {
-      if (++calls === 1) await blocked;
-      return receipt(current, request.operationId);
-    }, true);
+    let unmount: (() => Promise<void>) | undefined;
     try {
+      const fixture = await renderViewerInputFixture(async (request, current) => {
+        if (++calls === 1) await blocked;
+        return receipt(current, request.operationId);
+      }, true);
+      unmount = () => fixture.rendered.unmount();
       for (let index = 1; index <= 24; index++) {
         await fixture.frame(index, { frameId: "stable-main-frame" });
         await actRun(() =>
@@ -3473,7 +3475,7 @@ for (const switchTarget of [false, true]) {
       ).toBe(true);
     } finally {
       release();
-      await fixture.rendered.unmount();
+      await unmount?.();
       // oxlint-disable-next-line no-extend-native -- Restore the original built-in after the probe.
       Uint8Array.prototype.slice = originalSlice;
       canvasMock.restore();
