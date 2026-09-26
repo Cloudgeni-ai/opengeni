@@ -55,6 +55,14 @@ It does not inspect, edit, or authorize access to a document.
 
 The agent reaches a user's machine via one trusted line and keeps itself current.
 
+Managed Linux units use `KillMode=mixed`: SIGTERM reaches only the supervisor,
+which sends browserd its cooperative SIGINT. Scoped sidecars drain concurrently
+with a 60-second grace, covering browserd's 30-second close and exact owned-process
+cleanup; systemd retains a 90-second outer stop bound and final cgroup containment.
+Only byte-identical previously generated units migrate automatically; custom
+units and drop-ins remain operator-owned. These bounds do not preserve unsaved
+pages or guarantee graceful completion for a permanently stuck controller.
+
 - **Install scripts** — [`install/install.sh`](install/install.sh) (strict POSIX
   `sh`, Linux + macOS) and [`install/install.ps1`](install/install.ps1) (Windows).
   Each detects os/arch, resolves the matching GitHub-Release asset, downloads it,
@@ -201,3 +209,16 @@ wire equality. A green run proves the two generated stacks agree. The fixtures
 [`prost`]: https://docs.rs/prost
 [`protox`]: https://docs.rs/protox
 [`ts-proto`]: https://github.com/stephenh/ts-proto
+
+The optional slow-close acceptance fixture uses only synthetic profiles and a
+locally installed `chromium`. In an isolated Linux test environment, from `agent/`:
+
+```sh
+OPENGENI_TEST_SLOW_BROWSERD="$PWD/tests/fixtures/slow-browserd-chromium.sh" \
+  cargo test -p opengeni-agent shutdown_waits_for_slow_owned_cleanup_across_scopes_concurrently
+```
+
+It delays each of two sidecars' cleanup by 12 seconds, closes its own Chromium
+child, and reopens the same profile before confirming completion. This exercises
+native manager timing with real browsers; it is not a full browserd or live
+systemd integration test.
