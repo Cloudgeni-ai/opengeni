@@ -832,7 +832,10 @@ Managed Chrome on Linux drains browser stderr through a private launch
 wrapper. The last 64 KiB are retained in the session's owner-only
 `chrome-launch/chrome-stderr.log`; launcher and pipe files are removed on browser
 shutdown. This prevents a full Chrome stderr pipe from blocking CDP while keeping
-startup diagnostics bounded. Attached browsers are unaffected.
+startup diagnostics bounded. The wrapper resolves its `mkfifo` and `tail`
+utilities from the agent's `PATH`, with standard `/usr/bin` and `/bin` fallbacks,
+so Linux distributions with nonstandard installation paths are supported.
+Attached browsers are unaffected.
 
 Attached Chrome is an explicit user-profile choice, never an automatic fallback
 for an unavailable managed browser. A new attached BrowserSession creates a new

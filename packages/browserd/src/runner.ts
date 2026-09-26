@@ -479,8 +479,12 @@ async function linuxChromeStderrDrainWrapper(
 ): Promise<ManagedBrowserLaunch> {
   await access(executable, constants.X_OK);
   const actualExecutablePath = (await isScriptExecutable(executable)) ? null : executable;
-  const mkfifo = await firstExecutable(["/usr/bin/mkfifo", "/bin/mkfifo"]);
-  const tail = await firstExecutable(["/usr/bin/tail", "/bin/tail"]);
+  const mkfifo =
+    (await firstExecutableInPath(["mkfifo"])) ??
+    (await firstExecutable(["/usr/bin/mkfifo", "/bin/mkfifo"]));
+  const tail =
+    (await firstExecutableInPath(["tail"])) ??
+    (await firstExecutable(["/usr/bin/tail", "/bin/tail"]));
   if (!mkfifo || !tail) throw new Error("managed Linux Chrome requires mkfifo and tail");
   const directory = join(dirname(resolve(profileDirectory)), "chrome-launch");
   await mkdir(directory, { recursive: true, mode: 0o700 });
