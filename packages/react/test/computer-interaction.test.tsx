@@ -1,8 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import { StreamClose, StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
   ComputerActionReceipt,
+  ComputerActionRequest,
+  ComputerClipboard,
   ComputerFrame,
   ComputerFrameMetadata,
   ComputerObservation,
@@ -1195,6 +1197,7 @@ describe("ComputerViewer", () => {
 
   for (const recovery of ["Reconnect", "Refresh desktops"]) {
     test(`recovers an ended desktop producer through ${recovery} after a visible frame`, async () => {
+      const canvasMock = mockComputerCanvas();
       const current = computerSession();
       const currentTarget = target();
       const sockets: FakeComputerSocket[] = [];
@@ -1297,6 +1300,7 @@ describe("ComputerViewer", () => {
         expect(rendered.container.textContent).not.toContain("Live view disconnected");
       } finally {
         await rendered.unmount();
+        canvasMock.restore();
       }
     });
   }
@@ -1510,6 +1514,382 @@ describe("ComputerViewer", () => {
     await rendered.unmount();
   });
 });
+
+describe("ComputerViewer input reliability", () => {
+  test("retains keyboard focus after a canvas click and types after that click", async () => {
+    const canvasMock = mockComputerCanvas();
+    const fixture = await renderComputerInputFixture();
+    try {
+      await fixture.frame(1);
+      await canvasMock.finishDecode(0);
+      const pointer = new MouseEvent("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        clientX: 25,
+        clientY: 25,
+      });
+      await actRun(() => {
+        fixture.canvas.dispatchEvent(pointer);
+        fixture.canvas.dispatchEvent(
+          new MouseEvent("pointerup", {
+            bubbles: true,
+            button: 0,
+            clientX: 25,
+            clientY: 25,
+          }),
+        );
+      });
+      expect(pointer.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(fixture.keyboard);
+      await actRun(() => {
+        fixture.keyboard.value = "immediate text";
+        fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      });
+      await flush(30);
+      expect(fixture.actions.map((request) => request.action)).toEqual([
+        { type: "pointer", frameId: "frame-1", action: "click", x: 0, y: 0 },
+        { type: "keyboard", action: "type", value: "immediate text" },
+      ]);
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
+  test("uses the painted frame for pointer input and discards decoding after a target switch", async () => {
+    const canvasMock = mockComputerCanvas(true);
+    const fixture = await renderComputerInputFixture();
+    try {
+      await fixture.frame(1);
+      expect(fixture.canvas.className).toContain("invisible");
+      await canvasMock.finishDecode(0);
+      await fixture.frame(2);
+      await actRun(() => {
+        fixture.canvas.dispatchEvent(
+          new MouseEvent("pointerdown", {
+            bubbles: true,
+            button: 0,
+            clientX: 25,
+            clientY: 25,
+          }),
+        );
+        fixture.canvas.dispatchEvent(
+          new MouseEvent("pointerup", {
+            bubbles: true,
+            button: 0,
+            clientX: 25,
+            clientY: 25,
+          }),
+        );
+        fixture.keyboard.dispatchEvent(
+          new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+        );
+      });
+      await flush();
+      expect(fixture.actions[0]).toMatchObject({
+        expectedFrameId: "frame-1",
+        action: { type: "pointer", frameId: "frame-1", action: "click", x: 0, y: 0 },
+      });
+      await fixture.switchTarget();
+      await canvasMock.finishDecode(1);
+      expect(canvasMock.painted).toEqual([0]);
+      expect(fixture.canvas.className).toContain("invisible");
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
+  for (const boundary of ["target switch", "failed receipt"] as const) {
+    test(`discards queued keyboard input after a ${boundary}`, async () => {
+      let finishFirst!: (receipt: ComputerActionReceipt) => void;
+      const fixture = await renderComputerInputFixture(
+        async () =>
+          await new Promise<ComputerActionReceipt>((resolve) => {
+            finishFirst = resolve;
+          }),
+      );
+      try {
+        await actRun(() => {
+          fixture.keyboard.focus();
+          fixture.keyboard.dispatchEvent(
+            new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+          );
+          fixture.keyboard.dispatchEvent(
+            new KeyboardEvent("keydown", { bubbles: true, key: "Tab" }),
+          );
+        });
+        await flush();
+        expect(fixture.actions).toHaveLength(1);
+        if (boundary === "target switch") await fixture.switchTarget();
+        await actRun(() =>
+          finishFirst({
+            ...receipt(observation(), fixture.actions[0]!.operationId),
+            observation: null,
+            ...(boundary === "failed receipt"
+              ? {
+                  state: "failed" as const,
+                  error: {
+                    code: "resource_unavailable",
+                    message: "input failed",
+                    retryable: false,
+                  },
+                }
+              : {}),
+          }),
+        );
+        await flush();
+        expect(fixture.actions).toHaveLength(1);
+      } finally {
+        await fixture.rendered.unmount();
+      }
+    });
+  }
+
+  test("hides a frame after the selected target generation changes", async () => {
+    const canvasMock = mockComputerCanvas();
+    const fixture = await renderComputerInputFixture(async (request) =>
+      receipt(observation({ ...target(), targetGeneration: "generation-2" }), request.operationId),
+    );
+    try {
+      await fixture.frame(1);
+      await canvasMock.finishDecode(0);
+      await actRun(() => {
+        fixture.keyboard.focus();
+        fixture.keyboard.dispatchEvent(
+          new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+        );
+      });
+      await flush();
+      expect(fixture.canvas.className).toContain("invisible");
+      expect(canvasMock.painted).toEqual([0]);
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
+  test("does not paste a delayed clipboard read into a newly selected target", async () => {
+    let finishRead!: (clipboard: ComputerClipboard) => void;
+    const fixture = await renderComputerInputFixture(
+      undefined,
+      async () =>
+        await new Promise<ComputerClipboard>((resolve) => {
+          finishRead = resolve;
+        }),
+    );
+    try {
+      const paste = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", {
+        value: { getData: () => "old target text" },
+      });
+      await actRun(() => fixture.keyboard.dispatchEvent(paste));
+      await flush();
+      expect(fixture.actions.map((request) => request.action.type)).toEqual(["clipboard"]);
+      expect(finishRead).toBeDefined();
+      await fixture.switchTarget();
+      await actRun(() =>
+        finishRead({
+          computerSessionId: COMPUTER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          text: "old target text",
+          truncated: false,
+          observedAt: NOW,
+        }),
+      );
+      await flush();
+      expect(fixture.actions.map((request) => request.action)).toEqual([
+        { type: "clipboard", operation: "write", text: "old target text" },
+      ]);
+    } finally {
+      await fixture.rendered.unmount();
+    }
+  });
+
+  test("preserves scroll deltas across frames and sends scroll before a key", async () => {
+    const canvasMock = mockComputerCanvas();
+    const fixture = await renderComputerInputFixture();
+    try {
+      await fixture.frame(1);
+      await canvasMock.finishDecode(0);
+      await actRun(() => fixture.canvas.dispatchEvent(computerWheel(10)));
+      await fixture.frame(2);
+      await canvasMock.finishDecode(1);
+      await actRun(() => {
+        fixture.canvas.dispatchEvent(computerWheel(15));
+        fixture.keyboard.focus();
+        fixture.keyboard.dispatchEvent(
+          new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+        );
+      });
+      await flush(60);
+      expect(fixture.actions.map((request) => request.action)).toEqual([
+        {
+          type: "pointer",
+          frameId: "frame-2",
+          action: "scroll",
+          x: 0,
+          y: 0,
+          deltaX: 0,
+          deltaY: 25,
+        },
+        { type: "keyboard", action: "press", value: "Enter" },
+      ]);
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
+  test("dispatches a continuous wheel gesture within 45 ms", async () => {
+    const canvasMock = mockComputerCanvas();
+    const fixture = await renderComputerInputFixture();
+    try {
+      await fixture.frame(1);
+      await canvasMock.finishDecode(0);
+      const canvas = fixture.canvas;
+      jest.useFakeTimers();
+      let dispatchedBy60Ms = 0;
+      for (let index = 0; index < 10; index += 1) {
+        await actRun(() => {
+          if (index > 0) jest.advanceTimersByTime(20);
+          canvas.dispatchEvent(computerWheel(10));
+        });
+        if (index === 3) dispatchedBy60Ms = fixture.actions.length;
+      }
+      expect(dispatchedBy60Ms > 0).toBe(true);
+      await actRun(() => jest.advanceTimersByTime(45));
+      expect(
+        fixture.actions.reduce(
+          (sum, request) =>
+            sum + (request.action.type === "pointer" ? (request.action.deltaY ?? 0) : 0),
+          0,
+        ),
+      ).toBe(100);
+    } finally {
+      jest.useRealTimers();
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+});
+
+function mockComputerCanvas(deferred = false) {
+  const priorBitmap = Object.getOwnPropertyDescriptor(globalThis, "createImageBitmap");
+  const priorContext = HTMLCanvasElement.prototype.getContext;
+  const painted: number[] = [];
+  const decodes: { bitmap: ImageBitmap; resolve: (bitmap: ImageBitmap) => void }[] = [];
+  Object.defineProperty(globalThis, "createImageBitmap", {
+    configurable: true,
+    value: () => {
+      const bitmap = { index: decodes.length, close() {} } as unknown as ImageBitmap;
+      return new Promise<ImageBitmap>((resolve) => {
+        decodes.push({ bitmap, resolve });
+        if (!deferred) resolve(bitmap);
+      });
+    },
+  });
+  HTMLCanvasElement.prototype.getContext = (() => ({
+    drawImage: (bitmap: { index: number }) => painted.push(bitmap.index),
+  })) as unknown as typeof priorContext;
+  return {
+    painted,
+    finishDecode: async (index: number) => {
+      for (let tick = 0; tick < 100 && !decodes[index]; tick += 1) await flush(1);
+      expect(decodes[index]).toBeDefined();
+      await actRun(() => decodes[index]!.resolve(decodes[index]!.bitmap));
+      await flush();
+    },
+    restore: () => {
+      HTMLCanvasElement.prototype.getContext = priorContext;
+      if (priorBitmap) Object.defineProperty(globalThis, "createImageBitmap", priorBitmap);
+      else Reflect.deleteProperty(globalThis, "createImageBitmap");
+    },
+  };
+}
+
+function computerWheel(deltaY: number): WheelEvent {
+  const event = new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY });
+  Object.defineProperties(event, { clientX: { value: 20 }, clientY: { value: 20 } });
+  return event;
+}
+
+async function renderComputerInputFixture(
+  actInComputer?: (request: ComputerActionRequest) => Promise<ComputerActionReceipt>,
+  readComputerClipboard?: () => Promise<ComputerClipboard>,
+) {
+  const currentTarget = target();
+  const secondTarget = { ...target("window-2"), title: "Second desktop", focused: false };
+  const actions: ComputerActionRequest[] = [];
+  const sockets: FakeComputerSocket[] = [];
+  const client = fakeClient({
+    listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+    getComputerSession: async () => computerSession(),
+    listComputerTargets: async () => ({
+      computerSessionId: COMPUTER_SESSION_ID,
+      controllerGeneration: "controller-1",
+      targets: [currentTarget, secondTarget],
+    }),
+    observeComputerTarget: async (_workspaceId, _sessionId, targetId) =>
+      observation(targetId === secondTarget.id ? secondTarget : currentTarget),
+    attachComputerSession: async (_workspaceId, _sessionId, request) =>
+      attachment(request.targetId),
+    ...(readComputerClipboard ? { readComputerClipboard } : {}),
+    actInComputer: async (_workspaceId, _sessionId, request) => {
+      actions.push(request);
+      return actInComputer
+        ? await actInComputer(request)
+        : {
+            ...receipt(observation(currentTarget), request.operationId),
+            observation: null,
+          };
+    },
+  });
+  const rendered = await renderComponent(
+    <ComputerViewer
+      client={client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+      webSocketFactory={(url, protocols) => {
+        const socket = new FakeComputerSocket(url, protocols);
+        sockets.push(socket);
+        return socket as unknown as ComputerFrameWebSocket;
+      }}
+    />,
+  );
+  await flush(40);
+  await dispatch(sockets[0]!, "open");
+  return {
+    rendered,
+    actions,
+    get canvas() {
+      const canvas = rendered.container.querySelector<HTMLCanvasElement>("canvas")!;
+      canvas.getBoundingClientRect = () =>
+        ({ left: 0, top: 0, width: 100, height: 100 }) as DOMRect;
+      return canvas;
+    },
+    get keyboard() {
+      return rendered.container.querySelector<HTMLTextAreaElement>(
+        "textarea[aria-label='Desktop keyboard input']",
+      )!;
+    },
+    frame: async (sequence: number, overrides: Partial<ComputerFrameMetadata> = {}) => {
+      await dispatch(sockets[0]!, "message", {
+        data: frameMessage("window-1", sequence, overrides).buffer,
+      });
+      await flush();
+    },
+    switchTarget: async () => {
+      await actRun(() =>
+        [...rendered.container.querySelectorAll("button")]
+          .find((button) => button.textContent?.trim() === "Second desktop")!
+          .click(),
+      );
+      await flush();
+    },
+  };
+}
 
 async function dispatch(socket: FakeComputerSocket, type: string, event: any = {}): Promise<void> {
   await act(async () => socket.emit(type, event));

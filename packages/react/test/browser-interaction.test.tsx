@@ -4,6 +4,7 @@ import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
   AttachedBrowserBridge,
   AttachedBrowserDevice,
+  BrowserActionRequest,
   BrowserActionReceipt,
   BrowserDownload,
   BrowserFrame,
@@ -1769,6 +1770,7 @@ describe("BrowserViewer", () => {
   });
 
   test("shows peer browsers and routes semantic human input through the canonical action API", async () => {
+    const canvasMock = mockBrowserCanvas();
     const current = browserSession();
     const peer = browserSession(PEER_BROWSER_SESSION_ID, PEER_SESSION_ID, "Peer browser");
     const currentTarget = target();
@@ -1810,57 +1812,255 @@ describe("BrowserViewer", () => {
         }}
       />,
     );
-    await flush(40);
+    try {
+      await flush(40);
 
-    expect(rendered.container.textContent).toContain("Agent browser");
-    expect(rendered.container.textContent).toContain("Peer browser");
-    const continueButton = [...rendered.container.querySelectorAll("button")].find(
-      (button) => button.textContent?.trim() === "Continue",
-    );
-    expect(continueButton).toBeDefined();
-    await actRun(() => continueButton!.click());
-    await flush(5);
-    expect(actions).toHaveLength(1);
-    expect(actions[0]).toMatchObject({
-      targetId: "target-1",
-      expectedTargetGeneration: "target-1-generation",
-      expectedDocumentGeneration: "document-1",
-      expectedFrameId: "frame-document-1",
-      action: { type: "click", locator: { kind: "ref", ref: "e1" } },
-    });
-    expect(sockets).toHaveLength(1);
+      expect(rendered.container.textContent).toContain("Agent browser");
+      expect(rendered.container.textContent).toContain("Peer browser");
+      const continueButton = [...rendered.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Continue",
+      );
+      expect(continueButton).toBeDefined();
+      await actRun(() => continueButton!.click());
+      await flush(5);
+      expect(actions).toHaveLength(1);
+      expect(actions[0]).toMatchObject({
+        targetId: "target-1",
+        expectedTargetGeneration: "target-1-generation",
+        expectedDocumentGeneration: "document-1",
+        expectedFrameId: "frame-document-1",
+        action: { type: "click", locator: { kind: "ref", ref: "e1" } },
+      });
+      expect(sockets).toHaveLength(1);
 
-    await dispatch(sockets[0]!, "open");
-    await dispatch(sockets[0]!, "message", {
-      data: frameMessage("target-1", 1, "controller-1", {
-        frameId: "frame-document-1",
-        documentGeneration: "document-1",
-      }).buffer,
-    });
-    await flush(5);
-    const canvas = rendered.container.querySelector(
-      "canvas[aria-label='Interactive browser page']",
-    );
-    expect(canvas?.className).not.toContain("invisible");
+      await dispatch(sockets[0]!, "open");
+      await dispatch(sockets[0]!, "message", {
+        data: frameMessage("target-1", 1, "controller-1", {
+          frameId: "frame-document-1",
+          documentGeneration: "document-1",
+        }).buffer,
+      });
+      await flush(5);
+      const canvas = rendered.container.querySelector(
+        "canvas[aria-label='Interactive browser page']",
+      );
+      expect(canvas?.className).not.toContain("invisible");
 
-    const address = rendered.container.querySelector<HTMLInputElement>(
-      "input[aria-label='Address']",
-    );
-    const form = address?.closest("form");
-    expect(address).not.toBeNull();
-    expect(form).not.toBeNull();
-    await actRun(() => {
-      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-      setValue?.call(address, "example.com");
-      address!.dispatchEvent(new InputEvent("input", { bubbles: true }));
-      address!.dispatchEvent(new Event("change", { bubbles: true }));
+      const address = rendered.container.querySelector<HTMLInputElement>(
+        "input[aria-label='Address']",
+      );
+      const form = address?.closest("form");
+      expect(address).not.toBeNull();
+      expect(form).not.toBeNull();
+      await actRun(() => {
+        const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        setValue?.call(address, "example.com");
+        address!.dispatchEvent(new InputEvent("input", { bubbles: true }));
+        address!.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await actRun(() => form!.requestSubmit());
+      await flush(5);
+      expect(actions).toHaveLength(2);
+      expect(rendered.container.querySelector("canvas")?.className).toContain("invisible");
+      expect(rendered.container.textContent).toContain("Connecting");
+    } finally {
+      canvasMock.restore();
+      await rendered.unmount();
+    }
+  });
+
+  test("fences pointer input to the painted image and discards a decode after navigation", async () => {
+    const canvasMock = mockBrowserCanvas(true);
+    const fixture = await renderViewerInputFixture();
+    try {
+      await fixture.frame(1);
+      await canvasMock.finishDecode(0);
+      await fixture.frame(2, { deviceScaleFactor: 2 });
+      await actRun(() => {
+        fixture.canvas.dispatchEvent(
+          new MouseEvent("pointerdown", {
+            bubbles: true,
+            button: 0,
+            clientX: 25,
+            clientY: 25,
+          }),
+        );
+        fixture.canvas.dispatchEvent(
+          new MouseEvent("pointerup", {
+            bubbles: true,
+            button: 0,
+            clientX: 25,
+            clientY: 25,
+          }),
+        );
+      });
+      await flush();
+      expect(fixture.actions[0]).toMatchObject({
+        expectedFrameId: "frame-1",
+        action: { type: "pointer", action: "click", x: 0.25, y: 0.25 },
+      });
+
+      await actRun(() =>
+        fixture.rendered.container
+          .querySelector<HTMLButtonElement>("button[aria-label='Reload']")!
+          .click(),
+      );
+      await flush();
+      await canvasMock.finishDecode(1);
+      expect(canvasMock.painted).toEqual([0]);
+      expect(fixture.canvas.className).toContain("invisible");
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
+  test("drops queued semantic input when the human switches browser tabs", async () => {
+    let finishFirst!: (receipt: BrowserActionReceipt) => void;
+    const fixture = await renderViewerInputFixture(async (request, currentObservation) => {
+      if (request.action.type === "click") {
+        return await new Promise<BrowserActionReceipt>((resolve) => {
+          finishFirst = resolve;
+        });
+      }
+      return receipt(currentObservation, request.operationId);
     });
-    await actRun(() => form!.requestSubmit());
-    await flush(5);
-    expect(actions).toHaveLength(2);
-    expect(canvas?.className).toContain("invisible");
-    expect(rendered.container.textContent).toContain("Connecting");
-    await rendered.unmount();
+    try {
+      const continueButton = [...fixture.rendered.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Continue",
+      )!;
+      await actRun(() => {
+        continueButton.click();
+        continueButton.click();
+      });
+      await flush();
+      expect(fixture.actions).toHaveLength(1);
+      await actRun(() =>
+        [...fixture.rendered.container.querySelectorAll("button")]
+          .find((button) => button.textContent?.trim() === "Second tab")!
+          .click(),
+      );
+      await flush();
+      await actRun(() => finishFirst({ ...receipt(observation()), observation: null }));
+      await flush();
+      expect(fixture.actions).toHaveLength(1);
+    } finally {
+      await fixture.rendered.unmount();
+    }
+  });
+
+  test("retains owned keyboard focus after navigation without stealing address or other-tab focus", async () => {
+    const canvasMock = mockBrowserCanvas();
+    const fixture = await renderViewerInputFixture();
+    try {
+      await fixture.frame(1);
+      await actRun(() =>
+        fixture.canvas.dispatchEvent(
+          new MouseEvent("pointerdown", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            clientX: 25,
+            clientY: 25,
+          }),
+        ),
+      );
+      const initialKeyboard = fixture.keyboard;
+      expect(document.activeElement).toBe(initialKeyboard);
+      const reload = fixture.rendered.container.querySelector<HTMLButtonElement>(
+        "button[aria-label='Reload']",
+      )!;
+      await actRun(() => reload.click());
+      await flush();
+      expect(fixture.keyboard).not.toBe(initialKeyboard);
+      expect(document.activeElement === fixture.keyboard).toBe(true);
+
+      const address = fixture.rendered.container.querySelector<HTMLInputElement>(
+        "input[aria-label='Address']",
+      )!;
+      await actRun(() => {
+        address.focus();
+        reload.click();
+      });
+      await flush();
+      expect(document.activeElement).toBe(address);
+      expect(document.activeElement).not.toBe(fixture.keyboard);
+
+      await actRun(() => {
+        fixture.keyboard.focus();
+        [...fixture.rendered.container.querySelectorAll("button")]
+          .find((button) => button.textContent?.trim() === "Second tab")!
+          .click();
+      });
+      await flush();
+      expect(document.activeElement).not.toBe(fixture.keyboard);
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
+  test("preserves a wheel burst across painted frame updates and before a key", async () => {
+    const canvasMock = mockBrowserCanvas();
+    const fixture = await renderViewerInputFixture();
+    try {
+      await fixture.frame(1);
+      await actRun(() => fixture.canvas.dispatchEvent(browserWheel(10)));
+      await fixture.frame(2);
+      await actRun(() => {
+        fixture.canvas.dispatchEvent(browserWheel(15));
+        fixture.keyboard.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            bubbles: true,
+            key: "Enter",
+          }),
+        );
+      });
+      await flush(60);
+      expect(fixture.actions.map((request) => request.action)).toEqual([
+        { type: "pointer", action: "scroll", x: 0.2, y: 0.2, deltaX: 0, deltaY: 25 },
+        { type: "press", key: "Enter" },
+      ]);
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
+  test("dispatches continuous wheel input within 45 ms without waiting for gesture idle", async () => {
+    const canvasMock = mockBrowserCanvas();
+    const fixture = await renderViewerInputFixture();
+    try {
+      await fixture.frame(1);
+      const canvas = fixture.canvas;
+      jest.useFakeTimers();
+      let dispatchedBy60Ms = 0;
+      for (let index = 0; index < 10; index += 1) {
+        await actRun(() => {
+          if (index > 0) jest.advanceTimersByTime(20);
+          canvas.dispatchEvent(browserWheel(10));
+        });
+        if (index === 3) dispatchedBy60Ms = fixture.actions.length;
+      }
+      await actRun(() => jest.advanceTimersByTime(20));
+      expect(fixture.actions.length >= 3).toBe(true);
+      expect(dispatchedBy60Ms > 0).toBe(true);
+      await actRun(() => jest.advanceTimersByTime(45));
+      const scrolls = fixture.actions.map((request) => request.action);
+      expect(
+        scrolls.every((action) => action.type === "pointer" && action.action === "scroll"),
+      ).toBe(true);
+      expect(
+        scrolls.reduce(
+          (sum, action) => sum + (action.type === "pointer" ? (action.deltaY ?? 0) : 0),
+          0,
+        ),
+      ).toBe(100);
+    } finally {
+      jest.useRealTimers();
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
   });
 
   test("keeps unrelated workspace browsers discoverable without claiming one for this agent", async () => {
@@ -1890,6 +2090,7 @@ describe("BrowserViewer", () => {
   });
 
   test("routes clipboard events and only committed IME text through causal browser actions", async () => {
+    const canvasMock = mockBrowserCanvas();
     const current = browserSession();
     const currentTarget = target();
     const currentObservation = observation(BROWSER_SESSION_ID, currentTarget);
@@ -2003,6 +2204,7 @@ describe("BrowserViewer", () => {
       ]);
       expect(copied).toEqual(["remote selection"]);
     } finally {
+      canvasMock.restore();
       if (priorClipboard) Object.defineProperty(navigator, "clipboard", priorClipboard);
       else Reflect.deleteProperty(navigator, "clipboard");
       await rendered.unmount();
@@ -2751,6 +2953,126 @@ describe("BrowserViewer", () => {
 
 async function dispatch(socket: FakeBrowserSocket, type: string, event: any = {}): Promise<void> {
   await act(async () => socket.emit(type, event));
+}
+
+function mockBrowserCanvas(deferred = false) {
+  const priorBitmap = Object.getOwnPropertyDescriptor(globalThis, "createImageBitmap");
+  const priorContext = HTMLCanvasElement.prototype.getContext;
+  const painted: number[] = [];
+  const decodes: { bitmap: ImageBitmap; resolve: (bitmap: ImageBitmap) => void }[] = [];
+  Object.defineProperty(globalThis, "createImageBitmap", {
+    configurable: true,
+    value: () => {
+      const index = decodes.length;
+      const bitmap = { index, close() {} } as unknown as ImageBitmap;
+      return new Promise<ImageBitmap>((resolve) => {
+        decodes.push({ bitmap, resolve });
+        if (!deferred) resolve(bitmap);
+      });
+    },
+  });
+  HTMLCanvasElement.prototype.getContext = (() => ({
+    drawImage: (bitmap: { index: number }) => painted.push(bitmap.index),
+  })) as unknown as typeof priorContext;
+  return {
+    painted,
+    finishDecode: async (index: number) => {
+      expect(decodes[index]).toBeDefined();
+      await actRun(() => decodes[index]!.resolve(decodes[index]!.bitmap));
+      await flush();
+    },
+    restore: () => {
+      HTMLCanvasElement.prototype.getContext = priorContext;
+      if (priorBitmap) Object.defineProperty(globalThis, "createImageBitmap", priorBitmap);
+      else Reflect.deleteProperty(globalThis, "createImageBitmap");
+    },
+  };
+}
+
+function browserWheel(deltaY: number): WheelEvent {
+  const event = new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY });
+  // happy-dom's WheelEvent does not implement its inherited pointer coordinates.
+  Object.defineProperties(event, { clientX: { value: 20 }, clientY: { value: 20 } });
+  return event;
+}
+
+async function renderViewerInputFixture(
+  actInBrowser?: (
+    request: BrowserActionRequest,
+    current: BrowserObservation,
+  ) => Promise<BrowserActionReceipt>,
+) {
+  const current = browserSession();
+  let currentTarget = target();
+  let documentGeneration = 1;
+  const secondTarget = {
+    ...target(BROWSER_SESSION_ID, "target-2"),
+    title: "Second tab",
+    selected: false,
+  };
+  const actions: BrowserActionRequest[] = [];
+  const socket = new FakeBrowserSocket("wss://browser.example.test/v1/frames", []);
+  const client = fakeClient({
+    listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+    getBrowserSession: async () => current,
+    listBrowserTargets: async () => ({
+      browserSessionId: BROWSER_SESSION_ID,
+      controllerGeneration: "controller-1",
+      targets: [currentTarget, secondTarget],
+    }),
+    observeBrowserTarget: async () => observation(BROWSER_SESSION_ID, currentTarget),
+    attachBrowserSession: async () => attachment(currentTarget.id),
+    selectBrowserTarget: async () => {
+      currentTarget = { ...secondTarget, selected: true };
+      return observation(BROWSER_SESSION_ID, currentTarget);
+    },
+    actInBrowser: async (_workspaceId, _browserSessionId, request) => {
+      actions.push(request);
+      if (request.action.type === "navigate") {
+        currentTarget = {
+          ...currentTarget,
+          documentGeneration: `document-${++documentGeneration}`,
+        };
+      }
+      const currentObservation = observation(BROWSER_SESSION_ID, currentTarget);
+      return actInBrowser
+        ? await actInBrowser(request, currentObservation)
+        : receipt(currentObservation, request.operationId);
+    },
+  });
+  const rendered = await renderComponent(
+    <BrowserViewer
+      client={client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+      webSocketFactory={() => socket as unknown as BrowserFrameWebSocket}
+    />,
+  );
+  await flush(30);
+  await dispatch(socket, "open");
+  return {
+    rendered,
+    actions,
+    get canvas() {
+      const canvas = rendered.container.querySelector<HTMLCanvasElement>(
+        "canvas[aria-label='Interactive browser page']",
+      )!;
+      canvas.getBoundingClientRect = () =>
+        ({ left: 0, top: 0, width: 100, height: 100 }) as DOMRect;
+      return canvas;
+    },
+    get keyboard() {
+      return rendered.container.querySelector<HTMLTextAreaElement>(
+        "textarea[aria-label='Browser keyboard input']",
+      )!;
+    },
+    frame: async (sequence: number, overrides: Partial<BrowserFrameMetadata> = {}) => {
+      await dispatch(socket, "message", {
+        data: frameMessage("target-1", sequence, "controller-1", overrides).buffer,
+      });
+      await flush();
+    },
+  };
 }
 
 function relayMessage(tag: number, body: Uint8Array): ArrayBuffer {
