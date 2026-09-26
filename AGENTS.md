@@ -354,6 +354,11 @@ operator procedure.
 
 ## Keeping these notes current
 
+Signed macOS application updates must replace the entire verified bundle and
+retain it for rollback; never overwrite only `Contents/MacOS/opengeni-agent`.
+Pre-0.1.29 Mac agents require the official installer for that one-time bootstrap.
+See `docs/connected-machines.md` for release selection and receipt semantics.
+
 Managed production package availability is reconciled automatically after the
 runtime becomes healthy; it does not wait for later acceptance. See
 `reconcile-production-packages.yml` and `docs/deployment.md`.

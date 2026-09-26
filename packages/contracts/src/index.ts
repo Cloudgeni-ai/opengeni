@@ -16143,6 +16143,7 @@ export const MachineRuntime = z.object({
   updateChannel: z.enum(["stable", "beta"]).nullable(),
   desiredVersion: z.string().nullable(),
   versionState: z.enum(["unknown", "current", "outdated", "ahead", "updating", "update_failed"]),
+  updateBlockedReason: z.string().nullable().optional(),
   capabilities: MachineRuntimeCapabilities,
   update: MachineUpdateState.nullable(),
 });

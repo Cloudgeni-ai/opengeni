@@ -29,6 +29,16 @@ fn test_pubkey() -> String {
 }
 
 #[test]
+fn app_target_never_falls_back_to_a_standalone_binary() {
+    let release = staged_release();
+    let source = DirSource::new(release.path());
+    let mut cfg = config_for(release.path());
+    cfg.target = "universal-apple-darwin-app".to_string();
+    assert!(matches!(check_update_manifest(&source, &cfg),
+        Err(UpdateError::NoArtifactForTarget(target)) if target == cfg.target));
+}
+
+#[test]
 fn manifest_only_check_does_not_download_the_artifact() {
     let release = staged_release();
     let artifact = release.path().join("agent/stable/agent-v1.0.1");

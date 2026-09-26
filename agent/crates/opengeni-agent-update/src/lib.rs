@@ -32,6 +32,8 @@
 
 #![doc(html_root_url = "https://docs.rs/opengeni-agent-update")]
 
+#[cfg(target_os = "macos")]
+mod app_bundle;
 mod apply;
 mod error;
 mod manifest;
@@ -43,6 +45,8 @@ use std::path::{Path, PathBuf};
 use opengeni_agent_proto::v1::{UpdateArtifact, UpdateManifest};
 use tracing::{info, warn};
 
+#[cfg(target_os = "macos")]
+pub use app_bundle::{app_bundle_root, APP_BUNDLE_TARGET};
 #[cfg(unix)]
 pub use apply::replace_running_exe_at;
 pub use apply::{backup_path, promote, replace_running_exe, rollback, swap_binary, BACKUP_SUFFIX};
@@ -299,6 +303,8 @@ impl PendingUpdate {
     ///
     /// [`UpdateError::Io`] on a filesystem failure.
     pub fn apply_to(&self, install_path: &Path) -> UpdateResult<PathBuf> {
+        #[cfg(target_os = "macos")]
+        reject_bundle_binary_replacement(install_path)?;
         swap_binary(install_path, &self.bytes)
     }
 
@@ -310,6 +316,8 @@ impl PendingUpdate {
     /// Returns an I/O error if backup or replacement fails.
     #[cfg(unix)]
     pub fn apply_running_at(&self, install_path: &Path) -> UpdateResult<PathBuf> {
+        #[cfg(target_os = "macos")]
+        reject_bundle_binary_replacement(install_path)?;
         replace_running_exe_at(install_path, &self.bytes)
     }
 
@@ -320,8 +328,42 @@ impl PendingUpdate {
     ///
     /// [`UpdateError::Io`] if the swap fails.
     pub fn apply_running(&self) -> UpdateResult<PathBuf> {
+        #[cfg(target_os = "macos")]
+        {
+            let path = std::env::current_exe()
+                .map_err(|error| UpdateError::io("current executable", error))?;
+            reject_bundle_binary_replacement(&path)?;
+        }
         replace_running_exe(&self.bytes)
     }
+
+    /// Installs the complete verified, signed macOS application. The callback
+    /// persists the managed receipt after the new app passes signature/version
+    /// checks; failure restores the complete previous bundle atomically.
+    ///
+    /// # Errors
+    /// Returns a verification, staging, exchange, receipt, or rollback error.
+    #[cfg(target_os = "macos")]
+    pub fn apply_app_bundle(
+        &self,
+        install_path: &Path,
+        commit: impl FnOnce(&str) -> UpdateResult<()>,
+    ) -> UpdateResult<String> {
+        app_bundle::apply(install_path, &self.bytes, &self.version, commit)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn reject_bundle_binary_replacement(install_path: &Path) -> UpdateResult<()> {
+    if install_path
+        .ancestors()
+        .any(|path| path.extension().is_some_and(|ext| ext == "app"))
+    {
+        return Err(UpdateError::HealthCheck(
+            "an app-bundle install requires a complete signed app update".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Checks for and fully VERIFIES (but does not apply) an update against `source`.

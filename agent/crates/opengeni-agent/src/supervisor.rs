@@ -1359,7 +1359,12 @@ impl<P: Platform + 'static> Supervisor<P> {
                     shutdown.request_update();
                 }
                 Ok(Err(code)) => {
-                    let rolled_back = code == "startup_preflight_failed_rolled_back";
+                    let rolled_back = matches!(
+                        code.as_str(),
+                        "startup_preflight_failed_rolled_back"
+                            | "update_receipt_persist_failed_rolled_back"
+                            | "signed_app_update_failed_rolled_back"
+                    );
                     publish_agent_update_progress(
                         &client,
                         &events_subject,
