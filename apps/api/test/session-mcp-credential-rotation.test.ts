@@ -173,6 +173,32 @@ function send(app: Hono, f: Awaited<ReturnType<typeof fixture>>, body: unknown =
 }
 
 describe("standalone credential rotation HTTP authority", () => {
+  test("host-approved rotation completes nested authorization on one transaction connection", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const operations: string[] = [];
+    const app = appWith({
+      authorizeSession: async ({ operation }) => {
+        operations.push(operation);
+        return { allowed: true, relatedSessionAccess: "target" };
+      },
+    });
+    const response = await send(app, f);
+    expect(response.status).toBe(200);
+    expect(operations).toEqual([
+      "session.mcp.credentials.rotate",
+      "session.mcp.credentials.rotate",
+    ]);
+    expect(await response.json()).toMatchObject({
+      sessionId: f.session.id,
+      servers: [{ id: "external", credentialVersion: 2 }],
+    });
+    expect(
+      await admin`select id from session_command_receipts
+      where target_session_id = ${f.session.id}`,
+    ).toHaveLength(1);
+  });
+
   test("asUser can replace its own personal binding, never another user or the service", async () => {
     if (!available) return;
     const f = await fixture();
