@@ -111,7 +111,13 @@ test("the free model's daily limit names it and offers credits, a subscription a
     failureCode: "provider_quota_exhausted",
     quotaScope: "daily",
   };
-  const banner = (props: { freeModel?: boolean; modelChanged?: boolean }) => (
+  const banner = (props: {
+    freeModel?: boolean;
+    modelChanged?: boolean;
+    subscriptions?: { codex: boolean; supergrok: boolean };
+    canChooseModel?: boolean;
+    hasModelPicker?: boolean;
+  }) => (
     <FailedSessionBanner
       failure={daily}
       actions={actions}
@@ -119,6 +125,7 @@ test("the free model's daily limit names it and offers credits, a subscription a
       canBuyCredits
       canConnectModel
       canChooseModel
+      subscriptions={{ codex: true, supergrok: true }}
       {...props}
     />
   );
@@ -127,10 +134,30 @@ test("the free model's daily limit names it and offers credits, a subscription a
   const headline = () => row().querySelector("span")!.textContent;
   const labels = () => [...row().querySelectorAll("a, button")].map((node) => node.textContent);
   expect(headline()).toBe(
-    "The free model has reached its daily limit. Add OpenGeni credits, connect ChatGPT or SuperGrok, or pick another model to keep going.",
+    "The free model has reached its daily limit. Buy OpenGeni credits, connect ChatGPT or SuperGrok, or pick another model to keep going.",
   );
-  expect(labels()).toEqual(["Add credits", "Connect a subscription", "Retry"]);
+  expect(labels()).toEqual(["Buy credits", "Connect a subscription", "Retry"]);
   expect(row().querySelector("details p")!.textContent).toBe(detail);
+
+  // A deployment without subscriptions never names them or links to them.
+  await act(async () =>
+    root!.render(banner({ freeModel: true, subscriptions: { codex: false, supergrok: false } })),
+  );
+  expect(headline()).toBe(
+    "The free model has reached its daily limit. Buy OpenGeni credits, connect a model provider, or pick another model to keep going.",
+  );
+  expect(labels()).toEqual(["Buy credits", "Connect a model", "Retry"]);
+  await act(async () =>
+    root!.render(banner({ freeModel: true, subscriptions: { codex: true, supergrok: false } })),
+  );
+  expect(headline()).toContain("connect ChatGPT, or pick another model");
+  expect(labels()).toEqual(["Buy credits", "Connect ChatGPT", "Retry"]);
+
+  // Sending or a pending Retry locks the picker briefly; the remedies hold steady.
+  await act(async () =>
+    root!.render(banner({ freeModel: true, canChooseModel: false, hasModelPicker: true })),
+  );
+  expect(headline()).toContain("or pick another model to keep going.");
 
   // Once another model is picked, Retry runs on it and the remedies step aside.
   await act(async () => root!.render(banner({ freeModel: true, modelChanged: true })));

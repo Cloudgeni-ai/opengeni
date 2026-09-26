@@ -4,12 +4,15 @@ import type { ComponentProps } from "react";
 import { Button } from "@/components/ui/button";
 import type { SessionFailureSummary } from "@/lib/events";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
-import { freeModelDailyLimitReason } from "@/lib/free-model-limit-copy";
+import type { ConnectableSubscriptions } from "@/lib/deployment-free-model";
+import { freeModelConnectRemedy, freeModelDailyLimitReason } from "@/lib/free-model-limit-copy";
 import { FailedSessionActions } from "./failed-session-actions";
 import {
   SandboxRecoveryActions,
   type SandboxRecoveryActionsProps,
 } from "./sandbox-recovery-actions";
+
+const NO_SUBSCRIPTIONS: ConnectableSubscriptions = { codex: false, supergrok: false };
 
 /** Presentation only: admission, billing and retry identity remain with their owners. */
 export function FailedSessionBanner({
@@ -21,6 +24,8 @@ export function FailedSessionBanner({
   modelChanged = false,
   canChooseModel = false,
   freeModel = false,
+  subscriptions = NO_SUBSCRIPTIONS,
+  hasModelPicker,
   actions,
   sandboxRecovery,
 }: {
@@ -33,6 +38,13 @@ export function FailedSessionBanner({
   canChooseModel?: boolean;
   /** The failed turn ran on the deployment's free model (catalog `cost: "free"`). */
   freeModel?: boolean;
+  /** Subscriptions this deployment offers, for the free model's connect remedy. */
+  subscriptions?: ConnectableSubscriptions;
+  /**
+   * The composer shows a model picker, even while sending or a Retry briefly
+   * locks it. Keeps the free model's remedies steady; defaults to `canChooseModel`.
+   */
+  hasModelPicker?: boolean;
   actions?: ComponentProps<typeof FailedSessionActions>;
   sandboxRecovery?: Omit<
     SandboxRecoveryActionsProps,
@@ -58,7 +70,8 @@ export function FailedSessionBanner({
         modelChanged,
         canBuyCredits: offerCredits,
         canConnectModel: offerConnect,
-        canChooseModel: chooseModel,
+        subscriptions,
+        canChooseModel: hasModelPicker ?? canChooseModel,
       })
     : reason;
   // Retrying the same request on the same model cannot fix a missing model or
@@ -96,15 +109,18 @@ export function FailedSessionBanner({
         ) : null}
         {freeModelLimit && !modelChanged && workspaceId ? (
           <>
-            {offerCredits ? <BuyCreditsLink workspaceId={workspaceId} label="Add credits" /> : null}
+            {offerCredits ? <BuyCreditsLink workspaceId={workspaceId} /> : null}
             {offerConnect ? (
-              <ConnectModelLink workspaceId={workspaceId} label="Connect a subscription" />
+              <ConnectModelLink
+                workspaceId={workspaceId}
+                label={freeModelConnectRemedy(subscriptions).linkLabel}
+              />
             ) : null}
           </>
         ) : null}
         {billingFailure ? (
           workspaceId && canBuyCredits ? (
-            <BuyCreditsLink workspaceId={workspaceId} label="Buy credits" />
+            <BuyCreditsLink workspaceId={workspaceId} />
           ) : workspaceId && canConnectModel ? (
             <ConnectModelLink workspaceId={workspaceId} label="Connect a model" />
           ) : null
@@ -124,7 +140,7 @@ export function FailedSessionBanner({
   );
 }
 
-function BuyCreditsLink({ workspaceId, label }: { workspaceId: string; label: string }) {
+function BuyCreditsLink({ workspaceId }: { workspaceId: string }) {
   return (
     <Button asChild size="sm" variant="ghost">
       <Link
@@ -132,7 +148,7 @@ function BuyCreditsLink({ workspaceId, label }: { workspaceId: string; label: st
         params={{ workspaceId }}
         search={{ section: "billing" }}
       >
-        {label}
+        Buy credits
       </Link>
     </Button>
   );
