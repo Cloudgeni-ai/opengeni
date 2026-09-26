@@ -173,81 +173,95 @@ describe("web API auth helpers", () => {
     });
   });
 
-  test("bounds browser event streams only on HTTP/1", () => {
+  test("bounds browser event streams until multiplexed HTTP is observed", () => {
     expect(shouldBoundBrowserSseForProtocol("http/1.0")).toBe(true);
     expect(shouldBoundBrowserSseForProtocol("http/1.1")).toBe(true);
     expect(shouldBoundBrowserSseForProtocol("h2")).toBe(false);
+    expect(shouldBoundBrowserSseForProtocol("h2c")).toBe(false);
     expect(shouldBoundBrowserSseForProtocol("h3")).toBe(false);
-    expect(shouldBoundBrowserSseForProtocol(null)).toBe(false);
+    expect(shouldBoundBrowserSseForProtocol("h3-29")).toBe(false);
+    expect(shouldBoundBrowserSseForProtocol(" H2 ")).toBe(false);
+    expect(shouldBoundBrowserSseForProtocol(null)).toBe(true);
+    expect(shouldBoundBrowserSseForProtocol(undefined)).toBe(true);
+    expect(shouldBoundBrowserSseForProtocol("")).toBe(true);
+    expect(shouldBoundBrowserSseForProtocol("unknown")).toBe(true);
   });
 
-  test("holds a new bounded stream until foreground API reads drain", async () => {
-    const originalFetch = globalThis.fetch;
-    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
-    const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
-    let finiteController!: ReadableStreamDefaultController<Uint8Array>;
-    let streamDispatches = 0;
-    const streamAccepts: Array<string | null> = [];
-    Object.defineProperty(globalThis, "window", {
-      configurable: true,
-      value: { location: new URL("https://api.example.test/workspaces/current") },
-    });
-    Object.defineProperty(performance, "getEntriesByType", {
-      configurable: true,
-      value: (type: string) => (type === "navigation" ? [{ nextHopProtocol: "http/1.1" }] : []),
-    });
-    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      const url = new URL(String(input));
-      if (url.pathname === "/v1/workspaces") {
-        return new Response(
-          new ReadableStream<Uint8Array>({
-            start(controller) {
-              finiteController = controller;
-            },
-          }),
-          { headers: { "content-type": "application/json" } },
-        );
-      }
-      streamDispatches += 1;
-      streamAccepts.push(new Headers(init?.headers).get("accept"));
-      return new Response(": connected\n\n", {
-        headers: {
-          "content-type": "application/vnd.opengeni.sse-batch; charset=utf-8",
-          "content-length": "13",
-        },
+  test.each(["http1", "masked", "missing"] as const)(
+    "holds a new bounded stream until foreground API reads drain with %s timing",
+    async (timing) => {
+      const originalFetch = globalThis.fetch;
+      const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+      const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
+      let finiteController!: ReadableStreamDefaultController<Uint8Array>;
+      let streamDispatches = 0;
+      const streamAccepts: Array<string | null> = [];
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: { location: new URL("https://api.example.test/workspaces/current") },
       });
-    }) as unknown as typeof fetch;
+      Object.defineProperty(performance, "getEntriesByType", {
+        configurable: true,
+        value: (type: string) =>
+          timing === "http1" && type === "navigation"
+            ? [{ nextHopProtocol: "http/1.1" }]
+            : timing === "masked" && type === "resource"
+              ? [{ name: "https://api.example.test/v1/workspaces", nextHopProtocol: "" }]
+              : [],
+      });
+      globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/v1/workspaces") {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                finiteController = controller;
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        streamDispatches += 1;
+        streamAccepts.push(new Headers(init?.headers).get("accept"));
+        return new Response(": connected\n\n", {
+          headers: {
+            "content-type": "application/vnd.opengeni.sse-batch; charset=utf-8",
+            "content-length": "13",
+          },
+        });
+      }) as unknown as typeof fetch;
 
-    try {
-      configureManagedActorEpoch("foreground-gate");
-      const finite = managedActorFetch("https://api.example.test/v1/workspaces");
-      await Promise.resolve();
-      const stream = managedActorFetch(
-        "https://api.example.test/v1/workspaces/current/live-events/stream",
-        { headers: { accept: "text/event-stream" } },
-      );
-      await Promise.resolve();
-      expect(streamDispatches).toBe(0);
-      finiteController.enqueue(new TextEncoder().encode("[]"));
-      finiteController.close();
-      const finiteResponse = await finite;
-      const streamResponse = await stream;
-      expect(streamDispatches).toBe(1);
-      expect(streamAccepts).toEqual(["application/vnd.opengeni.sse-batch"]);
-      await finiteResponse.body!.cancel();
-      await streamResponse.body!.cancel();
-    } finally {
-      configureManagedActorEpoch(null);
-      globalThis.fetch = originalFetch;
-      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
-      else Reflect.deleteProperty(globalThis, "window");
-      if (entriesDescriptor) {
-        Object.defineProperty(performance, "getEntriesByType", entriesDescriptor);
-      } else {
-        Reflect.deleteProperty(performance, "getEntriesByType");
+      try {
+        configureManagedActorEpoch("foreground-gate");
+        const finite = managedActorFetch("https://api.example.test/v1/workspaces");
+        await Promise.resolve();
+        const stream = managedActorFetch(
+          "https://api.example.test/v1/workspaces/current/live-events/stream",
+          { headers: { accept: "text/event-stream" } },
+        );
+        await Promise.resolve();
+        expect(streamDispatches).toBe(0);
+        finiteController.enqueue(new TextEncoder().encode("[]"));
+        finiteController.close();
+        const finiteResponse = await finite;
+        const streamResponse = await stream;
+        expect(streamDispatches).toBe(1);
+        expect(streamAccepts).toEqual(["application/vnd.opengeni.sse-batch"]);
+        await finiteResponse.body!.cancel();
+        await streamResponse.body!.cancel();
+      } finally {
+        configureManagedActorEpoch(null);
+        globalThis.fetch = originalFetch;
+        if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+        else Reflect.deleteProperty(globalThis, "window");
+        if (entriesDescriptor) {
+          Object.defineProperty(performance, "getEntriesByType", entriesDescriptor);
+        } else {
+          Reflect.deleteProperty(performance, "getEntriesByType");
+        }
       }
-    }
-  });
+    },
+  );
 
   test("aborts a bounded stream that never receives response headers", async () => {
     jest.useFakeTimers();
@@ -348,6 +362,73 @@ describe("web API auth helpers", () => {
         Reflect.deleteProperty(performance, "getEntriesByType");
       }
       jest.useRealTimers();
+    }
+  });
+
+  test("keeps live events flowing while an attention mutation is pending", async () => {
+    const originalFetch = globalThis.fetch;
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
+    let mutationController!: ReadableStreamDefaultController<Uint8Array>;
+    let streamDispatches = 0;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: new URL("https://api.example.test/workspaces/current"),
+      },
+    });
+    Object.defineProperty(performance, "getEntriesByType", {
+      configurable: true,
+      value: () => [],
+    });
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      if (new URL(String(input)).pathname.endsWith("/attention")) {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              mutationController = controller;
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      streamDispatches += 1;
+      return new Response(": connected\n\n", {
+        headers: {
+          "content-type": "application/vnd.opengeni.sse-batch",
+          "content-length": "13",
+        },
+      });
+    }) as unknown as typeof fetch;
+    try {
+      configureManagedActorEpoch("pending-attention");
+      const mutation = managedActorFetch("https://api.example.test/v1/sessions/current/attention", {
+        method: "PUT",
+        body: "{}",
+      });
+      void mutation.catch(() => {});
+      await Promise.resolve();
+      const stream = managedActorFetch(
+        "https://api.example.test/v1/workspaces/current/live-events/stream",
+        {
+          headers: { accept: "text/event-stream" },
+        },
+      );
+      void stream.catch(() => {});
+      await Promise.resolve();
+      expect(streamDispatches).toBe(1);
+      mutationController.enqueue(new TextEncoder().encode("{}"));
+      mutationController.close();
+      await (await mutation).body!.cancel();
+      await (await stream).body!.cancel();
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      if (entriesDescriptor)
+        Object.defineProperty(performance, "getEntriesByType", entriesDescriptor);
+      else Reflect.deleteProperty(performance, "getEntriesByType");
     }
   });
 
