@@ -159,6 +159,7 @@ export type BrowserCdpConnection = {
 };
 
 type TargetInfo = {
+  browserContextId: string | null;
   targetId: string;
   type: string;
   title: string;
@@ -271,6 +272,8 @@ export type AgentBrowserDriverOptions = {
   frameStreaming?: boolean;
   emulation?: BrowserSessionEmulation;
   permissionControl?: boolean;
+  /** Experimental ephemeral context lease. Never a durable browser profile. */
+  browserContextId?: string;
 };
 
 export type BrowserSessionEmulation = {
@@ -332,6 +335,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly frameStreaming: boolean;
   private readonly emulation: BrowserSessionEmulation | null;
   private readonly permissionControl: boolean;
+  private readonly browserContextId: string | undefined;
+  private readonly ownedDownloads = new Set<string>();
   private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
   private readonly resolveWorkspaceFiles:
     | ((operationId: string, workspaceFileIds: readonly string[]) => Promise<readonly string[]>)
@@ -360,6 +365,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private started = false;
 
   constructor(options: AgentBrowserDriverOptions) {
+    if (
+      options.browserContextId !== undefined &&
+      (!options.browserContextId ||
+        options.targetLifecycle !== "cdp" ||
+        options.foregroundManagedTabs ||
+        options.runner.externalAuth ||
+        (options.engine !== undefined && options.engine !== "chromium"))
+    ) {
+      throw new Error(
+        "ephemeral contexts require Chromium CDP lifecycle without foreground or external auth",
+      );
+    }
+    this.browserContextId = options.browserContextId;
     this.browserSessionId = options.browserSessionId;
     this.controllerGeneration = options.controllerGeneration;
     this.runner = options.runner;
@@ -397,7 +415,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection = await this.ensureConnection();
       const created = await connection.send<{ targetId?: unknown }>(
         "Target.createTarget",
-        { url: "about:blank", background: true },
+        { url: "about:blank", background: true, ...this.contextScope() },
         { timeoutMs: BROWSER_START_TIMEOUT_MS },
       );
       launched = {
@@ -410,7 +428,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (!page) {
         const created = await connection.send<{ targetId?: unknown }>(
           "Target.createTarget",
-          { url: "about:blank", background: true },
+          { url: "about:blank", background: true, ...this.contextScope() },
           { timeoutMs: BROWSER_START_TIMEOUT_MS },
         );
         if (typeof created.targetId !== "string") {
@@ -477,6 +495,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const connection = await this.ensureConnection();
     const deferNavigation = this.emulation !== null && url !== "about:blank";
     const result = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
+      ...this.contextScope(),
       url: deferNavigation ? "about:blank" : url,
       background: true,
     });
@@ -519,6 +538,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     for (const unsubscribe of this.browserUnsubscribe.splice(0)) unsubscribe();
     for (const targetId of [...this.states.keys()]) this.removeState(targetId);
     this.firstSeenAt.clear();
+    this.ownedDownloads.clear();
     const connection = this.connection;
     this.connection = null;
     this.connectionPromise = null;
@@ -562,6 +582,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async runtimeSnapshot(): Promise<BrowserRuntimeSnapshot> {
+    if (this.browserContextId) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        "ephemeral browser contexts cannot capture or restore durable profiles",
+      );
+    }
     const targets = await this.listTargets();
     const tabs = targets
       .filter((target) => target.kind === "page" || target.kind === "popup")
@@ -1213,6 +1239,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       this.userAgent = typeof version.userAgent === "string" ? version.userAgent : "";
       if (this.downloadDirectory) {
         await connection.send("Browser.setDownloadBehavior", {
+          ...this.contextScope(),
           behavior: "allowAndName",
           downloadPath: this.downloadDirectory,
           eventsEnabled: true,
@@ -1220,6 +1247,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       if (this.emulation?.geolocation) {
         await connection.send("Browser.grantPermissions", {
+          ...this.contextScope(),
           permissions: ["geolocation"],
         });
       }
@@ -1233,8 +1261,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           const state = [...this.states.values()].find(
             (candidate) => candidate.frame.id === frameId,
           );
+          // Browser download events are process-wide. Unknown frames must not
+          // become downloads belonging to another context.
+          if (this.browserContextId && !state) return;
           if (this.downloadEvents) {
             const guid = typeof event.params.guid === "string" ? event.params.guid : "";
+            if (this.browserContextId) this.ownedDownloads.add(guid);
             const suggestedFilename =
               typeof event.params.suggestedFilename === "string"
                 ? event.params.suggestedFilename
@@ -1263,6 +1295,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         connection.on("Browser.downloadProgress", (event) => {
           if (!this.downloadEvents) return;
           const guid = typeof event.params.guid === "string" ? event.params.guid : "";
+          if (this.browserContextId && !this.ownedDownloads.has(guid)) return;
           const state = event.params.state;
           if (state !== "inProgress" && state !== "completed" && state !== "canceled") return;
           const receivedBytes = event.params.receivedBytes;
@@ -1282,8 +1315,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               totalBytes: typeof totalBytes === "number" ? totalBytes : null,
             })
             .then(async ({ cancelReason }) => {
+              if (state !== "inProgress") this.ownedDownloads.delete(guid);
               if (!cancelReason) return;
-              await connection.send("Browser.cancelDownload", { guid }).catch(() => undefined);
+              await connection
+                .send("Browser.cancelDownload", { guid, ...this.contextScope() })
+                .catch(() => undefined);
               await this.downloadEvents?.reject(guid, cancelReason);
             })
             .catch(() => undefined);
@@ -1319,6 +1355,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     let targets = visiblePageTargets(await this.targetInfos(connection));
     if (targets.length === 0) {
       const created = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
+        ...this.contextScope(),
         url: "about:blank",
         background: true,
       });
@@ -1715,6 +1752,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     connection: BrowserCdpConnection,
   ): Promise<BrowserUserAgentMetadata> {
     const created = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
+      ...this.contextScope(),
       url: "about:blank",
       hidden: true,
     });
@@ -2668,6 +2706,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await (
         await this.ensureConnection()
       ).send("Browser.setPermission", {
+        ...this.contextScope(),
         permission: { name: CDP_PERMISSION_NAMES[action.permission] },
         setting: action.setting,
         origin,
@@ -3498,11 +3537,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     );
   }
 
+  private contextScope(): { browserContextId?: string } {
+    return this.browserContextId ? { browserContextId: this.browserContextId } : {};
+  }
+
   private async targetInfos(connection: BrowserCdpConnection): Promise<TargetInfo[]> {
     const response = await connection.send<{ targetInfos?: unknown }>("Target.getTargets");
     if (!Array.isArray(response.targetInfos))
       throw new Error("CDP returned an invalid target list");
-    return response.targetInfos.map(normalizeTargetInfo);
+    return response.targetInfos
+      .map(normalizeTargetInfo)
+      .filter(
+        (target) =>
+          this.browserContextId === undefined || target.browserContextId === this.browserContextId,
+      );
   }
 
   private async requireTargetInfo(
@@ -3666,6 +3714,7 @@ function normalizeTargetInfo(value: unknown): TargetInfo {
     throw new Error("CDP returned an invalid target");
   }
   return {
+    browserContextId: typeof value.browserContextId === "string" ? value.browserContextId : null,
     targetId: value.targetId,
     type: value.type,
     title: typeof value.title === "string" ? value.title : "",

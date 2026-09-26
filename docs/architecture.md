@@ -1781,3 +1781,11 @@ Plugin marketplace discovery uses `scripts/refresh-plugin-catalog.ts` →
 `data/catalog/plugins-snapshot.json` → the workspace-authorized capabilities
 API → SDK `discoverPlugins` → shared React `PluginDiscovery`. This metadata
 catalogue does not confer installation compatibility. See [plugin catalogue](plugin-catalog.md).
+
+### Experimental browser context pooling
+
+`packages/browserd/src/chromium-context-pool.ts` owns a construction-only,
+opt-in disposable Chromium context experiment. No supervisor or public API
+enables it; dedicated browser profiles and lifecycle remain unchanged. See
+[`design/ephemeral-chromium-context-pool.md`](design/ephemeral-chromium-context-pool.md)
+for context authority, shared failure scope, and production integration gates.
