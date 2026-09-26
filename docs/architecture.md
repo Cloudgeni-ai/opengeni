@@ -1781,3 +1781,5 @@ Plugin marketplace discovery uses `scripts/refresh-plugin-catalog.ts` →
 `data/catalog/plugins-snapshot.json` → the workspace-authorized capabilities
 API → SDK `discoverPlugins` → shared React `PluginDiscovery`. This metadata
 catalogue does not confer installation compatibility. See [plugin catalogue](plugin-catalog.md).
+
+[Headless-shell](headless-shell.md).

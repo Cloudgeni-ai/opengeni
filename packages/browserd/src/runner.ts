@@ -645,9 +645,13 @@ async function linuxProcessArguments(pid: number): Promise<string[]> {
 }
 
 function isRecognizedLinuxBrowserExecutable(executablePath: string): boolean {
-  return ["chrome", "chromium", "chromium-browser", "google-chrome"].includes(
-    basename(executablePath),
-  );
+  return [
+    "chrome",
+    "chromium",
+    "chromium-browser",
+    "google-chrome",
+    "chrome-headless-shell",
+  ].includes(basename(executablePath));
 }
 
 async function readManagedBrowserPid(path: string): Promise<number | null> {

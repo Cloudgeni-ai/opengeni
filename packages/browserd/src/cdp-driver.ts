@@ -1,3 +1,7 @@
+import {
+  navigateBrowserMetadataDocument,
+  navigateToInterceptedMetadataDocument,
+} from "./browser-metadata";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
 import {
@@ -71,6 +75,12 @@ import type {
   BrowserDownloadProgressResult,
 } from "./downloads";
 import type { AgentBrowserJsonCommand } from "./runner";
+import {
+  captureHeadlessSessionCookies,
+  restoreHeadlessSessionCookies,
+  validateHeadlessSessionCookies,
+  type HeadlessSessionCookies,
+} from "./headless-session-cookies";
 
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 const BROWSER_START_TIMEOUT_MS = 30_000;
@@ -271,6 +281,12 @@ export type AgentBrowserDriverOptions = {
   frameStreaming?: boolean;
   emulation?: BrowserSessionEmulation;
   permissionControl?: boolean;
+  /** Headless shell has no chrome://version page. Read its real Client Hints
+   * from a controller-intercepted secure-origin document instead. */
+  userAgentMetadataSource?: "chrome_internal" | "intercepted_local";
+  /** Set only by the verified, dedicated managed headless-shell launcher. */
+  preserveHeadlessSessionCookies?: boolean;
+  headlessSessionCookies?: HeadlessSessionCookies;
 };
 
 export type BrowserSessionEmulation = {
@@ -332,6 +348,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly frameStreaming: boolean;
   private readonly emulation: BrowserSessionEmulation | null;
   private readonly permissionControl: boolean;
+  private readonly userAgentMetadataSource: "chrome_internal" | "intercepted_local";
   private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
   private readonly resolveWorkspaceFiles:
     | ((operationId: string, workspaceFileIds: readonly string[]) => Promise<readonly string[]>)
@@ -358,6 +375,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     { digest: string; result: BrowserExternalAuthResultValue }
   >();
   private started = false;
+  private readonly preserveHeadlessSessionCookies: boolean;
+  private headlessSessionCookies: HeadlessSessionCookies | null;
 
   constructor(options: AgentBrowserDriverOptions) {
     this.browserSessionId = options.browserSessionId;
@@ -367,12 +386,25 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.createId = options.createId ?? randomUUID;
     this.physicalGeneration = randomUUID();
     this.engine = options.engine ?? "chromium";
+    this.preserveHeadlessSessionCookies = options.preserveHeadlessSessionCookies ?? false;
+    if (
+      (this.preserveHeadlessSessionCookies || options.headlessSessionCookies) &&
+      (this.engine !== "chromium" || (options.targetLifecycle ?? "runner") !== "runner")
+    ) {
+      throw new Error("Headless cookie state requires its dedicated managed launcher");
+    }
+    if (options.headlessSessionCookies && !this.preserveHeadlessSessionCookies)
+      throw new Error("Headless cookie state requires its verified shell launcher");
+    this.headlessSessionCookies = options.headlessSessionCookies
+      ? validateHeadlessSessionCookies(options.headlessSessionCookies)
+      : null;
     this.targetLifecycle = options.targetLifecycle ?? "runner";
     this.tabControl = options.tabControl ?? true;
     this.foregroundManagedTabs = options.foregroundManagedTabs ?? false;
     this.frameStreaming = options.frameStreaming ?? true;
     this.emulation = hasBrowserEmulation(options.emulation) ? options.emulation : null;
     this.permissionControl = options.permissionControl ?? true;
+    this.userAgentMetadataSource = options.userAgentMetadataSource ?? "chrome_internal";
     this.resolveWorkspaceFiles = options.resolveWorkspaceFiles;
     this.downloadDirectory = options.downloadDirectory
       ? resolvePath(options.downloadDirectory)
@@ -406,6 +438,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       };
     } else {
       connection = await this.ensureConnection();
+      if (this.headlessSessionCookies) {
+        await restoreHeadlessSessionCookies(connection, this.headlessSessionCookies);
+        this.headlessSessionCookies = null;
+      }
       let page = visiblePageTargets(await this.targetInfos(connection))[0];
       if (!page) {
         const created = await connection.send<{ targetId?: unknown }>(
@@ -564,6 +600,22 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const engineVersion =
       rawVersion.length > 0 && Buffer.byteLength(rawVersion) <= 256 ? rawVersion : null;
     return { engine: this.engine, engineVersion, tabs };
+  }
+
+  /** Supervisor-only read after both action controllers have quiesced. Never
+   * exposed through the public browser observation/tool surface. */
+  async captureSessionCookies(): Promise<HeadlessSessionCookies | null> {
+    if (!this.preserveHeadlessSessionCookies) return null;
+    if (!this.started || !this.connection)
+      throw new Error("Headless cookie capture requires its active physical browser");
+    return await captureHeadlessSessionCookies(this.connection, {
+      browserSessionId: this.browserSessionId,
+      controllerGeneration: this.controllerGeneration,
+    });
+  }
+
+  get requiresExplicitProfileRestore(): boolean {
+    return this.preserveHeadlessSessionCookies;
   }
 
   async target(targetId: string): Promise<BrowserTargetValue | null> {
@@ -1728,7 +1780,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         connection.send("Page.enable", {}, { sessionId: attached.sessionId }),
         connection.send("Runtime.enable", {}, { sessionId: attached.sessionId }),
       ]);
-      await this.navigateForUserAgentMetadata(connection, attached.sessionId, "chrome://version/");
+      if (this.userAgentMetadataSource === "intercepted_local") {
+        await navigateToInterceptedMetadataDocument(connection, attached.sessionId);
+      } else {
+        await navigateBrowserMetadataDocument(connection, attached.sessionId, "chrome://version/");
+      }
       const evaluated = await connection.send<{
         result?: unknown;
         exceptionDetails?: unknown;
@@ -1769,29 +1825,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (closeError) throw closeError;
     if (!metadata) throw new Error("browser returned no User-Agent metadata");
     return metadata;
-  }
-
-  private async navigateForUserAgentMetadata(
-    connection: BrowserCdpConnection,
-    sessionId: string,
-    url: string,
-  ): Promise<void> {
-    const loaded = connection.waitForEvent("Page.loadEventFired", {
-      sessionId,
-      timeoutMs: 5_000,
-    });
-    let navigation: { errorText?: unknown };
-    try {
-      navigation = await connection.send("Page.navigate", { url }, { sessionId });
-    } catch (error) {
-      await loaded.catch(() => undefined);
-      throw error;
-    }
-    if (typeof navigation.errorText === "string" && navigation.errorText) {
-      await loaded.catch(() => undefined);
-      throw new Error(`browser metadata navigation failed: ${navigation.errorText}`);
-    }
-    await loaded;
   }
 
   private async observeUnlocked(

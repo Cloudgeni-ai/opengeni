@@ -1,3 +1,5 @@
+import { selectManagedChromiumExecutable, type VerifiedHeadlessShell } from "./headless-shell";
+import type { HeadlessSessionCookies } from "./headless-session-cookies";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -206,6 +208,9 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   ): Promise<BrowserDiagnosticBatch>;
   readClipboard(): BrowserClipboard;
   runtimeSnapshot(): Promise<BrowserRuntimeSnapshot>;
+  /** Private state capture adjunct, never part of runtimeSnapshot/public JSON. */
+  captureSessionCookies?(): Promise<HeadlessSessionCookies | null>;
+  readonly requiresExplicitProfileRestore?: boolean;
   protectedFill(command: BrowserProtectedAuthFillCommand): Promise<BrowserProtectedAuthObservation>;
   externalAuth?(command: BrowserExternalAuthCommand): Promise<BrowserExternalAuthResultValue>;
   /** Provider liveness probe used only after another operation reports a
@@ -219,6 +224,8 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
   sessionDirectory: string;
   socketDirectory: string;
   profileDirectory: string;
+  restoredProfile: boolean;
+  headlessSessionCookies?: HeadlessSessionCookies;
   downloadDirectory: string;
   screenshotDirectory: string;
   headed: boolean;
@@ -244,6 +251,7 @@ export type BrowserSupervisorOptions = {
   maxSessions?: number;
   agentBrowserBinary?: ResolvedAgentBrowserBinary;
   lightpandaBinary?: ResolvedLightpandaBinary;
+  headlessShell?: VerifiedHeadlessShell;
   createDriver?: (context: BrowserSupervisorDriverContext) => Promise<BrowserSupervisorDriver>;
   uploadArtifact?: (artifactPath: string, authority: BrowserStateUploadAuthority) => Promise<void>;
   uploadDownload?: typeof uploadBrowserDownload;
@@ -333,7 +341,12 @@ export class BrowserSupervisor {
     this.createDriver =
       options.createDriver ??
       (async (context) =>
-        await createBrowserDriver(context, options.agentBrowserBinary, options.lightpandaBinary));
+        await createBrowserDriver(
+          context,
+          options.agentBrowserBinary,
+          options.lightpandaBinary,
+          options.headlessShell,
+        ));
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
     this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
   }
@@ -744,13 +757,16 @@ export class BrowserSupervisor {
       await chmod(directory, 0o700);
     }
     let restoredManifest: BrowserProfileManifest | null = null;
+    let restoredCookies: HeadlessSessionCookies | undefined;
     let restoredProfileMaterialized = false;
     if (options.restore) {
-      restoredManifest = await materializeRestoredProfile({
+      const restored = await materializeRestoredProfile({
         sessionDirectory,
         profileDirectory,
         restore: options.restore,
       });
+      restoredManifest = restored.manifest;
+      restoredCookies = restored.headlessSessionCookies;
       restoredProfileMaterialized = true;
     } else {
       await mkdir(profileDirectory, { recursive: true, mode: 0o700 });
@@ -808,6 +824,8 @@ export class BrowserSupervisor {
       sessionDirectory,
       socketDirectory,
       profileDirectory,
+      restoredProfile: restoredProfileMaterialized,
+      ...(restoredCookies ? { headlessSessionCookies: restoredCookies } : {}),
       downloadDirectory: downloadStore?.filesDirectory ?? downloadDirectory,
       screenshotDirectory,
       headed: options.headed,
@@ -886,6 +904,7 @@ export class BrowserSupervisor {
         runtime.lastTargets = [observation.target];
         runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
       }
+      delete driverContext.headlessSessionCookies;
       return runtime;
     } catch (error) {
       const failures: unknown[] = [error];
@@ -985,6 +1004,8 @@ export class BrowserSupervisor {
       ]);
       await runtime.downloadStore?.interruptInProgress("browser_restarted");
       snapshot = await runtime.driver.runtimeSnapshot();
+      const cookies = await runtime.driver.captureSessionCookies?.();
+      if (cookies) runtime.driverContext.headlessSessionCookies = cookies;
       await runtime.driver.close();
       driverClosed = true;
       const manifest = profileManifest(runtime, snapshot);
@@ -994,6 +1015,7 @@ export class BrowserSupervisor {
         dataKey: input.dataKey,
         aad: input.aad,
         manifest,
+        ...(cookies ? { headlessSessionCookies: cookies } : {}),
       });
       if (input.afterCapture === "restart") {
         await this.restartRuntime(runtime, snapshot);
@@ -1011,7 +1033,10 @@ export class BrowserSupervisor {
         objectKey: input.objectKey,
         ...artifact,
       });
-      if (input.afterCapture === "stop") runtime.lifecycle = "captured";
+      if (input.afterCapture === "stop") {
+        runtime.lifecycle = "captured";
+        delete runtime.driverContext.headlessSessionCookies;
+      }
       return receipt;
     } catch (error) {
       const failures: unknown[] = [error];
@@ -1059,6 +1084,7 @@ export class BrowserSupervisor {
       );
       runtime.lastTargets = currentTargets;
       runtime.lastSnapshot = snapshotWithTargets(currentSnapshot, currentTargets);
+      delete runtime.driverContext.headlessSessionCookies;
     } catch (error) {
       await driver.close().catch(() => undefined);
       throw error;
@@ -1136,6 +1162,12 @@ export class BrowserSupervisor {
     if (runtime.options.transport.kind === "attached_chrome" || !runtime.driver.isAvailable)
       return false;
     if (await runtime.driver.isAvailable()) return false;
+    if (runtime.driver.requiresExplicitProfileRestore) {
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "Headless shell lost its live identity; restore saved browser state or create a new browser session",
+      );
+    }
     await this.recoverRuntimeAfterLoss(runtime);
     return true;
   }
@@ -1450,6 +1482,7 @@ async function createBrowserDriver(
   context: BrowserSupervisorDriverContext,
   binary?: ResolvedAgentBrowserBinary,
   lightpandaBinary?: ResolvedLightpandaBinary,
+  headlessShell?: VerifiedHeadlessShell,
 ): Promise<BrowserSupervisorDriver> {
   if (context.transport.kind === "attached_chrome") {
     const attached = await createAttachedChromeTransport({
@@ -1531,6 +1564,19 @@ async function createBrowserDriver(
   if (context.linkedComputer) {
     launchArguments.push("--force-renderer-accessibility=complete");
   }
+  const browserExecutablePath = await selectManagedChromiumExecutable({
+    headed: context.headed,
+    profileDirectory: context.profileDirectory,
+    restoredProfile: context.restoredProfile,
+    ...(context.browserExecutablePath
+      ? { browserExecutablePath: context.browserExecutablePath }
+      : {}),
+    ...(headlessShell ? { headlessShell } : {}),
+  });
+  const useHeadlessShell = headlessShell && browserExecutablePath === headlessShell.path;
+  if (context.headlessSessionCookies && !useHeadlessShell) {
+    throw new Error("Headless cookie state requires its matching verified profile launcher");
+  }
   const runner = await AgentBrowserJsonRunner.create({
     namespace: "og",
     // A close followed immediately by another daemon using the same socket
@@ -1546,9 +1592,7 @@ async function createBrowserDriver(
     ...(route?.kind === "proxy" && route.proxyUrl ? { proxyUrl: route.proxyUrl } : {}),
     ...(launchArguments.length > 0 ? { launchArguments } : {}),
     ...(route?.consistency.timezone ? { timezone: route.consistency.timezone } : {}),
-    ...(context.browserExecutablePath
-      ? { browserExecutablePath: context.browserExecutablePath }
-      : {}),
+    ...(browserExecutablePath ? { browserExecutablePath } : {}),
     ...(context.launchEnvironment ? { environment: context.launchEnvironment } : {}),
     ...(binary ? { binary } : {}),
   });
@@ -1556,7 +1600,18 @@ async function createBrowserDriver(
     browserSessionId: context.browserSessionId,
     controllerGeneration: context.controllerGeneration,
     runner,
+    ...(useHeadlessShell
+      ? {
+          preserveHeadlessSessionCookies: true,
+          ...(context.headlessSessionCookies
+            ? { headlessSessionCookies: context.headlessSessionCookies }
+            : {}),
+        }
+      : {}),
     foregroundManagedTabs: context.headed,
+    ...(headlessShell && browserExecutablePath === headlessShell.path
+      ? { userAgentMetadataSource: "intercepted_local" as const }
+      : {}),
     downloadDirectory: context.downloadDirectory,
     ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
     resolveWorkspaceFiles: context.resolveWorkspaceFiles,
@@ -2028,7 +2083,7 @@ async function materializeRestoredProfile(input: {
   sessionDirectory: string;
   profileDirectory: string;
   restore: ValidatedBrowserStateRestoreInput;
-}): Promise<BrowserProfileManifest> {
+}): Promise<{ manifest: BrowserProfileManifest; headlessSessionCookies?: HeadlessSessionCookies }> {
   const transferDirectory = join(input.sessionDirectory, "state-restores");
   const artifactPath = join(transferDirectory, `${input.restore.artifactDigest}.ogbs`);
   const stagingDirectory = join(
@@ -2037,6 +2092,7 @@ async function materializeRestoredProfile(input: {
   );
   await rm(artifactPath, { force: true });
   await rm(stagingDirectory, { recursive: true, force: true });
+  let headlessSessionCookies: HeadlessSessionCookies | undefined;
   try {
     await downloadBrowserStateArtifact(
       artifactPath,
@@ -2051,12 +2107,18 @@ async function materializeRestoredProfile(input: {
       expectedArtifactDigest: input.restore.artifactDigest,
       expectedContentDigest: input.restore.contentDigest,
       expectedSizeBytes: input.restore.sizeBytes,
+      acceptHeadlessSessionCookies: (state) => {
+        headlessSessionCookies = state;
+      },
     });
     assertRestoredManifestAuthority(receipt.manifest, input.restore);
     await rm(input.profileDirectory, { recursive: true, force: true });
     await rename(stagingDirectory, input.profileDirectory);
     await chmod(input.profileDirectory, 0o700);
-    return receipt.manifest;
+    return {
+      manifest: receipt.manifest,
+      ...(headlessSessionCookies ? { headlessSessionCookies } : {}),
+    };
   } catch (error) {
     if (error instanceof InteractionControllerError) throw error;
     if (error instanceof BrowserStateDownloadError) {

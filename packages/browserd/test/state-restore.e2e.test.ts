@@ -14,11 +14,13 @@ import {
   type BrowserProfileManifest,
 } from "../src";
 
+import { HEADLESS_SHELL_VERSION, resolvePinnedHeadlessShell } from "../src/headless-shell";
+
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
-e2e(
-  "preserves cookie, localStorage, and IndexedDB through a fresh encrypted profile restore",
-  async () => {
+e2e.each(["restart", "stop"] as const)(
+  "preserves cookie, localStorage, and IndexedDB through a fresh encrypted profile restore (%s)",
+  async (afterCapture) => {
     const directory = await mkdtemp("/tmp/ogb-state-restore-e2e-");
     const key = Buffer.alloc(32, 0x51);
     const aad = Buffer.from("browser-state:e2e:immutable-revision", "utf8");
@@ -40,7 +42,11 @@ e2e(
         });
       },
     });
+    const headlessShell = process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY
+      ? await resolvePinnedHeadlessShell(process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY)
+      : undefined;
     const supervisor = await BrowserSupervisor.open({
+      ...(headlessShell ? { headlessShell } : {}),
       rootDirectory: join(directory, "state"),
       uploadArtifact: async (path) => {
         uploaded = await readFile(path);
@@ -76,7 +82,7 @@ e2e(
         ...source,
         operationId,
         objectKey,
-        afterCapture: "restart",
+        afterCapture,
         dataKey: key,
         aad,
         upload: {
@@ -115,6 +121,23 @@ e2e(
         restored.observation.target.id,
         "cookie=present local=present idb=present",
       );
+      if (headlessShell) {
+        expect(
+          JSON.parse(
+            await readFile(
+              join(
+                directory,
+                "state",
+                "sessions",
+                target.browserSessionId,
+                "profile",
+                ".opengeni-headless-shell.json",
+              ),
+              "utf8",
+            ),
+          ),
+        ).toEqual({ version: HEADLESS_SHELL_VERSION });
+      }
       expect(observed.target.url).toBe(`${origin}/account`);
       expect(semanticNames(observed)).toContain("cookie=present local=present idb=present");
     } finally {

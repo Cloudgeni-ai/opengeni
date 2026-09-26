@@ -14,6 +14,14 @@ import { PassThrough, Readable, Transform, type TransformCallback } from "node:s
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
 import { BROWSER_PROFILE_ARTIFACT_FORMAT } from "@opengeni/contracts";
+import {
+  HEADLESS_COOKIE_ARCHIVE_PATH,
+  HEADLESS_COOKIE_MAX_BYTES,
+  assertHeadlessCookieManifest,
+  decodeHeadlessSessionCookies,
+  encodeHeadlessSessionCookies,
+  type HeadlessSessionCookies,
+} from "./headless-session-cookies";
 
 export { BROWSER_PROFILE_ARTIFACT_FORMAT } from "@opengeni/contracts";
 
@@ -133,6 +141,8 @@ export async function captureEncryptedBrowserProfile(input: {
   aad: Uint8Array;
   manifest: BrowserProfileManifest;
   limits?: BrowserProfileArtifactLimits;
+  /** Private memory-only state; encrypted with the complete profile artifact. */
+  headlessSessionCookies?: HeadlessSessionCookies;
 }): Promise<BrowserProfileArtifactReceipt> {
   const profileDirectory = resolve(input.profileDirectory);
   const artifactPath = resolve(input.artifactPath);
@@ -152,9 +162,15 @@ export async function captureEncryptedBrowserProfile(input: {
   await rm(temporaryPath, { force: true });
   const content = new DigestTransform();
   const artifact = new DigestTransform();
+  let cookieBytes: Buffer | undefined;
   try {
+    cookieBytes = input.headlessSessionCookies
+      ? encodeHeadlessSessionCookies(input.headlessSessionCookies, manifest)
+      : undefined;
     await pipeline(
-      Readable.from(encodeProfileArchive(profileDirectory, manifestBytes, limits, inventory)),
+      Readable.from(
+        encodeProfileArchive(profileDirectory, manifestBytes, limits, inventory, cookieBytes),
+      ),
       createGzip({ level: 6 }),
       content,
       new ArtifactEncryptTransform(key, aad),
@@ -176,6 +192,7 @@ export async function captureEncryptedBrowserProfile(input: {
     throw error;
   } finally {
     key.fill(0);
+    cookieBytes?.fill(0);
   }
 }
 
@@ -188,6 +205,8 @@ export async function restoreEncryptedBrowserProfile(input: {
   expectedContentDigest: string;
   expectedSizeBytes: number;
   limits?: BrowserProfileArtifactLimits;
+  /** Delivered only after GCM authentication and both digest checks succeed. */
+  acceptHeadlessSessionCookies?: (state: HeadlessSessionCookies) => void;
 }): Promise<BrowserProfileArtifactReceipt> {
   const artifactPath = resolve(input.artifactPath);
   const outputProfileDirectory = resolve(input.outputProfileDirectory);
@@ -212,6 +231,7 @@ export async function restoreEncryptedBrowserProfile(input: {
   const cleartext = new PassThrough({ highWaterMark: FILE_CHUNK_BYTES });
   let manifest: BrowserProfileManifest | null = null;
   let inventory: { fileCount: number; profileBytes: number } | null = null;
+  let cookieState: HeadlessSessionCookies | undefined;
   try {
     await mkdir(outputProfileDirectory, { recursive: false, mode: 0o700 });
     const decoding = pipeline(
@@ -230,6 +250,7 @@ export async function restoreEncryptedBrowserProfile(input: {
       const extracted = await extractProfileArchive(cleartext, outputProfileDirectory, limits);
       manifest = extracted.manifest;
       inventory = extracted.inventory;
+      cookieState = extracted.headlessSessionCookies;
       await decoding;
     } catch (error) {
       cleartext.destroy();
@@ -241,6 +262,15 @@ export async function restoreEncryptedBrowserProfile(input: {
     }
     if (content.digest() !== expectedContentDigest) {
       throw new Error("browser profile content digest does not match its authority");
+    }
+    if (cookieState) {
+      assertHeadlessCookieManifest(cookieState, manifest);
+      if (!input.acceptHeadlessSessionCookies) {
+        throw new Error(
+          "Headless session cookie restoration requires its private driver authority",
+        );
+      }
+      input.acceptHeadlessSessionCookies(cookieState);
     }
     return {
       format: BROWSER_PROFILE_ARTIFACT_FORMAT,
@@ -264,6 +294,7 @@ async function* encodeProfileArchive(
   manifest: Buffer,
   limits: Required<BrowserProfileArtifactLimits>,
   inventory: { fileCount: number; profileBytes: number },
+  cookieBytes?: Buffer,
 ): AsyncGenerator<Buffer> {
   const profileStat = await lstat(profileDirectory);
   if (!profileStat.isDirectory() || profileStat.isSymbolicLink()) {
@@ -272,6 +303,14 @@ async function* encodeProfileArchive(
   yield PROFILE_MAGIC;
   yield entryHeader("manifest.json", manifest.byteLength);
   yield manifest;
+  if (cookieBytes) {
+    inventory.fileCount += 1;
+    inventory.profileBytes += cookieBytes.byteLength;
+    if (inventory.fileCount > limits.maxFiles || inventory.profileBytes > limits.maxProfileBytes)
+      throw new Error("browser profile private state exceeds its capture bounds");
+    yield entryHeader(HEADLESS_COOKIE_ARCHIVE_PATH, cookieBytes.byteLength);
+    yield cookieBytes;
+  }
   for await (const entry of walkProfile(profileDirectory, "")) {
     inventory.fileCount += 1;
     inventory.profileBytes += entry.size;
@@ -352,6 +391,7 @@ async function extractProfileArchive(
 ): Promise<{
   manifest: BrowserProfileManifest;
   inventory: { fileCount: number; profileBytes: number };
+  headlessSessionCookies?: HeadlessSessionCookies;
 }> {
   const reader = new AsyncChunkReader(source);
   if (!(await reader.readExactly(PROFILE_MAGIC.byteLength)).equals(PROFILE_MAGIC)) {
@@ -361,6 +401,7 @@ async function extractProfileArchive(
   let manifest: BrowserProfileManifest | null = null;
   let fileCount = 0;
   let profileBytes = 0;
+  let headlessSessionCookies: HeadlessSessionCookies | undefined;
   while (true) {
     const type = (await reader.readExactly(1))[0]!;
     if (type === ARCHIVE_END) break;
@@ -388,6 +429,22 @@ async function extractProfileArchive(
         throw new Error("browser profile archive manifest is invalid JSON");
       }
       manifest = validateManifest(parsed);
+      continue;
+    }
+    if (path === HEADLESS_COOKIE_ARCHIVE_PATH) {
+      if (!manifest || size < 1 || size > HEADLESS_COOKIE_MAX_BYTES)
+        throw new Error("browser profile private state bounds are invalid");
+      fileCount += 1;
+      profileBytes += size;
+      if (fileCount > limits.maxFiles || profileBytes > limits.maxProfileBytes)
+        throw new Error("browser profile private state exceeds its extraction bounds");
+      const bytes = await reader.readExactly(size);
+      try {
+        headlessSessionCookies = decodeHeadlessSessionCookies(bytes);
+        assertHeadlessCookieManifest(headlessSessionCookies, manifest);
+      } finally {
+        bytes.fill(0);
+      }
       continue;
     }
     if (!manifest || !path.startsWith("profile/") || path.length === "profile/".length) {
@@ -421,7 +478,11 @@ async function extractProfileArchive(
   }
   await reader.requireEnd();
   if (!manifest) throw new Error("browser profile archive has no manifest");
-  return { manifest, inventory: { fileCount, profileBytes } };
+  return {
+    manifest,
+    inventory: { fileCount, profileBytes },
+    ...(headlessSessionCookies ? { headlessSessionCookies } : {}),
+  };
 }
 
 class ArtifactEncryptTransform extends Transform {
