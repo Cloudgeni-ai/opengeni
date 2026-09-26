@@ -105,6 +105,7 @@ export {
   sessionStatusFromEvents,
   toolDisplayName,
 } from "./timeline/projection";
+export type { GroupTimelineOptions } from "./timeline/projection";
 export type {
   ActivityItem,
   AgentMessageItem,

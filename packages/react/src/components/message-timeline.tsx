@@ -1,4 +1,7 @@
 import { RollingActivity } from "../timeline/rolling-activity";
+import { formatElapsed } from "../timeline/turn-summary";
+import { ActivityNoteTextContext } from "../timeline/activity-rail";
+import { timelineGroupContainsPresentedImage } from "../timeline/presented-image";
 import {
   isTimelineSearchTarget,
   TimelineSearchRevealContext,
@@ -8,11 +11,7 @@ import {
 import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
-import { parseSandboxFileArtifactReceipt } from "@opengeni/sdk";
-import { unwrapMcpOutput } from "../timeline/parsers";
 import { compactionSkipSubtitle } from "../timeline/compaction-copy";
-import { isRetainedImageContentType } from "../timeline/retained-image";
-import { mcpToolLeaf } from "../timeline/tool-display-name";
 import type {
   DraftTimelineAnnotation,
   MediaGenerationResult,
@@ -23,10 +22,13 @@ import { dequal } from "dequal/lite";
 import {
   ArrowDownIcon,
   ArrowRightIcon,
+  ArrowUpIcon,
   BotIcon,
   CheckCircle2Icon,
   CheckIcon,
+  ChevronDownIcon,
   ChevronRightIcon,
+  ChevronUpIcon,
   PauseCircleIcon,
   PauseIcon,
   MessageCircleQuestionIcon,
@@ -111,6 +113,7 @@ import {
   type VideoArtifactPlaybackLoader,
   type ToolRegistry,
   type TurnSummaryOptions,
+  type TurnSummaryStatus,
   type UserMessageItem,
   type FoldRestingState,
   type WorkerCompletionItem,
@@ -287,6 +290,8 @@ const PIN_THRESHOLD_PX = 48;
  * line-sized streaming movement.
  */
 const JUMP_TO_LATEST_CATCHUP_DEBT_PX = 240;
+/** Breathing room above the question when following stops at an answer. */
+const ANSWER_ANCHOR_MARGIN_PX = 12;
 /**
  * Prefetch older history when the top sentinel is this far from the viewport.
  * After a page loads we stay cool until the reader leaves this band (scrolls
@@ -408,6 +413,92 @@ function isNearBottom(node: HTMLElement): boolean {
   }
   const gap = maxScroll - node.scrollTop;
   return gap < Math.min(PIN_THRESHOLD_PX, maxScroll);
+}
+
+/** Content-space top of a timeline group, or null when it is not mounted. */
+function contentTopOf(node: HTMLElement, groupKey: string): number | null {
+  const element = node.querySelector(`[data-og-group-key="${cssEscapeAttribute(groupKey)}"]`);
+  if (!(element instanceof HTMLElement)) {
+    return null;
+  }
+  return element.getBoundingClientRect().top - node.getBoundingClientRect().top + node.scrollTop;
+}
+
+/** The question the reader is inside of, once its start has scrolled out of view. */
+type QuestionNav = { key: string; previous: string | null; next: string | null };
+
+/** How far a question's start must be above the viewport before navigation shows. */
+const QUESTION_NAV_HIDDEN_PX = 24;
+
+function readQuestionNav(node: HTMLElement): QuestionNav | null {
+  const view = node.getBoundingClientRect();
+  // The exchange being read is the one crossing the middle of the viewport.
+  const readingLine = view.top + view.height / 2;
+  const prompts = [...node.querySelectorAll<HTMLElement>("[data-og-prompt]")];
+  let current = -1;
+  for (let index = 0; index < prompts.length; index += 1) {
+    if (prompts[index]!.getBoundingClientRect().top >= readingLine) {
+      break;
+    }
+    current = index;
+  }
+  const prompt = prompts[current];
+  const key = prompt?.dataset.ogGroupKey;
+  if (!prompt || !key || prompt.getBoundingClientRect().top >= view.top - QUESTION_NAV_HIDDEN_PX) {
+    return null;
+  }
+  return {
+    key,
+    previous: prompts[current - 1]?.dataset.ogGroupKey ?? null,
+    next: prompts[current + 1]?.dataset.ogGroupKey ?? null,
+  };
+}
+
+function sameQuestionNav(a: QuestionNav | null, b: QuestionNav | null): boolean {
+  return (
+    a === b || (!!a && !!b && a.key === b.key && a.previous === b.previous && a.next === b.next)
+  );
+}
+
+/**
+ * The newest exchange when its answer is the last row: anchor candidates from
+ * the top down (its question, its status row, the answer itself).
+ */
+function exchangeAnswerAnchor(
+  groups: readonly { group: TimelineGroup; key: string }[],
+): { answerKey: string; candidates: string[] } | null {
+  const answer = groups[groups.length - 1];
+  const row = groups[groups.length - 2];
+  if (
+    answer?.group.kind !== "item" ||
+    answer.group.item.kind !== "agent-message" ||
+    !row ||
+    row.group.kind === "item"
+  ) {
+    return null;
+  }
+  let prompt: string | undefined;
+  for (let index = groups.length - 3; index >= 0; index -= 1) {
+    const group = groups[index]!.group;
+    if (group.kind === "item" && group.item.kind === "user-message") {
+      prompt = groups[index]!.key;
+      break;
+    }
+  }
+  return {
+    answerKey: answer.key,
+    candidates: prompt ? [prompt, row.key, answer.key] : [row.key, answer.key],
+  };
+}
+
+function latestPromptGroupKey(groups: readonly { group: TimelineGroup; key: string }[]) {
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    const group = groups[index]!.group;
+    if (group.kind === "item" && group.item.kind === "user-message") {
+      return groups[index]!.key;
+    }
+  }
+  return null;
 }
 
 /** Escape a value for use inside a CSS attribute selector. */
@@ -581,7 +672,12 @@ export function MessageTimeline({
   const readingAnchorRef = useRef<TimelineAnchor | null>(null);
   const olderPageBudgetRef = useRef(0);
   const [olderDemand, setOlderDemand] = useState(0);
-  const allGroups = useMemo(() => groupTimeline(resolvedItems), [resolvedItems]);
+  // The compact progress presentation folds each exchange behind one row.
+  const foldExchanges = turnSummary?.rolling === true;
+  const allGroups = useMemo(
+    () => groupTimeline(resolvedItems, { foldExchanges }),
+    [resolvedItems, foldExchanges],
+  );
   const annotationSources = useMemo(() => {
     const sources = new Map<string, TimelineAnnotationSourceDescriptor>();
     for (const item of resolvedItems) {
@@ -622,6 +718,19 @@ export function MessageTimeline({
   );
   const underfillRetryReadyRef = useRef(false);
   const resizeFollowRafRef = useRef<number | null>(null);
+  // Compact presentation: when an answer starts while following the tip, keep
+  // following only until the question (or, when it had already scrolled away,
+  // the status row or the answer itself) reaches the top. Then stop, so the
+  // question and the start of its answer stay on screen together.
+  const answerAnchorRef = useRef<{
+    answerKey: string;
+    anchorKey: string | null;
+    /** Where following stopped, until the reader moves or asks again. */
+    releasedAt?: number | undefined;
+  } | null>(null);
+  const latestPromptKeyRef = useRef<string | null | undefined>(undefined);
+  const questionNavFrameRef = useRef<number | null>(null);
+  const [questionNav, setQuestionNav] = useState<QuestionNav | null>(null);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until the tip is hard-parked across a short
   // post-commit settle (two rAFs). That absorbs sync late layout while hidden
@@ -718,6 +827,18 @@ export function MessageTimeline({
     previousBulkFirstKeyRef.current !== firstGroupKey;
   const bulkRender = allGroups.length > 0 && (bulkActive || firstKeyChangedForBulk);
   const groups = useStableTimelineGroupKeys(allGroups, !bulkRender);
+  const answerAnchor = foldExchanges ? exchangeAnswerAnchor(groups) : null;
+  // Whether any later top-level group is agent work (per index). A history
+  // window with newer pages is never the live edge.
+  const laterWorkFrom = useMemo(() => {
+    const flags: boolean[] = [];
+    let seen = hasNewer;
+    for (let index = groups.length - 1; index >= 0; index -= 1) {
+      flags[index] = seen;
+      if (groups[index]!.group.kind !== "item") seen = true;
+    }
+    return flags;
+  }, [groups, hasNewer]);
   const turnsWithOutput = useMemo(
     () =>
       new Set(
@@ -1157,6 +1278,41 @@ export function MessageTimeline({
     },
     [hasOlder, loadingOlder, olderBoundaryKey, onLoadOlder],
   );
+  const scheduleQuestionNav = useCallback(() => {
+    if (!foldExchanges || questionNavFrameRef.current != null) {
+      return;
+    }
+    questionNavFrameRef.current = requestFrame(() => {
+      questionNavFrameRef.current = null;
+      const node = scrollRef.current;
+      const next = node ? readQuestionNav(node) : null;
+      setQuestionNav((current) => (sameQuestionNav(current, next) ? current : next));
+    });
+  }, [foldExchanges]);
+  useEffect(
+    () => () => {
+      if (questionNavFrameRef.current != null) {
+        cancelFrame(questionNavFrameRef.current);
+        questionNavFrameRef.current = null;
+      }
+    },
+    [],
+  );
+  const jumpToQuestion = (key: string) => {
+    const node = scrollRef.current;
+    const top = node ? contentTopOf(node, key) : null;
+    if (!node || top === null) {
+      return;
+    }
+    // Explicit reader navigation: leave the tip and park the question on top.
+    releasePinFromReader();
+    wantPinRef.current = false;
+    disclosureKeepsUnpinnedRef.current = false;
+    writeScrollTop(node, Math.max(0, top - ANSWER_ANCHOR_MARGIN_PX));
+    syncScrollBaseline(node);
+    scheduleQuestionNav();
+  };
+
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(
     requestOlderIfUnderfilled as (node: HTMLElement, now?: number) => void,
   );
@@ -1259,6 +1415,19 @@ export function MessageTimeline({
         reducedMotion: prefersReducedMotion(),
         revealed: revealedRef.current,
       });
+      const anchorKey = answerAnchorRef.current?.anchorKey;
+      const anchorCap = anchorKey ? contentTopOf(node, anchorKey) : null;
+      if (anchorCap !== null && result.scrollTop >= anchorCap - ANSWER_ANCHOR_MARGIN_PX) {
+        // The answer has pushed its anchor to the top: stop following here.
+        const anchor = answerAnchorRef.current!;
+        anchor.anchorKey = null;
+        writeScrollTop(node, Math.max(node.scrollTop, anchorCap - ANSWER_ANCHOR_MARGIN_PX));
+        anchor.releasedAt = node.scrollTop;
+        syncScrollBaseline(node);
+        stopFollow();
+        applyPinned(false);
+        return;
+      }
       followRef.current = result.state;
       writeScrollTop(node, result.scrollTop);
       syncScrollBaseline(node);
@@ -1282,7 +1451,14 @@ export function MessageTimeline({
         followFrameRef.current = null;
       }
     },
-    [applyCanSkipTipCatchup, cancelLeaveFallback, stopFollow, syncScrollBaseline, writeScrollTop],
+    [
+      applyCanSkipTipCatchup,
+      applyPinned,
+      cancelLeaveFallback,
+      stopFollow,
+      syncScrollBaseline,
+      writeScrollTop,
+    ],
   );
   driveFollowRef.current = driveFollow;
 
@@ -1372,6 +1548,25 @@ export function MessageTimeline({
         }
       }
     };
+    const latestPromptKey = foldExchanges ? latestPromptGroupKey(groups) : null;
+    const releasedAt = answerAnchorRef.current?.releasedAt;
+    if (
+      latestPromptKey &&
+      latestPromptKeyRef.current !== undefined &&
+      latestPromptKey !== latestPromptKeyRef.current &&
+      releasedAt !== undefined &&
+      Math.abs(node.scrollTop - releasedAt) <= 2 &&
+      autoFollow &&
+      !pinnedRef.current &&
+      !hasNewer
+    ) {
+      // Following stopped for the last answer and the reader has not moved
+      // since; asking the next question returns them to the tip.
+      answerAnchorRef.current!.releasedAt = undefined;
+      clearPendingReaderLeave();
+      applyPinned(true);
+    }
+    latestPromptKeyRef.current = latestPromptKey;
     if (pendingJumpToStartRef.current && firstItemChanged) {
       // The oldest window landed — jump against the NEW DOM, and skip the
       // prepend correction (it would shift the reader away from the top).
@@ -1430,6 +1625,20 @@ export function MessageTimeline({
         }
       }
     } else if (autoFollow && pinnedRef.current && !hasNewer) {
+      if (answerAnchor && answerAnchorRef.current?.answerKey !== answerAnchor.answerKey) {
+        // A new answer started while following. Anchor on the highest of the
+        // question, status row, and answer that is still in view, and never
+        // on anything during the hidden first paint of a loaded history.
+        answerAnchorRef.current = {
+          answerKey: answerAnchor.answerKey,
+          anchorKey: revealedRef.current
+            ? (answerAnchor.candidates.find((key) => {
+                const top = contentTopOf(node, key);
+                return top !== null && top >= node.scrollTop - 1;
+              }) ?? null)
+            : null,
+        };
+      }
       // Load/remount (still hidden): hard-park. Live tip after reveal: ease.
       // Pending unarmed leave: tip *growth* must not yank (Vimium during stream).
       // Flat/shrink commits (fold) still recover — height did not grow under us.
@@ -1450,6 +1659,11 @@ export function MessageTimeline({
     if (prepended && !pinnedRef.current && node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
       rearmOlderPrefetchAfterLeavingTop(node);
     }
+    if (answerAnchor && answerAnchorRef.current?.answerKey !== answerAnchor.answerKey) {
+      // The answer started while the reader was elsewhere: nothing to anchor.
+      answerAnchorRef.current = { answerKey: answerAnchor.answerKey, anchorKey: null };
+    }
+    scheduleQuestionNav();
     previousFirstItemIdRef.current = firstItemId;
     previousScrollHeightRef.current = node.scrollHeight;
     syncScrollBaseline(node);
@@ -1587,6 +1801,8 @@ export function MessageTimeline({
     firstItemContentTopRef.current = null;
     foldMemoryRef.current.clear();
     userMessageDisclosureMemoryRef.current.clear();
+    answerAnchorRef.current = null;
+    latestPromptKeyRef.current = undefined;
     disclosureKeepsUnpinnedRef.current = false;
     clearReaderIntent();
     contentShrinkBaselineRef.current = null;
@@ -1806,6 +2022,7 @@ export function MessageTimeline({
     if (!node) {
       return;
     }
+    scheduleQuestionNav();
     const previousTop = lastScrollTopRef.current;
     const previousMaxScroll = lastMaxScrollRef.current;
     const nextTop = node.scrollTop;
@@ -2181,6 +2398,7 @@ export function MessageTimeline({
                                   groupKey={key}
                                   group={group}
                                   nextGroup={groups[index + 1]?.group}
+                                  laterWork={laterWorkFrom[index] === true}
                                   startupDismissed={
                                     group.kind === "activity" &&
                                     group.items.some(
@@ -2244,6 +2462,57 @@ export function MessageTimeline({
                       </Suspense>
                     ) : null}
 
+                    <AnimatePresence>
+                      {questionNav ? (
+                        <motion.div
+                          key="question-nav"
+                          initial={{ opacity: 0, y: -6 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -6 }}
+                          transition={{ duration: 0.15, ease: "easeOut" }}
+                          data-og-question-nav=""
+                          className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-center"
+                        >
+                          <div className="pointer-events-auto inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur">
+                            {questionNav.previous ? (
+                              <button
+                                type="button"
+                                aria-label="Previous question"
+                                title="Previous question"
+                                onClick={() => jumpToQuestion(questionNav.previous!)}
+                                className="inline-flex size-8 items-center justify-center rounded-full text-og-fg-muted hover:text-og-fg pointer-coarse:size-11"
+                              >
+                                <ChevronUpIcon aria-hidden className="size-3.5" />
+                              </button>
+                            ) : null}
+                            <button
+                              type="button"
+                              data-og-jump-to-question=""
+                              onClick={() => jumpToQuestion(questionNav.key)}
+                              className={cn(
+                                "inline-flex items-center gap-1.5 py-1.5 hover:text-og-fg pointer-coarse:min-h-11",
+                                questionNav.previous ? "pl-0.5" : "pl-3",
+                                questionNav.next ? "pr-0.5" : "pr-3",
+                              )}
+                            >
+                              <ArrowUpIcon aria-hidden className="size-3.5" />
+                              Your question
+                            </button>
+                            {questionNav.next ? (
+                              <button
+                                type="button"
+                                aria-label="Next question"
+                                title="Next question"
+                                onClick={() => jumpToQuestion(questionNav.next!)}
+                                className="inline-flex size-8 items-center justify-center rounded-full text-og-fg-muted hover:text-og-fg pointer-coarse:size-11"
+                              >
+                                <ChevronDownIcon aria-hidden className="size-3.5" />
+                              </button>
+                            ) : null}
+                          </div>
+                        </motion.div>
+                      ) : null}
+                    </AnimatePresence>
                     <AnimatePresence>
                       {loadingNewer ? (
                         <motion.div
@@ -2395,9 +2664,16 @@ function useStableTimelineGroupKeys(
               child.kind === "activity" &&
               child.items.every((item) => item.kind === "startup-phase"),
           );
+        // One exchange row alternates between its live cluster and its settled
+        // turn as turns start and end; it stays the same row throughout.
+        const sameExchangeRow =
+          previous?.group.kind !== "item" &&
+          group.kind !== "item" &&
+          group.id.startsWith("exchange-") &&
+          previous?.group.id === group.id;
         if (
           previous &&
-          (previous.group.kind === group.kind || startupCompletion) &&
+          (previous.group.kind === group.kind || startupCompletion || sameExchangeRow) &&
           !usedKeys.has(previous.key)
         ) {
           retainedGroup = previous;
@@ -2519,6 +2795,8 @@ type TimelineGroupEntryProps = {
   groupKey: string;
   group: TimelineGroup;
   nextGroup?: TimelineGroup | undefined;
+  /** A later top-level group is agent work, so this row is no longer the live edge. */
+  laterWork: boolean;
   startupDismissed: boolean;
   entranceEnabled: boolean;
   liveEntranceEnabled?: boolean | undefined;
@@ -2557,6 +2835,7 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
   groupKey,
   group,
   nextGroup,
+  laterWork,
   startupDismissed,
   entranceEnabled,
   liveEntranceEnabled,
@@ -2574,18 +2853,32 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
         ? 1
         : 0;
   const content = (
-    <TimelineGroupView
-      {...behavior}
-      group={group}
-      foldLiveCluster={isAgentProgress(nextGroup)}
-      startupDismissed={startupDismissed}
-      trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
-      contextCompactionCount={contextCompactionCount > 0 ? contextCompactionCount : undefined}
-    />
+    <ActivityNoteTextContext.Provider value={behavior.renderMessageText ?? null}>
+      <TimelineGroupView
+        {...behavior}
+        group={group}
+        foldLiveCluster={isAgentProgress(nextGroup)}
+        startupDismissed={startupDismissed}
+        trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
+        contextCompactionCount={contextCompactionCount > 0 ? contextCompactionCount : undefined}
+        exchangeNext={group.kind === "item" ? undefined : exchangeNextState(nextGroup, laterWork)}
+        exchangeNextAt={
+          group.kind === "item" || nextGroup?.kind !== "item"
+            ? undefined
+            : nextGroup.item.occurredAt
+        }
+      />
+    </ActivityNoteTextContext.Provider>
   );
   return (
     <GenieLoadingOptionsContext.Provider value={behavior.genieLoading}>
-      <div data-og-timeline-group-anchor="" data-og-group-key={groupKey}>
+      <div
+        data-og-timeline-group-anchor=""
+        data-og-group-key={groupKey}
+        data-og-prompt={
+          group.kind === "item" && group.item.kind === "user-message" ? "" : undefined
+        }
+      >
         <EntranceAnimationProvider value={entranceEnabled} liveValue={liveEntranceEnabled}>
           <TimelineGroupRenderBoundary resetKeys={[group, behavior]}>
             <UserMessageDisclosureProvider value={userMessageDisclosureContext}>
@@ -2600,6 +2893,7 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
                     key={
                       !startupDismissed &&
                       group.kind === "activity" &&
+                      !group.earlier?.length &&
                       group.items.every(
                         (item) =>
                           item.kind === "startup-phase" ||
@@ -2649,6 +2943,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
   startupDismissed = false,
   trailingAgentText,
   contextCompactionCount,
+  exchangeNext,
+  exchangeNextAt,
 }: {
   group: TimelineGroup;
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
@@ -2690,6 +2986,10 @@ const TimelineGroupView = memo(function TimelineGroupView({
   trailingAgentText?: string | undefined;
   /** Secondary chip facet when this fold sits next to a compaction landmark. */
   contextCompactionCount?: number | undefined;
+  /** What follows a top-level row (see {@link ExchangeNext}). */
+  exchangeNext?: ExchangeNext | undefined;
+  /** When the following item happened (answer start, approval request). */
+  exchangeNextAt?: string | undefined;
 }) {
   const startupDetails = useStartupDetails();
   const enter = useEntranceAnimation();
@@ -2734,13 +3034,16 @@ const TimelineGroupView = memo(function TimelineGroupView({
   const settleFold =
     !turnSummary?.rolling &&
     (group.kind === "turn" ? !!(enter && !insideTurn && !turnDefaultOpen) : liveActivitySettle);
+  const exchangeRow = !!turnSummary?.rolling && !insideTurn;
   switch (group.kind) {
     case "activity":
       // Preparation is one quiet surface, not a fold with eight technical steps.
+      // A later turn of the same exchange keeps its status row instead.
       if (
         !startupDetails &&
         !insideTurn &&
         !group.outcome &&
+        !group.earlier?.length &&
         group.items.every(
           (item) =>
             item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
@@ -2759,8 +3062,86 @@ const TimelineGroupView = memo(function TimelineGroupView({
           />
         );
       }
+      if (exchangeRow && !group.outcome && !containsPresentedImage) {
+        const earlier = group.earlier ?? [];
+        const workItems = group.items.filter((item) => item.kind !== "agent-message");
+        const startedAt = groupStartedAt(earlier[0]) ?? groupStartedAt(group);
+        const note = exchangeNext === "answer" ? undefined : latestNotePreview([group]);
+        const status: TurnSummaryStatus =
+          exchangeNext === "answer" || exchangeNext === "moved"
+            ? {
+                kind: "worked",
+                durationMs: durationBetween(startedAt ?? "", exchangeNextAt ?? ""),
+                ...(exchangeNext === "moved" ? { note } : {}),
+              }
+            : exchangeNext === "you" || exchangeNext === "blocked"
+              ? {
+                  kind: "waiting",
+                  label: exchangeNext === "you" ? "Waiting for you" : undefined,
+                  since: exchangeNextAt,
+                  note,
+                }
+              : {
+                  kind: "working",
+                  since: startedAt,
+                  note,
+                  preview: workItems.some((item) => item.kind !== "startup-phase") ? (
+                    <RollingActivity
+                      items={workItems}
+                      toolRegistry={toolRegistry}
+                      previousItem={previousSingleActivity.current}
+                      showCount={false}
+                    />
+                  ) : undefined,
+                };
+        if (foldMemory && earlier[0]) {
+          inheritFoldRestingState(foldMemory, group.id, [timelineGroupFoldId(earlier[0])]);
+        }
+        return (
+          <TurnSummary
+            key="exchange"
+            items={flattenActivityItems([group])}
+            outcome={undefined}
+            foldKey={group.id}
+            facets={turnSummary?.facets}
+            status={status}
+            contextCompactionCount={compactedLandmarkCount(earlier) || contextCompactionCount}
+          >
+            <FoldBody>
+              <TurnRailFrame>
+                {earlier.length > 0
+                  ? renderFoldedGroups(earlier, {
+                      renderMessageActions,
+                      renderMessageText,
+                      onOpenSession,
+                      onMemoryClick,
+                      onReconnect,
+                      renderAuthNeeded,
+                      resolveProviderLogo,
+                      toolRegistry,
+                      loadRetainedScreenshot,
+                      loadRetainedArtifact,
+                      loadVideoArtifactPlayback,
+                      turnSummary,
+                    })
+                  : null}
+                <ActivityRail
+                  items={group.items}
+                  onOpenSession={onOpenSession}
+                  onMemoryClick={onMemoryClick}
+                  toolRegistry={toolRegistry}
+                  loadRetainedScreenshot={loadRetainedScreenshot}
+                  loadRetainedArtifact={loadRetainedArtifact}
+                  bare
+                />
+              </TurnRailFrame>
+            </FoldBody>
+          </TurnSummary>
+        );
+      }
       if (
         turnSummary?.rolling &&
+        insideTurn &&
         !startupDetails &&
         !hasRememberedImageFold &&
         group.items.filter((item) => item.kind !== "startup-phase").length === 1
@@ -2900,58 +3281,55 @@ const TimelineGroupView = memo(function TimelineGroupView({
         )
       )
         return <ActivityRail items={activityItems} startupActive={false} bare />;
-      // Second-layer chips only when there are natural multi-cluster seams —
-      // otherwise the outer turn chip alone is enough ("N steps" wrapping one
-      // more "N steps" was the redundant double fold).
-      const nestClusters = foldableActivityClusterCount(group.groups) >= 2;
       const turnCopyText = collectTurnCopyText(group.groups, trailingAgentText);
-      const body = group.groups.map((child) => {
-        const key = timelineGroupKey(child);
-        return (
-          <TimelineGroupRenderBoundary
-            key={key}
-            resetKeys={[
-              child,
-              renderMessageActions,
-              renderMessageText,
-              onOpenSession,
-              onMemoryClick,
-              onReconnect,
-              renderAuthNeeded,
-              resolveProviderLogo,
-              toolRegistry,
-              loadRetainedScreenshot,
-              loadRetainedArtifact,
-              loadVideoArtifactPlayback,
-              turnSummary,
-            ]}
-          >
-            <TimelineGroupView
-              group={child}
-              renderMessageActions={renderMessageActions}
-              renderMessageText={renderMessageText}
-              onOpenSession={onOpenSession}
-              onMemoryClick={onMemoryClick}
-              onReconnect={onReconnect}
-              renderAuthNeeded={renderAuthNeeded}
-              resolveProviderLogo={resolveProviderLogo}
-              toolRegistry={toolRegistry}
-              loadRetainedScreenshot={loadRetainedScreenshot}
-              loadRetainedArtifact={loadRetainedArtifact}
-              loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-              turnSummary={turnSummary}
-              insideTurn
-              nestClusterChips={nestClusters}
-            />
-          </TimelineGroupRenderBoundary>
-        );
+      const body = renderFoldedGroups(group.groups, {
+        renderMessageActions,
+        renderMessageText,
+        onOpenSession,
+        onMemoryClick,
+        onReconnect,
+        renderAuthNeeded,
+        resolveProviderLogo,
+        toolRegistry,
+        loadRetainedScreenshot,
+        loadRetainedArtifact,
+        loadVideoArtifactPlayback,
+        turnSummary,
       });
+      const durationMs = durationBetween(group.startedAt, group.endedAt);
+      let status: TurnSummaryStatus | undefined;
+      if (exchangeRow && group.outcome === "complete") {
+        const lastChild = group.groups[group.groups.length - 1];
+        const parkedWait =
+          exchangeNext === "end" &&
+          lastChild?.kind === "item" &&
+          lastChild.item.kind === "notice" &&
+          lastChild.item.recordedOutcome
+            ? lastChild.item
+            : undefined;
+        // Delivered input at the tail means the agent is picking the work back up.
+        const resuming =
+          exchangeNext === "end" &&
+          lastChild?.kind === "item" &&
+          lastChild.item.kind === "machine-input-batch";
+        const note = exchangeNext === "answer" ? undefined : latestNotePreview(group.groups);
+        status = parkedWait
+          ? { kind: "waiting", label: waitingLabel(parkedWait), since: parkedWait.occurredAt, note }
+          : resuming
+            ? { kind: "working", since: group.startedAt, note }
+            : { kind: "worked", durationMs, note };
+        if (foldMemory && group.id.startsWith("exchange-") && group.groups[0]) {
+          inheritFoldRestingState(foldMemory, group.id, [timelineGroupFoldId(group.groups[0])]);
+        }
+      }
       return (
         <TurnSummary
+          key={status ? "exchange" : undefined}
+          status={status}
           items={activityItems}
           outcome={group.outcome}
           failureText={insideTurn ? undefined : group.failureText}
-          durationMs={durationBetween(group.startedAt, group.endedAt)}
+          durationMs={durationMs}
           defaultOpen={turnDefaultOpen ? true : undefined}
           bare={insideTurn}
           foldKey={group.id}
@@ -2987,6 +3365,167 @@ const TimelineGroupView = memo(function TimelineGroupView({
       );
   }
 });
+
+type FoldedGroupBehavior = {
+  renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  renderMessageText?:
+    | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
+    | undefined;
+  onOpenSession?: ((sessionId: string) => void) | undefined;
+  onMemoryClick?: ((memoryId: string) => void) | undefined;
+  onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode | undefined) | undefined;
+  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
+  toolRegistry: ToolRegistry;
+  loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
+  loadRetainedArtifact?: RetainedArtifactLoader | undefined;
+  loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
+  turnSummary?: TurnSummaryOptions | undefined;
+};
+
+/** Children of a folded turn or exchange, each on the shared rail. */
+function renderFoldedGroups(groups: readonly TimelineGroup[], behavior: FoldedGroupBehavior) {
+  // Second-layer chips only when there are natural multi-cluster seams:
+  // otherwise the outer turn chip alone is enough ("N steps" wrapping one
+  // more "N steps" was the redundant double fold).
+  const nestClusters = foldableActivityClusterCount(groups) >= 2;
+  return groups.map((child) => (
+    <TimelineGroupRenderBoundary
+      key={timelineGroupKey(child)}
+      resetKeys={[
+        child,
+        behavior.renderMessageActions,
+        behavior.renderMessageText,
+        behavior.onOpenSession,
+        behavior.onMemoryClick,
+        behavior.onReconnect,
+        behavior.renderAuthNeeded,
+        behavior.resolveProviderLogo,
+        behavior.toolRegistry,
+        behavior.loadRetainedScreenshot,
+        behavior.loadRetainedArtifact,
+        behavior.loadVideoArtifactPlayback,
+        behavior.turnSummary,
+      ]}
+    >
+      <TimelineGroupView {...behavior} group={child} insideTurn nestClusterChips={nestClusters} />
+    </TimelineGroupRenderBoundary>
+  ));
+}
+
+/**
+ * What follows a top-level exchange row: its answer; a pending approval or
+ * question ("you") or another wait such as capacity ("blocked") with nothing
+ * after it; nothing at all ("end"); some other row with no later work
+ * ("idle"); or later work, meaning the agent has moved past this row.
+ */
+type ExchangeNext = "answer" | "you" | "blocked" | "end" | "idle" | "moved";
+
+function exchangeNextState(next: TimelineGroup | undefined, laterWork: boolean): ExchangeNext {
+  if (next?.kind === "item" && next.item.kind === "agent-message" && next.item.text.trim()) {
+    return "answer";
+  }
+  if (laterWork) {
+    return "moved";
+  }
+  if (!next) {
+    return "end";
+  }
+  if (next.kind !== "item") {
+    return "idle";
+  }
+  const item = next.item;
+  if (item.kind === "session-status" && item.status === "requires_action") {
+    return "you";
+  }
+  if (item.kind === "notice" && item.tone === "waiting" && !item.recordedOutcome) {
+    return item.text.startsWith("Approval needed") ? "you" : "blocked";
+  }
+  return "idle";
+}
+
+/** "Waiting for 2 agents" when the wait knows its delegated workers. */
+function waitingLabel(item: NoticeItem): string {
+  const agents = item.waitingAgents ?? 0;
+  return agents > 0 ? `Waiting for ${agents} ${agents === 1 ? "agent" : "agents"}` : "Waiting";
+}
+
+/** Latest assistant prose inside a row, as one plain line for the status preview. */
+function latestNotePreview(groups: readonly TimelineGroup[]): string | undefined {
+  const text = latestNoteText(groups);
+  return text ? plainNotePreview(text) : undefined;
+}
+
+function latestNoteText(groups: readonly TimelineGroup[]): string | undefined {
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    const group = groups[index]!;
+    if (group.kind === "item") {
+      if (group.item.kind === "agent-message" && group.item.text.trim()) {
+        return group.item.text;
+      }
+      continue;
+    }
+    if (group.kind === "activity") {
+      for (let itemIndex = group.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+        const item = group.items[itemIndex]!;
+        if (item.kind === "agent-message" && item.text.trim()) {
+          return item.text;
+        }
+      }
+      const earlier = latestNoteText(group.earlier ?? []);
+      if (earlier) {
+        return earlier;
+      }
+      continue;
+    }
+    const nested = latestNoteText(group.groups);
+    if (nested) {
+      return nested;
+    }
+  }
+  return undefined;
+}
+
+/** Markdown reduced to readable text for a two-line clamp. */
+function plainNotePreview(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/(\*\*|__|\*|_|~~)(?=\S)([^*_~]+?)\1/g, "$2")
+    .replace(/^\s{0,3}(#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function compactedLandmarkCount(groups: readonly TimelineGroup[]): number {
+  return groups.filter(
+    (group) =>
+      group.kind === "item" &&
+      group.item.kind === "context-compaction" &&
+      group.item.phase === "compacted",
+  ).length;
+}
+
+/** The fold-memory key a group used before it joined an exchange row. */
+function timelineGroupFoldId(group: TimelineGroup): string {
+  return group.kind === "item" ? group.item.id : group.id;
+}
+
+function groupStartedAt(group: TimelineGroup | undefined): string | undefined {
+  if (!group) {
+    return undefined;
+  }
+  switch (group.kind) {
+    case "item":
+      return group.item.occurredAt;
+    case "activity":
+      return groupStartedAt(group.earlier?.[0]) ?? group.items[0]?.occurredAt;
+    case "turn":
+      return group.startedAt;
+  }
+}
 
 /**
  * Body under a turn/activity chip. Remount flashes are gated by the timeline
@@ -3048,33 +3587,15 @@ function timelineGroupContainsAuthNeeded(group: TimelineGroup): boolean {
   }
 }
 
-/** Deliberately published images are primary output, not incidental screenshots. */
-function timelineGroupContainsPresentedImage(group: TimelineGroup): boolean {
-  switch (group.kind) {
-    case "item":
-      return false;
-    case "activity":
-      return group.items.some((item) => {
-        if (item.kind !== "tool-call") return false;
-        const name = mcpToolLeaf(item.name);
-        if (name === "generate_image" || name === "image_generation_call") return true;
-        if (item.status !== "complete" || name !== "sandbox_file_publish") return false;
-        const output = unwrapMcpOutput(item.output);
-        if (output.isError) return false;
-        const receipt = parseSandboxFileArtifactReceipt(output.text);
-        return receipt !== null && isRetainedImageContentType(receipt.artifact.contentType);
-      });
-    case "turn":
-      return group.groups.some(timelineGroupContainsPresentedImage);
-  }
-}
-
 function timelineGroupItemIds(group: TimelineGroup): string[] {
   switch (group.kind) {
     case "item":
       return [group.item.id];
     case "activity":
-      return group.items.map((item) => item.id);
+      return [
+        ...(group.earlier ?? []).flatMap(timelineGroupItemIds),
+        ...group.items.map((item) => item.id),
+      ];
     case "turn":
       return group.groups.flatMap(timelineGroupItemIds);
   }
@@ -3101,7 +3622,7 @@ function isAgentProgress(next: TimelineGroup | undefined): boolean {
     item) can sit after the ACTIVE cluster, which must never fold mid-work. */
 function clusterIsSettled(group: Extract<TimelineGroup, { kind: "activity" }>): boolean {
   return group.items.every((item) => {
-    if (item.kind === "reasoning") {
+    if (item.kind === "reasoning" || item.kind === "agent-message") {
       return !item.streaming;
     }
     // Memory writes and fleet observations are discrete, already-settled events.
@@ -3123,11 +3644,11 @@ function foldableActivityClusterCount(groups: readonly TimelineGroup[]): number 
   return count;
 }
 
-function flattenActivityItems(groups: TimelineGroup[]): ActivityItem[] {
+function flattenActivityItems(groups: readonly TimelineGroup[]): ActivityItem[] {
   const items: ActivityItem[] = [];
   for (const group of groups) {
     if (group.kind === "activity") {
-      items.push(...group.items);
+      items.push(...flattenActivityItems(group.earlier ?? []), ...group.items);
     } else if (group.kind === "turn") {
       items.push(...flattenActivityItems(group.groups));
     }
@@ -3143,6 +3664,18 @@ function collectAgentMessageText(groups: readonly TimelineGroup[]): string {
       const text = group.item.text.trim();
       if (text.length > 0) {
         parts.push(text);
+      }
+    } else if (group.kind === "activity") {
+      // Commentary folded into clusters is still the assistant's own prose.
+      const nested = collectAgentMessageText(group.earlier ?? []);
+      if (nested.length > 0) {
+        parts.push(nested);
+      }
+      for (const item of group.items) {
+        const text = item.kind === "agent-message" ? item.text.trim() : "";
+        if (text.length > 0) {
+          parts.push(text);
+        }
       }
     } else if (group.kind === "turn") {
       const nested = collectAgentMessageText(group.groups);
@@ -3164,6 +3697,9 @@ function collectTurnIdsFromGroups(groups: readonly TimelineGroup[]): Set<string>
         ids.add(turnId);
       }
     } else if (group.kind === "activity") {
+      for (const nested of collectTurnIdsFromGroups(group.earlier ?? [])) {
+        ids.add(nested);
+      }
       for (const item of group.items) {
         if (item.turnId) {
           ids.add(item.turnId);
@@ -4099,14 +4635,8 @@ function NoticeRow({ item }: { item: NoticeItem }) {
             aria-hidden
             className="size-3.5 transition-transform group-open:rotate-90"
           />
-          <span>
-            Wait recorded ·{" "}
-            <time dateTime={item.occurredAt}>
-              {new Date(item.occurredAt).toLocaleString(undefined, {
-                dateStyle: "medium",
-                timeStyle: "short",
-              })}
-            </time>
+          <span title={new Date(item.occurredAt).toLocaleString()}>
+            {recordedWaitSummary(item)}
           </span>
         </summary>
         <p className="mt-1 whitespace-pre-wrap break-words pl-5 text-og-fg-muted">{item.text}</p>
@@ -4126,24 +4656,12 @@ function NoticeRow({ item }: { item: NoticeItem }) {
         "flex items-start gap-2.5 rounded-og-md border px-3.5 py-2.5 text-og-menu",
         tone,
       )}
-      role={item.recordedOutcome ? "note" : "status"}
-      data-og-recorded-outcome={item.recordedOutcome ? "wait" : undefined}
+      role="status"
     >
       <TriangleAlertIcon
         className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")}
       />
       <div className="min-w-0 flex-1">
-        {item.recordedOutcome ? (
-          <p className="mb-1 text-og-control font-medium">
-            Wait recorded{" "}
-            <time dateTime={item.occurredAt}>
-              {new Date(item.occurredAt).toLocaleString(undefined, {
-                dateStyle: "medium",
-                timeStyle: "short",
-              })}
-            </time>
-          </p>
-        ) : null}
         <span className="whitespace-pre-wrap break-words">{item.text}</span>
         {item.details ? (
           <details className="mt-2 text-og-control">
@@ -4165,6 +4683,41 @@ function NoticeRow({ item }: { item: NoticeItem }) {
         </a>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * "Waited for 2 agents · 3m 5s" once later input ended the wait, otherwise
+ * "Waiting for 2 agents · since 10:32" (with the date on a later day). The
+ * reason stays behind the disclosure.
+ */
+function recordedWaitSummary(item: NoticeItem): ReactNode {
+  const agents = item.waitingAgents ?? 0;
+  const target = agents > 0 ? ` for ${agents} ${agents === 1 ? "agent" : "agents"}` : "";
+  const waitedMs = item.waitEndedAt
+    ? durationBetween(item.occurredAt, item.waitEndedAt)
+    : undefined;
+  if (waitedMs !== undefined) {
+    return (
+      <>
+        Waited{target} ·{" "}
+        <time dateTime={`PT${Math.floor(waitedMs / 1000)}S`}>{formatElapsed(waitedMs)}</time>
+      </>
+    );
+  }
+  // An open wait is historical once its day has passed; keep its date visible.
+  const started = new Date(item.occurredAt);
+  const sameDay = started.toDateString() === new Date().toDateString();
+  return (
+    <>
+      {item.waitEndedAt ? "Waited" : "Waiting"}
+      {target} · since{" "}
+      <time dateTime={item.occurredAt}>
+        {sameDay
+          ? formatClockTime(item.occurredAt)
+          : started.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
+      </time>
+    </>
   );
 }
 

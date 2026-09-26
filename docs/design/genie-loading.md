@@ -71,16 +71,51 @@ The renderer receives `startedAt`, `detailsOpen`, and `onShowDetails` to optiona
 keep the diagnostics affordance. The SDK still owns loading visibility and exit
 transitions. Returning `null` hides the visual.
 
-## Rolling live Steps experiment
+## Compact progress (`turnSummary.rolling`)
 
-`turnSummary={{ rolling: true }}` starts live activity groups collapsed and shows
-the newest activity in a fixed-height rolling header. Opening it restores
-the existing Steps view and preserves the reader's expansion choice. Completed
-turns keep the normal summary. Tool labels reuse `ActivityDisclosure` through its
-compact presentation context; reasoning keeps a stable Thinking label with a live text preview. A single activity
-stays ungrouped until a second arrives. The header shows earlier-step and running
-counts. Step changes roll together over 400ms; a focused light beam sweeps across
-running text every 3.6 seconds. Reduced motion disables both animations.
+`turnSummary={{ rolling: true }}` selects the compact progress presentation, which
+the web app enables. It groups with `groupTimeline(items, { foldExchanges: true })`:
 
-The web app enables the experiment. `/rolling-steps.html` in the React demo loops
-through sample commands and supports light/dark comparison without model calls.
+- **Commentary is activity.** Assistant prose that narrates work joins its activity
+  cluster instead of splitting it: a provider-declared `commentary` phase, or, for
+  phase-less events, a message that more work or prose followed in the same turn.
+  The latest message of a running turn stays an answer candidate until activity
+  follows it.
+- **One row per exchange.** Everything between two human boundaries folds behind
+  one status row. Only human messages, structured human input, and input notices
+  start a new exchange. Routine machine inputs (child results and progress, agent
+  messages, background command results, wait timeouts, goal continuations),
+  recorded waits, and completed compaction fold inside; compaction also counts as
+  the chip's `compacted` facet. Failed turns, approvals, auth recovery, scheduled
+  prompts, generated media, and presented images stay visible between folds.
+- **Live status.** While the agent works, the row reads "Working · 2m 14s · 12
+  steps" with a live clock and the step count (notes are not steps). Below it, the
+  latest progress note is previewed muted and clamped to two lines, replaced when a
+  newer note arrives, and the fixed-height rolling reel shows the current step even
+  when there is no note. A parked exchange reads "Waiting for 2 agents · 3m" using
+  the agents that had not reported back when the wait began; an approval wait reads
+  "Waiting for approval". Opening the row shows every earlier turn, note, input,
+  and wait on one rail.
+- **Answer.** The answer renders below a "Worked for 4m 10s" separator that carries
+  the remaining facets. A turn that ends without an answer still lifts its latest
+  note as the visible reply, unless it parked in a wait.
+
+The recorded wait itself reads "Waited for 1 agent · 3m 5s" once later input ended
+it, or "Waiting · since 10:32" while it is still open, in both presentations.
+
+Following the tip stops once an answer pushes its question to the top of the
+viewport (or, when the question had already scrolled away, the status row or the
+answer itself). A reader who has not moved since returns to the tip with their
+next question. When the question of the exchange being read has scrolled away, a
+"Your question" control returns to it, with previous and next question buttons.
+
+Tool labels reuse `ActivityDisclosure` through its compact presentation context;
+reasoning keeps a stable Thinking label with a live text preview. Step changes roll
+together over 400ms; a focused light beam sweeps across running text every 3.6
+seconds. Reduced motion disables both animations.
+
+`/exchange-fold.html` in the React demo replays a delegated question through every
+stage (working, waiting, resumed, answering, done, follow-up) with a compact or
+classic toggle and light/dark themes; `/rolling-steps.html` loops sample commands.
+Neither needs model calls. `test/e2e/timeline-exchange-fold.browser.e2e.ts` covers
+the answer anchoring and question navigation in Chromium.

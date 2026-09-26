@@ -756,7 +756,9 @@ describe("published file presentation", () => {
     10_000,
   );
 
-  test.each([false, true])(
+  // The compact presentation folds narration into the cluster, so it has no
+  // multi-cluster wrap; its single-cluster variant follows this test.
+  test.each([false])(
     "explicit image collapse survives a multi-cluster turn wrap (rolling=%p)",
     async (rolling) => {
       resetTimelineEvents();
@@ -855,6 +857,80 @@ describe("published file presentation", () => {
     },
     10_000,
   );
+
+  test("compact presentation keeps an explicit image collapse once narration folds in", async () => {
+    resetTimelineEvents();
+    const prepared = [
+      timelineEvent("user.message", { text: "Show the implementation" }),
+      timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }),
+      ...["inspect-project", "prepare-project"].flatMap((id) => [
+        timelineEvent("agent.toolCall.created", {
+          id,
+          name: "exec_command",
+          arguments: { cmd: id },
+        }),
+        timelineEvent("agent.toolCall.output", { id, output: "ready" }),
+      ]),
+      timelineEvent("agent.message.completed", { text: "The project is ready." }),
+    ];
+    const loadRetainedArtifact = async () => ({
+      url: "https://objects.example/implementation.png",
+    });
+    const timeline = (events: SessionEvent[], status: "running" | "idle" = "running") => (
+      <MessageTimeline
+        events={events}
+        status={status}
+        turnSummary={{ rolling: true }}
+        loadRetainedArtifact={loadRetainedArtifact}
+      />
+    );
+    const r = await renderComponent(timeline(prepared));
+    try {
+      await flush();
+      // Narration after the work reads as the answer below a settled row.
+      expect(turnSummaryTrigger(r.container)?.textContent).toContain("Worked for");
+      const published = [
+        ...prepared,
+        timelineEvent("agent.toolCall.created", {
+          id: "published-image",
+          name: "opengeni__sandbox_file_publish",
+          arguments: { path: "/workspace/implementation.png" },
+        }),
+        timelineEvent("agent.toolCall.output", { id: "published-image", output: receipt() }),
+      ];
+      await r.rerender(timeline(published));
+      await flush();
+      // The narration is now commentary inside the one cluster, which opens
+      // because it presents an image.
+      const live = turnSummaryTriggers(r.container);
+      expect(live.map((trigger) => trigger.getAttribute("aria-expanded"))).toEqual(["true"]);
+      expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+      expect(r.container.querySelector("[data-og-activity-note]")?.textContent).toContain(
+        "The project is ready.",
+      );
+      await act(async () => live[0]?.click());
+      expect(live[0]?.getAttribute("aria-expanded")).toBe("false");
+
+      const settled = [
+        ...published,
+        timelineEvent("agent.message.completed", { text: "Here is the implementation." }),
+        timelineEvent("turn.completed", {}),
+      ];
+      await r.rerender(timeline(settled, "idle"));
+      await flush();
+      const settledTriggers = turnSummaryTriggers(r.container);
+      expect(settledTriggers.map((trigger) => trigger.getAttribute("aria-expanded"))).toEqual([
+        "false",
+      ]);
+      expect(r.container.querySelector('img[alt="implementation.png"]')).toBeNull();
+      // The remembered choice is not a lock.
+      await act(async () => settledTriggers[0]?.click());
+      await flush();
+      expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  }, 10_000);
 
   test.each([
     "sandbox_file_publish",
@@ -1757,10 +1833,12 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(visibleOutcome?.hasAttribute("open")).toBe(false);
     expect(visibleOutcome?.querySelector("summary")?.textContent).not.toContain(reason);
     expect(visibleOutcome?.getAttribute("role")).toBe("note");
-    expect(visibleOutcome?.textContent).toContain("Wait recorded");
+    // An open wait says since when; no delegated workers are known here.
+    expect(visibleOutcome?.querySelector("summary")?.textContent).toStartWith("Waiting · since ");
     expect(visibleOutcome?.querySelector("time")?.getAttribute("datetime")).toBe(
       events[2]!.occurredAt,
     );
+    // A wait from an earlier day keeps its date, so it never reads as current.
     expect(visibleOutcome?.querySelector("time")?.textContent).toContain(
       String(new Date(events[2]!.occurredAt).getFullYear()),
     );
