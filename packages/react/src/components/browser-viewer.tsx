@@ -117,11 +117,15 @@ type BrowserLaunchChoice =
   | { kind: "clean" }
   | { kind: "profile"; identityId: string; baseRevisionId?: string }
   | { kind: "attached"; device: AttachedBrowserDevice };
+// ArrayBuffer is opaque to React development prop diagnostics; a Uint8Array
+// exposes every image byte as an enumerable property retained in timing entries.
+type BrowserViewportFrame = Omit<BrowserFrame, "data"> & { data: ArrayBuffer };
+
 type PointerStart = {
   x: number;
   y: number;
   pointerId: number;
-  frame: BrowserFrame;
+  frame: BrowserViewportFrame;
 };
 type BrowserResumeAttempt = {
   operationId: string;
@@ -412,13 +416,17 @@ export function BrowserViewer({
     stream: { format: "jpeg", quality: 76, maxWidth: 1_920, maxHeight: 1_200 },
     ...(webSocketFactory ? { webSocketFactory } : {}),
   });
-  const displayedFrame = frameMatchesSelectedTarget(
+  const receivedFrame = frameMatchesSelectedTarget(
     frames.frame,
     browser.session,
     browser.selectedTarget,
   )
     ? frames.frame
     : null;
+  const displayedFrame = useMemo<BrowserViewportFrame | null>(
+    () => (receivedFrame ? { ...receivedFrame, data: receivedFrame.data.slice().buffer } : null),
+    [receivedFrame],
+  );
   const frameIsLive = frames.state === "live" && displayedFrame !== null;
   useEffect(() => {
     setHasLiveFrame(frameIsLive);
@@ -1857,7 +1865,7 @@ function BrowserAddressBar(props: {
 function BrowserViewport(props: {
   focusHandoffRef: { current: string | null };
   focusScope: string;
-  frame: BrowserFrame | null;
+  frame: BrowserViewportFrame | null;
   connectionState: string;
   supportsLiveFrames: boolean;
   connectionError: Error | null;
@@ -1895,19 +1903,19 @@ function BrowserViewport(props: {
     at: number;
     x: number;
     y: number;
-    frame: BrowserFrame;
+    frame: BrowserViewportFrame;
   } | null>(null);
   const wheelRef = useRef<{
     x: number;
     y: number;
     deltaX: number;
     deltaY: number;
-    frame: BrowserFrame;
+    frame: BrowserViewportFrame;
     timer: ReturnType<typeof setTimeout> | null;
   } | null>(null);
   const pendingTextRef = useRef<{
     text: string;
-    frame: BrowserFrame | null;
+    frame: BrowserViewportFrame | null;
     timer: ReturnType<typeof setTimeout>;
   } | null>(null);
   const actionRef = useRef(props.onAction);
@@ -1920,10 +1928,10 @@ function BrowserViewport(props: {
     frame: BrowserFrameInputFence;
     epoch: number;
   } | null>(null);
-  const queuedFrameRef = useRef<BrowserFrame | null>(null);
-  const currentFrameRef = useRef<BrowserFrame | null>(props.frame);
-  const paintedFrameRef = useRef<BrowserFrame | null>(null);
-  const [paintedFrame, setPaintedFrame] = useState<BrowserFrame | null>(null);
+  const queuedFrameRef = useRef<BrowserViewportFrame | null>(null);
+  const currentFrameRef = useRef<BrowserViewportFrame | null>(props.frame);
+  const paintedFrameRef = useRef<BrowserViewportFrame | null>(null);
+  const [paintedFrame, setPaintedFrame] = useState<BrowserViewportFrame | null>(null);
   const decodingFrameRef = useRef(false);
   const mountedRef = useRef(true);
   actionRef.current = props.onAction;
@@ -1954,7 +1962,7 @@ function BrowserViewport(props: {
 
           let objectUrl: string | null = null;
           try {
-            const blob = new Blob([frame.data.slice().buffer], {
+            const blob = new Blob([frame.data], {
               type: frame.mediaType,
             });
             if (typeof createImageBitmap === "function") {
@@ -2114,7 +2122,7 @@ function BrowserViewport(props: {
   );
 
   const point = useCallback(
-    (frame: BrowserFrame, clientX: number, clientY: number) =>
+    (frame: BrowserViewportFrame, clientX: number, clientY: number) =>
       browserPoint(canvasRef.current, frame, clientX, clientY),
     [],
   );
@@ -3048,7 +3056,7 @@ function loadImage(url: string): Promise<HTMLImageElement> {
 
 function browserPoint(
   canvas: HTMLCanvasElement | null,
-  frame: BrowserFrame | null,
+  frame: BrowserViewportFrame | null,
   clientX: number,
   clientY: number,
 ): { x: number; y: number } | null {
@@ -3109,7 +3117,10 @@ function sameBrowserDocument(left: BrowserFrameInputFence, right: BrowserFrameIn
   );
 }
 
-function sameOptionalBrowserFrame(left: BrowserFrame | null, right: BrowserFrame | null): boolean {
+function sameOptionalBrowserFrame(
+  left: BrowserViewportFrame | null,
+  right: BrowserViewportFrame | null,
+): boolean {
   return left === null || right === null ? left === right : sameFrameFence(left, right);
 }
 

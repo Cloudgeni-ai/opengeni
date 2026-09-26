@@ -3398,6 +3398,34 @@ test("native option input keeps its captured frame fence and rejects a changed t
   }
 });
 
+test("live image updates keep React timing diagnostics independent of screenshot bytes", async () => {
+  const canvasMock = mockBrowserCanvas();
+  const diagnosticSizes: number[] = [];
+  const measure = performance.measure.bind(performance);
+  const spy = jest.spyOn(performance, "measure").mockImplementation((name, options, end) => {
+    if (name.includes("BrowserViewport") && typeof options === "object") {
+      const detail = options.detail as { devtools?: { properties?: unknown[] } } | undefined;
+      if (detail?.devtools?.properties) diagnosticSizes.push(detail.devtools.properties.length);
+    }
+    return measure(name, options, end);
+  });
+  let unmount: (() => Promise<void>) | undefined;
+  try {
+    const fixture = await renderViewerInputFixture();
+    unmount = () => fixture.rendered.unmount();
+    for (let sequence = 1; sequence <= 3; sequence++) await fixture.frame(sequence);
+    expect(canvasMock.painted).toHaveLength(3);
+    expect(diagnosticSizes.length).toBeGreaterThan(0);
+    // Even this tiny 68-byte PNG previously added two indexed byte listings
+    // to every changed-frame diagnostic. Actual screenshots multiply that cost.
+    expect(Math.max(...diagnosticSizes)).toBeLessThan(64);
+  } finally {
+    await unmount?.();
+    spy.mockRestore();
+    canvasMock.restore();
+  }
+});
+
 for (const switchTarget of [false, true]) {
   test(`queued input releases old image buffers (${switchTarget ? "target switch" : "ordered drain"})`, async () => {
     const canvasMock = mockBrowserCanvas();
