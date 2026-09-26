@@ -1,14 +1,21 @@
 import { expect, jest, test } from "bun:test";
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { InteractionControllerError } from "@opengeni/interaction";
-import { AgentBrowserDriver, CdpConnection, type BrowserCommandRunner } from "../src";
+import {
+  AgentBrowserDriver,
+  BrowserSupervisor,
+  CdpConnection,
+  type BrowserCommandRunner,
+} from "../src";
 
 const jpeg = Buffer.from([
   0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 2, 0, 3, 1, 1, 0x11, 0, 0xff, 0xd9,
 ]).toString("base64");
 
 test("Lightpanda rejects screenshots before CDP can return placeholder pixels", async () => {
-  const fixture = await captureFixture("lightpanda");
+  const fixture = await captureFixture(undefined, "lightpanda");
   try {
     await fixture.driver.start();
     fixture.calls.length = 0;
@@ -23,6 +30,93 @@ test("Lightpanda rejects screenshots before CDP can return placeholder pixels", 
     expect((await fixture.driver.observe("target-1")).semantic?.kind).toBe("snapshot");
   } finally {
     await fixture.driver.close();
+  }
+});
+
+test("browser liveness does not depend on a renderer answering page commands", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.calls.length = 0;
+    fixture.stallNext("Page.getFrameTree");
+    jest.useFakeTimers();
+    const available = fixture.driver.isAvailable();
+    await settle();
+    jest.advanceTimersByTime(2_000);
+    await settle();
+    expect(await available).toBe(true);
+    expect(fixture.calls.map((call) => call.method)).toEqual(["Browser.getVersion"]);
+  } finally {
+    jest.useRealTimers();
+    await fixture.driver.close();
+  }
+});
+
+test("a browser command deadline does not authorize destructive runtime recovery", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.stallNext("Browser.getVersion");
+    jest.useFakeTimers();
+    const available = fixture.driver.isAvailable();
+    await fixture.waitUntilStalled();
+    jest.advanceTimersByTime(2_000);
+    await settle();
+    expect(await available).toBe(true);
+    fixture.replyToStalled();
+    await settle();
+    expect(await fixture.driver.isAvailable()).toBe(true);
+  } finally {
+    jest.useRealTimers();
+    await fixture.driver.close();
+  }
+});
+
+test("a closed browser connection still authorizes runtime recovery", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.disconnect();
+    expect(await fixture.driver.isAvailable()).toBe(false);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("the supervisor preserves target authority when a failed capture has a slow liveness probe", async () => {
+  const reference = { browserSessionId: randomUUID(), controllerGeneration: randomUUID() };
+  const fixture = await captureFixture(reference);
+  const directory = await mkdtemp("/tmp/ogb-capture-probe-");
+  let driverLifecycles = 0;
+  const supervisor = await BrowserSupervisor.open({
+    rootDirectory: join(directory, "state"),
+    socketRootDirectory: join(directory, "s"),
+    createDriver: async () => {
+      driverLifecycles += 1;
+      return fixture.driver;
+    },
+  });
+  try {
+    const created = await supervisor.createSession({ ...reference, headed: false });
+    fixture.stallNext("Page.captureScreenshot");
+    jest.useFakeTimers();
+    const failed = supervisor
+      .screenshot(reference, created.observation.target.id)
+      .catch((error: unknown) => error);
+    await fixture.waitUntilStalled();
+    fixture.stallNext("Browser.getVersion");
+    jest.advanceTimersByTime(10_000);
+    await fixture.waitUntilStalled();
+    jest.advanceTimersByTime(2_000);
+    await settle();
+    expect(await failed).toMatchObject({ code: "timeout", retryable: true });
+    expect(driverLifecycles).toBe(1);
+    expect(await supervisor.listTargets(reference)).toContainEqual(created.observation.target);
+    expect(fixture.calls.some((call) => call.method === "Browser.close")).toBe(false);
+  } finally {
+    jest.useRealTimers();
+    await supervisor.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -138,7 +232,10 @@ async function settle() {
   for (let index = 0; index < 60; index += 1) await Promise.resolve();
 }
 
-async function captureFixture(engine: "chromium" | "lightpanda" = "chromium") {
+async function captureFixture(
+  reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-capture" },
+  engine: "chromium" | "lightpanda" = "chromium",
+) {
   const calls: Array<{ id: number; method: string; sessionId?: string }> = [];
   let stalledMethod: string | null = null;
   let stalled: { id: number; method: string; sessionId?: string } | null = null;
@@ -219,9 +316,8 @@ async function captureFixture(engine: "chromium" | "lightpanda" = "chromium") {
     },
   };
   const driver = new AgentBrowserDriver({
+    ...reference,
     engine,
-    browserSessionId: randomUUID(),
-    controllerGeneration: "controller-capture",
     runner,
     foregroundManagedTabs: true,
     connect: async (endpoint) =>
@@ -238,6 +334,7 @@ async function captureFixture(engine: "chromium" | "lightpanda" = "chromium") {
   return {
     driver,
     calls,
+    disconnect: () => socket.close(),
     delayNext(method: string, delayMs: number) {
       delays.set(method, delayMs);
     },

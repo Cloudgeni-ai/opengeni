@@ -126,6 +126,12 @@ e2e("recovers a lost Lightpanda process without replaying mutations", async () =
     expect(targets).toHaveLength(1);
     expect(targets[0]!.id).toBe(oldTargetId);
     expect(targets[0]!.targetGeneration).not.toBe(created.observation.target.targetGeneration);
+    const stale = await supervisor.action(
+      navigateCommand(created.observation, `http://127.0.0.1:${page.port}/must-not-dispatch`),
+    );
+    expect(stale.state).toBe("failed");
+    expect(stale.error?.code).toBe("target_stale");
+    expect((await supervisor.listTargets(reference))[0]!.url).toBe(created.observation.target.url);
     expect(semanticNames(await supervisor.observe(reference, targets[0]!.id))).toContain(
       "Recovery page",
     );

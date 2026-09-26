@@ -730,7 +730,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "tabs"],
     title: "Manage browser tabs",
     description:
-      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Returns the authoritative complete tab list after the operation.",
+      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation.",
     input: BrowserTabsInput,
     output: BrowserTargetListResponse,
     readOnly: false,
@@ -1232,7 +1232,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "lifecycle"],
     title: "Change browser lifecycle",
     description:
-      "Suspend, resume, or end one BrowserSession through its durable exactly-once lifecycle journal. Suspending preserves a private working checkpoint; it does not publish a reusable identity version.",
+      "Suspend, resume, or end one BrowserSession through its durable exactly-once lifecycle journal. End a disposable managed session you created when its task is finished and no continuation or human handoff needs it; this releases the browser process and removes its private profile. Suspend instead when supported if later work needs the private working checkpoint; suspension does not publish a reusable identity version. Do not end another actor's, shared, or attached user browser merely because your turn is finished or it appears idle.",
     input: BrowserLifecycleInput,
     output: BrowserSessionMutationResponse,
     readOnly: false,

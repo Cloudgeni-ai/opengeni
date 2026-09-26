@@ -158,53 +158,59 @@ describe("BrowserSupervisor", () => {
     );
   });
 
-  test("repairs a lost managed browser without replaying an ambiguous action", async () => {
-    let firstDriverLost = false;
-    let factoryCalls = 0;
-    let dispatches = 0;
-    await withSupervisor(
-      async ({ supervisor }) => {
-        const session = reference(11);
-        const created = await supervisor.createSession({
-          ...session,
-          headed: false,
-          initialUrl: "https://recovery.test/",
-        });
-        const operationId = randomUUID();
-        const receipt = await supervisor.action(command(created.observation, operationId));
-        expect(receipt.state).toBe("outcome_unknown");
-        expect(receipt.error?.code).toBe("controller_lost");
-        expect(dispatches).toBe(1);
-        expect(factoryCalls).toBe(2);
+  test.each(["chromium", "lightpanda"] as const)(
+    "repairs a lost managed %s browser without replaying an ambiguous action",
+    async (engine) => {
+      let firstDriverLost = false;
+      let factoryCalls = 0;
+      let dispatches = 0;
+      await withSupervisor(
+        async ({ supervisor }) => {
+          const session = reference(11);
+          const created = await supervisor.createSession({
+            ...session,
+            headed: false,
+            initialUrl: "https://recovery.test/",
+            transport: { kind: "managed", engine },
+          });
+          const operationId = randomUUID();
+          const receipt = await supervisor.action(command(created.observation, operationId));
+          expect(receipt.state).toBe("outcome_unknown");
+          expect(receipt.error?.code).toBe("controller_lost");
+          expect(dispatches).toBe(1);
+          expect(factoryCalls).toBe(2);
 
-        const recovered = await supervisor.listTargets(session);
-        expect(recovered).toHaveLength(1);
-        expect(recovered[0]!.id).not.toBe(created.observation.target.id);
-        expect(recovered[0]!.url).toBe("https://recovery.test/");
+          const recovered = await supervisor.listTargets(session);
+          expect(recovered).toHaveLength(1);
+          expect(recovered[0]!.id).not.toBe(created.observation.target.id);
+          expect(recovered[0]!.url).toBe("https://recovery.test/");
 
-        expect(await supervisor.action(command(created.observation, operationId))).toEqual(receipt);
-        expect(dispatches).toBe(1);
-        const stale = await supervisor.action(command(created.observation));
-        expect(stale.state).toBe("failed");
-        expect(stale.error?.code).toBe("target_not_found");
-      },
-      {
-        onFactory: () => {
-          factoryCalls += 1;
+          expect(await supervisor.action(command(created.observation, operationId))).toEqual(
+            receipt,
+          );
+          expect(dispatches).toBe(1);
+          const stale = await supervisor.action(command(created.observation));
+          expect(stale.state).toBe("failed");
+          expect(stale.error?.code).toBe("target_not_found");
         },
-        driverHooks: {
-          available: (instance) => instance > 1 || !firstDriverLost,
-          async dispatch(instance) {
-            dispatches += 1;
-            if (instance === 1) {
-              firstDriverLost = true;
-              throw new Error("fixture browser transport disappeared after dispatch");
-            }
+        {
+          onFactory: () => {
+            factoryCalls += 1;
+          },
+          driverHooks: {
+            available: (instance) => instance > 1 || !firstDriverLost,
+            async dispatch(instance) {
+              dispatches += 1;
+              if (instance === 1) {
+                firstDriverLost = true;
+                throw new Error("fixture browser transport disappeared after dispatch");
+              }
+            },
           },
         },
-      },
-    );
-  });
+      );
+    },
+  );
 
   test("deduplicates concurrent creation and rejects stale or conflicting bindings", async () => {
     let factoryCalls = 0;
