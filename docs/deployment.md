@@ -1,5 +1,70 @@
 # Deployment
 
+## Verified signup trial runtime switch (0521)
+
+`0521_verified_signup_trial_runtime_switch.sql` is a rolling migration. It needs
+no drain and no `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`; migrate, then
+run the normal `db:provision-roles`. Its seed revision allows grants, so this
+migration changes no behavior on its own.
+
+A new verified self-service setup gets the one-time $10 trial credit only when
+**both** switches allow it:
+
+- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED` is the deployment master
+  opt-in. The API reads it at startup, so changing it needs a config rollout
+  and an API restart. Leave it `false` until the campaign is approved.
+- The runtime switch is the newest row of the append-only
+  `opengeni_private.verified_signup_trial_switch_revisions` table. Use it as
+  the fast kill switch for abuse response. A change applies to the next setup
+  transaction on every API replica, with no deploy or restart.
+
+To pause or resume grants, connect as the migration owner (the role in
+`OPENGENI_MIGRATIONS_DATABASE_URL`) and call the audited setter:
+
+```sql
+select set_verified_signup_trial_credits_enabled(
+  false,                                   -- true resumes grants
+  'github-actions:<run id>',               -- operator identity, 1-200 characters
+  'abuse response: pause signup trial'     -- reason, 6-1000 characters
+);
+```
+
+It returns the new revision as JSON (`revision`, `grantsEnabled`,
+`previousGrantsEnabled`, `changed`, `operator`, `reason`, `databaseRole`,
+`changedAt`). Every call appends one revision, even when the value does not
+change, and records the calling database login. Revisions cannot be updated,
+deleted, or truncated. Run it from an audited, access-controlled operator job
+(for example, a protected CI environment that already holds the migration
+credentials), never from an application pod. Read the current state with:
+
+```sql
+select revision, grants_enabled, previous_grants_enabled, operator, reason,
+       database_role, changed_at
+from opengeni_private.verified_signup_trial_switch_revisions
+order by revision desc
+limit 1;
+```
+
+What the switch guarantees:
+
+- The setter holds an exclusive advisory lock until commit. Each grant takes
+  the shared form of that lock before it reads the switch. After a disable
+  commits, no setup that commits later can still receive a grant.
+- A setup that runs while grants are off still succeeds, but gets no credit.
+  Turning grants back on never backfills it: its one-shot receipt already
+  exists.
+- The setter is `SECURITY DEFINER` and callable only by its owner. PUBLIC and
+  every runtime role lack `EXECUTE`. `db:provision-roles` revokes any stray
+  grant, and runtime posture fails readiness if a runtime role can call the
+  setter or write the table. Runtime roles get `SELECT` only.
+- If the table has no revision, grants fail closed.
+
+The control worker's sandbox-lease reaper pass (`OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS`,
+default 30 seconds) publishes
+`opengeni_verified_signup_trial_credits_runtime_enabled` (1 allows grants, 0
+blocks them). The gauge covers the runtime switch only. Check the API's
+environment for the master opt-in.
+
 ## Meaningful child attention (0503)
 
 `0503_session_meaningful_attention.sql` is a maintenance migration. Stop all old
@@ -2463,7 +2528,7 @@ The runtime secret must provide values such as:
 - `OPENGENI_OBJECT_STORAGE_BACKEND=gcs` plus `OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID`; prefer GKE Workload Identity over service-account JSON
 - `OPENGENI_PRODUCT_ACCESS_MODE=local|configured|managed`, independent of cloud/infrastructure profile
 - `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
-- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. The grant is account-wide and may pay any OpenGeni-credit resource; no payment card is required. A completed in-flight resource can leave a negative balance, and future top-ups clear that balance first; no card is automatically charged. While the grant leaves a positive balance, new work that names no model defaults to `OPENGENI_CREDITS_DEFAULT_MODEL` (unless a saved workspace default or connected subscription wins), and the post-signup model step shows the balance; at zero or below it falls back to the deployment default. See "Default model for new work" in [`model-providers.md`](model-providers.md).
+- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. It is the master opt-in; the database runtime switch from migration 0521 can pause and resume grants without a deploy or restart (see "Verified signup trial runtime switch (0521)" above). The grant is account-wide and may pay any OpenGeni-credit resource; no payment card is required. A completed in-flight resource can leave a negative balance, and future top-ups clear that balance first; no card is automatically charged. While the grant leaves a positive balance, new work that names no model defaults to `OPENGENI_CREDITS_DEFAULT_MODEL` (unless a saved workspace default or connected subscription wins), and the post-signup model step shows the balance; at zero or below it falls back to the deployment default. See "Default model for new work" in [`model-providers.md`](model-providers.md).
 - `OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only|shadow|credits` and `OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE=usage_only|shadow|credits` are independent of Stripe and default to `usage_only`. `shadow` is operator-only comparison, never a customer debit. Paid sandbox mode additionally needs a reviewed backend warm rate in `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON`; paid deployment-funded embeddings need `OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES` (integer USD micros per million input UTF-8 bytes) and `OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT` (ISO UTC timestamp; earlier queued jobs stay unpriced). This PR leaves commercial rates and production activation unset.
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
@@ -3321,7 +3386,7 @@ Minimum production dashboards should cover:
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`. In-flight and progress gauges are worker-local and exact-attempt-qualified: recoverable replacement attempts coexist without overwriting one another, and physical activity finalization always removes its own attempt even when durable outcome classification is unavailable.
 - Turn startup: the canonical `OpenGeni · Turn Startup` dashboard exposes 7-day and 30-day views of `opengeni_turn_worker_preparation_duration_seconds`, every bounded `opengeni_turn_startup_phase_duration_seconds` phase, and real cumulative `opengeni_turn_startup_milestone_duration_seconds{milestone="queue"|"provider_dispatch"|"first_byte"}` p50/p95/p99. Phase observations can overlap or nest: never sum them as elapsed critical-path time. `runtime_stream_initialization` replaces the misleading phase name `provider_dispatch`; the actual wire-dispatch milestone is unchanged. Nonblocking MCP preparation is recorded separately as `opengeni_tool_background_preparation_duration_seconds`, not as startup, even when it overlaps startup. The production observability example retains 30 days; environment overlays must preserve equivalent local or remote-write retention if they promise the 30-day view.
 - Model, MCP, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_context_compaction_starts_total{trigger}`, `opengeni_context_compactions_total{trigger}`, `opengeni_context_compaction_pending`, `opengeni_context_compaction_oldest_pending_age_seconds`, `opengeni_context_compaction_monitor_fresh`, `opengeni_mcp_tool_calls_total{outcome}`, `opengeni_mcp_tool_call_duration_seconds{outcome}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, logical `opengeni_sandbox_provisions_total{backend,stage,category,outcome,expected}` plus `opengeni_sandbox_provision_duration_seconds` and `opengeni_sandbox_provision_internal_attempts`, internal `opengeni_sandbox_provision_attempts_total{backend,stage,category,outcome}` plus its duration histogram, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total{backend,stage}`, and `opengeni_sandbox_orphans_terminated_total`. Logical provision metrics deliberately classify expected lifecycle transitions separately from actual failures; correlation/provider/session identities and error text are not labels.
-- Queue, admission, and billing: `opengeni_turns_queued`, `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
+- Queue, admission, and billing: `opengeni_turns_queued`, `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, `opengeni_verified_signup_trial_credits_runtime_enabled`, and `opengeni_build_info{version,revision}`.
 - Sandbox rollout state: `opengeni_sandbox_rollout_config{feature,state}` across API, control-worker, and turn-worker revisions; alert on disagreement before advancing a staged rollout.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.
 - Runtime health: API/worker restarts, continuous turn-worker host/cgroup utilization and RSS reserve consumption, node memory/I/O PSI, swap-out activity, kubelet runtime errors, node readiness, pod pending time, collector scrape/export errors, and OTLP export failures.

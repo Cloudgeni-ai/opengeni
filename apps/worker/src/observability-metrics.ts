@@ -1115,6 +1115,23 @@ export function recordCreditBalanceGauges(
   creditBalanceGaugeAccounts.set(observability, current);
 }
 
+/**
+ * The deployment-level runtime switch for the one-time verified signup trial
+ * credit (migration 0521): 1 while it allows grants, 0 when an operator has
+ * disabled it or no revision exists. A grant also needs the API's
+ * OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in.
+ */
+export function recordVerifiedSignupTrialSwitchGauge(
+  observability: Observability,
+  grantsEnabled: boolean,
+): void {
+  observability.setGauge({
+    name: "opengeni_verified_signup_trial_credits_runtime_enabled",
+    help: "Whether the runtime switch allows new verified signup trial credit grants (1) or blocks them (0).",
+    value: grantsEnabled ? 1 : 0,
+  });
+}
+
 export function recordSandboxOrphansTerminated(observability: Observability, count: number): void {
   if (count <= 0) {
     return;

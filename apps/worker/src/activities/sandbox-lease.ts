@@ -40,6 +40,7 @@ import {
   deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
   listCreditBalancesByAccount,
+  readVerifiedSignupTrialSwitch,
   listLegacyModalCheckpointSlots,
   listLiveModalSandboxLeaseAttributions,
   markWarmBillingStopCutoff,
@@ -160,6 +161,7 @@ import {
   recordSandboxOrphansTerminated,
   recordSandboxRotationBacklogGauges,
   recordTurnsQueuedGauge,
+  recordVerifiedSignupTrialSwitchGauge,
   runtimeMetricsHooksForObservability,
 } from "../observability-metrics";
 import {
@@ -2371,6 +2373,16 @@ async function refreshQueueLeaseAndCreditGauges(
         recordCreditBalanceGauges(observability, await listCreditBalancesByAccount(db));
       } catch (error) {
         observability.warn("sandbox reaper: credit-balance gauge refresh failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })(),
+    (async () => {
+      try {
+        const trialSwitch = await readVerifiedSignupTrialSwitch(db);
+        recordVerifiedSignupTrialSwitchGauge(observability, trialSwitch?.grantsEnabled === true);
+      } catch (error) {
+        observability.warn("sandbox reaper: trial-credit switch gauge refresh failed", {
           error: error instanceof Error ? error.message : String(error),
         });
       }

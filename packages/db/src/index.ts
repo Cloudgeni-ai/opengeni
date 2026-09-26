@@ -640,6 +640,7 @@ export * from "./task-notes";
 export * from "./work-claims";
 export * from "./managed-human-provisioning";
 export * from "./managed-user-setup";
+export * from "./verified-signup-trial-switch";
 export * from "./organization-membership-backfill";
 export * from "./connection-tenancy-backfill";
 export * from "./generated-images";

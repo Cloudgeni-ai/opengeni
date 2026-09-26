@@ -64,6 +64,15 @@ person proof, so monitor grants and abuse before scaling the offer.
    separately. Confirm new receipts get one $10 ledger entry, old receipts and
    invitation accounts get none, and balance/top-up screens handle negative
    values. Track campaign grants and registrations per period for abuse.
+   Once migration 0521 is live, grants also need its database runtime switch,
+   which starts enabled. To stop grants during abuse, turn that switch off. Do
+   not change the environment flag for this: that needs a config rollout and
+   an API restart. The runtime switch applies to the next setup transaction
+   without either. A setup made while it is off completes without the credit,
+   and turning it back on does not backfill that setup. See "Verified signup
+   trial runtime switch (0521)" in [`deployment.md`](deployment.md) for the
+   audited setter, the state query, and the
+   `opengeni_verified_signup_trial_credits_runtime_enabled` gauge.
 4. Activate one paid resource mode at a time on a controlled deployment only
    after its real database, failure-injection, and UI tests are green. Verify
    positive-balance admission for *new* work, idempotent full post-use settlement
