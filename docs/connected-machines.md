@@ -720,10 +720,12 @@ organization access and defaults to personal. Organization publication is
 available only to account administrators. Machines and Sandbox Environments display the
 resulting scope in their list cards so wider publication is never implicit.
 
-## Large file edits
+## Transactional file edits
 
-The editor uses transactional transfers for large text edits when the exact live
-agent advertises `transactional_fs_write`. This is separate from `op_stream`;
+The editor uses transactional transfers for text creation and in-place updates,
+including small files, when the exact live agent advertises
+`transactional_fs_write`. Small in-place updates must not bypass staging: a
+direct write can be interrupted after truncating the destination. This is separate from `op_stream`;
 older agents retain their existing single-message write behavior. An outbound
 message-size rejection is reported as a request-size fault, not an offline
 machine, and does not prove that earlier operations failed.
@@ -761,6 +763,10 @@ both paths before retrying.
 The source check and subsequent deletion are not conditional deletion; unrelated
 writers can still change the source between those steps. This is not a
 metadata-preserving filesystem rename.
+Small moves retain the legacy direct-write path so they do not acquire a new
+read requirement on a write-only destination. They do not have transactional
+publication guarantees. Legacy agents without transactional support also retain
+their existing direct-write behavior; inspect the destination after any timeout.
 
 Deploy matching protocol/runtime packages and a compatible native agent before
 expecting transactional support. Changing transport limits is not required.

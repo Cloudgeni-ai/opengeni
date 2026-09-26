@@ -1346,7 +1346,11 @@ export class SelfhostedSession {
       base?: string | (() => Promise<string | undefined>),
     ): Promise<((source: string, sourceBase: string) => Promise<void>) | undefined> => {
       const bytes = encoder.encode(content);
-      if (bytes.byteLength <= SELFHOSTED_FILE_CHUNK_BYTES) {
+      // Atomic publication and exact base checks matter for small edits too:
+      // a direct fsWrite can be interrupted after truncating the destination.
+      // Preserve legacy small moves into write-only destinations: their lazy
+      // base reader would introduce a new destination-read requirement.
+      if (bytes.byteLength <= SELFHOSTED_FILE_CHUNK_BYTES && typeof base === "function") {
         await this.writeFile({ path, content, createParents: true });
         return;
       }
