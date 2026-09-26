@@ -1518,7 +1518,7 @@ supervised commands keep separate proof. Details:
 
 Desktop/browser images and daemons release separately. Desktop/terminal data
 use the relay; the control plane retains authority. Large edits require
-capability-gated transactional transfers and verified receipts, never blind replay.
+connection-fenced transactional transfers and verified receipts, never blind replay.
 
 Canonical: `packages/runtime/src/sandbox/`,
 `apps/worker/src/activities/sandbox-lease.ts`,
