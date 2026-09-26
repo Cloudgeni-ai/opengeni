@@ -4,6 +4,8 @@
 //! Run with an existing synthetic root and nonzero epoch; stdin/stdout frames are
 //! a four-byte big-endian byte length followed by generated protobuf bytes.
 
+// This pipe fixture exercises upload semantics without a self-update supervisor.
+#[allow(dead_code)]
 #[path = "../src/uploads.rs"]
 mod uploads;
 

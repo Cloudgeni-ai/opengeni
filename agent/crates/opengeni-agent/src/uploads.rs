@@ -1,9 +1,12 @@
 //! Connection-instance-local transactional upload lifecycle. No op frames,
 //! child processes, implicit authority, automatic retries, or restart adoption.
 
+#[path = "update_drain.rs"]
+pub(crate) mod update_drain;
 use opengeni_agent_platform::{transactional_write::TransactionalWrite, Platform, PlatformError};
 use opengeni_agent_proto::v1::{self, control_request::Op, control_response::Result as ResultBody};
 use std::collections::HashMap;
+use update_drain::{UploadIdentity, WorkReservation};
 
 /// Existing protocol chunk bound (not a host workload policy).
 const CHUNK_BYTES: usize = 512 * 1024;
@@ -63,6 +66,7 @@ struct Upload {
     epoch: u32,
     begin: Option<v1::OpStart>,
     staged: Option<Box<dyn TransactionalWrite>>,
+    reservation: Option<WorkReservation>,
     last: Option<ChunkIdentity>,
     status: v1::OpStatus,
 }
@@ -116,7 +120,42 @@ fn valid_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
 }
 
+/// Scope an upload identity without locking its filesystem registry on the
+/// control/liveness runtime. The drain owns the accepted identity set.
+pub fn identity(request: &v1::ControlRequest, connection: &str) -> Option<UploadIdentity> {
+    let operation = match &request.op {
+        Some(Op::OpStart(_)) => &request.request_id,
+        Some(Op::WriteChunk(chunk)) => &chunk.op_id,
+        Some(Op::OpQuery(query)) => &query.op_id,
+        Some(Op::OpCancel(cancel)) => &cancel.op_id,
+        _ => return None,
+    };
+    Some(UploadIdentity {
+        connection: connection.to_owned(),
+        operation: operation.clone(),
+        epoch: request.epoch,
+    })
+}
+
 impl Uploads {
+    /// The pre-spawn route reservation covers begin until its staged transaction
+    /// retains a lifetime reservation. Terminal records retain only receipts.
+    pub fn serve_reserved<P: Platform>(
+        &mut self,
+        platform: &P,
+        request: &v1::ControlRequest,
+        connection_live: &dyn Fn() -> bool,
+        reservation: &WorkReservation,
+    ) -> v1::ControlResponse {
+        let response = self.serve(platform, request, connection_live);
+        if let Some(record) = self.records.get_mut(&request.request_id) {
+            if record.staged.is_some() && record.reservation.is_none() {
+                record.reservation = Some(reservation.retain_upload());
+            }
+        }
+        response
+    }
+
     /// Caller serializes through the exact link's mutex on a blocking thread.
     /// The live connection predicate is also checked at the actual commit point.
     /// Request epochs belong to individual sessions, not this shared machine.
@@ -233,6 +272,7 @@ impl Uploads {
             epoch,
             begin: Some(start.clone()),
             staged: None,
+            reservation: None,
             last: None,
             status: v1::OpStatus {
                 op_id: id.into(),
@@ -282,6 +322,7 @@ impl Uploads {
             epoch,
             begin: None,
             staged: None,
+            reservation: None,
             last: None,
             status: v1::OpStatus {
                 op_id: id.into(),
@@ -290,6 +331,7 @@ impl Uploads {
         });
         if record.status.state != v1::OpState::Complete as i32 {
             record.staged = None;
+            record.reservation = None;
             record.status.state = v1::OpState::Complete as i32;
             record.status.exit = Some(v1::OpExit {
                 cancelled: true,
@@ -380,6 +422,7 @@ impl Uploads {
                 ..Default::default()
             });
             record.staged = None;
+            record.reservation = None;
         }
         Ok(ResultBody::WriteChunk(v1::WriteChunkAck { seq: chunk.seq }))
     }
@@ -388,6 +431,7 @@ impl Uploads {
 impl Upload {
     fn fail(&mut self, error: &v1::AgentError) {
         self.staged = None;
+        self.reservation = None;
         self.status.state = v1::OpState::Complete as i32;
         self.status.exit = Some(v1::OpExit {
             failure_code: error
@@ -407,6 +451,40 @@ mod tests {
     use opengeni_agent_platform::NativePlatform;
 
     const ID: &str = "fsw-synthetic";
+    #[test]
+    fn upload_reservation_releases_on_complete_failure_cancel_or_link_drop() {
+        use super::update_drain::UpdateDrain;
+        use std::sync::Arc;
+        for outcome in ["complete", "failure", "cancel", "drop"] {
+            let mut rig = Rig::new();
+            let drain = Arc::new(UpdateDrain::default());
+            let body = b"synthetic";
+            let begin = request(start(body), 7);
+            let reserved = drain
+                .reserve_work(identity(&begin, "connection-one"))
+                .unwrap();
+            assert!(rig
+                .uploads
+                .serve_reserved(&rig.platform, &begin, &|| true, &reserved)
+                .error
+                .is_none());
+            drop(reserved);
+            assert_eq!(drain.snapshot().unwrap().uploads, 1);
+            assert_eq!(drain.snapshot().unwrap().routed, 0);
+            match outcome {
+                "complete" => assert!(rig.call(chunk(0, 0, body, true)).error.is_none()),
+                "failure" => assert!(rig.call(chunk(0, 0, b"incorrect", true)).error.is_some()),
+                "cancel" => {
+                    rig.call(Op::OpCancel(v1::OpCancel { op_id: ID.into() }));
+                }
+                "drop" => {
+                    drop(rig);
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(drain.snapshot().unwrap().uploads, 0, "{outcome}");
+        }
+    }
 
     struct Rig {
         dir: tempfile::TempDir,

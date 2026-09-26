@@ -29,9 +29,11 @@
 //! Resiliency here covers TRANSIENT BLIPS WHILE RUNNING (wifi roam, sleep/wake,
 //! NAT rebind). A deliberate stop is offline, not a blip (§23.0).
 
+use crate::uploads::update_drain::{UpdateDrain, UpdateReservation, WorkReservation};
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::stream::FuturesUnordered;
@@ -435,8 +437,7 @@ pub struct Supervisor<P: Platform> {
     shutdown: ShutdownSignal,
     /// Process-global update admission fence + idempotency key. One binary backs
     /// every workspace link, so concurrent per-link updates cannot be independent.
-    update_active: Arc<AtomicBool>,
-    update_operation_id: Arc<Mutex<Option<String>>>,
+    update_drain: Arc<UpdateDrain>,
 }
 
 impl<P: Platform + 'static> Supervisor<P> {
@@ -481,8 +482,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             metrics: Arc::new(std::sync::RwLock::new(v1::MetricsSample::default())),
             browser_bridge: None,
             shutdown: ShutdownSignal::default(),
-            update_active: Arc::new(AtomicBool::new(false)),
-            update_operation_id: Arc::new(Mutex::new(None)),
+            update_drain: Arc::new(UpdateDrain::default()),
         }
     }
 
@@ -992,22 +992,32 @@ impl<P: Platform + 'static> Supervisor<P> {
         let request_id = request.request_id.clone();
         let label = op_label(&request);
         let route = classify(&request);
-        if self.update_active.load(Ordering::Acquire)
-            && !matches!(
+        // The reservation is synchronous with the update fence, before any task
+        // can be spawned but not yet visible in the engine's admission counters.
+        let upload = crate::uploads::handles(&request);
+        let reservation = if upload
+            || !matches!(
                 &route,
                 Route::Liveness | Route::OpControl | Route::AgentUpdate(_)
-            )
-        {
-            publish_response(
-                client,
-                reply,
-                dispatch::update_draining_reply(request_id, label),
-                label,
-                max_payload,
-            )
-            .await;
-            return;
-        }
+            ) {
+            let identity = upload
+                .then(|| crate::uploads::identity(&request, &link.connection_id))
+                .flatten();
+            let Some(reservation) = self.update_drain.reserve_work(identity) else {
+                publish_response(
+                    client,
+                    reply,
+                    dispatch::update_draining_reply(request_id, label),
+                    label,
+                    max_payload,
+                )
+                .await;
+                return;
+            };
+            Some(reservation)
+        } else {
+            None
+        };
         if crate::uploads::handles(&request) {
             let uploads = link.uploads.clone();
             let platform = link.platform.clone();
@@ -1015,14 +1025,17 @@ impl<P: Platform + 'static> Supervisor<P> {
             let global_shutdown = self.shutdown.clone();
             let client = client.clone();
             rpc_tasks.spawn(async move {
+                // A blocking filesystem call outlives cancellation of its reply task.
                 let response = tokio::task::spawn_blocking(move || {
-                    uploads.lock().expect("upload registry").serve(
+                    let reservation = reservation.expect("upload reservation");
+                    uploads.lock().expect("upload registry").serve_reserved(
                         platform.as_ref(),
                         &request,
                         // RPC admission is scoped to this exact connection's
                         // subject. Session route epochs are pinned per upload;
                         // they are not a machine-wide generation.
                         &|| !shutdown.is_requested() && !global_shutdown.is_requested(),
+                        &reservation,
                     )
                 })
                 .await;
@@ -1068,6 +1081,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     resource_policy,
                     reply,
                     label,
+                    reservation.expect("work reservation"),
                     rpc_tasks,
                 );
             }
@@ -1090,6 +1104,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     resource_policy,
                     reply,
                     label,
+                    reservation.expect("work reservation"),
                     rpc_tasks,
                 );
             }
@@ -1100,6 +1115,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 let ctx = self.ctx(link, max_payload);
                 let scope = link.connection_id.clone();
                 rpc_tasks.spawn(async move {
+                    let _reservation = reservation;
                     let op = crate::engine::scoped_op_id(&scope, &request_id);
                     let origin = crate::engine::scoped_origin(&scope, crate::engine::LEGACY_ORIGIN);
                     let ticket = match engine.admit(&op, class, &origin).await {
@@ -1210,8 +1226,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         let events_subject = link.events_subject();
         let agent_id = link.creds.agent_id.clone();
         let engine = self.engine.clone();
-        let update_active = self.update_active.clone();
-        let update_operation_id = self.update_operation_id.clone();
+        let update_drain = self.update_drain.clone();
         let shutdown = self.shutdown.clone();
         // Process-global ownership is intentional. Credential rotation or one
         // transport generation ending must not cancel a verified binary swap.
@@ -1242,8 +1257,33 @@ impl<P: Platform + 'static> Supervisor<P> {
             .await;
 
             loop {
+                let pending = update_drain.snapshot();
+                if pending.is_none_or(|pending| pending.uploads > 0) {
+                    // Transactions survive transport reconnect and have no implicit
+                    // expiry. Defer this update rather than stranding or killing one.
+                    let code = if pending.is_some() {
+                        "update_busy_uploads"
+                    } else {
+                        "update_state_unavailable"
+                    };
+                    publish_agent_update_progress(
+                        &client,
+                        &events_subject,
+                        &agent_id,
+                        &update,
+                        v1::AgentUpdateStage::Failed,
+                        "",
+                        code,
+                        true,
+                        false,
+                    )
+                    .await;
+                    update_drain.release_update(&update.operation_id);
+                    return;
+                }
                 let admission = engine.admission_snapshot();
-                if admission.light_running == 0
+                if pending.is_some_and(|pending| pending.routed == 0)
+                    && admission.light_running == 0
                     && admission.light_queued == 0
                     && admission.heavy_running == 0
                     && admission.heavy_queued == 0
@@ -1312,10 +1352,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         rolled_back,
                     )
                     .await;
-                    update_active.store(false, Ordering::Release);
-                    if let Ok(mut operation) = update_operation_id.lock() {
-                        *operation = None;
-                    }
+                    update_drain.release_update(&update.operation_id);
                 }
                 Err(error) => {
                     warn!(%error, "self-update worker failed");
@@ -1331,10 +1368,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         false,
                     )
                     .await;
-                    update_active.store(false, Ordering::Release);
-                    if let Ok(mut operation) = update_operation_id.lock() {
-                        *operation = None;
-                    }
+                    update_drain.release_update(&update.operation_id);
                 }
             }
         });
@@ -1344,26 +1378,7 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// guard across an async reply. The same operation id is response-idempotent;
     /// a different operation is rejected until the owner finishes or restarts.
     fn reserve_update_operation(&self, operation_id: &str) -> UpdateReservation {
-        if self
-            .update_active
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return match self.update_operation_id.lock() {
-                Ok(operation) if operation.as_deref() == Some(operation_id) => {
-                    UpdateReservation::AlreadyAccepted
-                }
-                Ok(_) => UpdateReservation::Busy,
-                Err(_) => UpdateReservation::Unavailable,
-            };
-        }
-        if let Ok(mut operation) = self.update_operation_id.lock() {
-            *operation = Some(operation_id.to_string());
-            UpdateReservation::Started
-        } else {
-            self.update_active.store(false, Ordering::Release);
-            UpdateReservation::Unavailable
-        }
+        self.update_drain.reserve_update(operation_id)
     }
 
     /// Spawns a request/reply Git op as an engine job on its own task. The
@@ -1379,6 +1394,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         resource_policy: Option<v1::OperationResourcePolicy>,
         reply: async_nats::Subject,
         label: &'static str,
+        reservation: WorkReservation,
         rpc_tasks: &mut JoinSet<()>,
     ) {
         let max_payload = client.server_info().max_payload;
@@ -1389,6 +1405,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         let (request_epoch, held_epoch) = (request.epoch, self.ctx(link, max_payload).epoch);
         let request_id = request.request_id.clone();
         rpc_tasks.spawn(async move {
+            let _reservation = reservation;
             let response = if request_epoch != 0 && request_epoch < held_epoch {
                 dispatch::fenced_reply(request_id, request_epoch, held_epoch)
             } else {
@@ -1420,6 +1437,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         resource_policy: Option<v1::OperationResourcePolicy>,
         reply: async_nats::Subject,
         label: &'static str,
+        reservation: WorkReservation,
         rpc_tasks: &mut JoinSet<()>,
     ) {
         let max_payload = client.server_info().max_payload;
@@ -1446,6 +1464,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             }
         });
         rpc_tasks.spawn(async move {
+            let _reservation = reservation;
             let response = if request_epoch != 0 && request_epoch < held_epoch {
                 dispatch::fenced_reply(request_id, request_epoch, held_epoch)
             } else {
@@ -1748,14 +1767,6 @@ impl<P: Platform + 'static> Supervisor<P> {
         let _ = client.flush().await;
         info!("announced going-offline; closing cleanly");
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UpdateReservation {
-    Started,
-    AlreadyAccepted,
-    Busy,
-    Unavailable,
 }
 
 /// How a decoded control RPC is served.
@@ -2066,6 +2077,267 @@ fn running_binary_sha256() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_drain_reserves_unpolled_routed_work() {
+        use opengeni_agent_platform::NativePlatform;
+        let Some(bin) = it::find_nats_server() else {
+            eprintln!("SKIP update drain transport regression: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let client = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let dir = tempfile::tempdir_in("/dev/shm").unwrap();
+        let definition = SupervisorLink::new(
+            "audit-deferred",
+            Arc::new(NativePlatform::with_root(dir.path())),
+            it::test_credentials(&url),
+        );
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let supervisor = Supervisor::new_links(&[definition], "0.0.0");
+        let mut inbound = client.subscribe("audit.deferred.in").await.unwrap();
+        let mut responses = client.subscribe("audit.deferred.out").await.unwrap();
+        client.flush().await.unwrap();
+        let request = ControlRequest {
+            request_id: "audit-mkdir".into(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::FsMkdir(v1::FsMkdirRequest {
+                path: "after-idle".into(),
+                parents: false,
+                mode: 0o700,
+            })),
+        };
+        client
+            .publish_with_reply(
+                "audit.deferred.in",
+                "audit.deferred.out",
+                request.encode_to_vec().into(),
+            )
+            .await
+            .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), inbound.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut tasks = JoinSet::new();
+        supervisor
+            .route_message(&link, &client, message, &mut tasks)
+            .await;
+        // Current-thread runtime has not polled the just-spawned route task.
+        assert_eq!(tasks.len(), 1);
+        assert!(!dir.path().join("after-idle").exists());
+        assert_eq!(
+            supervisor.reserve_update_operation("audit-update"),
+            UpdateReservation::Started
+        );
+        let idle = supervisor.engine.admission_snapshot();
+        assert_eq!(
+            (
+                idle.light_running,
+                idle.light_queued,
+                idle.heavy_running,
+                idle.heavy_queued
+            ),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(supervisor.update_drain.snapshot().unwrap().routed, 1);
+        // Engine counters alone were zero; synchronous routing reservation prevents apply.
+        tokio::time::timeout(Duration::from_secs(5), tasks.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(5), responses.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let response = v1::ControlResponse::decode(reply.payload.as_ref()).unwrap();
+        assert!(response.error.is_none(), "{response:?}");
+        assert!(dir.path().join("after-idle").is_dir());
+        assert_eq!(supervisor.update_drain.snapshot().unwrap().routed, 0);
+        assert!(supervisor.update_drain.reserve_work(None).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::too_many_lines)] // one linear real-router upload/update/reconnect scenario
+    async fn update_drain_defers_active_upload_and_preserves_continuation() {
+        use opengeni_agent_platform::NativePlatform;
+        let Some(bin) = it::find_nats_server() else {
+            eprintln!("SKIP update drain transport regression: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let client = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let dir = tempfile::tempdir_in("/dev/shm").unwrap();
+        let definition = SupervisorLink::new(
+            "audit-upload",
+            Arc::new(NativePlatform::with_root(dir.path())),
+            it::test_credentials(&url),
+        );
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let supervisor = Supervisor::new_links(&[definition], "0.0.0");
+        let mut inbound = client.subscribe("audit.upload.in").await.unwrap();
+        let mut responses = client.subscribe("audit.upload.out").await.unwrap();
+        client.flush().await.unwrap();
+        let bytes = b"synthetic-only";
+        let mut tasks = JoinSet::new();
+        let start = ControlRequest {
+            request_id: "fsw-audit".into(),
+            epoch: 7,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::OpStart(v1::OpStart {
+                op: Some(v1::op_start::Op::FsWrite(v1::FsWriteBegin {
+                    path: "document".into(),
+                    expected_absent: true,
+                    content_size: Some(bytes.len() as u64),
+                    content_digest: blake3::hash(bytes).to_hex().to_string(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })),
+        };
+        client
+            .publish_with_reply(
+                "audit.upload.in",
+                "audit.upload.out",
+                start.encode_to_vec().into(),
+            )
+            .await
+            .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), inbound.next())
+            .await
+            .unwrap()
+            .unwrap();
+        supervisor
+            .route_message(&link, &client, message, &mut tasks)
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), tasks.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(5), responses.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let started = v1::ControlResponse::decode(reply.payload.as_ref()).unwrap();
+        assert!(started.error.is_none(), "{started:?}");
+        // Transport-generation reply tasks may stop without deleting the upload.
+        tasks.shutdown().await;
+        assert_eq!(supervisor.update_drain.snapshot().unwrap().uploads, 1);
+        let idle = supervisor.engine.admission_snapshot();
+        assert_eq!(
+            (
+                idle.light_running,
+                idle.light_queued,
+                idle.heavy_running,
+                idle.heavy_queued
+            ),
+            (0, 0, 0, 0)
+        );
+        let mut events = client.subscribe(link.events_subject()).await.unwrap();
+        client.flush().await.unwrap();
+        let update = ControlRequest {
+            request_id: "update-audit".into(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::AgentUpdateApply(
+                v1::AgentUpdateApplyRequest {
+                    operation_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                    target_version: "0.1.0".into(),
+                    channel: "stable".into(),
+                    expected_current_version: "0.0.0".into(),
+                    expected_current_sha256: String::new(),
+                    release_base_url: "http://127.0.0.1:1".into(),
+                },
+            )),
+        };
+        client
+            .publish_with_reply(
+                "audit.upload.in",
+                "audit.upload.out",
+                update.encode_to_vec().into(),
+            )
+            .await
+            .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), inbound.next())
+            .await
+            .unwrap()
+            .unwrap();
+        supervisor
+            .route_message(&link, &client, message, &mut tasks)
+            .await;
+        let reply = tokio::time::timeout(Duration::from_secs(5), responses.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(v1::ControlResponse::decode(reply.payload.as_ref())
+            .unwrap()
+            .error
+            .is_none());
+        assert!(it::wait_for_event(&mut events,Duration::from_secs(5),|event| matches!(&event.event,Some(Event::AgentUpdateProgress(progress)) if progress.stage == v1::AgentUpdateStage::Failed as i32 && progress.error_code == "update_busy_uploads" && progress.retryable)).await);
+        assert_eq!(supervisor.update_drain.snapshot().unwrap().uploads, 1);
+        // A deferred update releases exclusive admission, without ending the upload.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while supervisor.update_drain.reserve_work(None).is_none() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("deferred update must release admission");
+        assert_eq!(
+            supervisor.reserve_update_operation("continuation-audit"),
+            UpdateReservation::Started
+        );
+        let chunk = ControlRequest {
+            request_id: "audit-chunk".into(),
+            epoch: 7,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::WriteChunk(v1::WriteChunk {
+                op_id: "fsw-audit".into(),
+                seq: 0,
+                offset: 0,
+                bytes: bytes.to_vec().into(),
+                last: true,
+            })),
+        };
+        client
+            .publish_with_reply(
+                "audit.upload.in",
+                "audit.upload.out",
+                chunk.encode_to_vec().into(),
+            )
+            .await
+            .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), inbound.next())
+            .await
+            .unwrap()
+            .unwrap();
+        supervisor
+            .route_message(&link, &client, message, &mut tasks)
+            .await;
+        let reply = tokio::time::timeout(Duration::from_secs(5), responses.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let response = v1::ControlResponse::decode(reply.payload.as_ref()).unwrap();
+        assert!(response.error.is_none(), "{response:?}");
+        assert_eq!(std::fs::read(dir.path().join("document")).unwrap(), bytes);
+        tokio::time::timeout(Duration::from_secs(5), tasks.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(supervisor.update_drain.snapshot().unwrap().uploads, 0);
+        assert_eq!(supervisor.update_drain.snapshot().unwrap().routed, 0);
+    }
+
     use super::*;
 
     const TEST_CONNECTION_INSTANCE_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
