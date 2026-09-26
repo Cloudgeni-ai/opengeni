@@ -171,6 +171,28 @@ function checkpointArtifact(
 }
 
 describe("durable BrowserSession lifecycle", () => {
+  test("replays a legacy Lightpanda create with corrected screenshot capabilities", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const input = {
+      ...createInput(scope),
+      driverId: "opengeni.lightpanda.cdp.v1",
+      engine: "lightpanda" as const,
+      capabilities: { ...LIGHTPANDA_BROWSER_SESSION_CAPABILITIES, screenshots: true },
+    };
+    const original = await prepareBrowserSessionCreate(client.db, input);
+    const replay = await prepareBrowserSessionCreate(client.db, {
+      ...input,
+      capabilities: LIGHTPANDA_BROWSER_SESSION_CAPABILITIES,
+    });
+    expect(replay.session.id).toBe(original.session.id);
+    expect(replay.operation.replayed).toBe(true);
+    expect(replay.session.capabilities.screenshots).toBe(false);
+    await expect(
+      prepareBrowserSessionCreate(client.db, { ...input, name: "Changed request" }),
+    ).rejects.toBeInstanceOf(BrowserSessionOperationConflictError);
+  });
+
   test("restores a browser when end placement fails before dispatch", async () => {
     if (!available) return;
     const scope = await fixture();
@@ -411,7 +433,7 @@ describe("durable BrowserSession lifecycle", () => {
     });
     expect(LIGHTPANDA_BROWSER_SESSION_CAPABILITIES).toMatchObject({
       semanticObservation: true,
-      screenshots: true,
+      screenshots: false,
       liveFrames: false,
       downloads: false,
       privateCheckpoint: false,
