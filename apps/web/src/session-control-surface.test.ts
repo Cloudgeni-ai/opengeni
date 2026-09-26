@@ -423,6 +423,16 @@ describe("session control surface architecture", () => {
     expect(paginationKey).not.toContain("serverSessions");
   });
 
+  test("loads the first page and older sessions independently in each project", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain('sessionPaginationProjectGroup(null, "Default")');
+    expect(list).toContain('limit: group.kind === "channel" ? 50 : 100');
+    expect(list).toContain("if (!channelMode || search) return;");
+    expect(list).toContain("void loadMoreInGroup(group);");
+    expect(list).toContain("sessionPaginationProjectGroup(section.channelId, section.name)");
+    expect(list).toContain("(!channelMode || search) && workspacePagination");
+  });
+
   test("hands keyboard focus across optimistic project-move remounts", async () => {
     const list = await source("components/rail/session-list.tsx");
     expect(list).toContain('void onMoveToChannel(session, channel.id, "actions")');

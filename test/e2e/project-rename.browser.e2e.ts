@@ -49,9 +49,38 @@ afterAll(async () => {
   await Promise.allSettled([browser?.close(), web?.stop()]);
 });
 
-async function capture(name: string) {
-  if (screenshots) await page.screenshot({ path: `${screenshots}/${name}.png`, fullPage: true });
+async function capture(name: string, fullPage = true) {
+  if (screenshots) await page.screenshot({ path: `${screenshots}/${name}.png`, fullPage });
 }
+
+test("folders load their own first 50 and continue within that folder", async () => {
+  const redesign = page.getByRole("group", { name: "Website redesign", exact: true });
+  const bugfixes = page.getByRole("group", { name: "Bugfixes", exact: true });
+  const defaultFolder = page.getByRole("group", { name: "Default", exact: true });
+  await redesign.getByText("Website redesign kickoff").waitFor();
+  await bugfixes.getByText("Bugfix conversation 50").waitFor();
+  await defaultFolder.getByText("Default conversation 50").waitFor();
+  expect(await bugfixes.getByText("Bugfix conversation 51").count()).toBe(0);
+  expect(await defaultFolder.getByText("Default conversation 51").count()).toBe(0);
+  await bugfixes.getByRole("button", { name: "Load older sessions in Bugfixes" }).click();
+  await bugfixes.getByText("Bugfix conversation 55").waitFor();
+  expect(await defaultFolder.getByText("Default conversation 51").count()).toBe(0);
+  await defaultFolder.getByRole("button", { name: "Load older sessions in Default" }).click();
+  await defaultFolder.getByText("Default conversation 65").waitFor();
+  expect(await page.evaluate(() => (window as any).renameQa.pageCalls)).toEqual(
+    expect.arrayContaining([
+      { channelId: "project-qa", cursor: undefined, limit: 50 },
+      { channelId: "00000000-0000-4000-8000-000000000002", cursor: "50", limit: 50 },
+      { channelId: null, cursor: "50", limit: 50 },
+    ]),
+  );
+  await bugfixes.getByRole("button", { name: "Bugfixes", exact: true }).click();
+  await capture("project-folders-independent-pages", false);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await capture("project-folders-mobile", false);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  expect(pageErrors).toEqual([]);
+}, 30_000);
 
 test("production project menu renames, guards saves, and preserves failed drafts", async () => {
   const open = async (name: string) => {
