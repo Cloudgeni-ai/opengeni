@@ -83,6 +83,10 @@ import {
   type BrowserStateCaptureReceipt,
 } from "./state-journal";
 import {
+  managedChromiumSoftwareLaunchArguments,
+  type ManagedHeadedSoftwareRenderingPolicy,
+} from "./managed-browser-rendering";
+import {
   uploadBrowserStateArtifact,
   validateUploadAuthority,
   type BrowserStateUploadAuthority,
@@ -252,6 +256,8 @@ export type BrowserSupervisorOptions = {
   agentBrowserBinary?: ResolvedAgentBrowserBinary;
   lightpandaBinary?: ResolvedLightpandaBinary;
   headlessShell?: VerifiedHeadlessShell;
+  /** Trusted controller configuration; never sourced from a session request. */
+  managedHeadedSoftwareRenderingPolicy?: ManagedHeadedSoftwareRenderingPolicy;
   createDriver?: (context: BrowserSupervisorDriverContext) => Promise<BrowserSupervisorDriver>;
   uploadArtifact?: (artifactPath: string, authority: BrowserStateUploadAuthority) => Promise<void>;
   uploadDownload?: typeof uploadBrowserDownload;
@@ -346,6 +352,7 @@ export class BrowserSupervisor {
           options.agentBrowserBinary,
           options.lightpandaBinary,
           options.headlessShell,
+          options.managedHeadedSoftwareRenderingPolicy ?? "disabled",
         ));
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
     this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
@@ -1483,6 +1490,7 @@ async function createBrowserDriver(
   binary?: ResolvedAgentBrowserBinary,
   lightpandaBinary?: ResolvedLightpandaBinary,
   headlessShell?: VerifiedHeadlessShell,
+  softwareRenderingPolicy: ManagedHeadedSoftwareRenderingPolicy = "disabled",
 ): Promise<BrowserSupervisorDriver> {
   if (context.transport.kind === "attached_chrome") {
     const attached = await createAttachedChromeTransport({
@@ -1551,7 +1559,16 @@ async function createBrowserDriver(
     });
   }
   const route = context.networkRoute;
-  const launchArguments: string[] = [];
+  const launchArguments: string[] = [
+    ...managedChromiumSoftwareLaunchArguments({
+      policy: softwareRenderingPolicy,
+      headed: context.headed,
+      managedChromium: context.transport.kind === "managed",
+      // Only the server can obtain this environment from its live, linked
+      // ComputerSession allocator. An ambient DISPLAY is not proof of Xvfb.
+      allocatedDisplay: Boolean(context.linkedComputer && context.launchEnvironment?.DISPLAY),
+    }),
+  ];
   if (route?.consistency.locale) {
     launchArguments.push(`--lang=${route.consistency.locale}`);
   }

@@ -137,6 +137,15 @@ ScreenCaptureKit/CGEvent desktop feature as the release build. This is the suppo
 an agent binary next to arbitrary helpers can create a protocol-skewed runtime
 that production installation and managed updates deliberately forbid.
 
+On Linux, browserd uses Chromium software rendering for a headed managed
+BrowserSession linked to an OpenGeni-allocated `isolated_linux` display. The
+existing-seat mode keeps its launch behavior unless an operator explicitly sets
+`OPENGENI_BROWSERD_MANAGED_HEADED_SOFTWARE_RENDERING=true` for an externally
+provisioned virtual display. Set it to `false` to override the isolated-display
+default. This affects managed headed Chromium only; attached browsers, other
+engines, and headless sessions keep their launch behavior. The setting accepts
+only `true` or `false`; enabling it on a non-Linux host is rejected.
+
 The macOS native bridge drains Cocoa autorelease pools around synchronous calls
 and each Accessibility worker iteration. Stream ownership includes stopping a
 requested capture even when startup times out; dropping a timed-out request does

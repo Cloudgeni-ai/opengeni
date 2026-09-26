@@ -14,6 +14,7 @@ import { ComputerSupervisor } from "./computer-supervisor";
 import { BrowserControlServer } from "./server";
 import { BrowserSupervisor } from "./supervisor";
 import { retainControllerDiagnostic } from "./controller-diagnostics";
+import { resolveManagedHeadedSoftwareRenderingPolicy } from "./managed-browser-rendering";
 
 /** Exact release identity baked into compiled sidecars. Development builds share
  * one explicit marker with the Rust agent. Missing/mismatched identities fail
@@ -39,6 +40,7 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
     ...(config.socketRootDirectory ? { socketRootDirectory: config.socketRootDirectory } : {}),
     maxSessions: config.maxSessions,
     ...(headlessShell ? { headlessShell } : {}),
+    managedHeadedSoftwareRenderingPolicy: config.managedHeadedSoftwareRenderingPolicy,
     ...(agentBrowserBinary ? { agentBrowserBinary } : {}),
     ...(lightpandaBinary ? { lightpandaBinary } : {}),
   });
@@ -159,11 +161,17 @@ type BrowserdConfig = {
   computerNativeBinaryPath?: string;
   maxComputerSessions: number;
   computerEnvironmentMode: "existing" | "isolated_linux";
+  managedHeadedSoftwareRenderingPolicy: ReturnType<
+    typeof resolveManagedHeadedSoftwareRenderingPolicy
+  >;
 };
 
 async function browserdConfig(environment: NodeJS.ProcessEnv): Promise<BrowserdConfig> {
   const rootDirectory = resolve(requiredEnvironment(environment, "OPENGENI_BROWSERD_ROOT"));
   const tokenFile = resolve(requiredEnvironment(environment, "OPENGENI_BROWSERD_ADMIN_TOKEN_FILE"));
+  const environmentMode = computerEnvironmentMode(
+    environment.OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE,
+  );
   return {
     rootDirectory,
     ...(environment.OPENGENI_BROWSERD_SOCKET_ROOT
@@ -192,8 +200,11 @@ async function browserdConfig(environment: NodeJS.ProcessEnv): Promise<BrowserdC
       10_000,
       "OPENGENI_BROWSERD_MAX_COMPUTER_SESSIONS",
     ),
-    computerEnvironmentMode: computerEnvironmentMode(
-      environment.OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE,
+    computerEnvironmentMode: environmentMode,
+    managedHeadedSoftwareRenderingPolicy: resolveManagedHeadedSoftwareRenderingPolicy(
+      environment.OPENGENI_BROWSERD_MANAGED_HEADED_SOFTWARE_RENDERING,
+      environmentMode,
+      process.platform,
     ),
     allowedOrigins: commaSeparated(environment.OPENGENI_BROWSERD_ALLOWED_ORIGINS),
     ...(environment.OPENGENI_BROWSERD_BROWSER_EXECUTABLE
