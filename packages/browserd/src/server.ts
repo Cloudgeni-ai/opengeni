@@ -21,6 +21,7 @@ import {
   type InteractionError,
 } from "@opengeni/contracts";
 import { InteractionControllerError, InteractionDefiniteDriverError } from "@opengeni/interaction";
+import { CdpCommandTimeoutError, CdpTransportError } from "./cdp";
 import type { ComputerFrameSubscription, ComputerFrameStreamOptions } from "./computer-media";
 import {
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
@@ -363,7 +364,11 @@ export class BrowserControlServer {
     );
     const reference = binding(authority);
     if (segments.length === 4 && segments[3] === "targets") {
-      if (request.method === "GET") return success(await this.supervisor.listTargets(reference));
+      if (request.method === "GET") {
+        return await browserReadResponse("target inventory", () =>
+          this.supervisor.listTargets(reference),
+        );
+      }
       if (request.method === "POST") {
         const body = await readJsonObject(request);
         assertOnlyKeys(body, ["url"]);
@@ -522,7 +527,9 @@ export class BrowserControlServer {
       return success(await this.supervisor.selectTarget(reference, targetId));
     }
     if (operation === "observation" && request.method === "GET") {
-      return success(await this.supervisor.observe(reference, targetId));
+      return await browserReadResponse("observation", () =>
+        this.supervisor.observe(reference, targetId),
+      );
     }
     if (operation === "state" && request.method === "GET") {
       return success(await this.supervisor.targetState(reference, targetId));
@@ -1637,6 +1644,27 @@ class ProtocolError extends Error {
   ) {
     super(message);
     this.name = "ProtocolError";
+  }
+}
+
+// Only explicitly read-only browser routes may translate an uncertain CDP
+// transport result into a retryable read. Never apply this to target creation,
+// selection, closure, or journaled action dispatch; those may already have run.
+async function browserReadResponse(
+  operation: "target inventory" | "observation",
+  read: () => Promise<unknown>,
+): Promise<Response> {
+  try {
+    return success(await read());
+  } catch (error) {
+    if (!(error instanceof CdpTransportError)) throw error;
+    const timeout = error instanceof CdpCommandTimeoutError;
+    return failure(
+      timeout ? "timeout" : "resource_unavailable",
+      `browser ${operation} ${timeout ? "timed out" : "unavailable"}`,
+      true,
+      timeout ? 504 : 503,
+    );
   }
 }
 
