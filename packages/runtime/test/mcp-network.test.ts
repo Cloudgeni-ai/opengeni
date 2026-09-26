@@ -377,7 +377,7 @@ describe("MCP network and payload boundary", () => {
     );
     expect(budget.snapshot().entries).toBe(tools.length);
     expect(() => assertMcpToolListWithinBounds([...tools, { name: "extra" }])).toThrow(
-      McpPayloadTooLargeError,
+      "4096-entry safety limit",
     );
     expect(() =>
       assertMcpToolListWithinBounds(

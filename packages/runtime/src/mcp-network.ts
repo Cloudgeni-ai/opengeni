@@ -397,8 +397,9 @@ export class McpPayloadTooLargeError extends Error {
     readonly label: string,
     readonly actualBytes: number,
     readonly maxBytes: number,
+    readonly unit: "byte" | "entry" = "byte",
   ) {
-    super(`${label} exceeds the ${maxBytes}-byte safety limit`);
+    super(`${label} exceeds the ${maxBytes}-${unit} safety limit`);
     this.name = "McpPayloadTooLargeError";
   }
 }
@@ -422,7 +423,12 @@ export function assertMcpPayloadWithinBytes(value: unknown, maxBytes: number, la
 
 export function assertMcpToolListWithinBounds<T>(tools: readonly T[]): readonly T[] {
   if (tools.length > MCP_MAX_TOOL_LIST_ENTRIES) {
-    throw new McpPayloadTooLargeError("MCP tool list", tools.length, MCP_MAX_TOOL_LIST_ENTRIES);
+    throw new McpPayloadTooLargeError(
+      "MCP tool list",
+      tools.length,
+      MCP_MAX_TOOL_LIST_ENTRIES,
+      "entry",
+    );
   }
   for (const tool of tools) {
     const toolBytes = mcpSerializedSizeBytes(tool);
@@ -450,6 +456,7 @@ export function assertMcpServerSelectionWithinBounds<T>(servers: readonly T[]): 
       "selected MCP server count",
       servers.length,
       MCP_MAX_SELECTED_SERVERS,
+      "entry",
     );
   }
   return servers;
@@ -498,7 +505,7 @@ export class McpAggregateToolListBudget {
     const previous = this.contributions.get(sourceId) ?? { entries: 0, bytes: 0 };
     const nextEntries = this.totalEntries - previous.entries + contribution.entries;
     if (nextEntries > this.maxEntries) {
-      throw new McpPayloadTooLargeError(this.label, nextEntries, this.maxEntries);
+      throw new McpPayloadTooLargeError(this.label, nextEntries, this.maxEntries, "entry");
     }
     const nextBytes = this.totalBytes - previous.bytes + contribution.bytes;
     if (nextBytes > this.maxBytes) {
