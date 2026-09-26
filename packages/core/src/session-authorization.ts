@@ -416,10 +416,9 @@ async function resolveSessionAuthorizationActor(
   ) {
     throw new SessionAuthorizationDeniedError("caller_stale");
   }
-  const [callerSession, turn] = await Promise.all([
-    getSession(db, grant.workspaceId, callerSessionId),
-    getSessionTurnForAttempt(db, grant.workspaceId, callerSessionId, attemptId),
-  ]);
+  // These scoped reads can also open nested savepoints on a transaction handle.
+  const callerSession = await getSession(db, grant.workspaceId, callerSessionId);
+  const turn = await getSessionTurnForAttempt(db, grant.workspaceId, callerSessionId, attemptId);
   if (
     !callerSession ||
     callerSession.accountId !== grant.accountId ||
