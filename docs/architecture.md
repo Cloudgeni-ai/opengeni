@@ -1111,12 +1111,10 @@ handlers because its host owns process lifecycle.
 edge. `agent/proto/opengeni_agent.proto` is the single wire source, generated to
 Rust and `@opengeni/agent-proto` TypeScript types.
 
-One installed agent process may maintain independent connections to multiple
-OpenGeni deployments and workspaces while sharing the physical machine's host
-capacity and OS containment. The relay carries live terminal and desktop bytes;
-it is stateless beyond active channels and does not own session or lease truth.
-Install routes may serve baked binaries for `latest`; explicit version pins
-resolve binary assets and signatures from the immutable release archive.
+One agent connects independently to multiple deployments and workspaces within
+shared host containment. The relay carries terminal/desktop bytes, not durable
+session or lease state. Install `latest` may serve baked binaries; version pins
+resolve binaries/signatures from the immutable release archive.
 
 Canonical: [`../agent/README.md`](../agent/README.md) and
 [`connected-machines.md`](connected-machines.md).
