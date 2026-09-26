@@ -28,3 +28,5 @@ export * from "./state-journal";
 export * from "./state-upload";
 export * from "./supervisor";
 export * from "./workspace-files";
+
+export * from "./chromium-context-pool";
