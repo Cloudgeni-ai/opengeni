@@ -899,7 +899,11 @@ function isolatedEnvironment(
     AGENT_BROWSER_SCREENSHOT_DIR: resolve(options.screenshotDirectory),
     AGENT_BROWSER_IDLE_TIMEOUT_MS: "0",
     AGENT_BROWSER_HEADED: options.headed ? "1" : "0",
-    AGENT_BROWSER_ARGS: browserLaunchArguments(process.platform, options.launchArguments),
+    AGENT_BROWSER_ARGS: browserLaunchArguments(
+      process.platform,
+      options.launchArguments,
+      options.headed,
+    ),
     NO_COLOR: "1",
   });
   if (proxy) {
@@ -1029,6 +1033,7 @@ function supportedTimezone(value: string): string {
 export function browserLaunchArguments(
   platform: NodeJS.Platform,
   additional: readonly string[] = [],
+  headed = false,
 ): string {
   const policy = browserProfileCryptoPolicy(platform);
   const profileCryptoArgument =
@@ -1050,6 +1055,10 @@ export function browserLaunchArguments(
     "--restore-last-session",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
+    // Chromium's presentation-fenced screenshot path can wait indefinitely for
+    // hidden headed tabs. Copy a freshly repainted surface without raising the
+    // browser or changing the shared desktop's active tab.
+    platform === "linux" && headed ? "--enable-features=CDPScreenshotNewSurface" : null,
     platform === "linux" ? "--test-type" : null,
     profileCryptoArgument,
     ...validatedAdditional,
