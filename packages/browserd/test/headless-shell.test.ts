@@ -75,3 +75,39 @@ test("corrupt or unsupported bundle fails before launching", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("an empty restored Chromium profile is never implicitly converted to shell", async () => {
+  const profileDirectory = await mkdtemp("/tmp/ogb-shell-restored-");
+  try {
+    expect(
+      await selectManagedChromiumExecutable({
+        headed: false,
+        restoredProfile: true,
+        profileDirectory,
+        headlessShell: shell,
+        browserExecutablePath: "/chromium",
+      }),
+    ).toBe("/chromium");
+    // A fresh empty profile with otherwise identical options remains eligible.
+    expect(
+      await selectManagedChromiumExecutable({
+        headed: false,
+        restoredProfile: false,
+        profileDirectory,
+        headlessShell: shell,
+        browserExecutablePath: "/chromium",
+      }),
+    ).toBe(shell.path);
+    // A restored shell profile keeps its explicit version marker.
+    expect(
+      await selectManagedChromiumExecutable({
+        headed: false,
+        restoredProfile: true,
+        profileDirectory,
+        headlessShell: shell,
+      }),
+    ).toBe(shell.path);
+  } finally {
+    await rm(profileDirectory, { recursive: true, force: true });
+  }
+});

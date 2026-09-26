@@ -220,6 +220,7 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
   sessionDirectory: string;
   socketDirectory: string;
   profileDirectory: string;
+  restoredProfile: boolean;
   downloadDirectory: string;
   screenshotDirectory: string;
   headed: boolean;
@@ -815,6 +816,7 @@ export class BrowserSupervisor {
       sessionDirectory,
       socketDirectory,
       profileDirectory,
+      restoredProfile: restoredProfileMaterialized,
       downloadDirectory: downloadStore?.filesDirectory ?? downloadDirectory,
       screenshotDirectory,
       headed: options.headed,
@@ -1547,6 +1549,7 @@ async function createBrowserDriver(
   const browserExecutablePath = await selectManagedChromiumExecutable({
     headed: context.headed,
     profileDirectory: context.profileDirectory,
+    restoredProfile: context.restoredProfile,
     ...(context.browserExecutablePath
       ? { browserExecutablePath: context.browserExecutablePath }
       : {}),

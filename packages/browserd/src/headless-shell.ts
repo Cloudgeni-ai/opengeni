@@ -64,6 +64,7 @@ export async function resolvePinnedHeadlessShell(
  * fails closed instead of silently changing the executable on recovery. */
 export async function selectManagedChromiumExecutable(input: {
   headed: boolean;
+  restoredProfile?: boolean;
   profileDirectory: string;
   browserExecutablePath?: string;
   headlessShell?: VerifiedHeadlessShell;
@@ -84,7 +85,12 @@ export async function selectManagedChromiumExecutable(input: {
       throw new Error("Headless shell profile requires its matching headless launcher");
     return input.headlessShell.path;
   }
-  if (input.headed || !input.headlessShell || (await readdir(input.profileDirectory)).length > 0)
+  if (
+    input.headed ||
+    input.restoredProfile ||
+    !input.headlessShell ||
+    (await readdir(input.profileDirectory)).length > 0
+  )
     return input.browserExecutablePath;
   await writeFile(marker, JSON.stringify({ version: HEADLESS_SHELL_VERSION }), {
     flag: "wx",
