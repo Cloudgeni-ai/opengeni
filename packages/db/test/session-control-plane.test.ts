@@ -379,10 +379,24 @@ describe("clean session control plane", () => {
 
     test("refuses different ownership and a closed attempt with identical nonempty policies", async () => {
       const { grant, session, claimed, attempt, registration, register } = await policyAttempt();
+      // Use real, visible ownership targets so restrictive INSERT policies do
+      // not reject a nonexistent session before the exact-ID conflict check.
+      const sibling = await createSession(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        initialMessage: "other ownership target",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+      const siblingPrompt = await send(grant, sibling.id, "other turn ownership target");
       expect(await register()).toEqual(attempt);
       const changes: Partial<typeof registration>[] = [
-        { sessionId: crypto.randomUUID() },
-        { turnId: crypto.randomUUID() },
+        { sessionId: sibling.id },
+        { turnId: siblingPrompt.turn.id },
         { executionGeneration: registration.executionGeneration + 1 },
         { temporalWorkflowId: `${registration.temporalWorkflowId}-other` },
         { temporalWorkflowRunId: crypto.randomUUID() },
