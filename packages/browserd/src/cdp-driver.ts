@@ -1894,13 +1894,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // Native popup windows are absent from page screenshots. Expose only the
       // focused control, through the same isolated-world redaction and budget
       // as focused DOM reads; never alter the page to draw a fake popup.
-      const read = await this.callOnNode(
-        state,
-        focused.backendDOMNodeId,
-        DOM_READ_FUNCTION,
-        [{ value: 16_384 }, { value: [] }, { value: true }],
-        { isolatedFrameId: focused.frameId },
-      );
+      let read: unknown = null;
+      try {
+        read = await this.callOnNode(
+          state,
+          focused.backendDOMNodeId,
+          DOM_READ_FUNCTION,
+          [{ value: 16_384 }, { value: [] }, { value: true }],
+          { isolatedFrameId: focused.frameId },
+        );
+      } catch (error) {
+        // This optional projection may lose its node after the AX snapshot.
+        // Omit choices in that case; transport/context failures still propagate.
+        const disappeared =
+          (error instanceof CdpProtocolError &&
+            error.method === "DOM.resolveNode" &&
+            error.code === -32000 &&
+            error.message === "No node with given id found") ||
+          (error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found");
+        if (!disappeared) throw error;
+      }
       if (
         isRecord(read) &&
         read.redacted === null &&

@@ -832,11 +832,36 @@ headedE2e(
       screenshotDirectory: join(directory, "screenshots"),
       headed: true,
     });
+    let detachOnResolve = false;
     const driver = new AgentBrowserDriver({
       browserSessionId: randomUUID(),
       controllerGeneration: randomUUID(),
       runner,
       foregroundManagedTabs: true,
+      connect: async (endpoint) => {
+        const connection = await CdpConnection.connect(endpoint);
+        return {
+          send: async <T = Record<string, unknown>>(
+            method: string,
+            params?: Readonly<Record<string, unknown>>,
+            options?: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal },
+          ): Promise<T> => {
+            if (detachOnResolve && method === "DOM.resolveNode" && params?.executionContextId) {
+              detachOnResolve = false;
+              await connection.send(
+                "Runtime.evaluate",
+                { expression: "document.querySelector('select').remove()" },
+                options,
+              );
+              await connection.send("HeapProfiler.collectGarbage", {}, options);
+            }
+            return await connection.send<T>(method, params, options);
+          },
+          on: connection.on.bind(connection),
+          waitForEvent: connection.waitForEvent.bind(connection),
+          close: connection.close.bind(connection),
+        };
+      },
     });
     const focused = (view: BrowserObservation): InteractionSemanticNodeValue | undefined => {
       const queue = view.semantic?.kind === "snapshot" ? [...view.semantic.roots] : [];
@@ -849,11 +874,11 @@ headedE2e(
     try {
       let view = await driver.start(
         dataUrl(
-          '<label>Priority<select id="priority" oninput="document.querySelector(\'p\').textContent += \' input:\' + this.value" onchange="document.querySelector(\'p\').textContent += \' change:\' + this.value"><option value="low">Low</option><optgroup label="More"><option value="high">High</option><option value="blocked" disabled>Blocked</option></optgroup></select></label><p>Events</p>',
+          '<style>select{position:absolute;left:10px;top:40px;width:200px;height:40px}button{position:absolute;left:10px;top:150px;width:200px;height:40px}</style><button onclick="this.textContent=\'Counter 1\'">Counter 0</button><label>Priority<select id="priority" oninput="document.querySelector(\'p\').textContent += \' input:\' + this.value" onchange="document.querySelector(\'p\').textContent += \' change:\' + this.value"><option value="low">Low</option><optgroup label="More"><option value="high">High</option><option value="blocked" disabled>Blocked</option></optgroup></select></label><p>Events</p>',
         ),
       );
       view = await driver.dispatch(
-        command(view, { type: "click", locator: { kind: "label", text: "Priority" } }),
+        command(view, { type: "pointer", action: "click", x: 110, y: 60 }),
       );
       expect(focused(view)?.native?.data).toEqual({
         kind: "native-select",
@@ -879,6 +904,10 @@ headedE2e(
         command(view, { type: "select", locator: { kind: "ref", ref }, values: ["high"] }),
       );
       expect(names(view)).toContain("Events input:high change:high");
+      view = await driver.dispatch(
+        command(view, { type: "pointer", action: "click", x: 110, y: 170 }),
+      );
+      expect(names(view)).toContain("Counter 1");
       expect(
         (
           await driver.readDom(view.target.id, {
@@ -890,6 +919,15 @@ headedE2e(
           })
         ).count,
       ).toBe(1);
+      view = await driver.dispatch(
+        command(view, { type: "pointer", action: "click", x: 110, y: 60 }),
+      );
+      detachOnResolve = true;
+      view = await driver.observe(view.target.id);
+      expect(detachOnResolve).toBe(false);
+      expect(focused(view)?.native).toBeUndefined();
+      expect((await driver.captureScreenshot(view.target.id)).data.byteLength).toBeGreaterThan(100);
+      expect(names(await driver.observe(view.target.id))).toContain("Counter 1");
       view = await driver.dispatch(
         command(view, {
           type: "navigate",
