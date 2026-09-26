@@ -49,6 +49,23 @@ mock.module("@opengeni/react", () => ({
 }));
 let root: Root;
 let container: HTMLDivElement;
+
+async function waitForPreview(assertion: () => void): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  for (;;) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      if (Date.now() >= deadline) throw error;
+    }
+    // Commit the render before waiting: React.lazy module evaluation and the
+    // authenticated byte read can settle after the original act scope exits.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+}
 beforeEach(() => {
   artifact = {
     available: true,
@@ -69,6 +86,12 @@ beforeEach(() => {
   accessKeyVersion = 1;
   activeClient = client;
   for (const fn of Object.values(client)) fn.mockClear();
+  // Unconsumed one-shot reads from a failed lazy-render test must not leak into
+  // later previews (especially the PDF Blob lifecycle assertion).
+  client.downloadRetainedArtifact.mockReset().mockImplementation(async () => ({
+    bytes: new Uint8Array([37, 80, 68, 70]),
+    artifact,
+  }));
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -115,12 +138,11 @@ test("workbench text uses authenticated SDK bytes and keeps HTML inert", async (
         workbenchTextPreview
       />,
     );
-    await new Promise((resolve) => setTimeout(resolve, 30));
   });
+  await waitForPreview(() => expect(container.textContent).toContain("<script>alert(1)</script>"));
   expect(client.downloadRetainedArtifact).toHaveBeenCalledWith(workspaceId, artifact, {
     signal: expect.any(AbortSignal),
   });
-  expect(container.textContent).toContain("<script>alert(1)</script>");
   expect(container.querySelector("script")).toBeNull();
 });
 
@@ -136,7 +158,7 @@ test("oversized workbench text is rejected before downloading", async () => {
       />,
     ),
   );
-  expect(container.textContent).toContain("256 KiB");
+  await waitForPreview(() => expect(container.textContent).toContain("256 KiB"));
   expect(client.downloadRetainedArtifact).not.toHaveBeenCalled();
 });
 
@@ -152,13 +174,15 @@ test("workbench retry recovers and receipt changes abort stale text", async () =
     />
   );
   await act(async () => root.render(render()));
-  expect(container.textContent).toContain("Preview could not be loaded");
+  await waitForPreview(() =>
+    expect(container.textContent).toContain("Preview could not be loaded"),
+  );
   client.downloadRetainedArtifact.mockResolvedValueOnce({
     artifact,
     bytes: new TextEncoder().encode("Verified retry"),
   });
   await act(async () => (container.querySelector("button") as HTMLButtonElement).click());
-  expect(container.textContent).toContain("Verified retry");
+  await waitForPreview(() => expect(container.textContent).toContain("Verified retry"));
   let resolveOld!: (value: {
     artifact: RetainedArtifactReference;
     bytes: Uint8Array<ArrayBuffer>;
@@ -186,7 +210,7 @@ test("workbench retry recovers and receipt changes abort stale text", async () =
   await act(async () => root.render(render()));
   expect(oldSignal.aborted).toBe(true);
   await act(async () => resolveOld({ artifact, bytes: new TextEncoder().encode("STALE SECRET") }));
-  expect(container.textContent).toContain("New identity");
+  await waitForPreview(() => expect(container.textContent).toContain("New identity"));
   expect(container.textContent).not.toContain("STALE SECRET");
 });
 
@@ -205,7 +229,7 @@ test("workbench hides stale content on client and workspace replacement", async 
     />
   );
   await act(async () => root.render(render()));
-  expect(container.textContent).toContain("Old client source");
+  await waitForPreview(() => expect(container.textContent).toContain("Old client source"));
   let resolveNew!: (value: {
     artifact: RetainedArtifactReference;
     bytes: Uint8Array<ArrayBuffer>;
@@ -225,7 +249,7 @@ test("workbench hides stale content on client and workspace replacement", async 
   await act(async () =>
     resolveNew({ artifact, bytes: new TextEncoder().encode("New client source") }),
   );
-  expect(container.textContent).toContain("New client source");
+  await waitForPreview(() => expect(container.textContent).toContain("New client source"));
   await act(async () => root.render(render("44444444-4444-4444-8444-444444444444")));
   expect(container.textContent).not.toContain("New client source");
   expect(container.textContent).toContain("Loading preview");
@@ -313,7 +337,7 @@ test("PDF renderer failures stay inside the preview", async () => {
     ),
   );
   expect(container.textContent).toContain("Conversation remains");
-  expect(container.textContent).toContain("PDF preview unavailable");
+  await waitForPreview(() => expect(container.textContent).toContain("PDF preview unavailable"));
 });
 
 test("published link opens sidebar and embed renders playable video with stable chat space", async () => {
@@ -404,6 +428,7 @@ test("PDF bytes use a typed disposable Blob and revoke it when the preview close
       ),
     );
     expect(client.downloadRetainedArtifact).toHaveBeenCalledTimes(1);
+    await waitForPreview(() => expect(create).toHaveBeenCalledTimes(1));
     expect(create.mock.calls[0]![0].type).toBe("application/pdf");
     await act(async () => root.render(null));
     expect(revoke).toHaveBeenCalledWith("blob:test-pdf");
