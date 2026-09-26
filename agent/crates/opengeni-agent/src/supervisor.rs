@@ -1011,7 +1011,6 @@ impl<P: Platform + 'static> Supervisor<P> {
         if crate::uploads::handles(&request) {
             let uploads = link.uploads.clone();
             let platform = link.platform.clone();
-            let epoch = link.epoch.clone();
             let shutdown = link.shutdown.clone();
             let global_shutdown = self.shutdown.clone();
             let client = client.clone();
@@ -1020,13 +1019,10 @@ impl<P: Platform + 'static> Supervisor<P> {
                     uploads.lock().expect("upload registry").serve(
                         platform.as_ref(),
                         &request,
-                        &|| {
-                            if shutdown.is_requested() || global_shutdown.is_requested() {
-                                0
-                            } else {
-                                epoch.load()
-                            }
-                        },
+                        // RPC admission is scoped to this exact connection's
+                        // subject. Session route epochs are pinned per upload;
+                        // they are not a machine-wide generation.
+                        &|| !shutdown.is_requested() && !global_shutdown.is_requested(),
                     )
                 })
                 .await;
@@ -2790,8 +2786,10 @@ mod tests {
         let _server = it::NatsServerGuard::spawn(&nats_bin, port);
         let url = format!("nats://127.0.0.1:{port}");
         let client = it::connect_with_retry(&url, Duration::from_secs(5)).await;
-        let mut credentials = it::test_credentials(&url);
-        credentials.last_known_epoch = 7;
+        // Normal enrollment has no persisted machine epoch. The wire test must
+        // exercise that production state, not inject an otherwise unset value.
+        let credentials = it::test_credentials(&url);
+        assert_eq!(credentials.last_known_epoch, 0);
         let definition = SupervisorLink::new(
             "upload-wire-test",
             Arc::new(NativePlatform::with_root(dir.path())),

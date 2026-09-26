@@ -87,7 +87,7 @@ async fn serve(
             registry
                 .lock()
                 .expect("upload registry")
-                .serve(platform, &request, &|| epoch)
+                .serve(platform, &request, &|| true)
         }))
         .unwrap_or_else(|_| uploads::unknown_response(request.request_id));
     }

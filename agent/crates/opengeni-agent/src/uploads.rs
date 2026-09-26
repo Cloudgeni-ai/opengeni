@@ -118,14 +118,15 @@ fn valid_id(id: &str) -> bool {
 
 impl Uploads {
     /// Caller serializes through the exact link's mutex on a blocking thread.
-    /// The live epoch predicate is also passed down to the actual commit point.
+    /// The live connection predicate is also checked at the actual commit point.
+    /// Request epochs belong to individual sessions, not this shared machine.
     pub fn serve<P: Platform>(
         &mut self,
         platform: &P,
         request: &v1::ControlRequest,
-        current_epoch: &dyn Fn() -> u32,
+        connection_live: &dyn Fn() -> bool,
     ) -> v1::ControlResponse {
-        let result = self.dispatch(platform, request, current_epoch);
+        let result = self.dispatch(platform, request, connection_live);
         match result {
             Ok(result) => v1::ControlResponse {
                 request_id: request.request_id.clone(),
@@ -144,13 +145,13 @@ impl Uploads {
         &mut self,
         platform: &P,
         request: &v1::ControlRequest,
-        current_epoch: &dyn Fn() -> u32,
+        connection_live: &dyn Fn() -> bool,
     ) -> Result<ResultBody, v1::AgentError> {
-        if request.epoch == 0 || request.epoch != current_epoch() {
+        if request.epoch == 0 || !connection_live() {
             return Err(error(
                 v1::ErrorCode::Fenced,
                 "WRITE_FENCED",
-                "transaction requires exact current nonzero epoch",
+                "transaction requires a live connection and nonzero session epoch",
             ));
         }
         if request.resource_policy.is_some() {
@@ -164,9 +165,7 @@ impl Uploads {
             Some(Op::OpStart(start)) => {
                 self.begin(platform, &request.request_id, request.epoch, start)
             }
-            Some(Op::WriteChunk(chunk)) => {
-                self.chunk(request.epoch, chunk, &|| request.epoch == current_epoch())
-            }
+            Some(Op::WriteChunk(chunk)) => self.chunk(request.epoch, chunk, connection_live),
             Some(Op::OpQuery(query)) => Ok(ResultBody::OpStatus(
                 self.status(&query.op_id, request.epoch)?,
             )),
@@ -424,7 +423,8 @@ mod tests {
             }
         }
         fn call(&mut self, op: Op) -> v1::ControlResponse {
-            self.uploads.serve(&self.platform, &request(op, 7), &|| 7)
+            self.uploads
+                .serve(&self.platform, &request(op, 7), &|| true)
         }
         fn begin(&mut self, bytes: &[u8]) -> v1::ControlResponse {
             self.call(start(bytes))
@@ -581,14 +581,18 @@ mod tests {
         assert!(rig.call(chunk(0, 0, b"he", false)).error.is_none());
         let mut other = Uploads::default();
         let query = request(Op::OpQuery(v1::OpQuery { op_id: ID.into() }), 7);
-        let response = other.serve(&rig.platform, &query, &|| 7);
+        let response = other.serve(&rig.platform, &query, &|| true);
         let Some(ResultBody::OpStatus(status)) = response.result else {
             panic!("status");
         };
         assert_eq!(status.state, v1::OpState::Lost as i32);
         assert_eq!(status.lost_reason, v1::OpLostReason::AgentRestarted as i32);
         assert!(other
-            .serve(&rig.platform, &request(chunk(1, 2, b"llo", true), 7), &|| 7)
+            .serve(
+                &rig.platform,
+                &request(chunk(1, 2, b"llo", true), 7),
+                &|| true
+            )
             .error
             .is_some());
         rig.uploads = Uploads::default();
@@ -597,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_epoch_is_required_for_every_action_and_rechecked_at_commit() {
+    fn exact_operation_epoch_and_live_connection_are_required() {
         let mut rig = Rig::new();
         assert!(rig.begin(b"hello").error.is_none());
         for epoch in [0, 6, 8] {
@@ -607,11 +611,13 @@ mod tests {
                 Op::OpQuery(v1::OpQuery { op_id: ID.into() }),
                 Op::OpCancel(v1::OpCancel { op_id: ID.into() }),
             ] {
-                let response = rig.uploads.serve(&rig.platform, &request(op, epoch), &|| 7);
+                let response = rig
+                    .uploads
+                    .serve(&rig.platform, &request(op, epoch), &|| true);
                 assert_eq!(response.error.unwrap().code, v1::ErrorCode::Fenced as i32);
             }
         }
-        // Epoch can change after request admission, before final publication.
+        // Connection shutdown can land after admission, before publication.
         let calls = std::cell::Cell::new(0);
         let response = rig.uploads.serve(
             &rig.platform,
@@ -619,11 +625,7 @@ mod tests {
             &|| {
                 let n = calls.get();
                 calls.set(n + 1);
-                if n == 0 {
-                    7
-                } else {
-                    8
-                }
+                n == 0
             },
         );
         assert_eq!(
@@ -635,13 +637,67 @@ mod tests {
     }
 
     #[test]
+    fn independent_sessions_share_a_connection_without_sharing_epochs() {
+        let mut rig = Rig::new();
+        assert!(rig.begin(b"hello").error.is_none());
+        let mut second = request(start(b"other"), 19);
+        second.request_id = "fsw-other-session".into();
+        if let Some(Op::OpStart(v1::OpStart {
+            op: Some(v1::op_start::Op::FsWrite(begin)),
+            ..
+        })) = second.op.as_mut()
+        {
+            begin.path = "other-document".into();
+        }
+        assert!(rig
+            .uploads
+            .serve(&rig.platform, &second, &|| true)
+            .error
+            .is_none());
+        assert!(rig.call(chunk(0, 0, b"hello", true)).error.is_none());
+        let mut finish = chunk(0, 0, b"other", true);
+        if let Op::WriteChunk(body) = &mut finish {
+            body.op_id = second.request_id;
+        }
+        assert!(rig
+            .uploads
+            .serve(&rig.platform, &request(finish, 19), &|| true)
+            .error
+            .is_none());
+        assert_eq!(
+            std::fs::read(rig.dir.path().join("document")).unwrap(),
+            b"hello"
+        );
+        assert_eq!(
+            std::fs::read(rig.dir.path().join("other-document")).unwrap(),
+            b"other"
+        );
+    }
+
+    #[test]
+    fn stopped_connection_rejects_every_upload_action() {
+        let mut rig = Rig::new();
+        assert!(rig.begin(b"hello").error.is_none());
+        for op in [
+            start(b"hello"),
+            chunk(0, 0, b"hello", true),
+            Op::OpQuery(v1::OpQuery { op_id: ID.into() }),
+            Op::OpCancel(v1::OpCancel { op_id: ID.into() }),
+        ] {
+            let reply = rig.uploads.serve(&rig.platform, &request(op, 7), &|| false);
+            assert_eq!(reply.error.unwrap().code, v1::ErrorCode::Fenced as i32);
+        }
+        assert!(!rig.dir.path().join("document").exists());
+    }
+
+    #[test]
     fn newer_epoch_cannot_adopt_old_registry_record() {
         let mut rig = Rig::new();
         assert!(rig.begin(b"hello").error.is_none());
         let response = rig.uploads.serve(
             &rig.platform,
             &request(chunk(0, 0, b"hello", true), 8),
-            &|| 8,
+            &|| true,
         );
         assert_eq!(response.error.unwrap().code, v1::ErrorCode::Fenced as i32);
         assert!(!rig.dir.path().join("document").exists());
