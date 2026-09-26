@@ -984,7 +984,7 @@ credits-path price and is zero for externally billed calls.
 
 Insights usage uses a four-column projection (0484), preserving full-row readers
 and tenant/actor/visibility checks. Transaction-capability writes still
-require a writable database. 0519 drilldowns and 0520 organization usage reuse that capability.
+require a writable database. 0521 drilldowns and 0522 organization usage reuse that capability.
 Canonical: `packages/db/src/insights-usage-bundle.ts`,
 `packages/db/src/insights-model-bundle.ts`.
 

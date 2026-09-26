@@ -47,9 +47,9 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-test("0519 is additive: one new fact authority, released functions and policies untouched", async () => {
+test("0521 is additive: one new fact authority, released functions and policies untouched", async () => {
   const candidate = await Bun.file(
-    new URL("../drizzle/0519_insights_scoped_fact_projection.sql", import.meta.url),
+    new URL("../drizzle/0521_insights_scoped_fact_projection.sql", import.meta.url),
   ).text();
   expect(candidate).toStartWith("-- deployment-mode: rolling");
   expect(candidate.match(/CREATE FUNCTION/g)).toHaveLength(1);
@@ -118,7 +118,7 @@ test("the scoped projection enforces the exact workspace context and narrows by 
   const access = await ensureManagedAccessForUser(client.db, {
     userId,
     email: `${userId}@example.test`,
-    name: "Migration 0519 owner",
+    name: "Migration 0521 owner",
   });
   const grant = access.workspaceGrants[0]!;
   const workspaceId = grant.workspaceId!;
