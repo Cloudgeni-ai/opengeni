@@ -1,5 +1,31 @@
 # @opengeni/contracts
 
+## 5.2.0
+
+### Minor Changes
+
+- 084616e: Advertise the product documentation the web console links from its Help menu.
+  `ClientConfig` gains an optional `documentationUrl` field (an absolute http(s)
+  URL, or `null` when the deployment hides the link) served by
+  `/v1/config/client`, and `@opengeni/contracts` exports
+  `DEFAULT_OPENGENI_DOCUMENTATION_URL`. Operators set it with the new
+  `OPENGENI_DOCUMENTATION_URL` setting: unset means `https://docs.opengeni.ai`,
+  `none` hides the link, and any other value fails startup. An absent
+  field means a server that predates it, so clients show no link.
+- 1a427e0: Add the optional Jev-backed `code_search` agent tool. It finds where something is implemented, configured or decided in the workspace in one call and returns verbatim, line-numbered passages with a coverage status. It is controlled by `OPENGENI_CODE_SEARCH_MODE` (`off` by default, `opt_in`, `default_on`, or `experiment` for a fixed per-session half), the `OPENGENI_JEV_*` settings, and a per-workspace `codeSearchEnabled` setting (`null` follows the deployment). Each session freezes its decision when it is created (`sessions.code_search_enabled`, rolling migration 0520, exposed as `codeSearchEnabled` on the session), and children keep their parent's, so later setting changes never add the tool to a running session's cached prompt; only the deployment switch-off and a workspace Off, and undoing them, reach running sessions. Each call records Jev usage per workspace. The Jev key stays on the server (API and worker processes) and never reaches a sandbox or Connected Machine, which only run allowlisted read-only ripgrep and file reads. Windows Connected Machines do not get the tool. `tool_search` now lists every tool the query names exactly before BM25 results.
+- 6eb431b: Allow authenticated hosts to replace an existing session MCP attachment with an accessible native connection through the standalone credential rotation API. An optional explicit replacement URL must match the native account's stored destination while the old URL remains a compare-and-set precondition. Preserve resource restrictions, version fencing, quiescence and idempotent receipts without replacing session history or accepted-attempt identity.
+- e422b62: Add first-touch sign-up attribution contracts: the closed-charset `SignupAttribution` schema (slug tokens of `A-Z a-z 0-9 . _ ~ + -`, at most 100 characters) with its URL parameter names, the `SIGNUP_ACQUISITION_SOURCES` channel set, and `signupAcquisitionSource`, which normalizes untrusted campaign parameters into `producthunt`, `website`, `direct`, or `other` for bounded sign-up metrics. `StartManagedAuthSocialTransactionRequest` accepts an optional `attribution`; an invalid value is dropped rather than failing the social start.
+- bd365b7: Add a public, content-free `POST /v1/client-errors` beacon that counts web
+  client failures in `opengeni_client_errors_total{kind}` with per-kind admission
+  bounds, a streamed 512-byte body limit and a same-deployment `Origin` check, and
+  admit its grammar-validated route pattern and bundle revision in public
+  structured logs. The shared wire grammar is exported from
+  `@opengeni/contracts/client-error-report`.
+
+### Patch Changes
+
+- 48a8774: Generate automatic session titles on chat-completions providers, such as OpenRouter connections, through one direct request outside the agent runner instead of a runner-only traced call that always failed. Routes without a resolved provider client now take the same direct path. The title request uses the model's lowest runnable reasoning effort and a larger output budget, a response stopped by the output limit keeps only whole words, and inline `<think>` reasoning before the answer is dropped. Automatic titles no longer keep a dangling closing quote or markdown mark from a wrapped title such as `"Pod Crash Debugging"` or `**Pod Crash Debugging**`. The managed OpenRouter free route (`isManagedOpenRouterFreeRoute`: the deployment-funded OpenRouter provider serving a `:free` variant) sends no title request, because it would spend the deployment key's shared per-minute and per-day request limits that users' turns need; those sessions keep the prompt preview until a turn on another route titles them.
+
 ## 5.1.1
 
 ### Patch Changes

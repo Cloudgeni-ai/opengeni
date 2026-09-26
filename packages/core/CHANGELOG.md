@@ -1,5 +1,42 @@
 # @opengeni/core
 
+## 4.0.4
+
+### Patch Changes
+
+- 6eb431b: Allow authenticated hosts to replace an existing session MCP attachment with an accessible native connection through the standalone credential rotation API. An optional explicit replacement URL must match the native account's stored destination while the old URL remains a compare-and-set precondition. Preserve resource restrictions, version fencing, quiescence and idempotent receipts without replacing session history or accepted-attempt identity.
+- a307c83: Remove inherited account selections for integrations removed from a scheduled task. Retained integrations keep their exact accounts, and explicitly supplied selections still undergo normal validation.
+- f2ee81e: Count the one-time verified-signup trial grant as OpenGeni credits when resolving the default model for new work. Any positive credit balance now selects the configured credits default (after a saved workspace default or a connected subscription), and a balance at or below zero falls back to the deployment default.
+- Updated dependencies [f3d178b]
+- Updated dependencies [084616e]
+- Updated dependencies [9cdeef1]
+- Updated dependencies [b6d65a1]
+- Updated dependencies [1a427e0]
+- Updated dependencies [d582db0]
+- Updated dependencies [cbb7aa4]
+- Updated dependencies [6fd328b]
+- Updated dependencies [9b9c6df]
+- Updated dependencies [6eb431b]
+- Updated dependencies [f11a3e3]
+- Updated dependencies [48a8774]
+- Updated dependencies [51aa35e]
+- Updated dependencies [e422b62]
+- Updated dependencies [fa12bd4]
+- Updated dependencies [36e1764]
+- Updated dependencies [f2ee81e]
+- Updated dependencies [f48191e]
+- Updated dependencies [c1756ef]
+- Updated dependencies [bd365b7]
+  - @opengeni/runtime@4.1.0
+  - @opengeni/contracts@5.2.0
+  - @opengeni/config@3.0.0
+  - @opengeni/db@6.1.0
+  - @opengeni/storage@0.2.134
+  - @opengeni/events@0.4.33
+  - @opengeni/observability@0.8.33
+  - @opengeni/codex@0.2.27
+  - @opengeni/documents@0.8.35
+
 ## 4.0.3
 
 ### Patch Changes

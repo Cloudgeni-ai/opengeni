@@ -1,5 +1,24 @@
 # @opengeni/observability
 
+## 0.8.33
+
+### Patch Changes
+
+- c1756ef: Make operational signals truthful: the session recovery backlog no longer counts effectively paused sessions as stale, a read-only first sandbox probe that finds no path is recorded as a completed startup phase, Knowledge index deferrals log a content-free cause, and repeated warnings can be throttled per key with a suppressed count.
+- bd365b7: Add a public, content-free `POST /v1/client-errors` beacon that counts web
+  client failures in `opengeni_client_errors_total{kind}` with per-kind admission
+  bounds, a streamed 512-byte body limit and a same-deployment `Origin` check, and
+  admit its grammar-validated route pattern and bundle revision in public
+  structured logs. The shared wire grammar is exported from
+  `@opengeni/contracts/client-error-report`.
+- Updated dependencies [084616e]
+- Updated dependencies [1a427e0]
+- Updated dependencies [6eb431b]
+- Updated dependencies [48a8774]
+- Updated dependencies [e422b62]
+- Updated dependencies [bd365b7]
+  - @opengeni/contracts@5.2.0
+
 ## 0.8.32
 
 ### Patch Changes

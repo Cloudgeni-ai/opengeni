@@ -1,5 +1,18 @@
 # @opengeni/react
 
+## 7.2.0
+
+### Patch Changes
+
+- 19ecc86: Composer `autoFocus` no longer moves focus out of an open menu, listbox, or dialog when the composer becomes interactive late, so a hydrating composer cannot dismiss a menu the person just opened.
+- b85a966: Keep suspended browsers asleep when their viewer opens, and resume only after an explicit Open browser action.
+- d0b6742: Detach live browser frames when the page has been hidden, and reconnect when it becomes visible.
+- 2eaeec6: Publish the `@opengeni/react/accounts` subpath with its built JavaScript and declaration files. The previous release mapped that export to a source file name the package does not ship, so importing it failed.
+- Updated dependencies [084616e]
+- Updated dependencies [1a427e0]
+- Updated dependencies [6eb431b]
+  - @opengeni/sdk@7.2.0
+
 ## 7.1.2
 
 ### Patch Changes
