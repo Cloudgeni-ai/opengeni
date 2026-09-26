@@ -20,6 +20,7 @@ import {
   formatTokens,
   formatUtcTimestamp,
   formatUsd,
+  formatUsdTick,
   formatWarmHours,
   providerLabel,
   CACHE_MISS_MIN_INPUT_TOKENS,
@@ -546,6 +547,7 @@ export function InsightsRoute({
               className="mt-3"
               labels={series.map((p) => p.label)}
               formatValue={measure === "tokens" ? formatTokens : formatUsd}
+              formatAxisValue={measure === "tokens" ? formatTokens : formatUsdTick}
               height={210}
               series={
                 measure === "tokens"

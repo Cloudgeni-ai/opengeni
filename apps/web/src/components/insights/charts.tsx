@@ -79,6 +79,8 @@ export function AreaChart(props: {
   /** Soft y-axis floor for percentage charts */
   yMax?: number;
   formatValue?: (value: number) => string;
+  /** Y-axis tick labels; defaults to `formatValue`. */
+  formatAxisValue?: (value: number) => string;
 }) {
   const reduceMotion = useReducedMotion();
   const gradId = useId();
@@ -155,6 +157,8 @@ export function AreaChart(props: {
     props.formatValue
       ? props.formatValue(value)
       : `${props.valuePrefix ?? ""}${formatChartNumber(value, props.valueDigits)}${props.valueSuffix ?? ""}`;
+  const formattedTick = (value: number) =>
+    props.formatAxisValue ? props.formatAxisValue(value) : formattedValue(value);
   const formattedPoint = (value: number | null | undefined) =>
     value === null || value === undefined ? "Unknown" : formattedValue(value);
   const pointDescription = (index: number) =>
@@ -299,7 +303,7 @@ export function AreaChart(props: {
                 className="fill-fg-subtle"
                 style={{ fontSize: 10, fontFamily: "ui-monospace, monospace" }}
               >
-                {formattedValue(label)}
+                {formattedTick(label)}
               </text>
             </g>
           );

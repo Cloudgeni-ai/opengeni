@@ -7,6 +7,7 @@ import {
   formatDeltaUsd,
   formatPctDelta,
   formatUsd,
+  formatUsdTick,
   formatUtcTimestamp,
   formatWarmHours,
   pctDelta,
@@ -257,6 +258,13 @@ describe("buildInsightsView", () => {
     expect(formatDeltaUsd(-0.1754)).toBe("\u2212$0.1754");
     expect(formatDeltaUsd(1.17)).toBe("+$1.17");
     expect(formatDeltaUsd(0)).toBe("$0.00");
+  });
+
+  test("rounds axis ticks to cents once they reach ten cents", () => {
+    expect(formatUsdTick(0.7326)).toBe("$0.73");
+    expect(formatUsdTick(1.4652)).toBe("$1.47");
+    expect(formatUsdTick(0)).toBe("$0.00");
+    expect(formatUsdTick(0.0425)).toBe("$0.0425");
   });
 
   test("formatWarmHours stays in hours", () => {

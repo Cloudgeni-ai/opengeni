@@ -98,6 +98,10 @@ export function formatUsd(value: number, digits?: number): string {
   })}`;
 }
 
+export function formatUsdTick(value: number): string {
+  return formatUsd(value, value === 0 || Math.abs(value) >= 0.1 ? 2 : undefined);
+}
+
 export function formatDeltaUsd(value: number): string {
   if (value === 0) return formatUsd(0);
   return `${value > 0 ? "+" : "−"}${formatUsd(Math.abs(value))}`;
