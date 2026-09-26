@@ -14,6 +14,72 @@ const jpeg = Buffer.from([
   0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 2, 0, 3, 1, 1, 0x11, 0, 0xff, 0xd9,
 ]).toString("base64");
 
+test("bounded mobile frames keep one scale across rounded raster captures and viewport changes", async () => {
+  const fixture = await captureFixture();
+  let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
+  try {
+    await fixture.driver.start();
+    fixture.setRaster({ width: 487.7600402832031, height: 1055.562744140625, density: 1 });
+    frames = await fixture.driver.subscribeFrames("target-1", {
+      format: "jpeg",
+      maxWidth: 1280,
+      maxHeight: 900,
+    });
+    const iterator = frames[Symbol.asyncIterator]();
+    const dimensions = new Set<string>();
+    for (let index = 0; index < 12; index += 1) {
+      const frame = (await iterator.next()).value!;
+      dimensions.add(frame.width + "x" + frame.height);
+      expect(frame.width).toBeLessThanOrEqual(1280);
+      expect(frame.height).toBeLessThanOrEqual(900);
+      // A pixel-space point maps back to the same CSS location on every frame.
+      expect(frame.deviceScaleFactor).toBeCloseTo(415 / 487.7600402832031, 12);
+    }
+    expect(dimensions.size).toBe(1);
+    const scales = fixture.calls
+      .filter((call) => call.method === "Page.captureScreenshot")
+      .map((call) => call.params?.clip.scale);
+    expect(new Set(scales).size).toBe(1);
+
+    fixture.setRaster({ width: 800, height: 600, density: 2 });
+    let resized = (await iterator.next()).value!;
+    for (let index = 0; index < 3 && resized.width !== 1200; index += 1) {
+      resized = (await iterator.next()).value!;
+    }
+    expect(resized.width).toBe(1200);
+    expect(resized.height).toBe(900);
+    expect(resized.deviceScaleFactor).toBe(1.5);
+    for (let index = 0; index < 3; index += 1) {
+      const frame = (await iterator.next()).value!;
+      expect([frame.width, frame.height]).toEqual([1200, 900]);
+    }
+
+    // A new emulation density with identical CSS dimensions recalibrates rather
+    // than retaining the previous high-DPI downscale.
+    const observation = await fixture.driver.observe("target-1");
+    fixture.setRaster({ width: 800, height: 600, density: 1 });
+    await fixture.driver.dispatch({
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      browserSessionId: observation.browserSessionId,
+      controllerGeneration: observation.target.controllerGeneration,
+      targetId: "target-1",
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration,
+      expectedFrameId: observation.frameId!,
+      actor: { kind: "agent", subjectId: "frame-scale-test" },
+      action: { type: "viewport", width: 800, height: 600, deviceScaleFactor: 1, mobile: false },
+    });
+    let reset = (await iterator.next()).value!;
+    for (let index = 0; index < 3 && reset.width !== 800; index += 1)
+      reset = (await iterator.next()).value!;
+    expect([reset.width, reset.height, reset.deviceScaleFactor]).toEqual([800, 600, 1]);
+  } finally {
+    await frames?.close();
+    await fixture.driver.close();
+  }
+}, 10_000);
+
 test("browser liveness does not depend on a renderer answering page commands", async () => {
   const fixture = await captureFixture();
   try {
@@ -216,7 +282,13 @@ async function settle() {
 async function captureFixture(
   reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-capture" },
 ) {
-  const calls: Array<{ id: number; method: string; sessionId?: string }> = [];
+  const calls: Array<{
+    id: number;
+    method: string;
+    sessionId?: string;
+    params?: Record<string, any>;
+  }> = [];
+  let raster: { width: number; height: number; density: number } | null = null;
   let stalledMethod: string | null = null;
   let stalled: { id: number; method: string; sessionId?: string } | null = null;
   let reachedStall = () => {};
@@ -228,7 +300,7 @@ async function captureFixture(
     send(raw: string): void;
     close(): void;
   };
-  const reply = (command: { id: number; method: string; sessionId?: string }) => {
+  const reply = (command: (typeof calls)[number]) => {
     let result: unknown = {};
     if (command.method === "Browser.getVersion") result = { product: "Chrome/151.0.0.0" };
     if (command.method === "Target.getTargets") {
@@ -256,11 +328,24 @@ async function captureFixture(
     if (command.method === "Accessibility.getFullAXTree") result = { nodes: [] };
     if (command.method === "Page.getLayoutMetrics") {
       result = {
-        cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 3, clientHeight: 2 },
+        cssVisualViewport: {
+          pageX: 0,
+          pageY: 0,
+          clientWidth: raster?.width ?? 3,
+          clientHeight: raster?.height ?? 2,
+        },
         cssContentSize: { x: 0, y: 0, width: 3, height: 2 },
       };
     }
-    if (command.method === "Page.captureScreenshot") result = { data: jpeg };
+    if (command.method === "Page.captureScreenshot") {
+      const data = Buffer.from(jpeg, "base64");
+      if (raster) {
+        const scale = Number(command.params?.clip.scale ?? 1) * raster.density;
+        data.writeUInt16BE(Math.floor(raster.height * scale), 7);
+        data.writeUInt16BE(Math.floor(raster.width * scale), 9);
+      }
+      result = { data: data.toString("base64") };
+    }
     queueMicrotask(() =>
       socket.dispatchEvent(
         new MessageEvent("message", {
@@ -313,6 +398,9 @@ async function captureFixture(
   return {
     driver,
     calls,
+    setRaster(value: NonNullable<typeof raster>) {
+      raster = value;
+    },
     disconnect: () => socket.close(),
     delayNext(method: string, delayMs: number) {
       delays.set(method, delayMs);

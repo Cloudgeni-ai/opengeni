@@ -90,6 +90,83 @@ headedE2e(
 );
 
 e2e(
+  "keeps scaled mobile frames stable during pointer interaction",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-scale-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: "scale_" + randomUUID().slice(0, 8),
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+    });
+    let frames: Awaited<ReturnType<typeof driver.subscribeFrames>> | undefined;
+    try {
+      let observation = await driver.start(
+        dataUrl(`<!doctype html><meta name="viewport" content="width=device-width">
+      <body style="margin:0"><div style="width:469px;height:1400px">
+      <button style="position:absolute;left:200px;top:400px;width:30px;height:30px" onclick="this.textContent='Hit'">Aim</button></div>`),
+      );
+      observation = await driver.dispatch(
+        command(observation, {
+          type: "viewport",
+          width: 390,
+          height: 844,
+          mobile: true,
+          deviceScaleFactor: 1,
+        }),
+      );
+      frames = await driver.subscribeFrames(observation.target.id, {
+        format: "jpeg",
+        maxWidth: 1280,
+        maxHeight: 900,
+      });
+      const iterator = frames[Symbol.asyncIterator]();
+      const first = await frameWithin(iterator, 3_000);
+      for (let index = 0; index < 20; index += 1) {
+        const frame = await frameWithin(iterator, 3_000);
+        expect([frame.width, frame.height, frame.deviceScaleFactor]).toEqual([
+          first.width,
+          first.height,
+          first.deviceScaleFactor,
+        ]);
+        expect(frame.documentGeneration).toBe(first.documentGeneration);
+      }
+      // The button center in the streamed image converts back through its published
+      // scale, exactly as the human browser surface sends viewport pointer actions.
+      const pixelX = Math.round(215 * first.deviceScaleFactor);
+      const pixelY = Math.round(415 * first.deviceScaleFactor);
+      const clicked = await driver.dispatch(
+        command(observation, {
+          type: "pointer",
+          action: "click",
+          x: pixelX / first.deviceScaleFactor,
+          y: pixelY / first.deviceScaleFactor,
+        }),
+      );
+      expect(names(clicked)).toContain("Hit");
+      expect(first.width).toBeLessThanOrEqual(1280);
+      expect(first.height).toBeLessThanOrEqual(900);
+    } finally {
+      await frames?.close();
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
+
+e2e(
   "preserves partial batch uncertainty without claiming controller loss or replaying actions",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-partial-");

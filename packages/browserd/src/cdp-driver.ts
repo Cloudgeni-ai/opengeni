@@ -200,7 +200,7 @@ type TargetScreencast = {
   options: NormalizedBrowserFrameStreamOptions;
   sequence: number;
   lastFrameAt: number;
-  captureDeviceScaleFactor: number | null;
+  captureScale: { width: number; height: number; scale: number } | null;
   fallbackAbort: AbortController;
   capturePromise: Promise<void> | null;
   subscriptions: Map<string, LatestBrowserFrameSubscription>;
@@ -922,7 +922,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           options: normalized,
           sequence: 0,
           lastFrameAt: 0,
-          captureDeviceScaleFactor: null,
+          captureScale: null,
           fallbackAbort: new AbortController(),
           capturePromise: null,
           subscriptions: new Map(),
@@ -2087,12 +2087,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       const metrics = await this.layoutMetrics(state, FRAME_CAPTURE_TIMEOUT_MS);
       const viewport = metrics.viewport;
-      const estimatedDeviceScaleFactor = expected.captureDeviceScaleFactor ?? 1;
-      let scale = Math.min(
-        1,
-        expected.options.maxWidth / (viewport.width * estimatedDeviceScaleFactor),
-        expected.options.maxHeight / (viewport.height * estimatedDeviceScaleFactor),
-      );
+      // Reuse the accepted clip scale for this viewport. Inferring a new device
+      // scale from rounded image pixels feeds quantization back into every frame
+      // and makes an unchanged mobile viewport oscillate in size.
+      const previous = expected.captureScale;
+      let scale =
+        previous?.width === viewport.width && previous.height === viewport.height
+          ? previous.scale
+          : Math.min(
+              1,
+              expected.options.maxWidth / viewport.width,
+              expected.options.maxHeight / viewport.height,
+            );
       let data: Uint8Array<ArrayBufferLike> = new Uint8Array();
       let dimensions = { width: 0, height: 0 };
       for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -2135,7 +2141,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       if (state.screencasts.get(expected.key) !== expected || this.protectedAuthQuiet(state))
         return;
-      expected.captureDeviceScaleFactor = finiteScale(dimensions.width / (viewport.width * scale));
+      expected.captureScale = { width: viewport.width, height: viewport.height, scale };
       const frame = this.imageFrame({
         state,
         sequence: ++expected.sequence,
@@ -2463,6 +2469,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         });
         return;
       case "viewport":
+        for (const stream of state.screencasts.values()) stream.captureScale = null;
         if (this.engine === "lightpanda") {
           throw new InteractionDefiniteDriverError(
             "unsupported",
