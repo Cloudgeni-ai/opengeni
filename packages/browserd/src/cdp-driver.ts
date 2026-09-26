@@ -438,23 +438,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return await this.observe(target.targetId);
   }
 
-  /** Bounded liveness probe for the supervisor's recovery path. It never
-   * starts or repairs the browser, preserving one recovery authority. */
+  /** Bounded browser liveness probe for the supervisor's recovery path.
+   * Renderer stalls and command deadlines do not prove browser loss: replacing
+   * a live browser would discard document state that URL restoration cannot recover. */
   async isAvailable(): Promise<boolean> {
     if (!this.started || !this.connection) return false;
     try {
       await this.connection.send("Browser.getVersion", {}, { timeoutMs: 2_000 });
-      const selected = this.selectedTargetId ? this.states.get(this.selectedTargetId) : null;
-      if (selected) {
-        await this.connection.send(
-          "Page.getFrameTree",
-          {},
-          { sessionId: selected.sessionId, timeoutMs: 2_000 },
-        );
-      }
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      return error instanceof CdpCommandTimeoutError || !(error instanceof CdpTransportError);
     }
   }
 
