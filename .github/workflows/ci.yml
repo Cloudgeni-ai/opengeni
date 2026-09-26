@@ -1181,6 +1181,9 @@ jobs:
           chmod 700 "$RUNNER_TEMP/opengeni-test-chromium"
           export OPENGENI_BROWSER_EXECUTABLE="$RUNNER_TEMP/opengeni-test-chromium"
           bun run --cwd packages/browserd test:e2e
+          OPENGENI_BROWSERD_HEADED_E2E=1 xvfb-run --auto-servernum \
+            bun test --timeout 120000 packages/browserd/test/cdp-driver.e2e.test.ts \
+            --test-name-pattern 'streams a mobile headed tab continuously'
 
   test:
     name: Typecheck and unit tests

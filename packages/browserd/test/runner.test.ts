@@ -23,6 +23,14 @@ describe("managed browser profile cryptography", () => {
     );
   });
 
+  test("uses presentation-independent screenshots only for headed Linux browsers", () => {
+    const feature = "--enable-features=CDPScreenshotNewSurface";
+    expect(browserLaunchArguments("linux", [], true)).toContain(feature);
+    expect(browserLaunchArguments("linux", [], false)).not.toContain(feature);
+    expect(browserLaunchArguments("darwin", [], true)).not.toContain(feature);
+    expect(browserLaunchArguments("win32", [], true)).not.toContain(feature);
+  });
+
   test.skipIf(process.platform !== "darwin")(
     "launches a managed browser through the lifecycle-preserving background helper",
     async () => {
