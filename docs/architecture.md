@@ -383,7 +383,7 @@ Structured Files exposes the selected machine's effective host-native working
 directory as `FileSystem.root`; canonical links and tree nodes share that namespace.
 Connected Machine reads accept external absolute paths under the machine account's
 OS permissions: working directories are browsing defaults, not read boundaries.
-Managed provider reads and structured mutations remain workspace-confined. Files
+Managed reads and structured mutations honor workspace boundaries, including `/`. Files
 requests carry capability epoch and root. The API binds one active route per
 request; target/root changes return retryable conflicts, never reinterpret paths
 on another filesystem.
