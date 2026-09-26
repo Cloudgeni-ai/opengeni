@@ -14,6 +14,25 @@ const jpeg = Buffer.from([
   0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 2, 0, 3, 1, 1, 0x11, 0, 0xff, 0xd9,
 ]).toString("base64");
 
+test("Lightpanda rejects screenshots before CDP can return placeholder pixels", async () => {
+  const fixture = await captureFixture(undefined, "lightpanda");
+  try {
+    await fixture.driver.start();
+    fixture.calls.length = 0;
+    await expect(fixture.driver.captureScreenshot("target-1")).rejects.toMatchObject({
+      code: "unsupported",
+      message: "Lightpanda does not render page screenshots; use semantic observation",
+    });
+    await expect(fixture.driver.subscribeFrames("target-1")).rejects.toMatchObject({
+      code: "unsupported",
+    });
+    expect(fixture.calls).toHaveLength(0);
+    expect((await fixture.driver.observe("target-1")).semantic?.kind).toBe("snapshot");
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
 test("browser liveness does not depend on a renderer answering page commands", async () => {
   const fixture = await captureFixture();
   try {
@@ -215,6 +234,7 @@ async function settle() {
 
 async function captureFixture(
   reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-capture" },
+  engine: "chromium" | "lightpanda" = "chromium",
 ) {
   const calls: Array<{ id: number; method: string; sessionId?: string }> = [];
   let stalledMethod: string | null = null;
@@ -297,6 +317,7 @@ async function captureFixture(
   };
   const driver = new AgentBrowserDriver({
     ...reference,
+    engine,
     runner,
     foregroundManagedTabs: true,
     connect: async (endpoint) =>

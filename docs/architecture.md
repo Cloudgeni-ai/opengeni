@@ -1339,12 +1339,11 @@ Postgres state under workspace RLS, then check the existing one-use nonce.
 Editable artifacts use `@opengeni/artifact-tool` and durable collaboration.
 Attempt-scoped `BrowserSession`/`ComputerSession` tools use
 `@opengeni/interaction` and `@opengeni/browserd` on the selected sandbox or
-machine. Agent browser views are bounded; focused reads and stills use
-authenticated session/controller/target routing. SDK/viewer retain full
+machine. Bounded reads and stills authenticate session/controller/target routing. SDK/viewer retain full
 observations. Code Mode receives a local image handle. Human computer control
 requires consent. Computer frames bind screenshot digest to
 controller/session/target at runtime and API; SDK verifies independently. The
-browser extension only attaches.
+browser extension only attaches; Lightpanda supports semantic observations only.
 
 Native macOS operations drain Cocoa pools and clean up pending capture starts.
 Desktop discovery proceeds independently of semantic inspection.
