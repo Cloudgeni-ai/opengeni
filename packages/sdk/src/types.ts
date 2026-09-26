@@ -669,12 +669,16 @@ export type SessionMcpCredentialUpdateInput = {
 
 export type RotateSessionMcpCredentialsRequest = {
   operationKey: string;
-  updates: Array<{
-    id: string;
-    expectedCredentialVersion: number;
-    expectedServerUrl: string;
-    headers: Record<string, string>;
-  }>;
+  updates: Array<
+    {
+      id: string;
+      expectedCredentialVersion: number;
+      expectedServerUrl: string;
+    } & (
+      | { headers: Record<string, string> }
+      | { nativeConnectionId: string; replacementServerUrl?: string | undefined }
+    )
+  >;
 };
 
 export type RotateSessionMcpCredentialsReceipt = {
@@ -1501,6 +1505,12 @@ export type Session = {
    * admission; `portable` ⇒ plaintext compaction and free provider switching.
    */
   codexCompactionMode: "remote_v2" | "portable";
+  /**
+   * The `code_search` decision frozen at create. A turn gets the tool only when
+   * this is true, the deployment still offers it, the workspace is not Off, and
+   * the turn has POSIX compute.
+   */
+  codeSearchEnabled?: boolean;
   /** Personal (authenticated subject) workspace pin state, never workspace-global. */
   pinned?: boolean;
   /** Stable pin ordering key; null when this subject has not pinned the session. */
@@ -2226,6 +2236,15 @@ export type ToolAuthNeededPayload = {
         action: "connect" | "add_credentials" | "enable";
         rationale: string;
         requiredVariables: string[];
+      }
+    | undefined;
+  /** Agent suggestion; never a connection or permission grant. */
+  setupRequest?:
+    | {
+        kind: "mcp";
+        name: string;
+        endpointUrl: string;
+        rationale: string;
       }
     | undefined;
 };
@@ -3201,6 +3220,7 @@ export type FirstPartyMcpToolName =
   | "environment_set_variable"
   | "capability_catalog_search"
   | "capability_authorization_request"
+  | "custom_mcp_setup_request"
   | "github_connect_link"
   | "github_repositories_list"
   | "social_connections_list"
@@ -3423,8 +3443,24 @@ export type WorkspaceModelCatalogModel = ClientModel & {
   availability: ModelAvailabilityV1;
 };
 
+/** Why a new chat or scheduled task without an explicit model gets its default. */
+export type DefaultModelSelectionSource = "workspace" | "subscription" | "credits" | "deployment";
+
+export type DefaultModelSelection = {
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  source: DefaultModelSelectionSource;
+};
+
 export type WorkspaceModelCatalogResponse = {
   models: WorkspaceModelCatalogModel[];
+  /** Default for new chats and scheduled tasks that name no model. */
+  defaultSelection?: DefaultModelSelection | undefined;
+  /**
+   * The default this workspace would use once its organization holds an
+   * OpenGeni credit balance. Null when the deployment does not bill credits.
+   */
+  creditsSelection?: DefaultModelSelection | null | undefined;
 };
 
 export type WorkspaceGatewayCustomModel = {
@@ -3914,11 +3950,21 @@ export type ClientConfig = {
   fileUploads: { enabled: boolean; maxSizeBytes: number };
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
+  /**
+   * Whether the deployment offers the Jev-backed code_search agent tool and
+   * what workspaces without their own setting get (`split` = half of sessions).
+   */
+  codeSearch?: { available: boolean; workspaceDefault: "off" | "on" | "split" } | undefined;
   productAccessMode: ProductAccessMode;
   /** Client-safe hint for whether the console should offer Stripe checkout. */
   billingMode?: BillingMode | undefined;
   managedAuthSessionSetMode: "legacy" | "dual" | "broker";
   auth: ClientAuthConfig;
+  /**
+   * Product documentation for a console Help link. `null` means the deployment
+   * hides the link; absent means a server that predates the field.
+   */
+  documentationUrl?: string | null | undefined;
   analytics: {
     consentRequired: boolean;
     providers: {
@@ -4549,6 +4595,8 @@ export type WorkspaceSettings = {
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   /** Whether agents may invoke the built-in structured human-input tool. */
   agentHumanInputEnabled?: boolean | undefined;
+  /** Whether agents get the Jev-backed code_search tool; absent or null follows the deployment. */
+  codeSearchEnabled?: boolean | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   /** Slack orchestration notices; both default off when absent or invalid. */
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
@@ -4640,6 +4688,7 @@ export type UpdateWorkspaceSettingsRequest = {
   maxNestedAgentDepth?: number | null | undefined;
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   agentHumanInputEnabled?: boolean | undefined;
+  codeSearchEnabled?: boolean | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   [key: string]: unknown;
@@ -5100,6 +5149,11 @@ export type NewSessionDraft = {
   model: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
+  /**
+   * True when the person chose this model policy; false follows the resolved
+   * default for new chats. Absent from older servers.
+   */
+  modelProvided?: boolean | undefined;
   /** Absent on legacy drafts; null records an explicit Default-project selection. */
   selectedProjectChannelId?: string | null | undefined;
   options: NewSessionDraftOptions;

@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { CdpConnection, CdpProtocolError } from "../src";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { CdpCommandTimeoutError, CdpConnection, CdpProtocolError } from "../src";
 
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 
@@ -8,6 +8,54 @@ afterEach(() => {
 });
 
 describe("CdpConnection", () => {
+  test("cleans up a timed out command and ignores its late reply without closing the connection", async () => {
+    let replyToExpired: (() => void) | undefined;
+    const server = Bun.serve({
+      port: 0,
+      fetch(request, instance) {
+        if (instance.upgrade(request)) return;
+        return new Response(null, { status: 426 });
+      },
+      websocket: {
+        message(socket, raw) {
+          const message = JSON.parse(String(raw)) as { id: number; method: string };
+          const reply = () =>
+            socket.send(JSON.stringify({ id: message.id, result: { method: message.method } }));
+          if (message.method === "Page.captureScreenshot") replyToExpired = reply;
+          else reply();
+        },
+      },
+    });
+    servers.push(server);
+    const connection = await CdpConnection.connect(`ws://127.0.0.1:${server.port}/devtools`);
+    const controller = new AbortController();
+    const cleanup = spyOn(controller.signal, "removeEventListener");
+    try {
+      const error = await connection
+        .send(
+          "Page.captureScreenshot",
+          {},
+          {
+            timeoutMs: 20,
+            signal: controller.signal,
+          },
+        )
+        .catch((value: unknown) => value);
+      expect(error).toBeInstanceOf(CdpCommandTimeoutError);
+      expect(error).toMatchObject({ method: "Page.captureScreenshot" });
+      expect(cleanup).toHaveBeenCalledTimes(1);
+      replyToExpired?.();
+      const layout = await connection.send<{ method: string }>("Page.getLayoutMetrics");
+      expect(layout).toEqual({ method: "Page.getLayoutMetrics" });
+      controller.abort();
+      const version = await connection.send<{ method: string }>("Browser.getVersion");
+      expect(version).toEqual({ method: "Browser.getVersion" });
+    } finally {
+      cleanup.mockRestore();
+      connection.close();
+    }
+  });
+
   test("multiplexes commands, target sessions, and events over one local socket", async () => {
     const server = Bun.serve({
       port: 0,

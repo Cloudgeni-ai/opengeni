@@ -1719,6 +1719,12 @@ describe("buildTimeline", () => {
     ]);
   });
 
+  test("explains a checkpoint that cannot fit the selected model", () => {
+    expect(compactionSkipSubtitle("replacement_exceeds_model_budget")).toContain(
+      "Chat history is unchanged",
+    );
+  });
+
   test("shows a terminal compaction-summary failure without claiming history changed", () => {
     reset();
     const items = buildTimeline([
@@ -2718,6 +2724,34 @@ describe("buildTimeline", () => {
         id: "api:github-app",
         action: "connect",
         rationale: "This lets me inspect the repositories you asked about.",
+      },
+    });
+  });
+
+  test("agent-proposed MCP setup stays distinct from an installed catalog capability", () => {
+    reset();
+    const items = buildTimeline([
+      event("tool.auth_needed", {
+        serverId: "opengeni",
+        toolName: "custom_mcp_setup_request",
+        providerDomain: "mcp.example.test",
+        reason: "missing_connection",
+        setupRequest: {
+          kind: "mcp",
+          name: "Records MCP",
+          endpointUrl: "https://mcp.example.test/mcp",
+          rationale: "Find the requested records.",
+        },
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "auth-needed",
+      source: "capability",
+      capability: null,
+      setupRequest: {
+        endpointUrl: "https://mcp.example.test/mcp",
+        rationale: "Find the requested records.",
       },
     });
   });

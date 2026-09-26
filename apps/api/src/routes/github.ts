@@ -2,6 +2,7 @@ import {
   GitHubActionPoliciesResponse,
   GitHubActionPolicyActorState,
   GitHubAppManifestCreate,
+  OrganizationIntegrationDeniedError,
   UpdateGitHubActionPolicyRequest,
   type AccessGrant,
   type GitHubInstallationBindingCandidate,
@@ -32,6 +33,7 @@ import {
   GitHubPublicRepositoryVerificationError,
   githubAppMissingSettings,
   githubOAuthAuthorizeUrl,
+  inspectSignedState,
   organizationAppManifestUrl,
   personalAppManifestUrl,
   readSignedState,
@@ -40,9 +42,10 @@ import {
   type GitHubSignedStatePayload,
   verifySignedState,
 } from "@opengeni/github";
-import type { Context, Hono } from "hono";
+import type { Context, Hono, MiddlewareHandler } from "hono";
 import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   githubAppActionPolicyActor,
   hasPermission,
@@ -72,6 +75,7 @@ import {
   assertPersonalConnectionOwnerPrincipal,
   requireLegacyOAuthActor,
 } from "../connection-ownership";
+import { workspaceIntegrationsPathForUntrusted } from "../integrations/oauth-client";
 import { listPersonalGitHubConnections } from "../integrations/personal-github";
 import {
   integrationCommitGrant,
@@ -82,10 +86,12 @@ import {
   isConsistentGitHubBindingProof,
 } from "../integrations/github-installation-proof";
 import {
+  githubConnectFailureHtml,
   githubInstallationChooserHtml,
   githubSetupPendingHtml,
   githubSetupSuccessHtml,
   githubSuccessHtml,
+  type GitHubConnectFailure,
 } from "./github-browser-pages";
 import {
   completeGitHubAppConnect,
@@ -96,8 +102,61 @@ const githubStateCookie = "opengeni_github_state";
 const githubBindingStateMaxAgeSeconds = 10 * 60;
 const legacyInstallationChooserDisabledMessage =
   "The legacy repository-admin GitHub installation chooser is disabled; use the GitHub owner-consent connect flow";
+/**
+ * GitHub routes a browser navigates to (not the JSON API). A page-load link
+ * opened after it expired, GitHub's Cancel button, or a non-owner all land on
+ * one of these, so their failures render a readable page instead of JSON.
+ */
+const GITHUB_BROWSER_ROUTES = [
+  "/v1/workspaces/:workspaceId/github/connect",
+  "/v1/workspaces/:workspaceId/github/installations/select",
+  "/v1/workspaces/:workspaceId/github/installations/:installationId/configure",
+  "/v1/github/app-manifest/callback",
+  "/v1/github/setup",
+  "/v1/github/install/callback",
+  "/v1/github/oauth/callback",
+] as const;
+
+/** An HTTP failure that already knows which browser page explains it. */
+class GitHubBrowserFailure extends HTTPException {
+  constructor(
+    status: 400 | 403,
+    message: string,
+    readonly failure: GitHubConnectFailure,
+  ) {
+    super(status, { message });
+    this.name = "GitHubBrowserFailure";
+  }
+}
+
 export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings, githubStateSecret } = deps;
+  // Registered before the routes so it wraps them. The status code is kept, so
+  // automation still sees the same outcome; only the body becomes a page. Every
+  // failure is rendered, not only HTTP ones: an organization policy denial or an
+  // unexpected fault must not reach the browser as the JSON error envelope.
+  const browserFailurePage: MiddlewareHandler = async (c, next) => {
+    let failure: unknown;
+    let handledStatus: number | undefined;
+    try {
+      await next();
+      if (!c.error) return;
+      failure = c.error;
+      // The app error handler has already answered this failure.
+      handledStatus = c.res.status;
+    } catch (error) {
+      failure = error;
+    }
+    c.res = c.html(
+      githubConnectFailureHtml(
+        githubBrowserFailureKind(failure),
+        githubFailureReturnUrl(deps, c),
+        githubBrowserFailureDetail(failure),
+      ),
+      githubBrowserFailureStatus(failure, handledStatus) as ContentfulStatusCode,
+    );
+  };
+  for (const path of GITHUB_BROWSER_ROUTES) app.use(path, browserFailurePage);
 
   app.get("/v1/workspaces/:workspaceId/github/app", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -586,6 +645,9 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     const code = c.req.query("code");
     const state = c.req.query("state");
+    if (c.req.query("error") === "access_denied") {
+      throw new GitHubBrowserFailure(400, "GitHub authorization was cancelled", "cancelled");
+    }
     if (!code) {
       throw new HTTPException(400, { message: "missing GitHub OAuth code" });
     }
@@ -987,7 +1049,7 @@ function githubAuthorityHttpError(error: unknown): HTTPException {
   }
   if (error instanceof GitHubInstallationAuthorityError) {
     if (error.reason === "authority_denied") {
-      return new HTTPException(403, { message: error.message });
+      return new GitHubBrowserFailure(403, error.message, "not_owner");
     }
     if (error.reason === "installation_missing") {
       return new HTTPException(404, { message: error.message });
@@ -1090,4 +1152,56 @@ function openGeniReturnUrl(
 
 function openGeniBaseUrl(settings: ApiRouteDeps["settings"], c: Context): string {
   return githubBrowserBaseUrl(settings, new URL(c.req.url).origin);
+}
+
+/** The status the app error handler gives this failure; the page keeps it. */
+function githubBrowserFailureStatus(error: unknown, handledStatus: number | undefined): number {
+  if (error instanceof HTTPException) return error.status;
+  if (error instanceof OrganizationIntegrationDeniedError) return 403;
+  // An unexpected fault keeps whatever the error handler answered (500 by default).
+  return handledStatus ?? 500;
+}
+
+function githubBrowserFailureKind(error: unknown): GitHubConnectFailure {
+  if (error instanceof OrganizationIntegrationDeniedError) return "policy_denied";
+  if (!(error instanceof HTTPException)) return "failed";
+  if (error instanceof GitHubBrowserFailure) return error.failure;
+  if (error.status === 401) return "signed_out";
+  if (error.status === 403) return "forbidden";
+  // Every signed-state rejection names its state; they all mean "start again".
+  if (error.status === 400 && /\bstate\b/iu.test(error.message)) return "expired";
+  return "failed";
+}
+
+/**
+ * Human-authored HTTP messages only; configuration errors carry a JSON
+ * envelope. Anything else (an unexpected fault) shows no detail.
+ */
+function githubBrowserFailureDetail(error: unknown): string | null {
+  if (!(error instanceof HTTPException)) return null;
+  if (error instanceof GitHubBrowserFailure && error.failure === "cancelled") return null;
+  try {
+    const parsed = JSON.parse(error.message) as { message?: unknown };
+    return typeof parsed?.message === "string" ? parsed.message : null;
+  } catch {
+    return error.message || null;
+  }
+}
+
+/**
+ * The failure page links back to the workspace integrations page when the
+ * request names a workspace (its path, or a correctly signed state even if it
+ * aged out); otherwise to the OpenGeni home. This is only a link target, so an
+ * expired state is acceptable evidence of where the user came from.
+ */
+function githubFailureReturnUrl(deps: ApiRouteDeps, c: Context): string {
+  const baseUrl = (
+    deps.settings.webBaseUrl ??
+    (openGeniBaseUrl(deps.settings, c) || new URL(c.req.url).origin)
+  ).replace(/\/+$/u, "");
+  const rawState = c.req.query("state");
+  const candidate =
+    c.req.param("workspaceId") ??
+    (rawState ? inspectSignedState(rawState, deps.githubStateSecret)?.workspaceId : undefined);
+  return `${baseUrl}${workspaceIntegrationsPathForUntrusted(candidate) ?? "/"}`;
 }

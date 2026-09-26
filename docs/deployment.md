@@ -249,8 +249,8 @@ The public MCP authorization server is disabled by default. Enable it only in
 managed or local product-access mode with
 `OPENGENI_MCP_OAUTH_ENABLED=true` and an exact credential-free
 `OPENGENI_PUBLIC_BASE_URL` origin. Non-local environments require HTTPS.
-Generated runtime env and Helm artifacts carry the explicit enable switch and
-`OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS`; enabling OAuth makes the public base
+Generated runtime env and Helm artifacts carry the explicit enable switch and,
+when set, `OPENGENI_API_TRUSTED_PROXY_HOPS`; enabling OAuth makes the public base
 URL a required artifact input and rejects configured product-access profiles
 before deployment.
 
@@ -271,15 +271,10 @@ through the refresh-token lifetime plus one day. Bounded opportunistic cleanup
 removes expired clients, consent requests, authorization codes, access tokens,
 and refresh tokens without requiring a separate scheduler.
 
-The source quota uses the transport peer address reported by Bun and ignores
-caller-provided `X-Forwarded-For` and `X-Real-IP` by default. A deployment behind
-a fixed trusted proxy chain may set
-`OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS=<count>`; OpenGeni then walks
-`X-Forwarded-For` from the server side by exactly that many hops, so a caller
-cannot evade the quota by prepending values. Enable this only when firewall or
-network-policy rules prevent direct API access and every declared hop overwrites
-or appends the forwarding chain. A missing or shorter chain fails back to the
-server-owned transport peer.
+The source quota keys on the API request source address described in
+[API request source and auth rate limits](#api-request-source-and-auth-rate-limits):
+the transport peer by default, or the forwarded client when
+`OPENGENI_API_TRUSTED_PROXY_HOPS` declares a trusted proxy chain.
 
 Current-human HTTP/SDK calls classified for human approval use the ordinary API
 database and require migration `0405_tool_gateway_approval_capabilities.sql`.
@@ -454,7 +449,7 @@ The NATS client/monitor ports and Garage RPC/admin/web ports are not exposed. On
 bind NodePorts to loopback with
 `--kube-proxy-arg=nodeport-addresses=127.0.0.0/8`, then publish only the five
 loopback listeners through a private edge such as Tailscale Serve. Route `/` to
-web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`, `/metrics`,
+web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`,
 `/install.sh`, `/install.ps1`, `/uninstall.sh`,
 `/opengeni-agent-minisign.pub`, and `/agent` to the API. Give the NATS
 websocket, relay, and Garage S3 API their own private TLS ports. Set
@@ -1360,6 +1355,15 @@ Browser and desktop controller requests also admit the configured
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_WEB_BASE_URL` origins directly; this
 does not grant those origins credentialed cross-origin responses.
 
+The unauthenticated local development API (`OPENGENI_PRODUCT_ACCESS_MODE=local`
+with the default `OPENGENI_ENVIRONMENT=local`) uses a stricter browser boundary
+instead: no wildcard CORS, browser `Origin`s limited to its web origin, its own
+address, and `OPENGENI_LOCAL_ALLOWED_ORIGINS`, and `Host` limited to this
+computer's names and configured addresses. See
+[local-development.md](local-development.md#start-the-full-stack). Managed and
+configured access modes, and local access mode under any other
+`OPENGENI_ENVIRONMENT` (such as the Helm examples), keep the policy above.
+
 For Azure Blob, the blob-service CORS rule must allow origin `*`, method `PUT`
 (plus `GET`, `HEAD`, and `OPTIONS` for the complete file flow), and all request
 and exposed headers. S3/GCS equivalents must express the same wildcard-origin
@@ -1577,8 +1581,35 @@ filesystems even though Docker accepts the mount.
 The production web image serves the built SPA through the repository-owned Bun
 server, not Vite's preview server. The build precompresses text assets;
 content-hashed `/assets/*` responses are served with immutable one-year caching,
-while the HTML shell revalidates. The API compresses JSON responses and leaves
-SSE and other streaming transports uncompressed.
+while the HTML shell revalidates. Every shell response carries
+`X-Content-Type-Options: nosniff` and `Referrer-Policy:
+strict-origin-when-cross-origin` (the setup-account page keeps its stricter
+`no-referrer`). The server deliberately sets no `X-Frame-Options`,
+`frame-ancestors`, or other CSP, because the console supports embedding. The
+API compresses JSON responses and leaves SSE and other streaming transports
+uncompressed.
+
+The shell carries a meta description plus Open Graph and Twitter card tags so
+shared console links unfurl with the bundled 1200x630 `/og-image.png`. Link
+preview crawlers need an absolute image URL, and the static shell cannot know
+its own origin, so the web server rewrites root-relative `og:image` and
+`twitter:image` URLs against `OPENGENI_WEB_BASE_URL`, or
+`OPENGENI_PUBLIC_BASE_URL` when the console and API share an origin. The Helm
+chart already hands the web pod the shared config map, so no extra setting is
+needed. A split-origin deployment must set `OPENGENI_WEB_BASE_URL` to the
+console origin: the `OPENGENI_PUBLIC_BASE_URL` fallback would point the image at
+the API host, which does not serve it. Without either value the URL stays
+relative: browsers accept it, but
+some crawlers then show a preview without an image. The origin is never taken
+from request headers. Top-level icon files (`/favicon.ico`, `/favicon.svg`,
+`/apple-touch-icon.png`) ship with the shell, and any other missing top-level
+file such as `/robots.txt` answers 404 instead of the SPA HTML.
+
+The console's account menu links to product documentation under Help. The API
+advertises the link in `/v1/config/client` as `documentationUrl`, defaulting to
+the public OpenGeni docs at `https://docs.opengeni.ai`. Set
+`OPENGENI_DOCUMENTATION_URL` on the API to an absolute http(s) URL for your own
+documentation, or to `none` to hide the entry; any other value fails startup.
 
 Web assets, the React demo, and the server bundle compile once on BuildKit's
 native build platform. The amd64 and arm64 web images copy those portable
@@ -2432,7 +2463,7 @@ The runtime secret must provide values such as:
 - `OPENGENI_OBJECT_STORAGE_BACKEND=gcs` plus `OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID`; prefer GKE Workload Identity over service-account JSON
 - `OPENGENI_PRODUCT_ACCESS_MODE=local|configured|managed`, independent of cloud/infrastructure profile
 - `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
-- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. The grant is account-wide and may pay any OpenGeni-credit resource; no payment card is required. A completed in-flight resource can leave a negative balance, and future top-ups clear that balance first; no card is automatically charged.
+- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. The grant is account-wide and may pay any OpenGeni-credit resource; no payment card is required. A completed in-flight resource can leave a negative balance, and future top-ups clear that balance first; no card is automatically charged. While the grant leaves a positive balance, new work that names no model defaults to `OPENGENI_CREDITS_DEFAULT_MODEL` (unless a saved workspace default or connected subscription wins), and the post-signup model step shows the balance; at zero or below it falls back to the deployment default. See "Default model for new work" in [`model-providers.md`](model-providers.md).
 - `OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only|shadow|credits` and `OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE=usage_only|shadow|credits` are independent of Stripe and default to `usage_only`. `shadow` is operator-only comparison, never a customer debit. Paid sandbox mode additionally needs a reviewed backend warm rate in `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON`; paid deployment-funded embeddings need `OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES` (integer USD micros per million input UTF-8 bytes) and `OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT` (ISO UTC timestamp; earlier queued jobs stay unpriced). This PR leaves commercial rates and production activation unset.
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
@@ -2445,6 +2476,37 @@ The runtime secret must provide values such as:
 - sandbox backend credentials when required
 
 Do not commit real secret values.
+
+When `OPENGENI_BILLING_MODE=stripe`, point the Stripe webhook endpoint at
+`/v1/webhooks/stripe` and subscribe it to exactly these events (or `*`):
+
+```text
+checkout.session.completed
+checkout.session.async_payment_succeeded
+checkout.session.async_payment_failed
+checkout.session.expired
+payment_intent.succeeded
+payment_intent.payment_failed
+payment_intent.canceled
+charge.refunded
+refund.created
+refund.updated
+refund.failed
+charge.dispute.created
+charge.dispute.funds_withdrawn
+charge.dispute.closed
+charge.dispute.funds_reinstated
+charge.dispute.updated
+customer.created
+customer.updated
+```
+
+Credits are granted only once Stripe reports the Checkout payment `paid`: at
+`checkout.session.completed` for immediate payment methods, or at
+`checkout.session.async_payment_succeeded` for delayed ones. Checkout Sessions
+without OpenGeni metadata (another product sharing the Stripe account) and
+OpenGeni sessions for an account this deployment does not hold (another
+OpenGeni deployment sharing the account) are acknowledged and ignored.
 
 ### MCP OAuth and tool-gateway posture cutover (0404-0405)
 
@@ -2871,10 +2933,13 @@ ingress and secret wiring:
 - **Stream relay** (`opengeni-relay` image): a stateless wss byte-pump that
   splices the agent's producer stream and the viewer's consumer stream for a
   channel (pty/desktop). Enable with `relay.enabled=true`; the chart then renders
-  the relay Deployment, Service, HPA, PodDisruptionBudget, NetworkPolicy, and —
-  when observability is on — a ServiceMonitor. The relay holds no cluster state
-  and makes no cluster egress; both the agent and the viewer dial IN through the
-  ingress.
+  the relay Deployment, Service, HPA, PodDisruptionBudget, NetworkPolicy, and,
+  when observability is on, a ServiceMonitor. With the default
+  `relay.metricsPort` it also renders an internal ClusterIP
+  `<release>-relay-metrics` Service for Prometheus. The relay holds no cluster
+  state and makes no cluster egress; both the agent and the viewer dial IN
+  through the ingress. Route only `/stream` and `/healthz` of the relay host to
+  it.
 - **NATS with auth-callout**: the machine's agent dials a NATS websocket to reach
   the request/reply control plane, authenticated per workspace by a NATS
   auth-callout responder. Use chart-managed NATS with
@@ -2919,7 +2984,9 @@ Non-secret wiring goes in config/values: `OPENGENI_SELFHOSTED_NATS_URL` and
 `OPENGENI_SELFHOSTED_RELAY_URL` (the public wss URLs the agent dials, matching the
 ingress hosts; both are returned to the agent as connect info at enrollment)
 plus the callout account/user names. The relay process itself listens on
-`OPENGENI_RELAY_BIND`. The relay's non-secret tuning
+`OPENGENI_RELAY_BIND`, and serves `GET /metrics` only on
+`OPENGENI_RELAY_METRICS_BIND` when that is set (see Service endpoints below).
+The relay's non-secret tuning
 knobs are `OPENGENI_RELAY_RING_FRAMES`, `OPENGENI_RELAY_SPLICE_BUFFER`,
 `OPENGENI_RELAY_RATE_BURST_BYTES`, `OPENGENI_RELAY_RATE_BYTES_PER_SEC`, and
 `OPENGENI_RELAY_PAIR_TIMEOUT_SECS`. A missing token secret makes the relay reject
@@ -2996,7 +3063,7 @@ Long-lived public deployments should still sit behind a gateway or ingress stack
 - Access logs that include request id, user or tenant id from the gateway, route, status, and duration.
 - Explicit deny rules for internal-only surfaces if you expose only the public client API.
 
-When `OPENGENI_AUTH_REQUIRED=true`, `/v1/config/client` remains public but does not expose the access key, `/healthz` is public by default for Kubernetes probes, and `/metrics` is protected by default unless `OPENGENI_AUTH_ALLOW_METRICS=true` is set for an internal scraper path.
+When `OPENGENI_AUTH_REQUIRED=true`, `/v1/config/client` remains public but does not expose the access key, `POST /v1/client-errors` remains public so the web app can count failures before sign-in (it accepts only a closed, content-free report from the deployment's own web origins and bounds its own admission; the browser sends it with `credentials: "omit"`, so a host behind edge basic auth must also list `/v1/client-errors` as an `Exact` path on the Helm `publicIngress` to receive it), `/healthz` is public by default for Kubernetes probes, and `/metrics` is protected by default unless `OPENGENI_AUTH_ALLOW_METRICS=true` is set for an internal scraper path.
 
 For AKS smoke deployments using `ingress-nginx` behind an Azure LoadBalancer service, configure the ingress controller service health probes explicitly. HTTP/HTTPS probes to `/` can mark ingress-nginx unhealthy when the default backend returns a non-200 response, leaving the public VIP allocated but unrouted. TCP probes are sufficient for the temporary ingress-controller smoke path:
 
@@ -3008,6 +3075,77 @@ controller:
       service.beta.kubernetes.io/port_80_health-probe_protocol: Tcp
       service.beta.kubernetes.io/port_443_health-probe_protocol: Tcp
 ```
+
+### API request source and auth rate limits
+
+Every API rate limit and abuse quota keys on one request source address:
+managed sign-in, sign-up, verification, and password-reset limits (Better
+Auth), the address recorded on each auth session, MCP OAuth client
+registration, Connected Machine enrollment, invited-user account setup, and
+browser login transactions. By default it is the transport peer address
+reported by Bun, and caller-supplied `X-Forwarded-For` and `X-Real-IP` are
+ignored, so a caller cannot choose its own bucket.
+
+Behind a fixed proxy chain, set `OPENGENI_API_TRUSTED_PROXY_HOPS=<count>`
+(0-16, default 0). OpenGeni then takes the client address from
+`X-Forwarded-For`, walking that many entries from the server side, so values a
+caller prepends never replace the address the trusted edge observed. Each
+trusted proxy must append the address of the peer that connected to it, or
+overwrite the header with the original client address. A missing, short, or
+malformed chain falls back to the transport peer. Enable it only when firewall
+or network-policy rules prevent direct API access; with `networkPolicy.enabled`
+the chart's API NetworkPolicy admits only the ingress controller, web, and
+collector pods. `OPENGENI_API_TRUSTED_PROXY_CIDRS` (comma-separated CIDRs or
+addresses, optional, requires a hop count) additionally honors the forwarded
+chain only when the transport peer is inside one of those ranges, for example
+the node/pod subnet the ingress controller runs in. Boot fails on a malformed
+entry. Without an enforcing NetworkPolicy plugin, any in-cluster pod in a
+trusted range can still reach the API directly and set the header, so keep
+untrusted workloads out of that range.
+
+For `ingress-nginx` on a cloud LoadBalancer, the default
+`externalTrafficPolicy: Cluster` source-NATs every request to a node address,
+so all users share a handful of rate-limit buckets. Set
+`controller.service.externalTrafficPolicy=Local` so the controller sees the
+real client, then set `OPENGENI_API_TRUSTED_PROXY_HOPS=1`: with its default
+`use-forwarded-headers: false`, ingress-nginx overwrites `X-Forwarded-For` with
+the address it observed. Add one hop for each further trusted proxy (for
+example a CDN) in front of the controller. Leaving it at 0 behind
+ingress-nginx keys every client on the controller pod address instead.
+
+Setting the hop count before the traffic policy change is safe, but until
+`externalTrafficPolicy: Local` is live every limiter keys on the few node
+addresses, so each per-address limit acts as a deployment-wide limit. Email
+sign-in and sign-up allow at least Better Auth's previous default (3 per 10 s)
+per address for this reason, but OAuth callbacks, email verification, and
+password-reset completion are tighter than Better Auth's old defaults. Put the
+traffic policy change in place before expecting a burst of real users, such as
+a launch.
+
+Managed auth applies per-client-address limits to sign-in, sign-up, social
+sign-in and callbacks, verification email, email verification, and password
+reset, plus per-email limits (shared by every API replica) on email sign-in,
+sign-up, password-reset requests, and verification-email requests. The exact
+values live in `apps/api/src/auth/managed-auth-rate-limits.ts`. Each per-email
+limit has two fixed windows: a tight one per email and client address, and a
+looser one per email that only attempts admitted by the first reach. A single
+client address therefore exhausts an email's budget only for itself; locking a
+person out of email/password sign-in, sign-up, password reset, or verification
+mail needs at least five client addresses inside the window, and social
+sign-in is never limited per email. The accepted cost is that a distributed
+attacker may still spend the looser budget. IPv6 clients key on their /64 in
+every limiter. A refused Better Auth request receives HTTP 429 with an
+`X-Retry-After` header; the browser session-set sign-in returns 429
+`login_transaction_rate_limited` with `Retry-After` and
+`details.retryAfterSeconds`. Per-email counters are stored as keyed digests,
+never as email or client addresses.
+
+Upgrading a managed deployment behind a proxy: earlier releases let Better Auth
+read a single-value `X-Forwarded-For` by default. It now ignores forwarding
+headers unless `OPENGENI_API_TRUSTED_PROXY_HOPS` is set, so without it every
+user shares the proxy's address and its sign-in and sign-up limits. The
+MCP-only `OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS` is retired; API startup and
+runtime-artifact generation fail when it is still set to anything but `0`.
 
 Secret delivery should use one of these patterns:
 
@@ -3116,9 +3254,9 @@ and storage objects, so it proves deeper behavior but is not a liveness probe.
 
 Service endpoints:
 
-- API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts.
+- API: `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts. `GET /metrics` is served on `OPENGENI_API_METRICS_PORT` when it is set, and then never on `OPENGENI_API_PORT`, so an ingress that forwards every path to the API cannot publish it. Without it, `/metrics` stays on `OPENGENI_API_PORT` (the local and Docker Compose default). The Helm chart sets it from `api.metricsPort` (default `9464`) behind a separate always-ClusterIP `<release>-api-metrics` Service that the ServiceMonitor, scrape annotations, and bundled collector use; do not route it through an Ingress. The ServiceMonitor relabels those series back to the public API Service's `service`/`job` identity, so alerts keyed on `service="<release>-api"` keep matching; annotation-based scrapers see the new Service name. `api.metricsPort: null` restores the legacy single-port layout.
 - Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness requires lifecycle state `ready` plus healthy Postgres, NATS, and Temporal checks. The standalone worker reserves a one-connection Postgres probe pool so ordinary activity-pool saturation cannot create false readiness failures. A draining worker stays live but becomes unready before polling stops.
-- Relay: `GET /metrics` and `GET /healthz` on the relay port when the relay is enabled.
+- Relay: `GET /healthz` on `OPENGENI_RELAY_BIND` (the wss port, default `8443`) when the relay is enabled. `GET /metrics` is served on `OPENGENI_RELAY_METRICS_BIND` (a `host:port`) when it is set, and then never on the wss port, so an ingress that forwards every path of the relay host cannot publish it. Without it, `/metrics` stays on the wss port (the local development default, where the relay binds loopback). The relay refuses to start when both binds share a port. The Helm chart sets it from `relay.metricsPort` (default `9464`) behind a separate always-ClusterIP `<release>-relay-metrics` Service that the relay ServiceMonitor and scrape annotations use; do not route it through an Ingress. The ServiceMonitor relabels those series back to the public relay Service's `service`/`job` identity; annotation-based scrapers see the new `<release>-relay-metrics` Service name. The default needs a relay image from the same release or later; `relay.metricsPort: null` restores the legacy single-port layout, including for an older pinned relay image.
 
 API and worker health responses include the non-fatal warning
 `github_app_bot_identity_unavailable` when that process has partial workspace
@@ -3135,6 +3273,8 @@ Useful settings:
 - `OPENGENI_WORKER_HTTP_PORT=8001` for the worker metrics/health listener.
 - `OPENGENI_AUTH_ALLOW_HEALTH=true` allows `/healthz`, `/traffic-readyz`, and `/readyz` through the deployment-key gate.
 - `OPENGENI_AUTH_ALLOW_METRICS=true` allows API `/metrics` through the deployment-key gate for an internal scraper path.
+- `OPENGENI_API_METRICS_PORT=9464` moves API `/metrics` to a dedicated internal listener. That listener serves nothing else and applies the same deployment-key rules.
+- `OPENGENI_RELAY_METRICS_BIND=0.0.0.0:9464` moves relay `/metrics` to a dedicated internal listener that serves nothing else.
 - `OPENGENI_DISABLE_OPENAI_TRACING=true` disables OpenAI Agents SDK tracing; tracing also defaults off when no OTLP endpoint is configured.
 - `OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` to export spans to an OpenTelemetry Collector.
 - `OPENGENI_OTEL_EXPORTER_OTLP_HEADERS=key=value,...` for exporter headers; put this in a secret when it contains credentials.
@@ -3149,11 +3289,31 @@ helm upgrade --install opengeni deploy/helm/opengeni \
   --set secret.existingSecret=opengeni-runtime
 ```
 
+Upgrade note for clusters that enforce NetworkPolicy: with
+`networkPolicy.enabled=true`, the API NetworkPolicy admits only the bundled
+collector and `networkPolicy.monitoring` to `api.metricsPort`, never the
+`networkPolicy.ingressController` peers. Before the dedicated listener, a
+Prometheus outside the release could scrape the API on its public port through
+the ingress-controller rule, whose default empty selectors admit every pod. If
+such a Prometheus (ServiceMonitor or scrape annotations) scrapes the API, set
+`networkPolicy.monitoring` to its namespace and pod selectors before upgrading;
+otherwise the API target goes down and the `up == 0` availability alert fires.
+The relay follows the same rule: with `relay.metricsPort` set, the relay
+NetworkPolicy admits only `networkPolicy.monitoring` to that port, and the wss
+port admits only the ingress controller. A Prometheus that reached the relay's
+wss port through the ingress-controller rule needs `networkPolicy.monitoring`
+too. The default `relay.metricsPort` needs a relay image from the same release
+or later: an older relay binary ignores `OPENGENI_RELAY_METRICS_BIND` and keeps
+`/metrics` on the wss port, so its scrape target goes down. When you pin an older
+relay image, set `relay.metricsPort: null` to keep the legacy layout. The managed
+example values files carry a commented `monitoring` block.
+
 `ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), a model-aware automatic context-compaction start that remains durably pending for 15 minutes, traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, release-owned turn-worker restarts and crash loops, durable worker-death recovery and exhausted recovery, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Compaction start/completion counters initialize at zero for rate diagnostics; a trigger-maintained exact-attempt pending projection and control-worker freshness gauge preserve alert truth across concurrent activities, terminal skips, and turn-worker restarts without exporting tenant identities. Worker-death recovery outcomes are emitted by the fenced control activity after the durable recovery transaction wins, because the process-local metrics registry of the dead turn worker no longer exists. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
 
 Minimum production dashboards should cover:
 
-- API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
+- API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`. `route` is a bounded template, never a raw path: an explicit established label, or else the registered path template of the Hono handler that answers the request (for example `/v1/organizations/:organizationId/members`). Better Auth endpoints behind the `/v1/auth/*` registration keep a closed set of labels (`/v1/auth/sign-up/email`, `/v1/auth/callback/google`, and so on). `/v1/unknown` and `/unknown` now mean that no registered handler matched, so a sustained rise indicates 404 probing or a client/server route mismatch rather than unlabeled product traffic.
+- Sign-up funnel (managed access mode): `opengeni_auth_events_total{event="sign_up"|"email_verified"|"sign_in",method="email"|"google"|"github"|"other"}`, `opengeni_organization_setup_total{outcome="created"|"failed"}` for the self-service post-sign-in organization setup, and `opengeni_signup_acquisition_total{source="producthunt"|"website"|"direct"|"other"}` for new accounts. Every series initializes at zero. `sign_up` counts Better Auth user creation (a duplicate sign-up for an existing address is not counted); `sign_in` counts non-discarded provider sessions, including the first session of a new social account and, in the default `legacy` session-set mode, the session that the first successful email-verification click creates (a reused link creates none). A new email user's first `sign_in` is therefore normally that click, the session they continue into organization setup with, not a later password sign-in; read the funnel as `sign_up` -> `email_verified` -> `sign_in` -> organization setup `created`. `sign_in` is a session count that includes returning sign-ins, not a unique-user count. A mail link scanner that follows the verification link first takes that automatic sign-in, so the person's later password sign-in is a second `sign_in` and `sign_in` can exceed one per new email user. Invited-user account setup is not a sign-up. The acquisition source is normalized server-side from first-touch `utm_*`/`ref` parameters the web app forwards with the sign-up request or OAuth state (including the session-set social start in `dual`/`broker` mode); no per-user acquisition data is stored. The acquisition counter increments when the account is created, before email verification, so it includes accounts that never verify (and bot sign-ups); `email_verified` carries no source label, so compare the two only in aggregate. A Product Hunt listing adds `?ref=producthunt` to its link, and a `producthunt` `ref` wins over any `utm_source`: point the listing at `https://app.opengeni.ai/?mode=signup&ref=producthunt`, or at the marketing site only while it forwards the inbound `ref` onto its app links, otherwise those visitors count as `website`. An idempotent replay of a committed organization setup request counts `created` again. These counters are process-local; aggregate them with `sum` across API replicas and use `increase()` over the reporting window.
 - Advisory work discovery: request/outcome rate, p50/p95/p99 duration, result count, response bytes, overlap count, stable match-class distribution, and observer errors from the `opengeni_work_discovery_*` family. Keep only its fixed surface/mode/outcome/scope/match labels; never add workspace, session, query, subject, title, goal, claim, version, or provenance labels. See [`work-discovery.md`](work-discovery.md).
 - Workspace Insights: `opengeni_workspace_insights_request_duration_seconds{range,provider_filter,model_filter,outcome}` measures the complete route handler, including access resolution, aggregation, contract projection, and response construction. Its exact `le="2"` bucket verifies the default unfiltered weekly view's two-second target. Labels carry only closed range/outcome values and filter-presence flags, never workspace, subject, provider, or model values. If the `usage_bundle` or `model_bundle` phase dominates `opengeni_workspace_insights_phase_duration_seconds`, check the fact authority functions still carry `enable_nestloop=off` (migration 0512): a time window newer than the last `ANALYZE` is estimated at about one row, and a nested-loop plan rescans every workspace session per fact. The route shares one in-flight rollup only between concurrent requests with the same workspace, range, filters, and database RLS actor.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
@@ -3190,6 +3350,14 @@ sum by (activity, status) (rate(opengeni_worker_activity_runs_total{variable set
 ```
 
 ```promql
+sum by (event, method) (increase(opengeni_auth_events_total{environment="production"}[1d]))
+```
+
+```promql
+sum by (source) (increase(opengeni_signup_acquisition_total{environment="production"}[1d]))
+```
+
+```promql
 histogram_quantile(
   0.95,
   sum by (le, activity) (rate(opengeni_worker_activity_duration_seconds_bucket{variable set="production"}[5m]))
@@ -3211,7 +3379,7 @@ Minimum production alerts:
 - Context compaction: an exact active attempt's latest automatic compaction landmark remains durably `started` for 15 minutes. Terminal skips settle normally, and the control-worker projection survives turn-worker replacement while following each resolved model's actual threshold.
 - Sandbox create failures: sandbox create failure ratio is above 20% for 10 minutes.
 - Sandbox orphan growth: `increase(opengeni_sandbox_orphans_terminated_total[30m]) > 0`.
-- Codex credential pool: any zero-eligible observation is critical; repeated one-eligible observations are warning-level reduced redundancy. The default PrometheusRule uses `opengeni_codex_pool_low_total{depth="zero"|"one"}`.
+- Codex credential pool: any zero-eligible observation is critical; repeated one-eligible observations are warning-level reduced redundancy. The default PrometheusRule uses `opengeni_codex_pool_low_total{depth="zero"|"one"}`. The matching "Codex eligible credential pool is low" log line is throttled to the first observation per workspace pool depth and then one line per 10 minutes carrying `suppressedCount` and `reason` (`eligible_pool_zero` or `eligible_pool_one`); alert on the counter, not the log. Connected Machine auth-callout denial warnings use the same per-source throttle (one line per minute per rejected bearer or enrollment, with `reason` `invalid_bearer`, `inactive_enrollment`, or `duplicate_runner`); the denial itself is never throttled.
 - Worker failures: `runAgentTurn` failure ratio is above 5% for 10 minutes.
 - Worker duration: p95 `runAgentTurn` duration is above the expected model/tool budget for 15 minutes.
 - Scheduler health: manual scheduled-task conformance does not dispatch a session through Temporal within the configured timeout.
@@ -3229,7 +3397,13 @@ It supports:
 - AKS for OpenGeni workloads.
 - ACR for images.
 - Key Vault for runtime secret storage.
-- Managed Azure PostgreSQL when `postgres.mode = "managed"`.
+- Managed Azure PostgreSQL when `postgres.mode = "managed"`, with optional
+  non-secret policies for capacity and `max_connections`
+  (`managed_postgres_capacity`), a high-availability standby, custom
+  maintenance window, and server update timeout for standby seeding
+  (`managed_postgres_availability`), and CPU/connection
+  saturation alerts on the observability action group
+  (`managed_postgres_alerts`). See `deploy/terraform/azure/README.md`.
 - Existing customer Postgres when `postgres.mode = "external"`.
 - Existing Temporal endpoint when `temporal.mode = "external"`.
 - Managed Azure Blob storage when `object_storage.mode = "managed"` and `object_storage.api = "azure-blob"`.
@@ -3237,6 +3411,21 @@ It supports:
 
 Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
 upload files to signed Blob URLs without per-application registration.
+
+Pod stdout/stderr lives only as long as each pod. To retain it, enable the
+optional `aks_container_insights` object together with `observability.enabled`.
+It installs the AKS monitoring addon with managed-identity ingestion, one data
+collection rule scoped to the listed namespaces (`ContainerLogV2`, Kubernetes
+events, and pod inventory by default), and a mandatory daily ingestion cap on
+the observability Log Analytics workspace, whose retention stays 30 days.
+The cap is shared with Application Insights data in that workspace, so size it
+well above normal ingestion; reaching it pauses ingestion until the daily reset.
+Two log search alerts notify the observability action group when the cap is
+reached or when collection stops. An optional `container_log_transform_kql`
+redacts container log content, such as ingress query strings, before it is
+retained.
+The addon adds a DaemonSet with CPU and memory requests on every node, so check
+node headroom first. See `deploy/terraform/azure/README.md`.
 
 Before applying anything in Azure:
 

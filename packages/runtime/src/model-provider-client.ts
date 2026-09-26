@@ -28,6 +28,7 @@ import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-tr
 import { ReplayableJsonOpenAI } from "./replayable-json-body";
 import { recordModelTransportStarted } from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
+import { withoutQuotaExhaustedRetries } from "./provider-quota";
 
 let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
 
@@ -85,7 +86,10 @@ export function buildOpenAIClientFromSettings(
           settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
             ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
             : undefined,
-        fetch: instrumentedModelFetch(providerId, globalThis.fetch),
+        fetch: sdkRetryingModelFetch(
+          settings.openaiMaxRetries,
+          instrumentedModelFetch(providerId, globalThis.fetch),
+        ),
       },
       { modelRequestPolicy: azureModelRequestPolicy },
     );
@@ -94,8 +98,21 @@ export function buildOpenAIClientFromSettings(
     apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
     ...(settings.openaiBaseUrl ? { baseURL: settings.openaiBaseUrl } : {}),
     maxRetries: settings.openaiMaxRetries,
-    fetch: instrumentedModelFetch(providerId, globalThis.fetch),
+    fetch: sdkRetryingModelFetch(
+      settings.openaiMaxRetries,
+      instrumentedModelFetch(providerId, globalThis.fetch),
+    ),
   });
+}
+
+/**
+ * A client that lets the OpenAI SDK retry 429s must not replay an exhausted
+ * provider quota: the refusal cannot clear within the SDK's backoff, and each
+ * retry only delays the typed turn failure. Clients with SDK retries disabled
+ * need no veto.
+ */
+function sdkRetryingModelFetch(maxRetries: number, inner: typeof fetch): typeof fetch {
+  return maxRetries > 0 ? withoutQuotaExhaustedRetries(inner) : inner;
 }
 
 /**
@@ -282,6 +299,11 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     throw new WorkspaceGatewayUnavailableError();
   }
   const anonymousProvider = provider.kind === "anonymous";
+  // Gateway and OpenRouter requests can incur upstream work or charges
+  // before a retryable response failure reaches this process. Neither
+  // transport has a provider idempotency key tied to our durable call,
+  // so never let the SDK replay them blindly.
+  const registryMaxRetries = gatewayProvider || openRouterProvider ? 0 : settings.openaiMaxRetries;
   const client = provider.builtin
     ? buildOpenAIClientFromSettings(settings, provider.id)
     : provider.kind === "codex-subscription"
@@ -342,24 +364,23 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                   ? { apiKey: provider.apiKey }
                   : {}),
               ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-              // Gateway and OpenRouter requests can incur upstream work or charges
-              // before a retryable response failure reaches this process. Neither
-              // transport has a provider idempotency key tied to our durable call,
-              // so never let the SDK replay them blindly.
-              maxRetries: gatewayProvider || openRouterProvider ? 0 : settings.openaiMaxRetries,
+              maxRetries: registryMaxRetries,
               ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
               ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
-              fetch: anonymousProvider
-                ? withoutAuthenticationHeaders(
-                    instrumentedModelFetch(provider.id, globalThis.fetch),
-                  )
-                : gatewayProvider
-                  ? vercelGatewayRoutingFetch(
-                      provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+              fetch: sdkRetryingModelFetch(
+                registryMaxRetries,
+                anonymousProvider
+                  ? withoutAuthenticationHeaders(
                       instrumentedModelFetch(provider.id, globalThis.fetch),
-                      gatewayPolicies,
                     )
-                  : instrumentedModelFetch(provider.id, globalThis.fetch),
+                  : gatewayProvider
+                    ? vercelGatewayRoutingFetch(
+                        provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                        instrumentedModelFetch(provider.id, globalThis.fetch),
+                        gatewayPolicies,
+                      )
+                    : instrumentedModelFetch(provider.id, globalThis.fetch),
+              ),
             },
             { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
           );

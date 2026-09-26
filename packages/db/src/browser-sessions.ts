@@ -162,9 +162,15 @@ export type PrepareBrowserSessionEndInput = {
   browserSessionId: string;
   operationId: string;
   actorSubjectId: string;
+  expectedLifecycle?: BrowserSessionRow["lifecycle"];
+  expectedControllerGeneration?: string | null;
+  expectedFailureCode?: string | null;
 };
 
-export type PrepareBrowserSessionLifecycleInput = PrepareBrowserSessionEndInput;
+export type PrepareBrowserSessionLifecycleInput = Omit<
+  PrepareBrowserSessionEndInput,
+  "expectedLifecycle" | "expectedControllerGeneration" | "expectedFailureCode"
+>;
 
 export type BrowserPrivateCheckpointAuthority = {
   artifactId: string;
@@ -1479,6 +1485,50 @@ export async function failPreparedBrowserSessionSuspend(
     error: InteractionErrorValue;
   },
 ): Promise<BrowserSessionMutationResponseValue | null> {
+  return await failPreparedBrowserSessionTransition(db, {
+    ...input,
+    kind: "suspend",
+    transitionalLifecycle: "suspending",
+    restoreLifecycle: "active",
+  });
+}
+
+/** Restore the previous lifecycle when an end fails before controller dispatch. */
+export async function failPreparedBrowserSessionEnd(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    operationId: string;
+    browserSessionId: string;
+    restoreLifecycle: BrowserSessionRow["lifecycle"];
+    restoreFailureCode: string | null;
+    expectedControllerGeneration: string | null;
+    error: InteractionErrorValue;
+  },
+): Promise<BrowserSessionMutationResponseValue | null> {
+  return await failPreparedBrowserSessionTransition(db, {
+    ...input,
+    kind: "end",
+    transitionalLifecycle: "ending",
+  });
+}
+
+async function failPreparedBrowserSessionTransition(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    operationId: string;
+    browserSessionId: string;
+    kind: "suspend" | "end";
+    transitionalLifecycle: "suspending" | "ending";
+    restoreLifecycle: BrowserSessionRow["lifecycle"];
+    restoreFailureCode?: string | null;
+    expectedControllerGeneration?: string | null;
+    error: InteractionErrorValue;
+  },
+): Promise<BrowserSessionMutationResponseValue | null> {
   const error = InteractionError.parse(input.error);
   return await withRlsContext(
     db,
@@ -1488,24 +1538,45 @@ export async function failPreparedBrowserSessionSuspend(
         const tx = txRaw as unknown as Database;
         await lockOperation(tx, input.workspaceId, input.operationId);
         const operation = await loadOperation(tx, input.workspaceId, input.operationId);
-        assertOperationResource(operation, input.browserSessionId, "suspend");
+        assertOperationResource(operation, input.browserSessionId, input.kind);
         if (operation.state !== "prepared" || operation.dispatchedAt) return null;
 
         await lockBrowserSession(tx, input.workspaceId, input.browserSessionId);
+        if (input.expectedControllerGeneration !== undefined) {
+          const [current] = await tx
+            .select({ controllerGeneration: schema.browserSessions.controllerGeneration })
+            .from(schema.browserSessions)
+            .where(
+              and(
+                eq(schema.browserSessions.workspaceId, input.workspaceId),
+                eq(schema.browserSessions.id, input.browserSessionId),
+              ),
+            )
+            .limit(1);
+          if (!current || current.controllerGeneration !== input.expectedControllerGeneration) {
+            throw new BrowserSessionOperationConflictError(
+              "Prepared BrowserSession controller generation changed",
+            );
+          }
+        }
         const now = new Date();
         const [sessionRow] = await tx
           .update(schema.browserSessions)
-          .set({ lifecycle: "active", failureCode: null, updatedAt: now })
+          .set({
+            lifecycle: input.restoreLifecycle,
+            failureCode: input.restoreFailureCode ?? null,
+            updatedAt: now,
+          })
           .where(
             and(
               eq(schema.browserSessions.workspaceId, input.workspaceId),
               eq(schema.browserSessions.id, input.browserSessionId),
-              eq(schema.browserSessions.lifecycle, "suspending"),
+              eq(schema.browserSessions.lifecycle, input.transitionalLifecycle),
             ),
           )
           .returning();
         if (!sessionRow) {
-          throw new BrowserSessionStateError("Prepared BrowserSession suspension changed state");
+          throw new BrowserSessionStateError("Prepared BrowserSession lifecycle changed state");
         }
         const [operationRow] = await tx
           .update(schema.interactionOperations)
@@ -1885,6 +1956,7 @@ export async function failBrowserSessionSuspension(
     browserSessionId: string;
     controllerGeneration: string;
     state?: "failed" | "outcome_unknown";
+    missingControllerSession?: boolean;
     error: InteractionErrorValue;
   },
 ): Promise<BrowserSessionMutationResponseValue> {
@@ -1892,8 +1964,8 @@ export async function failBrowserSessionSuspension(
     ...input,
     kind: "suspend",
     expectedLifecycle: "suspending",
-    resultLifecycle: "active",
-    clearController: false,
+    resultLifecycle: input.missingControllerSession ? "lost" : "active",
+    clearController: input.missingControllerSession === true,
   });
 }
 
@@ -1949,7 +2021,7 @@ async function failBrowserSessionTransition(
     controllerGeneration: string | null;
     kind: "suspend" | "resume";
     expectedLifecycle: "suspending" | "restoring";
-    resultLifecycle: "active" | "suspended";
+    resultLifecycle: "active" | "suspended" | "lost";
     state?: "failed" | "outcome_unknown";
     clearController: boolean;
     error: InteractionErrorValue;
@@ -1994,7 +2066,7 @@ async function failBrowserSessionTransition(
                   controllerHeartbeatAt: null,
                 }
               : {}),
-            failureCode: null,
+            failureCode: input.resultLifecycle === "lost" ? "controller_resource_missing" : null,
             updatedAt: now,
           })
           .where(
@@ -2054,6 +2126,19 @@ export async function prepareBrowserSessionEnd(
           await lockBrowserSession(tx, input.workspaceId, input.browserSessionId);
           const session = await loadBrowserSession(tx, input.workspaceId, input.browserSessionId);
           if (!session) throw new BrowserSessionNotFoundError("BrowserSession not found");
+          if (
+            (input.expectedLifecycle !== undefined &&
+              session.lifecycle !== input.expectedLifecycle) ||
+            (input.expectedFailureCode !== undefined &&
+              session.failureCode !== input.expectedFailureCode) ||
+            (input.expectedControllerGeneration !== undefined &&
+              (session.controller?.controllerGeneration ?? null) !==
+                input.expectedControllerGeneration)
+          ) {
+            throw new BrowserSessionOperationConflictError(
+              "BrowserSession changed before end preparation",
+            );
+          }
           const now = new Date();
           const terminal = session.lifecycle === "ended";
           const [insertedOperation] = await tx

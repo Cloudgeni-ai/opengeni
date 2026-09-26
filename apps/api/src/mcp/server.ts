@@ -187,7 +187,12 @@ import {
   searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
-import { recordWorkspaceUsage, requireLimit, workflowIdForSession } from "@opengeni/core";
+import {
+  recordWorkspaceUsage,
+  requireLimit,
+  resolveScheduledTaskPreflightModel,
+  workflowIdForSession,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   githubBindingStatus,
@@ -307,6 +312,7 @@ import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../san
 import {
   createOpenGeniSlackBotClient,
   resolveSlackBotConnectionForTool,
+  type OpenGeniSlackBotClient,
 } from "../integrations/slack-bot";
 import { createFikenClient, resolveFikenConnectionForTool } from "../integrations/fiken";
 import {
@@ -572,6 +578,51 @@ class PolicyMcpServer extends McpServer {
       )
       .disable();
   }
+}
+
+export function slackBotFileContentResult(
+  result: Awaited<ReturnType<OpenGeniSlackBotClient["fileContent"]>>,
+) {
+  if (!("image" in result)) {
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+      structuredContent: {
+        kind: "text" as const,
+        fileId: result.file.id,
+        contentType: result.contentType,
+        content: result.content,
+        sizeBytes: null,
+        nextOffset: result.nextOffset,
+      },
+    };
+  }
+  return {
+    structuredContent: {
+      kind: "image" as const,
+      fileId: result.file.id,
+      contentType: result.image.contentType,
+      content: null,
+      sizeBytes: result.image.bytes.byteLength,
+      nextOffset: null,
+    },
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({
+          channel: result.channel,
+          file: result.file,
+          contentType: result.image.contentType,
+          sizeBytes: result.image.bytes.byteLength,
+          receipt: result.receipt,
+        }),
+      },
+      {
+        type: "image" as const,
+        mimeType: result.image.contentType,
+        data: Buffer.from(result.image.bytes).toString("base64"),
+      },
+    ],
+  };
 }
 
 export function buildOpenGeniMcpServer(
@@ -1598,7 +1649,7 @@ export function buildOpenGeniMcpServer(
             workspaceId: grant.workspaceId,
             action: "agent_run:create",
             quantity: 1,
-            model: task.agentConfig.model ?? deps.settings.openaiModel,
+            model: await resolveScheduledTaskPreflightModel(deps.db, catalogSettings, task),
           });
         }
         const triggerToken = scheduledTaskTriggerToken(triggerId);
@@ -1944,7 +1995,7 @@ function registerSlackBotTools(
     "slack_bot_file_content",
     {
       description:
-        "Read a bounded page of UTF-8 text from a Slack file or canvas shared with a channel where the workspace-shared OpenGeni bot is already a member. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so OpenGeni can verify the channel-to-canvas-to-transcript chain. Slack may still restrict a huddle transcript body to participants; that returns huddle_transcript_requires_participant_access. Private Slack URLs and credentials are never returned. Continue with nextOffset when truncated is true.",
+        "Read a bounded page of text or view a PNG, JPEG, or WebP image from a Slack file shared with a channel where the workspace-shared OpenGeni bot is already a member. Use the file ID from thread replies to view images in earlier thread messages. Images are returned as viewable content, only when directly shared to a non-shared channel, up to 640 KiB; offset must be 0. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so OpenGeni can verify the channel-to-canvas-to-transcript chain. Slack may still restrict a huddle transcript body to participants; that returns huddle_transcript_requires_participant_access. Private Slack URLs and credentials are never returned. Continue with nextOffset for truncated text.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -1952,18 +2003,26 @@ function registerSlackBotTools(
         parentFileId: z4.string().min(1).max(64).optional(),
         offset: z4.number().int().min(0).max(4_000_000).optional(),
       },
+      outputSchema: {
+        kind: z4.enum(["text", "image"]),
+        fileId: z4.string(),
+        contentType: z4.string(),
+        content: z4.string().nullable(),
+        sizeBytes: z4.number().int().nullable(),
+        nextOffset: z4.number().int().nullable(),
+      },
     },
-    async ({ connectionId, channelId, fileId, parentFileId, offset }) =>
-      json(
-        await (
-          await clientFor(connectionId)
-        ).fileContent({
-          channelId,
-          fileId,
-          ...(parentFileId ? { parentFileId } : {}),
-          ...(offset !== undefined ? { offset } : {}),
-        }),
-      ),
+    async ({ connectionId, channelId, fileId, parentFileId, offset }) => {
+      const result = await (
+        await clientFor(connectionId)
+      ).fileContent({
+        channelId,
+        fileId,
+        ...(parentFileId ? { parentFileId } : {}),
+        ...(offset !== undefined ? { offset } : {}),
+      });
+      return slackBotFileContentResult(result);
+    },
   );
 
   server.registerTool(
@@ -2521,7 +2580,7 @@ function registerGoalTools(
     "goal_update",
     {
       description:
-        "Propose or apply a semantic goal revision under the session's mutation policy. Retain the standing goal unless explicit user direction or meaningful new evidence justifies the declared refinement, adaptation, or replacement. Every rewrite must use the exact expected objective revision and a concise rationale. Root constraints cannot be changed by an agent. A rewrite is not an execution-progress audit fact; use the optional goal_progress tool when such a fact should be recorded.",
+        "Maintain your operational goal as user direction or meaningful new evidence clarifies the intended outcome. Changes apply directly unless the user explicitly configured review_changes; refinement, adaptation, and replacement are audit classifications, not approval gates under the default policy. Use the exact expected objective revision and a concise rationale. Updating a goal grants no additional authority and cannot change root constraints. Use goal_progress for an execution-progress audit fact rather than a goal rewrite.",
       inputSchema: {
         text: goalText.optional(),
         successCriteria: successCriteriaSchema.nullable().optional(),
@@ -6023,6 +6082,72 @@ function registerCapabilityDiscoveryTools(
         eventId: appended.events[0]?.id ?? null,
         message:
           "The recommendation was posted for human confirmation. No access has been granted yet.",
+      });
+    },
+  );
+
+  server.registerTool(
+    "custom_mcp_setup_request",
+    {
+      description:
+        "Show a review card for a remote HTTPS MCP server that is not in the workspace catalog. Use only an endpoint supplied by the user or established by reliable documentation; do not invent a URL. Never include query parameters or secrets in this URL; the human can edit it in the protected setup form. The agent cannot add, enable, or contact the server. Search the catalog first and do not propose an already available integration.",
+      inputSchema: {
+        name: z4.string().trim().min(1).max(256),
+        endpointUrl: z4
+          .string()
+          .url()
+          .max(2048)
+          .refine((url) => {
+            const parsed = new URL(url);
+            return (
+              parsed.protocol === "https:" &&
+              !parsed.username &&
+              !parsed.password &&
+              !parsed.hash &&
+              !parsed.search
+            );
+          }),
+        rationale: z4.string().trim().min(1).max(2000),
+      },
+    },
+    async ({ name, endpointUrl, rationale }) => {
+      await authorize();
+      const current = await catalog();
+      const existing = current.items.find(
+        (item) => item.kind === "mcp" && item.endpointUrl === endpointUrl && !item.stale,
+      );
+      if (existing) {
+        return json({
+          status: "already_in_catalog",
+          capabilityId: existing.id,
+          message: "Use the catalog authorization flow for this server instead.",
+        });
+      }
+      const claims = exactAgentCommandContext(grant, sessionId);
+      const payload = ToolAuthNeededPayload.parse({
+        serverId: "opengeni",
+        toolName: "custom_mcp_setup_request",
+        providerDomain: new URL(endpointUrl).hostname,
+        reason: "missing_connection",
+        setupRequest: { kind: "mcp", name, endpointUrl, rationale },
+      });
+      const appended = await appendAndPublishTurnEventsFenced(
+        deps.db,
+        deps.bus,
+        grant.workspaceId,
+        sessionId,
+        claims.callerTurnId,
+        claims.callerExecutionGeneration,
+        claims.callerAttemptId,
+        [{ type: "tool.auth_needed", payload }],
+      );
+      if (!appended.accepted) {
+        throw new Error("The calling turn was replaced before the setup request committed.");
+      }
+      return json({
+        status: "setup_requested",
+        eventId: appended.events[0]?.id ?? null,
+        message: "The human review card was posted. No server was added or contacted.",
       });
     },
   );

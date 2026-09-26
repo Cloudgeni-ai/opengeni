@@ -15,6 +15,7 @@ import {
   organizationModelProviderConnectionActiveForWorkspace,
   persistAttemptToolCatalog,
   prepareConnectorActionApproval,
+  recordUsageEvent,
   previewConnectorActionApproval,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
@@ -101,11 +102,13 @@ import type {
 } from "./turn-context";
 import {
   createSessionTitleAttemptToolDefinition,
+  routeAllowsSessionTitleRequests,
   sessionTitleToolPlan,
   shouldRequestMissingSessionTitle,
 } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
+import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
 import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
@@ -152,6 +155,7 @@ export type PrepareTurnToolRuntimeDeps = {
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   trigger: ClaimTurnOk["trigger"];
   runSettings: GovernanceModelOk["runSettings"];
+  resolvedModel: GovernanceModelOk["resolvedModel"];
   lazyToolTransport: GovernanceModelOk["lazyToolTransport"];
   turnTools: ReturnType<typeof withFirstPartyTools>;
   connectionScope: { accountId: string; workspaceId: string };
@@ -163,6 +167,8 @@ export type PrepareTurnToolRuntimeDeps = {
   credentialSubjectId: ClaimTurnOk["credentialSubjectId"];
   interactionInterventionResume: ClaimTurnOk["interactionInterventionResume"];
   runWorkspaceMutationForSandbox: SandboxTurnRuntime["runWorkspaceMutationForSandbox"];
+  /** Deployment and workspace allow the Jev-backed code_search tool. */
+  codeSearchEnabled: boolean;
   throwIfWorkerShuttingDown: () => void;
   throwIfTurnCancelled: () => void;
 };
@@ -371,6 +377,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     turnExecutionPolicy,
     trigger,
     runSettings: canonicalRunSettings,
+    resolvedModel,
     lazyToolTransport,
     turnTools: canonicalTurnTools,
     sandboxArtifactRuntime,
@@ -381,6 +388,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     credentialSubjectId,
     interactionInterventionResume,
     runWorkspaceMutationForSandbox,
+    codeSearchEnabled,
     throwIfWorkerShuttingDown,
     throwIfTurnCancelled,
   } = deps;
@@ -573,6 +581,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       firstPartyMcpPermissions: effectiveFirstPartyPermissions,
     }),
     parallelGenerationAvailable: typeof runtime.generateSessionTitle === "function",
+    routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
   const googleDrivePublicationAllowed =
     selectedFirstPartyMcpTools.includes("editable_artifact_export") &&
@@ -762,6 +771,60 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       return ((await prepared.ready) ?? prepared).attemptToolEnvironment;
     },
   });
+  const codeSearchTools = codeSearchToolDefinitions({
+    enabled: codeSearchEnabled,
+    settings: runSettings,
+    backend: activeSandboxBackend ?? groupBoxBackend,
+    machineWorkspaceRoot: sandboxState.machinePrimarySession?.workspaceRoot ?? null,
+    observability,
+    // OpenGeni's Jev key pays for these calls whatever model billing the
+    // workspace uses; record them per workspace so the cost stays visible.
+    recordUsage: async (usage) => {
+      const shared = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sourceResourceType: "code_search",
+        sourceResourceId: usage.operationId,
+        sessionId: input.sessionId,
+        turnId: turn.id,
+        turnAttemptId: input.attemptId,
+      };
+      await recordUsageEvent(db, {
+        ...shared,
+        eventType: "code_search.jev_input_tokens",
+        quantity: usage.jevInputTokens,
+        unit: "tokens",
+        idempotencyKey: `usage:code_search.jev_input_tokens:${input.attemptId}:${usage.operationId}`,
+      });
+      await recordUsageEvent(db, {
+        ...shared,
+        eventType: "code_search.jev_cost",
+        quantity: Math.round(usage.jevCostUsd * 1_000_000),
+        unit: "usd_micros",
+        idempotencyKey: `usage:code_search.jev_cost:${input.attemptId}:${usage.operationId}`,
+      });
+    },
+    workspace: async () => {
+      throwIfWorkerShuttingDown();
+      throwIfTurnCancelled();
+      const access = await resolveTurnSandboxAccess(
+        sandboxState,
+        media.sdkOwnedSandboxSession,
+        "code_search requires a sandbox or Connected Machine.",
+      );
+      const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
+      const runAs = sandboxRunAs(runSettings);
+      return codeSearchWorkspaceFromChannel(
+        new SandboxChannelAService({
+          session: access.session,
+          workspaceRoot: machineRoot ?? "/workspace",
+          ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
+          leaseEpoch: access.leaseEpoch,
+          ...(runAs ? { runAs } : {}),
+        }),
+      );
+    },
+  });
   const attemptToolDefinitions = [
     ...(operationReadStore
       ? [
@@ -903,6 +966,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     ...(googleDrivePublicationTool && googleDrivePublicationAllowed
       ? [googleDrivePublicationTool]
       : []),
+    ...codeSearchTools,
   ];
   recordTurnStartupPhase(observability, {
     phase: "tool_context_preparation",
@@ -1124,6 +1188,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       ...titleToolPlan.preparationIndependentToolNames,
       "skill_read",
     ],
+    codeSearchAvailable: codeSearchTools.length > 0,
     skillCatalog,
   };
 }

@@ -96,7 +96,7 @@ afterEach(async () => {
 });
 afterAll(() => GlobalRegistrator.unregister());
 
-async function render(thumbnail = false, showArtifactLink = false) {
+async function render(thumbnail = false, showArtifactLink = false, viewer = false) {
   await act(async () =>
     root.render(
       <InlineChatImage
@@ -105,6 +105,7 @@ async function render(thumbnail = false, showArtifactLink = false) {
         alt="Diagram"
         thumbnail={thumbnail}
         showArtifactLink={showArtifactLink}
+        viewer={viewer}
       />,
     ),
   );
@@ -192,6 +193,24 @@ test("thumbnails remain eager, container-sized, and non-interactive", async () =
   await act(async () => image.dispatchEvent(new Event("error")));
   expect(container.textContent).toContain("unavailable");
   expect(container.querySelector("button, a")).toBeNull();
+});
+
+test("artifact viewer loads without a chat slot and fits the page and viewport", async () => {
+  await render(false, false, true);
+  expect(notify).toBeUndefined();
+  expect(metadataCalls).toBe(1);
+  expect(container.querySelector('[style*="360"]')).toBeNull();
+  await act(async () => metadata.resolve(artifact));
+  await act(async () => bytes.resolve({ artifact, bytes: new Uint8Array([0]) }));
+  const image = container.querySelector("img")!;
+  expect(image.className).toContain("h-auto");
+  expect(image.className).toContain("max-h-[calc(100dvh-12rem)]");
+  expect(image.className).toContain("w-full");
+  expect(image.className).toContain("object-contain");
+  const expand = container.querySelector<HTMLButtonElement>('button[aria-label="Expand Diagram"]')!;
+  expect(expand.className).not.toContain("h-full");
+  await act(async () => expand.click());
+  expect(open).toHaveBeenCalledTimes(1);
 });
 
 test("the optional artifact link stays inside the original reserved slot", async () => {

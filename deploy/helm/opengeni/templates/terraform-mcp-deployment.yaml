@@ -19,6 +19,7 @@ spec:
         app.kubernetes.io/component: terraform-mcp
     spec:
       serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

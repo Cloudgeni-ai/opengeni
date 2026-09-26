@@ -119,6 +119,7 @@ describe("sandbox observability contract", () => {
       "opengeni_sandbox_operations_total",
       "opengeni_sandbox_operation_duration_seconds_bucket",
       "opengeni_sandbox_warming_timeouts_total",
+      "opengeni_sandbox_readiness_replacements_total",
       "opengeni_sandbox_orphans_terminated_total",
       "opengeni:sandbox_checkpoint_artifacts:fresh_max",
       "opengeni_sandbox_checkpoint_artifact_operations_total",

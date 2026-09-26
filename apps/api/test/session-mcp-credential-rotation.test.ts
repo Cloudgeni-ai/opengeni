@@ -4,20 +4,28 @@ import { Hono } from "hono";
 import postgres from "postgres";
 import {
   createApiKey,
+  createConnection,
+  createOrganizationApiKey,
+  ensureExternalIdentity,
+  grantWorkspaceAccess,
+  listOwnedConnectionAccounts,
+  withRlsContext,
   createDb,
   createSession,
   createSessionMcpServers,
   migrate,
   provisionRoles,
   revokeApiKey,
+  type Database,
   type DbClient,
 } from "@opengeni/db";
 import {
   signDelegatedAccessToken,
+  type AccessGrant,
   type Permission,
   type SessionAuthorizationPort,
 } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { listOwnConnectionAccountsForGrant, type ApiRouteDeps } from "@opengeni/core";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -25,6 +33,8 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { registerSessionRoutes } from "../src/routes/sessions";
+import { organizationApiKeyPermissionsForAccess } from "../src/routes/api-keys";
+import { OpenGeniClient } from "@opengeni/sdk";
 
 const externalAdminUrl = process.env.OPENGENI_TEST_THROWAWAY_DATABASE_ADMIN_URL?.trim();
 let shared: SharedTestDatabase | null = null;
@@ -167,6 +177,253 @@ function send(app: Hono, f: Awaited<ReturnType<typeof fixture>>, body: unknown =
 }
 
 describe("standalone credential rotation HTTP authority", () => {
+  test("host-approved rotation completes nested authorization on one transaction connection", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const operations: string[] = [];
+    const app = appWith({
+      authorizeSession: async ({ operation }) => {
+        operations.push(operation);
+        return { allowed: true, relatedSessionAccess: "target" };
+      },
+    });
+    const response = await send(app, f);
+    expect(response.status).toBe(200);
+    expect(operations).toEqual([
+      "session.mcp.credentials.rotate",
+      "session.mcp.credentials.rotate",
+    ]);
+    expect(await response.json()).toMatchObject({
+      sessionId: f.session.id,
+      servers: [{ id: "external", credentialVersion: 2 }],
+    });
+    expect(
+      await admin`select id from session_command_receipts
+      where target_session_id = ${f.session.id}`,
+    ).toHaveLength(1);
+  });
+
+  test("asUser can replace its own personal binding among multiple accounts, never another user or the service", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const granted = organizationApiKeyPermissionsForAccess("full");
+    await admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
+      values (${f.accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'native-replacement-test')`;
+    const token = crypto.randomUUID();
+    await createOrganizationApiKey(client.db, {
+      accountId: f.accountId,
+      name: "Native replacement fixture",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: granted,
+    });
+    const identities = await Promise.all(
+      ["alice", "bob"].map(async (externalId) => {
+        const identity = await ensureExternalIdentity(client.db, {
+          accountId: f.accountId,
+          externalId,
+        });
+        await grantWorkspaceAccess(client.db, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          subjectId: identity.subjectId,
+          permissions: granted,
+        });
+        return identity;
+      }),
+    );
+    const destination = "https://tools.example.test/mcp/organizations/example";
+    await admin`update session_mcp_servers set connection_ref = ${admin.json({
+      authoritySource: "host",
+      hostBinding: { selection: "accepted_turn" },
+      subjectScope: "subject",
+      providerDomain: "tools.example.test",
+      kind: "delegated",
+    })} where session_id = ${f.session.id}`;
+    const native = await createConnection(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      subjectId: identities[0]!.subjectId,
+      providerDomain: "tools.example.test",
+      kind: "oauth2",
+      credentialEncrypted: "synthetic-never-resolved",
+      createdBySubjectId: identities[0]!.subjectId,
+      metadata: { mcpUrl: destination, resource: destination },
+    });
+    await createConnection(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      subjectId: identities[0]!.subjectId,
+      providerDomain: "other.example.test",
+      kind: "oauth2",
+      credentialEncrypted: "synthetic-never-resolved",
+      createdBySubjectId: identities[0]!.subjectId,
+      metadata: { mcpUrl: "https://other.example.test/mcp" },
+    });
+    expect(
+      await listOwnedConnectionAccounts(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        subjectId: identities[0]!.subjectId,
+      }),
+    ).toHaveLength(2);
+    await withRlsContext(
+      client.db,
+      { accountId: f.accountId, workspaceId: f.workspaceId },
+      async (tx) => {
+        let inFlight = 0;
+        let maxInFlight = 0;
+        const observed = new Proxy(tx, {
+          get(target, property, receiver) {
+            if (property !== "transaction") return Reflect.get(target, property, receiver);
+            const begin = Reflect.get(target, property, target) as (
+              ...args: unknown[]
+            ) => Promise<unknown>;
+            return async (...args: unknown[]) => {
+              inFlight++;
+              maxInFlight = Math.max(maxInFlight, inFlight);
+              try {
+                if (inFlight > 1) throw new Error("overlapping RLS savepoints");
+                await new Promise((resolve) => setTimeout(resolve, 5));
+                return await begin.apply(target, args);
+              } finally {
+                inFlight--;
+              }
+            };
+          },
+        }) as Database;
+        const visible = await listOwnConnectionAccountsForGrant(observed, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          subjectId: identities[0]!.subjectId,
+          principalKind: "human_session",
+          permissions: granted,
+          metadata: {},
+        } as AccessGrant);
+        expect(
+          visible.filter((connection) => connection.subjectId === identities[0]!.subjectId),
+        ).toHaveLength(2);
+        expect(maxInFlight).toBe(1);
+      },
+    );
+    const app = appWith();
+    const service = new OpenGeniClient({
+      baseUrl: "http://fixture",
+      apiKey: token,
+      fetch: (input, init) => app.request(input, init),
+    });
+    const { headers: _headers, ...preconditions } = f.request.updates[0]!;
+    const request = {
+      operationKey: f.request.operationKey,
+      updates: [
+        { ...preconditions, nativeConnectionId: native.id, replacementServerUrl: destination },
+      ],
+    };
+    for (const actor of [service, service.asUser("bob")]) {
+      await expect(
+        actor.rotateSessionMcpCredentials(f.workspaceId, f.session.id, request),
+      ).rejects.toMatchObject({ status: 422 });
+    }
+    expect(
+      await service
+        .asUser("alice")
+        .rotateSessionMcpCredentials(f.workspaceId, f.session.id, request),
+    ).toMatchObject({
+      sessionId: f.session.id,
+      servers: [{ id: "external", credentialVersion: 2 }],
+    });
+    const [row] =
+      await admin`select connection_ref, url from session_mcp_servers where session_id = ${f.session.id}`;
+    expect(row!.connection_ref).toMatchObject({
+      connectionId: native.id,
+      subjectScope: "subject",
+      resource: destination,
+    });
+    expect(row!.url).toBe(destination);
+  });
+
+  test("native replacement uses visible workspace credentials without changing session history or policy", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const native = await createConnection(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      subjectId: null,
+      providerDomain: "tools.example.test",
+      kind: "oauth2",
+      credentialEncrypted: "synthetic-never-resolved",
+      createdBySubjectId: `api_key:${f.credential.id}`,
+      metadata: { mcpUrl: f.request.updates[0]!.expectedServerUrl },
+    });
+    await admin`update session_mcp_servers set connection_ref = ${admin.json({
+      authoritySource: "host",
+      connectionId: "legacy",
+      providerDomain: "tools.example.test",
+      kind: "delegated",
+    })} where session_id = ${f.session.id}`;
+    const { headers: _headers, ...preconditions } = f.request.updates[0]!;
+    const request = {
+      operationKey: f.request.operationKey,
+      updates: [{ ...preconditions, nativeConnectionId: native.id }],
+    };
+    const before = await admin`select * from sessions where id = ${f.session.id}`;
+    const app = appWith();
+    const result = await send(app, f, request);
+    expect(result.status).toBe(200);
+    const receipt = await result.json();
+    expect(await (await send(app, f, request)).json()).toEqual(receipt);
+    const [server] =
+      await admin`select connection_ref, headers_encrypted, require_approval, credential_version
+      from session_mcp_servers where session_id = ${f.session.id}`;
+    expect(server!.connection_ref).toEqual({
+      connectionId: native.id,
+      providerDomain: "tools.example.test",
+      kind: "oauth2",
+      subjectScope: "workspace",
+    });
+    expect(server!.headers_encrypted).toEqual({});
+    expect(server!.require_approval).toEqual(["write_record"]);
+    expect(server!.credential_version).toBe(2);
+    expect(await admin`select * from sessions where id = ${f.session.id}`).toEqual(before);
+    expect(
+      await admin`select id from session_turns where session_id = ${f.session.id}`,
+    ).toHaveLength(0);
+  });
+
+  test("native replacement rejects unavailable accounts, destination mismatch and missing permissions", async () => {
+    if (!available) return;
+    for (const mismatch of ["unavailable", "destination", "permission"] as const) {
+      const f = await fixture(mismatch === "permission" ? ["sessions:control"] : permissions);
+      const native = await createConnection(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        subjectId: null,
+        providerDomain: "tools.example.test",
+        kind: "oauth2",
+        credentialEncrypted: "synthetic-never-resolved",
+        createdBySubjectId: `api_key:${f.credential.id}`,
+        metadata: { mcpUrl: "https://tools.example.test/another-destination" },
+      });
+      const { headers: _headers, ...preconditions } = f.request.updates[0]!;
+      const result = await send(appWith(), f, {
+        operationKey: f.request.operationKey,
+        updates: [
+          {
+            ...preconditions,
+            nativeConnectionId: mismatch === "unavailable" ? crypto.randomUUID() : native.id,
+          },
+        ],
+      });
+      expect(result.status).toBe(mismatch === "permission" ? 403 : 422);
+      expect(
+        await admin`select id from session_command_receipts where target_session_id = ${f.session.id}`,
+      ).toHaveLength(0);
+      const [server] =
+        await admin`select credential_version from session_mcp_servers where session_id = ${f.session.id}`;
+      expect(server!.credential_version).toBe(1);
+    }
+  });
+
   test("same API key rotating different sessions completes without a lock upgrade deadlock", async () => {
     if (!available) return;
     const f = await fixture();

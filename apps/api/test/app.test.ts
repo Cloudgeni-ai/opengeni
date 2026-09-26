@@ -1327,6 +1327,32 @@ describe("API helpers", () => {
     });
   });
 
+  test("refuses a private MCP endpoint before an enablement probe can contact it", async () => {
+    const item = capabilityItem({
+      id: "mcp:private",
+      kind: "mcp",
+      name: "Private MCP",
+      endpointUrl: "https://127.0.0.1/mcp",
+      runtime: {
+        available: true,
+        mcpServerId: "cap-private",
+        transport: "streamable-http",
+        notes: null,
+      },
+    });
+    await expect(
+      validateMcpCapabilityConnection(
+        item,
+        undefined,
+        undefined,
+        testSettings({
+          environment: "production",
+          integrationsAllowPrivateNetworkTargets: false,
+        }),
+      ),
+    ).rejects.toThrow('MCP capability "Private MCP" could not be enabled');
+  });
+
   test("passes credential headers to the MCP enable probe", async () => {
     const metadata = await validateMcpCapabilityConnection(
       capabilityItem({
@@ -1984,6 +2010,19 @@ describe("GET /v1/config/client", () => {
         ga4: { measurementId: "G-ABC123" },
       },
     });
+  });
+
+  test("advertises the configured documentation link and hides it when disabled", async () => {
+    expect((await fetchClientConfig(testSettings())).documentationUrl).toBe(
+      "https://docs.opengeni.ai",
+    );
+    expect(
+      (await fetchClientConfig(testSettings({ documentationUrl: "https://docs.example.test/" })))
+        .documentationUrl,
+    ).toBe("https://docs.example.test/");
+    expect(
+      (await fetchClientConfig(testSettings({ documentationUrl: null }))).documentationUrl,
+    ).toBeNull();
   });
 
   test("supports a Codex subscription model as the client default", async () => {

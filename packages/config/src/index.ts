@@ -2,6 +2,7 @@ import {
   BillingMode,
   CAPABILITY_DESCRIPTORS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  DEFAULT_OPENGENI_DOCUMENTATION_URL,
   currentAgentLearningToolSelection,
   Entitlements,
   EntitlementsMode,
@@ -26,6 +27,7 @@ import {
   type VideoGenerationResolution,
   type FirstPartyMcpToolName as FirstPartyMcpToolNameType,
 } from "@opengeni/contracts";
+import type { CodeSearchDeploymentPolicy } from "@opengeni/contracts/code-search";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
 import {
   CODEX_FALLBACK_MODEL_SLUGS,
@@ -48,6 +50,7 @@ import {
 } from "@opengeni/xai-subscription";
 export { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 import { z } from "zod";
 
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -305,12 +308,34 @@ const SettingsSchema = z.object({
     .regex(/^G-[A-Z0-9]+$/u)
     .optional(),
   publicBaseUrl: z.string().url().optional(),
+  // Product documentation the web console links from its Help menu. Absent
+  // means the public OpenGeni docs; `none` hides the link for deployments that
+  // publish no documentation of their own.
+  documentationUrl: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value.trim().toLowerCase() === "none"
+          ? null
+          : value.trim()
+        : value,
+    z
+      .url({ protocol: /^https?$/u, error: "must be an absolute http(s) URL or none" })
+      .nullable()
+      .default(DEFAULT_OPENGENI_DOCUMENTATION_URL),
+  ),
   // Standards-based OAuth authorization server for external workspace MCP
   // clients. Opt-in because it creates a new public authentication surface.
   mcpOauthEnabled: EnvBoolean.default(false),
-  // Forwarded client addresses are ignored by default. Operators may trust an
+  // Client source address for every API rate limit, abuse quota, and auth
+  // session record (Better Auth, MCP OAuth registration, enrollment, account
+  // setup, login transactions). Forwarded client addresses are ignored by
+  // default so a caller cannot choose its own bucket. Operators may trust an
   // exact number of proxy hops only when direct access to the API is blocked.
-  mcpOauthTrustedProxyHops: z.coerce.number().int().min(0).max(16).default(0),
+  apiTrustedProxyHops: z.coerce.number().int().min(0).max(16).default(0),
+  // Optional comma-separated CIDRs (or single addresses) of the proxy that
+  // connects to the API. When set, forwarded client addresses are honored
+  // only for requests whose transport peer is inside one of them.
+  apiTrustedProxyCidrs: z.string().default(""),
   // Browser origin when the web app and API use separate origins in local
   // development. Production normally leaves this unset and uses publicBaseUrl.
   webBaseUrl: z.string().url().optional(),
@@ -550,6 +575,9 @@ const SettingsSchema = z.object({
   authAllowMetrics: EnvBoolean.default(false),
   apiHost: z.string().default("0.0.0.0"),
   apiPort: z.coerce.number().int().positive().default(8000),
+  // When set, GET /metrics is served only on this dedicated internal listener
+  // and never on the public API port that an ingress forwards to.
+  apiMetricsPort: z.coerce.number().int().positive().optional(),
   workerHttpPort: z.coerce.number().int().positive().default(8001),
   // Worker-side first-party MCP traffic stays on the deployment's internal
   // network. OPENGENI_MCP_URL remains the sandbox/external route used by
@@ -560,6 +588,11 @@ const SettingsSchema = z.object({
   // call the public API with bearer credentials, but never receive credentialed
   // CORS responses.
   corsAllowOriginRegex: z.string().default(String.raw`^https?://(localhost|127\.0\.0\.1)(:\d+)?$`),
+  // Local development only (`local` access mode in the `local` environment):
+  // extra exact browser origins, comma-separated, that may call the
+  // unauthenticated API besides this stack's own web origin. The local browser
+  // boundary ignores `corsAllowOriginRegex`.
+  localAllowedOrigins: z.string().optional(),
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
   openaiBaseUrl: z.string().optional(),
@@ -747,6 +780,24 @@ const SettingsSchema = z.object({
   reasoningConfigurationUpdatesEnabled: EnvBoolean.default(false),
   openaiReasoningEffort: ReasoningEffort.default("low"),
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh,max"),
+  // Default for new chats and scheduled tasks when the workspace has an
+  // OpenGeni credit balance, no saved workspace default, and no usable
+  // connected subscription, and the deployment default is not already a
+  // credits-billed model. Selected only when this model is selectable in the
+  // workspace catalog; otherwise the first selectable credits model is used.
+  // OPENGENI_CREDITS_DEFAULT_MODEL / OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT.
+  creditsDefaultModel: z
+    .string()
+    .trim()
+    .min(1)
+    .max(256)
+    .refine((value) => !/[\u000A\u000D|]/u.test(value), {
+      message: "credits default model must not contain newlines or the | field separator",
+    })
+    .default("gpt-6-luna"),
+  // Preferred effort for the credits default. Clamped to the highest effort
+  // the selected model supports at or below this value.
+  creditsDefaultReasoningEffort: ReasoningEffort.default("xhigh"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
   // Provider-assigned item ids (rs_/msg_/fc_…) in Responses API input are
   // resolved against the provider's server-side response store. That store is
@@ -772,6 +823,19 @@ const SettingsSchema = z.object({
   // merged with the MCP-server tools (getAllTools = [...mcpTools, ...tools])
   // and the sandbox capability tools, never replacing them.
   webSearchEnabled: EnvBoolean.default(true),
+  // Jev (TypeSafe's fast judge model) for worker-side agent tools. Without a
+  // usable key every Jev-backed feature is off. The key stays on the server
+  // (API and worker) and never reaches a sandbox or Connected Machine.
+  jevApiKey: z.string().optional(),
+  jevBaseUrl: z.string().url().default("https://api.typesafe.ai"),
+  jevModel: z.string().trim().min(1).max(128).default("jev-latest"),
+  jevRequestTimeoutMs: z.coerce.number().int().positive().max(120_000).default(10_000),
+  // Jev-backed `code_search` agent tool. `off` never offers it, `opt_in` offers
+  // it only where workspace settings enable it, `default_on` offers it
+  // everywhere except workspaces that disable it, and `experiment` gives it to
+  // a fixed half of sessions in workspaces without their own setting, for
+  // comparison. It also needs jevApiKey.
+  codeSearchMode: z.enum(["off", "opt_in", "default_on", "experiment"]).default("off"),
   // Deployment-default agent persona template (the white-label surface). The
   // runtime resolves the effective template per turn as
   // per-session-override > per-workspace override > this default, substitutes
@@ -1571,6 +1635,31 @@ export type VoiceInputProviderConfig =
 
 function usableDeploymentSecret(value: string | null | undefined): string | undefined {
   return isUsableVoiceInputSecret(value) ? value : undefined;
+}
+
+/** The deployment's Jev key, or undefined when it is missing or a placeholder. */
+export function usableJevApiKey(settings: Pick<Settings, "jevApiKey">): string | undefined {
+  return usableDeploymentSecret(settings.jevApiKey);
+}
+
+/**
+ * Deployment half of the `code_search` decision. `available` is false when
+ * the mode is off or no usable Jev key is configured; workspaces then cannot
+ * turn it on. `workspaceDefault` applies to workspaces without their own
+ * setting.
+ */
+export function codeSearchDeploymentPolicy(
+  settings: Pick<Settings, "codeSearchMode" | "jevApiKey">,
+): CodeSearchDeploymentPolicy {
+  const available = settings.codeSearchMode !== "off" && usableJevApiKey(settings) !== undefined;
+  if (!available) return { available: false, workspaceDefault: "off" };
+  const workspaceDefault =
+    settings.codeSearchMode === "default_on"
+      ? "on"
+      : settings.codeSearchMode === "experiment"
+        ? "split"
+        : "off";
+  return { available, workspaceDefault };
 }
 
 /**
@@ -2556,6 +2645,26 @@ export interface ConfiguredModel {
   hostedWebSearch: boolean;
 }
 
+/**
+ * Whether a resolved route is the deployment-funded OpenRouter free tier: the
+ * managed OpenRouter provider, which sends every workspace's requests with the
+ * deployment's one OpenRouter key, serving an upstream `:free` variant (the
+ * curated catalog admits nothing else). OpenRouter limits free-variant
+ * requests per account per minute and per day, so each request on this route
+ * spends quota that every turn on the deployment shares. A workspace or
+ * organization OpenRouter connection uses its own account and is not this
+ * route.
+ */
+export function isManagedOpenRouterFreeRoute(route: {
+  provider: Pick<ResolvedModelProvider, "kind">;
+  configured: Pick<ConfiguredModel, "upstreamModelId">;
+}): boolean {
+  return (
+    route.provider.kind === "openrouter-managed" &&
+    route.configured.upstreamModelId.endsWith(":free")
+  );
+}
+
 export const VERCEL_AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1" as const;
 export const VERCEL_AI_GATEWAY_AI_SDK_BASE_URL = "https://ai-gateway.vercel.sh/v4/ai" as const;
 export const VERCEL_AI_GATEWAY_CONNECTION_DOMAIN = "ai-gateway.vercel.sh" as const;
@@ -3077,8 +3186,10 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     analyticsPosthogHost: optional("OPENGENI_ANALYTICS_POSTHOG_HOST"),
     analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
+    documentationUrl: optional("OPENGENI_DOCUMENTATION_URL"),
     mcpOauthEnabled: optional("OPENGENI_MCP_OAUTH_ENABLED"),
-    mcpOauthTrustedProxyHops: optional("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS"),
+    apiTrustedProxyHops: optional("OPENGENI_API_TRUSTED_PROXY_HOPS"),
+    apiTrustedProxyCidrs: optional("OPENGENI_API_TRUSTED_PROXY_CIDRS"),
     webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
@@ -3166,10 +3277,12 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     authAllowMetrics: optional("OPENGENI_AUTH_ALLOW_METRICS"),
     apiHost: optional("OPENGENI_API_HOST"),
     apiPort: optional("OPENGENI_API_PORT"),
+    apiMetricsPort: optional("OPENGENI_API_METRICS_PORT"),
     workerHttpPort: optional("OPENGENI_WORKER_HTTP_PORT"),
     opengeniMcpInternalUrl: optional("OPENGENI_MCP_INTERNAL_URL"),
     opengeniMcpUrl: optional("OPENGENI_MCP_URL"),
     corsAllowOriginRegex: optional("OPENGENI_CORS_ALLOW_ORIGIN_REGEX"),
+    localAllowedOrigins: optional("OPENGENI_LOCAL_ALLOWED_ORIGINS"),
     openaiProvider: optional("OPENGENI_OPENAI_PROVIDER"),
     openaiApiKey: optional("OPENGENI_OPENAI_API_KEY") ?? optional("OPENAI_API_KEY"),
     openaiBaseUrl: optional("OPENGENI_OPENAI_BASE_URL") ?? optional("OPENAI_BASE_URL"),
@@ -3241,11 +3354,18 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ),
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),
     openaiAllowedReasoningEfforts: optional("OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"),
+    creditsDefaultModel: optional("OPENGENI_CREDITS_DEFAULT_MODEL"),
+    creditsDefaultReasoningEffort: optional("OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT"),
     openaiResponsesTransport: optional("OPENGENI_OPENAI_RESPONSES_TRANSPORT"),
     openaiProviderItemIds: optional("OPENGENI_OPENAI_PROVIDER_ITEM_IDS"),
     openaiReasoningEncryptedContent: optional("OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT"),
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
+    jevApiKey: optional("OPENGENI_JEV_API_KEY"),
+    jevBaseUrl: optional("OPENGENI_JEV_BASE_URL"),
+    jevModel: optional("OPENGENI_JEV_MODEL"),
+    jevRequestTimeoutMs: optional("OPENGENI_JEV_REQUEST_TIMEOUT_MS"),
+    codeSearchMode: optional("OPENGENI_CODE_SEARCH_MODE"),
     agentInstructionsTemplate: optional("OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE"),
     azureOpenaiBaseUrl: optional("OPENGENI_AZURE_OPENAI_BASE_URL"),
     azureOpenaiEndpoint: optional("OPENGENI_AZURE_OPENAI_ENDPOINT"),
@@ -6713,8 +6833,95 @@ function isDigestPinnedModalDesktopImage(settings: Settings): boolean {
   );
 }
 
+export type TrustedProxyCidr = { address: string; prefix: number; family: "ipv4" | "ipv6" };
+
+/**
+ * Parse `OPENGENI_API_TRUSTED_PROXY_CIDRS`: comma-separated IPv4/IPv6 CIDRs or
+ * single addresses. Throws on any malformed entry so a typo can never widen or
+ * silently disable the trusted proxy set.
+ */
+export function trustedProxyCidrEntries(raw: string): TrustedProxyCidr[] {
+  const entries: TrustedProxyCidr[] = [];
+  for (const entry of raw.split(",")) {
+    const value = entry.trim();
+    if (!value) continue;
+    const slash = value.indexOf("/");
+    const address = slash < 0 ? value : value.slice(0, slash);
+    const version = isIP(address);
+    const family = version === 4 ? "ipv4" : version === 6 ? "ipv6" : null;
+    const maxPrefix = family === "ipv4" ? 32 : 128;
+    const prefixText = slash < 0 ? String(maxPrefix) : value.slice(slash + 1);
+    const prefix = /^\d{1,3}$/u.test(prefixText) ? Number(prefixText) : Number.NaN;
+    if (!family || !Number.isInteger(prefix) || prefix < 0 || prefix > maxPrefix) {
+      throw new Error(
+        `OPENGENI_API_TRUSTED_PROXY_CIDRS entry "${value.slice(0, 64)}" is not an IP address or CIDR range`,
+      );
+    }
+    entries.push({ address, prefix, family });
+  }
+  return entries;
+}
+
+/**
+ * Parse `OPENGENI_LOCAL_ALLOWED_ORIGINS`: comma-separated exact browser origins
+ * (`http(s)://host[:port]`, no path, query, credentials, or wildcard). Throws on
+ * any malformed entry so a typo can never widen or silently disable the local
+ * browser boundary.
+ */
+export function localAllowedOriginEntries(raw: string | undefined): string[] {
+  const origins: string[] = [];
+  for (const entry of (raw ?? "").split(",")) {
+    const value = entry.trim();
+    if (!value) continue;
+    let url: URL | null = null;
+    try {
+      url = new URL(value);
+    } catch {
+      url = null;
+    }
+    if (
+      !url ||
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      url.username ||
+      url.password ||
+      url.hostname.includes("*") ||
+      url.pathname !== "/" ||
+      url.search ||
+      url.hash ||
+      value.endsWith("?") ||
+      value.endsWith("#")
+    ) {
+      throw new Error(
+        `OPENGENI_LOCAL_ALLOWED_ORIGINS entry "${value.slice(0, 64)}" is not an exact http(s) origin such as http://127.0.0.1:5173`,
+      );
+    }
+    origins.push(url.origin);
+  }
+  return origins;
+}
+
+const LOCAL_SANDBOX_API_ROUTES: readonly RegExp[] = [
+  // Codemode calls, journal reads, catalog, and the Site/SDK proxy.
+  /^\/v1\/workspaces\/[^/]+\/codemode(?:\/|$)/u,
+  // First-party MCP, including its /docs and /files servers.
+  /^\/v1\/workspaces\/[^/]+\/mcp(?:\/|$)/u,
+  // The personal GitHub HTTPS smart-Git broker.
+  /^\/v1\/git\/personal\/[A-Za-z0-9_-]{43}\/(?:info\/refs|git-upload-pack|git-receive-pack)$/u,
+];
+
+/**
+ * Local development only: whether a normalized API path is one a sandbox calls
+ * (Codemode, first-party MCP, and the personal Git broker). The Linux Docker
+ * sandbox route relays only these, and the local API serves only these on the
+ * addresses that only sandboxes use (see `apps/api/src/http/local-browser-boundary.ts`).
+ */
+export function localSandboxApiRouteAllowed(pathname: string): boolean {
+  return LOCAL_SANDBOX_API_ROUTES.some((route) => route.test(pathname));
+}
+
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
+  localAllowedOriginEntries(settings.localAllowedOrigins);
   if (
     settings.organizationUserSetupEmailTokenTransport === "query" &&
     !settings.organizationUserSetupQueryEdgeSanitizationConfirmed
@@ -6807,6 +7014,21 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
         "OPENGENI_PUBLIC_BASE_URL must use https when managed social authentication is configured outside local/test",
       );
     }
+  }
+  // The retired MCP-only name must never be ignored silently: a deployment
+  // that trusted forwarded addresses would fall back to the transport peer.
+  // "0" (the old .env.example value) means the same as the new default.
+  const retiredTrustedProxyHops = source.OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS?.trim();
+  if (retiredTrustedProxyHops && retiredTrustedProxyHops !== "0") {
+    throw new Error(
+      "OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS was renamed to OPENGENI_API_TRUSTED_PROXY_HOPS, which now sets the client address for every API rate limit and auth session; rename the variable",
+    );
+  }
+  const trustedProxyCidrs = trustedProxyCidrEntries(settings.apiTrustedProxyCidrs);
+  if (trustedProxyCidrs.length > 0 && settings.apiTrustedProxyHops === 0) {
+    throw new Error(
+      "OPENGENI_API_TRUSTED_PROXY_CIDRS requires OPENGENI_API_TRUSTED_PROXY_HOPS greater than 0",
+    );
   }
   if (settings.mcpOauthEnabled) {
     if (settings.productAccessMode === "configured") {
@@ -7384,6 +7606,27 @@ export function validateModelCatalogSettings(
     throw new Error(
       `The default model ${settings.openaiModel} is not executable in the resolved model catalog`,
     );
+  }
+  // An operator-set credits default must name a credits-billed model in the
+  // env catalog; a typo would otherwise fall back silently to the first
+  // selectable credits model. Only an explicit value in code catalog mode is
+  // checked: the built-in gpt-6-luna may be absent from a custom catalog, and
+  // a database catalog is edited independently of this env value, so both keep
+  // the documented fallback (docs/model-providers.md) instead of failing
+  // every catalog read.
+  const explicitCreditsDefault = source.OPENGENI_CREDITS_DEFAULT_MODEL?.trim();
+  if (
+    explicitCreditsDefault &&
+    settings.modelCatalogSource === "code" &&
+    settings.billingMode === "stripe"
+  ) {
+    const creditsDefaultId = canonicalizeConfiguredModelId(settings, settings.creditsDefaultModel);
+    const creditsDefault = models.find((model) => model.id === creditsDefaultId);
+    if (creditsDefault?.cost !== "credits") {
+      throw new Error(
+        `OPENGENI_CREDITS_DEFAULT_MODEL ${settings.creditsDefaultModel} is not a credits-billed model in the resolved model catalog`,
+      );
+    }
   }
 
   const deploymentProductIds = new Set(

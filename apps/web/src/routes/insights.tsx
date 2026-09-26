@@ -1,11 +1,12 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { XIcon } from "lucide-react";
+import { BarChart3Icon, XIcon } from "lucide-react";
 import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
 
 import { AreaChart, DonutChart, UsageMeter, donutTone } from "@/components/insights/charts";
 import { CausalSheet } from "@/components/insights/causal-sheet";
 import { CountUp } from "@/components/insights/count-up";
+import { PageHeader } from "@/components/common";
 import {
   RANGE_OPTIONS,
   backendLabel,
@@ -25,7 +26,12 @@ import {
   type InsightsRange,
   type TraceTarget,
 } from "@/components/insights/mock-data";
-import { ContentPage } from "@/components/ui/content-layout";
+import { Button } from "@/components/ui/button";
+import { ContentPage, DataScroller } from "@/components/ui/content-layout";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Notice } from "@/components/ui/notice";
+import { Select } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
@@ -72,6 +78,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
   const [loadedFilters, setLoadedFilters] = useState<InsightsFilters>(filters);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
     if (!canRead) {
@@ -106,7 +113,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       cancelled = true;
       controller.abort();
     };
-  }, [canRead, context.client, filters, range, workspaceId]);
+  }, [canRead, context.client, filters, range, retry, workspaceId]);
 
   const view = useMemo(
     () => (snapshot ? buildInsightsView(snapshot, loadedFilters) : null),
@@ -169,57 +176,73 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
     }
     return true;
   });
+  const heading = (
+    <PageHeader
+      icon={<BarChart3Icon className="size-4" />}
+      title="Insights"
+      description={`Usage and activity in ${workspace?.name ?? "this workspace"}.`}
+    />
+  );
 
   if (!canRead || (loadError && !snapshot)) {
     return (
-      <ContentPage width="wide" data-insights className="gap-4">
-        <h1 className="text-xl font-semibold tracking-tight text-fg">Workspace insights</h1>
-        <p className="text-sm text-fg-muted">{loadError ?? "Unavailable."}</p>
+      <ContentPage width="wide" data-insights className="gap-6">
+        {heading}
+        <div role="alert">
+          <Notice
+            tone={canRead ? "failed" : "muted"}
+            title={canRead ? "Insights couldn't load" : "Workspace access required"}
+            action={
+              canRead ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setRetry((value) => value + 1)}
+                >
+                  Retry
+                </Button>
+              ) : undefined
+            }
+          >
+            {canRead
+              ? `Try again to load workspace usage. ${loadError}`
+              : "Workspace admin permission is required to view Insights."}
+          </Notice>
+        </div>
       </ContentPage>
     );
   }
 
   if ((!snapshot && loading) || !snap || !totals || !deltas || !view) {
     return (
-      <ContentPage width="wide" data-insights className="gap-4">
-        <h1 className="text-xl font-semibold tracking-tight text-fg">Workspace insights</h1>
-        <p className="text-sm text-fg-muted">Loading rollups…</p>
+      <ContentPage width="wide" data-insights className="gap-6">
+        {heading}
+        <div role="status" aria-label="Loading workspace insights" className="grid gap-3">
+          <span className="text-sm text-fg-muted">Loading workspace usage…</span>
+          <div aria-hidden="true" className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Skeleton className="h-32 sm:col-span-2" />
+            <Skeleton className="h-32" />
+            <Skeleton className="h-32" />
+          </div>
+          <Skeleton aria-hidden="true" className="h-56" />
+        </div>
       </ContentPage>
     );
   }
 
   return (
-    <ContentPage width="wide" data-insights className="gap-8">
-      <motion.header
-        initial={reduceMotion ? false : { opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-        className="flex flex-col gap-4 border-b border-border pb-5"
-      >
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="min-w-0">
-            <p className="text-2xs font-medium uppercase tracking-[0.14em] text-fg-subtle">
-              {workspace?.name ?? "Workspace"}
-            </p>
-            <h1 className="mt-1 text-xl font-semibold tracking-tight text-fg">Insights</h1>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <MeasureControl value={measure} onChange={setMeasure} />
-            <RangeControl value={range} onChange={setRange} />
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
+    <ContentPage width="wide" data-insights className="gap-7 sm:gap-9">
+      {heading}
+      <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+        <div className="flex min-w-0 flex-wrap items-end gap-3">
           <FilterSelect
             label="Provider"
             value={filters.provider}
-            onChange={(v) => setProvider(v)}
+            onChange={setProvider}
             options={[
               { value: "all", label: "All providers" },
-              ...view.availableProviders.map((p) => ({
-                value: p,
-                label: providerLabel(p),
-              })),
+              ...view.availableProviders.map((p) => ({ value: p, label: providerLabel(p) })),
             ]}
           />
           <FilterSelect
@@ -232,27 +255,60 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
             ]}
           />
           {filtered ? (
-            <button
-              type="button"
-              onClick={clearFilters}
-              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1.5 text-2xs text-fg-muted hover:bg-surface-2 hover:text-fg"
-            >
-              <XIcon className="size-3" />
-              Clear
-            </button>
-          ) : null}
-          {loading ? (
-            <span className="text-2xs text-fg-subtle" role="status">
-              {showingPreviousSelection ? "Refreshing… showing previous selection" : "Refreshing…"}
-            </span>
+            <Button type="button" variant="ghost" size="sm" onClick={clearFilters}>
+              <XIcon className="size-3.5" />
+              Clear filters
+            </Button>
           ) : null}
         </div>
-      </motion.header>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <MeasureControl value={measure} onChange={setMeasure} />
+          <RangeControl value={range} onChange={setRange} />
+        </div>
+        {loading ? (
+          <span className="text-xs text-fg-muted lg:col-span-2" role="status">
+            {showingPreviousSelection ? "Refreshing… showing previous selection" : "Refreshing…"}
+          </span>
+        ) : null}
+      </div>
 
       {loadError ? (
-        <div className="rounded-lg border border-status-failed/30 bg-status-failed/5 px-3 py-2 text-xs text-status-failed">
-          Refresh failed; showing the last successful selection and snapshot. {loadError}
+        <div role="alert">
+          <Notice
+            tone="failed"
+            title="Couldn't refresh insights"
+            action={
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setRetry((value) => value + 1)}
+              >
+                Retry
+              </Button>
+            }
+          >
+            Showing the last successful selection. {loadError}
+          </Notice>
         </div>
+      ) : null}
+
+      {snap.modelCalls === 0 ? (
+        <EmptyState
+          title={filtered ? "No calls match these filters" : "No model calls in this window"}
+          description={
+            filtered
+              ? "Choose another provider or model to see usage."
+              : "Model usage will appear here after this workspace makes a call. Other workspace activity may still appear below."
+          }
+          action={
+            filtered ? (
+              <Button type="button" variant="outline" size="sm" onClick={clearFilters}>
+                Clear filters
+              </Button>
+            ) : undefined
+          }
+        />
       ) : null}
 
       {/* 1. Headline — token truth by default; money remains explicitly split. */}
@@ -267,7 +323,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           ) : null}
         </div>
         {measure === "money" ? (
-          <div className="rounded-lg border border-brand/20 bg-brand/5 px-3 py-2 text-xs leading-5 text-fg-muted">
+          <Notice tone="muted" title="How prices are calculated">
             <strong className="text-fg">Estimated provider USD</strong> is a hypothetical
             provider-rate comparison from captured list pricing or gateway-reported inference cost,
             before OpenGeni markup.{" "}
@@ -275,64 +331,70 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
             includes the configured markup even when the call was externally paid.{" "}
             <strong className="text-fg">OpenGeni credit price</strong> is the actual credits-path
             price and is zero for externally paid calls.
-          </div>
+          </Notice>
         ) : null}
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1.9fr)]">
           {measure === "tokens" ? (
             <>
               <Metric
+                featured
                 label="Total tokens"
                 value={formatTokens(totals.totalTokens)}
                 delta={`${formatPctDelta(deltas.tokensPct, snap.priorLabel)} · ${totals.tokenCoveragePct}% call coverage`}
               />
-              <Metric
-                label="Input tokens"
-                value={formatTokens(totals.inputTokens)}
-                delta={`${formatTokens(totals.cachedTokens)} cache reads`}
-              />
-              <Metric
-                label="Output tokens"
-                value={formatTokens(totals.outputTokens)}
-                delta={`${formatTokens(totals.reasoningTokens)} reasoning tokens reported`}
-              />
-              <Metric
-                label="Cache hit"
-                value={`${totals.cacheHitPct}%`}
-                delta={`${deltas.cachePts > 0 ? "+" : ""}${deltas.cachePts} pts vs ${snap.priorLabel.toLowerCase()} · ${totals.cacheCoveragePct}% coverage`}
-                tone={totals.cacheHitPct >= 60 ? "good" : "neutral"}
-              />
+              <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                <Metric
+                  label="Input tokens"
+                  value={formatTokens(totals.inputTokens)}
+                  delta={`${formatTokens(totals.cachedTokens)} cache reads`}
+                />
+                <Metric
+                  label="Output tokens"
+                  value={formatTokens(totals.outputTokens)}
+                  delta={`${formatTokens(totals.reasoningTokens)} reasoning tokens reported`}
+                />
+                <Metric
+                  label="Cache hit"
+                  value={`${totals.cacheHitPct}%`}
+                  delta={`${deltas.cachePts > 0 ? "+" : ""}${deltas.cachePts} pts vs ${snap.priorLabel.toLowerCase()} · ${totals.cacheCoveragePct}% coverage`}
+                  tone={totals.cacheHitPct >= 60 ? "good" : "neutral"}
+                />
+              </div>
             </>
           ) : (
             <>
               <Metric
+                featured
                 label="Estimated provider USD"
                 value={formatUsd(totals.estimatedProviderUsd)}
                 delta={`${formatPctDelta(deltas.estimatedPct, snap.priorLabel)} · ${totals.pricingCoveragePct}% call coverage`}
               />
-              <Metric
-                label="Equivalent OpenGeni credit price"
-                value={formatUsd(totals.equivalentCreditUsd)}
-                delta={`${formatPctDelta(deltas.equivalentPct, snap.priorLabel)} · ${totals.equivalentPricingCoveragePct}% call coverage`}
-              />
-              <Metric
-                label={
-                  snap.modelFilterActive
-                    ? "OpenGeni credit price (filtered)"
-                    : "OpenGeni credit price"
-                }
-                value={formatUsd(totals.creditUsd)}
-                delta={`${formatPctDelta(deltas.modelPct, snap.priorLabel)} · external calls excluded`}
-              />
-              <Metric
-                label="Equivalent-priced calls"
-                value={`${snap.equivalentCreditCostKnownCalls.toLocaleString()} / ${snap.modelCalls.toLocaleString()}`}
-                delta="Historical or unconfigured prices remain unknown"
-              />
-              <Metric
-                label="Total tokens"
-                value={formatTokens(totals.totalTokens)}
-                delta={`${totals.tokenCoveragePct}% of calls reported total tokens`}
-              />
+              <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+                <Metric
+                  label="Equivalent OpenGeni credit price"
+                  value={formatUsd(totals.equivalentCreditUsd)}
+                  delta={`${formatPctDelta(deltas.equivalentPct, snap.priorLabel)} · ${totals.equivalentPricingCoveragePct}% call coverage`}
+                />
+                <Metric
+                  label={
+                    snap.modelFilterActive
+                      ? "OpenGeni credit price (filtered)"
+                      : "OpenGeni credit price"
+                  }
+                  value={formatUsd(totals.creditUsd)}
+                  delta={`${formatPctDelta(deltas.modelPct, snap.priorLabel)} · external calls excluded`}
+                />
+                <Metric
+                  label="Equivalent-priced calls"
+                  value={`${snap.equivalentCreditCostKnownCalls.toLocaleString()} / ${snap.modelCalls.toLocaleString()}`}
+                  delta="Historical or unconfigured prices remain unknown"
+                />
+                <Metric
+                  label="Total tokens"
+                  value={formatTokens(totals.totalTokens)}
+                  delta={`${totals.tokenCoveragePct}% of calls reported total tokens`}
+                />
+              </div>
             </>
           )}
         </div>
@@ -469,7 +531,10 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           />
         </div>
 
-        <div className="mt-4 overflow-x-auto rounded-lg border border-border">
+        <DataScroller
+          aria-label="Prompt source contributions"
+          className="mt-4 border border-border"
+        >
           <table className="min-w-full text-left text-xs">
             <thead className="border-b border-border bg-surface/50 text-fg-subtle">
               <tr>
@@ -508,7 +573,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               ) : null}
             </tbody>
           </table>
-        </div>
+        </DataScroller>
       </Section>
 
       {/* 2. Models — primary pivot */}
@@ -542,7 +607,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
             />
           </div>
 
-          <div className="overflow-x-auto rounded-lg border border-border">
+          <DataScroller aria-label="Usage by model" className="border border-border">
             <table className="min-w-full text-left text-xs">
               <thead className="border-b border-border bg-surface/50 text-fg-subtle">
                 <tr>
@@ -571,12 +636,24 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                 {models.map((row) => (
                   <tr
                     key={row.id}
-                    className="cursor-pointer border-b border-border/70 last:border-0 hover:bg-surface-2/60"
+                    className="border-b border-border/70 last:border-0 hover:bg-surface-2/60"
                     onClick={() => {
                       setFilters({ provider: row.provider, model: row.model });
                     }}
                   >
-                    <td className="px-3 py-2.5 font-medium text-fg">{row.model}</td>
+                    <td className="px-3 py-2.5 font-medium text-fg">
+                      <button
+                        type="button"
+                        aria-label={`Filter by ${row.model} from ${providerLabel(row.provider)}`}
+                        className="rounded text-left text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setFilters({ provider: row.provider, model: row.model });
+                        }}
+                      >
+                        {row.model}
+                      </button>
+                    </td>
                     <td className="px-3 py-2.5 text-fg-muted">{providerLabel(row.provider)}</td>
                     <td className="px-3 py-2.5">
                       <BillingPill billing={row.billing} />
@@ -627,7 +704,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                 ) : null}
               </tbody>
             </table>
-          </div>
+          </DataScroller>
         </div>
       </Section>
 
@@ -636,7 +713,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           Most recent 50 calls in the selected UTC window. Unknown means the provider did not report
           that field or historical pricing was not captured.
         </p>
-        <div className="overflow-x-auto rounded-lg border border-border">
+        <DataScroller aria-label="Recent model calls" className="border border-border">
           <table className="min-w-full text-left text-xs">
             <thead className="border-b border-border bg-surface/50 text-fg-subtle">
               <tr>
@@ -734,7 +811,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               ) : null}
             </tbody>
           </table>
-        </div>
+        </DataScroller>
       </Section>
 
       {/* 3. Providers */}
@@ -767,7 +844,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               }))}
             />
           </div>
-          <div className="grid gap-2 sm:grid-cols-2">
+          <div className="grid min-w-0 content-start gap-2 sm:grid-cols-2">
             {providers.map((p) => {
               const active = filters.provider === p.provider;
               return (
@@ -777,8 +854,9 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                   onClick={() =>
                     setProvider(active && filters.model === "all" ? "all" : p.provider)
                   }
+                  aria-pressed={active}
                   className={cn(
-                    "rounded-lg border px-3.5 py-3 text-left transition-colors",
+                    "min-w-0 rounded-lg border px-3.5 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     active
                       ? "border-brand/40 bg-brand/5"
                       : "border-border bg-surface/35 hover:bg-surface-2/60",
@@ -793,7 +871,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                   <p className="mt-2 font-mono text-xs tabular-nums text-fg-muted">
                     {formatTokens(p.totalTokens)} total · {p.calls.toLocaleString()} calls
                   </p>
-                  <p className="mt-1 font-mono text-xs tabular-nums text-fg-subtle">
+                  <p className="mt-1 break-words text-xs tabular-nums text-fg-subtle">
                     {p.estimatedProviderCostKnownCalls > 0
                       ? `${formatUsd(p.estimatedProviderUsd)} est. provider`
                       : "provider price unknown"}
@@ -896,7 +974,10 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           </div>
         </div>
 
-        <div className="mt-4 overflow-hidden rounded-lg border border-border">
+        <DataScroller
+          aria-label="Warm usage by sandbox group"
+          className="mt-4 border border-border"
+        >
           <div className="border-b border-border px-3 py-2">
             <h3 className="text-sm font-medium text-fg">By sandbox group</h3>
             <p className="text-2xs text-fg-subtle">
@@ -933,9 +1014,9 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                 ))}
             </tbody>
           </table>
-        </div>
+        </DataScroller>
 
-        <div className="mt-4 overflow-hidden rounded-lg border border-border">
+        <div className="mt-4 min-w-0 overflow-hidden rounded-lg border border-border">
           <div className="border-b border-border px-3 py-2">
             <h3 className="text-sm font-medium text-fg">Live warm boxes</h3>
             <p className="text-2xs text-fg-subtle">Idle = warm with no active turn</p>
@@ -988,7 +1069,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           Top drivers ranked by total tokens, so externally paid work is never hidden by a zero
           OpenGeni-credit price. Share is relative to the rows shown.
         </p>
-        <div className="overflow-x-auto rounded-lg border border-border">
+        <DataScroller aria-label="Usage drivers" className="border border-border">
           <table className="min-w-full text-left text-xs">
             <thead className="border-b border-border bg-surface/50 text-fg-subtle">
               <tr>
@@ -1012,10 +1093,21 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               {snap.drivers.map((driver) => (
                 <tr
                   key={driver.id}
-                  className="cursor-pointer border-b border-border/70 last:border-0 hover:bg-surface-2/60"
+                  className="border-b border-border/70 last:border-0 hover:bg-surface-2/60"
                   onClick={() => openTrace(driver.id)}
                 >
-                  <td className="px-3 py-2.5 font-medium text-fg">{driver.label}</td>
+                  <td className="px-3 py-2.5 font-medium text-fg">
+                    <button
+                      type="button"
+                      className="rounded text-left text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openTrace(driver.id);
+                      }}
+                    >
+                      {driver.label}
+                    </button>
+                  </td>
                   <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
                     {formatTokens(driver.tokens)}
                   </td>
@@ -1057,7 +1149,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               ) : null}
             </tbody>
           </table>
-        </div>
+        </DataScroller>
       </Section>
 
       {/* 6. Live */}
@@ -1070,7 +1162,11 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
             : ""}
           .
         </p>
-        <div className="mb-3 flex gap-1 rounded-md border border-border p-0.5 w-fit">
+        <div
+          role="group"
+          aria-label="Session activity"
+          className="mb-3 flex w-fit gap-1 rounded-md border border-border p-0.5"
+        >
           {(
             [
               ["all", "All"],
@@ -1080,9 +1176,10 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
             <button
               key={id}
               type="button"
+              aria-pressed={floorFilter === id}
               onClick={() => setFloorFilter(id)}
               className={cn(
-                "rounded px-2.5 py-1 text-2xs font-medium transition-colors",
+                "rounded px-2.5 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                 floorFilter === id ? "bg-surface-2 text-fg" : "text-fg-muted hover:text-fg",
               )}
             >
@@ -1090,7 +1187,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
             </button>
           ))}
         </div>
-        <div className="overflow-x-auto rounded-lg border border-border">
+        <DataScroller aria-label="Live sessions" className="border border-border">
           <table className="min-w-full text-left text-xs">
             <thead className="border-b border-border bg-surface/50 text-fg-subtle">
               <tr>
@@ -1106,7 +1203,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                 {floor.map((session) => (
                   <tr
                     key={session.id}
-                    className="cursor-pointer border-b border-border/70 last:border-0 hover:bg-surface-2/50"
+                    className="border-b border-border/70 last:border-0 hover:bg-surface-2/50"
                     onClick={() => {
                       if (session.model) {
                         setFilters({
@@ -1119,7 +1216,21 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                     <td className="px-3 py-2.5">
                       <div className="flex items-center gap-2">
                         <StateDot state={session.state} />
-                        <span className="font-medium text-fg">{session.title}</span>
+                        {session.model ? (
+                          <button
+                            type="button"
+                            aria-label={`Filter usage by ${session.model} from ${session.title}`}
+                            className="rounded text-left font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setFilters({ provider: "all", model: session.model! });
+                            }}
+                          >
+                            {session.title}
+                          </button>
+                        ) : (
+                          <span className="font-medium text-fg">{session.title}</span>
+                        )}
                       </div>
                     </td>
                     <td className="px-3 py-2.5 font-mono text-2xs text-fg-muted">
@@ -1140,7 +1251,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               </AnimatePresence>
             </tbody>
           </table>
-        </div>
+        </DataScroller>
       </Section>
 
       {/* 7. Schedules */}
@@ -1149,7 +1260,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           Attribution covers turns whose initiator carried a scheduled run id. Goal continuations
           without that lineage remain session usage rather than schedule usage.
         </p>
-        <div className="overflow-x-auto rounded-lg border border-border">
+        <DataScroller aria-label="Schedule usage" className="border border-border">
           <table className="min-w-full text-left text-xs">
             <thead className="border-b border-border bg-surface/50 text-fg-subtle">
               <tr>
@@ -1215,7 +1326,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               ) : null}
             </tbody>
           </table>
-        </div>
+        </DataScroller>
       </Section>
 
       {/* 8. Caps — billable meters (UTC month), not Insights input tokens */}
@@ -1225,7 +1336,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           {snap.modelFilterActive ? " · workspace-wide (not model-filtered)" : ""}. Codex/external
           usage is omitted from the token meter.
         </p>
-        <div className="grid gap-4 rounded-lg border border-border bg-surface/35 p-4 sm:grid-cols-2">
+        <div className="grid gap-4 sm:grid-cols-2">
           {snap.billableTokenCap != null ? (
             <UsageMeter
               key={`tok-cap-${range}`}
@@ -1348,7 +1459,7 @@ function MeasureControl(props: {
 }) {
   return (
     <div
-      role="tablist"
+      role="group"
       aria-label="Usage measure"
       className="inline-flex rounded-lg border border-border bg-surface/50 p-0.5"
     >
@@ -1363,11 +1474,10 @@ function MeasureControl(props: {
           <button
             key={id}
             type="button"
-            role="tab"
-            aria-selected={active}
+            aria-pressed={active}
             onClick={() => props.onChange(id)}
             className={cn(
-              "relative rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+              "relative min-h-8 rounded-md px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
               active ? "text-fg" : "text-fg-muted hover:text-fg",
             )}
           >
@@ -1389,7 +1499,7 @@ function MeasureControl(props: {
 function RangeControl(props: { value: InsightsRange; onChange: (range: InsightsRange) => void }) {
   return (
     <div
-      role="tablist"
+      role="group"
       aria-label="Time range"
       className="inline-flex rounded-lg border border-border bg-surface/50 p-0.5"
     >
@@ -1399,11 +1509,10 @@ function RangeControl(props: { value: InsightsRange; onChange: (range: InsightsR
           <button
             key={option.id}
             type="button"
-            role="tab"
-            aria-selected={active}
+            aria-pressed={active}
             onClick={() => props.onChange(option.id)}
             className={cn(
-              "relative rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+              "relative min-h-8 rounded-md px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
               active ? "text-fg" : "text-fg-muted hover:text-fg",
             )}
           >
@@ -1430,27 +1539,27 @@ function FilterSelect(props: {
   options: Array<{ value: string; label: string }>;
 }) {
   return (
-    <label className="inline-flex items-center gap-2 text-2xs text-fg-subtle">
-      <span className="sr-only">{props.label}</span>
-      <select
+    <label className="grid min-w-0 gap-1 text-xs font-medium text-fg-muted">
+      <span>{props.label}</span>
+      <Select
         value={props.value}
         onChange={(e) => props.onChange(e.target.value)}
-        className="h-8 rounded-md border border-border bg-surface/50 px-2 text-xs text-fg outline-none focus-visible:border-brand/50"
+        className="max-w-52 text-xs"
       >
         {props.options.map((opt) => (
           <option key={opt.value} value={opt.value}>
             {opt.label}
           </option>
         ))}
-      </select>
+      </Select>
     </label>
   );
 }
 
 function Section(props: { title: string; children: ReactNode }) {
   return (
-    <section className="grid gap-3">
-      <h2 className="text-sm font-semibold tracking-[-0.02em] text-fg">{props.title}</h2>
+    <section className="grid min-w-0 gap-4 border-t border-border pt-6">
+      <h2 className="text-base font-semibold tracking-tight text-fg">{props.title}</h2>
       {props.children}
     </section>
   );
@@ -1461,13 +1570,22 @@ function Metric(props: {
   value: ReactNode;
   delta: string;
   tone?: "warn" | "neutral" | "good";
+  featured?: boolean;
 }) {
   return (
-    <div className="rounded-lg border border-border bg-surface/40 px-3.5 py-3">
-      <p className="text-2xs font-medium text-fg-subtle">{props.label}</p>
+    <div
+      className={cn(
+        "flex min-w-0 flex-col justify-center rounded-lg border",
+        props.featured
+          ? "border-brand/25 bg-brand/[0.06] px-5 py-5"
+          : "border-border bg-surface/35 px-3.5 py-3",
+      )}
+    >
+      <p className="text-xs font-medium text-fg-muted">{props.label}</p>
       <p
         className={cn(
-          "mt-1.5 text-2xl font-semibold tracking-[-0.03em] tabular-nums",
+          "mt-1.5 break-words font-semibold tracking-tight tabular-nums",
+          props.featured ? "text-3xl sm:text-4xl" : "text-xl",
           props.tone === "warn" && "text-status-failed",
           props.tone === "good" && "text-status-running",
           (props.tone == null || props.tone === "neutral") && "text-fg",
@@ -1475,7 +1593,7 @@ function Metric(props: {
       >
         {props.value}
       </p>
-      <p className="mt-1 line-clamp-2 text-2xs tabular-nums text-fg-muted">{props.delta}</p>
+      <p className="mt-2 text-xs leading-5 tabular-nums text-fg-muted">{props.delta}</p>
     </div>
   );
 }
@@ -1499,7 +1617,7 @@ function StateDot(props: { state: FloorSession["state"] }) {
   return (
     <span className="relative flex size-2 shrink-0">
       {live ? (
-        <span className="absolute inline-flex size-full animate-ping rounded-full bg-status-running opacity-40" />
+        <span className="absolute inline-flex size-full motion-safe:animate-ping rounded-full bg-status-running opacity-40" />
       ) : null}
       <span className={cn("relative size-2 rounded-full", stateColor(props.state))} />
     </span>

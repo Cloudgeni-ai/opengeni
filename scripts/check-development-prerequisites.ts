@@ -160,8 +160,8 @@ export async function collectDevelopmentPrerequisites(
       await requireProbe(
         "docker",
         ["compose", "version"],
-        "Docker Compose v2 is required. Install the Docker Compose plugin (docker-compose-plugin on Docker's Debian/Ubuntu repository) or enable it in Docker Desktop.",
-        /(?:version\s+)?v?2\.\d+/u,
+        "Docker Compose v2 or newer is required. Install the Docker Compose plugin (docker-compose-plugin on Docker's Debian/Ubuntu repository) or enable it in Docker Desktop.",
+        /\bDocker Compose version v?(?:[2-9]|[1-9]\d+)\.\d+\.\d+\b/u,
       );
       if (
         !environment.OPENGENI_SANDBOX_BACKEND ||

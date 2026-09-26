@@ -72,6 +72,7 @@ import {
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
   registerPendingSessionToolCall,
+  registerSessionTurnAttemptClaim,
   recordPendingSessionToolCallResult,
   recordStartedContextCompaction,
   recordUsageEvent,
@@ -248,6 +249,187 @@ async function claimTestSessionWork(
 }
 
 describe("clean session control plane", () => {
+  describe("exact-attempt connector policy replay", () => {
+    async function policyAttempt() {
+      const { grant, session } = await fixture();
+      const { policy } = await upsertConnectorActionPolicy(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        subjectId: grant.subjectId,
+        connectionId: `opaque-connection-${crypto.randomUUID()}`,
+        serverId: "connector_docs",
+        toolName: "perform_action",
+        actionName: "write",
+        policy: "ask",
+      });
+      await send(grant, session.id, "reenter with frozen connector policies");
+      const claimInput = {
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: `dispatch-${crypto.randomUUID()}`,
+        trigger: { kind: "next" as const },
+      };
+      const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, claimInput);
+      if (claimed.action !== "claimed") throw new Error("policy attempt was not claimed");
+      const [attempt] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db
+          .select()
+          .from(schema.sessionTurnAttempts)
+          .where(eq(schema.sessionTurnAttempts.id, claimInput.attemptId)),
+      );
+      if (!attempt) throw new Error("policy attempt was not persisted");
+      const registration: Parameters<typeof registerSessionTurnAttemptClaim>[1] = {
+        id: attempt.id,
+        accountId: attempt.accountId,
+        workspaceId: attempt.workspaceId,
+        sessionId: attempt.sessionId,
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+        temporalWorkflowId: attempt.temporalWorkflowId,
+        temporalWorkflowRunId: attempt.temporalWorkflowRunId,
+        temporalActivityId: attempt.temporalActivityId,
+        verifiedControlRevision: attempt.verifiedControlRevision,
+        authorityEpoch: attempt.authorityEpoch,
+        authorityVisibility: attempt.authorityVisibility as "user_private" | "workspace_shared",
+        authorityOwnerOrganizationMembershipId: attempt.authorityOwnerOrganizationMembershipId,
+        personalResourceProtocolVersion: attempt.personalResourceProtocolVersion,
+        mcpApprovalPolicies: attempt.mcpApprovalPolicies,
+        connectorActionPolicies: attempt.connectorActionPolicies,
+      };
+      const register = (overrides: Partial<typeof registration> = {}) =>
+        withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
+          db.transaction((tx) =>
+            registerSessionTurnAttemptClaim(tx as unknown as typeof db, {
+              ...registration,
+              ...overrides,
+            }),
+          ),
+        );
+      return { grant, session, policy, claimInput, claimed, attempt, registration, register };
+    }
+
+    test("reenters the exact attempt after JSONB reorders nonempty connector policy keys", async () => {
+      const { grant, policy, claimInput, claimed, attempt } = await policyAttempt();
+      // This is the SELECT projection order used by claimSessionWorkForAttempt,
+      // not PostgreSQL JSONB's object-key order after the first INSERT.
+      const selectedPolicies = [
+        {
+          id: policy.id,
+          connectionId: policy.connectionId,
+          serverId: policy.serverId,
+          toolName: policy.toolName,
+          actionName: policy.actionName,
+          policy: policy.policy,
+          version: policy.version,
+        },
+      ];
+      expect(attempt.connectorActionPolicies).toEqual(selectedPolicies);
+      expect(JSON.stringify(attempt.connectorActionPolicies)).not.toBe(
+        JSON.stringify(selectedPolicies),
+      );
+
+      const replay = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, claimInput);
+      expect(replay).toMatchObject({
+        action: "claimed",
+        turn: {
+          id: claimed.turn.id,
+          activeAttemptId: attempt.id,
+          executionGeneration: claimed.turn.executionGeneration,
+        },
+      });
+      const attempts = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db
+          .select()
+          .from(schema.sessionTurnAttempts)
+          .where(eq(schema.sessionTurnAttempts.turnId, claimed.turn.id)),
+      );
+      expect(attempts).toEqual([attempt]);
+    });
+
+    test("refuses genuine connector policy field and version changes on exact-attempt replay", async () => {
+      const { attempt, register } = await policyAttempt();
+      const [policy] = attempt.connectorActionPolicies;
+      if (!policy) throw new Error("nonempty policy snapshot required");
+      // Start from JSONB's own key order, so the broken order-sensitive
+      // comparator cannot accidentally make these negative controls pass.
+      expect(await register()).toEqual(attempt);
+      const changes: Partial<schema.ConnectorActionPolicySnapshotEntry>[] = [
+        { id: crypto.randomUUID() },
+        { connectionId: `${policy.connectionId}-other` },
+        { serverId: `${policy.serverId}-other` },
+        { toolName: `${policy.toolName}-other` },
+        { actionName: `${policy.actionName}-other` },
+        { policy: "allow" },
+        { version: policy.version + 1 },
+      ];
+      for (const change of changes) {
+        await expect(
+          register({ connectorActionPolicies: [{ ...policy, ...change }] }),
+        ).rejects.toThrow(
+          `Attempt ${attempt.id} conflicts with a different or closed ownership chain`,
+        );
+      }
+      await expect(register({ connectorActionPolicies: [] })).rejects.toThrow(
+        `Attempt ${attempt.id} conflicts with a different or closed ownership chain`,
+      );
+      expect(await register()).toEqual(attempt);
+    });
+
+    test("refuses different ownership and a closed attempt with identical nonempty policies", async () => {
+      const { grant, session, claimed, attempt, registration, register } = await policyAttempt();
+      // Use real, visible ownership targets so restrictive INSERT policies do
+      // not reject a nonexistent session before the exact-ID conflict check.
+      const sibling = await createSession(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        initialMessage: "other ownership target",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+      const siblingPrompt = await send(grant, sibling.id, "other turn ownership target");
+      expect(await register()).toEqual(attempt);
+      const changes: Partial<typeof registration>[] = [
+        { sessionId: sibling.id },
+        { turnId: siblingPrompt.turn.id },
+        { executionGeneration: registration.executionGeneration + 1 },
+        { temporalWorkflowId: `${registration.temporalWorkflowId}-other` },
+        { temporalWorkflowRunId: crypto.randomUUID() },
+        { temporalActivityId: `${registration.temporalActivityId}-other` },
+        { authorityEpoch: registration.authorityEpoch + 1 },
+        {
+          personalResourceProtocolVersion:
+            registration.personalResourceProtocolVersion === 1 ? 0 : 1,
+        },
+      ];
+      for (const change of changes) {
+        await expect(register(change)).rejects.toThrow(
+          `Attempt ${attempt.id} conflicts with a different or closed ownership chain`,
+        );
+      }
+      expect(await register()).toEqual(attempt);
+
+      await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: claimed.turn.id,
+        triggerEventId: claimed.turn.triggerEventId,
+        attemptId: attempt.id,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [{ type: "turn.completed", payload: { output: "done" } }],
+      });
+      await expect(register()).rejects.toThrow(
+        `Attempt ${attempt.id} conflicts with a different or closed ownership chain`,
+      );
+    });
+  });
+
   test("records native tool-search results whose id only survives in provider data", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "find matching tools");

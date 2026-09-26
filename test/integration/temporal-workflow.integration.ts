@@ -57,6 +57,11 @@ const workerDeathTestTimeoutMs = 360_000;
 // ceiling that covers that scheduling variance without changing any runtime
 // timeout, retry contract, or behavioral assertion.
 const temporalWorkflowTestTimeoutMs = 60_000;
+// Capacity-wait protocol cases assert wake/reconcile ordering, not the herd
+// spread. The test-only workflow input disables the up-to-30s/60s jitter so a
+// real-server run does not pay it on every wake (the bound itself is unit
+// tested in apps/worker/test/session-capacity-wake-jitter.test.ts).
+const noCapacityWakeJitter = { capacityWakeJitterMaxMs: 0 } as const;
 // This proof spans initial activity admission, cancellation-wait observation,
 // and replacement admission. Each phase gets the same loaded-runner allowance
 // above; the outer ceiling leaves enough room for two delayed polls plus drain.
@@ -65,6 +70,14 @@ const workflowDefinitionsPath = new URL("../../apps/worker/src/workflows.ts", im
   .pathname;
 const legacySandboxReaperWorkflowPath = new URL(
   "../../apps/worker/test/fixtures/legacy-sandbox-reaper-workflow.ts",
+  import.meta.url,
+).pathname;
+// Recorded with the session workflow immediately before
+// session-capacity-wake-jitter-v1: a capacity wait cut short by a capacity
+// signal, then a waiter whose reset timer fired. Delete it only once that patch
+// is deprecated and no pre-jitter capacity wait can still be replayed.
+const legacySessionCapacityWaitHistoryPath = new URL(
+  "../../apps/worker/test/fixtures/legacy-session-capacity-wait-history.json",
   import.meta.url,
 ).pathname;
 
@@ -2399,7 +2412,7 @@ describe("Temporal workflow integration", () => {
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId,
-          args: [{ ...scope, sessionId, initialEventId: "event-1" }],
+          args: [{ ...scope, sessionId, initialEventId: "event-1", ...noCapacityWakeJitter }],
         });
         await waitFor(() => attempts.length === 1);
         // Signal until the workflow has entered its durable wait, then send a
@@ -2420,6 +2433,231 @@ describe("Temporal workflow integration", () => {
         worker.shutdown();
         await run;
       }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "spreads a capacity wake by a bounded replay-safe jitter",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `session-${sessionId}`;
+      const queuedTurns = [queuedTurn("event-1")];
+      const attempts: Array<{ attemptId: string; turnId: string }> = [];
+      const reconciledAt: number[] = [];
+      const jitterCeilingMs = 1_500;
+      const waiter = {
+        waiterId: crypto.randomUUID(),
+        generation: 1,
+        nextCheckAt: new Date(Date.now() + 60_000).toISOString(),
+        wakeRevision: 1,
+      };
+      let resumed = false;
+      const admission = createTurnAdmission(queuedTurns, async (input, turn) => {
+        attempts.push({ attemptId: input.attemptId, turnId: turn.id });
+        return attempts.length === 1
+          ? { status: "waiting_capacity", capacityWait: waiter }
+          : { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
+        getCodexCapacityWait: async () => (resumed ? null : waiter),
+        reconcileCodexCapacityWait: async () => {
+          reconciledAt.push(Date.now());
+          resumed = true;
+          admission.resumeCapacity();
+          return { action: "resumed" };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [
+            {
+              ...scope,
+              sessionId,
+              initialEventId: "event-1",
+              capacityWakeJitterMaxMs: jitterCeilingMs,
+            },
+          ],
+        });
+        await waitFor(() => attempts.length === 1);
+        const firstSignalAt = Date.now();
+        // Repeated wakes during the pause must neither cut it short nor
+        // produce a second reconciliation.
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+          await handle.signal("codexCapacityChanged", waiter.wakeRevision + attempt + 1);
+          await Bun.sleep(25);
+        }
+        await handle.result();
+        expect(reconciledAt).toHaveLength(1);
+        expect(attempts).toHaveLength(2);
+        // Bounded by the ceiling plus scheduling slack for a loaded runner.
+        expect(reconciledAt[0]! - firstSignalAt).toBeLessThan(jitterCeilingMs + 10_000);
+        // The jitter path is patch-gated so pre-change histories replay with
+        // their original commands; a live run records the marker.
+        const history = await handle.fetchHistory();
+        const markerPayloadText = (history.events ?? [])
+          .map((event) => event.markerRecordedEventAttributes)
+          .filter((marker) => marker != null)
+          .flatMap((marker) =>
+            Object.values(marker!.details ?? {}).flatMap((payloads) =>
+              (payloads.payloads ?? []).map((payload) =>
+                Buffer.from(payload.data ?? new Uint8Array()).toString("utf8"),
+              ),
+            ),
+          );
+        expect(
+          markerPayloadText.some((text) => text.includes("session-capacity-wake-jitter-v1")),
+        ).toBe(true);
+        await Worker.runReplayHistory(
+          { workflowsPath: workflowDefinitionsPath },
+          history,
+          workflowId,
+        );
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "spreads a fired reset timer and an already-due waiter with replay-safe history",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `session-${sessionId}`;
+      const queuedTurns = [queuedTurn("event-1")];
+      const attempts: Array<{ attemptId: string; turnId: string }> = [];
+      const causes: string[] = [];
+      const jitterCeilingMs = 1_500;
+      const baseTimerMs = 300;
+      const waiter = {
+        waiterId: crypto.randomUUID(),
+        generation: 1,
+        nextCheckAt: new Date(Date.now() + 60_000).toISOString(),
+        wakeRevision: 1,
+      };
+      let current: typeof waiter | null = null;
+      const admission = createTurnAdmission(queuedTurns, async (input, turn) => {
+        attempts.push({ attemptId: input.attemptId, turnId: turn.id });
+        if (attempts.length > 1) return { status: "idle" };
+        // The reset deadline is set at commit time so the first wait is a real
+        // timer rather than an already-due waiter.
+        current = { ...waiter, nextCheckAt: new Date(Date.now() + baseTimerMs).toISOString() };
+        return { status: "waiting_capacity", capacityWait: current };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
+        getCodexCapacityWait: async () => current,
+        reconcileCodexCapacityWait: async (input: { cause: string }) => {
+          causes.push(input.cause);
+          if (causes.length === 1) {
+            // Still exhausted, and the next check is already due: the loop must
+            // spread it instead of reconciling again immediately.
+            current = {
+              ...waiter,
+              generation: 2,
+              nextCheckAt: new Date(0).toISOString(),
+              wakeRevision: 2,
+            };
+            return { action: "waiting", ...current };
+          }
+          current = null;
+          admission.resumeCapacity();
+          return { action: "resumed" };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [
+            {
+              ...scope,
+              sessionId,
+              initialEventId: "event-1",
+              capacityWakeJitterMaxMs: jitterCeilingMs,
+            },
+          ],
+        });
+        await handle.result();
+        expect(causes).toEqual(["timer", "timer"]);
+        expect(attempts).toHaveLength(2);
+        const history = await handle.fetchHistory();
+        const timerMs = (history.events ?? [])
+          .map((event) => event.timerStartedEventAttributes?.startToFireTimeout)
+          .filter((timeout) => timeout != null)
+          .map((timeout) => Number(timeout!.seconds ?? 0) * 1_000 + (timeout!.nanos ?? 0) / 1e6);
+        // The reset timer keeps its own deadline and each spread is a separate
+        // bounded timer (a zero draw creates none), so bound them rather than
+        // count them. The 5 s timers are the ordinary idle window after the turn.
+        const capacityTimers = timerMs.filter((duration) => duration !== 5_000);
+        expect(capacityTimers.length).toBeGreaterThanOrEqual(1);
+        expect(capacityTimers.length).toBeLessThanOrEqual(3);
+        for (const duration of capacityTimers) {
+          expect(duration).toBeLessThanOrEqual(Math.max(baseTimerMs, jitterCeilingMs));
+        }
+        expect(patchIds(history)).toContain("session-capacity-wake-jitter-v1");
+        await Worker.runReplayHistory(
+          { workflowsPath: workflowDefinitionsPath },
+          history,
+          workflowId,
+        );
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "replays a pre-jitter capacity wait recorded by the previous worker",
+    async () => {
+      // Forward rolling direction: a patched worker must replay every capacity
+      // wait an older worker recorded (signal-cut timer, then a fired timer)
+      // without adding the jitter timers. The reverse direction is not
+      // supported: an older worker fails a history that carries the marker.
+      const history = (await Bun.file(legacySessionCapacityWaitHistoryPath).json()) as {
+        events: Array<{
+          workflowExecutionStartedEventAttributes?: { workflowId?: string };
+          markerRecordedEventAttributes?: unknown;
+          timerStartedEventAttributes?: unknown;
+          eventType?: string;
+        }>;
+      };
+      const recordedPatches = patchIds(history);
+      expect(recordedPatches).toContain("session-safe-control-observation-v1");
+      expect(recordedPatches).not.toContain("session-capacity-wake-jitter-v1");
+      expect(history.events.filter((event) => event.timerStartedEventAttributes)).toHaveLength(3);
+      const workflowId =
+        history.events[0]?.workflowExecutionStartedEventAttributes?.workflowId ?? "fake";
+      await Worker.runReplayHistory(
+        { workflowsPath: workflowDefinitionsPath },
+        history,
+        workflowId,
+      );
     },
     temporalWorkflowTestTimeoutMs,
   );
@@ -2473,7 +2711,7 @@ describe("Temporal workflow integration", () => {
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId,
-          args: [{ ...scope, sessionId, initialEventId: "event-1" }],
+          args: [{ ...scope, sessionId, initialEventId: "event-1", ...noCapacityWakeJitter }],
         });
         await waitFor(() => attempts.length === 1);
         await handle.signal("codexCapacityChanged", waiter.wakeRevision + 1);
@@ -2548,7 +2786,7 @@ describe("Temporal workflow integration", () => {
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId,
-          args: [{ ...scope, sessionId, initialEventId: "event-1" }],
+          args: [{ ...scope, sessionId, initialEventId: "event-1", ...noCapacityWakeJitter }],
         });
         await waitFor(() => waiterReads === 1);
         await handle.signal("codexCapacityChanged", waiter.wakeRevision + 1);
@@ -2617,7 +2855,7 @@ describe("Temporal workflow integration", () => {
         const firstHandle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId,
-          args: [{ ...scope, sessionId, initialEventId: "event-1" }],
+          args: [{ ...scope, sessionId, initialEventId: "event-1", ...noCapacityWakeJitter }],
         });
         await waitFor(() => attempts.length === 1);
         admission.pauseControl();
@@ -2632,7 +2870,7 @@ describe("Temporal workflow integration", () => {
           taskQueue,
           workflowId,
           workflowIdReusePolicy: "ALLOW_DUPLICATE",
-          args: [{ ...scope, sessionId }],
+          args: [{ ...scope, sessionId, ...noCapacityWakeJitter }],
           signal: "queueChanged",
         });
         for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -2713,6 +2951,7 @@ describe("Temporal workflow integration", () => {
               sessionId,
               initialEventId: "event-1",
               maxCapacityChecksPerRun: 1,
+              ...noCapacityWakeJitter,
             },
           ],
         });
@@ -2735,6 +2974,7 @@ describe("Temporal workflow integration", () => {
           workspaceId: scope.workspaceId,
           sessionId,
           maxCapacityChecksPerRun: 1,
+          ...noCapacityWakeJitter,
         });
       } finally {
         worker.shutdown();
@@ -2789,7 +3029,7 @@ describe("Temporal workflow integration", () => {
       const handle = await client.workflow.start("sessionWorkflow", {
         taskQueue,
         workflowId,
-        args: [{ ...scope, sessionId, initialEventId: "event-1" }],
+        args: [{ ...scope, sessionId, initialEventId: "event-1", ...noCapacityWakeJitter }],
       });
       await waitFor(() => attempts.length === 1);
       await Bun.sleep(100);
@@ -3095,6 +3335,33 @@ describe("Temporal workflow integration", () => {
     continueAsNewTestTimeoutMs,
   );
 });
+
+/** Patch ids recorded in a fetched or JSON-exported workflow history. */
+function patchIds(history: {
+  events?: Array<{ markerRecordedEventAttributes?: unknown }> | null;
+}): string[] {
+  const ids: string[] = [];
+  for (const event of history.events ?? []) {
+    const marker = event.markerRecordedEventAttributes as
+      | {
+          details?: Record<
+            string,
+            { payloads?: Array<{ data?: Uint8Array | string | null }> | null } | null
+          > | null;
+        }
+      | null
+      | undefined;
+    const data = marker?.details?.["patch-data"]?.payloads?.[0]?.data;
+    if (data == null) continue;
+    const text =
+      typeof data === "string"
+        ? Buffer.from(data, "base64").toString("utf8")
+        : Buffer.from(data).toString("utf8");
+    const id = (JSON.parse(text) as { id?: unknown }).id;
+    if (typeof id === "string") ids.push(id);
+  }
+  return ids;
+}
 
 function decodeContinuedInput(
   event:

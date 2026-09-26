@@ -46,7 +46,10 @@ historical absent/null sets retain the legacy execution path. Scheduled tasks
 save the selected pairs with `connectionAccountsFrozen: true` under the task's
 execution owner and revalidate them when an occurrence is accepted. A frozen
 empty list stays empty if accounts are connected later. Material edits preserve
-the accepted selection unless the owner explicitly replaces the account choices;
+the accepted selection unless the owner explicitly replaces the account choices.
+Removing an MCP tool also removes its inherited account choice, without changing
+the exact accounts of retained tools. Explicitly supplied choices for unselected
+tools are still rejected;
 historical tasks without the marker retain their prior selection semantics.
 Unavailable selected accounts permanently block the occurrence with
 `connection_account_unavailable`, rather than retrying another identity.
@@ -68,6 +71,12 @@ The host binding/delegation/resolver HTTP routes and corresponding SDK methods
 are removed. `OPENGENI_HOST_MCP_CREDENTIAL_RESOLVERS_JSON` no longer configures
 the runtime. Do not register a callback or copy a host binding into a native
 connection reference. Provision an ordinary connection and select it explicitly.
+
+Existing session attachments are not implicitly migrated by account selection.
+An authorized host can replace their saved binding in place using the
+[standalone native-account replacement](session-mcp-servers.md#standalone-native-account-replacement)
+operation, retaining the session's history and files. This requires a quiescent
+session and exact destination/version preconditions; accepted work is unchanged.
 
 See [product integration](product-integration.md),
 [connection authority](design/connection-authority-delegation.md), and the

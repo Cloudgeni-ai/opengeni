@@ -50,6 +50,24 @@ export const handleChat = createChatHandler(og, {
 
 `authenticate` is your existing cookie or bearer verifier, not an OpenGeni function. It must return the user's authorized tenant and user ID; never take either directly from the request body or an unverified identity header. Keep `source` stable: it identifies your product when mapping tenants and users.
 
+Chat requests never grant workspace membership, and the API answers `403` for a user without it. Onboard each user once, when your product admits them to a tenant:
+
+```ts
+export async function onboardChatUser(
+  me: { tenantId: string; userId: string },
+  operationId: string,
+) {
+  const workspaceId = await og.workspaceId({ tenant: me.tenantId });
+  await og.client.addExternalWorkspaceMember(workspaceId, {
+    identity: { externalId: me.userId, source: og.source },
+    permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
+    operationId, // A UUID you store first; reuse it only to retry this same request.
+  });
+}
+```
+
+These permissions cover the chat routes: open and create conversations, read and stream them, and send follow-ups or answer pending decisions. Grant more only for features your product exposes. See [external-user onboarding](/reference/authentication#external-user-onboarding).
+
 Set `OPENGENI_API_BASE_URL` to the compatible deployment from the note above. If omitted, `OpenGeni` defaults to `https://app.opengeni.ai`; verify compatibility before relying on that default. Each tenant's workspace is resolved idempotently on first use; the conversation's session is created on its first message. These are organization workspaces, not Personal workspaces.
 
 ## Mount the handler

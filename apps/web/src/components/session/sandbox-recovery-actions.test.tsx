@@ -3,6 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { SandboxRecoveryProjection } from "@opengeni/sdk";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { SandboxRecoveryClient, SandboxRecoveryRequest } from "@/lib/sandbox-recovery";
 
 // Radix detects browser support at import time, before rendering its real portal.
@@ -192,6 +193,71 @@ test("unavailable reads and unsupported structural failures never fall back to r
   await click("Check recovery status");
   expect(container.textContent).toContain("unavailable");
   expect(container.textContent).not.toContain("Choose another model");
+});
+
+test.each([false, true])(
+  "a 403 read (structural %p) is not applicable, not a failed check",
+  async (structural) => {
+    let reads = 0;
+    const container = await render(
+      {
+        getSandboxRecovery: async () => {
+          reads++;
+          throw new OpenGeniApiError(
+            403,
+            JSON.stringify({ error: { code: "forbidden", message: "Managed human required." } }),
+          );
+        },
+        recoverSandbox: async () => {
+          throw new Error("unexpected mutation");
+        },
+      },
+      structural,
+    );
+    expect(reads).toBe(1);
+    expect(container.textContent).not.toContain("Could not check checkpoint recovery");
+    expect(container.textContent).not.toContain("Checking checkpoint recovery");
+    expect(container.textContent).not.toContain("Check recovery status");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    // The lane defers to its caller's ordinary remedies; the banner already
+    // withholds generic Retry from structural failures.
+    expect(container.textContent).toContain("Try again");
+  },
+);
+
+test("a 403 read after an unconfirmed consent keeps the notice and status checks", async () => {
+  let denied = false;
+  let reads = 0;
+  let writes = 0;
+  const container = await render(
+    {
+      getSandboxRecovery: async () => {
+        reads++;
+        if (denied)
+          throw new OpenGeniApiError(403, JSON.stringify({ error: { message: "denied" } }));
+        return eligible;
+      },
+      recoverSandbox: async () => {
+        writes++;
+        throw new Error("response lost");
+      },
+    },
+    false,
+  );
+  await click("Review checkpoint recovery");
+  await click("Accept and restore checkpoint");
+  expect(container.textContent).toContain("outcome unconfirmed");
+  denied = true;
+  await click("Check recovery status");
+  expect(container.textContent).toContain("outcome unconfirmed");
+  expect(container.querySelector('[role="alert"]')!.textContent).toContain(
+    "Could not check checkpoint recovery",
+  );
+  expect(container.textContent).not.toContain("Try again");
+  const before = reads;
+  await click("Check recovery status");
+  expect(reads).toBe(before + 1);
+  expect(writes).toBe(1);
 });
 
 test("nonstructural unsupported recovery preserves ordinary failure controls", async () => {

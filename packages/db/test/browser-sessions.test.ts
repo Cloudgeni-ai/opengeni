@@ -23,6 +23,7 @@ import {
   dispatchComputerSessionOperation,
   failBrowserSessionSuspension,
   failBrowserSessionOperation,
+  failPreparedBrowserSessionEnd,
   failPreparedBrowserSessionSuspend,
   findBrowserSessionControlRecordByOperation,
   getBrowserSession,
@@ -170,6 +171,180 @@ function checkpointArtifact(
 }
 
 describe("durable BrowserSession lifecycle", () => {
+  test("restores a browser when end placement fails before dispatch", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const active = await activeBrowser(scope);
+    const input = {
+      ...scope,
+      browserSessionId: active.session.id,
+      operationId: crypto.randomUUID(),
+      actorSubjectId: scope.subjectId,
+      expectedLifecycle: active.session.lifecycle,
+      expectedFailureCode: active.session.failureCode,
+      expectedControllerGeneration: active.controllerGeneration,
+    };
+    const prepared = await prepareBrowserSessionEnd(client.db, input);
+    expect(prepared).toMatchObject({
+      session: { lifecycle: "ending" },
+      operation: { state: "prepared" },
+    });
+    const failed = await failPreparedBrowserSessionEnd(client.db, {
+      ...input,
+      restoreLifecycle: "active",
+      restoreFailureCode: null,
+      error: { code: "driver_failed", message: "Placement unavailable", retryable: true },
+    });
+    expect(failed).toMatchObject({
+      session: { lifecycle: "active", controller: active.session.controller },
+      operation: { state: "failed", error: { message: "Placement unavailable" } },
+    });
+    expect((await prepareBrowserSessionEnd(client.db, input)).operation.state).toBe("failed");
+
+    const nextOperationId = crypto.randomUUID();
+    await prepareBrowserSessionEnd(client.db, { ...input, operationId: nextOperationId });
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: nextOperationId,
+      browserSessionId: active.session.id,
+      controllerGeneration: active.controllerGeneration,
+    });
+    expect(
+      await failPreparedBrowserSessionEnd(client.db, {
+        ...input,
+        operationId: nextOperationId,
+        restoreLifecycle: "active",
+        restoreFailureCode: null,
+        error: { code: "driver_failed", message: "Too late", retryable: true },
+      }),
+    ).toBeNull();
+    expect(
+      (
+        await getBrowserSessionControlRecord(client.db, {
+          ...scope,
+          browserSessionId: active.session.id,
+          operationId: nextOperationId,
+        })
+      ).operation?.state,
+    ).toBe("dispatched");
+  });
+
+  test("preserves a suspended checkpoint when end fails before dispatch", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const active = await activeBrowser(scope);
+    const suspendOperationId = crypto.randomUUID();
+    await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId: active.session.id,
+      operationId: suspendOperationId,
+      actorSubjectId: scope.subjectId,
+    });
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: suspendOperationId,
+      browserSessionId: active.session.id,
+      controllerGeneration: active.controllerGeneration,
+      stateUpload: {
+        objectKey: checkpointArtifact(scope, suspendOperationId).objectKey,
+        cleanupAfter: new Date(Date.now() + 60_000),
+      },
+    });
+    await commitBrowserSessionSuspension(client.db, {
+      ...scope,
+      operationId: suspendOperationId,
+      browserSessionId: active.session.id,
+      controllerGeneration: active.controllerGeneration,
+      artifact: checkpointArtifact(scope, suspendOperationId),
+    });
+    await clearSuspendedBrowserSessionController(client.db, {
+      ...scope,
+      browserSessionId: active.session.id,
+      expectedControllerGeneration: active.controllerGeneration,
+    });
+
+    const operationId = crypto.randomUUID();
+    await prepareBrowserSessionEnd(client.db, {
+      ...scope,
+      browserSessionId: active.session.id,
+      operationId,
+      actorSubjectId: scope.subjectId,
+      expectedLifecycle: "suspended",
+      expectedFailureCode: null,
+      expectedControllerGeneration: null,
+    });
+    const failed = await failPreparedBrowserSessionEnd(client.db, {
+      ...scope,
+      browserSessionId: active.session.id,
+      operationId,
+      restoreLifecycle: "suspended",
+      restoreFailureCode: null,
+      expectedControllerGeneration: null,
+      error: { code: "driver_failed", message: "Placement unavailable", retryable: true },
+    });
+    expect(failed).toMatchObject({
+      session: { lifecycle: "suspended", controller: null },
+      operation: { state: "failed" },
+    });
+    expect(
+      await getBrowserPrivateCheckpointAuthority(client.db, {
+        ...scope,
+        browserSessionId: active.session.id,
+      }),
+    ).not.toBeNull();
+  });
+
+  test("preserves a lost browser's failure reason when end fails before dispatch", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const active = await activeBrowser(scope);
+    const suspendOperationId = crypto.randomUUID();
+    await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId: active.session.id,
+      operationId: suspendOperationId,
+      actorSubjectId: scope.subjectId,
+    });
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: suspendOperationId,
+      browserSessionId: active.session.id,
+      controllerGeneration: active.controllerGeneration,
+    });
+    const lost = await failBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: suspendOperationId,
+      browserSessionId: active.session.id,
+      state: "outcome_unknown",
+      error: { code: "driver_failed", message: "Controller stopped responding", retryable: false },
+    });
+    expect(lost.session).toMatchObject({ lifecycle: "lost", failureCode: "driver_failed" });
+
+    const operationId = crypto.randomUUID();
+    await prepareBrowserSessionEnd(client.db, {
+      ...scope,
+      browserSessionId: active.session.id,
+      operationId,
+      actorSubjectId: scope.subjectId,
+      expectedLifecycle: "lost",
+      expectedFailureCode: "driver_failed",
+      expectedControllerGeneration: active.controllerGeneration,
+    });
+    const failed = await failPreparedBrowserSessionEnd(client.db, {
+      ...scope,
+      browserSessionId: active.session.id,
+      operationId,
+      restoreLifecycle: "lost",
+      restoreFailureCode: "driver_failed",
+      expectedControllerGeneration: active.controllerGeneration,
+      error: { code: "driver_failed", message: "Placement unavailable", retryable: true },
+    });
+    expect(failed).toMatchObject({
+      session: { lifecycle: "lost", failureCode: "driver_failed" },
+      operation: { state: "failed" },
+    });
+  });
+
   test("restores an active browser after a pre-dispatch suspend failure", async () => {
     if (!available) return;
     const scope = await fixture();
@@ -995,6 +1170,51 @@ describe("durable BrowserSession lifecycle", () => {
       lifecycle: "active",
       controller: { controllerGeneration: active.controllerGeneration },
     });
+  });
+
+  test("retires a browser whose controller confirms its session is missing", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const active = await activeBrowser(scope);
+    const operationId = crypto.randomUUID();
+    await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId: active.session.id,
+      operationId,
+      actorSubjectId: scope.subjectId,
+    });
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId,
+      browserSessionId: active.session.id,
+      controllerGeneration: active.controllerGeneration,
+    });
+    const failed = await failBrowserSessionSuspension(client.db, {
+      ...scope,
+      operationId,
+      browserSessionId: active.session.id,
+      controllerGeneration: active.controllerGeneration,
+      missingControllerSession: true,
+      error: {
+        code: "resource_not_found",
+        message: "browser session is not active",
+        retryable: false,
+      },
+    });
+    expect(failed.session).toMatchObject({
+      lifecycle: "lost",
+      controller: null,
+      failureCode: "controller_resource_missing",
+    });
+    expect(failed.operation.state).toBe("failed");
+    const replay = await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId: active.session.id,
+      operationId,
+      actorSubjectId: scope.subjectId,
+    });
+    expect(replay.operation).toMatchObject({ state: "failed", replayed: true });
+    expect(replay.session.lifecycle).toBe("lost");
   });
 
   test("enforces workspace RLS for reads", async () => {

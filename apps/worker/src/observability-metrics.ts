@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { errorCodeToJSON } from "@opengeni/agent-proto";
 import { SandboxBackend, type SessionEventType } from "@opengeni/contracts";
 import type { SessionEventAppendPhaseObservation } from "@opengeni/db";
-import type { EventLogger } from "@opengeni/events";
+import {
+  natsSubscriptionTerminationCounter,
+  type EventBusOptions,
+  type EventLogger,
+} from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
 import {
@@ -80,6 +84,16 @@ const CONTEXT_COMPACTIONS_METRIC = {
   help: "Total completed context compactions, by trigger.",
 } as const;
 
+/** Logger plus the closed-label subscription-termination counter for NATS connections. */
+export function observabilityEventBusOptions(
+  observability: Observability,
+): Pick<EventBusOptions, "logger" | "onSubscriptionTerminated"> {
+  return {
+    logger: observabilityEventLogger(observability),
+    onSubscriptionTerminated: natsSubscriptionTerminationCounter(observability),
+  };
+}
+
 export function observabilityEventLogger(observability: Observability): EventLogger {
   return {
     debug: (message, attributes) => observability.debug(message, eventAttributes(attributes)),
@@ -154,6 +168,13 @@ export function runtimeMetricsHooksForObservability(
         name: "opengeni_sandbox_warming_timeouts_total",
         help: "Total sandbox warming timeouts.",
         labels: { backend, stage },
+      });
+    },
+    onSandboxReadinessReplacement: ({ backend, outcome }) => {
+      observability.incrementCounter({
+        name: "opengeni_sandbox_readiness_replacements_total",
+        help: "Fresh sandbox command-readiness replacement decisions by backend and outcome.",
+        labels: { backend, outcome },
       });
     },
     onSandboxProviderApiThrottle: ({ backend, operation }) => {
@@ -2263,4 +2284,52 @@ export function modelCallAccountContext(input: {
     servingAccountHash: stableAccountHash(input.servingCredentialId),
     accountChangedFromPrevCall,
   };
+}
+
+export type CodeSearchCallOutcome =
+  | "completed"
+  | "jev_unavailable"
+  | "jev_rejected"
+  | "workspace_unavailable"
+  | "invalid_arguments"
+  | "breaker_open"
+  | "cancelled"
+  | "failed";
+
+/** One `code_search` tool call: outcome, wall time and the Jev work it used. */
+export function recordCodeSearchCall(
+  observability: Observability,
+  input: {
+    outcome: CodeSearchCallOutcome;
+    durationSeconds: number;
+    jevRequests: number;
+    jevCostUsd: number;
+  },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_code_search_calls_total",
+    help: "Jev-backed code_search tool calls by outcome.",
+    labels: { outcome: input.outcome },
+  });
+  observability.observeHistogram({
+    name: "opengeni_code_search_duration_seconds",
+    help: "Wall time of one code_search tool call.",
+    buckets: [0.5, 1, 2, 4, 8, 15, 30, 60],
+    labels: { outcome: input.outcome },
+    value: Math.max(0, input.durationSeconds),
+  });
+  if (input.jevRequests > 0) {
+    observability.incrementCounter({
+      name: "opengeni_code_search_jev_requests_total",
+      help: "Jev requests made by code_search.",
+      amount: input.jevRequests,
+    });
+  }
+  if (input.jevCostUsd > 0) {
+    observability.incrementCounter({
+      name: "opengeni_code_search_jev_cost_micro_usd_total",
+      help: "Estimated Jev list-price cost of code_search, in micro-USD.",
+      amount: Math.round(input.jevCostUsd * 1_000_000),
+    });
+  }
 }

@@ -475,6 +475,8 @@ export type AuthNeededItem = {
   authorizationUrl: string | null;
   /** Agent-selected catalog recommendation. The host still owns authorization. */
   capability?: NonNullable<ToolAuthNeededPayload["capability"]> | null | undefined;
+  /** Human-reviewed custom integration proposal. Never treated as catalog authority. */
+  setupRequest?: ToolAuthNeededPayload["setupRequest"] | null | undefined;
   occurredAt: string;
 };
 

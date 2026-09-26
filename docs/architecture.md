@@ -40,7 +40,7 @@ Accepted conversation context remains unchanged.
 Session `mcpApprovalPolicies` requires session-control authority. Claims freeze
 inherited approvals with catalog floors; policies grant neither capabilities nor credentials.
 
-Account isolation: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
+Account isolation/rebinding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
 [`remote-mcp-credentials.md`](remote-mcp-credentials.md).
 
 ---
@@ -118,7 +118,8 @@ Provider work stays outside retries; retry only idempotent settlement.
 Accepted-policy [compatibility/recovery](run-lifecycle.md).
 Replay: [notices/catalogs](run-lifecycle.md),
 [compaction](context-compaction.md). `packages/runtime/src/prepared-compaction-request.ts`
-shares sandbox/lazy-tool-prepared requests with remote compaction, including before first inference.
+shares prepared prefixes with both Responses compaction modes; Chat retains
+its transcript adapter.
 
 Failed-session retry differs from Pause/Resume and prompt admission.
 `packages/db/src/session-retry.ts` fences failure identity, reserves actor-scoped
@@ -173,12 +174,12 @@ External SDK history and append verification: [`run-lifecycle.md`](run-lifecycle
 
 ### 3.4 Long runs are bounded by policy and intent, not arbitrary loop caps
 
-Agents may work for days; call/continuation/duration counts cannot prove stalled
-progress. Budget admission, provider capacity, Pause/Cancel, goal state and host
-policy govern. Safe recovery preserves logical turns/sessions. Postgres owns
-continuation obligations; Temporal supplies replaceable nudges. Goals never live
+Run length does not prove stalled progress. Budget admission, provider capacity,
+Pause/Cancel, goal state and host policy govern. Recovery preserves logical work.
+Postgres owns continuation obligations, not Temporal. Goal edits apply directly
+unless review is configured; human-owned constraints remain. Goals never live
 in `Agent.instructions` or solely workflow memory.
-Generic caps cannot replace recovery, pacing, memory or tool-lifecycle fixes.
+Generic caps cannot replace lifecycle fixes.
 
 Non-transient preclaim rejection parks accepted work behind a durable admission
 block. Resume/Send/Steer rechecks without granting authority; operational outages
@@ -351,11 +352,12 @@ before changing `free`/`credits`. Database `codexModels` overrides membership,
 not credentials; retirement preserves only exact accepted execution.
 
 Documentation explains contracts without duplicating drift-prone lists.
-Cross-boundary enums are additive within major releases unless the whole release
+Cross-boundary enums are additive within major releases unless the release
 train breaks compatibility. Contract-parity tests pin intentional client/deployment mirrors.
 
 Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
-`packages/core/src/model-catalog.ts`, [`model-providers.md`](model-providers.md),
+`packages/core/src/model-catalog.ts`, `packages/core/src/default-session-model.ts`,
+[`model-providers.md`](model-providers.md),
 [`model-connection-access.md`](model-connection-access.md),
 and `packages/sdk/test/contract-parity.test.ts`.
 
@@ -787,7 +789,7 @@ state failures remain terminal, and no model, tool, or provider work is replayed
 or converted into a new queue item.
 
 Transient provider recovery is bounded by a durable consecutive-failure streak,
-not lifetime failures accumulated across a long turn. A completed model request
+not lifetime failures across a long turn. A completed model request
 from the exact current attempt clears the durable streak atomically with its
 timeline event, and the worker clears its in-memory copy only after that commit;
 late attempt evidence cannot replenish the retry budget. See
@@ -900,9 +902,8 @@ path.
 
 The closed always-visible local first-request set is `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
-`request_human_input`, and `list_models`. The last tool returns the current
-workspace's selectable model IDs and deployment-defined costs; it does not
-switch the session model. Other non-MCP function tools and non-eager MCP schemas
+`request_human_input`, `list_models` (lists selectable models; never switches
+them), and optional [`code_search`](code-search.md). Other non-MCP function tools and non-eager MCP schemas
 remain behind progressive search.
 
 Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
@@ -1065,6 +1066,7 @@ handlers because its host owns process lifecycle.
 | `packages/connect` | `@opengeni/connect` | Framework-neutral connection setup, navigation, polling and account-selection contracts |
 | `packages/config` | `@opengeni/config` | Settings parsing, validation, defaults, and derived runtime configuration |
 | `packages/network` | `@opengeni/network` | DNS-pinned, bounded credential-bearing HTTP transport and shared MCP OAuth discovery semantics |
+| `packages/jev` | `@opengeni/jev` | Jev client and `code_search` engine |
 | `packages/core` | `@opengeni/core` | Framework-neutral access, domain, billing, and dependency seams |
 | `packages/db` | `@opengeni/db` | Drizzle schema, scoped repositories, migrations, RLS posture, and role provisioning |
 | `packages/runtime` | `@opengeni/runtime` | Agent construction, model routing, tool execution, history projection, and sandbox abstraction |
@@ -1146,6 +1148,10 @@ admission behavior. Routes reuse domain rules shared with MCP, workers, and embe
 Composer submission's shared command, `packages/core/src/application/composer-submit.ts`,
 serves stock HTTP and in-process embedding hosts, owning validation, draft rotation,
 event append, turn routing, receipt/replay behavior, and the response contract.
+Web Send rebases drafts (including unavailable files), aligns
+file-only text with create, freezes edits, preserves late voice transcripts
+(`packages/react/src/hooks/use-voice-input.ts`, `apps/web/src/lib/use-new-session-draft.ts`,
+`apps/web/src/routes/sessions-index.tsx`), and protects sibling drafts.
 
 Canonical: `apps/api/src/app.ts`, `apps/api/src/routes/`, and
 `packages/core/src/`.
@@ -1357,12 +1363,11 @@ serves session docks, filtered before pagination by version `sourceSessionId`.
 Workspace/session discovery shares `/artifact-catalog` across Sites, editable
 artifacts, generated images, and published files, preserving existing content
 authority. File provenance stays separate from bytes; `kind:id` identifies list
-entries. Browsing never executes Sites or wakes compute. See
-[`artifact-library.md`](artifact-library.md).
+entries. Browsing never executes Sites or wakes compute.
 
 Published-file links use `Markdown.artifactHref`; `retained-file-preview.tsx`
-shares media/PDF previews through authorized storage APIs. Sandbox links remain
-workspace-inspector requests.
+previews media/PDF via authorized APIs; `sandbox:` opens the inspector.
+Stored-byte routes share `http/user-content.ts` ([`artifact-library.md`](artifact-library.md)).
 
 Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
@@ -1513,7 +1518,7 @@ supervised commands keep separate proof. Details:
 
 Desktop/browser images and daemons release separately. Desktop/terminal data
 use the relay; the control plane retains authority. Large edits require
-capability-gated transactional transfers and verified receipts, never blind replay.
+connection-fenced transactional transfers and verified receipts, never blind replay.
 
 Canonical: `packages/runtime/src/sandbox/`,
 `apps/worker/src/activities/sandbox-lease.ts`,
@@ -1641,7 +1646,7 @@ Subsystem routing; complete topic map: [`README.md`](README.md).
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Session workflow, wake delivery, or `continueAsNew` | `apps/worker/src/workflows/session.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
-| Turn claim, execution, settlement, or recovery | `apps/worker/src/activities/agent-turn/` | [`run-lifecycle.md`](run-lifecycle.md) |
+| Turn claim, execution, settlement, or recovery | `apps/worker/src/activities/agent-turn/`, `packages/runtime/src/provider-quota.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Session Debug model-visible context | `packages/runtime/src/model-request-capture.ts`, `packages/runtime/src/model-provider-client.ts`, `packages/runtime/src/model-context-inspector.ts`, `apps/web/src/components/session/model-context-inspector.tsx`, `apps/web/src/components/session/context-text-reader.tsx` | [`run-lifecycle.md`](run-lifecycle.md#debug-context-capture) |
 | Goals and continuations | `apps/worker/src/activities/goals.ts`, `packages/db/src/` | [`goals.md`](goals.md) |
 | Approval or structured human input | `apps/worker/src/activities/agent-turn/stream-attempt.ts`, `apps/api/src/routes/sessions.ts` | [`human-input.md`](human-input.md) |
@@ -1699,7 +1704,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
-| Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
+| Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |

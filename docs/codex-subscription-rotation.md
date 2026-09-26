@@ -452,6 +452,33 @@ waiter so Resume can reconstruct it. Steer, cancellation, or another semantic
 fence change supersedes the waiter/blocked turn rather than letting a stale wake
 run. Reset/boost entitlement redemption is never automatic.
 
+Capacity wakes are spread, not simultaneous. Every waiter of one exhausted pool
+learns the same authoritative reset time, and one capacity mutation (such as the
+bounded refresh that verifies a quota reset) wakes every waiter at once through
+both the typed signal and the generic durable workflow wake. The session
+workflow (Codex and xAI alike) therefore delays each reconciliation by a
+replay-deterministic jitter behind the `session-capacity-wake-jitter-v1` patch:
+up to 60 seconds once a scheduled reset timer fires, and up to 30 seconds after a
+capacity or queue wake that arrives before the deadline or after a waiter that is
+already due when the loop starts (a fresh run after continue-as-new, a worker
+restart, or Resume maps every unobserved wake revision to an already-due
+waiter). A wake that lands inside a waiter's reset-timer spread does not start a
+second, shorter one, so when the first waiter's bounded refresh wakes the rest of
+the pool they still resume across the whole minute. Only Pause, Steer or Cancel
+cut a spread short. The jitter only delays the same reconciliation activity: the
+waiter row stays authoritative, and nothing is enqueued, synthesized, or run
+twice.
+
+The patch is safe to roll forward: a patched worker replays every capacity wait
+an older worker recorded without adding jitter (pinned by a recorded pre-patch
+history in the Temporal workflow integration suite). It is not safe to roll the
+worker image back past it. An older worker cannot replay a history that carries
+the patch marker, so a session that waited on capacity in its current workflow
+run fails its workflow tasks as nondeterministic until a patched worker returns.
+Roll forward instead; if a rollback is unavoidable, accept that those sessions
+stay stuck until the patched image is back, and treat a mixed old/new fleet
+during the rollout as a transient source of the same task failures.
+
 Only a **definitive credential/account refusal** can move the same durable turn to
 another credential:
 

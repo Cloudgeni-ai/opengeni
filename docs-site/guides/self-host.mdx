@@ -84,6 +84,12 @@ Review sandbox preparation profiles and environment allowlists before running li
   upgrade.
 </Warning>
 
+## Console links
+
+The web console's account menu has a Help entry that opens the public OpenGeni documentation. Set `OPENGENI_DOCUMENTATION_URL` on the API to your own documentation URL, or to `none` to hide the entry.
+
+Shared console links unfurl in Slack, X, and other chat tools with a preview card. Keep `OPENGENI_PUBLIC_BASE_URL` set to the address people use, so the preview image URL is absolute. If the console and API use different origins, also set `OPENGENI_WEB_BASE_URL` to the console origin: without it the preview image URL points at the API host, which does not serve that image.
+
 ## Going deeper
 
 The [deployment guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md) in the repository is the canonical operator reference: profiles, Helm values, Terraform outputs, Connected Machine relay configuration, observability, and cloud-specific notes.

@@ -50,10 +50,14 @@ and local environments without teaching agents or containers the user's GitHub
 password or provider token.
 
 When the Docker sandbox backend is used, set `OPENGENI_MCP_URL` to an API URL
-reachable from sandbox containers. A Compose service URL such as
-`http://api:8000/v1/workspaces/{workspaceId}/mcp` is accepted; a loopback URL is
-translated to the Docker host gateway for stock local runs. The broker remains
-the only recipient of the short-lived OpenGeni bearer.
+reachable from sandbox containers. `bun run dev` does this on Linux Docker
+Engine with its Docker sandbox route (see
+[local-development.md](local-development.md#start-the-full-stack)), and Docker
+Desktop reaches the API through `host.docker.internal`. A Compose service URL
+such as `http://api:8000/v1/workspaces/{workspaceId}/mcp` is accepted; a
+loopback URL is translated to the Docker host gateway, which works only when
+the API listens there. The broker remains the only recipient of the short-lived
+OpenGeni bearer.
 
 ## User experience
 

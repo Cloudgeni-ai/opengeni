@@ -9,6 +9,9 @@ metadata:
   annotations:
     {{- toYaml .Values.catalogImport.annotations | nindent 4 }}
 spec:
+  {{- with $.Values.jobTtlSecondsAfterFinished }}
+  ttlSecondsAfterFinished: {{ . }}
+  {{- end }}
   backoffLimit: {{ .Values.catalogImport.backoffLimit }}
   template:
     metadata:
@@ -18,6 +21,7 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      enableServiceLinks: false
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:

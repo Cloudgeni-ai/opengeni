@@ -67,3 +67,51 @@ opengeni_resolve_dev_backend() {
     ;;
   esac
 }
+opengeni_resolve_dev_bind_host() {
+  # The local stack serves an unauthenticated API, and the default local sandbox
+  # runs agent commands directly on this machine. Host-facing services therefore
+  # bind loopback unless the developer deliberately exposes them on 0.0.0.0.
+  local requested="${OPENGENI_DEV_BIND_HOST:-127.0.0.1}"
+  case "$requested" in
+  127.0.0.1 | 0.0.0.0)
+    printf '%s\n' "$requested"
+    ;;
+  *)
+    echo "OPENGENI_DEV_BIND_HOST must be 127.0.0.1 (default) or 0.0.0.0." >&2
+    return 1
+    ;;
+  esac
+}
+opengeni_dev_bind_host_notice() {
+  # $1 = resolved bind host.
+  if [ "$1" = "0.0.0.0" ]; then
+    echo "OPENGENI_DEV_BIND_HOST=0.0.0.0: the unauthenticated API, web app, and infrastructure ports accept connections from your network. The API still answers browsers only for its configured addresses; set OPENGENI_WEB_BASE_URL (and VITE_API_BASE_URL) to the address other devices use."
+  fi
+}
+opengeni_dev_sandbox_bridge_mode() {
+  # How Docker sandboxes reach this stack's API. Prints:
+  #   forward  Linux Docker Engine with a loopback API: publish only the
+  #            sandbox routes on this worktree's Compose network gateway
+  #            (scripts/dev-sandbox-bridge.ts).
+  #   direct   Linux Docker Engine with OPENGENI_DEV_BIND_HOST=0.0.0.0: the API
+  #            already listens on that gateway; only point sandboxes at it.
+  #   none     Docker Desktop (macOS/Windows) forwards host.docker.internal to
+  #            the loopback API, other sandbox backends do not run in Docker,
+  #            and an explicit sandbox-reachable OPENGENI_MCP_URL is kept.
+  # $1 = resolved bind host, $2 = sandbox backend, $3 = `uname -s`,
+  # $4 = infrastructure backend.
+  if [ "$2" != "docker" ] || [ "$3" != "Linux" ] || [ "$4" != "docker" ]; then
+    echo none
+    return
+  fi
+  if [ -n "${OPENGENI_MCP_URL:-}" ] &&
+    ! [[ "${OPENGENI_MCP_URL}" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*://(127\.0\.0\.1|localhost|\[::1\]|host\.docker\.internal)([:/]|$) ]]; then
+    echo none
+    return
+  fi
+  if [ "$1" = "0.0.0.0" ]; then
+    echo direct
+  else
+    echo forward
+  fi
+}

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "5.1.1",
+  "version": "5.2.0",
   "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -21,6 +21,10 @@
     "./managed-sign-in-methods": {
       "types": "./src/managed-sign-in-methods.ts",
       "default": "./src/managed-sign-in-methods.ts"
+    },
+    "./client-error-report": {
+      "types": "./src/client-error-report.ts",
+      "default": "./src/client-error-report.ts"
     },
     "./mcp-endpoint": {
       "types": "./src/mcp-endpoint.ts",
@@ -117,6 +121,10 @@
     "./model-picker-order": {
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"
+    },
+    "./code-search": {
+      "types": "./src/code-search.ts",
+      "default": "./src/code-search.ts"
     },
     "./editable-artifacts": {
       "types": "./src/editable-artifacts.ts",

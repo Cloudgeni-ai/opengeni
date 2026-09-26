@@ -1386,6 +1386,72 @@ describe("worker activities integration", () => {
     });
   });
 
+  test("fails the turn promptly on an exhausted provider quota instead of recovering", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "daily quota",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "finish the long-running provisioning",
+      createdBy: "api",
+    });
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "daily quota" } },
+    ]);
+    // The OpenAI SDK's APIError shape for OpenRouter's free-tier daily cap.
+    const providerMessage =
+      "Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day";
+    const error = Object.assign(new Error(`429 ${providerMessage}`), {
+      status: 429,
+      code: 429,
+      error: { message: providerMessage, code: 429, metadata: { provider_name: null } },
+      headers: new Headers({ "content-type": "application/json" }),
+    });
+    const activities = createWorkerActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ error }]),
+      }),
+    });
+
+    const result = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      trigger: { kind: "next" },
+      workflowId: "workflow-quota-exhausted",
+      workflowRunId: crypto.randomUUID(),
+    });
+    expect(result).toMatchObject({ status: "failed" });
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    expect(events.some((event) => event.type === "turn.recovery.requested")).toBe(false);
+    expect(events.find((event) => event.type === "turn.failed")?.payload).toEqual({
+      error:
+        "This model's daily limit at the model provider has been reached, so automatic retries stopped. Choose another model, or try again after the limit resets.",
+      code: "provider_quota_exhausted",
+      retryable: false,
+      quotaScope: "daily",
+      detail: `429 ${providerMessage}`,
+    });
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({ id: result.turnId, status: "failed" });
+  });
+
   test("recovers the same turn on a retryable provider failure when a goal is active", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {

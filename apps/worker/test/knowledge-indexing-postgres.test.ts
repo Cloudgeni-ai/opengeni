@@ -71,30 +71,52 @@ test("worker resumes batches, meters committed chunks once, and serves scoped se
   expect(chunks.length).toBeGreaterThan(32);
   let failProvider = true;
   let embedded = 0;
+  const providerSecret = "private provider response body";
   const embedder: DocumentServices["embedder"] = {
     model: "knowledge-index-test",
     dimensions: 3,
     embedQuery: async () => [1, 0, 0],
     embedMany: async (texts) => {
-      if (failProvider) throw new Error("provider unavailable");
+      if (failProvider)
+        throw Object.assign(new Error(`provider unavailable: ${providerSecret}`), { status: 503 });
       embedded += texts.length;
       return texts.map(() => [1, 0, 0]);
     },
   };
+  const warnings: Array<{ message: string; fields: unknown }> = [];
   const makeWorker = () =>
     createKnowledgeIndexingActivities(
       async () =>
         ({
           db: client.db,
           settings: { billingMode: "none", usageLimitsMode: "none" } as Settings,
-          observability: { warn: () => undefined },
-        }) as ControlActivityServices,
+          observability: {
+            warn: (message: string, fields: unknown) => warnings.push({ message, fields }),
+          },
+        }) as unknown as ControlActivityServices,
       async () => ({ embedder }) as DocumentServices,
     );
   expect((await makeWorker().indexKnowledge()).deferred).toBe(1);
   const [failed] =
-    await shared.admin`SELECT next_index, state FROM knowledge_index_jobs WHERE revision_id=${saved.revisionId}`;
-  expect(failed).toMatchObject({ next_index: 0, state: "pending" });
+    await shared.admin`SELECT next_index, state, last_failure FROM knowledge_index_jobs WHERE revision_id=${saved.revisionId}`;
+  expect(failed).toMatchObject({
+    next_index: 0,
+    state: "pending",
+    last_failure: "embedding_unavailable",
+  });
+  // The deferral names the actual cause without provider content.
+  expect(warnings).toEqual([
+    {
+      message: "Knowledge indexing batch deferred",
+      fields: {
+        errorClass: "KnowledgeIndexOperationError",
+        errorCode: "knowledge_index_embedding_failed",
+        origin: "worker",
+        status: 503,
+      },
+    },
+  ]);
+  expect(JSON.stringify(warnings)).not.toContain(providerSecret);
   expect(
     (await searchKnowledgeEntries(client.db, context, { query: "supply" }, () => embedder)).entries,
   ).toHaveLength(1);

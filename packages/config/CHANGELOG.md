@@ -1,5 +1,39 @@
 # @opengeni/config
 
+## 3.0.0
+
+### Major Changes
+
+- f48191e: Key managed sign-in, sign-up, verification, and password-reset rate limits, the address recorded on auth sessions, and every other API abuse quota on one trusted request source address, with IPv6 clients keyed on their /64. Managed auth adds explicit per-client-address limits and two-tier per-email throttles (per email and address, then per email), the browser session-set sign-in returns `Retry-After` on a per-email refusal, and the managed-auth database pool keeps serving when the server closes its connections instead of crashing the API.
+
+  Breaking: `OPENGENI_API_TRUSTED_PROXY_HOPS` (optionally narrowed by `OPENGENI_API_TRUSTED_PROXY_CIDRS`) replaces `OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS` and `Settings.mcpOauthTrustedProxyHops` is now `Settings.apiTrustedProxyHops`. API startup and runtime-artifact generation fail while the old variable is set to anything but `0`; rename it. Managed deployments behind a proxy must now set `OPENGENI_API_TRUSTED_PROXY_HOPS`: Better Auth previously read a single-value `X-Forwarded-For` by default and now ignores forwarding headers unless the hop count is declared, so without it every user shares the proxy's address and its sign-in and sign-up limits.
+
+### Minor Changes
+
+- b6d65a1: Add `OPENGENI_API_METRICS_PORT`. When it is set, the API serves `GET /metrics` only on that dedicated internal listener and never on the public API port, so an ingress that forwards every path to the API cannot publish Prometheus metrics. The listener applies the same deployment-key rules as before. Leaving it unset keeps the existing single-port behavior. The Helm chart now sets it by default (`api.metricsPort: 9464`). Upgrade note: on a cluster that enforces NetworkPolicy, only the bundled collector and `networkPolicy.monitoring` reach that port, so set `networkPolicy.monitoring` for any other Prometheus that scrapes the API. Managed-auth email verification now signs the user in on the first successful link click in the default `legacy` session-set mode, and every verification email tells a recipient who did not sign up to ignore it.
+- 1a427e0: Add the optional Jev-backed `code_search` agent tool. It finds where something is implemented, configured or decided in the workspace in one call and returns verbatim, line-numbered passages with a coverage status. It is controlled by `OPENGENI_CODE_SEARCH_MODE` (`off` by default, `opt_in`, `default_on`, or `experiment` for a fixed per-session half), the `OPENGENI_JEV_*` settings, and a per-workspace `codeSearchEnabled` setting (`null` follows the deployment). Each session freezes its decision when it is created (`sessions.code_search_enabled`, rolling migration 0520, exposed as `codeSearchEnabled` on the session), and children keep their parent's, so later setting changes never add the tool to a running session's cached prompt; only the deployment switch-off and a workspace Off, and undoing them, reach running sessions. Each call records Jev usage per workspace. The Jev key stays on the server (API and worker processes) and never reaches a sandbox or Connected Machine, which only run allowlisted read-only ripgrep and file reads. Windows Connected Machines do not get the tool. `tool_search` now lists every tool the query names exactly before BM25 results.
+- d582db0: Guard the unauthenticated local development API against browser attacks. In `local` access mode with `OPENGENI_ENVIRONMENT=local`, the API now answers only requests whose `Host` names this computer, which blocks DNS rebinding: loopback and the hosts of `OPENGENI_WEB_BASE_URL`, `OPENGENI_PUBLIC_BASE_URL`, `OPENGENI_GITHUB_APP_MANIFEST_BASE_URL`, and the new `OPENGENI_LOCAL_ALLOWED_ORIGINS` for browsers, plus sandbox-only names (`host.docker.internal` with the Docker sandbox, and the hosts of `OPENGENI_MCP_URL` and `OPENGENI_MCP_INTERNAL_URL`) that serve only the Codemode, first-party MCP, and Git broker routes and refuse browser requests. Refused requests are logged once per distinct `Host` or `Origin`. Browser requests are accepted only from the configured web origin, the API's own address, or an exact origin listed in `OPENGENI_LOCAL_ALLOWED_ORIGINS`; any other `Origin` gets 403, and local mode no longer answers with wildcard CORS. Requests without an `Origin` (the SDK, servers, sandbox callbacks) are unaffected. Managed and configured access modes, and local access mode under any other `OPENGENI_ENVIRONMENT`, are unchanged.
+
+### Patch Changes
+
+- 084616e: Advertise the product documentation the web console links from its Help menu.
+  `ClientConfig` gains an optional `documentationUrl` field (an absolute http(s)
+  URL, or `null` when the deployment hides the link) served by
+  `/v1/config/client`, and `@opengeni/contracts` exports
+  `DEFAULT_OPENGENI_DOCUMENTATION_URL`. Operators set it with the new
+  `OPENGENI_DOCUMENTATION_URL` setting: unset means `https://docs.opengeni.ai`,
+  `none` hides the link, and any other value fails startup. An absent
+  field means a server that predates it, so clients show no link.
+- 48a8774: Generate automatic session titles on chat-completions providers, such as OpenRouter connections, through one direct request outside the agent runner instead of a runner-only traced call that always failed. Routes without a resolved provider client now take the same direct path. The title request uses the model's lowest runnable reasoning effort and a larger output budget, a response stopped by the output limit keeps only whole words, and inline `<think>` reasoning before the answer is dropped. Automatic titles no longer keep a dangling closing quote or markdown mark from a wrapped title such as `"Pod Crash Debugging"` or `**Pod Crash Debugging**`. The managed OpenRouter free route (`isManagedOpenRouterFreeRoute`: the deployment-funded OpenRouter provider serving a `:free` variant) sends no title request, because it would spend the deployment key's shared per-minute and per-day request limits that users' turns need; those sessions keep the prompt preview until a turn on another route titles them.
+- Updated dependencies [084616e]
+- Updated dependencies [1a427e0]
+- Updated dependencies [6eb431b]
+- Updated dependencies [48a8774]
+- Updated dependencies [e422b62]
+- Updated dependencies [bd365b7]
+  - @opengeni/contracts@5.2.0
+  - @opengeni/codex@0.2.27
+
 ## 2.1.1
 
 ### Patch Changes

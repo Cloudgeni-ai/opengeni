@@ -14,6 +14,7 @@ import type { NativeConnectRequest } from "@/components/capabilities/native-conn
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { observeSessionTurnEvents } from "@/lib/analytics-observer";
 import { needsSandboxRecoveryCheck } from "@/lib/sandbox-failure";
 import {
   admissionRecheckControl,
@@ -94,11 +95,12 @@ import {
   UserMessageBody,
 } from "@/components/session/banners";
 import { useRail } from "@/components/rail/rail-context";
-import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
+import { CLOUD_SANDBOX_LABEL, machineDisplayName } from "@/components/session/sandbox-switcher";
+import { useBackgroundAttentionTitle } from "@/lib/background-attention-title";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { ArtifactLinkBoundary } from "@/components/session/artifact-link-boundary";
-import { SessionVariableSetPicker } from "@/components/session/session-variable-set-picker";
+import { SessionVariableSetPicker } from "@/components/session/session-variable-set-picker-panel";
 import { useSessionVariableSetPickerState } from "@/lib/use-session-variable-set-picker-state";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -168,6 +170,7 @@ import {
   sessionPolicyPickerIds,
 } from "@/lib/session-tools";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
+import { githubAppConnectRequest } from "@/lib/github-app-connect";
 import {
   useFixedResourceScopes,
   usePersonalResourceAttachment,
@@ -307,6 +310,9 @@ export function SessionRoute({
     jumpToSequence,
     error: streamError,
   } = useSessionEvents(sessionId);
+  // Consented funnel telemetry: a session this page started reached its first
+  // completed turn. Only event types are inspected.
+  useEffect(() => observeSessionTurnEvents(sessionId, events), [events, sessionId]);
   const sessionDetailReadOwner = useRef<object>({});
   const beginSessionDetailRead = useCallback(
     () =>
@@ -361,6 +367,8 @@ export function SessionRoute({
         : null,
     [queue.effectiveControl, sessionSeed, sessionStatus, sessionStatusSequence],
   );
+  // Background-tab cue: mark the title when this open session settles for the user.
+  useBackgroundAttentionTitle(sessionId, session?.status ?? null);
   // Dispatch retries update their durable ledger without timeline events. Read
   // that evidence only while this visible session is queued, with no overlapping
   // requests, so a moving retry schedule cannot masquerade as active execution.
@@ -713,9 +721,12 @@ export function SessionRoute({
     window.history.replaceState(null, "", window.location.pathname);
     const capabilityId = params.get("capability_auth");
     if (outcome !== "success") {
-      toast.error("Reconnect failed", {
-        description: params.get("reason") ?? undefined,
-      });
+      // The failure copy loads only on this path, keeping it out of the route.
+      void import("@/lib/oauth-callback-messages").then(({ mcpOAuthCallbackFailureMessage }) =>
+        toast.error("Reconnect failed", {
+          description: mcpOAuthCallbackFailureMessage(params.get("stage"), params.get("reason")),
+        }),
+      );
       return;
     }
     if (!capabilityId) {
@@ -826,6 +837,13 @@ export function SessionRoute({
   // calm inline error on the reconnect card.
   const reconnectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
   const [reconnectRequest, setReconnectRequest] = useState<NativeConnectRequest | null>(null);
+  // Workspace GitHub App setup from the follow-up repository menu uses this
+  // route-level Connect dialog: the menu closes when GitHub's authorization
+  // popup takes focus, which would unmount a dialog hosted inside it.
+  const connectGitHubApp = useCallback(
+    () => setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport)),
+    [reconnectTransport, workspaceId],
+  );
   const onReconnect = useCallback(
     async (item: AuthNeededItem) => {
       if (item.authoritySource === "host") {
@@ -1088,6 +1106,7 @@ export function SessionRoute({
       onApprove={(approvalId) => approve(approvalId, "approve")}
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
+      onConnectGitHubApp={connectGitHubApp}
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
       onOpenSandboxFile={openSandboxFile}
@@ -1105,6 +1124,11 @@ export function SessionRoute({
             onClose={() => setReconnectRequest(null)}
             onComplete={() => {
               setReconnectRequest(null);
+              if (reconnectRequest.providerId === "github-app") {
+                toast.success("GitHub connected");
+                void context.refreshGitHub(workspaceId, undefined, { sync: true });
+                return;
+              }
               toast.success("Connection updated", {
                 description: "New tool calls can use the updated connection.",
               });
@@ -1478,6 +1502,8 @@ function SessionChatPane(props: {
   onApprove: (approvalId: string) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
+  /** Opens workspace GitHub App setup in the route-level Connect dialog. */
+  onConnectGitHubApp: () => void;
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
   onOpenSandboxFile: (path: string, line?: number) => void;
@@ -1533,8 +1559,8 @@ function SessionChatPane(props: {
     sessionId: props.session.id,
     pollIntervalMs: MACHINES_SESSION_POLL_MS,
   });
-  const computeLabel =
-    fleet.machines.find((machine) => machine.active)?.name ?? CLOUD_SANDBOX_LABEL;
+  const activeMachine = fleet.machines.find((machine) => machine.active);
+  const computeLabel = activeMachine ? machineDisplayName(activeMachine) : CLOUD_SANDBOX_LABEL;
   const loadRetainedScreenshot = useMemo(
     () =>
       createSessionRetainedScreenshotLoader(
@@ -1701,7 +1727,7 @@ function SessionChatPane(props: {
         ? "personal"
         : "workspace",
   });
-  const repositories = useFollowUpRepositories(props.session);
+  const repositories = useFollowUpRepositories(props.session, props.onConnectGitHubApp);
   const firstPartyToolOptions = firstPartySessionToolOptionsFor(
     clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
   );
@@ -1735,6 +1761,13 @@ function SessionChatPane(props: {
       selectedIds: [...durableToolSelection.mcpServerIds],
     },
     context.workspaceCapabilityCatalog,
+    context.accessContext === null
+      ? null
+      : hasWorkspacePermission(
+          context.accessContext,
+          props.session.workspaceId,
+          "connections:read",
+        ),
   );
   const reloadSessionAfterSetup = props.onReloadSession;
   const refreshConnectionAccounts = connectionAccounts.refresh;
@@ -1744,7 +1777,9 @@ function SessionChatPane(props: {
   }, [reloadSessionAfterSetup, refreshConnectionAccounts]);
   const renderAuthNeeded = useCallback(
     (item: AuthNeededItem) => {
-      const recommendation = sessionAuthRecommendation(item, context.workspaceCapabilityCatalog);
+      const recommendation = item.setupRequest
+        ? item
+        : sessionAuthRecommendation(item, context.workspaceCapabilityCatalog);
       return recommendation ? (
         <Suspense
           fallback={
@@ -2805,6 +2840,7 @@ function SessionChatPane(props: {
                       onChoose: connectionAccounts.selectAccount,
                       loading: connectionAccounts.loading,
                       error: connectionAccounts.error,
+                      accessDenied: connectionAccounts.accessDenied,
                       onRefresh: () => void connectionAccounts.refresh(),
                       disabled:
                         terminal || composer.sending || durableToolsSaving || !durableToolsHydrated,

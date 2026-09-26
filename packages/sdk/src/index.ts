@@ -591,6 +591,8 @@ export type {
   SessionRealtimeState,
   WorkspaceModelCatalogModel,
   WorkspaceModelCatalogResponse,
+  DefaultModelSelection,
+  DefaultModelSelectionSource,
   WorkspaceGatewayCustomModel,
   WorkspaceGatewayCustomModelsResponse,
   CreateWorkspaceGatewayCustomModelRequest,

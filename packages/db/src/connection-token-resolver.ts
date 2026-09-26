@@ -7,6 +7,7 @@ import type {
   ConnectionCredentialPlacement,
   ConnectionKind,
   ConnectionStatus,
+  ConnectionMetadata,
   McpConnectionResourceScope,
   McpCredentialAuthNeededReason,
 } from "@opengeni/contracts";
@@ -768,7 +769,7 @@ function authorityReasonForScope(personal: boolean): AuthNeededReason {
 }
 
 function connectionBindingMatches(
-  cred: ConnectionCredentialForBroker,
+  cred: Pick<ConnectionCredentialForBroker, "providerDomain" | "kind" | "credential" | "metadata">,
   ref: McpServerConnectionRef,
   destinationUrl: string,
 ): boolean {
@@ -805,6 +806,20 @@ function connectionBindingMatches(
     if (canonicalResource(ref.resource) !== canonicalResource(boundResource)) return false;
   }
   return true;
+}
+
+/** Credential-free preflight only. Physical requests still resolve credentials
+ * and enforce their binding, current status and accepted-use authority. */
+export function connectionMetadataMatchesBinding(
+  connection: ConnectionMetadata,
+  ref: McpServerConnectionRef,
+  destinationUrl: string,
+): boolean {
+  return (
+    connectionBindingMatches({ ...connection, credential: {} }, ref, destinationUrl) &&
+    missingRequestedScopes(ref.scopes, connection.grantedScopes, connection.providerDomain)
+      .length === 0
+  );
 }
 
 function destinationHostMatchesProvider(destinationUrl: string, providerDomain: string): boolean {

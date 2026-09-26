@@ -6,7 +6,7 @@ OpenGeni freezes a per-session compaction mode at create time
 | Mode | When | Mechanism |
 | --- | --- | --- |
 | `portable` | All non-Codex sessions; existing sessions (backfill); new Codex sessions when the workspace sets `codexCompactionDefault: "portable"` | Durable plaintext checkpoint (Codex CLI local path). Free mid-session provider switching. |
-| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` on `remote_v2` goes through normal sandbox and lazy-tool request preparation, stopping before ordinary inference (portable `/compact` still skips prepareTools/sandbox). Retained cleartext keeps recent user/developer messages **including images** within the 64k budget. The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
+| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` goes through normal sandbox and lazy-tool request preparation, stopping before ordinary inference. Retained cleartext keeps recent user/developer messages **including images** within the 64k budget. The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
 
 There is no off switch, compatibility ladder, ordinary-turn history trim, or
 deterministic non-model fallback. A `remote_v2` session never silently falls
@@ -25,7 +25,7 @@ The implementation lives in:
 
 - `packages/runtime/src/context-compaction.ts`: thresholds, portable rebuild,
   remote v2 retain/rebuild helpers, and the typed compaction signal.
-- `packages/runtime/src/prepared-compaction-request.ts`: retains the actual prepared request prefix at the model dispatch boundary. Pre-turn/operator and mid-turn compaction stop there before ordinary inference; no prefix is rebuilt from the original Agent. A missing prepared request fails closed. Compaction preserves all prepared model settings and replaces only input plus the per-call cancellation signal.
+- `packages/runtime/src/prepared-compaction-request.ts`: retains the actual prepared request prefix at the model dispatch boundary. Responses pre-turn/operator and mid-turn compaction stop there before ordinary inference; no prefix is rebuilt from the original Agent. A missing prepared request fails closed. Remote v2 preserves all prepared model settings; portable Responses preserves the prepared tools and instructions while applying its summary-specific output limit and provider safety settings.
 - `apps/worker/src/activities/run-input.ts`: operator compaction loads canonical history through ordinary input preparation without a synthetic message or required update batch.
 - `packages/runtime/src/index.ts`: portable summarizer + `requestRemoteCompactionV2`.
 - `apps/worker/src/activities/context-compaction.ts`: mode branch, summarizer
@@ -128,10 +128,24 @@ The compaction model receives:
    Portable compaction omits opaque `encrypted_content` from that copy
    (plaintext reasoning stays; `{ type: "compaction" }` blobs are dropped)
    so a SuperGrok-origin session can compact on Codex. Durable rows stay.
-   Remote v2 still sends Codex blobs.
+   Remote v2 still sends Codex blobs. Portable preparation keeps the full
+   sanitized history on its first request when it fits the structural window;
+   an actual overflow permits one smaller retry.
 2. one final user message containing Codex's checkpoint prompt;
-3. the same system instructions as the running agent;
-4. no tools and no provider-side context-management policy.
+3. for Responses providers, the exact prepared system instructions and
+   model-visible tool schemas from the ordinary agent request; portable
+   compaction sets `tool_choice:none` and cannot execute returned tool calls.
+   Chat providers still use a tool-less transcript request and composed
+   instructions because their protocol differs;
+4. no provider-side context-management policy.
+
+Portable checkpoint output is capped at 20,000 tokens or one quarter of the
+model's configured context window, whichever is smaller. The input fitting
+budget reserves that same amount, and the retained real-user-message budget
+has the same cap. A Chat completion whose finish reason is
+not `stop` cannot replace active history, even if it contains partial text.
+Provider-specific output ceilings are not in the model catalog; a provider
+that rejects this cap fails compaction with the existing active history intact.
 
 Explicit compaction is a new accepted logical turn and therefore composes the
 same deterministic workspace instruction-policy and preference-descriptor
@@ -146,20 +160,27 @@ tool calls/results remain real protocol items on the wire. Chat providers use a
 request-local transcript adapter because Chat Completions has a different item
 protocol. It projects only record types the Chat converter cannot express,
 preserves their readable historical facts, and never mutates canonical history.
+The Chat transcript is text-only: historical image pixels are unavailable to
+that summarizer. Recent user images and references to omitted attachments are
+retained by the replacement-history policy, but their visual meaning is not
+inferred during the checkpoint.
 Historical `tool_search` calls and outputs are not rerun, compared with the
 current catalog, or reclassified. There is no switch-time rewrite and no second
 durable history form.
 
-Before the provider call, OpenGeni estimates the complete checkpoint input. It
+Before the provider call, OpenGeni estimates the history and checkpoint prompt. It
 replaces aggregate oversized tool results oldest-first only in the temporary
 copy, preserving recent detail. If that remains too large, it removes whole
 oldest user-delimited work units and re-sanitizes the suffix so no tool result,
-call, or reasoning fragment is orphaned. The first request is kept beneath the
-effective input ceiling, raw window minus requested summary, and estimator
-headroom. If the provider still reports context overflow, OpenGeni performs one
-half-size refit and one final request. The 50% retry covers the greater-than-2×
-provider/byte-estimator skew measured in the production incident. It never
-issues one failing provider call per history item.
+call, or reasoning fragment is orphaned. The temporary history copy is kept
+beneath the effective input ceiling and raw window minus requested summary.
+For a prepared Responses call, OpenGeni reserves the estimated instruction and
+tool-schema tokens before fitting history. If the provider still reports context
+overflow, it refits history to 40% of the remaining target and sends one final
+request. The provider may still count differently; on another overflow, active
+history stays intact. If only the checkpoint instruction fits, OpenGeni stops
+without asking the model to summarize unseen history. It never issues one
+failing call per history item.
 
 Remote v2 keeps its normal first request unchanged. Only an exact provider
 `context_length_exceeded` code permits one retry to the same remote-compaction
@@ -186,7 +207,8 @@ never installs a manufactured placeholder as conversation truth.
 
 The replacement history is:
 
-1. the newest real user messages that fit one cumulative 20,000-token budget,
+1. the newest real user messages that fit one cumulative budget of at most
+   20,000 tokens (one quarter of the context window on smaller models),
    in chronological order;
 2. one user-role summary item prefixed with Codex's `summary_prefix.md` text and
    marked `opengeni_context_summary: true`.

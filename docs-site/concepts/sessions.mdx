@@ -173,3 +173,16 @@ provider. Turn fallback off to use only your selected provider.
 
 Your recording remains saved while transcription retries. A recovered transcript
 appears as **Insert saved transcript**, so you can review it before sending.
+
+## Fast code search
+
+When your deployment offers it, **Fast code search** in workspace settings gives
+agents a `code_search` tool. The agent asks one question with a few likely
+names and gets back the most relevant source passages with file paths and line
+numbers, instead of running many separate searches and file reads. It is
+fastest and cheapest for questions about a codebase, such as where a setting is
+stored or how a feature works. Choose **On**, **Off**, or **Default** to follow
+your deployment. A new choice applies to sessions created after it, so a
+running session keeps a stable prompt. **Off** also pauses the tool in running
+sessions from their next turn; switching back restores it in sessions that had
+it.

@@ -146,6 +146,13 @@ to another window or screen. `macos_autorelease` exercises the actual helper wit
 Objective-C missing-pool diagnostics enabled; run this ignored test explicitly
 in an unlocked local GUI session.
 
+Native window and screen pointer input uses the exact painted frame's encoded
+dimensions. Continuous capture retains superseded frame metadata for at most
+two seconds, bounded to 32 frames per target and 512 per adapter, so a newer
+capture does not reject a pending viewer click. A latest still screenshot keeps
+its existing authority during agent planning. Input clears retained frames;
+target generation, native identity and current placement checks remain enforced.
+
 On macOS, runner restart waits for the previous launchd label to disappear before
 accepting a replacement. A matching program path on a retiring job is not proof
 that the replacement started.
@@ -724,6 +731,11 @@ machine, and does not prove that earlier operations failed.
 Transfers stage bounded chunks privately, verify the intended BLAKE3 digest and
 byte count, and publish only after the expected destination state is checked.
 Every transfer request is reauthorized against the same physical connection.
+The runner pins each operation to its original nonzero session route epoch;
+different sessions may have different epochs on the same machine. This is not
+the legacy machine hello epoch, which normal enrollment leaves unset. The
+connection-local registry rejects another epoch adopting an operation, and
+connection shutdown is checked again at publication.
 An ambiguous acknowledgment triggers one read-only query of the exact operation,
 never a replay of the edit. A lost operation after agent restart remains unknown;
 inspect the destination before submitting another edit.
