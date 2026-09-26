@@ -27,18 +27,33 @@ const MACHINE_HEARTBEAT_FRESH_MS = 120_000;
 export const WORKSPACE_INSIGHTS_PROVIDER_FILTER_MAX_UTF8_BYTES = 256;
 export const WORKSPACE_INSIGHTS_MODEL_FILTER_MAX_UTF8_BYTES = 512;
 
-export type WorkspaceInsightsFilterField = "provider" | "model";
+export type WorkspaceInsightsFilterField = "provider" | "model" | "rootSessionId" | "sessionId";
 
 export class WorkspaceInsightsFilterValidationError extends Error {
   readonly field: WorkspaceInsightsFilterField;
   readonly maxUtf8Bytes: number;
 
-  constructor(field: WorkspaceInsightsFilterField, maxUtf8Bytes: number) {
-    super(`${field} must be at most ${maxUtf8Bytes} UTF-8 bytes`);
+  constructor(field: WorkspaceInsightsFilterField, maxUtf8Bytes: number, message?: string) {
+    super(message ?? `${field} must be at most ${maxUtf8Bytes} UTF-8 bytes`);
     this.name = "WorkspaceInsightsFilterValidationError";
     this.field = field;
     this.maxUtf8Bytes = maxUtf8Bytes;
   }
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Normalize a session drilldown scope; only exact UUIDs are accepted. */
+export function normalizeWorkspaceInsightsSessionScope(
+  value: string | null | undefined,
+  field: "rootSessionId" | "sessionId",
+): string | null {
+  const normalized = value?.trim() || null;
+  if (normalized === null || normalized === "all") return null;
+  if (!UUID_PATTERN.test(normalized)) {
+    throw new WorkspaceInsightsFilterValidationError(field, 36, `${field} must be a UUID`);
+  }
+  return normalized.toLowerCase();
 }
 
 /** Normalize the public filter sentinel and enforce the database authority envelope. */
@@ -63,6 +78,8 @@ export type GetWorkspaceInsightsInput = {
   range: InsightsRange;
   provider?: string | null;
   model?: string | null;
+  rootSessionId?: string | null;
+  sessionId?: string | null;
   now?: Date;
 };
 
@@ -70,8 +87,8 @@ function microsToUsd(micros: number): number {
   return micros / 1_000_000;
 }
 
-function cacheHitPct(cached: number, input: number): number {
-  if (input <= 0) return 0;
+function cacheHitPct(cached: number, input: number): number | null {
+  if (input <= 0) return null;
   return Math.min(100, Math.max(0, Math.round((cached / input) * 100)));
 }
 
@@ -209,6 +226,23 @@ export function insightsSessionLabel(input: {
   return `${(input.depth ?? 0) > 0 ? "Agent" : "Session"} ${input.id.slice(0, 8)}`;
 }
 
+export function insightsProjectLabel(input: {
+  kind: "project" | "other" | "unfiled" | "unavailable";
+  name: string | null;
+  projects: number;
+}): string {
+  switch (input.kind) {
+    case "project":
+      return input.name?.trim() || "Untitled project";
+    case "other":
+      return `${input.projects.toLocaleString("en-US")} other ${input.projects === 1 ? "project" : "projects"}`;
+    case "unfiled":
+      return "No project";
+    case "unavailable":
+      return "Root session not visible";
+  }
+}
+
 export async function getWorkspaceInsights(
   db: Database,
   settings: Settings,
@@ -217,13 +251,19 @@ export async function getWorkspaceInsights(
 ): Promise<WorkspaceInsightsResponse> {
   const provider = normalizeWorkspaceInsightsFilter(input.provider, "provider");
   const model = normalizeWorkspaceInsightsFilter(input.model, "model");
+  const rootSessionId = normalizeWorkspaceInsightsSessionScope(
+    input.rootSessionId,
+    "rootSessionId",
+  );
+  const sessionId = normalizeWorkspaceInsightsSessionScope(input.sessionId, "sessionId");
   await measureInsightsPhase(observePhase, "require_workspace", () =>
     requireWorkspace(db, input.workspaceId),
   );
   const now = input.now ?? new Date();
   const window = resolveRangeWindow(input.range, now);
   const modelFilterActive = Boolean(provider || model);
-  const filter = { provider, model };
+  const scopeActive = Boolean(rootSessionId || sessionId);
+  const filter = { provider, model, rootSessionId, sessionId };
 
   const [modelBundle, usageBundle, liveWarm, tasks, depth, floorRows, machinesOnline] =
     await Promise.all([
@@ -275,10 +315,16 @@ export async function getWorkspaceInsights(
     factBuckets: factDays,
     rootDrivers,
     priorRootDrivers,
+    projects,
     scheduleFacts,
     facets,
     recentCalls,
     promptContributions,
+    dataThrough,
+    driverGroups,
+    driversTruncated,
+    facetsTruncated,
+    recentCallsTruncated,
   } = modelBundle;
   const {
     workspaceCreditMicros,
@@ -369,6 +415,8 @@ export async function getWorkspaceInsights(
     0,
   );
   const modelCalls = modelRows.reduce((sum, row) => sum + row.calls, 0);
+  const cachedTokens = modelRows.reduce((sum, row) => sum + row.cachedTokens, 0);
+  const cacheInputTokens = modelRows.reduce((sum, row) => sum + row.cacheInputTokens, 0);
   const priorInputTokens = priorModelRows.reduce((sum, row) => sum + row.inputTokens, 0);
   const priorTotalTokens = priorModelRows.reduce((sum, row) => sum + row.totalTokens, 0);
   const priorCachedTokens = priorModelRows.reduce((sum, row) => sum + row.cachedTokens, 0);
@@ -397,9 +445,10 @@ export async function getWorkspaceInsights(
       cacheKnownCalls: 0,
       calls: 0,
     };
-    const modelCostMicros = modelFilterActive
-      ? facts.costMicros
-      : (usageBuckets.get(bucket)?.costMicros ?? facts.costMicros);
+    const modelCostMicros =
+      modelFilterActive || scopeActive
+        ? facts.costMicros
+        : (usageBuckets.get(bucket)?.costMicros ?? facts.costMicros);
     return {
       label: input.range === "today" ? bucket.slice(11) : bucket.slice(5),
       modelCostUsd: microsToUsd(modelCostMicros),
@@ -451,6 +500,20 @@ export async function getWorkspaceInsights(
       deltaUsdVsPrior: creditUsd - priorUsd,
     };
   });
+
+  const projectRows = projects.map((row) => ({
+    id: row.kind === "project" && row.channelId ? `project:${row.channelId}` : row.kind,
+    kind: row.kind,
+    label: insightsProjectLabel(row),
+    projects: row.projects,
+    rootSessions: row.rootSessions,
+    calls: row.calls,
+    creditUsd: microsToUsd(row.pricedCostMicros),
+    estimatedProviderUsd: microsToUsd(row.estimatedProviderCostMicros),
+    estimatedProviderCostKnownCalls: row.estimatedProviderCostKnownCalls,
+    tokens: row.totalTokens,
+    cacheHitPct: cacheHitPct(row.cachedTokens, row.cacheInputTokens),
+  }));
 
   const scheduleFactById = new Map(scheduleFacts.map((row) => [row.scheduledTaskId, row] as const));
   const schedules = tasks.map((task) => {
@@ -512,6 +575,7 @@ export async function getWorkspaceInsights(
       sessions: bucket.sessions,
     })),
     drivers,
+    projects: projectRows,
     schedules,
     recentCalls: recentCalls.map((row) => ({
       id: row.id,
@@ -601,7 +665,14 @@ export async function getWorkspaceInsights(
     billableTokenCap: limits.maxMonthlyTokensPerWorkspace ?? null,
     agentRunsUsed,
     agentRunCap: limits.maxMonthlyAgentRunsPerWorkspace ?? null,
-    modelFilterActive,
+    modelFilterActive: modelFilterActive || scopeActive,
+    dataThrough: dataThrough?.toISOString() ?? null,
+    cacheHitPct: cacheHitPct(cachedTokens, cacheInputTokens),
+    scope: { rootSessionId, sessionId },
+    driverGroups,
+    driversTruncated,
+    facetsTruncated,
+    recentCallsTruncated,
   });
 
   return { snapshot };

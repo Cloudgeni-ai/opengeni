@@ -497,6 +497,11 @@ const effectiveBudgets = {
     // 2,442,346 raw / 689,953 gzip across 34 files in Linux/x64 browser CI.
     // Keep the existing headroom policy; compressed and unrelated caps stay fixed.
     wholeKibEnvelope(2_442_346, 1.5 * kib),
+    // The organization model-usage client method and Insights session-scope
+    // parameters live on the shared SDK client: 2,447,541 raw / 691,288 gzip
+    // across 33 files in a clean Linux/x64 build. Both dashboards stay lazy;
+    // gzip, file-count, and every other cap are unchanged.
+    wholeKibEnvelope(2_447_541, 1.5 * kib),
     wholeKibEnvelope(2_354_899),
     wholeKibEnvelope(2_326_478),
     wholeKibEnvelope(2_333_912),

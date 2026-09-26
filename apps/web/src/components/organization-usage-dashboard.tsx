@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { useAppContext } from "@/context";
 import { LoadErrorState } from "@/components/common";
 import { AreaChart } from "@/components/insights/charts";
+import { OrganizationModelUsagePanel } from "@/components/organization-model-usage";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { usageMetricLabel, usageUnitLabel } from "@/lib/usage-metric";
@@ -303,6 +304,18 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
           )}
         </>
       )}
+      {props.enabled ? (
+        <OrganizationModelUsagePanel
+          accountId={props.accountId}
+          period={period}
+          revision={revision}
+          ledgerCreditMicros={
+            data?.totals.find(
+              (total) => total.eventType === "model.cost" && total.unit === "usd_micros",
+            )?.quantity
+          }
+        />
+      ) : null}
     </section>
   );
 }

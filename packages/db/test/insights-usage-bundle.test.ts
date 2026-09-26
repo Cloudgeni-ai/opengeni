@@ -31,8 +31,26 @@ setDefaultTimeout(120_000);
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
+async function acquireDatabase(): Promise<SharedTestDatabase | null> {
+  const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_TEST_POSTGRES_APP_URL;
+  if (!adminUrl && !appUrl) return await acquireSharedTestDatabase("insights-usage-bundle");
+  if (!adminUrl || !appUrl) {
+    throw new Error(
+      "OPENGENI_TEST_POSTGRES_ADMIN_URL and OPENGENI_TEST_POSTGRES_APP_URL must be set together",
+    );
+  }
+  const admin = postgres(adminUrl, { max: 4 });
+  return {
+    admin,
+    adminUrl,
+    appUrl,
+    release: async () => await admin.end().catch(() => undefined),
+  };
+}
+
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("insights-usage-bundle");
+  shared = await acquireDatabase();
   if (!shared) return;
   client = createDb(shared.appUrl, { max: 8 });
 }, 180_000);
@@ -274,11 +292,12 @@ function instrumentedDb(statements: string[]): { db: Database; close: () => Prom
 }
 
 describe("Workspace Insights usage bundle", () => {
-  test("materializes only the reused current window", async () => {
+  test("aggregates the current window in one grouping-sets pass without materializing it", async () => {
     const source = await Bun.file(
       new URL("../src/insights-usage-bundle.ts", import.meta.url),
     ).text();
-    expect(source).toContain("current_visible as materialized");
+    expect(source).not.toContain("as materialized");
+    expect(source.match(/group by grouping sets/g)).toHaveLength(1);
     expect(source).not.toContain("prior_visible");
     expect(source).not.toContain("month_visible");
   });

@@ -2300,6 +2300,15 @@ describe("OpenGeniClient billing", () => {
     expect(new URL(requests[1]!.url).pathname).toBe("/v1/billing/usage-workspaces");
     expect(new URL(requests[1]!.url).searchParams.get("afterWorkspaceId")).toBe(WORKSPACE_ID);
     expect(new URL(requests[1]!.url).searchParams.get("until")).toBe(response.until);
+    await client.getOrganizationModelUsage({
+      accountId: "acc-1",
+      period: "week",
+      afterWorkspaceId: WORKSPACE_ID,
+    });
+    expect(requests).toHaveLength(3);
+    expect(new URL(requests[2]!.url).pathname).toBe("/v1/billing/usage-models");
+    expect(new URL(requests[2]!.url).searchParams.get("period")).toBe("week");
+    expect(new URL(requests[2]!.url).searchParams.get("afterWorkspaceId")).toBe(WORKSPACE_ID);
   });
 
   test("billing reads pass account/workspace selectors as query params", async () => {

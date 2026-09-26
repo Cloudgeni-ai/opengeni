@@ -337,6 +337,8 @@ const workspaceMachinesRoute = createRoute({
 const workspaceInsightsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "insights",
+  // The lazy Insights chunk owns parsing so the shell graph stays unchanged.
+  validateSearch: (search: Record<string, unknown>): Record<string, unknown> => search,
   component: Insights,
 });
 const workspacePriorityRoute = createRoute({
@@ -677,7 +679,15 @@ function Machines() {
 
 function Insights() {
   const { workspaceId } = workspaceInsightsRoute.useParams();
-  return <LazyInsightsRoute workspaceId={workspaceId} />;
+  const search = workspaceInsightsRoute.useSearch();
+  const navigate = workspaceInsightsRoute.useNavigate();
+  return (
+    <LazyInsightsRoute
+      workspaceId={workspaceId}
+      search={search}
+      onSearchChange={(next) => void navigate({ search: next, replace: true })}
+    />
+  );
 }
 
 function Priority() {

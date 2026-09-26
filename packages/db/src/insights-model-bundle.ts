@@ -21,14 +21,47 @@ export type WorkspaceInsightsModelBundleInput = {
   granularity: "day" | "hour";
   provider?: string | null;
   model?: string | null;
+  rootSessionId?: string | null;
+  sessionId?: string | null;
 };
 
+export const INSIGHTS_ROOT_DRIVER_LIMIT = 8;
+/** Projects listed by name; the rest fold into one exact `other` row. */
+export const INSIGHTS_PROJECT_LIMIT = 24;
+
+export type InsightsProjectAggregateRow = {
+  kind: "project" | "other" | "unfiled" | "unavailable";
+  channelId: string | null;
+  name: string | null;
+  /** Projects folded into this row: 1 for a named project, N for `other`. */
+  projects: number;
+  rootSessions: number;
+  calls: number;
+  totalTokens: number;
+  cachedTokens: number;
+  cacheInputTokens: number;
+  pricedCostMicros: number;
+  estimatedProviderCostMicros: number;
+  estimatedProviderCostKnownCalls: number;
+};
+export const INSIGHTS_FACET_LIMIT = 500;
+export const INSIGHTS_RECENT_CALL_LIMIT = 50;
+
 export type WorkspaceInsightsModelBundle = {
+  /** Newest `recorded_at` among visible facts in the unfiltered current window. */
+  dataThrough: Date | null;
+  /** Distinct root-session groups before the driver limit is applied. */
+  driverGroups: number;
+  driversTruncated: boolean;
+  facetsTruncated: boolean;
+  recentCallsTruncated: boolean;
   modelRows: ModelCallFactAggregateRow[];
   priorModelRows: ModelCallFactAggregateRow[];
   factBuckets: Map<string, ModelCallFactSeriesAggregate>;
   rootDrivers: RootSessionDriverRow[];
   priorRootDrivers: RootSessionDriverRow[];
+  /** Every root group in the window, grouped by project; sums to the totals. */
+  projects: InsightsProjectAggregateRow[];
   scheduleFacts: ScheduleFactAggregate[];
   facets: ModelCallFacetRow[];
   recentCalls: RecentModelCallRow[];
@@ -136,6 +169,14 @@ function mapRootRows(value: unknown, label: string): RootSessionDriverRow[] {
   }));
 }
 
+function projectKind(row: JsonRecord): InsightsProjectAggregateRow["kind"] {
+  const kind = stringValue(row, "kind");
+  if (kind === "project" || kind === "other" || kind === "unfiled" || kind === "unavailable") {
+    return kind;
+  }
+  throw new Error(`Insights model bundle project kind ${kind} is unknown`);
+}
+
 function mapBundle(value: unknown): WorkspaceInsightsModelBundle {
   const payload = record(value, "payload");
   const bucketRows = records(payload.factBuckets, "factBuckets");
@@ -148,6 +189,14 @@ function mapBundle(value: unknown): WorkspaceInsightsModelBundle {
     calls: numberValue(row, "calls"),
   }));
   return {
+    dataThrough:
+      payload.dataThrough === null || payload.dataThrough === undefined
+        ? null
+        : dateValue(payload, "dataThrough"),
+    driverGroups: numberValue(payload, "driverGroups"),
+    driversTruncated: payload.driversTruncated === true,
+    facetsTruncated: payload.facetsTruncated === true,
+    recentCallsTruncated: payload.recentCallsTruncated === true,
     modelRows: mapModelRows(payload.modelRows, "modelRows"),
     priorModelRows: mapModelRows(payload.priorModelRows, "priorModelRows"),
     factBuckets: new Map(
@@ -174,6 +223,20 @@ function mapBundle(value: unknown): WorkspaceInsightsModelBundle {
     ),
     rootDrivers: mapRootRows(payload.rootDrivers, "rootDrivers"),
     priorRootDrivers: mapRootRows(payload.priorRootDrivers, "priorRootDrivers"),
+    projects: records(payload.projects, "projects").map((row) => ({
+      kind: projectKind(row),
+      channelId: nullableString(row, "channelId"),
+      name: nullableString(row, "name"),
+      projects: numberValue(row, "projects"),
+      rootSessions: numberValue(row, "rootSessions"),
+      calls: numberValue(row, "calls"),
+      totalTokens: numberValue(row, "totalTokens"),
+      cachedTokens: numberValue(row, "cachedTokens"),
+      cacheInputTokens: numberValue(row, "cacheInputTokens"),
+      pricedCostMicros: numberValue(row, "pricedCostMicros"),
+      estimatedProviderCostMicros: numberValue(row, "estimatedProviderCostMicros"),
+      estimatedProviderCostKnownCalls: numberValue(row, "estimatedProviderCostKnownCalls"),
+    })),
     scheduleFacts: records(payload.scheduleFacts, "scheduleFacts").map((row) => ({
       scheduledTaskId: stringValue(row, "scheduledTaskId"),
       pricedCostMicros: numberValue(row, "pricedCostMicros"),
@@ -225,299 +288,127 @@ function mapBundle(value: unknown): WorkspaceInsightsModelBundle {
 }
 
 /**
- * One bounded model-fact query for the Workspace Insights response. The two
- * narrow materialized inputs are the exact filtered current/prior UTC windows.
- * A filtered request adds one unfiltered current-window read because facets are
- * deliberately workspace-wide; an unfiltered request reuses current_visible.
+ * One bounded model-fact query for the Workspace Insights response. Each UTC
+ * window is read once through the narrow scoped projection (migration 0521) and
+ * aggregated in one grouping-sets pass. A filtered or session-scoped request adds
+ * one unfiltered current-window read because facets and the freshness watermark
+ * are deliberately workspace-wide; an unfiltered request reuses current_visible.
+ * Every bounded list reads one row past its limit so truncation is reported
+ * rather than silent.
  */
 export async function readWorkspaceInsightsModelBundle(
   db: Database,
   input: WorkspaceInsightsModelBundleInput,
 ): Promise<WorkspaceInsightsModelBundle> {
   const context = await rlsContextForWorkspace(db, input.workspaceId);
-  const bucket =
+  // Group on the truncated timestamp; format only the grouped buckets.
+  const unit = input.granularity === "hour" ? sql`'hour'` : sql`'day'`;
+  const bucket = sql`date_trunc(${unit}, fact.occurred_at at time zone 'UTC')`;
+  const bucketLabel =
     input.granularity === "hour"
-      ? sql`to_char(date_trunc('hour', fact.occurred_at at time zone 'UTC'), 'YYYY-MM-DD"T"HH24:00')`
-      : sql`to_char(date_trunc('day', fact.occurred_at at time zone 'UTC'), 'YYYY-MM-DD')`;
-  const facetSource =
-    input.provider != null || input.model != null
-      ? sql`opengeni_private.visible_workspace_insights_model_call_facts(
-          ${input.workspaceId},
-          ${input.since.toISOString()}::timestamp with time zone,
-          ${input.until.toISOString()}::timestamp with time zone,
-          null::text,
-          null::text
-        ) fact`
-      : sql`current_visible fact`;
+      ? sql`to_char(bucket, 'YYYY-MM-DD"T"HH24:00')`
+      : sql`to_char(bucket, 'YYYY-MM-DD')`;
+  const provider = input.provider ?? null;
+  const model = input.model ?? null;
+  const rootSessionId = input.rootSessionId ?? null;
+  const sessionId = input.sessionId ?? null;
+  const narrowed = provider != null || model != null || rootSessionId != null || sessionId != null;
+  const factRows = (since: Date, until: Date, scoped: boolean) => sql`
+    opengeni_private.visible_workspace_insights_model_fact_rows(
+      ${input.workspaceId}::uuid,
+      ${since.toISOString()}::timestamp with time zone,
+      ${until.toISOString()}::timestamp with time zone,
+      ${scoped ? provider : null}::text,
+      ${scoped ? model : null}::text,
+      ${scoped ? rootSessionId : null}::uuid,
+      ${scoped ? sessionId : null}::uuid
+    )`;
+  // Facets and freshness are workspace-wide. Unnarrowed, the grouped pass already
+  // holds every (provider, model) and the newest recorded_at; narrowed, they need
+  // one unscoped read of the same window.
+  const workspaceCurrentSource = narrowed
+    ? sql`select fact.provider, fact.model, max(fact.recorded_at) as recorded_at
+        from ${factRows(input.since, input.until, false)} fact
+        group by fact.provider, fact.model`
+    : sql`select provider, model, max(data_through) as recorded_at
+        from current_grouped
+        where by_model
+        group by provider, model`;
+  const sums = sql`
+          coalesce(sum(fact.input_tokens), 0)::bigint as input_tokens,
+          coalesce(sum(fact.output_tokens), 0)::bigint as output_tokens,
+          coalesce(sum(fact.cached_tokens), 0)::bigint as cached_tokens,
+          coalesce(sum(fact.input_tokens) filter (
+            where fact.cached_tokens is not null and fact.input_tokens is not null
+          ), 0)::bigint as cache_input_tokens,
+          coalesce(sum(fact.cache_write_tokens), 0)::bigint as cache_write_tokens,
+          coalesce(sum(fact.reasoning_tokens), 0)::bigint as reasoning_tokens,
+          coalesce(sum(fact.total_tokens), 0)::bigint as total_tokens,
+          count(fact.total_tokens)::bigint as token_known_calls,
+          count(*) filter (
+            where fact.cached_tokens is not null and fact.input_tokens is not null
+          )::bigint as cache_known_calls,
+          coalesce(sum(fact.priced_cost_micros) filter (
+            where fact.billing_path = 'opengeni_credits'
+          ), 0)::bigint as priced_cost_micros,
+          coalesce(sum(fact.estimated_provider_cost_micros), 0)::bigint
+            as estimated_provider_cost_micros,
+          count(fact.estimated_provider_cost_micros)::bigint
+            as estimated_provider_cost_known_calls,
+          coalesce(sum(fact.equivalent_credit_cost_micros), 0)::bigint
+            as equivalent_credit_cost_micros,
+          count(fact.equivalent_credit_cost_micros)::bigint
+            as equivalent_credit_cost_known_calls,
+          count(*)::bigint as calls,
+          count(fact.context_contributions)::bigint as covered_calls,
+          max(fact.recorded_at) as data_through`;
+  const modelRowJson = sql`jsonb_build_object(
+            'provider', provider,
+            'model', model,
+            'billingPath', billing_path,
+            'calls', calls,
+            'inputTokens', input_tokens,
+            'outputTokens', output_tokens,
+            'cachedTokens', cached_tokens,
+            'cacheInputTokens', cache_input_tokens,
+            'cacheWriteTokens', cache_write_tokens,
+            'reasoningTokens', reasoning_tokens,
+            'totalTokens', total_tokens,
+            'tokenKnownCalls', token_known_calls,
+            'cacheKnownCalls', cache_known_calls,
+            'pricedCostMicros', priced_cost_micros,
+            'estimatedProviderCostMicros', estimated_provider_cost_micros,
+            'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls,
+            'equivalentCreditCostMicros', equivalent_credit_cost_micros,
+            'equivalentCreditCostKnownCalls', equivalent_credit_cost_known_calls
+          )`;
+  const rootRowJson = sql`jsonb_build_object(
+            'rootSessionId', root_session_id,
+            'title', title,
+            'pricedCostMicros', priced_cost_micros,
+            'estimatedProviderCostMicros', estimated_provider_cost_micros,
+            'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls,
+            'equivalentCreditCostMicros', equivalent_credit_cost_micros,
+            'equivalentCreditCostKnownCalls', equivalent_credit_cost_known_calls,
+            'totalTokens', total_tokens,
+            'cachedTokens', cached_tokens,
+            'cacheInputTokens', cache_input_tokens
+          )`;
   return await withRlsContext(db, context, async (scopedDb) => {
+    // The grouping-sets passes hash a few thousand groups over up to ~1.5M rows;
+    // the default 4MB budget makes the planner spill one set through a disk sort.
+    await scopedDb.execute(sql`select set_config('work_mem', '64MB', true)`);
     const [row] = await scopedDb.execute<RawBundleRow>(sql`
       with current_visible as materialized (
-        select
-          fact.id,
-          fact.workspace_id,
-          fact.session_id,
-          fact.turn_id,
-          fact.provider,
-          fact.provider_api,
-          fact.model,
-          fact.billing_path,
-          fact.scheduled_task_id,
-          fact.input_tokens,
-          fact.output_tokens,
-          fact.cached_tokens,
-          fact.cache_write_tokens,
-          fact.reasoning_tokens,
-          fact.total_tokens,
-          fact.priced_cost_micros,
-          fact.estimated_provider_cost_micros,
-          fact.equivalent_credit_cost_micros,
-          fact.pricing_source,
-          fact.context_contributions,
-          fact.occurred_at,
-          fact.recorded_at
-        from opengeni_private.visible_workspace_insights_model_call_facts(
-          ${input.workspaceId},
-          ${input.since.toISOString()}::timestamp with time zone,
-          ${input.until.toISOString()}::timestamp with time zone,
-          ${input.provider ?? null}::text,
-          ${input.model ?? null}::text
-        ) fact
+        select fact.*, ${bucket} as bucket
+        from ${factRows(input.since, input.until, true)} fact
       ), prior_visible as materialized (
         select
-          fact.workspace_id,
-          fact.session_id,
+          fact.root_session_id,
           fact.provider,
           fact.model,
           fact.billing_path,
-          fact.input_tokens,
-          fact.output_tokens,
-          fact.cached_tokens,
-          fact.cache_write_tokens,
-          fact.reasoning_tokens,
-          fact.total_tokens,
-          fact.priced_cost_micros,
-          fact.estimated_provider_cost_micros,
-          fact.equivalent_credit_cost_micros
-        from opengeni_private.visible_workspace_insights_model_call_facts(
-          ${input.workspaceId},
-          ${input.priorSince.toISOString()}::timestamp with time zone,
-          ${input.priorUntil.toISOString()}::timestamp with time zone,
-          ${input.provider ?? null}::text,
-          ${input.model ?? null}::text
-        ) fact
-      ), selected_session_refs as (
-        select fact.workspace_id, fact.session_id
-        from current_visible fact
-        union
-        select fact.workspace_id, fact.session_id
-        from prior_visible fact
-      ), selected_sessions as materialized (
-        select
-          child.workspace_id,
-          child.id as session_id,
-          child.root_session_id,
-          child.title as session_title,
-          child.nested_agent_depth as session_depth,
-          root.title as root_title
-        from selected_session_refs fact_reference
-        inner join sessions child
-          on child.workspace_id = fact_reference.workspace_id
-          and child.id = fact_reference.session_id
-        left join sessions root
-          on root.workspace_id = child.workspace_id
-          and root.id = child.root_session_id
-      ), current_model_rows as (
-        select
-          fact.provider,
-          fact.model,
-          fact.billing_path,
-          count(*)::bigint as calls,
-          coalesce(sum(fact.input_tokens), 0)::bigint as input_tokens,
-          coalesce(sum(fact.output_tokens), 0)::bigint as output_tokens,
-          coalesce(sum(fact.cached_tokens), 0)::bigint as cached_tokens,
-          coalesce(sum(fact.input_tokens) filter (
-            where fact.cached_tokens is not null and fact.input_tokens is not null
-          ), 0)::bigint as cache_input_tokens,
-          coalesce(sum(fact.cache_write_tokens), 0)::bigint as cache_write_tokens,
-          coalesce(sum(fact.reasoning_tokens), 0)::bigint as reasoning_tokens,
-          coalesce(sum(fact.total_tokens), 0)::bigint as total_tokens,
-          count(fact.total_tokens)::bigint as token_known_calls,
-          count(*) filter (
-            where fact.cached_tokens is not null and fact.input_tokens is not null
-          )::bigint as cache_known_calls,
-          coalesce(sum(fact.priced_cost_micros) filter (
-            where fact.billing_path = 'opengeni_credits'
-          ), 0)::bigint as priced_cost_micros,
-          coalesce(sum(fact.estimated_provider_cost_micros), 0)::bigint
-            as estimated_provider_cost_micros,
-          count(fact.estimated_provider_cost_micros)::bigint
-            as estimated_provider_cost_known_calls,
-          coalesce(sum(fact.equivalent_credit_cost_micros), 0)::bigint
-            as equivalent_credit_cost_micros,
-          count(fact.equivalent_credit_cost_micros)::bigint
-            as equivalent_credit_cost_known_calls
-        from current_visible fact
-        group by fact.provider, fact.model, fact.billing_path
-      ), prior_model_rows as (
-        select
-          fact.provider,
-          fact.model,
-          fact.billing_path,
-          count(*)::bigint as calls,
-          coalesce(sum(fact.input_tokens), 0)::bigint as input_tokens,
-          coalesce(sum(fact.output_tokens), 0)::bigint as output_tokens,
-          coalesce(sum(fact.cached_tokens), 0)::bigint as cached_tokens,
-          coalesce(sum(fact.input_tokens) filter (
-            where fact.cached_tokens is not null and fact.input_tokens is not null
-          ), 0)::bigint as cache_input_tokens,
-          coalesce(sum(fact.cache_write_tokens), 0)::bigint as cache_write_tokens,
-          coalesce(sum(fact.reasoning_tokens), 0)::bigint as reasoning_tokens,
-          coalesce(sum(fact.total_tokens), 0)::bigint as total_tokens,
-          count(fact.total_tokens)::bigint as token_known_calls,
-          count(*) filter (
-            where fact.cached_tokens is not null and fact.input_tokens is not null
-          )::bigint as cache_known_calls,
-          coalesce(sum(fact.priced_cost_micros) filter (
-            where fact.billing_path = 'opengeni_credits'
-          ), 0)::bigint as priced_cost_micros,
-          coalesce(sum(fact.estimated_provider_cost_micros), 0)::bigint
-            as estimated_provider_cost_micros,
-          count(fact.estimated_provider_cost_micros)::bigint
-            as estimated_provider_cost_known_calls,
-          coalesce(sum(fact.equivalent_credit_cost_micros), 0)::bigint
-            as equivalent_credit_cost_micros,
-          count(fact.equivalent_credit_cost_micros)::bigint
-            as equivalent_credit_cost_known_calls
-        from prior_visible fact
-        group by fact.provider, fact.model, fact.billing_path
-      ), current_series_rows as (
-        select
-          ${bucket} as bucket,
-          coalesce(sum(fact.priced_cost_micros) filter (
-            where fact.billing_path = 'opengeni_credits'
-          ), 0)::bigint as cost_micros,
-          coalesce(sum(fact.estimated_provider_cost_micros), 0)::bigint
-            as estimated_provider_cost_micros,
-          count(fact.estimated_provider_cost_micros)::bigint
-            as estimated_provider_cost_known_calls,
-          coalesce(sum(fact.equivalent_credit_cost_micros), 0)::bigint
-            as equivalent_credit_cost_micros,
-          count(fact.equivalent_credit_cost_micros)::bigint
-            as equivalent_credit_cost_known_calls,
-          coalesce(sum(fact.input_tokens), 0)::bigint as input_tokens,
-          coalesce(sum(fact.output_tokens), 0)::bigint as output_tokens,
-          coalesce(sum(fact.cached_tokens), 0)::bigint as cached_tokens,
-          coalesce(sum(fact.input_tokens) filter (
-            where fact.cached_tokens is not null and fact.input_tokens is not null
-          ), 0)::bigint as cache_input_tokens,
-          coalesce(sum(fact.cache_write_tokens), 0)::bigint as cache_write_tokens,
-          coalesce(sum(fact.reasoning_tokens), 0)::bigint as reasoning_tokens,
-          coalesce(sum(fact.total_tokens), 0)::bigint as total_tokens,
-          count(fact.total_tokens)::bigint as token_known_calls,
-          count(*) filter (
-            where fact.cached_tokens is not null and fact.input_tokens is not null
-          )::bigint as cache_known_calls,
-          count(*)::bigint as calls
-        from current_visible fact
-        group by ${bucket}
-      ), current_root_aggregates as (
-        select
-          session.root_session_id,
-          session.root_title as title,
-          coalesce(sum(fact.priced_cost_micros) filter (
-            where fact.billing_path = 'opengeni_credits'
-          ), 0)::bigint as priced_cost_micros,
-          coalesce(sum(fact.estimated_provider_cost_micros), 0)::bigint
-            as estimated_provider_cost_micros,
-          count(fact.estimated_provider_cost_micros)::bigint
-            as estimated_provider_cost_known_calls,
-          coalesce(sum(fact.equivalent_credit_cost_micros), 0)::bigint
-            as equivalent_credit_cost_micros,
-          count(fact.equivalent_credit_cost_micros)::bigint
-            as equivalent_credit_cost_known_calls,
-          coalesce(sum(fact.total_tokens), 0)::bigint as total_tokens,
-          coalesce(sum(fact.cached_tokens), 0)::bigint as cached_tokens,
-          coalesce(sum(fact.input_tokens) filter (
-            where fact.cached_tokens is not null and fact.input_tokens is not null
-          ), 0)::bigint as cache_input_tokens
-        from current_visible fact
-        inner join selected_sessions session
-          on session.workspace_id = fact.workspace_id and session.session_id = fact.session_id
-        group by session.root_session_id, session.root_title
-      ), current_root_rows as materialized (
-        select *
-        from current_root_aggregates
-        order by total_tokens desc
-        limit 8
-      ), prior_root_rows as (
-        select
-          session.root_session_id,
-          session.root_title as title,
-          coalesce(sum(fact.priced_cost_micros) filter (
-            where fact.billing_path = 'opengeni_credits'
-          ), 0)::bigint as priced_cost_micros,
-          coalesce(sum(fact.estimated_provider_cost_micros), 0)::bigint
-            as estimated_provider_cost_micros,
-          count(fact.estimated_provider_cost_micros)::bigint
-            as estimated_provider_cost_known_calls,
-          coalesce(sum(fact.equivalent_credit_cost_micros), 0)::bigint
-            as equivalent_credit_cost_micros,
-          count(fact.equivalent_credit_cost_micros)::bigint
-            as equivalent_credit_cost_known_calls,
-          coalesce(sum(fact.total_tokens), 0)::bigint as total_tokens,
-          coalesce(sum(fact.cached_tokens), 0)::bigint as cached_tokens,
-          coalesce(sum(fact.input_tokens) filter (
-            where fact.cached_tokens is not null and fact.input_tokens is not null
-          ), 0)::bigint as cache_input_tokens
-        from prior_visible fact
-        inner join selected_sessions session
-          on session.workspace_id = fact.workspace_id and session.session_id = fact.session_id
-        inner join current_root_rows selected_root
-          on selected_root.root_session_id = session.root_session_id
-        group by session.root_session_id, session.root_title
-      ), schedule_rows as (
-        select
           fact.scheduled_task_id,
-          coalesce(sum(fact.priced_cost_micros) filter (
-            where fact.billing_path = 'opengeni_credits'
-          ), 0)::bigint as priced_cost_micros,
-          coalesce(sum(fact.estimated_provider_cost_micros), 0)::bigint
-            as estimated_provider_cost_micros,
-          count(fact.estimated_provider_cost_micros)::bigint
-            as estimated_provider_cost_known_calls,
-          coalesce(sum(fact.equivalent_credit_cost_micros), 0)::bigint
-            as equivalent_credit_cost_micros,
-          count(fact.equivalent_credit_cost_micros)::bigint
-            as equivalent_credit_cost_known_calls,
-          coalesce(sum(fact.total_tokens), 0)::bigint as total_tokens,
-          coalesce(sum(fact.cached_tokens), 0)::bigint as cached_tokens,
-          coalesce(sum(fact.input_tokens) filter (
-            where fact.cached_tokens is not null and fact.input_tokens is not null
-          ), 0)::bigint as cache_input_tokens,
-          count(*)::bigint as calls,
-          case when bool_or(fact.billing_path = 'opengeni_credits')
-            then 'opengeni_credits' else 'external' end as billing_path
-        from current_visible fact
-        where fact.scheduled_task_id is not null
-        group by fact.scheduled_task_id
-      ), facet_rows as (
-        select distinct fact.provider, fact.model
-        from ${facetSource}
-        order by fact.provider, fact.model
-        limit 500
-      ), recent_rows as (
-        select
-          fact.id,
-          fact.occurred_at,
-          fact.recorded_at,
-          fact.session_id,
-          session.session_title,
-          session.session_depth,
-          fact.turn_id,
-          fact.provider,
-          fact.provider_api,
-          fact.model,
-          fact.billing_path,
           fact.input_tokens,
           fact.output_tokens,
           fact.cached_tokens,
@@ -527,17 +418,165 @@ export async function readWorkspaceInsightsModelBundle(
           fact.priced_cost_micros,
           fact.estimated_provider_cost_micros,
           fact.equivalent_credit_cost_micros,
-          fact.pricing_source
+          null::jsonb as context_contributions,
+          fact.recorded_at
+        from ${factRows(input.priorSince, input.priorUntil, true)} fact
+      ), current_grouped as materialized (
+        select
+          grouping(fact.provider, fact.model, fact.billing_path) = 0 as by_model,
+          grouping(fact.bucket) = 0 as by_bucket,
+          grouping(fact.root_session_id) = 0 as by_root,
+          grouping(fact.scheduled_task_id) = 0 as by_schedule,
+          fact.provider,
+          fact.model,
+          fact.billing_path,
+          fact.bucket,
+          fact.root_session_id,
+          fact.scheduled_task_id,
+          ${sums},
+          case when bool_or(fact.billing_path = 'opengeni_credits')
+            then 'opengeni_credits' else 'external' end as schedule_billing_path
         from current_visible fact
-        left join selected_sessions session
-          on session.workspace_id = fact.workspace_id and session.session_id = fact.session_id
+        group by grouping sets (
+          (fact.provider, fact.model, fact.billing_path),
+          (fact.bucket),
+          (fact.root_session_id),
+          (fact.scheduled_task_id)
+        )
+      ), workspace_current as materialized (
+        ${workspaceCurrentSource}
+      ), prior_grouped as materialized (
+        select
+          grouping(fact.provider, fact.model, fact.billing_path) = 0 as by_model,
+          fact.provider,
+          fact.model,
+          fact.billing_path,
+          fact.root_session_id,
+          ${sums}
+        from prior_visible fact
+        group by grouping sets (
+          (fact.provider, fact.model, fact.billing_path),
+          (fact.root_session_id)
+        )
+      ), current_root_aggregates as (
+        select * from current_grouped where by_root
+      ), current_root_rows as materialized (
+        select
+          aggregate.*,
+          row_number() over (
+            order by aggregate.total_tokens desc, aggregate.root_session_id
+          ) as rn
+        from (
+          select *
+          from current_root_aggregates
+          order by total_tokens desc, root_session_id
+          limit ${INSIGHTS_ROOT_DRIVER_LIMIT + 1}
+        ) aggregate
+      ), current_root_titled as (
+        select current_root_rows.*, root.title
+        from current_root_rows
+        left join sessions root
+          on root.workspace_id = ${input.workspaceId}::uuid
+          and root.id = current_root_rows.root_session_id
+      ), current_project_roots as (
+        -- A tree belongs to its root session's current project, the same rule
+        -- the rail uses. A root the viewer cannot read has no knowable project.
+        select
+          case
+            when root.id is null then 'unavailable'
+            when root.channel_id is null then 'unfiled'
+            else 'project'
+          end as kind,
+          root.channel_id,
+          aggregate.*
+        from current_root_aggregates aggregate
+        left join sessions root
+          on root.workspace_id = ${input.workspaceId}::uuid
+          and root.id = aggregate.root_session_id
+      ), current_project_grouped as (
+        select
+          kind,
+          channel_id,
+          count(*)::bigint as root_sessions,
+          sum(calls)::bigint as calls,
+          sum(total_tokens)::bigint as total_tokens,
+          sum(cached_tokens)::bigint as cached_tokens,
+          sum(cache_input_tokens)::bigint as cache_input_tokens,
+          sum(priced_cost_micros)::bigint as priced_cost_micros,
+          sum(estimated_provider_cost_micros)::bigint as estimated_provider_cost_micros,
+          sum(estimated_provider_cost_known_calls)::bigint
+            as estimated_provider_cost_known_calls
+        from current_project_roots
+        group by kind, channel_id
+      ), current_project_ranked as (
+        select
+          grouped.*,
+          case when grouped.kind = 'project' then row_number() over (
+            partition by grouped.kind = 'project'
+            order by grouped.total_tokens desc, grouped.channel_id
+          ) end as rn
+        from current_project_grouped grouped
+      ), current_project_rows as (
+        select
+          case when rn > ${INSIGHTS_PROJECT_LIMIT} then 'other' else kind end as kind,
+          case when rn > ${INSIGHTS_PROJECT_LIMIT} then null else channel_id end as channel_id,
+          count(*)::bigint as projects,
+          sum(root_sessions)::bigint as root_sessions,
+          sum(calls)::bigint as calls,
+          sum(total_tokens)::bigint as total_tokens,
+          sum(cached_tokens)::bigint as cached_tokens,
+          sum(cache_input_tokens)::bigint as cache_input_tokens,
+          sum(priced_cost_micros)::bigint as priced_cost_micros,
+          sum(estimated_provider_cost_micros)::bigint as estimated_provider_cost_micros,
+          sum(estimated_provider_cost_known_calls)::bigint
+            as estimated_provider_cost_known_calls
+        from current_project_ranked
+        group by 1, 2
+      ), current_project_titled as (
+        select project_row.*, channel.name
+        from current_project_rows project_row
+        left join channels channel
+          on channel.workspace_id = ${input.workspaceId}::uuid
+          and channel.id = project_row.channel_id
+      ), prior_root_rows as (
+        select prior.*, root.title
+        from prior_grouped prior
+        inner join current_root_rows selected_root
+          on selected_root.root_session_id = prior.root_session_id
+          and selected_root.rn <= ${INSIGHTS_ROOT_DRIVER_LIMIT}
+        left join sessions root
+          on root.workspace_id = ${input.workspaceId}::uuid
+          and root.id = prior.root_session_id
+        where not prior.by_model
+      ), facet_values as (
+        select distinct fact.provider, fact.model
+        from workspace_current fact
+      ), facet_rows as (
+        select facet.provider, facet.model
+        from facet_values facet
+        order by facet.provider, facet.model
+        limit ${INSIGHTS_FACET_LIMIT + 1}
+      ), recent_limited as (
+        select fact.*
+        from current_visible fact
         order by fact.occurred_at desc, fact.id desc
-        limit 50
+        limit ${INSIGHTS_RECENT_CALL_LIMIT + 1}
+      ), recent_rows as (
+        select
+          fact.*,
+          session.title as session_title,
+          session.nested_agent_depth as session_depth,
+          row_number() over (order by fact.occurred_at desc, fact.id desc) as rn
+        from recent_limited fact
+        left join sessions session
+          on session.workspace_id = ${input.workspaceId}::uuid
+          and session.id = fact.session_id
       ), contribution_coverage as (
         select
-          count(*)::bigint as total_calls,
-          count(fact.context_contributions)::bigint as covered_calls
-        from current_visible fact
+          coalesce(sum(calls), 0)::bigint as total_calls,
+          coalesce(sum(covered_calls), 0)::bigint as covered_calls
+        from current_grouped
+        where by_model
       ), contribution_source_rows as (
         select
           contribution.entry->>'source' as source,
@@ -559,6 +598,7 @@ export async function readWorkspaceInsightsModelBundle(
         from current_visible fact
         cross join lateral jsonb_array_elements(fact.context_contributions)
           with ordinality contribution(entry, ordinal)
+        where fact.context_contributions is not null
       ), contribution_rows as (
         select
           source,
@@ -571,55 +611,17 @@ export async function readWorkspaceInsightsModelBundle(
       )
       select jsonb_build_object(
         'modelRows', coalesce((
-          select jsonb_agg(jsonb_build_object(
-            'provider', provider,
-            'model', model,
-            'billingPath', billing_path,
-            'calls', calls,
-            'inputTokens', input_tokens,
-            'outputTokens', output_tokens,
-            'cachedTokens', cached_tokens,
-            'cacheInputTokens', cache_input_tokens,
-            'cacheWriteTokens', cache_write_tokens,
-            'reasoningTokens', reasoning_tokens,
-            'totalTokens', total_tokens,
-            'tokenKnownCalls', token_known_calls,
-            'cacheKnownCalls', cache_known_calls,
-            'pricedCostMicros', priced_cost_micros,
-            'estimatedProviderCostMicros', estimated_provider_cost_micros,
-            'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls,
-            'equivalentCreditCostMicros', equivalent_credit_cost_micros,
-            'equivalentCreditCostKnownCalls', equivalent_credit_cost_known_calls
-          ) order by provider, model, billing_path)
-          from current_model_rows
+          select jsonb_agg(${modelRowJson} order by provider, model, billing_path)
+          from current_grouped where by_model
         ), '[]'::jsonb),
         'priorModelRows', coalesce((
-          select jsonb_agg(jsonb_build_object(
-            'provider', provider,
-            'model', model,
-            'billingPath', billing_path,
-            'calls', calls,
-            'inputTokens', input_tokens,
-            'outputTokens', output_tokens,
-            'cachedTokens', cached_tokens,
-            'cacheInputTokens', cache_input_tokens,
-            'cacheWriteTokens', cache_write_tokens,
-            'reasoningTokens', reasoning_tokens,
-            'totalTokens', total_tokens,
-            'tokenKnownCalls', token_known_calls,
-            'cacheKnownCalls', cache_known_calls,
-            'pricedCostMicros', priced_cost_micros,
-            'estimatedProviderCostMicros', estimated_provider_cost_micros,
-            'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls,
-            'equivalentCreditCostMicros', equivalent_credit_cost_micros,
-            'equivalentCreditCostKnownCalls', equivalent_credit_cost_known_calls
-          ) order by provider, model, billing_path)
-          from prior_model_rows
+          select jsonb_agg(${modelRowJson} order by provider, model, billing_path)
+          from prior_grouped where by_model
         ), '[]'::jsonb),
         'factBuckets', coalesce((
           select jsonb_agg(jsonb_build_object(
-            'bucket', bucket,
-            'costMicros', cost_micros,
+            'bucket', ${bucketLabel},
+            'costMicros', priced_cost_micros,
             'estimatedProviderCostMicros', estimated_provider_cost_micros,
             'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls,
             'equivalentCreditCostMicros', equivalent_credit_cost_micros,
@@ -635,36 +637,35 @@ export async function readWorkspaceInsightsModelBundle(
             'cacheKnownCalls', cache_known_calls,
             'calls', calls
           ) order by bucket)
-          from current_series_rows
+          from current_grouped where by_bucket
         ), '[]'::jsonb),
         'rootDrivers', coalesce((
+          select jsonb_agg(${rootRowJson} order by total_tokens desc, root_session_id)
+          from current_root_titled
+          where rn <= ${INSIGHTS_ROOT_DRIVER_LIMIT}
+        ), '[]'::jsonb),
+        'projects', coalesce((
           select jsonb_agg(jsonb_build_object(
-            'rootSessionId', root_session_id,
-            'title', title,
-            'pricedCostMicros', priced_cost_micros,
-            'estimatedProviderCostMicros', estimated_provider_cost_micros,
-            'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls,
-            'equivalentCreditCostMicros', equivalent_credit_cost_micros,
-            'equivalentCreditCostKnownCalls', equivalent_credit_cost_known_calls,
+            'kind', kind,
+            'channelId', channel_id,
+            'name', name,
+            'projects', projects,
+            'rootSessions', root_sessions,
+            'calls', calls,
             'totalTokens', total_tokens,
             'cachedTokens', cached_tokens,
-            'cacheInputTokens', cache_input_tokens
-          ) order by total_tokens desc)
-          from current_root_rows
+            'cacheInputTokens', cache_input_tokens,
+            'pricedCostMicros', priced_cost_micros,
+            'estimatedProviderCostMicros', estimated_provider_cost_micros,
+            'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls
+          ) order by
+            case kind when 'project' then 0 when 'other' then 1 when 'unfiled' then 2 else 3 end,
+            total_tokens desc,
+            channel_id)
+          from current_project_titled
         ), '[]'::jsonb),
         'priorRootDrivers', coalesce((
-          select jsonb_agg(jsonb_build_object(
-            'rootSessionId', root_session_id,
-            'title', title,
-            'pricedCostMicros', priced_cost_micros,
-            'estimatedProviderCostMicros', estimated_provider_cost_micros,
-            'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls,
-            'equivalentCreditCostMicros', equivalent_credit_cost_micros,
-            'equivalentCreditCostKnownCalls', equivalent_credit_cost_known_calls,
-            'totalTokens', total_tokens,
-            'cachedTokens', cached_tokens,
-            'cacheInputTokens', cache_input_tokens
-          ) order by total_tokens desc)
+          select jsonb_agg(${rootRowJson} order by total_tokens desc, root_session_id)
           from prior_root_rows
         ), '[]'::jsonb),
         'scheduleFacts', coalesce((
@@ -679,16 +680,21 @@ export async function readWorkspaceInsightsModelBundle(
             'cachedTokens', cached_tokens,
             'cacheInputTokens', cache_input_tokens,
             'calls', calls,
-            'billingPath', billing_path
+            'billingPath', schedule_billing_path
           ) order by scheduled_task_id)
-          from schedule_rows
+          from current_grouped
+          where by_schedule and scheduled_task_id is not null
         ), '[]'::jsonb),
         'facets', coalesce((
           select jsonb_agg(jsonb_build_object(
             'provider', provider,
             'model', model
           ) order by provider, model)
-          from facet_rows
+          from (
+            select * from facet_rows
+            order by provider, model
+            limit ${INSIGHTS_FACET_LIMIT}
+          ) facet
         ), '[]'::jsonb),
         'recentCalls', coalesce((
           select jsonb_agg(jsonb_build_object(
@@ -715,6 +721,7 @@ export async function readWorkspaceInsightsModelBundle(
             'pricingSource', pricing_source
           ) order by occurred_at desc, id desc)
           from recent_rows
+          where rn <= ${INSIGHTS_RECENT_CALL_LIMIT}
         ), '[]'::jsonb),
         'promptContributions', jsonb_build_object(
           'estimatedTokens', coalesce((select sum(estimated_tokens) from contribution_rows), 0),
@@ -731,7 +738,12 @@ export async function readWorkspaceInsightsModelBundle(
             ) order by estimated_tokens desc nulls last, source)
             from contribution_rows
           ), '[]'::jsonb)
-        )
+        ),
+        'driverGroups', (select count(*) from current_root_aggregates),
+        'driversTruncated', (select count(*) > ${INSIGHTS_ROOT_DRIVER_LIMIT} from current_root_rows),
+        'facetsTruncated', (select count(*) > ${INSIGHTS_FACET_LIMIT} from facet_rows),
+        'recentCallsTruncated', (select count(*) > ${INSIGHTS_RECENT_CALL_LIMIT} from recent_limited),
+        'dataThrough', (select max(recorded_at) from workspace_current)
       ) as payload
     `);
     if (!row) {

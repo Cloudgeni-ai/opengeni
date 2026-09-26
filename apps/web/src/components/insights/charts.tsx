@@ -13,7 +13,8 @@ import { cn } from "@/lib/utils";
 type Series = {
   id: string;
   label: string;
-  values: number[];
+  /** `null` marks a bucket with no measurable value; it renders as a gap, not zero. */
+  values: Array<number | null>;
   className: string;
 };
 
@@ -78,6 +79,8 @@ export function AreaChart(props: {
   /** Soft y-axis floor for percentage charts */
   yMax?: number;
   formatValue?: (value: number) => string;
+  /** Y-axis tick labels; defaults to `formatValue`. */
+  formatAxisValue?: (value: number) => string;
 }) {
   const reduceMotion = useReducedMotion();
   const gradId = useId();
@@ -87,11 +90,11 @@ export function AreaChart(props: {
   const active = pointerActive ?? keyboardActive;
   const height = props.height ?? 220;
   const width = 720;
-  const padL = 36;
+  const padL = 52;
   const padR = 12;
   const padTop = 16;
   const padBottom = 6;
-  const all = props.series.flatMap((s) => s.values);
+  const all = props.series.flatMap((s) => s.values.filter((v): v is number => v !== null));
   const dataMax = Math.max(...all, 0);
   const max = props.yMax ?? Math.max(dataMax * 1.12, 1);
   const innerW = width - padL - padR;
@@ -99,20 +102,31 @@ export function AreaChart(props: {
 
   const geometry = useMemo(() => {
     return props.series.map((series) => {
-      const points = series.values.map((value, i) => {
+      const points: Array<{ x: number; y: number; value: number; index: number }> = [];
+      const runs: Array<Array<{ x: number; y: number }>> = [];
+      let run: Array<{ x: number; y: number }> = [];
+      series.values.forEach((value, i) => {
+        if (value === null) {
+          if (run.length > 0) runs.push(run);
+          run = [];
+          return;
+        }
         const x =
           padL +
           (series.values.length <= 1 ? innerW / 2 : (i / (series.values.length - 1)) * innerW);
         const y = padTop + innerH - (value / max) * innerH;
-        return { x, y, value };
+        points.push({ x, y, value, index: i });
+        run.push({ x, y });
       });
-      const line = smoothLine(points);
-      const first = points[0];
-      const last = points[points.length - 1];
-      const area =
-        first && last
-          ? `${line} L${last.x},${padTop + innerH} L${first.x},${padTop + innerH} Z`
-          : "";
+      if (run.length > 0) runs.push(run);
+      const line = runs.map((segment) => smoothLine(segment)).join(" ");
+      const area = runs
+        .map((segment) => {
+          const first = segment[0]!;
+          const last = segment[segment.length - 1]!;
+          return `${smoothLine(segment)} L${last.x},${padTop + innerH} L${first.x},${padTop + innerH} Z`;
+        })
+        .join(" ");
       return { series, points, line, area };
     });
   }, [props.series, innerH, innerW, max, padTop]);
@@ -143,9 +157,13 @@ export function AreaChart(props: {
     props.formatValue
       ? props.formatValue(value)
       : `${props.valuePrefix ?? ""}${formatChartNumber(value, props.valueDigits)}${props.valueSuffix ?? ""}`;
+  const formattedTick = (value: number) =>
+    props.formatAxisValue ? props.formatAxisValue(value) : formattedValue(value);
+  const formattedPoint = (value: number | null | undefined) =>
+    value === null || value === undefined ? "Unknown" : formattedValue(value);
   const pointDescription = (index: number) =>
     `${props.labels[index]}. ${props.series
-      .map((series) => `${series.label}: ${formattedValue(series.values[index] ?? 0)}`)
+      .map((series) => `${series.label}: ${formattedPoint(series.values[index])}`)
       .join(", ")}`;
   const onChartKeyDown = (event: ReactKeyboardEvent<SVGSVGElement>) => {
     const current = keyboardActive ?? pointerActive ?? 0;
@@ -166,7 +184,10 @@ export function AreaChart(props: {
       ({ index }) => index === 0 || index === props.labels.length - 1 || index % labelStride === 0,
     );
 
-  if (props.labels.length === 0 || props.series.every((series) => series.values.length === 0)) {
+  if (
+    props.labels.length === 0 ||
+    props.series.every((series) => series.values.every((value) => value === null))
+  ) {
     return (
       <div
         className={cn(
@@ -208,7 +229,7 @@ export function AreaChart(props: {
                     <span className="text-fg-muted">{series.label}</span>
                   </span>
                   <span className="font-mono tabular-nums text-fg">
-                    {formattedValue(series.values[active] ?? 0)}
+                    {formattedPoint(series.values[active])}
                   </span>
                 </div>
               ))}
@@ -282,7 +303,7 @@ export function AreaChart(props: {
                 className="fill-fg-subtle"
                 style={{ fontSize: 10, fontFamily: "ui-monospace, monospace" }}
               >
-                {formattedValue(label)}
+                {formattedTick(label)}
               </text>
             </g>
           );
@@ -333,18 +354,18 @@ export function AreaChart(props: {
                 />
               </>
             ) : null}
-            {points.map((point, i) => (
+            {points.map((point) => (
               <circle
                 key={`${series.id}-x${point.x}`}
                 cx={point.x}
                 cy={point.y}
-                r={active === i ? 4.5 : 2.25}
+                r={active === point.index ? 4.5 : 2.25}
                 className={cn(
                   "stroke-bg transition-[r]",
-                  active === i || active == null ? "opacity-100" : "opacity-40",
+                  active === point.index || active == null ? "opacity-100" : "opacity-40",
                 )}
                 fill="currentColor"
-                strokeWidth={active === i ? 2 : 1.5}
+                strokeWidth={active === point.index ? 2 : 1.5}
               />
             ))}
           </g>
@@ -362,7 +383,7 @@ export function AreaChart(props: {
         ) : null}
       </svg>
 
-      <div className="mt-1 flex justify-between pl-9 pr-1">
+      <div className="mt-1 flex justify-between pl-[7.2%] pr-1">
         {visibleLabels.map(({ label, index }) => (
           <button
             key={`${label}-${index}`}

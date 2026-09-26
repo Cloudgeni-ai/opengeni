@@ -77,6 +77,7 @@ function snapshot(overrides: Partial<WorkspaceInsightsSnapshot> = {}): Workspace
     series: [],
     depth: [],
     drivers: [],
+    projects: [],
     schedules: [],
     recentCalls: [],
     promptContributions: {
@@ -123,6 +124,13 @@ function snapshot(overrides: Partial<WorkspaceInsightsSnapshot> = {}): Workspace
     agentRunsUsed: 5,
     agentRunCap: 100,
     modelFilterActive: false,
+    dataThrough: "2026-07-07T23:59:00.000Z",
+    cacheHitPct: 40,
+    scope: { rootSessionId: null, sessionId: null },
+    driverGroups: 0,
+    driversTruncated: false,
+    facetsTruncated: false,
+    recentCallsTruncated: false,
     ...overrides,
   };
 }
@@ -222,7 +230,7 @@ describe("Insights route presentation", () => {
       nextError = null;
       await click(rendered.container.querySelector<HTMLButtonElement>("button"));
       expect(getWorkspaceInsights).toHaveBeenCalledTimes(2);
-      expect(rendered.container.textContent).toContain("Total tokens");
+      expect(rendered.container.textContent).toContain("Credits spent");
     } finally {
       await rendered.unmount();
     }
@@ -243,6 +251,87 @@ describe("Insights route presentation", () => {
       expect(
         rendered.container.querySelector('[role="region"][aria-label="Usage by model"]'),
       ).not.toBeNull();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("scopes to a root session through a keyboard-reachable driver action", async () => {
+    const rootSessionId = "33333333-3333-4333-8333-333333333333";
+    nextSnapshot = snapshot({
+      drivers: [
+        {
+          id: `root:${rootSessionId}`,
+          groupBy: "root_session",
+          label: "Refactor billing ledger",
+          creditUsd: 2.5,
+          estimatedProviderUsd: 2,
+          estimatedProviderCostKnownCalls: 8,
+          equivalentCreditUsd: 2.1,
+          equivalentCreditCostKnownCalls: 8,
+          tokens: 1100,
+          cacheHitPct: 40,
+          pctOfCreditUsd: 100,
+          pctOfTokens: 100,
+          deltaUsdVsPrior: 0,
+        },
+      ],
+      driverGroups: 1,
+    });
+    const rendered = await renderRoute();
+    try {
+      await click(
+        rendered.container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Scope to root session Refactor billing ledger"]',
+        ),
+      );
+      expect(getWorkspaceInsights).toHaveBeenLastCalledWith(
+        workspaceId,
+        expect.objectContaining({ range: "week", rootSessionId }),
+      );
+      expect(rendered.container.textContent).toContain("Root session");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("states exactly how much of the charged ledger the breakdown covers", async () => {
+    const rendered = await renderRoute();
+    try {
+      expect(rendered.container.querySelector("[data-insights-ledger-gap]")?.textContent).toContain(
+        "Per-model breakdowns cover $2.50 of the $3.00 charged. $0.50 has no per-call record yet",
+      );
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("lists project usage with an explicit unfiled row and unknown provider estimates", async () => {
+    const row = {
+      projects: 1,
+      rootSessions: 1,
+      calls: 2,
+      creditUsd: 1.5,
+      estimatedProviderUsd: 0,
+      estimatedProviderCostKnownCalls: 0,
+      cacheHitPct: null,
+    };
+    nextSnapshot = snapshot({
+      projects: [
+        { ...row, id: "project:billing", kind: "project", label: "Billing", tokens: 750 },
+        { ...row, id: "unfiled", kind: "unfiled", label: "No project", tokens: 250 },
+      ],
+    });
+    const rendered = await renderRoute();
+    try {
+      const table = rendered.container.querySelector('[aria-label="Usage by project"]');
+      const rows = [...(table?.querySelectorAll("tbody tr") ?? [])].map((tr) =>
+        [...tr.querySelectorAll("td")].map((td) => td.textContent),
+      );
+      expect(rows.map((cells) => [cells[0], cells[4], cells[7]])).toEqual([
+        ["Billing", "75%", "Unknown"],
+        ["No project", "25%", "Unknown"],
+      ]);
     } finally {
       await rendered.unmount();
     }

@@ -7559,8 +7559,13 @@ export type InsightsSeriesPoint = {
   totalTokens: number;
   tokenKnownCalls: number;
   cacheKnownCalls: number;
-  cacheHitPct: number;
+  cacheHitPct: number | null;
   calls: number;
+};
+
+export type InsightsScope = {
+  rootSessionId: string | null;
+  sessionId: string | null;
 };
 
 export type InsightsDepthBucket = {
@@ -7583,10 +7588,24 @@ export type InsightsSpendDriver = {
   equivalentCreditUsd: number;
   equivalentCreditCostKnownCalls: number;
   tokens: number;
-  cacheHitPct: number;
+  cacheHitPct: number | null;
   pctOfCreditUsd: number;
   pctOfTokens: number;
   deltaUsdVsPrior: number;
+};
+
+export type InsightsProjectRow = {
+  id: string;
+  kind: "project" | "other" | "unfiled" | "unavailable";
+  label: string;
+  projects: number;
+  rootSessions: number;
+  calls: number;
+  creditUsd: number;
+  estimatedProviderUsd: number;
+  estimatedProviderCostKnownCalls: number;
+  tokens: number;
+  cacheHitPct: number | null;
 };
 
 export type InsightsWarmGroupRow = {
@@ -7696,6 +7715,7 @@ export type WorkspaceInsightsSnapshot = {
   series: InsightsSeriesPoint[];
   depth: InsightsDepthBucket[];
   drivers: InsightsSpendDriver[];
+  projects: InsightsProjectRow[];
   schedules: InsightsScheduleRow[];
   recentCalls: InsightsModelCallRow[];
   promptContributions: InsightsPromptContributions;
@@ -7721,7 +7741,7 @@ export type WorkspaceInsightsSnapshot = {
   modelCalls: number;
   priorInputTokens: number;
   priorTotalTokens: number;
-  priorCacheHitPct: number;
+  priorCacheHitPct: number | null;
   priorCalls: number;
   goalsActive: number;
   goalsCompleted: number;
@@ -7736,6 +7756,13 @@ export type WorkspaceInsightsSnapshot = {
   agentRunsUsed: number;
   agentRunCap: number | null;
   modelFilterActive: boolean;
+  dataThrough: string | null;
+  cacheHitPct: number | null;
+  scope: InsightsScope;
+  driverGroups: number;
+  driversTruncated: boolean;
+  facetsTruncated: boolean;
+  recentCallsTruncated: boolean;
 };
 
 export type WorkspaceInsightsResponse = {

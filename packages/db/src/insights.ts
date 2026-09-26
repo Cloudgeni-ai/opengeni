@@ -1,5 +1,5 @@
 import { withLatestStartedSessionPolicy } from "./session-execution-policy";
-import { and, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Database } from "./database";
 import { rlsContextForWorkspace, withRlsContext } from "./database";
@@ -1127,6 +1127,162 @@ export function enumerateUtcHours(since: Date, until: Date): string[] {
   return hours;
 }
 
+type ModelUsageEventRow = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string | null;
+  turnAttemptId: string | null;
+  payload: unknown;
+  occurredAt: Date;
+};
+
+/**
+ * Rebuild one fact from its durable `agent.model.usage` event. Idempotent: an
+ * existing (workspace, turn, source_key) fact is left untouched.
+ */
+async function insertModelCallFactFromUsageEvent(
+  scopedDb: Database,
+  workspaceId: string,
+  event: ModelUsageEventRow,
+): Promise<boolean> {
+  if (!event.turnId) return false;
+  const payload =
+    event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+      ? (event.payload as Record<string, unknown>)
+      : null;
+  if (!payload) return false;
+  const sourceKey = typeof payload.sourceKey === "string" ? payload.sourceKey : null;
+  const provider = typeof payload.provider === "string" ? payload.provider : null;
+  const providerApi = typeof payload.providerApi === "string" ? payload.providerApi : null;
+  const model = typeof payload.model === "string" ? payload.model : null;
+  if (!sourceKey || !provider || !providerApi || !model) return false;
+  const upstreamProvider =
+    typeof payload.upstreamProvider === "string" &&
+    /^[a-z0-9][a-z0-9-]{0,63}$/.test(payload.upstreamProvider)
+      ? payload.upstreamProvider
+      : null;
+  const durableBillingPath =
+    payload.billingPath === "external" || payload.billingPath === "opengeni_credits"
+      ? payload.billingPath
+      : null;
+
+  const sourceResourceId = `${event.turnId}:${sourceKey}`;
+  const [cost] = await scopedDb
+    .select({ quantity: schema.usageEvents.quantity })
+    .from(schema.usageEvents)
+    .where(
+      and(
+        eq(schema.usageEvents.workspaceId, workspaceId),
+        eq(schema.usageEvents.eventType, "model.cost"),
+        eq(schema.usageEvents.sourceResourceId, sourceResourceId),
+      ),
+    )
+    .limit(1);
+  const [tokenRow] = await scopedDb
+    .select({ id: schema.usageEvents.id })
+    .from(schema.usageEvents)
+    .where(
+      and(
+        eq(schema.usageEvents.workspaceId, workspaceId),
+        eq(schema.usageEvents.eventType, "model.tokens"),
+        eq(schema.usageEvents.sourceResourceId, sourceResourceId),
+      ),
+    )
+    .limit(1);
+
+  // New usage events carry the accepted billing authority because a
+  // deployment-funded free call legitimately writes both model.tokens
+  // and model.cost=0. Older events predate that field: their external
+  // subscription/workspace calls wrote cost=0 without tokens, while
+  // zero-token credits calls wrote neither.
+  const pricedCostMicros = cost ? Number(cost.quantity) : 0;
+  const billingPath =
+    durableBillingPath ??
+    (cost != null && pricedCostMicros === 0 && !tokenRow ? "external" : "opengeni_credits");
+
+  const [turn] = await scopedDb
+    .select({
+      source: schema.sessionTurns.source,
+      initiatorKind: schema.sessionTurns.initiatorKind,
+      initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+      initiatorContext: schema.sessionTurns.initiatorContext,
+    })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.id, event.turnId),
+      ),
+    )
+    .limit(1);
+
+  let scheduledTaskId: string | null = null;
+  const runIds =
+    turn?.initiatorContext &&
+    typeof turn.initiatorContext === "object" &&
+    !Array.isArray(turn.initiatorContext) &&
+    Array.isArray((turn.initiatorContext as Record<string, unknown>).scheduledRunIds)
+      ? ((turn.initiatorContext as Record<string, unknown>).scheduledRunIds as unknown[]).filter(
+          (value): value is string => typeof value === "string",
+        )
+      : [];
+  if (runIds.length > 0) {
+    const [run] = await scopedDb
+      .select({ taskId: schema.scheduledTaskRuns.taskId })
+      .from(schema.scheduledTaskRuns)
+      .where(
+        and(
+          eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
+          inArray(schema.scheduledTaskRuns.id, runIds),
+        ),
+      )
+      .orderBy(schema.scheduledTaskRuns.createdAt)
+      .limit(1);
+    scheduledTaskId = run?.taskId ?? null;
+  }
+
+  const insertedRows = await scopedDb
+    .insert(schema.modelCallFacts)
+    .values({
+      accountId: event.accountId,
+      workspaceId: event.workspaceId,
+      sessionId: event.sessionId,
+      turnId: event.turnId,
+      turnAttemptId: event.turnAttemptId,
+      sourceKey,
+      provider: upstreamProvider ?? provider,
+      providerApi,
+      model,
+      billingPath,
+      turnSource: turn?.source ?? null,
+      initiatorKind: turn?.initiatorKind ?? null,
+      initiatorSubjectId: turn?.initiatorSubjectId ?? null,
+      scheduledTaskId,
+      inputTokens: numberOrNull(payload.inputTokens),
+      outputTokens: numberOrNull(payload.outputTokens),
+      cachedTokens: numberOrNull(payload.cachedTokens),
+      cacheWriteTokens: numberOrNull(payload.cacheWriteTokens),
+      reasoningTokens: numberOrNull(payload.reasoningTokens),
+      totalTokens:
+        numberOrNull(payload.inputTokens) !== null || numberOrNull(payload.outputTokens) !== null
+          ? (numberOrNull(payload.inputTokens) ?? 0) + (numberOrNull(payload.outputTokens) ?? 0)
+          : null,
+      pricedCostMicros,
+      occurredAt: event.occurredAt,
+    })
+    .onConflictDoNothing({
+      target: [
+        schema.modelCallFacts.workspaceId,
+        schema.modelCallFacts.turnId,
+        schema.modelCallFacts.sourceKey,
+      ],
+    })
+    .returning({ id: schema.modelCallFacts.id });
+  return insertedRows.length > 0;
+}
+
 /**
  * Idempotent YTD backfill from authoritative agent.model.usage into model_call_facts.
  * Never rewrites billing rows or existing live facts (onConflictDoNothing).
@@ -1191,142 +1347,9 @@ export async function backfillModelCallFactsFromSessionEvents(
     const batchUpserted = await withRlsContext(db, context, async (scopedDb) => {
       let inserted = 0;
       for (const event of page) {
-        if (!event.turnId) continue;
-        const payload =
-          event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
-            ? (event.payload as Record<string, unknown>)
-            : null;
-        if (!payload) continue;
-        const sourceKey = typeof payload.sourceKey === "string" ? payload.sourceKey : null;
-        const provider = typeof payload.provider === "string" ? payload.provider : null;
-        const providerApi = typeof payload.providerApi === "string" ? payload.providerApi : null;
-        const model = typeof payload.model === "string" ? payload.model : null;
-        if (!sourceKey || !provider || !providerApi || !model) continue;
-        const upstreamProvider =
-          typeof payload.upstreamProvider === "string" &&
-          /^[a-z0-9][a-z0-9-]{0,63}$/.test(payload.upstreamProvider)
-            ? payload.upstreamProvider
-            : null;
-        const durableBillingPath =
-          payload.billingPath === "external" || payload.billingPath === "opengeni_credits"
-            ? payload.billingPath
-            : null;
-
-        const sourceResourceId = `${event.turnId}:${sourceKey}`;
-        const [cost] = await scopedDb
-          .select({ quantity: schema.usageEvents.quantity })
-          .from(schema.usageEvents)
-          .where(
-            and(
-              eq(schema.usageEvents.workspaceId, input.workspaceId),
-              eq(schema.usageEvents.eventType, "model.cost"),
-              eq(schema.usageEvents.sourceResourceId, sourceResourceId),
-            ),
-          )
-          .limit(1);
-        const [tokenRow] = await scopedDb
-          .select({ id: schema.usageEvents.id })
-          .from(schema.usageEvents)
-          .where(
-            and(
-              eq(schema.usageEvents.workspaceId, input.workspaceId),
-              eq(schema.usageEvents.eventType, "model.tokens"),
-              eq(schema.usageEvents.sourceResourceId, sourceResourceId),
-            ),
-          )
-          .limit(1);
-
-        // New usage events carry the accepted billing authority because a
-        // deployment-funded free call legitimately writes both model.tokens
-        // and model.cost=0. Older events predate that field: their external
-        // subscription/workspace calls wrote cost=0 without tokens, while
-        // zero-token credits calls wrote neither.
-        const pricedCostMicros = cost ? Number(cost.quantity) : 0;
-        const billingPath =
-          durableBillingPath ??
-          (cost != null && pricedCostMicros === 0 && !tokenRow ? "external" : "opengeni_credits");
-
-        const [turn] = await scopedDb
-          .select({
-            source: schema.sessionTurns.source,
-            initiatorKind: schema.sessionTurns.initiatorKind,
-            initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-            initiatorContext: schema.sessionTurns.initiatorContext,
-          })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, event.turnId),
-            ),
-          )
-          .limit(1);
-
-        let scheduledTaskId: string | null = null;
-        const runIds =
-          turn?.initiatorContext &&
-          typeof turn.initiatorContext === "object" &&
-          !Array.isArray(turn.initiatorContext) &&
-          Array.isArray((turn.initiatorContext as Record<string, unknown>).scheduledRunIds)
-            ? (
-                (turn.initiatorContext as Record<string, unknown>).scheduledRunIds as unknown[]
-              ).filter((value): value is string => typeof value === "string")
-            : [];
-        if (runIds.length > 0) {
-          const [run] = await scopedDb
-            .select({ taskId: schema.scheduledTaskRuns.taskId })
-            .from(schema.scheduledTaskRuns)
-            .where(
-              and(
-                eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
-                inArray(schema.scheduledTaskRuns.id, runIds),
-              ),
-            )
-            .orderBy(schema.scheduledTaskRuns.createdAt)
-            .limit(1);
-          scheduledTaskId = run?.taskId ?? null;
+        if (await insertModelCallFactFromUsageEvent(scopedDb, input.workspaceId, event)) {
+          inserted += 1;
         }
-
-        const insertedRows = await scopedDb
-          .insert(schema.modelCallFacts)
-          .values({
-            accountId: event.accountId,
-            workspaceId: event.workspaceId,
-            sessionId: event.sessionId,
-            turnId: event.turnId,
-            turnAttemptId: event.turnAttemptId,
-            sourceKey,
-            provider: upstreamProvider ?? provider,
-            providerApi,
-            model,
-            billingPath,
-            turnSource: turn?.source ?? null,
-            initiatorKind: turn?.initiatorKind ?? null,
-            initiatorSubjectId: turn?.initiatorSubjectId ?? null,
-            scheduledTaskId,
-            inputTokens: numberOrNull(payload.inputTokens),
-            outputTokens: numberOrNull(payload.outputTokens),
-            cachedTokens: numberOrNull(payload.cachedTokens),
-            cacheWriteTokens: numberOrNull(payload.cacheWriteTokens),
-            reasoningTokens: numberOrNull(payload.reasoningTokens),
-            totalTokens:
-              numberOrNull(payload.inputTokens) !== null ||
-              numberOrNull(payload.outputTokens) !== null
-                ? (numberOrNull(payload.inputTokens) ?? 0) +
-                  (numberOrNull(payload.outputTokens) ?? 0)
-                : null,
-            pricedCostMicros,
-            occurredAt: event.occurredAt,
-          })
-          .onConflictDoNothing({
-            target: [
-              schema.modelCallFacts.workspaceId,
-              schema.modelCallFacts.turnId,
-              schema.modelCallFacts.sourceKey,
-            ],
-          })
-          .returning({ id: schema.modelCallFacts.id });
-        if (insertedRows.length > 0) inserted += 1;
       }
       return inserted;
     });
@@ -1335,6 +1358,123 @@ export async function backfillModelCallFactsFromSessionEvents(
   }
 
   return { considered, upserted };
+}
+
+/** One ordered page of workspace ids for global maintenance sweeps. */
+export async function listWorkspaceIdsAfter(
+  db: Database,
+  input: { afterId: string | null; limit: number },
+): Promise<string[]> {
+  const rows = await db
+    .select({ id: schema.workspaces.id })
+    .from(schema.workspaces)
+    .where(input.afterId ? gt(schema.workspaces.id, input.afterId) : undefined)
+    .orderBy(asc(schema.workspaces.id))
+    .limit(Math.max(1, Math.min(input.limit, 1_000)));
+  return rows.map((row) => row.id);
+}
+
+export type ModelCallFactReconciliation = {
+  /** Charged ledger calls in the window whose per-call fact is missing. */
+  missing: number;
+  /** Missing facts rebuilt from their durable `agent.model.usage` event. */
+  repaired: number;
+  /** Missing facts not rebuilt: no usable durable usage event (or a concurrent writer won). */
+  unrepaired: number;
+  /** True when more missing facts remain than this bounded pass examined. */
+  truncated: boolean;
+};
+
+/**
+ * Find ledger model calls (`usage_events` model.cost) in the window that have
+ * no model_call_fact for the exact (turn, source key), and rebuild each from its
+ * durable usage event. The ledger key is `${turnId}:${sourceKey}`, so detection
+ * is exact regardless of each writer's own timestamp. Bounded and idempotent:
+ * never rewrites the ledger or an existing fact.
+ */
+export async function reconcileModelCallFacts(
+  db: Database,
+  input: { workspaceId: string; since: Date; until: Date; limit?: number },
+): Promise<ModelCallFactReconciliation> {
+  const limit = Math.max(1, Math.min(input.limit ?? 1_000, 10_000));
+  const context = await rlsContextForWorkspace(db, input.workspaceId);
+  return await withRlsContext(db, context, async (scopedDb) => {
+    const missingRows = await scopedDb.execute<{
+      turn_id: string;
+      session_id: string;
+      source_key: string;
+    }>(sql`
+      select usage_row.turn_id, usage_row.session_id,
+        substr(usage_row.source_resource_id, 38) as source_key
+      from ${schema.usageEvents} usage_row
+      where usage_row.workspace_id = ${input.workspaceId}::uuid
+        and usage_row.event_type = 'model.cost'
+        and usage_row.source_resource_type = 'model_response'
+        and usage_row.occurred_at >= ${input.since.toISOString()}::timestamp with time zone
+        and usage_row.occurred_at < ${input.until.toISOString()}::timestamp with time zone
+        and usage_row.turn_id is not null
+        and usage_row.session_id is not null
+        and left(usage_row.source_resource_id, 37) = usage_row.turn_id::text || ':'
+        and not exists (
+          select 1
+          from ${schema.modelCallFacts} fact
+          where fact.workspace_id = usage_row.workspace_id
+            and fact.turn_id = usage_row.turn_id
+            and fact.source_key = substr(usage_row.source_resource_id, 38)
+        )
+      order by usage_row.occurred_at, usage_row.id
+      limit ${limit + 1}
+    `);
+    const truncated = missingRows.length > limit;
+    const candidates: Array<{ turn_id: string; session_id: string; source_key: string }> = [
+      ...missingRows,
+    ].slice(0, limit);
+    const events =
+      candidates.length === 0
+        ? []
+        : await scopedDb
+            .select({
+              id: schema.sessionEvents.id,
+              accountId: schema.sessionEvents.accountId,
+              workspaceId: schema.sessionEvents.workspaceId,
+              sessionId: schema.sessionEvents.sessionId,
+              turnId: schema.sessionEvents.turnId,
+              turnAttemptId: schema.sessionEvents.turnAttemptId,
+              payload: schema.sessionEvents.payload,
+              occurredAt: schema.sessionEvents.occurredAt,
+              sourceKey: sql<string | null>`${schema.sessionEvents.payload}->>'sourceKey'`,
+            })
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                inArray(schema.sessionEvents.turnId, [
+                  ...new Set(candidates.map((candidate) => candidate.turn_id)),
+                ]),
+                eq(schema.sessionEvents.type, "agent.model.usage"),
+                eq(schema.sessionEvents.turnAssociation, "current"),
+              ),
+            )
+            .orderBy(schema.sessionEvents.occurredAt, schema.sessionEvents.id);
+    const eventByKey = new Map<string, (typeof events)[number]>();
+    for (const event of events) {
+      const key = `${event.turnId}:${event.sourceKey}`;
+      if (event.sourceKey !== null && !eventByKey.has(key)) eventByKey.set(key, event);
+    }
+    let repaired = 0;
+    for (const candidate of candidates) {
+      const event = eventByKey.get(`${candidate.turn_id}:${candidate.source_key}`);
+      if (event && (await insertModelCallFactFromUsageEvent(scopedDb, input.workspaceId, event))) {
+        repaired += 1;
+      }
+    }
+    return {
+      missing: candidates.length,
+      repaired,
+      unrepaired: candidates.length - repaired,
+      truncated,
+    };
+  });
 }
 
 function numberOrNull(value: unknown): number | null {

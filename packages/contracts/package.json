@@ -50,6 +50,10 @@
       "types": "./src/site-session-http.ts",
       "default": "./src/site-session-http.ts"
     },
+    "./organization-model-usage": {
+      "types": "./src/organization-model-usage.ts",
+      "default": "./src/organization-model-usage.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

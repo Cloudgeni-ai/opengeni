@@ -11,14 +11,20 @@ import {
   aggregateRootSessionDrivers,
   aggregateScheduleFacts,
   backfillModelCallFactsFromSessionEvents,
+  createChannel,
   createDb,
   createSession,
   ensureManagedAccessForUser,
   getOrganizationPrivateSessionSettings,
   listModelCallFacets,
   listRecentModelCalls,
+  INSIGHTS_RECENT_CALL_LIMIT,
+  INSIGHTS_PROJECT_LIMIT,
+  INSIGHTS_ROOT_DRIVER_LIMIT,
   readWorkspaceInsightsModelBundle,
+  reconcileModelCallFacts,
   registerDbBinding,
+  setSessionChannel,
   transitionSessionVisibility,
   updateOrganizationPrivateSessionSettings,
   withSessionRlsActorContext,
@@ -69,6 +75,7 @@ type Fixture = {
   workspaceId: string;
   ownerSubjectId: string;
   sharedSessionId: string;
+  privateSessionId: string;
   input: WorkspaceInsightsModelBundleInput;
 };
 
@@ -209,6 +216,7 @@ async function fixture(): Promise<Fixture> {
     workspaceId,
     ownerSubjectId,
     sharedSessionId: sharedSession.id,
+    privateSessionId: privateSession.id,
     input: {
       workspaceId,
       since,
@@ -220,10 +228,20 @@ async function fixture(): Promise<Fixture> {
   };
 }
 
+type LegacyComparableBundle = Omit<
+  WorkspaceInsightsModelBundle,
+  | "dataThrough"
+  | "driverGroups"
+  | "driversTruncated"
+  | "facetsTruncated"
+  | "recentCallsTruncated"
+  | "projects"
+>;
+
 async function legacyModelBundle(
   db: Database,
   input: WorkspaceInsightsModelBundleInput,
-): Promise<WorkspaceInsightsModelBundle> {
+): Promise<LegacyComparableBundle> {
   const filter = {
     ...(input.provider !== undefined ? { provider: input.provider } : {}),
     ...(input.model !== undefined ? { model: input.model } : {}),
@@ -278,7 +296,16 @@ async function legacyModelBundle(
   };
 }
 
-function comparable(bundle: WorkspaceInsightsModelBundle) {
+function comparable(input: LegacyComparableBundle | WorkspaceInsightsModelBundle) {
+  const {
+    dataThrough: _dataThrough,
+    driverGroups: _driverGroups,
+    driversTruncated: _driversTruncated,
+    facetsTruncated: _facetsTruncated,
+    recentCallsTruncated: _recentCallsTruncated,
+    projects: _projects,
+    ...bundle
+  } = input as WorkspaceInsightsModelBundle;
   return {
     ...bundle,
     modelRows: [...bundle.modelRows].sort((a, b) =>
@@ -350,15 +377,18 @@ function sessionRelationLoops(value: unknown, loops: number[] = []): number[] {
 }
 
 describe("Workspace Insights model bundle", () => {
-  test("materializes only projected fact columns and centralizes session labels", async () => {
+  test("reads each window once through the scoped projection and aggregates in grouping sets", async () => {
     const source = await Bun.file(
       new URL("../src/insights-model-bundle.ts", import.meta.url),
     ).text();
-    expect(source).not.toContain("fact.*");
-    expect(source.match(/inner join sessions child/g)).toHaveLength(1);
-    expect(source.match(/left join sessions root/g)).toHaveLength(1);
-    expect(source).not.toContain("left join sessions session");
-    expect(source).toContain("selected_sessions as materialized");
+    expect(source).toContain("visible_workspace_insights_model_fact_rows");
+    expect(source).not.toContain("visible_workspace_insights_model_call_facts");
+    expect(source.match(/group by grouping sets/g)).toHaveLength(2);
+    // Sessions are joined only for grouped roots and the bounded recent-call
+    // rows, never across the whole fact window.
+    expect(source).not.toContain("selected_sessions");
+    expect(source.match(/left join sessions root/g)).toHaveLength(3);
+    expect(source.match(/left join sessions session/g)).toHaveLength(1);
     expect(source).not.toContain("count(distinct id)");
     expect(source).toContain("count(*) filter (where first_source)");
   });
@@ -421,8 +451,16 @@ describe("Workspace Insights model bundle", () => {
   test("matches the legacy helpers for shared/private visibility, filters, and UTC buckets", async () => {
     if (!shared || !client) return;
     const seeded = await fixture();
-    const cases: Array<{ subjectId: string; input: WorkspaceInsightsModelBundleInput }> = [
-      { subjectId: seeded.ownerSubjectId, input: seeded.input },
+    const cases: Array<{
+      subjectId: string;
+      input: WorkspaceInsightsModelBundleInput;
+      expectedDataThrough: string;
+    }> = [
+      {
+        subjectId: seeded.ownerSubjectId,
+        input: seeded.input,
+        expectedDataThrough: "2026-08-14T12:00:01.000Z",
+      },
       {
         subjectId: seeded.ownerSubjectId,
         input: {
@@ -431,8 +469,13 @@ describe("Workspace Insights model bundle", () => {
           provider: "openai",
           model: "gpt-bundle",
         },
+        expectedDataThrough: "2026-08-14T12:00:01.000Z",
       },
-      { subjectId: `user:${crypto.randomUUID()}`, input: seeded.input },
+      {
+        subjectId: `user:${crypto.randomUUID()}`,
+        input: seeded.input,
+        expectedDataThrough: "2026-08-12T10:30:01.000Z",
+      },
     ];
     for (const testCase of cases) {
       const [legacy, bundled] = await withSessionRlsActorContext(
@@ -444,6 +487,11 @@ describe("Workspace Insights model bundle", () => {
           ]),
       );
       expect(comparable(bundled)).toEqual(comparable(legacy));
+      expect(bundled.driverGroups).toBe(legacy.rootDrivers.length);
+      expect(bundled.driversTruncated).toBe(false);
+      expect(bundled.facetsTruncated).toBe(false);
+      expect(bundled.recentCallsTruncated).toBe(false);
+      expect(bundled.dataThrough?.toISOString()).toBe(testCase.expectedDataThrough);
       if (testCase.input.provider || testCase.input.model) {
         expect(bundled.facets).toEqual([
           { provider: "azure", model: "azure-bundle" },
@@ -451,6 +499,158 @@ describe("Workspace Insights model bundle", () => {
         ]);
       }
     }
+  });
+
+  test("scopes a session drilldown while keeping facets and freshness workspace-wide", async () => {
+    if (!shared || !client) return;
+    const seeded = await fixture();
+    const bundled = await withSessionRlsActorContext(
+      { subjectId: seeded.ownerSubjectId },
+      async () =>
+        await readWorkspaceInsightsModelBundle(client!.db, {
+          ...seeded.input,
+          sessionId: seeded.sharedSessionId,
+        }),
+    );
+    expect(bundled.recentCalls).toHaveLength(2);
+    expect(bundled.recentCalls.every((call) => call.sessionId === seeded.sharedSessionId)).toBe(
+      true,
+    );
+    expect(bundled.rootDrivers.length).toBeGreaterThan(0);
+    expect(
+      bundled.rootDrivers.every((driver) => driver.rootSessionId === seeded.sharedSessionId),
+    ).toBe(true);
+    expect(bundled.facets).toEqual([
+      { provider: "azure", model: "azure-bundle" },
+      { provider: "openai", model: "gpt-bundle" },
+    ]);
+    expect(bundled.dataThrough?.toISOString()).toBe("2026-08-14T12:00:01.000Z");
+  });
+
+  test("scopes a root drilldown through the same private-session visibility", async () => {
+    if (!shared || !client) return;
+    const seeded = await fixture();
+    const scoped = (subjectId: string) =>
+      withSessionRlsActorContext(
+        { subjectId },
+        async () =>
+          await readWorkspaceInsightsModelBundle(client!.db, {
+            ...seeded.input,
+            rootSessionId: seeded.privateSessionId,
+          }),
+      );
+    const owner = await scoped(seeded.ownerSubjectId);
+    expect(owner.recentCalls.map((call) => call.sessionId)).toEqual([
+      seeded.privateSessionId,
+      seeded.privateSessionId,
+    ]);
+    expect(owner.rootDrivers.map((driver) => driver.rootSessionId)).toEqual([
+      seeded.privateSessionId,
+    ]);
+    expect(owner.priorRootDrivers.map((driver) => driver.totalTokens)).toEqual([20]);
+
+    const outsider = await scoped(`user:${crypto.randomUUID()}`);
+    expect(outsider.recentCalls).toEqual([]);
+    expect(outsider.rootDrivers).toEqual([]);
+    expect(outsider.modelRows).toEqual([]);
+    expect(outsider.priorModelRows).toEqual([]);
+    // Facets stay workspace-wide but still exclude the outsider's invisible session.
+    expect(outsider.facets).toEqual([
+      { provider: "azure", model: "azure-bundle" },
+      { provider: "openai", model: "gpt-bundle" },
+    ]);
+  });
+
+  test("groups every root by its current project and folds the tail exactly", async () => {
+    if (!shared || !client) return;
+    const seeded = await fixture();
+    const fileInNewProject = async (name: string, sessionId: string) => {
+      const channel = await createChannel(client!.db, {
+        accountId: seeded.accountId,
+        workspaceId: seeded.workspaceId,
+        name,
+      });
+      await withSessionRlsActorContext({ subjectId: seeded.ownerSubjectId }, () =>
+        setSessionChannel(client!.db, {
+          workspaceId: seeded.workspaceId,
+          sessionId,
+          channelId: channel.id,
+        }),
+      );
+    };
+    await fileInNewProject("Billing", seeded.sharedSessionId);
+    const read = (subjectId: string) =>
+      withSessionRlsActorContext({ subjectId }, () =>
+        readWorkspaceInsightsModelBundle(client!.db, seeded.input),
+      );
+
+    const owner = await read(seeded.ownerSubjectId);
+    expect(
+      owner.projects.map((row) => [
+        row.kind,
+        row.name,
+        row.rootSessions,
+        row.calls,
+        row.totalTokens,
+      ]),
+    ).toEqual([
+      ["project", "Billing", 1, 2, 160],
+      ["unfiled", null, 1, 2, 75],
+    ]);
+    expect(owner.projects.map((row) => row.pricedCostMicros)).toEqual([200, 375]);
+
+    const outsider = await read(`user:${crypto.randomUUID()}`);
+    expect(outsider.projects.map((row) => [row.kind, row.name, row.calls])).toEqual([
+      ["project", "Billing", 2],
+    ]);
+
+    // One more filed root than the named limit leaves two projects in `other`.
+    for (let index = 0; index < INSIGHTS_PROJECT_LIMIT + 1; index += 1) {
+      const session = await withSessionRlsActorContext({ subjectId: seeded.ownerSubjectId }, () =>
+        createSession(client!.db, {
+          accountId: seeded.accountId,
+          workspaceId: seeded.workspaceId,
+          initialMessage: `project ${index}`,
+          resources: [],
+          metadata: {},
+          model: "fixture-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: seeded.ownerSubjectId },
+          createdByContext: {},
+        }),
+      );
+      await fileInNewProject(`Project ${index}`, session.id);
+      await shared.admin`
+        insert into model_call_facts (
+          account_id, workspace_id, session_id, turn_id, source_key, provider,
+          provider_api, model, billing_path, input_tokens, output_tokens,
+          cached_tokens, total_tokens, priced_cost_micros, occurred_at
+        ) values (
+          ${seeded.accountId}, ${seeded.workspaceId}, ${session.id}, ${crypto.randomUUID()},
+          ${`project-${index}-${crypto.randomUUID()}`}, 'openai', 'responses', 'gpt-bundle',
+          'opengeni_credits', 10, 1, 4, ${100 + index}, 7, '2026-08-15T00:00:00.000Z'
+        )`;
+    }
+    const folded = await read(seeded.ownerSubjectId);
+    const named = folded.projects.filter((row) => row.kind === "project");
+    const other = folded.projects.filter((row) => row.kind === "other");
+    expect(named).toHaveLength(INSIGHTS_PROJECT_LIMIT);
+    expect(folded.projects.map((row) => row.kind).slice(-2)).toEqual(["other", "unfiled"]);
+    expect(other).toHaveLength(1);
+    expect(other[0]?.projects).toBe(2);
+    expect(other[0]?.name).toBeNull();
+    const sum = (rows: Array<{ totalTokens: number; pricedCostMicros: number; calls: number }>) =>
+      rows.reduce(
+        (total, row) => ({
+          totalTokens: total.totalTokens + row.totalTokens,
+          pricedCostMicros: total.pricedCostMicros + row.pricedCostMicros,
+          calls: total.calls + row.calls,
+        }),
+        { totalTokens: 0, pricedCostMicros: 0, calls: 0 },
+      );
+    expect(sum(folded.projects)).toEqual(sum(folded.modelRows));
   });
 
   test("backfill preserves free external billing when the live fact write was lost", async () => {
@@ -612,7 +812,104 @@ describe("Workspace Insights model bundle", () => {
     ]);
   });
 
-  test("reduces model sources from nine to two by default and three with filtered facets", async () => {
+  test("reconciler rebuilds exactly the charged ledger calls that lack a fact", async () => {
+    if (!shared || !client) return;
+    const seeded = await fixture();
+    const occurredAt = new Date("2026-08-15T10:00:00.000Z");
+    const calls = ["with-event", "without-event", "already-faceted"].map((label, index) => ({
+      label,
+      turnId: crypto.randomUUID(),
+      sourceKey: `reconcile-${label}-${crypto.randomUUID()}`,
+      costMicros: [1200, 800, 500][index]!,
+      position: index + 1,
+    }));
+    for (const call of calls) {
+      await shared.admin`
+        insert into session_turns (
+          id, account_id, workspace_id, session_id, trigger_event_id,
+          temporal_workflow_id, status, position, prompt, model,
+          reasoning_effort, latency_mode, sandbox_backend, resources, tools,
+          metadata, started_at, finished_at
+        ) values (
+          ${call.turnId}, ${seeded.accountId}, ${seeded.workspaceId}, ${seeded.sharedSessionId},
+          ${crypto.randomUUID()}, ${`session-${seeded.sharedSessionId}`}, 'completed',
+          ${100 + call.position}, 'reconcile fixture', 'gpt-bundle',
+          'medium', 'standard', 'none', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+          ${occurredAt}, ${occurredAt}
+        )`;
+      const sourceResourceId = `${call.turnId}:${call.sourceKey}`;
+      await shared.admin`
+        insert into usage_events (
+          account_id, workspace_id, event_type, quantity, unit,
+          source_resource_type, source_resource_id, session_id, turn_id,
+          idempotency_key, occurred_at
+        ) values (
+          ${seeded.accountId}, ${seeded.workspaceId}, 'model.cost', ${call.costMicros}, 'usd_micros',
+          'model_response', ${sourceResourceId}, ${seeded.sharedSessionId}, ${call.turnId},
+          ${`usage:model.cost:${sourceResourceId}`},
+          ${occurredAt}::timestamptz + ${`${call.position} minutes`}::interval
+        )`;
+    }
+    for (const call of [calls[0]!, calls[2]!]) {
+      await shared.admin`
+        insert into session_events (
+          account_id, workspace_id, session_id, turn_id, turn_association,
+          sequence, type, payload, occurred_at
+        ) values (
+          ${seeded.accountId}, ${seeded.workspaceId}, ${seeded.sharedSessionId}, ${call.turnId},
+          'current',
+          (
+            select coalesce(max(sequence), 0) + 1
+            from session_events
+            where workspace_id = ${seeded.workspaceId}
+              and session_id = ${seeded.sharedSessionId}
+          ),
+          'agent.model.usage',
+          ${shared.admin.json({
+            sourceKey: call.sourceKey,
+            provider: "openai",
+            providerApi: "responses",
+            model: "gpt-bundle",
+            billingPath: "opengeni_credits",
+            inputTokens: 100,
+            outputTokens: 20,
+          })},
+          ${occurredAt}
+        )`;
+    }
+    await shared.admin`
+      insert into model_call_facts (
+        account_id, workspace_id, session_id, turn_id, source_key, provider,
+        provider_api, model, billing_path, priced_cost_micros, occurred_at
+      ) values (
+        ${seeded.accountId}, ${seeded.workspaceId}, ${seeded.sharedSessionId}, ${calls[2]!.turnId},
+        ${calls[2]!.sourceKey}, 'openai', 'responses', 'gpt-bundle', 'opengeni_credits', 500,
+        ${occurredAt}::timestamptz + interval '3 milliseconds'
+      )`;
+    const window = {
+      workspaceId: seeded.workspaceId,
+      since: new Date("2026-08-15T00:00:00.000Z"),
+      until: new Date("2026-08-16T00:00:00.000Z"),
+    };
+
+    const bounded = await reconcileModelCallFacts(client.db, { ...window, limit: 1 });
+    expect(bounded).toEqual({ missing: 1, repaired: 1, unrepaired: 0, truncated: true });
+
+    const first = await reconcileModelCallFacts(client.db, window);
+    expect(first).toEqual({ missing: 1, repaired: 0, unrepaired: 1, truncated: false });
+    const rebuilt = await shared.admin`
+      select priced_cost_micros::text, billing_path, total_tokens::text
+      from model_call_facts
+      where workspace_id = ${seeded.workspaceId} and turn_id = ${calls[0]!.turnId}`;
+    expect([...rebuilt]).toEqual([
+      { priced_cost_micros: "1200", billing_path: "opengeni_credits", total_tokens: "120" },
+    ]);
+
+    const again = await reconcileModelCallFacts(client.db, window);
+    expect(again).toEqual({ missing: 1, repaired: 0, unrepaired: 1, truncated: false });
+  });
+
+  test("reduces model sources from nine legacy reads to two by default and three with filtered facets", async () => {
     if (!shared) return;
     const seeded = await fixture();
     const legacyStatements: CapturedStatement[] = [];
@@ -634,9 +931,11 @@ describe("Workspace Insights model bundle", () => {
       await bundledDb.close();
     }
 
-    const source = "visible_workspace_insights_model_call_facts";
+    const legacySource = "visible_workspace_insights_model_call_facts";
+    const source = "visible_workspace_insights_model_fact_rows";
     const legacyInvocations = legacyStatements.reduce(
-      (total, statement) => total + (statement.query.match(new RegExp(source, "g"))?.length ?? 0),
+      (total, statement) =>
+        total + (statement.query.match(new RegExp(legacySource, "g"))?.length ?? 0),
       0,
     );
     const bundleQueries = bundledStatements.filter((statement) => statement.query.includes(source));
@@ -670,10 +969,10 @@ describe("Workspace Insights model bundle", () => {
     );
     expect(filteredQueries).toHaveLength(1);
     expect(filteredInvocations).toBe(3);
-    expect(filteredQueries[0]?.query).toContain("null::text");
+    expect(filteredQueries[0]?.query).toContain("::text");
   });
 
-  test("bounds outer session-table lookup loops by distinct sessions, not fact rows", async () => {
+  test("bounds outer session-table lookup loops by result limits, not fact rows", async () => {
     if (!shared) return;
     const seeded = await fixture();
     const sourcePrefix = `insights-session-map-${crypto.randomUUID()}-`;
@@ -709,7 +1008,7 @@ describe("Workspace Insights model bundle", () => {
       await capturedDb.close();
     }
     const statement = statements.find((candidate) =>
-      candidate.query.includes("visible_workspace_insights_model_call_facts"),
+      candidate.query.includes("visible_workspace_insights_model_fact_rows"),
     );
     expect(statement).toBeDefined();
     if (!statement) return;
@@ -733,8 +1032,12 @@ describe("Workspace Insights model bundle", () => {
       });
       const loops = sessionRelationLoops(plan);
       expect(loops.length).toBeGreaterThan(0);
-      expect(loops.reduce((total, value) => total + value, 0)).toBeLessThanOrEqual(16);
-      expect(factsPerWindow * 2).toBeGreaterThan(1_000);
+      // The project grouping reads each distinct root once; the fixture has two.
+      const rootGroups = 2;
+      const resultBound =
+        INSIGHTS_RECENT_CALL_LIMIT + 1 + 2 * (INSIGHTS_ROOT_DRIVER_LIMIT + 1) + rootGroups;
+      expect(loops.reduce((total, value) => total + value, 0)).toBeLessThanOrEqual(resultBound);
+      expect(factsPerWindow * 2).toBeGreaterThan(resultBound * 10);
     } finally {
       await app.end();
     }
