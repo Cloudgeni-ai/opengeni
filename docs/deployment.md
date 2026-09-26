@@ -3090,6 +3090,8 @@ back the stable channel by changing the configured version only after the
 corresponding `agent-v<version>` release and its signed assets exist; never move
 or delete an agent release tag. A baked asset still takes precedence so a
 deployed control-plane image serves its release-coherent binary directly.
+Explicit `/agent/v<version>/<asset>` binary and signature requests always use
+that immutable archive release; a baked canary cannot override a version pin.
 The same deployment serves signed `/agent/stable/manifest.json` and
 `manifest.json.minisig` routes so an enrolled agent updates through a control
 plane it already trusts instead of depending on public DNS. Beta is independent
