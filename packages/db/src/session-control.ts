@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   boundWorkspaceControlEvent,
   childPausedClassification,
@@ -931,8 +932,9 @@ export async function registerSessionTurnAttemptClaim(
     existing.temporalWorkflowRunId !== input.temporalWorkflowRunId ||
     existing.temporalActivityId !== input.temporalActivityId ||
     existing.personalResourceProtocolVersion !== input.personalResourceProtocolVersion ||
-    JSON.stringify(existing.connectorActionPolicies) !==
-      JSON.stringify(input.connectorActionPolicies) ||
+    // JSONB changes object key order; compare the immutable snapshot by value
+    // so exact-attempt reentry remains idempotent after a database round trip.
+    !isDeepStrictEqual(existing.connectorActionPolicies, input.connectorActionPolicies) ||
     existing.state === "closed"
   ) {
     throw new SessionControlInvariantError(
