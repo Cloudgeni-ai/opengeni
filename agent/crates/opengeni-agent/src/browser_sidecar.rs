@@ -109,9 +109,10 @@ impl BrowserSidecarManager {
                 .map(|(_, sidecar)| sidecar)
                 .collect::<Vec<_>>()
         };
-        for sidecar in sidecars {
-            stop_sidecar(sidecar).await;
-        }
+        // Every authority receives its cooperative signal immediately. Serial
+        // per-scope waits multiply the stop budget and let the service manager
+        // kill later scopes before their profile cleanup even starts.
+        futures::future::join_all(sidecars.into_iter().map(stop_sidecar)).await;
     }
 
     async fn start(
@@ -361,9 +362,14 @@ impl BrowserControlBackend for BrowserSidecarManager {
 
 async fn stop_sidecar(mut sidecar: Sidecar) {
     signal_sidecar_termination(&mut sidecar.child);
-    if tokio::time::timeout(Duration::from_secs(10), sidecar.child.wait())
-        .await
-        .is_err()
+    if tokio::time::timeout(
+        Duration::from_secs(
+            opengeni_agent_platform::service::BROWSER_SIDECAR_SHUTDOWN_TIMEOUT_SECS,
+        ),
+        sidecar.child.wait(),
+    )
+    .await
+    .is_err()
     {
         let _ = sidecar.child.kill().await;
         let _ = sidecar.child.wait().await;
@@ -837,6 +843,58 @@ mod tests {
             bounded_ready_value("before-test-secret-after", "test-secret"),
             "\"before-[redacted]-after\""
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_waits_for_slow_owned_cleanup_across_scopes_concurrently() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temporary = tempfile::tempdir().expect("temporary sidecar root");
+        let binary = temporary.path().join("slow-browserd");
+        // The optional fixture runs real browsers in the isolated acceptance
+        // environment. The default needs only POSIX sh, including on macOS CI.
+        let script = if let Ok(fixture) = std::env::var("OPENGENI_TEST_SLOW_BROWSERD") {
+            std::fs::read_to_string(fixture)
+                .expect("read slow browser fixture")
+                .replace("@RUNTIME_BUILD_ID@", expected_runtime_build_id())
+        } else {
+            format!(
+                "#!/bin/sh\nmkdir -p \"$OPENGENI_BROWSERD_ROOT\"\ntrap 'sleep 12; touch \"$OPENGENI_BROWSERD_ROOT/cleaned\"; exit 0' INT\nprintf '%s\\n' '{{\"service\":\"opengeni-browserd\",\"status\":\"ready\",\"protocolVersion\":1,\"runtimeBuildId\":\"{}\",\"computer\":false,\"hostname\":\"127.0.0.1\",\"port\":12345}}'\nwhile :; do sleep 1; done\n",
+                expected_runtime_build_id()
+            )
+        };
+        std::fs::write(&binary, script).expect("write slow browserd");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))
+            .expect("make slow browserd executable");
+        let config = temporary.path().join("config");
+        let manager = BrowserSidecarManager::with_binary(&config, &binary).expect("manager");
+        for scope in ["slow-first", "slow-second"] {
+            manager
+                .ensure(&v1::BrowserControlEnsureRequest {
+                    scope_id: scope.to_string(),
+                    scope_generation: "generation".to_string(),
+                    admin_token: "s".repeat(32),
+                    allowed_origins: vec![],
+                })
+                .await
+                .expect("start slow sidecar");
+        }
+        let started = std::time::Instant::now();
+        manager.shutdown().await;
+        assert!(
+            started.elapsed() < Duration::from_secs(23),
+            "scope drains must overlap"
+        );
+        for scope in ["slow-first", "slow-second"] {
+            assert!(
+                config
+                    .join("browserd/scopes")
+                    .join(scope_storage_key(scope))
+                    .join("state/cleaned")
+                    .is_file(),
+                "owned cleanup must finish after old 10s cutoff"
+            );
+        }
     }
 
     #[cfg(unix)]
