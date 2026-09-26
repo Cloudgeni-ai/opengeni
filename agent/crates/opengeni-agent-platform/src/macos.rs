@@ -213,16 +213,24 @@ impl DesktopBackend for MacosDesktop {
         // blank. Report the actionable reason at Hello (non-prompting preflight) so the
         // control plane withholds the desktop cell instead of advertising a capture it
         // cannot perform.
-        if macffi::screen_capture_granted() {
-            None
-        } else {
-            Some(
+        if !macffi::screen_capture_granted() {
+            return Some(
                 "Screen Recording permission not granted — enable it for OpenGeni in \
                  System Settings → Privacy & Security → Screen & System Audio Recording, \
-                 then reconnect the machine."
+                 availability refreshes automatically after permission is granted."
                     .to_string(),
-            )
+            );
         }
+        match macffi::machine_locked() {
+            Ok(true) => {
+                return Some("This Mac is locked. Unlock it to use desktop capture.".into())
+            }
+            Err(_) => return Some("The macOS login session is unavailable.".into()),
+            Ok(false) => {}
+        }
+        macffi::list_displays().err().map(|_| {
+            "No active macOS display is available. Wake the displays to use desktop capture.".into()
+        })
     }
 }
 

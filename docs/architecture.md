@@ -81,6 +81,12 @@ validation active while restoring wide-session locking and compatibility writes.
 
 Commands acknowledge durable commits, independent of replayable NATS/Temporal notifications.
 
+Connected Machine heartbeats carry optional, background-sampled desktop status.
+The current runner instance refreshes display availability and the desktop
+capability together; unchanged and legacy snapshots do not churn state. Sleep,
+wake, and permission changes do not reconnect the command plane or grant consent.
+See `apps/api/src/sandbox/metrics-ingestion.ts` and `docs/connected-machines.md`.
+
 Control revisions increase.
 
 Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
