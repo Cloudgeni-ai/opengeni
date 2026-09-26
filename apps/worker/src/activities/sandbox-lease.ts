@@ -161,6 +161,7 @@ import {
   recordSandboxOrphansTerminated,
   recordSandboxRotationBacklogGauges,
   recordTurnsQueuedGauge,
+  recordVerifiedSignupTrialDeploymentFlagGauge,
   recordVerifiedSignupTrialSwitchGauge,
   runtimeMetricsHooksForObservability,
 } from "../observability-metrics";
@@ -2378,6 +2379,10 @@ async function refreshQueueLeaseAndCreditGauges(
       }
     })(),
     (async () => {
+      recordVerifiedSignupTrialDeploymentFlagGauge(
+        observability,
+        settings.verifiedSignupTrialCreditsEnabled,
+      );
       try {
         const trialSwitch = await readVerifiedSignupTrialSwitch(db);
         recordVerifiedSignupTrialSwitchGauge(observability, trialSwitch?.grantsEnabled === true);

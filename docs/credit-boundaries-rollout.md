@@ -72,7 +72,8 @@ person proof, so monitor grants and abuse before scaling the offer.
    and turning it back on does not backfill that setup. See "Verified signup
    trial runtime switch (0521)" in [`deployment.md`](deployment.md) for the
    audited setter, the state query, and the
-   `opengeni_verified_signup_trial_credits_runtime_enabled` gauge.
+   `opengeni_verified_signup_trial_credits_runtime_enabled` and
+   `opengeni_verified_signup_trial_credits_deployment_enabled` gauges.
 4. Activate one paid resource mode at a time on a controlled deployment only
    after its real database, failure-injection, and UI tests are green. Verify
    positive-balance admission for *new* work, idempotent full post-use settlement

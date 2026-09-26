@@ -121,6 +121,46 @@ $body$;
 
 REVOKE ALL ON FUNCTION set_verified_signup_trial_credits_enabled(boolean, text, text) FROM PUBLIC;
 
+-- REVOKE FROM PUBLIC leaves grants that out-of-band ALTER DEFAULT PRIVILEGES
+-- gave named roles at CREATE time. Strip every non-owner grantee from the new
+-- table and the setter so no runtime role can write the switch or call the
+-- setter before db:provision-roles runs; provisioning then grants SELECT only.
+DO $switch_acl$
+DECLARE
+  grantee_name text;
+BEGIN
+  FOR grantee_name IN
+    SELECT DISTINCT role_row.rolname FROM pg_catalog.pg_class relation
+    CROSS JOIN LATERAL pg_catalog.aclexplode(coalesce(
+      relation.relacl, pg_catalog.acldefault('r', relation.relowner)
+    )) privilege
+    JOIN pg_catalog.pg_roles role_row ON role_row.oid = privilege.grantee
+    WHERE relation.oid = 'opengeni_private.verified_signup_trial_switch_revisions'::regclass
+      AND privilege.grantee <> relation.relowner
+  LOOP
+    EXECUTE pg_catalog.format(
+      'REVOKE ALL ON TABLE opengeni_private.verified_signup_trial_switch_revisions FROM %I',
+      grantee_name
+    );
+  END LOOP;
+  FOR grantee_name IN
+    SELECT DISTINCT role_row.rolname FROM pg_catalog.pg_proc routine
+    CROSS JOIN LATERAL pg_catalog.aclexplode(coalesce(
+      routine.proacl, pg_catalog.acldefault('f', routine.proowner)
+    )) privilege
+    JOIN pg_catalog.pg_roles role_row ON role_row.oid = privilege.grantee
+    WHERE routine.oid = 'set_verified_signup_trial_credits_enabled(boolean, text, text)'::regprocedure
+      AND privilege.grantee <> routine.proowner
+  LOOP
+    EXECUTE pg_catalog.format(
+      'REVOKE ALL ON FUNCTION %I.set_verified_signup_trial_credits_enabled(boolean, text, text) FROM %I',
+      pg_catalog.current_schema(),
+      grantee_name
+    );
+  END LOOP;
+END
+$switch_acl$;
+
 -- The grant keeps every 0509 invariant and adds the runtime switch after the
 -- per-request deployment opt-in, so a disabled master switch never touches it.
 CREATE OR REPLACE FUNCTION opengeni_private.grant_verified_signup_trial_credit()

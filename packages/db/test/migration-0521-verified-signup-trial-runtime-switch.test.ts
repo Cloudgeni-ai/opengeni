@@ -259,6 +259,63 @@ describe("migration 0521 verified signup trial runtime switch", () => {
     }
   });
 
+  test("strips default-privilege grants from the switch table and setter at creation", async () => {
+    if (!owned || !owner) return;
+    const migration = readFileSync(
+      new URL("../drizzle/0521_verified_signup_trial_runtime_switch.sql", import.meta.url),
+      "utf8",
+    );
+    const rollback = new Error("roll back the 0521 replay");
+    let probe: { probe_insert: boolean; probe_execute: boolean } | undefined;
+    let grantees: { table_grantees: string[]; setter_grantees: string[] } | undefined;
+    await owner
+      .begin(async (tx) => {
+        // Replay 0521 in a rolled-back transaction after installing default
+        // privileges that grant the runtime role write and EXECUTE on new objects.
+        await tx.unsafe(`
+          DROP TABLE opengeni_private.verified_signup_trial_switch_revisions;
+          DROP FUNCTION public.${SETTER};
+          DROP FUNCTION public.reject_verified_signup_trial_switch_revision_mutation();
+          ALTER DEFAULT PRIVILEGES IN SCHEMA opengeni_private
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO opengeni_app;
+          ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO opengeni_app;
+          CREATE TABLE opengeni_private.default_acl_probe_0521 (id integer);
+          CREATE FUNCTION public.default_acl_probe_0521() RETURNS integer
+            LANGUAGE sql AS 'select 1';
+        `);
+        [probe] = await tx<Array<{ probe_insert: boolean; probe_execute: boolean }>>`
+          select
+            has_table_privilege('opengeni_app', 'opengeni_private.default_acl_probe_0521', 'INSERT')
+              as probe_insert,
+            has_function_privilege('opengeni_app', 'public.default_acl_probe_0521()', 'EXECUTE')
+              as probe_execute`;
+        await tx.unsafe(migration);
+        [grantees] = await tx<Array<{ table_grantees: string[]; setter_grantees: string[] }>>`
+          select
+            coalesce((
+              select array_agg(distinct acl.grantee::regrole::text)
+              from pg_class c,
+                aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) acl
+              where c.oid = 'opengeni_private.verified_signup_trial_switch_revisions'::regclass
+                and acl.grantee <> c.relowner
+            ), '{}'::text[]) as table_grantees,
+            coalesce((
+              select array_agg(distinct acl.grantee::regrole::text)
+              from pg_proc p,
+                aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+              where p.oid = ${`public.${SETTER}`}::text::regprocedure
+                and acl.grantee <> p.proowner
+            ), '{}'::text[]) as setter_grantees`;
+        throw rollback;
+      })
+      .catch((error: unknown) => {
+        if (error !== rollback) throw error;
+      });
+    // The default privileges really would have leaked to the runtime role.
+    expect(probe).toEqual({ probe_insert: true, probe_execute: true });
+    expect(grantees).toEqual({ table_grantees: [], setter_grantees: [] });
+  }, 60_000);
+
   test("the runtime role can read the switch but never flip or rewrite it", async () => {
     if (!owned || !app || !appClient) return;
     const [privileges] = await owned.admin<
