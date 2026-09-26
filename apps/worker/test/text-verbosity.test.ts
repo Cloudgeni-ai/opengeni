@@ -32,6 +32,18 @@ function builtinSettings(overrides: Parameters<typeof testSettings>[0] = {}): Se
         models: [{ id: "accounts/fireworks/models/glm-5p2", label: "GLM 5.2" }],
       },
       {
+        id: "azure-sol",
+        label: "Azure OpenAI Sol",
+        api: "responses",
+        wireProfile: "azure-openai",
+        baseUrl: "https://registry.openai.azure.com/openai/v1",
+        apiKey: "azure-registry-test-key",
+        models: [
+          { id: "azure-sol/gpt-6-sol", upstreamModelId: "gpt-6-sol", label: "Sol" },
+          { id: "azure-sol/gpt-4.1", upstreamModelId: "gpt-4.1", label: "GPT-4.1" },
+        ],
+      },
+      {
         id: "compatible",
         label: "OpenAI-compatible Responses",
         api: "responses",
@@ -67,14 +79,22 @@ describe("textVerbosityForTurn", () => {
     expect(textVerbosityForTurn(codexModel, "gpt-5.1-codex-max")).toBeUndefined();
     expect(textVerbosityForTurn(codexModel, "gpt-5-chat-latest")).toBeUndefined();
 
-    // Unverified wires keep the provider default.
+    // Azure OpenAI Responses, built in or registered, with the same model check.
     const azure = builtinSettings({
       openaiProvider: "azure",
       azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
       azureOpenaiApiKey: "az-test-key",
     });
     expect(resolved(azure, "gpt-5.6-sol").provider.wireProfile).toBe("azure-openai");
-    expect(verbosityFor(azure, "gpt-5.6-sol")).toBeUndefined();
+    expect(verbosityFor(azure, "gpt-5.6-sol")).toBe("low");
+    expect(verbosityFor(azure, "gpt-4.1")).toBeUndefined();
+    const azureRegistry = resolved(builtinSettings(), "azure-sol/gpt-6-sol").provider;
+    expect(azureRegistry.builtin).toBe(false);
+    expect(azureRegistry.wireProfile).toBe("azure-openai");
+    expect(verbosityFor(builtinSettings(), "azure-sol/gpt-6-sol")).toBe("low");
+    expect(verbosityFor(builtinSettings(), "azure-sol/gpt-4.1")).toBeUndefined();
+
+    // Unverified wires keep the provider default.
     const proxied = builtinSettings({ openaiBaseUrl: "https://proxy.example.test/v1" });
     expect(verbosityFor(proxied, "gpt-5.6-sol")).toBeUndefined();
     expect(verbosityFor(builtinSettings(), "compatible/gpt-5.6-sol")).toBeUndefined();
@@ -161,7 +181,7 @@ async function buildWorkerAgent(settings: Settings, modelId: string) {
   }
 }
 
-test("the worker builds every Codex turn with low verbosity and leaves Azure unchanged", async () => {
+test("the worker builds Codex and Azure turns with low verbosity and leaves other wires unchanged", async () => {
   const codex = await buildWorkerAgent(
     withCodexCatalogProvider(builtinSettings()),
     "codex/gpt-6-sol",
@@ -177,6 +197,10 @@ test("the worker builds every Codex turn with low verbosity and leaves Azure unc
     }),
     "gpt-5.6-sol",
   );
-  expect(azure.modelSettings.text).toBeUndefined();
+  expect(azure.modelSettings.text).toEqual({ verbosity: "low" });
   expect(azure.modelSettings.reasoning).toEqual({ effort: "medium", summary: "detailed" });
+
+  const compatible = await buildWorkerAgent(builtinSettings(), "compatible/gpt-5.6-sol");
+  expect(compatible.modelSettings.text).toBeUndefined();
+  expect(compatible.modelSettings.reasoning).toEqual({ effort: "medium", summary: "detailed" });
 });

@@ -86,11 +86,13 @@ export function structuredToolTransportForTurn(
 /**
  * `text.verbosity: "low"` is the Codex CLI default for its GPT-5-family models
  * and keeps final answers short. Send it only where the wire is known to accept
- * it: the ChatGPT/Codex subscription backend and direct OpenAI Responses.
- * Azure, Gateways, xAI, other OpenAI-compatible endpoints and chat wires keep
- * their provider default. The result depends only on the route and model, so a
- * session sends the same value on every request until its model changes, and a
- * model change already starts a new prompt-cache prefix.
+ * it: the ChatGPT/Codex subscription backend, direct OpenAI Responses, and the
+ * Azure OpenAI Responses wire, where the parallel session-title request already
+ * sends the same field with the turn's model. Gateways, xAI, other
+ * OpenAI-compatible endpoints and chat wires keep their provider default. The
+ * result depends only on the route and model, so a session sends the same value
+ * on every request until its model changes, and a model change already starts a
+ * new prompt-cache prefix.
  */
 export function textVerbosityForTurn(
   resolvedModel: {
@@ -98,6 +100,7 @@ export function textVerbosityForTurn(
       id: string;
       kind: ResolvedModelProvider["kind"];
       api: ModelProviderApi;
+      wireProfile: "openai" | "azure-openai";
       builtin: boolean;
       baseUrl?: string | undefined;
     };
@@ -108,6 +111,7 @@ export function textVerbosityForTurn(
   const provider = resolvedModel.provider;
   const acceptsVerbosity =
     provider.kind === "codex-subscription" ||
+    provider.wireProfile === "azure-openai" ||
     (provider.builtin && provider.id === "openai" && isDirectOpenAiApiBaseUrl(provider.baseUrl));
   return acceptsVerbosity && modelAcceptsTextVerbosity(upstreamModelId) ? "low" : undefined;
 }
