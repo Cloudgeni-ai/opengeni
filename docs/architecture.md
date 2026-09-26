@@ -365,10 +365,7 @@ and `packages/sdk/test/contract-parity.test.ts`.
 
 A Connected Machine (`selfhosted` internally) is the user's computer. When selected
 for a turn, agents run there directly; OpenGeni creates, leases, and bills no hidden sandbox.
-Managed Linux service shutdown signals the supervisor first; browser sidecars drain
-concurrently before systemd applies its final cgroup kill. Native sidecar ownership
-and the generated unit budgets are defined in `agent/crates/opengeni-agent/src/browser_sidecar.rs`
-and `agent/crates/opengeni-agent-platform/src/service.rs`.
+See [native lifecycle](../agent/README.md#distribution) for coordinated Linux browser shutdown.
 
 The machine owns its filesystem, Git authentication, environment, and long-lived
 platform credentials. OpenGeni neither clones repositories nor installs durable
