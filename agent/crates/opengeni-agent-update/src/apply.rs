@@ -157,6 +157,39 @@ pub fn replace_running_exe(new_bytes: &[u8]) -> UpdateResult<PathBuf> {
     Ok(backup)
 }
 
+/// Atomically replaces a Unix executable at its previously captured install path.
+/// Keeps a copied rollback backup without ever moving the canonical file aside.
+/// Unlike a late current_exe lookup, this remains valid after a prior apply or
+/// rollback in the same process.
+///
+/// # Errors
+///
+/// Returns an I/O error if the existing install cannot be inspected, backed up,
+/// or atomically replaced.
+#[cfg(unix)]
+pub fn replace_running_exe_at(install_path: &Path, new_bytes: &[u8]) -> UpdateResult<PathBuf> {
+    let permissions = std::fs::metadata(install_path)
+        .map_err(|error| UpdateError::io(install_path.display().to_string(), error))?
+        .permissions();
+    let tmp = temp_sibling(install_path);
+    write_executable(&tmp, new_bytes)?;
+    let backup = backup_path(install_path);
+    let result = (|| {
+        std::fs::set_permissions(&tmp, permissions)
+            .map_err(|error| UpdateError::io(tmp.display().to_string(), error))?;
+        let _ = std::fs::remove_file(&backup);
+        std::fs::copy(install_path, &backup)
+            .map_err(|error| UpdateError::io(backup.display().to_string(), error))?;
+        std::fs::rename(&tmp, install_path)
+            .map_err(|error| UpdateError::io(install_path.display().to_string(), error))?;
+        Ok(backup)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// A temp file name sibling to `path` on the same directory/filesystem.
 fn temp_sibling(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
@@ -193,6 +226,30 @@ mod tests {
 
     fn read(path: &Path) -> Vec<u8> {
         fs::read(path).expect("read")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_install_replacement_preserves_permissions_and_rollback() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("agent");
+        fs::write(&bin, b"old").unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o750)).unwrap();
+        let backup = replace_running_exe_at(&bin, b"new").unwrap();
+        assert_eq!(read(&bin), b"new");
+        assert_eq!(read(&backup), b"old");
+        assert_eq!(
+            fs::metadata(&bin).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+        rollback(&bin).unwrap();
+        assert_eq!(read(&bin), b"old");
+        replace_running_exe_at(&bin, b"retry").unwrap();
+        promote(&bin).unwrap();
+        assert_eq!(read(&bin), b"retry");
+        assert!(!backup.exists());
+        assert!(!temp_sibling(&bin).exists());
     }
 
     #[test]

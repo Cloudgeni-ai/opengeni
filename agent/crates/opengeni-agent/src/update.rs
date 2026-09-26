@@ -12,6 +12,8 @@
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use opengeni_agent_update::{
     check_update_manifest, finalize_update, HttpSource, ManifestCheckOutcome, UpdateConfig,
@@ -27,6 +29,37 @@ use crate::DEFAULT_API_URL;
 
 /// Public fallback used only before the machine has any enrolled deployment.
 const DEFAULT_BASE_URL: &str = "https://get.opengeni.ai";
+// Linux current_exe follows the running inode. After replacement it can return
+// a deleted path; retain the install identity for retries and successor exec.
+static INSTALLED_EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+
+/// Stable install pathname captured before any running-inode replacement.
+pub fn installed_executable() -> Result<&'static Path, String> {
+    INSTALLED_EXECUTABLE
+        .get_or_init(|| {
+            std::env::current_exe().map_err(|_| "installed_binary_unavailable".to_string())
+        })
+        .as_deref()
+        .map_err(Clone::clone)
+}
+
+fn apply_verified_update(
+    pending: &opengeni_agent_update::PendingUpdate,
+    install_path: &Path,
+) -> UpdateResult<PathBuf> {
+    // Unix permits replacing the running file using the captured pathname.
+    // Windows still needs self-replace's running-image lock handling.
+    #[cfg(unix)]
+    {
+        pending.apply_running_at(install_path)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = install_path;
+        pending.apply_running()
+    }
+}
+
 const COMPLETED_UPDATE_RECEIPT_FILE: &str = "completed-update.json";
 
 /// Non-secret durable proof that the exact control-plane operation installed a
@@ -137,6 +170,7 @@ fn persist_completed_update_receipt_at(
 ///
 /// Returns a human-facing error string on any fetch/verify/apply failure.
 pub fn run(args: &UpdateArgs) -> Result<(), String> {
+    let install_path = installed_executable()?;
     let legacy_api_url =
         std::env::var("OPENGENI_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
     let connections = config::load_connections(&legacy_api_url)
@@ -221,14 +255,11 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
     let pending = plan
         .download(&source)
         .map_err(|error| format!("failed to download the selected update: {error}"))?;
-    let install_path = std::env::current_exe()
-        .map_err(|error| format!("could not resolve installed agent path: {error}"))?;
-    pending
-        .apply_running()
+    apply_verified_update(&pending, install_path)
         .map_err(|e| format!("failed to apply the update: {e}"))?;
     finalize_update(
-        &install_path,
-        verify_installed_binary(&install_path, &pending.version),
+        install_path,
+        verify_installed_binary(install_path, &pending.version),
     )
     .map_err(|error| {
         format!("new binary failed its startup preflight and was rolled back: {error}")
@@ -268,6 +299,7 @@ pub fn apply_managed(
     target_version: &str,
     mut progress: impl FnMut(ManagedUpdatePhase),
 ) -> Result<ManagedUpdateResult, String> {
+    let install_path = installed_executable()?;
     if uuid::Uuid::parse_str(operation_id).is_err() {
         return Err("invalid_update_operation".to_string());
     }
@@ -306,15 +338,11 @@ pub fn apply_managed(
         .download(&source)
         .map_err(|_| "artifact_verification_failed".to_string())?;
     progress(ManagedUpdatePhase::Verifying);
-    let install_path =
-        std::env::current_exe().map_err(|_| "installed_binary_unavailable".to_string())?;
     progress(ManagedUpdatePhase::Applying);
-    pending
-        .apply_running()
-        .map_err(|_| "atomic_apply_failed".to_string())?;
-    let health = verify_installed_binary(&install_path, &pending.version);
+    apply_verified_update(&pending, install_path).map_err(|_| "atomic_apply_failed".to_string())?;
+    let health = verify_installed_binary(install_path, &pending.version);
     if let Err(error) = health {
-        finalize_update(&install_path, Err(error))
+        finalize_update(install_path, Err(error))
             .map_err(|_| "startup_preflight_failed_rolled_back".to_string())?;
     }
     let receipt = CompletedUpdateReceipt {
@@ -324,14 +352,14 @@ pub fn apply_managed(
     };
     if let Err(error_code) = persist_completed_update_receipt(&receipt) {
         finalize_update(
-            &install_path,
+            install_path,
             Err(UpdateError::HealthCheck(error_code.clone())),
         )
         .map_err(|_| "update_receipt_persist_failed_rolled_back".to_string())?;
     }
     // Once the new binary and its durable receipt are verified, failure to
     // delete the rollback backup is cleanup debt—not a failed installation.
-    if let Err(error) = finalize_update(&install_path, Ok(())) {
+    if let Err(error) = finalize_update(install_path, Ok(())) {
         warn!(%error, "verified update is live; stale rollback backup cleanup failed");
     }
     Ok(ManagedUpdateResult { expected_sha256 })
@@ -430,6 +458,59 @@ mod tests {
                 last_known_epoch: 0,
             },
         )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn successor_exec_uses_install_path_after_replacement_and_rollback() {
+        const CHILD_DIR: &str = "OPENGENI_TEST_UPDATE_SUCCESSOR_DIR";
+        if let Some(directory) = std::env::var_os(CHILD_DIR) {
+            let directory = PathBuf::from(directory);
+            let installed = directory.join("agent");
+            let marker = directory.join("ready-for-successor");
+            if marker.exists() {
+                assert_eq!(std::env::current_exe().unwrap(), installed);
+                assert_eq!(installed_executable().unwrap(), installed);
+                return;
+            }
+            let captured = installed_executable().unwrap();
+            assert_eq!(captured, installed);
+            let bytes = std::fs::read(captured).unwrap();
+            opengeni_agent_update::replace_running_exe_at(captured, &bytes).unwrap();
+            assert_ne!(std::env::current_exe().unwrap(), captured);
+            opengeni_agent_update::rollback(captured).unwrap();
+            // Rollback restores a copied binary; our running inode remains deleted.
+            assert_ne!(std::env::current_exe().unwrap(), captured);
+            // Retry must continue using the same canonical install identity.
+            assert_eq!(installed_executable().unwrap(), installed);
+            opengeni_agent_update::replace_running_exe_at(installed_executable().unwrap(), &bytes)
+                .unwrap();
+            opengeni_agent_update::finalize_update(captured, Ok(())).unwrap();
+            assert_ne!(std::env::current_exe().unwrap(), captured);
+            assert_eq!(installed_executable().unwrap(), installed);
+            std::fs::write(&marker, b"ready").unwrap();
+            crate::restart_after_verified_update().expect("successor exec");
+            panic!("successful Unix exec never returns");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let installed = directory.path().join("agent");
+        std::fs::copy(std::env::current_exe().unwrap(), &installed).unwrap();
+        let output = std::process::Command::new(&installed)
+            .args([
+                "--exact",
+                "update::tests::successor_exec_uses_install_path_after_replacement_and_rollback",
+                "--nocapture",
+            ])
+            .env(CHILD_DIR, directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(directory.path().join("ready-for-successor").exists());
     }
 
     #[test]

@@ -43,6 +43,8 @@ use std::path::{Path, PathBuf};
 use opengeni_agent_proto::v1::{UpdateArtifact, UpdateManifest};
 use tracing::{info, warn};
 
+#[cfg(unix)]
+pub use apply::replace_running_exe_at;
 pub use apply::{backup_path, promote, replace_running_exe, rollback, swap_binary, BACKUP_SUFFIX};
 pub use error::{UpdateError, UpdateResult};
 pub use manifest::{artifact_for_target, in_rollout, parse_manifest};
@@ -298,6 +300,17 @@ impl PendingUpdate {
     /// [`UpdateError::Io`] on a filesystem failure.
     pub fn apply_to(&self, install_path: &Path) -> UpdateResult<PathBuf> {
         swap_binary(install_path, &self.bytes)
+    }
+
+    /// Applies verified bytes to the captured Unix running-executable install path.
+    /// Preserves the copied backup and single atomic replacement used by live updates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if backup or replacement fails.
+    #[cfg(unix)]
+    pub fn apply_running_at(&self, install_path: &Path) -> UpdateResult<PathBuf> {
+        replace_running_exe_at(install_path, &self.bytes)
     }
 
     /// Applies the verified update to the CURRENTLY-RUNNING executable (the live
