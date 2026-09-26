@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   BrowserAction,
@@ -18,6 +18,7 @@ import {
   resolvePinnedLightpandaBinary,
   uploadBrowserDownload,
 } from "../src";
+import { resolvePinnedHeadlessShell, selectManagedChromiumExecutable } from "../src/headless-shell";
 import { startBrowserConformanceFixture } from "./fixtures/browser-conformance-fixture";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
@@ -56,10 +57,26 @@ e2e(
       ],
     });
     const fixture = startBrowserConformanceFixture();
-    const lightpandaBinaryPath = process.env.OPENGENI_BROWSERD_LIGHTPANDA_BINARY;
+    // Stock images advertise both installed engines. An explicit shell test
+    // must not accidentally exercise their default Lightpanda binary instead.
+    const lightpandaBinaryPath = process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY
+      ? undefined
+      : process.env.OPENGENI_BROWSERD_LIGHTPANDA_BINARY;
     const lightpandaBinary = lightpandaBinaryPath
       ? await resolvePinnedLightpandaBinary({ binaryPath: lightpandaBinaryPath })
       : null;
+    const headlessShell = process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY
+      ? await resolvePinnedHeadlessShell(process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY)
+      : undefined;
+    await mkdir(join(directory, "profile"), { recursive: true });
+    const browserExecutablePath = await selectManagedChromiumExecutable({
+      headed: false,
+      profileDirectory: join(directory, "profile"),
+      ...(headlessShell ? { headlessShell } : {}),
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
     const runner = lightpandaBinary
       ? await LightpandaRunner.create({
           binary: lightpandaBinary,
@@ -73,14 +90,13 @@ e2e(
           downloadDirectory: downloadStore.filesDirectory,
           screenshotDirectory: join(directory, "screenshots"),
           headed: false,
-          ...(process.env.OPENGENI_BROWSER_EXECUTABLE
-            ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
-            : {}),
+          ...(browserExecutablePath ? { browserExecutablePath } : {}),
         });
     const driver = new AgentBrowserDriver({
       browserSessionId,
       controllerGeneration,
       runner,
+      ...(headlessShell ? { userAgentMetadataSource: "intercepted_local" as const } : {}),
       downloadDirectory: downloadStore.filesDirectory,
       downloadEvents: {
         begin: downloadStore.begin.bind(downloadStore),

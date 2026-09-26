@@ -1337,7 +1337,7 @@ Postgres state under workspace RLS, then check the existing one-use nonce.
 ### 7.5 Artifacts, browser control, and managed computer sessions
 
 Editable artifacts use `@opengeni/artifact-tool` and durable collaboration.
-Attempt-scoped `BrowserSession` and `ComputerSession` tools run through
+Attempt-scoped `BrowserSession`/`ComputerSession` tools use
 `@opengeni/interaction` and `@opengeni/browserd` on the selected sandbox or
 machine. Agent browser views are bounded; focused reads and stills use
 authenticated session/controller/target routing. SDK/viewer retain full
@@ -1692,7 +1692,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Sandbox backend or provider registry | `packages/runtime/src/sandbox/providers/`, `packages/contracts/src/index.ts` | §3.9 and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes |
 | Lease, snapshot, reaper, or active target | `apps/worker/src/activities/sandbox-lease.ts`, `packages/runtime/src/sandbox/routing/` | §8 and [`connected-machines.md`](connected-machines.md) |
 | Connected Machine agent or protocol | `agent/`, `agent/proto/opengeni_agent.proto`, `packages/runtime/src/sandbox/selfhosted/` | [`connected-machines.md`](connected-machines.md) |
-| Browser or computer interaction | `packages/interaction/`, `packages/browserd/`, `apps/browser-extension/` | [`connected-machines.md`](connected-machines.md) |
+| Browser or computer interaction | `packages/interaction/`, `packages/browserd/`, `apps/browser-extension/` | [`connected-machines.md`](connected-machines.md), [experimental context pooling](design/ephemeral-chromium-context-pool.md) |
 
 ### Knowledge, artifacts, integrations, and clients
 
@@ -1782,10 +1782,4 @@ Plugin marketplace discovery uses `scripts/refresh-plugin-catalog.ts` →
 API → SDK `discoverPlugins` → shared React `PluginDiscovery`. This metadata
 catalogue does not confer installation compatibility. See [plugin catalogue](plugin-catalog.md).
 
-### Experimental browser context pooling
-
-`packages/browserd/src/chromium-context-pool.ts` owns a construction-only,
-opt-in disposable Chromium context experiment. No supervisor or public API
-enables it; dedicated browser profiles and lifecycle remain unchanged. See
-[`design/ephemeral-chromium-context-pool.md`](design/ephemeral-chromium-context-pool.md)
-for context authority, shared failure scope, and production integration gates.
+[Headless-shell](headless-shell.md).

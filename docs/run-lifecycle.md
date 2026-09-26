@@ -2267,6 +2267,13 @@ wording. Retry stays hidden only for rejected credentials, and only while the
 same model is selected: it stays hidden for that failure on that model even
 after the key is fixed, when a new message re-runs the work. Billing, access,
 daily-limit and quota failures keep Retry, because each condition can clear.
+When the failed turn's model is the deployment's free model (catalog
+`cost: "free"`), the daily-limit copy names the free model instead and lists
+only the remedies the viewer can use: buying OpenGeni credits, connecting a
+model, or picking another model, with matching links. The connect remedy names
+ChatGPT or SuperGrok only when the deployment enables that subscription, and
+otherwise reads "connect a model provider". Every other model keeps the generic
+daily-limit wording.
 Failures with any other worker code keep their authored wording.
 
 A genuinely new `user.message` can still transition failed → queued and start a

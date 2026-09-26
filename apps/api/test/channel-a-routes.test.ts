@@ -703,6 +703,14 @@ describe("ephemeral controller callback replay fence", () => {
     );
     const uncached = active.slice(active.indexOf("return await withBrowserPlacement("));
     expect(uncached).toContain('browserSessionStorageMode(record.session) !== "ephemeral_context"');
+    expect(uncached).toContain(
+      'if (browserSessionStorageMode(record.session) === "ephemeral_context") return await use();',
+    );
+    expect(
+      uncached.indexOf(
+        'if (browserSessionStorageMode(record.session) === "ephemeral_context") return await use();',
+      ),
+    ).toBeLessThan(uncached.indexOf("withControllerTransportRecovery({"));
     const placement = route.slice(
       route.indexOf("async function withBrowserPlacement"),
       route.indexOf("async function withActiveBrowserController"),
