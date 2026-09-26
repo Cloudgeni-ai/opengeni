@@ -2785,6 +2785,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     operation: ChannelAOperation,
     waitSignal: AbortSignal,
     callback: (placement: BrowserPlacement) => Promise<T>,
+    allowOperationReplay = true,
   ): Promise<T> {
     if (expectedPlacement?.kind === "attached_device") {
       waitSignal.throwIfAborted();
@@ -2877,6 +2878,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         waitSignal,
         operation,
         retryControllerTransport: operation === "browser.read" || operation === "browser.action",
+        allowOperationReplay,
       },
       async (handle) => {
         if (expectedPlacement?.kind === "sandbox_group") {
@@ -3305,6 +3307,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               () => placement,
             ),
           ),
+        browserSessionStorageMode(record.session) !== "ephemeral_context",
       );
     } catch (error) {
       throw browserRouteError(error);

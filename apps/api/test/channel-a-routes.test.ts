@@ -665,3 +665,49 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(body).not.toContain("execSessionId === null");
   });
 });
+
+describe("ephemeral controller callback replay fence", () => {
+  for (const failure of [
+    new BrowserControlTransportError("response lost after controller consumed request"),
+    new ChannelAUnavailableError("provider response lost after callback dispatch"),
+  ]) {
+    test(`never refreshes or replays a consumed callback after ${failure.constructor.name}`, async () => {
+      let callbacks = 0;
+      let refreshes = 0;
+      await expect(
+        runChannelAReadWithFreshHandleRetry(
+          async () => {
+            callbacks += 1;
+            throw failure;
+          },
+          async () => {
+            refreshes += 1;
+          },
+          {
+            allowOperationReplay: false,
+            maxFreshHandleRetries: 2,
+            retryableError: () => true,
+          },
+        ),
+      ).rejects.toBe(failure);
+      expect(callbacks).toBe(1);
+      expect(refreshes).toBe(0);
+    });
+  }
+
+  test("uncached browser placement carries the persisted ephemeral mode into Channel-A", () => {
+    const route = readFileSync(resolve(here, "..", "src", "routes", "browser-sessions.ts"), "utf8");
+    const active = route.slice(
+      route.indexOf("async function withActiveBrowserController"),
+      route.indexOf("async function throwBrowserSourcePlacementChanged"),
+    );
+    const uncached = active.slice(active.indexOf("return await withBrowserPlacement("));
+    expect(uncached).toContain('browserSessionStorageMode(record.session) !== "ephemeral_context"');
+    const placement = route.slice(
+      route.indexOf("async function withBrowserPlacement"),
+      route.indexOf("async function withActiveBrowserController"),
+    );
+    expect(placement).toContain("allowOperationReplay,");
+    expect(channelASeam).toContain("allowOperationReplay: ctx.allowOperationReplay");
+  });
+});

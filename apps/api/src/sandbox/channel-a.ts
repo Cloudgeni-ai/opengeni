@@ -159,6 +159,8 @@ export type ChannelAContext = {
    * provider handle and replay the request. Tab/lifecycle mutations that lack
    * a controller operation id must never opt into this recovery. */
   retryControllerTransport?: boolean | undefined;
+  /** Ephemeral browser callbacks must never replay after an ambiguous result. */
+  allowOperationReplay?: boolean | undefined;
 };
 
 export type ChannelAOperationFailureReason =
@@ -406,6 +408,8 @@ type ChannelAReadRecoveryOptions = {
   /** Modal may expose one more stale command-router route after the first
    * successful handle rebuild. Keep this closed and statically bounded. */
   maxFreshHandleRetries?: 1 | 2;
+  /** Explicit opt-out overrides every transport/provider retry classification. */
+  allowOperationReplay?: boolean | undefined;
   /** Never start another provider attempt after the originating request ends. */
   waitSignal?: AbortSignal | undefined;
   /** Additional callback-specific failure that is safe to replay. */
@@ -432,7 +436,11 @@ export async function runChannelAReadWithFreshHandleRetry<T>(
     } catch (error) {
       const retryable =
         error instanceof ChannelAUnavailableError || options.retryableError?.(error) === true;
-      if (!retryable || retries >= maxFreshHandleRetries) {
+      if (
+        options.allowOperationReplay === false ||
+        !retryable ||
+        retries >= maxFreshHandleRetries
+      ) {
         throw error;
       }
       options.waitSignal?.throwIfAborted();
@@ -1180,6 +1188,7 @@ async function withChannelAOperation<T>(
           },
           {
             maxFreshHandleRetries: session.sandboxBackend === "modal" ? 2 : 1,
+            allowOperationReplay: ctx.allowOperationReplay,
             ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
             ...(ctx.retryControllerTransport
               ? { retryableError: isRetryableControllerTransport }

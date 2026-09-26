@@ -28,22 +28,37 @@ import { createApp } from "../../apps/api/src/app";
 
 // Explicitly supply a disposable image built from THIS source revision, with
 // OPENGENI_BROWSERD_EPHEMERAL_CONTEXT_POOL=1 in its environment. Never run against
-// a production API or mutate a shared image. Missing opt-in is a visible skip.
+// a production API or mutate a shared image. Alternatively use an explicitly
+// isolated disposable Linux sandbox with loopback PostgreSQL and a locally
+// installed controller from this source. Missing opt-in is a visible skip.
 const image = process.env.OPENGENI_EPHEMERAL_BROWSER_CANARY_IMAGE?.trim();
+const isolatedLocal = process.env.OPENGENI_EPHEMERAL_BROWSER_CANARY_LOCAL === "1";
+const enabled = Boolean(image) || isolatedLocal;
 const secret = "ephemeral-browser-live-delegation-secret";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 beforeAll(async () => {
-  if (!image) return;
+  if (!enabled) return;
+  if (
+    isolatedLocal &&
+    (process.platform !== "linux" || process.env.OPENGENI_EPHEMERAL_BROWSER_CANARY_ISOLATED !== "1")
+  ) {
+    throw new Error("local canary requires an explicitly isolated disposable Linux environment");
+  }
   const isolatedDatabaseUrl = process.env.OPENGENI_EPHEMERAL_BROWSER_CANARY_DATABASE_URL;
   if (isolatedDatabaseUrl) {
     const url = new URL(isolatedDatabaseUrl);
-    if (!["127.0.0.1", "localhost"].includes(url.hostname) || !url.pathname.startsWith("/og_ephemeral_")) {
+    if (
+      !["127.0.0.1", "localhost"].includes(url.hostname) ||
+      !url.pathname.startsWith("/og_ephemeral_")
+    ) {
       throw new Error("explicit canary database must be a loopback og_ephemeral_* fixture");
     }
     client = createDb(isolatedDatabaseUrl);
     return;
   }
+  if (isolatedLocal)
+    throw new Error("isolated local canary requires its own loopback PostgreSQL fixture");
   shared = await acquireSharedTestDatabase("ephemeral-browser-live");
   if (!shared) throw new Error("ephemeral BrowserSession acceptance requires PostgreSQL");
   client = createDb(shared.appUrl);
@@ -54,7 +69,7 @@ afterAll(async () => {
 }, 60_000);
 
 describe("ephemeral BrowserSession public HTTP acceptance", () => {
-  (image ? test : test.skip)(
+  (enabled ? test : test.skip)(
     "isolates actors and contexts, rejects replay mutation, preserves peer after end",
     async () => {
       const suffix = crypto.randomUUID();
@@ -79,13 +94,13 @@ describe("ephemeral BrowserSession public HTTP acceptance", () => {
         model: "scripted-model",
         reasoningEffort: "medium",
         latencyMode: "standard",
-        sandboxBackend: "docker",
+        sandboxBackend: isolatedLocal ? "local" : "docker",
       });
       const settings = testSettings({
         productAccessMode: "managed",
         delegationSecret: secret,
-        sandboxBackend: "docker",
-        dockerImage: image!,
+        sandboxBackend: isolatedLocal ? "local" : "docker",
+        ...(image ? { dockerImage: image } : {}),
         sandboxOwnershipEnabled: true,
         sandboxIdleGraceMs: 1_000,
         experimentalBrowserContextPoolEnabled: true,
@@ -159,7 +174,7 @@ describe("ephemeral BrowserSession public HTTP acceptance", () => {
           );
         },
       });
-      const fixtureUrl = `http://host.docker.internal:${fixture.port}/`;
+      const fixtureUrl = `http://${isolatedLocal ? "127.0.0.1" : "host.docker.internal"}:${fixture.port}/`;
       const created: { session: BrowserSession; headers: typeof actors.a }[] = [];
       let containerId: string | null = null;
       let primary: unknown;
@@ -295,12 +310,10 @@ describe("ephemeral BrowserSession public HTTP acceptance", () => {
           }
         }
         // Three contexts, two owners: siblings share a process; different owners do not.
-        if (!containerId) throw new Error("expected exact disposable Docker placement");
+        if (!containerId) throw new Error("expected exact disposable sandbox placement");
         const processCount = Bun.spawn(
           [
-            "docker",
-            "exec",
-            containerId,
+            ...(isolatedLocal ? [] : ["docker", "exec", containerId]),
             "python3",
             "-c",
             "import glob,json; args=[open(p,'rb').read().split(bytes([0])) for p in glob.glob('/proc/[0-9]*/cmdline')]; print(json.dumps(sum(any(a.startswith(b'--remote-debugging-port=') for a in v) and not any(a.startswith(b'--type=') for a in v) for v in args)))",
@@ -389,9 +402,27 @@ describe("ephemeral BrowserSession public HTTP acceptance", () => {
             cleanupErrors.push(error);
           }
         }
+        const evidenceDirectory = process.env.OPENGENI_EPHEMERAL_BROWSER_EVIDENCE_DIR;
+        if (primary && evidenceDirectory && containerId) {
+          await mkdir(evidenceDirectory, { recursive: true });
+          const diagnostic = Bun.spawn(
+            [
+              ...(isolatedLocal ? [] : ["docker", "exec", containerId]),
+              "sh",
+              "-c",
+              "tail -n 100 /tmp/opengeni-browserd/browserd.log 2>/dev/null || true",
+            ],
+            { stdout: "pipe", stderr: "pipe" },
+          );
+          await Bun.write(
+            join(evidenceDirectory, "controller-failure.log"),
+            await new Response(diagnostic.stdout).text(),
+          );
+          await diagnostic.exited;
+        }
         fixture.stop(true);
         http.stop(true);
-        if (containerId && /^[a-f0-9]{64}$/u.test(containerId)) {
+        if (!isolatedLocal && containerId && /^[a-f0-9]{64}$/u.test(containerId)) {
           const cleanup = Bun.spawn(["docker", "rm", "-f", containerId], {
             stdout: "pipe",
             stderr: "pipe",
