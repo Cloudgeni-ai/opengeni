@@ -1466,6 +1466,9 @@
 :where(.og-root).left-2,:where(.og-root) .left-2 {
     left: calc(var(--spacing) * 2);
   }
+:where(.og-root).left-3,:where(.og-root) .left-3 {
+    left: calc(var(--spacing) * 3);
+  }
 :where(.og-root).z-0,:where(.og-root) .z-0 {
     z-index: 0;
   }
@@ -2071,6 +2074,9 @@
   }
 :where(.og-root).max-w-\[240px\],:where(.og-root) .max-w-\[240px\] {
     max-width: 240px;
+  }
+:where(.og-root).max-w-\[calc\(100\%-1\.5rem\)\],:where(.og-root) .max-w-\[calc\(100\%-1\.5rem\)\] {
+    max-width: calc(100% - 1.5rem);
   }
 :where(.og-root).max-w-\[calc\(100vw-2rem\)\],:where(.og-root) .max-w-\[calc\(100vw-2rem\)\] {
     max-width: calc(100vw - 2rem);

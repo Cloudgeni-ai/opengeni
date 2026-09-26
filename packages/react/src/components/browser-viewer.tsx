@@ -73,6 +73,7 @@ import { isSourcePlacementChangedError } from "../lib/interaction-errors";
 import type { EmbeddedBrowserInteractionClientOverride } from "../session-context";
 import { browserKey, HUMAN_BROWSER_HOME_URL, normalizeBrowserAddress } from "./browser-input";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
+import { BrowserSelectControl } from "./browser-select-control";
 
 export type BrowserViewerNotification = {
   kind: "error" | "info";
@@ -920,6 +921,8 @@ export function BrowserViewer({
               return receipt;
             }}
             onReadClipboard={browser.readClipboard}
+            onObserveForInput={browser.observeForInput}
+            onSelectFromObservation={browser.actFromObservation}
             onReconnect={
               attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)
                 ? () => {
@@ -1862,6 +1865,11 @@ function BrowserViewport(props: {
   activityLabel?: string | undefined;
   onAction: (action: BrowserAction, frame: BrowserFrame | null) => Promise<BrowserActionReceipt>;
   onReadClipboard: () => Promise<{ text: string }>;
+  onObserveForInput: () => Promise<BrowserObservation>;
+  onSelectFromObservation: (
+    action: BrowserAction,
+    observation: BrowserObservation,
+  ) => Promise<BrowserActionReceipt>;
   onReconnect: () => void;
   reconnectLabel?: string | undefined;
   reconnectMessage?: string | undefined;
@@ -2309,6 +2317,18 @@ function BrowserViewport(props: {
           onReconnect={props.onReconnect}
           reconnectLabel={props.reconnectLabel}
           reconnectMessage={props.reconnectMessage}
+        />
+      ) : null}
+      {showCanvas ? (
+        <BrowserSelectControl
+          observe={async () => {
+            flushPendingText();
+            flushPendingWheel();
+            await actionTailRef.current;
+            if (!mountedRef.current) throw new Error("The browser page changed.");
+            return await props.onObserveForInput();
+          }}
+          act={props.onSelectFromObservation}
         />
       ) : null}
       {props.mutating ? (
