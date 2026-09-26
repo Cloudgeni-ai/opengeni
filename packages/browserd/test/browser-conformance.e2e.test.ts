@@ -57,7 +57,11 @@ e2e(
       ],
     });
     const fixture = startBrowserConformanceFixture();
-    const lightpandaBinaryPath = process.env.OPENGENI_BROWSERD_LIGHTPANDA_BINARY;
+    // Stock images advertise both installed engines. An explicit shell test
+    // must not accidentally exercise their default Lightpanda binary instead.
+    const lightpandaBinaryPath = process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY
+      ? undefined
+      : process.env.OPENGENI_BROWSERD_LIGHTPANDA_BINARY;
     const lightpandaBinary = lightpandaBinaryPath
       ? await resolvePinnedLightpandaBinary({ binaryPath: lightpandaBinaryPath })
       : null;
