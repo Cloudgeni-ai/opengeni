@@ -34,18 +34,23 @@ extend the same prompt-cache prefix and recovery replays identical authority.
 
 ## Report delivery
 
-A user-facing report is a native document Artifact by default. This includes a
-secondary output such as an audit produced while organizing Knowledge. Routing
-lives in the provider-neutral operational instructions; the bundled
-`opengeni-documents` Skill owns the authoring procedure. The artifact is the
-working document from the start, not a published copy of a sandbox Markdown or
-DOCX report.
+Agents answer in chat by default, including summaries and reports. A native
+document Artifact is the deliverable when the user asks for a document or file,
+or when the result is large (multi-page) or clearly meant to be kept or shared.
+That can include a secondary output such as an audit produced while organizing
+Knowledge. The chat reply then gives a short summary and the artifact link
+rather than restating the document. Routing lives in the provider-neutral
+operational instructions; the bundled `opengeni-documents` Skill owns the
+authoring procedure. The artifact is the working document from the start, not a
+published copy of a sandbox Markdown or DOCX report.
 
 Report requirements are explicit, typed declarations, not a heuristic scan of
-goal text, conversation content or local links. Declare them before authoring:
-initial reports belong in `goal_set` / `GoalSpec.reportRequirements`; reports
-discovered during an active goal are appended through `goal_progress` without
-replacing the objective. Each requirement has a stable `id` and `title`.
+goal text, conversation content or local links. Inside a goal, declare them
+before authoring: initial reports belong in `goal_set` /
+`GoalSpec.reportRequirements`; reports discovered during an active goal are
+appended through `goal_progress` without replacing the objective. Each
+requirement has a stable `id` and `title`. A session without a goal does not
+create one only to declare a document.
 
 Completion must match every persisted requirement to a native document and a
 server-authored inspection receipt. The receipt identifies the exact inspected
@@ -60,9 +65,9 @@ When artifact tooling is unavailable, do not invent a receipt or silently
 substitute a sandbox link. Explain the concrete blocker and retain the unfinished
 deliverable. Ordinary in-chat answers, brief status updates, internal worker
 findings, source-code navigation, and explicitly requested local-file workflows
-are outside this report contract. Without goal tools, the artifact-first
-authoring and handoff procedure still applies, but no goal-completion guard can
-run.
+are outside this report contract. Without a goal, the artifact-first authoring
+and handoff procedure still applies to a document deliverable, but nothing is
+declared and no goal-completion guard runs.
 
 The guard proves delivery of **declared** reports, not the semantic quality or
 completeness of arbitrary prose. Routing instructions make declaration part of
@@ -173,6 +178,11 @@ A goal is `active`, `paused`, or `completed`.
   reason, preserves its objective, resets continuation counters, and arms its
   durable wake. Already-active calls succeed unchanged. Existing sessions with
   `goal_pause` also receive `goal_resume` within the deployment tool ceiling.
+  The agent is told to resume only when the user asks it to continue or the
+  blocker it paused for has cleared. A user's question alone is not a reason:
+  the agent answers it in a final response and leaves the goal paused. An
+  active goal still continues through its ordinary continuation after that
+  answer.
 
 Long waits are session-level rather than goal mutations. `wait_for_input {
 reason, timeoutSeconds, idempotencyKey? }` is self-only, requires no goal, and

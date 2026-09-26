@@ -10,12 +10,15 @@ live object the user sees in the Artifacts dock and full editor. Never create a
 mutable DOCX shadow, publish a sandbox file, or alternate between file and
 artifact state.
 
-This also applies when a report is a secondary output of another task, such as
-a Knowledge cleanup audit. Declare the report through the available goal tools
-before authoring; if the task has no goal and goal tools are available, create
-one with the report requirement. If a goal already exists, append the report
-requirement without replacing the standing objective. Ordinary chat answers,
-brief progress updates, internal worker findings, code navigation and explicitly requested local-file
+Create a document when the user asks for a document or file, or when a
+deliverable is large (multi-page) or clearly meant to be kept or shared;
+otherwise answer in chat. This also applies when a report is a secondary output
+of another task, such as a Knowledge cleanup audit. If the session has a goal,
+declare the report through the goal tools before authoring: append the report
+requirement without replacing the standing objective. Do not create a goal only
+to declare a document. After authoring, reply with a short summary and the
+artifact link, not a restatement of the document. Ordinary chat answers, brief
+progress updates, internal worker findings, code navigation and explicitly requested local-file
 work are not report deliverables.
 
 Read [references/api.md](references/api.md) before editing.
