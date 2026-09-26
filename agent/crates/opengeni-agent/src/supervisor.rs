@@ -2433,7 +2433,7 @@ mod tests {
             platform,
             it::test_credentials("nats://127.0.0.1:1"),
         );
-        let supervisor = Supervisor::new_links(&[definition.clone()], "test");
+        let supervisor = Supervisor::new_links(std::slice::from_ref(&definition), "test");
         let link = WorkspaceLink::from_definition(definition);
         link.epoch.store(42);
         let sample = supervisor.refresh_desktop_status(&link);
