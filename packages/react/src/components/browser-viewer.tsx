@@ -1095,22 +1095,24 @@ function BrowserToolbar(props: {
           <ChevronDownIcon className="size-3 shrink-0 text-og-subtle" />
         </summary>
         <div className="absolute left-0 top-8 z-30 w-72 overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
-          <BrowserSessionGroup
-            label="Current agent"
-            sessions={current}
-            identities={props.identities}
-            selectedId={props.selectedSessionId}
-            interventionCounts={props.interventionCounts}
-            onSelect={choose}
-          />
-          <BrowserSessionGroup
-            label="Workspace browsers"
-            sessions={others}
-            identities={props.identities}
-            selectedId={props.selectedSessionId}
-            interventionCounts={props.interventionCounts}
-            onSelect={choose}
-          />
+          <div className="max-h-[min(24rem,60dvh)] overflow-y-auto overscroll-contain">
+            <BrowserSessionGroup
+              label="Current agent"
+              sessions={current}
+              identities={props.identities}
+              selectedId={props.selectedSessionId}
+              interventionCounts={props.interventionCounts}
+              onSelect={choose}
+            />
+            <BrowserSessionGroup
+              label="Workspace browsers"
+              sessions={others}
+              identities={props.identities}
+              selectedId={props.selectedSessionId}
+              interventionCounts={props.interventionCounts}
+              onSelect={choose}
+            />
+          </div>
           <div className="mt-1 flex gap-1 border-t border-og-border pt-1">
             {current.length > 0 ? (
               <MenuButton onClick={props.onFollow}>Follow agent</MenuButton>
@@ -1209,6 +1211,8 @@ function BrowserSessionGroup(props: {
           <button
             key={session.id}
             type="button"
+            aria-label={`${session.name}${identity ? ` · ${identity.name}` : ""} · ${placementLabel(session)}`}
+            aria-pressed={session.id === props.selectedId}
             onClick={() => props.onSelect(session.id)}
             className={cn(
               "flex w-full items-center gap-2 rounded-og-sm px-2 py-1.5 text-left transition hover:bg-og-surface-2",
