@@ -1,5 +1,22 @@
 # @opengeni/storage
 
+## 0.2.134
+
+### Patch Changes
+
+- 51aa35e: `createGetUrl` accepts an optional `responseContentDisposition` that signs a `Content-Disposition` response override into the URL (S3-compatible, AWS S3, Azure Blob and GCS), so a browser that opens it downloads the object instead of rendering it.
+- Updated dependencies [084616e]
+- Updated dependencies [b6d65a1]
+- Updated dependencies [1a427e0]
+- Updated dependencies [d582db0]
+- Updated dependencies [6eb431b]
+- Updated dependencies [48a8774]
+- Updated dependencies [e422b62]
+- Updated dependencies [f48191e]
+- Updated dependencies [bd365b7]
+  - @opengeni/contracts@5.2.0
+  - @opengeni/config@3.0.0
+
 ## 0.2.133
 
 ### Patch Changes

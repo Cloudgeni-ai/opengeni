@@ -1,5 +1,35 @@
 # @opengeni/db
 
+## 6.1.0
+
+### Minor Changes
+
+- 1a427e0: Add the optional Jev-backed `code_search` agent tool. It finds where something is implemented, configured or decided in the workspace in one call and returns verbatim, line-numbered passages with a coverage status. It is controlled by `OPENGENI_CODE_SEARCH_MODE` (`off` by default, `opt_in`, `default_on`, or `experiment` for a fixed per-session half), the `OPENGENI_JEV_*` settings, and a per-workspace `codeSearchEnabled` setting (`null` follows the deployment). Each session freezes its decision when it is created (`sessions.code_search_enabled`, rolling migration 0520, exposed as `codeSearchEnabled` on the session), and children keep their parent's, so later setting changes never add the tool to a running session's cached prompt; only the deployment switch-off and a workspace Off, and undoing them, reach running sessions. Each call records Jev usage per workspace. The Jev key stays on the server (API and worker processes) and never reaches a sandbox or Connected Machine, which only run allowlisted read-only ripgrep and file reads. Windows Connected Machines do not get the tool. `tool_search` now lists every tool the query names exactly before BM25 results.
+
+### Patch Changes
+
+- cbb7aa4: Let a normally completed, closed turn owner reach bounded Modal deadline and repeated-provider-error capture without an interruption-only quiescence receipt. Failed or interrupted owners still require physical quiescence proof; checkpoint publication and other-writer fences are unchanged.
+- 6fd328b: Restore a browser session when ending fails before controller dispatch.
+- 9b9c6df: Mark a BrowserSession lost when its controller definitively reports that the browser no longer exists during suspension.
+- 6eb431b: Allow authenticated hosts to replace an existing session MCP attachment with an accessible native connection through the standalone credential rotation API. An optional explicit replacement URL must match the native account's stored destination while the old URL remains a compare-and-set precondition. Preserve resource restrictions, version fencing, quiescence and idempotent receipts without replacing session history or accepted-attempt identity.
+- f11a3e3: Compare connector policy snapshots by value when replaying an exact session attempt, so PostgreSQL JSONB key ordering cannot fail approval or human-handoff resume with a false ownership conflict.
+- 36e1764: An exhausted model-provider quota no longer retries. A daily or monthly allowance (for example OpenRouter's `free-models-per-day` cap or a requests/tokens-per-day limit), a used-up quota (`insufficient_quota`), an account out of credits (HTTP 402), or a 429 whose provider retry hint exceeds 15 minutes now fails the turn at once with the new `provider_quota_exhausted` code, `retryable: false`, a `quotaScope`, plain-language copy, and the provider's text as `detail`, instead of five paced same-turn recoveries. Ordinary per-minute rate limits, and quota wording whose provider retry hint is a minute or less, remain `provider_rate_limited` and retryable. `@opengeni/runtime` exports the classifier (`classifyProviderQuotaError`), and model clients that let the OpenAI SDK retry classify the exact SDK error for a 429 and mark an exhausted one `x-should-retry: false`, so the SDK does not replay it either and both decisions always agree. Google's generic `RESOURCE_EXHAUSTED` status and snake_case per-minute metric ids (Vertex `requests_per_minute_per_project`) stay retryable. A quota-refused compaction request records the same `quotaScope` marker, and failed session detail projects it. Codex and SuperGrok subscription transports keep their credential-rotation and capacity-wait semantics.
+- f2ee81e: Count the one-time verified-signup trial grant as OpenGeni credits when resolving the default model for new work. Any positive credit balance now selects the configured credits default (after a saved workspace default or a connected subscription), and a balance at or below zero falls back to the deployment default.
+- c1756ef: Make operational signals truthful: the session recovery backlog no longer counts effectively paused sessions as stale, a read-only first sandbox probe that finds no path is recorded as a completed startup phase, Knowledge index deferrals log a content-free cause, and repeated warnings can be throttled per key with a suppressed count.
+- Updated dependencies [084616e]
+- Updated dependencies [b6d65a1]
+- Updated dependencies [1a427e0]
+- Updated dependencies [d582db0]
+- Updated dependencies [6eb431b]
+- Updated dependencies [48a8774]
+- Updated dependencies [e422b62]
+- Updated dependencies [f48191e]
+- Updated dependencies [bd365b7]
+  - @opengeni/contracts@5.2.0
+  - @opengeni/config@3.0.0
+  - @opengeni/codemode@0.6.3
+  - @opengeni/codex@0.2.27
+
 ## 6.0.3
 
 ### Patch Changes

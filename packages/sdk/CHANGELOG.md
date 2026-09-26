@@ -1,5 +1,30 @@
 # @opengeni/sdk
 
+## 7.2.0
+
+### Minor Changes
+
+- 1a427e0: Add the optional Jev-backed `code_search` agent tool. It finds where something is implemented, configured or decided in the workspace in one call and returns verbatim, line-numbered passages with a coverage status. It is controlled by `OPENGENI_CODE_SEARCH_MODE` (`off` by default, `opt_in`, `default_on`, or `experiment` for a fixed per-session half), the `OPENGENI_JEV_*` settings, and a per-workspace `codeSearchEnabled` setting (`null` follows the deployment). Each session freezes its decision when it is created (`sessions.code_search_enabled`, rolling migration 0520, exposed as `codeSearchEnabled` on the session), and children keep their parent's, so later setting changes never add the tool to a running session's cached prompt; only the deployment switch-off and a workspace Off, and undoing them, reach running sessions. Each call records Jev usage per workspace. The Jev key stays on the server (API and worker processes) and never reaches a sandbox or Connected Machine, which only run allowlisted read-only ripgrep and file reads. Windows Connected Machines do not get the tool. `tool_search` now lists every tool the query names exactly before BM25 results.
+- 6eb431b: Allow authenticated hosts to replace an existing session MCP attachment with an accessible native connection through the standalone credential rotation API. An optional explicit replacement URL must match the native account's stored destination while the old URL remains a compare-and-set precondition. Preserve resource restrictions, version fencing, quiescence and idempotent receipts without replacing session history or accepted-attempt identity.
+
+### Patch Changes
+
+- 084616e: Advertise the product documentation the web console links from its Help menu.
+  `ClientConfig` gains an optional `documentationUrl` field (an absolute http(s)
+  URL, or `null` when the deployment hides the link) served by
+  `/v1/config/client`, and `@opengeni/contracts` exports
+  `DEFAULT_OPENGENI_DOCUMENTATION_URL`. Operators set it with the new
+  `OPENGENI_DOCUMENTATION_URL` setting: unset means `https://docs.opengeni.ai`,
+  `none` hides the link, and any other value fails startup. An absent
+  field means a server that predates it, so clients show no link.
+- Updated dependencies [084616e]
+- Updated dependencies [1a427e0]
+- Updated dependencies [6eb431b]
+- Updated dependencies [48a8774]
+- Updated dependencies [e422b62]
+- Updated dependencies [bd365b7]
+  - @opengeni/contracts@5.2.0
+
 ## 7.1.1
 
 ### Patch Changes
