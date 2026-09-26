@@ -75,6 +75,7 @@ function snapshot(overrides: Partial<WorkspaceInsightsSnapshot> = {}): Workspace
     ],
     depth: [{ depth: 0, sessions: 3 }],
     drivers: [],
+    projects: [],
     schedules: [],
     recentCalls: [],
     promptContributions: {

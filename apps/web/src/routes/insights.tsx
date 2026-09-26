@@ -215,6 +215,9 @@ export function InsightsRoute({
   const series = view?.series ?? [];
   const models = view?.models ?? [];
   const providers = view?.providers ?? [];
+  // An API older than the web bundle omits projects; show the empty state.
+  const projects = snap?.projects ?? [];
+  const projectTokenTotal = projects.reduce((sum, project) => sum + project.tokens, 0);
   const promptContributions = snap?.promptContributions ?? {
     ...EMPTY_PROMPT_CONTRIBUTIONS,
     totalCalls: snap?.modelCalls ?? 0,
@@ -830,6 +833,70 @@ export function InsightsRoute({
             })}
           </div>
         ) : null}
+      </Section>
+
+      <Section
+        title="By project"
+        aside={<p>Each session tree counts under its root session's current project</p>}
+      >
+        <DataScroller aria-label="Usage by project" className="border border-border">
+          <table className="min-w-full text-left text-xs">
+            <thead className="border-b border-border bg-surface/50 text-fg-subtle">
+              <tr>
+                {[
+                  "Project",
+                  "Root sessions",
+                  "Calls",
+                  "Tokens",
+                  "Share",
+                  "Cache",
+                  "Credits",
+                  "Provider-rate est.",
+                ].map((h) => (
+                  <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {projects.map((project) => (
+                <tr key={project.id} className="border-b border-border/70 last:border-0">
+                  <td
+                    className={cn(
+                      "max-w-72 truncate px-3 py-2.5 font-medium",
+                      project.kind === "project" ? "text-fg" : "text-fg-muted",
+                    )}
+                  >
+                    {project.label}
+                  </td>
+                  <Num>{project.rootSessions.toLocaleString()}</Num>
+                  <Num>{project.calls.toLocaleString()}</Num>
+                  <Num>{formatTokens(project.tokens)}</Num>
+                  <Num>
+                    {projectTokenTotal > 0
+                      ? `${Math.round((project.tokens / projectTokenTotal) * 100)}%`
+                      : "—"}
+                  </Num>
+                  <Num>{formatCachePct(project.cacheHitPct)}</Num>
+                  <Num>{formatUsd(project.creditUsd)}</Num>
+                  <Num>
+                    {project.estimatedProviderCostKnownCalls > 0
+                      ? `~${formatUsd(project.estimatedProviderUsd)}`
+                      : "Unknown"}
+                  </Num>
+                </tr>
+              ))}
+              {projects.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="px-3 py-8 text-center text-fg-subtle">
+                    No attributed model usage in this window.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </DataScroller>
       </Section>
 
       <Section

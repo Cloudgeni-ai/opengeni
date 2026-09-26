@@ -541,6 +541,7 @@ export type {
   InsightsDepthBucket,
   InsightsModelFacet,
   InsightsSpendDriver,
+  InsightsProjectRow,
   InsightsWarmGroupRow,
   InsightsLiveWarmLease,
   InsightsFloorSession,

@@ -11,6 +11,7 @@ import {
   aggregateRootSessionDrivers,
   aggregateScheduleFacts,
   backfillModelCallFactsFromSessionEvents,
+  createChannel,
   createDb,
   createSession,
   ensureManagedAccessForUser,
@@ -18,10 +19,12 @@ import {
   listModelCallFacets,
   listRecentModelCalls,
   INSIGHTS_RECENT_CALL_LIMIT,
+  INSIGHTS_PROJECT_LIMIT,
   INSIGHTS_ROOT_DRIVER_LIMIT,
   readWorkspaceInsightsModelBundle,
   reconcileModelCallFacts,
   registerDbBinding,
+  setSessionChannel,
   transitionSessionVisibility,
   updateOrganizationPrivateSessionSettings,
   withSessionRlsActorContext,
@@ -227,7 +230,12 @@ async function fixture(): Promise<Fixture> {
 
 type LegacyComparableBundle = Omit<
   WorkspaceInsightsModelBundle,
-  "dataThrough" | "driverGroups" | "driversTruncated" | "facetsTruncated" | "recentCallsTruncated"
+  | "dataThrough"
+  | "driverGroups"
+  | "driversTruncated"
+  | "facetsTruncated"
+  | "recentCallsTruncated"
+  | "projects"
 >;
 
 async function legacyModelBundle(
@@ -295,6 +303,7 @@ function comparable(input: LegacyComparableBundle | WorkspaceInsightsModelBundle
     driversTruncated: _driversTruncated,
     facetsTruncated: _facetsTruncated,
     recentCallsTruncated: _recentCallsTruncated,
+    projects: _projects,
     ...bundle
   } = input as WorkspaceInsightsModelBundle;
   return {
@@ -375,10 +384,10 @@ describe("Workspace Insights model bundle", () => {
     expect(source).toContain("visible_workspace_insights_model_fact_rows");
     expect(source).not.toContain("visible_workspace_insights_model_call_facts");
     expect(source.match(/group by grouping sets/g)).toHaveLength(2);
-    // Sessions are joined only for the bounded root and recent-call result rows,
-    // never across the whole fact window.
+    // Sessions are joined only for grouped roots and the bounded recent-call
+    // rows, never across the whole fact window.
     expect(source).not.toContain("selected_sessions");
-    expect(source.match(/left join sessions root/g)).toHaveLength(2);
+    expect(source.match(/left join sessions root/g)).toHaveLength(3);
     expect(source.match(/left join sessions session/g)).toHaveLength(1);
     expect(source).not.toContain("count(distinct id)");
     expect(source).toContain("count(*) filter (where first_source)");
@@ -550,6 +559,98 @@ describe("Workspace Insights model bundle", () => {
       { provider: "azure", model: "azure-bundle" },
       { provider: "openai", model: "gpt-bundle" },
     ]);
+  });
+
+  test("groups every root by its current project and folds the tail exactly", async () => {
+    if (!shared || !client) return;
+    const seeded = await fixture();
+    const fileInNewProject = async (name: string, sessionId: string) => {
+      const channel = await createChannel(client!.db, {
+        accountId: seeded.accountId,
+        workspaceId: seeded.workspaceId,
+        name,
+      });
+      await withSessionRlsActorContext({ subjectId: seeded.ownerSubjectId }, () =>
+        setSessionChannel(client!.db, {
+          workspaceId: seeded.workspaceId,
+          sessionId,
+          channelId: channel.id,
+        }),
+      );
+    };
+    await fileInNewProject("Billing", seeded.sharedSessionId);
+    const read = (subjectId: string) =>
+      withSessionRlsActorContext({ subjectId }, () =>
+        readWorkspaceInsightsModelBundle(client!.db, seeded.input),
+      );
+
+    const owner = await read(seeded.ownerSubjectId);
+    expect(
+      owner.projects.map((row) => [
+        row.kind,
+        row.name,
+        row.rootSessions,
+        row.calls,
+        row.totalTokens,
+      ]),
+    ).toEqual([
+      ["project", "Billing", 1, 2, 160],
+      ["unfiled", null, 1, 2, 75],
+    ]);
+    expect(owner.projects.map((row) => row.pricedCostMicros)).toEqual([200, 375]);
+
+    const outsider = await read(`user:${crypto.randomUUID()}`);
+    expect(outsider.projects.map((row) => [row.kind, row.name, row.calls])).toEqual([
+      ["project", "Billing", 2],
+    ]);
+
+    // One more filed root than the named limit leaves two projects in `other`.
+    for (let index = 0; index < INSIGHTS_PROJECT_LIMIT + 1; index += 1) {
+      const session = await withSessionRlsActorContext({ subjectId: seeded.ownerSubjectId }, () =>
+        createSession(client!.db, {
+          accountId: seeded.accountId,
+          workspaceId: seeded.workspaceId,
+          initialMessage: `project ${index}`,
+          resources: [],
+          metadata: {},
+          model: "fixture-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: seeded.ownerSubjectId },
+          createdByContext: {},
+        }),
+      );
+      await fileInNewProject(`Project ${index}`, session.id);
+      await shared.admin`
+        insert into model_call_facts (
+          account_id, workspace_id, session_id, turn_id, source_key, provider,
+          provider_api, model, billing_path, input_tokens, output_tokens,
+          cached_tokens, total_tokens, priced_cost_micros, occurred_at
+        ) values (
+          ${seeded.accountId}, ${seeded.workspaceId}, ${session.id}, ${crypto.randomUUID()},
+          ${`project-${index}-${crypto.randomUUID()}`}, 'openai', 'responses', 'gpt-bundle',
+          'opengeni_credits', 10, 1, 4, ${100 + index}, 7, '2026-08-15T00:00:00.000Z'
+        )`;
+    }
+    const folded = await read(seeded.ownerSubjectId);
+    const named = folded.projects.filter((row) => row.kind === "project");
+    const other = folded.projects.filter((row) => row.kind === "other");
+    expect(named).toHaveLength(INSIGHTS_PROJECT_LIMIT);
+    expect(folded.projects.map((row) => row.kind).slice(-2)).toEqual(["other", "unfiled"]);
+    expect(other).toHaveLength(1);
+    expect(other[0]?.projects).toBe(2);
+    expect(other[0]?.name).toBeNull();
+    const sum = (rows: Array<{ totalTokens: number; pricedCostMicros: number; calls: number }>) =>
+      rows.reduce(
+        (total, row) => ({
+          totalTokens: total.totalTokens + row.totalTokens,
+          pricedCostMicros: total.pricedCostMicros + row.pricedCostMicros,
+          calls: total.calls + row.calls,
+        }),
+        { totalTokens: 0, pricedCostMicros: 0, calls: 0 },
+      );
+    expect(sum(folded.projects)).toEqual(sum(folded.modelRows));
   });
 
   test("backfill preserves free external billing when the live fact write was lost", async () => {
@@ -931,7 +1032,10 @@ describe("Workspace Insights model bundle", () => {
       });
       const loops = sessionRelationLoops(plan);
       expect(loops.length).toBeGreaterThan(0);
-      const resultBound = INSIGHTS_RECENT_CALL_LIMIT + 1 + 2 * (INSIGHTS_ROOT_DRIVER_LIMIT + 1);
+      // The project grouping reads each distinct root once; the fixture has two.
+      const rootGroups = 2;
+      const resultBound =
+        INSIGHTS_RECENT_CALL_LIMIT + 1 + 2 * (INSIGHTS_ROOT_DRIVER_LIMIT + 1) + rootGroups;
       expect(loops.reduce((total, value) => total + value, 0)).toBeLessThanOrEqual(resultBound);
       expect(factsPerWindow * 2).toBeGreaterThan(resultBound * 10);
     } finally {

@@ -77,6 +77,7 @@ function snapshot(overrides: Partial<WorkspaceInsightsSnapshot> = {}): Workspace
     series: [],
     depth: [],
     drivers: [],
+    projects: [],
     schedules: [],
     recentCalls: [],
     promptContributions: {
@@ -300,6 +301,37 @@ describe("Insights route presentation", () => {
       expect(rendered.container.querySelector("[data-insights-ledger-gap]")?.textContent).toContain(
         "Per-model breakdowns cover $2.50 of the $3.00 charged. $0.50 has no per-call record yet",
       );
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("lists project usage with an explicit unfiled row and unknown provider estimates", async () => {
+    const row = {
+      projects: 1,
+      rootSessions: 1,
+      calls: 2,
+      creditUsd: 1.5,
+      estimatedProviderUsd: 0,
+      estimatedProviderCostKnownCalls: 0,
+      cacheHitPct: null,
+    };
+    nextSnapshot = snapshot({
+      projects: [
+        { ...row, id: "project:billing", kind: "project", label: "Billing", tokens: 750 },
+        { ...row, id: "unfiled", kind: "unfiled", label: "No project", tokens: 250 },
+      ],
+    });
+    const rendered = await renderRoute();
+    try {
+      const table = rendered.container.querySelector('[aria-label="Usage by project"]');
+      const rows = [...(table?.querySelectorAll("tbody tr") ?? [])].map((tr) =>
+        [...tr.querySelectorAll("td")].map((td) => td.textContent),
+      );
+      expect(rows.map((cells) => [cells[0], cells[4], cells[7]])).toEqual([
+        ["Billing", "75%", "Unknown"],
+        ["No project", "25%", "Unknown"],
+      ]);
     } finally {
       await rendered.unmount();
     }

@@ -226,6 +226,23 @@ export function insightsSessionLabel(input: {
   return `${(input.depth ?? 0) > 0 ? "Agent" : "Session"} ${input.id.slice(0, 8)}`;
 }
 
+export function insightsProjectLabel(input: {
+  kind: "project" | "other" | "unfiled" | "unavailable";
+  name: string | null;
+  projects: number;
+}): string {
+  switch (input.kind) {
+    case "project":
+      return input.name?.trim() || "Untitled project";
+    case "other":
+      return `${input.projects.toLocaleString("en-US")} other ${input.projects === 1 ? "project" : "projects"}`;
+    case "unfiled":
+      return "No project";
+    case "unavailable":
+      return "Root session not visible";
+  }
+}
+
 export async function getWorkspaceInsights(
   db: Database,
   settings: Settings,
@@ -298,6 +315,7 @@ export async function getWorkspaceInsights(
     factBuckets: factDays,
     rootDrivers,
     priorRootDrivers,
+    projects,
     scheduleFacts,
     facets,
     recentCalls,
@@ -483,6 +501,20 @@ export async function getWorkspaceInsights(
     };
   });
 
+  const projectRows = projects.map((row) => ({
+    id: row.kind === "project" && row.channelId ? `project:${row.channelId}` : row.kind,
+    kind: row.kind,
+    label: insightsProjectLabel(row),
+    projects: row.projects,
+    rootSessions: row.rootSessions,
+    calls: row.calls,
+    creditUsd: microsToUsd(row.pricedCostMicros),
+    estimatedProviderUsd: microsToUsd(row.estimatedProviderCostMicros),
+    estimatedProviderCostKnownCalls: row.estimatedProviderCostKnownCalls,
+    tokens: row.totalTokens,
+    cacheHitPct: cacheHitPct(row.cachedTokens, row.cacheInputTokens),
+  }));
+
   const scheduleFactById = new Map(scheduleFacts.map((row) => [row.scheduledTaskId, row] as const));
   const schedules = tasks.map((task) => {
     const fact = scheduleFactById.get(task.id);
@@ -543,6 +575,7 @@ export async function getWorkspaceInsights(
       sessions: bucket.sessions,
     })),
     drivers,
+    projects: projectRows,
     schedules,
     recentCalls: recentCalls.map((row) => ({
       id: row.id,

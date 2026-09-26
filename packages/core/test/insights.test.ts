@@ -20,6 +20,7 @@ function emptyModelBundle(): WorkspaceInsightsModelBundle {
     factBuckets: new Map(),
     rootDrivers: [],
     priorRootDrivers: [],
+    projects: [],
     scheduleFacts: [],
     facets: [],
     recentCalls: [],
@@ -568,6 +569,57 @@ describe("getWorkspaceInsights", () => {
     expect(snapshot.floor[0]?.title).toBe("Agent 22222222");
     expect(snapshot.recentCalls[0]?.sessionTitle).toBe("Agent 22222222");
     expect(snapshot.deepestSessionTitle).toBe("Agent 22222222");
+  });
+
+  test("labels project rows and keeps their credit and cache figures exact", async () => {
+    const { modelBundle } = stubEmptyWorkspace();
+    const row = {
+      rootSessions: 1,
+      calls: 2,
+      totalTokens: 100,
+      cachedTokens: 30,
+      cacheInputTokens: 60,
+      pricedCostMicros: 1_250_000,
+      estimatedProviderCostMicros: 0,
+      estimatedProviderCostKnownCalls: 0,
+    };
+    modelBundle.mockResolvedValue({
+      ...emptyModelBundle(),
+      projects: [
+        {
+          ...row,
+          kind: "project",
+          channelId: "44444444-4444-4444-8444-444444444444",
+          name: "Billing",
+          projects: 1,
+        },
+        {
+          ...row,
+          kind: "project",
+          channelId: "55555555-5555-4555-8555-555555555555",
+          name: "  ",
+          projects: 1,
+        },
+        { ...row, kind: "other", channelId: null, name: null, projects: 3 },
+        { ...row, kind: "unfiled", channelId: null, name: null, projects: 1, cacheInputTokens: 0 },
+        { ...row, kind: "unavailable", channelId: null, name: null, projects: 1 },
+      ],
+    });
+    const { snapshot } = await getWorkspaceInsights(
+      db,
+      testSettings({ sandboxSelfhostedEnabled: false }),
+      { workspaceId: WORKSPACE, range: "today", now: new Date("2026-08-26T08:00:00.000Z") },
+    );
+
+    expect(snapshot.projects.map((project) => [project.id, project.label])).toEqual([
+      ["project:44444444-4444-4444-8444-444444444444", "Billing"],
+      ["project:55555555-5555-4555-8555-555555555555", "Untitled project"],
+      ["other", "3 other projects"],
+      ["unfiled", "No project"],
+      ["unavailable", "Root session not visible"],
+    ]);
+    expect(snapshot.projects[0]).toMatchObject({ creditUsd: 1.25, cacheHitPct: 50, calls: 2 });
+    expect(snapshot.projects[3]?.cacheHitPct).toBeNull();
   });
 });
 

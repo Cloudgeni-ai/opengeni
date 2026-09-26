@@ -7594,6 +7594,20 @@ export type InsightsSpendDriver = {
   deltaUsdVsPrior: number;
 };
 
+export type InsightsProjectRow = {
+  id: string;
+  kind: "project" | "other" | "unfiled" | "unavailable";
+  label: string;
+  projects: number;
+  rootSessions: number;
+  calls: number;
+  creditUsd: number;
+  estimatedProviderUsd: number;
+  estimatedProviderCostKnownCalls: number;
+  tokens: number;
+  cacheHitPct: number | null;
+};
+
 export type InsightsWarmGroupRow = {
   id: string;
   groupId: string;
@@ -7701,6 +7715,7 @@ export type WorkspaceInsightsSnapshot = {
   series: InsightsSeriesPoint[];
   depth: InsightsDepthBucket[];
   drivers: InsightsSpendDriver[];
+  projects: InsightsProjectRow[];
   schedules: InsightsScheduleRow[];
   recentCalls: InsightsModelCallRow[];
   promptContributions: InsightsPromptContributions;

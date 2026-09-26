@@ -26,6 +26,24 @@ export type WorkspaceInsightsModelBundleInput = {
 };
 
 export const INSIGHTS_ROOT_DRIVER_LIMIT = 8;
+/** Projects listed by name; the rest fold into one exact `other` row. */
+export const INSIGHTS_PROJECT_LIMIT = 24;
+
+export type InsightsProjectAggregateRow = {
+  kind: "project" | "other" | "unfiled" | "unavailable";
+  channelId: string | null;
+  name: string | null;
+  /** Projects folded into this row: 1 for a named project, N for `other`. */
+  projects: number;
+  rootSessions: number;
+  calls: number;
+  totalTokens: number;
+  cachedTokens: number;
+  cacheInputTokens: number;
+  pricedCostMicros: number;
+  estimatedProviderCostMicros: number;
+  estimatedProviderCostKnownCalls: number;
+};
 export const INSIGHTS_FACET_LIMIT = 500;
 export const INSIGHTS_RECENT_CALL_LIMIT = 50;
 
@@ -42,6 +60,8 @@ export type WorkspaceInsightsModelBundle = {
   factBuckets: Map<string, ModelCallFactSeriesAggregate>;
   rootDrivers: RootSessionDriverRow[];
   priorRootDrivers: RootSessionDriverRow[];
+  /** Every root group in the window, grouped by project; sums to the totals. */
+  projects: InsightsProjectAggregateRow[];
   scheduleFacts: ScheduleFactAggregate[];
   facets: ModelCallFacetRow[];
   recentCalls: RecentModelCallRow[];
@@ -149,6 +169,14 @@ function mapRootRows(value: unknown, label: string): RootSessionDriverRow[] {
   }));
 }
 
+function projectKind(row: JsonRecord): InsightsProjectAggregateRow["kind"] {
+  const kind = stringValue(row, "kind");
+  if (kind === "project" || kind === "other" || kind === "unfiled" || kind === "unavailable") {
+    return kind;
+  }
+  throw new Error(`Insights model bundle project kind ${kind} is unknown`);
+}
+
 function mapBundle(value: unknown): WorkspaceInsightsModelBundle {
   const payload = record(value, "payload");
   const bucketRows = records(payload.factBuckets, "factBuckets");
@@ -195,6 +223,20 @@ function mapBundle(value: unknown): WorkspaceInsightsModelBundle {
     ),
     rootDrivers: mapRootRows(payload.rootDrivers, "rootDrivers"),
     priorRootDrivers: mapRootRows(payload.priorRootDrivers, "priorRootDrivers"),
+    projects: records(payload.projects, "projects").map((row) => ({
+      kind: projectKind(row),
+      channelId: nullableString(row, "channelId"),
+      name: nullableString(row, "name"),
+      projects: numberValue(row, "projects"),
+      rootSessions: numberValue(row, "rootSessions"),
+      calls: numberValue(row, "calls"),
+      totalTokens: numberValue(row, "totalTokens"),
+      cachedTokens: numberValue(row, "cachedTokens"),
+      cacheInputTokens: numberValue(row, "cacheInputTokens"),
+      pricedCostMicros: numberValue(row, "pricedCostMicros"),
+      estimatedProviderCostMicros: numberValue(row, "estimatedProviderCostMicros"),
+      estimatedProviderCostKnownCalls: numberValue(row, "estimatedProviderCostKnownCalls"),
+    })),
     scheduleFacts: records(payload.scheduleFacts, "scheduleFacts").map((row) => ({
       scheduledTaskId: stringValue(row, "scheduledTaskId"),
       pricedCostMicros: numberValue(row, "pricedCostMicros"),
@@ -436,6 +478,66 @@ export async function readWorkspaceInsightsModelBundle(
         left join sessions root
           on root.workspace_id = ${input.workspaceId}::uuid
           and root.id = current_root_rows.root_session_id
+      ), current_project_roots as (
+        -- A tree belongs to its root session's current project, the same rule
+        -- the rail uses. A root the viewer cannot read has no knowable project.
+        select
+          case
+            when root.id is null then 'unavailable'
+            when root.channel_id is null then 'unfiled'
+            else 'project'
+          end as kind,
+          root.channel_id,
+          aggregate.*
+        from current_root_aggregates aggregate
+        left join sessions root
+          on root.workspace_id = ${input.workspaceId}::uuid
+          and root.id = aggregate.root_session_id
+      ), current_project_grouped as (
+        select
+          kind,
+          channel_id,
+          count(*)::bigint as root_sessions,
+          sum(calls)::bigint as calls,
+          sum(total_tokens)::bigint as total_tokens,
+          sum(cached_tokens)::bigint as cached_tokens,
+          sum(cache_input_tokens)::bigint as cache_input_tokens,
+          sum(priced_cost_micros)::bigint as priced_cost_micros,
+          sum(estimated_provider_cost_micros)::bigint as estimated_provider_cost_micros,
+          sum(estimated_provider_cost_known_calls)::bigint
+            as estimated_provider_cost_known_calls
+        from current_project_roots
+        group by kind, channel_id
+      ), current_project_ranked as (
+        select
+          grouped.*,
+          case when grouped.kind = 'project' then row_number() over (
+            partition by grouped.kind = 'project'
+            order by grouped.total_tokens desc, grouped.channel_id
+          ) end as rn
+        from current_project_grouped grouped
+      ), current_project_rows as (
+        select
+          case when rn > ${INSIGHTS_PROJECT_LIMIT} then 'other' else kind end as kind,
+          case when rn > ${INSIGHTS_PROJECT_LIMIT} then null else channel_id end as channel_id,
+          count(*)::bigint as projects,
+          sum(root_sessions)::bigint as root_sessions,
+          sum(calls)::bigint as calls,
+          sum(total_tokens)::bigint as total_tokens,
+          sum(cached_tokens)::bigint as cached_tokens,
+          sum(cache_input_tokens)::bigint as cache_input_tokens,
+          sum(priced_cost_micros)::bigint as priced_cost_micros,
+          sum(estimated_provider_cost_micros)::bigint as estimated_provider_cost_micros,
+          sum(estimated_provider_cost_known_calls)::bigint
+            as estimated_provider_cost_known_calls
+        from current_project_ranked
+        group by 1, 2
+      ), current_project_titled as (
+        select project_row.*, channel.name
+        from current_project_rows project_row
+        left join channels channel
+          on channel.workspace_id = ${input.workspaceId}::uuid
+          and channel.id = project_row.channel_id
       ), prior_root_rows as (
         select prior.*, root.title
         from prior_grouped prior
@@ -541,6 +643,26 @@ export async function readWorkspaceInsightsModelBundle(
           select jsonb_agg(${rootRowJson} order by total_tokens desc, root_session_id)
           from current_root_titled
           where rn <= ${INSIGHTS_ROOT_DRIVER_LIMIT}
+        ), '[]'::jsonb),
+        'projects', coalesce((
+          select jsonb_agg(jsonb_build_object(
+            'kind', kind,
+            'channelId', channel_id,
+            'name', name,
+            'projects', projects,
+            'rootSessions', root_sessions,
+            'calls', calls,
+            'totalTokens', total_tokens,
+            'cachedTokens', cached_tokens,
+            'cacheInputTokens', cache_input_tokens,
+            'pricedCostMicros', priced_cost_micros,
+            'estimatedProviderCostMicros', estimated_provider_cost_micros,
+            'estimatedProviderCostKnownCalls', estimated_provider_cost_known_calls
+          ) order by
+            case kind when 'project' then 0 when 'other' then 1 when 'unfiled' then 2 else 3 end,
+            total_tokens desc,
+            channel_id)
+          from current_project_titled
         ), '[]'::jsonb),
         'priorRootDrivers', coalesce((
           select jsonb_agg(${rootRowJson} order by total_tokens desc, root_session_id)

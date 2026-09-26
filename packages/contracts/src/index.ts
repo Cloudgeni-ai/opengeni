@@ -3649,6 +3649,26 @@ export const InsightsSpendDriver = z.object({
 });
 export type InsightsSpendDriver = z.infer<typeof InsightsSpendDriver>;
 
+/**
+ * Usage grouped by each root session's current project. `other` folds the
+ * projects past the listed limit; `unavailable` holds trees whose root the
+ * viewer cannot read. Rows sum to the window totals.
+ */
+export const InsightsProjectRow = z.object({
+  id: z.string().min(1),
+  kind: z.enum(["project", "other", "unfiled", "unavailable"]),
+  label: z.string().min(1),
+  projects: z.number().int().nonnegative(),
+  rootSessions: z.number().int().nonnegative(),
+  calls: z.number().int().nonnegative(),
+  creditUsd: z.number().nonnegative(),
+  estimatedProviderUsd: z.number().nonnegative(),
+  estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  tokens: z.number().nonnegative(),
+  cacheHitPct: z.number().int().min(0).max(100).nullable(),
+});
+export type InsightsProjectRow = z.infer<typeof InsightsProjectRow>;
+
 export const InsightsWarmGroupRow = z.object({
   id: z.string().min(1),
   groupId: z.string().uuid(),
@@ -3751,6 +3771,7 @@ export const WorkspaceInsightsSnapshot = z.object({
   series: z.array(InsightsSeriesPoint),
   depth: z.array(InsightsDepthBucket),
   drivers: z.array(InsightsSpendDriver),
+  projects: z.array(InsightsProjectRow).default([]),
   schedules: z.array(InsightsScheduleRow),
   recentCalls: z.array(InsightsModelCallRow),
   promptContributions: InsightsPromptContributions.default({
