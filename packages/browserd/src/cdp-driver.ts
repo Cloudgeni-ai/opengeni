@@ -75,6 +75,12 @@ import type {
   BrowserDownloadProgressResult,
 } from "./downloads";
 import type { AgentBrowserJsonCommand } from "./runner";
+import {
+  captureHeadlessSessionCookies,
+  restoreHeadlessSessionCookies,
+  validateHeadlessSessionCookies,
+  type HeadlessSessionCookies,
+} from "./headless-session-cookies";
 
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 const BROWSER_START_TIMEOUT_MS = 30_000;
@@ -278,6 +284,9 @@ export type AgentBrowserDriverOptions = {
   /** Headless shell has no chrome://version page. Read its real Client Hints
    * from a controller-intercepted secure-origin document instead. */
   userAgentMetadataSource?: "chrome_internal" | "intercepted_local";
+  /** Set only by the verified, dedicated managed headless-shell launcher. */
+  preserveHeadlessSessionCookies?: boolean;
+  headlessSessionCookies?: HeadlessSessionCookies;
 };
 
 export type BrowserSessionEmulation = {
@@ -366,6 +375,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     { digest: string; result: BrowserExternalAuthResultValue }
   >();
   private started = false;
+  private readonly preserveHeadlessSessionCookies: boolean;
+  private headlessSessionCookies: HeadlessSessionCookies | null;
 
   constructor(options: AgentBrowserDriverOptions) {
     this.browserSessionId = options.browserSessionId;
@@ -375,6 +386,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.createId = options.createId ?? randomUUID;
     this.physicalGeneration = randomUUID();
     this.engine = options.engine ?? "chromium";
+    this.preserveHeadlessSessionCookies = options.preserveHeadlessSessionCookies ?? false;
+    if (
+      (this.preserveHeadlessSessionCookies || options.headlessSessionCookies) &&
+      (this.engine !== "chromium" || (options.targetLifecycle ?? "runner") !== "runner")
+    ) {
+      throw new Error("Headless cookie state requires its dedicated managed launcher");
+    }
+    if (options.headlessSessionCookies && !this.preserveHeadlessSessionCookies)
+      throw new Error("Headless cookie state requires its verified shell launcher");
+    this.headlessSessionCookies = options.headlessSessionCookies
+      ? validateHeadlessSessionCookies(options.headlessSessionCookies)
+      : null;
     this.targetLifecycle = options.targetLifecycle ?? "runner";
     this.tabControl = options.tabControl ?? true;
     this.foregroundManagedTabs = options.foregroundManagedTabs ?? false;
@@ -415,6 +438,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       };
     } else {
       connection = await this.ensureConnection();
+      if (this.headlessSessionCookies) {
+        await restoreHeadlessSessionCookies(connection, this.headlessSessionCookies);
+        this.headlessSessionCookies = null;
+      }
       let page = visiblePageTargets(await this.targetInfos(connection))[0];
       if (!page) {
         const created = await connection.send<{ targetId?: unknown }>(
@@ -580,6 +607,22 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const engineVersion =
       rawVersion.length > 0 && Buffer.byteLength(rawVersion) <= 256 ? rawVersion : null;
     return { engine: this.engine, engineVersion, tabs };
+  }
+
+  /** Supervisor-only read after both action controllers have quiesced. Never
+   * exposed through the public browser observation/tool surface. */
+  async captureSessionCookies(): Promise<HeadlessSessionCookies | null> {
+    if (!this.preserveHeadlessSessionCookies) return null;
+    if (!this.started || !this.connection)
+      throw new Error("Headless cookie capture requires its active physical browser");
+    return await captureHeadlessSessionCookies(this.connection, {
+      browserSessionId: this.browserSessionId,
+      controllerGeneration: this.controllerGeneration,
+    });
+  }
+
+  get requiresExplicitProfileRestore(): boolean {
+    return this.preserveHeadlessSessionCookies;
   }
 
   async target(targetId: string): Promise<BrowserTargetValue | null> {

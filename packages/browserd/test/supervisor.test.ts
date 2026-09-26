@@ -206,6 +206,33 @@ describe("BrowserSupervisor", () => {
     );
   });
 
+  test("refuses implicit headless-shell recovery that would discard uncaptured session authentication", async () => {
+    let available = true;
+    let factories = 0;
+    await withSupervisor(
+      async ({ supervisor }) => {
+        const session = reference(11);
+        await supervisor.createSession({ ...session, headed: false });
+        available = false;
+        await expect(supervisor.listTargets(session)).rejects.toMatchObject({
+          code: "resource_unavailable",
+        });
+        await expect(supervisor.listTargets(session)).rejects.toThrow(
+          "restore saved browser state",
+        );
+        expect(factories).toBe(1);
+        await supervisor.endSession(session, { removeState: true });
+        expect(supervisor.listSessions()).toEqual([]);
+      },
+      {
+        onFactory: () => {
+          factories += 1;
+        },
+        driverHooks: { available: () => available, requiresExplicitProfileRestore: true },
+      },
+    );
+  });
+
   test("deduplicates concurrent creation and rejects stale or conflicting bindings", async () => {
     let factoryCalls = 0;
     await withSupervisor(
@@ -788,6 +815,7 @@ async function withSupervisor(
       ) => ReturnType<NonNullable<BrowserSupervisorDriver["externalAuth"]>>;
       engineVersion?: () => string;
       available?: (instance: number) => boolean;
+      requiresExplicitProfileRestore?: boolean;
     };
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
   } = {},
@@ -828,6 +856,7 @@ function fakeDriver(
     ) => ReturnType<NonNullable<BrowserSupervisorDriver["externalAuth"]>>;
     engineVersion?: () => string;
     available?: (instance: number) => boolean;
+    requiresExplicitProfileRestore?: boolean;
   } = {},
   instance = 1,
 ): BrowserSupervisorDriver {
@@ -869,6 +898,7 @@ function fakeDriver(
     if (hooks.available && !hooks.available(instance)) throw new Error("driver unavailable");
   };
   return {
+    ...(hooks.requiresExplicitProfileRestore ? { requiresExplicitProfileRestore: true } : {}),
     async start(url) {
       requireOpen();
       hooks.start?.(instance);
