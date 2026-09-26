@@ -26,8 +26,8 @@ type LeaseOptions = Pick<
   | "emulation"
 >;
 
-/** Experimental construction-only path for bounded disposable verification.
- * No supervisor/API selects this pool. Contexts share a browser crash boundary;
+/** Experimental opt-in path for bounded disposable verification.
+ * Contexts share a browser crash boundary;
  * they are not a security sandbox or a substitute for durable actor profiles.
  * A failed/empty pool is terminal: a new pool requires a fresh generation and
  * fresh contexts. No dispatched command or previous identity is replayed. */
@@ -56,7 +56,14 @@ export class EphemeralChromiumContextPool {
     this.connect = options.connect ?? ((endpoint) => CdpConnection.connect(endpoint));
   }
 
-  async createDriver(authorityKey: string, options: LeaseOptions): Promise<AgentBrowserDriver> {
+  isTerminal(): boolean {
+    return this.terminal;
+  }
+
+  async createDriver(
+    authorityKey: string,
+    options: LeaseOptions,
+  ): Promise<AgentBrowserDriver & { isTerminal(): boolean }> {
     return await this.serial(async () => {
       this.assertLive();
       if (authorityKey !== this.options.authorityKey)
@@ -90,63 +97,66 @@ export class EphemeralChromiumContextPool {
             await this.serial(() => this.release(contextId));
           },
         };
-        return new AgentBrowserDriver({
-          ...options,
-          runner,
-          engine: "chromium",
-          targetLifecycle: "cdp",
-          browserContextId: contextId,
-          foregroundManagedTabs: false,
-          connect: async (endpoint) => {
-            assertLease();
-            let connection: BrowserCdpConnection;
-            try {
-              connection = await this.connect(endpoint);
-            } catch (error) {
-              await this.shutdown();
-              throw error;
-            }
-            try {
+        return Object.assign(
+          new AgentBrowserDriver({
+            ...options,
+            runner,
+            engine: "chromium",
+            targetLifecycle: "cdp",
+            browserContextId: contextId,
+            foregroundManagedTabs: false,
+            connect: async (endpoint) => {
               assertLease();
-            } catch (error) {
-              connection.close();
-              throw error;
-            }
-            this.leases.get(contextId)!.add(connection);
-            return {
-              send: async <T>(
-                method: string,
-                params?: Readonly<Record<string, unknown>>,
-                callOptions?: Parameters<BrowserCdpConnection["send"]>[2],
-              ): Promise<T> => {
+              let connection: BrowserCdpConnection;
+              try {
+                connection = await this.connect(endpoint);
+              } catch (error) {
+                await this.shutdown();
+                throw error;
+              }
+              try {
                 assertLease();
-                try {
-                  return await connection.send<T>(method, params, callOptions);
-                } catch (error) {
-                  if (error instanceof CdpTransportError && this.leases.has(contextId))
-                    await this.shutdown();
-                  throw error;
-                }
-              },
-              on: (method, listener, sessionId) =>
-                connection.on(
-                  method,
-                  (event) => {
-                    if (!this.terminal && this.leases.has(contextId)) listener(event);
-                  },
-                  sessionId,
-                ),
-              waitForEvent: (method, callOptions) => {
-                assertLease();
-                return connection.waitForEvent(method, callOptions);
-              },
-              close: () => {
-                this.leases.get(contextId)?.delete(connection);
+              } catch (error) {
                 connection.close();
-              },
-            };
-          },
-        });
+                throw error;
+              }
+              this.leases.get(contextId)!.add(connection);
+              return {
+                send: async <T>(
+                  method: string,
+                  params?: Readonly<Record<string, unknown>>,
+                  callOptions?: Parameters<BrowserCdpConnection["send"]>[2],
+                ): Promise<T> => {
+                  assertLease();
+                  try {
+                    return await connection.send<T>(method, params, callOptions);
+                  } catch (error) {
+                    if (error instanceof CdpTransportError && this.leases.has(contextId))
+                      await this.shutdown();
+                    throw error;
+                  }
+                },
+                on: (method, listener, sessionId) =>
+                  connection.on(
+                    method,
+                    (event) => {
+                      if (!this.terminal && this.leases.has(contextId)) listener(event);
+                    },
+                    sessionId,
+                  ),
+                waitForEvent: (method, callOptions) => {
+                  assertLease();
+                  return connection.waitForEvent(method, callOptions);
+                },
+                close: () => {
+                  this.leases.get(contextId)?.delete(connection);
+                  connection.close();
+                },
+              };
+            },
+          }),
+          { isTerminal: () => this.terminal },
+        );
       } catch (error) {
         // A create timeout can have created a context. End this owned process,
         // rather than retrying creation and leaking an untracked identity.
@@ -174,6 +184,10 @@ export class EphemeralChromiumContextPool {
     if (!result.cdpUrl) throw new Error("ephemeral browser did not expose CDP");
     this.endpoint = result.cdpUrl;
     this.control = await this.connect(this.endpoint);
+    this.control.onDisconnect?.(() => {
+      // Persist failure in shutdownPromise; closers still observe termination errors.
+      void this.shutdown().catch(() => undefined);
+    });
   }
 
   private async release(contextId: string): Promise<void> {

@@ -2008,7 +2008,7 @@ function parseBrowserTransport(
     throw new ProtocolError("invalid_action", "browser transport is invalid", 400);
   }
   if (value.kind === "managed") {
-    assertOnlyKeys(value, ["kind", "engine"]);
+    assertOnlyKeys(value, ["kind", "engine", "ephemeralPartition"]);
     if (
       value.engine !== undefined &&
       value.engine !== "chromium" &&
@@ -2016,7 +2016,18 @@ function parseBrowserTransport(
     ) {
       throw new ProtocolError("invalid_action", "managed browser engine is unsupported", 400);
     }
-    return { kind: "managed", engine: value.engine ?? "chromium" };
+    if (
+      value.ephemeralPartition !== undefined &&
+      (typeof value.ephemeralPartition !== "string" ||
+        !/^[0-9a-f]{64}$/u.test(value.ephemeralPartition))
+    ) {
+      throw new ProtocolError("invalid_action", "ephemeral browser partition is invalid", 400);
+    }
+    return {
+      kind: "managed",
+      engine: value.engine ?? "chromium",
+      ...(value.ephemeralPartition ? { ephemeralPartition: value.ephemeralPartition } : {}),
+    };
   }
   if (value.kind === "external_provider") {
     assertOnlyKeys(value, [

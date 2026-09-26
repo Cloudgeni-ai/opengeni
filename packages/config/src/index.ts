@@ -1018,6 +1018,7 @@ const SettingsSchema = z.object({
   // --- cloudflare (headless) ---
   cloudflareWorkerUrl: z.string().url().optional(),
   cloudflareApiKey: z.string().optional(),
+  experimentalBrowserContextPoolEnabled: EnvBoolean.default(false),
   // --- remote browser placements ---
   // Provider credentials are injected only into the placement-resident
   // browserd launch. They never enter session contracts, journals, or sandboxes.
@@ -3434,6 +3435,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     blaxelTtl: optional("OPENGENI_BLAXEL_TTL"),
     cloudflareWorkerUrl: optional("OPENGENI_CLOUDFLARE_WORKER_URL"),
     cloudflareApiKey: optional("OPENGENI_CLOUDFLARE_API_KEY"),
+    experimentalBrowserContextPoolEnabled: optional(
+      "OPENGENI_EXPERIMENTAL_BROWSER_CONTEXT_POOL_ENABLED",
+    ),
     browserbaseApiKey: optional("OPENGENI_BROWSERBASE_API_KEY"),
     kernelApiKey: optional("OPENGENI_KERNEL_API_KEY"),
     kernelEndpoint: optional("OPENGENI_KERNEL_ENDPOINT"),
