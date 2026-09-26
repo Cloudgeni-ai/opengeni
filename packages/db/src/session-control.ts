@@ -2372,12 +2372,15 @@ export async function registerSessionWorkflowWakeInTransaction(
  * remains undelivered, another update makes that same batch richer instead of
  * manufacturing another transport revision or sequential model turn.
  *
- * The caller still signals after commit in both cases. An undelivered row is
- * often a delayed wake that nothing signals before its time (a `wait_for_input`
- * deadline or goal idle backoff); pulling `next_attempt_at` to now alone leaves
- * the input waiting for the periodic dispatcher. The signal is only a hint: the
- * workflow re-reads PostgreSQL, one claim consumes the whole pending batch, and
- * the admission-aware acknowledgement keeps this revision open until it does.
+ * Producers outside the workflow should signal after commit in both cases, so
+ * `shouldSignal` is always `true`; the field stays for callers that read it. An
+ * undelivered row is often a delayed wake that nothing signals before its time
+ * (a `wait_for_input` deadline or goal idle backoff); pulling `next_attempt_at`
+ * to now alone leaves the input waiting for the periodic dispatcher. The signal
+ * is only a hint: the workflow re-reads PostgreSQL, one claim consumes the
+ * whole pending batch, and the admission-aware acknowledgement keeps this
+ * revision open until it does. Terminal background-command settlement does not
+ * signal from its settlement callers yet, so the dispatcher delivers that wake.
  */
 export async function registerInternalUpdateWakeInTransaction(
   db: Database,
@@ -2387,7 +2390,7 @@ export async function registerInternalUpdateWakeInTransaction(
     sessionId: string;
     temporalWorkflowId: string;
   },
-): Promise<{ wakeRevision: number; shouldSignal: boolean }> {
+): Promise<{ wakeRevision: number; shouldSignal: true }> {
   const [existing] = await db
     .select()
     .from(schema.sessionWorkflowWakeOutbox)
