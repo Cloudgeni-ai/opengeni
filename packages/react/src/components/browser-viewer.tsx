@@ -50,6 +50,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -236,6 +237,7 @@ export function BrowserViewer({
   const previousSessionIdRef = useRef(sessionId);
   const seenInterventionIdsRef = useRef(new Set<string>());
   const diagnosticRequestRef = useRef(0);
+  const viewportFocusHandoffRef = useRef<string | null>(null);
   const [diagnosticsView, setDiagnosticsView] = useState<BrowserDiagnosticsView | null>(null);
 
   const notifyError = useCallback(
@@ -879,6 +881,20 @@ export function BrowserViewer({
             }}
           />
           <BrowserViewport
+            // A new control scope must discard every buffered gesture and queued action.
+            key={JSON.stringify([
+              selection?.sessionId,
+              browser.selectedTarget?.id,
+              browser.selectedTarget?.targetGeneration,
+              browser.selectedTarget?.documentGeneration,
+              frames.attachment?.controllerGeneration,
+            ])}
+            focusHandoffRef={viewportFocusHandoffRef}
+            focusScope={JSON.stringify([
+              selection?.sessionId,
+              browser.selectedTarget?.id,
+              browser.selectedTarget?.targetGeneration,
+            ])}
             frame={displayedFrame}
             connectionState={displayConnectionState}
             supportsLiveFrames={supportsLiveFrames}
@@ -1824,6 +1840,8 @@ function BrowserAddressBar(props: {
 }
 
 function BrowserViewport(props: {
+  focusHandoffRef: { current: string | null };
+  focusScope: string;
   frame: BrowserFrame | null;
   connectionState: string;
   supportsLiveFrames: boolean;
@@ -1868,11 +1886,25 @@ function BrowserViewport(props: {
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
   const actionQueueEpochRef = useRef(0);
   const queuedFrameRef = useRef<BrowserFrame | null>(null);
+  const currentFrameRef = useRef<BrowserFrame | null>(props.frame);
+  const paintedFrameRef = useRef<BrowserFrame | null>(null);
+  const [paintedFrame, setPaintedFrame] = useState<BrowserFrame | null>(null);
   const decodingFrameRef = useRef(false);
   const mountedRef = useRef(true);
   actionRef.current = props.onAction;
   readClipboardRef.current = props.onReadClipboard;
   errorRef.current = props.onError;
+
+  const clearBufferedInput = useCallback(() => {
+    if (wheelRef.current?.timer) clearTimeout(wheelRef.current.timer);
+    if (pendingTextRef.current?.timer) clearTimeout(pendingTextRef.current.timer);
+    wheelRef.current = null;
+    pendingTextRef.current = null;
+    pointerStartRef.current = null;
+    lastClickRef.current = null;
+    composingRef.current = false;
+    if (inputRef.current) inputRef.current.value = "";
+  }, []);
 
   const paintQueuedFrames = useCallback(() => {
     if (decodingFrameRef.current) return;
@@ -1893,8 +1925,15 @@ function BrowserViewport(props: {
               const bitmap = await createImageBitmap(blob);
               try {
                 const canvas = canvasRef.current;
-                if (mountedRef.current && canvas) {
+                if (
+                  mountedRef.current &&
+                  canvas &&
+                  currentFrameRef.current &&
+                  sameBrowserDocument(frame, currentFrameRef.current)
+                ) {
                   paintCanvas(canvas, bitmap, frame.width, frame.height);
+                  paintedFrameRef.current = frame;
+                  setPaintedFrame(frame);
                 }
               } finally {
                 bitmap.close();
@@ -1904,11 +1943,23 @@ function BrowserViewport(props: {
             objectUrl = URL.createObjectURL(blob);
             const image = await loadImage(objectUrl);
             const canvas = canvasRef.current;
-            if (mountedRef.current && canvas) {
+            if (
+              mountedRef.current &&
+              canvas &&
+              currentFrameRef.current &&
+              sameBrowserDocument(frame, currentFrameRef.current)
+            ) {
               paintCanvas(canvas, image, frame.width, frame.height);
+              paintedFrameRef.current = frame;
+              setPaintedFrame(frame);
             }
           } catch (cause) {
-            if (mountedRef.current) errorRef.current(cause);
+            if (
+              mountedRef.current &&
+              currentFrameRef.current &&
+              sameBrowserDocument(frame, currentFrameRef.current)
+            )
+              errorRef.current(cause);
           } finally {
             if (objectUrl) URL.revokeObjectURL(objectUrl);
           }
@@ -1920,27 +1971,39 @@ function BrowserViewport(props: {
     })();
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     mountedRef.current = true;
+    if (props.focusHandoffRef.current === props.focusScope) {
+      inputRef.current?.focus({ preventScroll: true });
+    }
+    props.focusHandoffRef.current = null;
     return () => {
+      // Only a same-target replacement may inherit focus the keyboard sink owned.
+      if (document.activeElement === inputRef.current) {
+        props.focusHandoffRef.current = props.focusScope;
+      }
       mountedRef.current = false;
+      actionQueueEpochRef.current += 1;
       queuedFrameRef.current = null;
+      clearBufferedInput();
     };
-  }, []);
+  }, [clearBufferedInput, props.focusHandoffRef, props.focusScope]);
 
-  useEffect(() => {
-    if (!props.frame) return;
+  useLayoutEffect(() => {
+    if (currentFrameRef.current && !props.frame) {
+      actionQueueEpochRef.current += 1;
+      clearBufferedInput();
+    }
+    currentFrameRef.current = props.frame;
+    if (!props.frame) {
+      queuedFrameRef.current = null;
+      paintedFrameRef.current = null;
+      setPaintedFrame(null);
+      return;
+    }
     queuedFrameRef.current = props.frame;
     paintQueuedFrames();
-  }, [paintQueuedFrames, props.frame]);
-
-  useEffect(
-    () => () => {
-      if (wheelRef.current?.timer) clearTimeout(wheelRef.current.timer);
-      if (pendingTextRef.current?.timer) clearTimeout(pendingTextRef.current.timer);
-    },
-    [],
-  );
+  }, [clearBufferedInput, paintQueuedFrames, props.frame]);
 
   const enqueue = useCallback(
     (
@@ -1949,20 +2012,24 @@ function BrowserViewport(props: {
       after?: (receipt: BrowserActionReceipt) => Promise<void>,
     ) => {
       const epoch = actionQueueEpochRef.current;
+      const dispatch = actionRef.current;
       actionTailRef.current = actionTailRef.current
         .catch(() => undefined)
         .then(async () => {
-          if (epoch !== actionQueueEpochRef.current) return;
-          const receipt = await actionRef.current(action, frame);
+          if (!mountedRef.current || epoch !== actionQueueEpochRef.current) return;
+          const receipt = await dispatch(action, frame);
+          if (!mountedRef.current || epoch !== actionQueueEpochRef.current) return;
           await after?.(receipt);
         })
         .catch((cause) => {
+          if (!mountedRef.current || epoch !== actionQueueEpochRef.current) return;
           // Do not replay or continue input collected behind a failed request.
           actionQueueEpochRef.current += 1;
+          clearBufferedInput();
           errorRef.current(cause);
         });
     },
-    [],
+    [clearBufferedInput],
   );
 
   const point = useCallback(
@@ -1983,19 +2050,39 @@ function BrowserViewport(props: {
     lastClickRef.current = null;
   }, []);
 
+  const flushPendingWheel = useCallback(() => {
+    const batch = wheelRef.current;
+    if (!batch) return;
+    if (batch.timer) clearTimeout(batch.timer);
+    wheelRef.current = null;
+    enqueue(
+      {
+        type: "pointer",
+        action: "scroll",
+        x: batch.x,
+        y: batch.y,
+        deltaX: batch.deltaX,
+        deltaY: batch.deltaY,
+      },
+      batch.frame,
+    );
+  }, [enqueue]);
+
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
-    if (!props.frame || event.button !== 0) return;
+    const frame = paintedFrameRef.current;
+    if (!frame || event.button !== 0) return;
     // Keep the hidden keyboard sink focused after the browser performs the
     // pointerdown default action for the canvas. Without preventing that
     // default, Chrome immediately moves focus back to the document and all
     // subsequent typing/paste is silently lost.
     event.preventDefault();
+    flushPendingWheel();
     flushPendingText();
     pointerStartRef.current = {
       x: event.clientX,
       y: event.clientY,
       pointerId: event.pointerId,
-      frame: props.frame,
+      frame,
     };
     event.currentTarget.setPointerCapture?.(event.pointerId);
     inputRef.current?.focus({ preventScroll: true });
@@ -2044,8 +2131,9 @@ function BrowserViewport(props: {
 
   const contextMenu = (event: MouseEvent<HTMLCanvasElement>) => {
     event.preventDefault();
-    const frame = props.frame;
+    const frame = paintedFrameRef.current;
     if (!frame) return;
+    flushPendingWheel();
     flushPendingText();
     flushPendingClick();
     const at = point(frame, event.clientX, event.clientY);
@@ -2053,41 +2141,35 @@ function BrowserViewport(props: {
   };
 
   const wheel = (event: WheelEvent<HTMLCanvasElement>) => {
-    const frame = props.frame;
+    const frame = paintedFrameRef.current;
     if (!frame) return;
     const at = point(frame, event.clientX, event.clientY);
     if (!at) return;
     flushPendingText();
     flushPendingClick();
     event.preventDefault();
-    const pending = wheelRef.current;
-    if (pending?.timer) clearTimeout(pending.timer);
+    let pending = wheelRef.current;
+    if (
+      pending &&
+      (!sameBrowserDocument(pending.frame, frame) ||
+        Math.hypot(pending.x - at.x, pending.y - at.y) > 6)
+    ) {
+      flushPendingWheel();
+      pending = null;
+    }
     wheelRef.current = {
       x: at.x,
       y: at.y,
-      deltaX: (pending && sameFrameFence(pending.frame, frame) ? pending.deltaX : 0) + event.deltaX,
-      deltaY: (pending && sameFrameFence(pending.frame, frame) ? pending.deltaY : 0) + event.deltaY,
+      deltaX: (pending?.deltaX ?? 0) + event.deltaX,
+      deltaY: (pending?.deltaY ?? 0) + event.deltaY,
       frame,
-      timer: setTimeout(() => {
-        const batch = wheelRef.current;
-        wheelRef.current = null;
-        if (batch)
-          enqueue(
-            {
-              type: "pointer",
-              action: "scroll",
-              x: batch.x,
-              y: batch.y,
-              deltaX: batch.deltaX,
-              deltaY: batch.deltaY,
-            },
-            batch.frame,
-          );
-      }, 45),
+      // Retain the first event's deadline so a continuous gesture keeps moving.
+      timer: pending?.timer ?? setTimeout(flushPendingWheel, 45),
     };
   };
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    flushPendingWheel();
     const command = event.metaKey || event.ctrlKey;
     if (
       props.clipboardEnabled &&
@@ -2103,16 +2185,19 @@ function BrowserViewport(props: {
     event.preventDefault();
     flushPendingText();
     flushPendingClick();
-    enqueue({ type: "press", key }, props.frame);
+    enqueue({ type: "press", key }, paintedFrameRef.current);
   };
 
   const copy = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     if (!props.clipboardEnabled) return;
     event.preventDefault();
+    flushPendingWheel();
     flushPendingText();
     flushPendingClick();
-    enqueue({ type: "clipboard", operation: "copy" }, props.frame, async () => {
-      const clipboard = await readClipboardRef.current();
+    const readClipboard = readClipboardRef.current;
+    enqueue({ type: "clipboard", operation: "copy" }, paintedFrameRef.current, async () => {
+      const clipboard = await readClipboard();
+      if (!mountedRef.current) return;
       if (clipboard.text.length === 0) return;
       if (!(await copyTextToClipboard(clipboard.text))) {
         throw new Error("Browser text could not be copied to the local clipboard");
@@ -2123,6 +2208,7 @@ function BrowserViewport(props: {
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     if (!props.clipboardEnabled) return;
     event.preventDefault();
+    flushPendingWheel();
     flushPendingText();
     flushPendingClick();
     enqueue(
@@ -2131,16 +2217,17 @@ function BrowserViewport(props: {
         operation: "paste",
         text: event.clipboardData.getData("text/plain"),
       },
-      props.frame,
+      paintedFrameRef.current,
     );
   };
 
   const input = (value: string, nativeComposing = false) => {
     if (composingRef.current || nativeComposing) return;
     if (!value) return;
+    flushPendingWheel();
     flushPendingClick();
     const pending = pendingTextRef.current;
-    if (pending && sameOptionalBrowserFrame(pending.frame, props.frame)) {
+    if (pending && sameOptionalBrowserFrame(pending.frame, paintedFrameRef.current)) {
       clearTimeout(pending.timer);
       pending.text += value;
       pending.timer = setTimeout(flushPendingText, 16);
@@ -2148,7 +2235,7 @@ function BrowserViewport(props: {
       flushPendingText();
       pendingTextRef.current = {
         text: value,
-        frame: props.frame,
+        frame: paintedFrameRef.current,
         timer: setTimeout(flushPendingText, 16),
       };
     }
@@ -2164,7 +2251,8 @@ function BrowserViewport(props: {
     input(event.currentTarget.value || event.data);
   };
 
-  const showCanvas = props.frame !== null;
+  const showCanvas =
+    props.frame !== null && paintedFrame !== null && sameBrowserDocument(props.frame, paintedFrame);
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden bg-black">
       <canvas
@@ -2912,13 +3000,16 @@ function frameMatchesSelectedTarget(
 }
 
 function sameFrameFence(left: BrowserFrame, right: BrowserFrame): boolean {
+  return sameBrowserDocument(left, right) && left.frameId === right.frameId;
+}
+
+function sameBrowserDocument(left: BrowserFrame, right: BrowserFrame): boolean {
   return (
     left.browserSessionId === right.browserSessionId &&
     left.controllerGeneration === right.controllerGeneration &&
     left.targetId === right.targetId &&
     left.targetGeneration === right.targetGeneration &&
-    left.documentGeneration === right.documentGeneration &&
-    left.frameId === right.frameId
+    left.documentGeneration === right.documentGeneration
   );
 }
 
