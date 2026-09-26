@@ -4492,9 +4492,7 @@ describe("runtime event normalization", () => {
       instructionsTemplate: template,
     });
     expect(staticInstructions(agent.instructions)).toContain("You are ACME's deployment co-pilot.");
-    expect(staticInstructions(agent.instructions)).not.toContain(
-      "You are an OpenGeni workspace agent.",
-    );
+    expect(staticInstructions(agent.instructions)).not.toContain("general assistant");
     // CORE (the goal-loop ownership line naming opengeni__goal_*) survives.
     expect(staticInstructions(agent.instructions)).toContain(
       "you call opengeni__goal_complete with concrete evidence",

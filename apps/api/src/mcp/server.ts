@@ -2858,7 +2858,7 @@ function registerGoalTools(
     "goal_resume",
     {
       description:
-        "Resume this session's paused goal, regardless of who paused it or why, when the user asks you to continue or the blocker you paused for has cleared. A user's question alone is not a reason to resume: answer it and leave the goal paused. Already active is a successful no-op. Preserves the objective and resets continuation counters.",
+        "Resume this session's paused goal when the user asks you to continue (whoever paused it), or when the blocker you paused for has cleared. A user's question alone is not a reason to resume: answer it and leave the goal paused. Already active is a successful no-op. Preserves the objective and resets continuation counters.",
       inputSchema: {},
     },
     async () => {

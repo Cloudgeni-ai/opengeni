@@ -238,16 +238,32 @@ describe("provider-neutral operational instructions", () => {
     expect(end).toBeGreaterThan(start);
     expect(guidance).not.toContain("provide the update and then progress with the task");
     expect(guidance).toContain(
-      "If it only asks a question or for status, answer it in a final response and end the turn",
+      "If it only asks a question or for status, answer it without starting or resuming other work in that turn unless the user asks.",
     );
-    expect(guidance).toContain("offer to continue");
-    expect(guidance).toContain("An active goal continues on its own after your answer");
+    expect(guidance).toContain(
+      "Otherwise the answer is your final response: an active goal continues on its own, and without one, offer to continue when work remains.",
+    );
     expect(guidance).toContain("acknowledgement, not approval");
+  });
+
+  test("a question asked during a wait keeps the wait so in-flight results still resume the agent", () => {
+    // A newer finished turn supersedes a registered wait, and child or command
+    // results wake a goal-less session only while a wait is held. A question
+    // turn that answered and ended would silently drop the watch.
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "If you were waiting on unchanged in-flight work (a child, a command, or a timed recheck), give the answer, then call `wait_for_input` again with the same reason so its result still resumes you.",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "do not post a status right before `wait_for_input` unless it answers the user",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "If remaining work depends on background commands, register that session-level wait before ending your turn.",
+    );
   });
 
   test("holds an unchanged external wait outside question turns without stalling useful work", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "Outside that case, do not end with only a status reply and leave an immediate continuation",
+      "Outside a question or status turn, do not end with only a status reply and leave an immediate continuation",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "only when further progress genuinely depends on unchanged work already in flight",
@@ -256,10 +272,15 @@ describe("provider-neutral operational instructions", () => {
       "Do not use `wait_for_input` for work you can still advance or for a blocker that requires a human decision.",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "after calling `wait_for_input`, end without another final or status restatement unless you found material new information",
+      "A continuation that only confirms the same unchanged wait calls `wait_for_input` and ends without restating the status unless you found material new information.",
     );
+    // Any turn may end with a wait instead of a final response, so a turn that
+    // starts long work and waits still has a compliant ending.
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "except for the unchanged-wait `wait_for_input` continuation described above",
+      "A turn that ends with `wait_for_input` has no final response; its reason is the user-visible status.",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
+      "unchanged-wait `wait_for_input` continuation",
     );
   });
 });
@@ -295,6 +316,14 @@ describe("proportional effort", () => {
     expect(guidance).toContain("at least every two minutes");
     expect(guidance).toContain("Do not narrate Skill reads or waits");
     expect(guidance).toContain("do not post a status right before `wait_for_input`");
+  });
+
+  test("puts a blank line before every heading so the contract renders as Markdown", () => {
+    const lines = OPENGENI_OPERATIONAL_INSTRUCTIONS.split("\n");
+    const crowded = lines.filter(
+      (line, index) => /^#+ /.test(line) && index > 0 && lines[index - 1] !== "",
+    );
+    expect(crowded).toEqual([]);
   });
 
   test("leads final answers with the answer and keeps simple answers short", () => {

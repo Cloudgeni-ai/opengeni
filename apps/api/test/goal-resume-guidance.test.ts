@@ -37,7 +37,9 @@ test("goal_resume tells the agent that a question alone does not resume a paused
     server as unknown as { _registeredTools: Record<string, { description?: string }> }
   )._registeredTools;
   const description = registered.goal_resume?.description ?? "";
-  expect(description).toContain("when the user asks you to continue");
+  expect(description).toContain("when the user asks you to continue (whoever paused it)");
+  expect(description).toContain("or when the blocker you paused for has cleared");
+  expect(description).not.toContain("regardless of who paused it or why");
   expect(description).toContain("A user's question alone is not a reason to resume");
   expect(description).toContain("Already active is a successful no-op");
 });

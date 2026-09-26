@@ -180,9 +180,10 @@ A goal is `active`, `paused`, or `completed`.
   `goal_pause` also receive `goal_resume` within the deployment tool ceiling.
   The agent is told to resume only when the user asks it to continue or the
   blocker it paused for has cleared. A user's question alone is not a reason:
-  the agent answers it in a final response and leaves the goal paused. An
-  active goal still continues through its ordinary continuation after that
-  answer.
+  the agent answers it and leaves the goal paused. An active goal still
+  continues through its ordinary continuation after that answer; if the agent
+  was holding a `wait_for_input` on unchanged in-flight work, it answers and
+  registers the same wait again instead.
 
 Long waits are session-level rather than goal mutations. `wait_for_input {
 reason, timeoutSeconds, idempotencyKey? }` is self-only, requires no goal, and

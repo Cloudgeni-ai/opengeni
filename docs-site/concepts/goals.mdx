@@ -12,7 +12,7 @@ A goal is `active`, `paused`, or `completed`.
 
 - **Set** it when creating a session, from a scheduled task, or from inside the run with the agent's `goal_set` tool. A goal carries an objective and success criteria.
 - **Complete** is explicit: the agent calls `goal_complete` with evidence.
-- **Pause** holds the goal with a rationale: the agent's `goal_pause`, a user pause, an API call, or a budget or admission limit. Any pause is resumable with `goal_resume`. The agent resumes a paused goal when you ask it to continue; a question gets an answer, not a resume.
+- **Pause** holds the goal with a rationale: the agent's `goal_pause`, a user pause, an API call, or a budget or admission limit. Any pause is resumable with `goal_resume`. The agent resumes a paused goal when you ask it to continue, or when the blocker it paused for clears; a question gets an answer, not a resume.
 - **Clear** removes the goal. The session stays usable as an ordinary session.
 
 Pausing the session (the workstream) is separate from pausing the goal: it holds inference without changing goal state.
