@@ -3184,7 +3184,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       const safelyReplayable =
         channelOperation === "browser.read" || channelOperation === "browser.action";
       let controllerTransportFailed = false;
-      let controllerRecoveryAttempted = false;
+      const controllerRecoveryState = { attempted: false };
       const run = async (
         placement: BrowserPlacement,
         provisionedClient?: BrowserControlClient,
@@ -3269,20 +3269,13 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                 () => placement,
               ),
             );
-          if (
-            !safelyReplayable ||
-            placement.placement.kind !== "sandbox_group" ||
-            controllerRecoveryAttempted
-          ) {
-            return await use();
-          }
           return await withControllerTransportRecovery({
+            channelOperation,
+            placementKind: placement.placement.kind,
+            recoveryState: controllerRecoveryState,
             transportAlreadyFailed: controllerTransportFailed,
             use,
-            recover: async () => {
-              // Channel A may refresh its provider handle. Keep sidecar recovery
-              // bounded across those retries and retain the exec-capable session.
-              controllerRecoveryAttempted = true;
+            admitRecovery: async () => {
               if (
                 !(await touchBrowserSessionController(deps.db, {
                   accountId: grant.accountId,
@@ -3293,6 +3286,10 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               ) {
                 throw new BrowserSessionStateError("BrowserSession controller authority changed");
               }
+            },
+            recover: async () => {
+              // Provision and restore through the original exec-capable session;
+              // the cached tunnel alone cannot start browserd or its display.
               const client = await provisionController(
                 deps,
                 grant,
