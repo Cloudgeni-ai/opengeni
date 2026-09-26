@@ -1014,7 +1014,15 @@ explicitly provide a durable catalog through skillCatalogInHistory.
 Workspace-managed Skill reads return current authorized content, so a read can
 observe a saved revision newer than its initial descriptor. Bundled/session Skill
 reads use the selected attempt's artifacts. Read outputs enter ordinary tool-call
-history.
+history. A repeated default `SKILL.md` read by the model returns a short
+`alreadyInContext` receipt with the current revision identity instead of the text
+when an active, call-paired `skill_read` result in this session already holds the
+same identity and exact text. Compaction marks those rows inactive, so the next read
+after compaction returns full text; a truncated or spilled result never counts.
+Explicit `paths` (the fresh-copy request, including `["SKILL.md"]`), `listFiles`,
+and Codemode callers always receive content. The check reads only the acting
+session's active history and leaves the tool schema, instructions, and Skill index
+unchanged, so it does not move the cached prompt prefix.
 If repository resources are attached, ordinary repository setup first makes
 their existing checkout available; runtime then indexes canonical
 `.agents/skills` and compatible `.claude/skills` directories through the bound

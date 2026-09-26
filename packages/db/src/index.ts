@@ -627,6 +627,7 @@ export * from "./governed-learning-evaluator";
 export * from "./slack-task-policy";
 export * from "./preference-registry";
 export * from "./skills";
+export * from "./session-tool-results";
 export type { SkillSourceReleaseReceipt } from "./skill-source-release";
 export { SkillSourceRemovalAuthorityError } from "./skill-source-release";
 export * from "./memory-governance";
