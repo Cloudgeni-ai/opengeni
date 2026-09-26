@@ -793,6 +793,21 @@ See the [`@opengeni/react` README](../packages/react/README.md) for wiring.
 
 ### Interaction runtime reliability
 
+Connected Machine BrowserSessions can explicitly request `engine: "lightpanda"`
+for headless semantic work. Chromium remains the default. This requires the
+pinned Lightpanda executable configured on the native agent through
+`OPENGENI_BROWSERD_LIGHTPANDA_BINARY`; browserd verifies the platform-specific
+digest in `packages/browserd/src/lightpanda-binary.ts` before use. Standard native
+agent releases do not currently embed this optional executable. A missing or
+incompatible executable fails the request; it never falls back to Chromium.
+Provision it only on supported Linux or macOS platforms, preserving the source
+and license obligations of the upstream release.
+
+This engine does not provide rendered screenshots, live viewing, desktop input,
+Chromium profile identities, or a linked ComputerSession. Use Chromium for
+visual/mobile testing and human interaction. Browser authority, per-session
+isolation, and source-placement fences remain identical for both engines.
+
 Managed BrowserSessions own browser lifetime across tool calls. A browser daemon
 launched by a shell command remains subject to that command's containment and
 cleanup; repeating its CLI session name does not retain its process. Explicit
