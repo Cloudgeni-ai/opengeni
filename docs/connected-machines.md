@@ -807,6 +807,12 @@ Connected Machine interaction creation must match the source session's current
 placement. Move the session first; a creation mismatch is a 422, while an existing
 resource on a retired placement retains the terminal stale-resource fence.
 
+Managed Chrome on Linux drains browser stderr through a private launch
+wrapper. The last 64 KiB are retained in the session's owner-only
+`chrome-launch/chrome-stderr.log`; launcher and pipe files are removed on browser
+shutdown. This prevents a full Chrome stderr pipe from blocking CDP while keeping
+startup diagnostics bounded. Attached browsers are unaffected.
+
 Attached Chrome is an explicit user-profile choice, never an automatic fallback
 for an unavailable managed browser. A new attached BrowserSession creates a new
 background tab rather than navigating an existing personal tab. Reuse honors
