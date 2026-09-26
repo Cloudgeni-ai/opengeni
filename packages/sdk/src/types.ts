@@ -7914,7 +7914,7 @@ export type MachineRuntime = {
   desiredVersion: string | null;
   versionState: "unknown" | "current" | "outdated" | "ahead" | "updating" | "update_failed";
   /** Required installer bootstrap when a legacy updater cannot safely replace the install. */
-  updateBlockedReason?: string | null;
+  updateBlockedReason?: string | null | undefined;
   capabilities: MachineRuntimeCapabilities;
   update: MachineUpdateState | null;
 };
