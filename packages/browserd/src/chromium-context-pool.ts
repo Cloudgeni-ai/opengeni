@@ -39,6 +39,7 @@ export class EphemeralChromiumContextPool {
   private control: BrowserCdpConnection | null = null;
   private endpoint: string | null = null;
   private terminal = false;
+  private shutdownPromise: Promise<void> | null = null;
   private tail: Promise<unknown> = Promise.resolve();
   private readonly leases = new Map<string, Set<BrowserCdpConnection>>();
 
@@ -177,7 +178,10 @@ export class EphemeralChromiumContextPool {
 
   private async release(contextId: string): Promise<void> {
     const connections = this.leases.get(contextId);
-    if (!connections) return;
+    if (!connections) {
+      await this.shutdownPromise;
+      return;
+    }
     this.leases.delete(contextId);
     for (const connection of connections) connection.close();
     try {
@@ -189,14 +193,17 @@ export class EphemeralChromiumContextPool {
     if (this.leases.size === 0) await this.shutdown();
   }
 
-  private async shutdown(): Promise<void> {
-    if (this.terminal) return;
+  private shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
     this.terminal = true;
-    for (const connections of this.leases.values())
-      for (const connection of connections) connection.close();
-    this.leases.clear();
-    this.control?.close();
-    await this.runner?.terminate?.();
+    this.shutdownPromise = Promise.resolve().then(async () => {
+      for (const connections of this.leases.values())
+        for (const connection of connections) connection.close();
+      this.leases.clear();
+      this.control?.close();
+      await this.runner?.terminate?.();
+    });
+    return this.shutdownPromise;
   }
 
   private async serial<T>(operation: () => Promise<T>): Promise<T> {

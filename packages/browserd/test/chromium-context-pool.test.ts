@@ -7,7 +7,7 @@ import {
   type CdpEvent,
 } from "../src";
 
-function fixture() {
+function fixture(terminate?: () => Promise<void>) {
   const calls: Array<{ method: string; params: Readonly<Record<string, unknown>> }> = [];
   const connections: Array<{ emit: (method: string, params: Record<string, unknown>) => void }> =
     [];
@@ -23,6 +23,7 @@ function fixture() {
       return {
         run: async <T>() => ({ cdpUrl: "ws://127.0.0.1/fixture" }) as T,
         terminate: async () => {
+          await terminate?.();
           stops++;
         },
       };
@@ -219,3 +220,56 @@ test("uncertain context creation ends the entire owned process instead of retryi
   );
   expect(f.counts()).toEqual({ launches: 1, stops: 1 });
 });
+
+test.each([false, true])(
+  "every close awaits shared termination and observes its failure=%s",
+  async (reject) => {
+    const started = Promise.withResolvers<void>();
+    const completion = Promise.withResolvers<void>();
+    const f = fixture(async () => {
+      started.resolve();
+      await completion.promise;
+    });
+    const driver = await f.pool.createDriver("trusted-owner-and-egress", f.options());
+    await driver.listTargets();
+    f.fail("Target.getTargets");
+    const observation = driver.listTargets().catch((error: unknown) => error);
+    await started.promise;
+    let poolSettled = false;
+    let driverSettled = false;
+    const poolClose = f.pool.close().then(
+      () => {
+        poolSettled = true;
+      },
+      (error: unknown) => {
+        poolSettled = true;
+        return error;
+      },
+    );
+    const driverClose = driver.close().then(
+      () => {
+        driverSettled = true;
+      },
+      (error: unknown) => {
+        driverSettled = true;
+        return error;
+      },
+    );
+    await Bun.sleep(0);
+    expect(poolSettled).toBe(false);
+    expect(driverSettled).toBe(false);
+    expect(f.counts().stops).toBe(0);
+    const failure = new Error("termination failed");
+    if (reject) completion.reject(failure);
+    else completion.resolve();
+    const results = await Promise.all([observation, poolClose, driverClose]);
+    if (reject) {
+      expect(results).toEqual([failure, failure, failure]);
+      await expect(f.pool.close()).rejects.toThrow("termination failed");
+    } else {
+      expect(results[0]).toBeInstanceOf(CdpTransportError);
+      expect(results.slice(1)).toEqual([undefined, undefined]);
+      expect(f.counts().stops).toBe(1);
+    }
+  },
+);
