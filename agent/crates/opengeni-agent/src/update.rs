@@ -60,6 +60,14 @@ fn apply_verified_update(
     }
 }
 
+fn select_install_target(config: &mut UpdateConfig, install_path: &Path) {
+    #[cfg(target_os = "macos")]
+    if opengeni_agent_update::app_bundle_root(install_path).is_some() {
+        config.target = opengeni_agent_update::APP_BUNDLE_TARGET.to_string();
+    }
+    let _ = (config, install_path);
+}
+
 const COMPLETED_UPDATE_RECEIPT_FILE: &str = "completed-update.json";
 
 /// Non-secret durable proof that the exact control-plane operation installed a
@@ -197,7 +205,8 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
     let mut failures = Vec::new();
 
     for base_url in &bases {
-        let config = UpdateConfig::new(base_url, &channel, &agent_id, current_version);
+        let mut config = UpdateConfig::new(base_url, &channel, &agent_id, current_version);
+        select_install_target(&mut config, install_path);
         info!(
             version = current_version,
             channel = %config.channel,
@@ -255,6 +264,17 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
     let pending = plan
         .download(&source)
         .map_err(|error| format!("failed to download the selected update: {error}"))?;
+    #[cfg(target_os = "macos")]
+    if opengeni_agent_update::app_bundle_root(install_path).is_some() {
+        pending
+            .apply_app_bundle(install_path, |_| Ok(()))
+            .map_err(|error| format!("signed application update failed: {error}"))?;
+        println!(
+            "complete signed application updated to v{}; restart the agent to activate it",
+            pending.version
+        );
+        return Ok(());
+    }
     apply_verified_update(&pending, install_path)
         .map_err(|e| format!("failed to apply the update: {e}"))?;
     finalize_update(
@@ -273,11 +293,12 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
 }
 
 /// Result of an explicitly requested control-plane update. The digest is the
-/// artifact sha256 from the verified signed manifest and is echoed in progress;
+/// installed executable sha256 and is echoed in progress (for a macOS app this
+/// differs from the signed manifest's ZIP digest);
 /// the control plane requires the successor Hello to report it before success.
 #[derive(Debug, Clone)]
 pub struct ManagedUpdateResult {
-    /// Lowercase sha256 pinned by the signed manifest.
+    /// Lowercase executable sha256 authenticated by the signed release artifact.
     pub expected_sha256: String,
 }
 
@@ -318,6 +339,7 @@ pub fn apply_managed(
         install_identity.public_key_base64(),
         env!("CARGO_PKG_VERSION"),
     );
+    select_install_target(&mut config, install_path);
     // This path exists only after an authorized human/control-plane request.
     // Manual opt-in may cross a staged rollout boundary and may re-pin the same
     // version after a failed/rolled-back attempt; signature, digest, target,
@@ -339,6 +361,27 @@ pub fn apply_managed(
         .map_err(|_| "artifact_verification_failed".to_string())?;
     progress(ManagedUpdatePhase::Verifying);
     progress(ManagedUpdatePhase::Applying);
+    #[cfg(target_os = "macos")]
+    if opengeni_agent_update::app_bundle_root(install_path).is_some() {
+        let expected_sha256 = pending
+            .apply_app_bundle(install_path, |binary_sha256| {
+                persist_completed_update_receipt(&CompletedUpdateReceipt {
+                    operation_id: operation_id.to_string(),
+                    target_version: pending.version.clone(),
+                    binary_sha256: binary_sha256.to_string(),
+                })
+                .map_err(UpdateError::HealthCheck)
+            })
+            .map_err(|error| {
+                warn!(%error, "complete signed application update failed");
+                match error {
+                    UpdateError::AppRolledBack(_) => "signed_app_update_failed_rolled_back",
+                    _ => "signed_app_update_failed",
+                }
+                .to_string()
+            })?;
+        return Ok(ManagedUpdateResult { expected_sha256 });
+    }
     apply_verified_update(&pending, install_path).map_err(|_| "atomic_apply_failed".to_string())?;
     let health = verify_installed_binary(install_path, &pending.version);
     if let Err(error) = health {
@@ -439,6 +482,20 @@ fn resolve_channel(
 mod tests {
     use super::*;
     use crate::config::StoredCredentials;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn app_and_standalone_installations_select_distinct_signed_artifacts() {
+        let mut config = UpdateConfig::new("https://example.com", "stable", "agent", "0.1.28");
+        select_install_target(
+            &mut config,
+            Path::new("/Applications/OpenGeni Agent.app/Contents/MacOS/opengeni-agent"),
+        );
+        assert_eq!(config.target, "universal-apple-darwin-app");
+        let mut standalone = UpdateConfig::new("https://example.com", "stable", "agent", "0.1.28");
+        select_install_target(&mut standalone, Path::new("/usr/local/bin/opengeni-agent"));
+        assert_eq!(standalone.target, "universal-apple-darwin");
+    }
 
     fn connection(channel: &str) -> StoredConnection {
         StoredConnection::new(

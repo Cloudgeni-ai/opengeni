@@ -645,6 +645,21 @@ installations may require their service manager to start the verified canonical
 executable path after the old process exits.
 `opengeni-agent run` is the explicit foreground alternative.
 
+Mac app installations update the complete signed application, including bundled
+browser/computer helpers. The updater selects the signed manifest's
+`universal-apple-darwin-app` ZIP, verifies its signature and checksum, stages it
+beside the installed application, and checks the sealed resources, bundle ID,
+signing-team continuity and executable version before an atomic directory
+exchange. A failed post-exchange verification or managed-receipt write exchanges
+the entire old app back. The successor receipt contains the installed executable
+digest, not the ZIP digest. Interrupted transactions retain their recovery copy.
+Standalone Mac executables retain the binary update path.
+
+Mac agents older than 0.1.29 require a one-time upgrade through the official
+whole-app installer. Their old updater would replace a single sealed executable;
+the Machines UI explains this limitation and the API refuses to dispatch that
+unsafe update. Do not run an older app's `update` command as a bootstrap shortcut.
+
 Because the binary is shared, the current installer refuses to replace a newer
 installed agent with an older verified release from a lagging deployment. Set
 `OPENGENI_ALLOW_DOWNGRADE=1` only for an intentional rollback.

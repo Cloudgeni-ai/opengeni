@@ -7913,6 +7913,8 @@ export type MachineRuntime = {
   updateChannel: "stable" | "beta" | null;
   desiredVersion: string | null;
   versionState: "unknown" | "current" | "outdated" | "ahead" | "updating" | "update_failed";
+  /** Required installer bootstrap when a legacy updater cannot safely replace the install. */
+  updateBlockedReason?: string | null;
   capabilities: MachineRuntimeCapabilities;
   update: MachineUpdateState | null;
 };
