@@ -12707,6 +12707,45 @@ export const SessionEventType = z.enum([
 export type SessionEventType = z.infer<typeof SessionEventType>;
 
 /**
+ * The assistant channel on `agent.message.delta` / `agent.message.completed`:
+ * the provider-declared Responses phase, or `commentary` when the model asked
+ * for tool work in the same response (the SDK never returns such a message as
+ * the final output). Absent on legacy events and undeclared final messages.
+ */
+export type AssistantMessagePhase = "commentary" | "final_answer";
+
+function sessionEventPayloadRecord(payload: unknown): Record<string, unknown> | null {
+  return payload !== null && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : null;
+}
+
+export function assistantMessagePhase(payload: unknown): AssistantMessagePhase | null {
+  const phase = sessionEventPayloadRecord(payload)?.phase;
+  return phase === "commentary" || phase === "final_answer" ? phase : null;
+}
+
+/**
+ * A completion the worker streamed for one provider message (it carries the
+ * provider `messageId` or a `phase`). The phase-less, id-less shape is the
+ * settlement copy published with `turn.completed` by older workers, or when a
+ * stream did not complete the final text itself. A streamed final message is
+ * followed by its `turn.completed` with the same output, so consumers that act
+ * on settled answers (Slack, `session_wait` change mode) wait for that instead.
+ */
+export function isStreamedAssistantMessageCompletion(event: {
+  type: string;
+  payload: unknown;
+}): boolean {
+  if (event.type !== "agent.message.completed") return false;
+  const payload = sessionEventPayloadRecord(event.payload);
+  return (
+    (typeof payload?.messageId === "string" && payload.messageId.length > 0) ||
+    assistantMessagePhase(payload) !== null
+  );
+}
+
+/**
  * Stable semantic groups for bounded session monitoring. These are a read
  * projection only: an event keeps its canonical durable `type`, and callers
  * can always combine a class with explicit type include/exclude filters.

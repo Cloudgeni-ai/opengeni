@@ -7914,6 +7914,58 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     });
   }, 60_000);
 
+  test("posts no streamed commentary and delivers the streamed final once as the turn result", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_STREAMED_PHASE_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_STREAMED_PHASE",
+        ts: "1746000000.000001",
+        text: "Check the deploy",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+    const answer = "The deploy is healthy in every region.";
+
+    // The worker streams one completion per provider message, each committed
+    // before the turn settles, so the pump runs between every one of them.
+    for (const payload of [
+      { text: "Checking the deploy logs.", messageId: "msg_progress_1", phase: "commentary" },
+      { text: "Still checking the last region.", messageId: "msg_progress_2", phase: "commentary" },
+      { text: answer, messageId: "msg_answer", phase: "final_answer" },
+    ]) {
+      await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+        { type: "agent.message.completed", payload },
+      ]);
+      await drainAll(value.deps);
+      expect(value.slack.posts).toHaveLength(postsBefore);
+      expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+        progress_count: 0,
+        terminal_delivery_state: "open",
+      });
+    }
+
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output: answer } },
+    ]);
+    await drainAll(value.deps);
+    // One final post (not a progress slot), so it carries the requester
+    // mention in production instead of editing it onto an earlier post.
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([answer]);
+    expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+      progress_count: 0,
+      terminal_delivery_state: "completed",
+    });
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+  }, 60_000);
+
   test("terminalizes permanent Slack delivery errors without retrying", async () => {
     if (!available) return;
     const value = await fixture();

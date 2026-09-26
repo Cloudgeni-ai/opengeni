@@ -1,5 +1,8 @@
 import type { StoredSessionAdmissionBlock } from "./session-admission-block";
-import { meaningfulSessionEventSql } from "./session-meaningful-events";
+import {
+  commentaryInclusiveMeaningfulSessionEventSql,
+  meaningfulSessionEventSql,
+} from "./session-meaningful-events";
 import type {
   SandboxProviderCommand,
   CommandSupervisionReceipt,
@@ -8855,7 +8858,11 @@ export const sessionEvents = pgTable(
       table.type,
       table.sequence,
     ),
+    // Pre-0522 attention probes (which still counted commentary) during a rolling deploy.
     meaningfulAttention: index("session_events_meaningful_attention_idx")
+      .on(table.workspaceId, table.sessionId, table.sequence)
+      .where(commentaryInclusiveMeaningfulSessionEventSql("session_events")),
+    meaningfulAttentionWithoutCommentary: index("session_events_meaningful_attention_v2_idx")
       .on(table.workspaceId, table.sessionId, table.sequence)
       .where(meaningfulSessionEventSql("session_events")),
     workspaceTurnType: index("session_events_workspace_turn_type_idx")

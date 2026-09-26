@@ -1320,7 +1320,8 @@ dependent work. `goal.completed` is a durable goal fact, not proof that the
 child has emitted its final result. Completed commentary messages, maintenance
 turns, and continuation segment settlements are also ignored until an ordinary
 result-bearing turn settles. The ordinary `waitFor: "change"` mode remains
-available for progress monitoring.
+available for monitoring settled changes; it does not wake on streamed
+commentary or on a final message before its turn settles.
 Only physical attempt quiescence can clear the stopping projection.
 When paused control remains authoritative after that receipt is durable, the
 session parks as `idle` while retaining the same `recovering` logical turn and
@@ -2448,6 +2449,18 @@ audit reads may return it, so it is never a secret boundary.
    reconstruct the target session's model conversation. A manager can inspect an
    independently bounded cross-session monitoring projection as ordinary tool
    output; that does not turn audit events into conversation truth.
+   `packages/runtime/src/run-events.ts` emits one `agent.message.completed` per
+   provider message, with its `messageId` and `phase`: `commentary` or
+   `final_answer` as a Responses provider declares it (deltas carry the phase
+   declared in `response.output_item.added`), or `commentary` when the model
+   asked for tool work in the same response, since the SDK never returns such a
+   message as the final output. The worker publishes the phase-less settlement
+   copy with `turn.completed` only when the stream did not already complete the
+   final text. Commentary is activity, not an answer: it creates no unread
+   attention, never wakes `session_wait` change mode or becomes a Slack post, and
+   stays out of the SDK chat reply. `assistantMessagePhase` and
+   `isStreamedAssistantMessageCompletion` in `@opengeni/contracts` are the shared
+   classifiers; `phase` stays optional for older events.
 
 Retained screenshots have a separate database/object lifecycle, not a fourth
 conversation store. Preparation creates a deterministic pending file/artifact

@@ -8,6 +8,7 @@ import {
   ListSlackUserLinkAccessRequestsResponse,
   PrepareSlackUserLinkAccessRequest,
   evaluateSlackTaskPolicy,
+  isStreamedAssistantMessageCompletion,
   resolveWorkspaceSlackOrchestrationNoticeSettings,
   resolveWorkspaceSlackReactionSummonSettings,
   SlackChannelRouteListResponse,
@@ -4460,7 +4461,15 @@ async function deliverSlackSessionEvents(
     lastSequence = Math.max(lastSequence, event.sequence);
     if (event.type === "agent.message.completed") {
       const latestAssistantText = safePayloadText(event.payload, "text");
-      if (latestAssistantText && !terminalAssistantSequences.has(event.sequence)) {
+      // A streamed per-message completion is either commentary (activity,
+      // never a Slack post) or a final message that its turn.completed
+      // delivers with the requester mention. Posting it early as progress
+      // would turn the mention into an edit, which Slack does not notify.
+      if (
+        latestAssistantText &&
+        !terminalAssistantSequences.has(event.sequence) &&
+        !isStreamedAssistantMessageCompletion(event)
+      ) {
         const progress = await claimSlackInteractionProgressDelivery(deps.db, {
           accountId: interaction.accountId,
           workspaceId: interaction.workspaceId,

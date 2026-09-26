@@ -23,7 +23,13 @@ import {
   getLogger,
   invalidateServerToolsCache,
 } from "@openai/agents";
-import { RunToolApprovalItem, Usage } from "@openai/agents-core";
+import {
+  Agent,
+  RunItemStreamEvent,
+  RunMessageOutputItem,
+  RunToolApprovalItem,
+  Usage,
+} from "@openai/agents-core";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { IntegrationInvocationError } from "@opengeni/capabilities";
 import {
@@ -883,32 +889,37 @@ describe("runtime event normalization", () => {
   });
 
   test("preserves the assistant message phase on completed events", () => {
-    const [commentary] = normalizeSdkEvent({
-      type: "run_item_stream_event",
-      item: {
-        type: "message_output_item",
-        text: "Waiting for the child run to finish.",
-        rawItem: {
-          role: "assistant",
-          status: "completed",
-          phase: "commentary",
-          content: [{ type: "output_text", text: "Waiting for the child run to finish." }],
-        },
-      },
-    } as any);
-    const [finalAnswer] = normalizeSdkEvent({
-      type: "run_item_stream_event",
-      item: {
-        type: "message_output_item",
-        text: "All checks passed.",
-        rawItem: {
-          role: "assistant",
-          status: "completed",
-          phase: "final_answer",
-          content: [{ type: "output_text", text: "All checks passed." }],
-        },
-      },
-    } as any);
+    const agent = new Agent({ name: "phase-test" });
+    const [commentary] = normalizeSdkEvent(
+      new RunItemStreamEvent(
+        "message_output_created",
+        new RunMessageOutputItem(
+          {
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            phase: "commentary",
+            content: [{ type: "output_text", text: "Waiting for the child run to finish." }],
+          } as never,
+          agent,
+        ),
+      ),
+    );
+    const [finalAnswer] = normalizeSdkEvent(
+      new RunItemStreamEvent(
+        "message_output_created",
+        new RunMessageOutputItem(
+          {
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            phase: "final_answer",
+            content: [{ type: "output_text", text: "All checks passed." }],
+          } as never,
+          agent,
+        ),
+      ),
+    );
 
     expect(commentary).toEqual({
       type: "agent.message.completed",
@@ -928,10 +939,21 @@ describe("runtime event normalization", () => {
         itemId: "message-a",
       } as any),
     );
-    const [completed] = normalizeSdkEvent({
-      type: "run_item_stream_event",
-      item: { type: "message_output_item", text: "partial answer", rawItem: { id: "message-a" } },
-    } as any);
+    const [completed] = normalizeSdkEvent(
+      new RunItemStreamEvent(
+        "message_output_created",
+        new RunMessageOutputItem(
+          {
+            type: "message",
+            id: "message-a",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "partial answer" }],
+          } as never,
+          new Agent({ name: "identity-test" }),
+        ),
+      ),
+    );
     expect(delta?.payload).toEqual({ text: "partial", messageId: "message-a" });
     expect(completed?.payload).toEqual({ text: "partial answer", messageId: "message-a" });
   });

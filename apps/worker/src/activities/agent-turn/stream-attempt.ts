@@ -15,6 +15,7 @@ import {
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
+  AssistantMessagePhaseTracker,
   normalizeModelCallUsage,
   normalizeSdkEvent,
   withMcpToolDisplayMetadata,
@@ -586,6 +587,12 @@ export async function runTurnStreamAttempt(
     let currentToolBatchCallIds = new Set<string>();
     let currentToolBatchCompletedCallIds = new Set<string>();
     let streamSawPerResponseUsage = false;
+    // Deltas learn the phase a provider declares when it announces a message;
+    // undeclared messages the SDK runs past (same response asks for tools)
+    // are commentary. Every SDK event of this stream is normalized once.
+    const messagePhases = new AssistantMessagePhaseTracker();
+    // Text of the newest assistant message this stream completed durably.
+    let latestStreamedAssistantText: string | null = null;
     // Actual input tokens of the most recent model response this turn; the
     // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
     throwIfWorkerShuttingDown();
@@ -1206,6 +1213,7 @@ export async function runTurnStreamAttempt(
             durableSdkEvent as typeof next.value,
             retainedScreenshotMetadata
               ? {
+                  messagePhases,
                   toolOutputOverride: retainedScreenshotMetadata,
                   retainedOutputEvidence: retainedScreenshotMetadata.available
                     ? retainedScreenshotMetadata
@@ -1214,7 +1222,7 @@ export async function runTurnStreamAttempt(
                         reason: retainedScreenshotMetadata.reason,
                       },
                 }
-              : {},
+              : { messagePhases },
           );
           const normalizedToolOutput = normalizedSdkEvents.find(
             (event) =>
@@ -1307,6 +1315,7 @@ export async function runTurnStreamAttempt(
             durableSdkEvent as typeof next.value,
             retainedScreenshotMetadata
               ? {
+                  messagePhases,
                   toolOutputOverride: retainedScreenshotMetadata,
                   retainedOutputEvidence: retainedScreenshotMetadata.available
                     ? retainedScreenshotMetadata
@@ -1315,7 +1324,7 @@ export async function runTurnStreamAttempt(
                         reason: retainedScreenshotMetadata.reason,
                       },
                 }
-              : {},
+              : { messagePhases },
           );
         for (const event of normalized) {
           if (event.type === "agent.toolCall.created")
@@ -1325,6 +1334,10 @@ export async function runTurnStreamAttempt(
             );
           streamTiming.onEvent(event.type);
           await eventing.batcher.push(event);
+          if (event.type === "agent.message.completed") {
+            // Completed messages are structural: push returns once durable.
+            latestStreamedAssistantText = (event.payload as { text: string }).text;
+          }
         }
         // Structural tool-output events await their durable append before
         // push returns. The complete result is now retained in the event
@@ -1700,6 +1713,10 @@ export async function runTurnStreamAttempt(
     const finalOutput = String(
       requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded),
     );
+    // The final output is the newest message this stream completed, already
+    // durable with its provider identity and phase. A phase-less settlement
+    // copy is published only when this stream did not complete that text.
+    const finalOutputAlreadyCompleted = latestStreamedAssistantText === finalOutput;
     await historySink.reconcileConversationTruth({ requireDurable: true });
     // Op-stream durability fence: the tool outputs are now durably in the
     // history store (a redispatch would NOT re-execute them), so this
@@ -1712,7 +1729,7 @@ export async function runTurnStreamAttempt(
     if (
       !(await eventing.settle!({
         events: [
-          ...(inputWaitYielded
+          ...(inputWaitYielded || finalOutputAlreadyCompleted
             ? []
             : [{ type: "agent.message.completed" as const, payload: { text: finalOutput } }]),
           { type: "turn.completed", payload: { output: finalOutput } },

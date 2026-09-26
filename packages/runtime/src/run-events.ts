@@ -7,6 +7,7 @@ import {
   canonicalSkillReviewQuestion,
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
+  type AssistantMessagePhase,
   type SessionEventMediaPreview,
   type SessionEventType,
 } from "@opengeni/contracts";
@@ -27,7 +28,100 @@ export type NormalizeSdkEventOptions = {
   toolOutputOverride?: unknown;
   /** Separately trusted receipt for the event truncation boundary. */
   retainedOutputEvidence?: unknown;
+  /** Per-stream phase memory; without it only a completion's own declared phase is known. */
+  messagePhases?: AssistantMessagePhaseTracker;
 };
+
+/** The Chat Completions converter's stand-in when a provider sent no response id. */
+const PLACEHOLDER_MESSAGE_ID = "FAKE_ID";
+
+/**
+ * Client-executed calls. A response carrying one of these always runs again, so
+ * the Agents SDK never treats an assistant message in that response as the
+ * final output (`hasToolsOrApprovalsToRun` in the SDK's model-output resolver).
+ */
+const CLIENT_TOOL_CALL_ITEM_TYPES: ReadonlySet<string> = new Set([
+  "function_call",
+  "computer_call",
+  "shell_call",
+  "apply_patch_call",
+]);
+
+function declaredAssistantMessagePhase(item: unknown): AssistantMessagePhase | undefined {
+  if (!item || typeof item !== "object") return undefined;
+  const record = item as { phase?: unknown; providerData?: { phase?: unknown } | null };
+  const phase = record.phase ?? record.providerData?.phase;
+  return phase === "commentary" || phase === "final_answer" ? phase : undefined;
+}
+
+function providerMessageId(item: unknown): string | undefined {
+  const id = item && typeof item === "object" ? (item as { id?: unknown }).id : undefined;
+  return typeof id === "string" && id && id !== PLACEHOLDER_MESSAGE_ID ? id : undefined;
+}
+
+/**
+ * Remembers assistant message phases across one SDK stream. Text deltas carry
+ * only the provider item id, so the phase a Responses provider declares when it
+ * announces the item (`response.output_item.added`) is stamped onto them here.
+ * Providers that declare no phase get the SDK's own rule instead: a message in
+ * a response that also asks for client tool work is commentary, because that
+ * response never becomes the final output. Anything else stays undeclared.
+ */
+export class AssistantMessagePhaseTracker {
+  private readonly phases = new Map<string, AssistantMessagePhase>();
+
+  observe(event: RunStreamEvent): void {
+    if (isOpenAIResponsesRawModelStreamEvent(event)) {
+      const raw = (event as any).data?.event;
+      if (raw?.type !== "response.output_item.added" || raw.item?.type !== "message") return;
+      const id = providerMessageId(raw.item);
+      const phase = declaredAssistantMessagePhase(raw.item);
+      if (id && phase) this.phases.set(id, phase);
+      return;
+    }
+    if (event.type !== "raw_model_stream_event") return;
+    const data = (event as any).data;
+    if (data?.type !== "response_done" || !Array.isArray(data.response?.output)) return;
+    const output: unknown[] = data.response.output;
+    const continues = output.some(
+      (item) =>
+        !!item &&
+        typeof item === "object" &&
+        CLIENT_TOOL_CALL_ITEM_TYPES.has(String((item as { type?: unknown }).type)),
+    );
+    for (const item of output) {
+      if ((item as { type?: unknown } | null)?.type !== "message") continue;
+      const id = providerMessageId(item);
+      if (!id) continue;
+      const phase = declaredAssistantMessagePhase(item) ?? (continues ? "commentary" : undefined);
+      if (phase) this.phases.set(id, phase);
+    }
+  }
+
+  /** Phase for a streamed text delta, when the provider already declared it. */
+  deltaPhase(messageId: string | undefined): AssistantMessagePhase | undefined {
+    return messageId ? this.phases.get(messageId) : undefined;
+  }
+
+  /** Phase for a completed message; the entry is released once it completes. */
+  completedPhase(rawItem: unknown): AssistantMessagePhase | undefined {
+    const id = providerMessageId(rawItem);
+    const remembered = id ? this.phases.get(id) : undefined;
+    if (id) this.phases.delete(id);
+    return declaredAssistantMessagePhase(rawItem) ?? remembered;
+  }
+}
+
+/** The text the Agents SDK reports for a message: every `output_text` part, joined. */
+function assistantMessageText(rawItem: unknown): string | undefined {
+  const parts = rawItem && typeof rawItem === "object" ? (rawItem as any).content : undefined;
+  if (!Array.isArray(parts)) return undefined;
+  let text = "";
+  for (const part of parts) {
+    if (part?.type === "output_text" && typeof part.text === "string") text += part.text;
+  }
+  return text;
+}
 
 export type ModelResponseUsage = {
   responseId?: string;
@@ -272,14 +366,18 @@ export function normalizeSdkEvent(
   const pushProtocolEvent = (normalized: NormalizedRuntimeEvent): void => {
     out.push(normalizeProtocolJsonValue(normalized, '$["event"]'));
   };
+  options.messagePhases?.observe(event);
   if (event.type === "raw_model_stream_event") {
     const data = (event as any).data;
     if (data?.type === "output_text_delta" && typeof data.delta === "string") {
+      const messageId = typeof data.itemId === "string" && data.itemId ? data.itemId : undefined;
+      const phase = options.messagePhases?.deltaPhase(messageId);
       out.push({
         type: "agent.message.delta",
         payload: {
           text: data.delta,
-          ...(typeof data.itemId === "string" && data.itemId ? { messageId: data.itemId } : {}),
+          ...(messageId ? { messageId } : {}),
+          ...(phase ? { phase } : {}),
         },
       });
       return out;
@@ -382,17 +480,20 @@ export function normalizeSdkEvent(
       },
     });
   } else if (item.type === "message_output_item") {
-    const text = typeof item.text === "string" ? item.text : undefined;
+    // `RunMessageOutputItem` carries the provider item as `rawItem`; its text is
+    // the joined `output_text` parts (the SDK's own `content` getter).
+    const text = assistantMessageText(item.rawItem);
+    const phase = options.messagePhases
+      ? options.messagePhases.completedPhase(item.rawItem)
+      : declaredAssistantMessagePhase(item.rawItem);
     if (text) {
-      const phase = item.rawItem?.phase;
+      const messageId = providerMessageId(item.rawItem);
       out.push({
         type: "agent.message.completed",
         payload: {
           text,
-          ...(typeof item.rawItem?.id === "string" && item.rawItem.id
-            ? { messageId: item.rawItem.id }
-            : {}),
-          ...(phase === "commentary" || phase === "final_answer" ? { phase } : {}),
+          ...(messageId ? { messageId } : {}),
+          ...(phase ? { phase } : {}),
         },
       });
     }
