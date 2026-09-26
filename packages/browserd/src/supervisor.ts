@@ -1133,12 +1133,7 @@ export class BrowserSupervisor {
   }
 
   private async recoverIfUnavailable(runtime: Runtime): Promise<boolean> {
-    if (
-      runtime.options.transport.kind === "attached_chrome" ||
-      (runtime.options.transport.kind === "managed" &&
-        runtime.options.transport.engine === "lightpanda") ||
-      !runtime.driver.isAvailable
-    )
+    if (runtime.options.transport.kind === "attached_chrome" || !runtime.driver.isAvailable)
       return false;
     if (await runtime.driver.isAvailable()) return false;
     await this.recoverRuntimeAfterLoss(runtime);
