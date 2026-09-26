@@ -3525,6 +3525,8 @@ The AWS Terraform root lives at `deploy/terraform/aws`.
 
 It supports EKS, ECR, S3, AWS Secrets Manager, optional RDS PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.aws-managed.example.yaml` as the non-secret Helm values shape.
 
+When `postgres.mode = "managed"` runs against an existing VPC (`network.create_vpc = false`), the RDS security group has no default ingress source; declare the application sources with `postgres.allowed_client_cidrs` and/or `postgres.allowed_security_group_ids`.
+
 Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
 upload files to signed S3 URLs without per-application registration.
 
@@ -3546,7 +3548,7 @@ After apply, save exact resource names and cleanup commands outside the reposito
 
 The GCP Terraform root lives at `deploy/terraform/gcp`.
 
-It supports GKE, Artifact Registry, GCS, Secret Manager, workload identity, optional Cloud SQL PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.gcp-managed.example.yaml` as the non-secret Helm values shape.
+It supports GKE, Artifact Registry, GCS, Secret Manager, workload identity, optional Cloud SQL PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.gcp-managed.example.yaml` as the non-secret Helm values shape. The runtime service account's Secret Manager access is scoped to the created runtime secret, not the project.
 
 Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
 upload files to signed GCS URLs without per-application registration.

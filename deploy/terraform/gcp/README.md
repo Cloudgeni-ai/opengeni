@@ -6,7 +6,7 @@ This root creates a cleanup-friendly GCP substrate for the Helm chart:
 - Artifact Registry Docker repository.
 - GCS bucket for `OPENGENI_OBJECT_STORAGE_BACKEND=gcs`, with uniform bucket-level access and public access prevention.
 - Secret Manager runtime secret placeholder.
-- Runtime service account for Workload Identity, GCS access, Secret Manager access, signed URL generation, and Artifact Registry image pulls.
+- Runtime service account for Workload Identity, GCS access, Secret Manager access scoped to the created runtime secret, signed URL generation, and Artifact Registry image pulls.
 - Optional Cloud SQL PostgreSQL when `postgres.mode = "managed"`.
 - Private Service Connect / service networking for managed Cloud SQL when `postgres.private_ip_enabled = true`.
 - `temporal.mode = "officialChart"` output wiring for the stack-wrapper managed upstream Temporal chart, or `external` for Temporal Cloud/customer endpoints.

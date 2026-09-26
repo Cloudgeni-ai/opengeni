@@ -16,7 +16,7 @@ public wss ingress must route both dials for a channel to the same replica
 relay replica runs. See `docs/deployment.md` (Connected Machines) for the full
 relay/NATS/secret wiring.
 - AWS Secrets Manager runtime secret placeholder.
-- Optional RDS PostgreSQL when `postgres.mode = "managed"`.
+- Optional RDS PostgreSQL when `postgres.mode = "managed"`. Managed-VPC mode (`network.create_vpc = true`) allows PostgreSQL ingress from the VPC CIDR only. Existing-VPC mode (`network.create_vpc = false`) has no default source: set `postgres.allowed_client_cidrs` and/or `postgres.allowed_security_group_ids` to the exact application sources, or validation fails.
 - `temporal.mode = "officialChart"` output wiring for the stack-wrapper managed upstream Temporal chart, or `external` for Temporal Cloud/customer endpoints.
 
 Keep OpenGeni workloads in the provider-neutral Helm chart. This root should only create cloud substrate and emit non-secret Helm values.
