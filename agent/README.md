@@ -80,6 +80,12 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   installation as a health gate, and automatically rolls back on failure. A
   tampered or non-booting artifact is always rejected. Capabilities that depend on
   service topology remain unadvertised until that reconciliation succeeds.
+- **Managed update drain** — routed work reserves its place before task spawning,
+  so an unpolled RPC cannot escape the idle check. An unfinished transactional
+  upload defers the update with retryable `update_busy_uploads`; its exact
+  connection, operation, and epoch may continue or cancel. Uploads retain their
+  existing reconnect behavior and have no invented expiry. Completion, failure,
+  cancellation, or removal of the owning link releases the upload reservation.
 - **Background service** — `opengeni-agent start|stop|status` is the normal simple
   lifecycle; `service install|uninstall|...` is the advanced surface. It uses a
   systemd user/system unit, macOS LaunchAgent, or Windows Service. Repeated `start`
