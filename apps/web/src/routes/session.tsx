@@ -2435,6 +2435,9 @@ function SessionChatPane(props: {
             key={props.session.id}
             failure={props.failure}
             canChooseModel={canChooseRecoveryModel}
+            freeModel={
+              findPickerRow(modelCatalog.rows, props.session.model)?.catalog.cost === "free"
+            }
             modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
             creditExhausted={props.creditExhausted}
             workspaceId={props.session.workspaceId}

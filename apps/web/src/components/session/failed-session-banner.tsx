@@ -4,6 +4,7 @@ import type { ComponentProps } from "react";
 import { Button } from "@/components/ui/button";
 import type { SessionFailureSummary } from "@/lib/events";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { freeModelDailyLimitReason } from "@/lib/free-model-limit-copy";
 import { FailedSessionActions } from "./failed-session-actions";
 import {
   SandboxRecoveryActions,
@@ -19,6 +20,7 @@ export function FailedSessionBanner({
   canConnectModel = false,
   modelChanged = false,
   canChooseModel = false,
+  freeModel = false,
   actions,
   sandboxRecovery,
 }: {
@@ -29,6 +31,8 @@ export function FailedSessionBanner({
   canConnectModel?: boolean;
   modelChanged?: boolean;
   canChooseModel?: boolean;
+  /** The failed turn ran on the deployment's free model (catalog `cost: "free"`). */
+  freeModel?: boolean;
   actions?: ComponentProps<typeof FailedSessionActions>;
   sandboxRecovery?: Omit<
     SandboxRecoveryActionsProps,
@@ -37,12 +41,26 @@ export function FailedSessionBanner({
 }) {
   const structuralFailure = Boolean(failure.structuralSandboxFailure);
   const billingFailure = creditExhausted && !structuralFailure;
-  const { reason, unavailableModel, retryUnhelpful, detail } = failedSessionCopy(
+  const chooseModel = canChooseModel && !structuralFailure;
+  const { reason, unavailableModel, retryUnhelpful, detail, dailyLimit } = failedSessionCopy(
     failure,
     billingFailure,
     modelChanged,
-    canChooseModel && !structuralFailure,
+    chooseModel,
   );
+  // The free model's daily allowance is deployment-wide: name it and offer the
+  // ways to keep going. Every other model keeps the generic daily-limit copy.
+  const freeModelLimit = freeModel && dailyLimit && !structuralFailure;
+  const offerCredits = Boolean(workspaceId && canBuyCredits);
+  const offerConnect = Boolean(workspaceId && canConnectModel);
+  const headline = freeModelLimit
+    ? freeModelDailyLimitReason({
+        modelChanged,
+        canBuyCredits: offerCredits,
+        canConnectModel: offerConnect,
+        canChooseModel: chooseModel,
+      })
+    : reason;
   // Retrying the same request on the same model cannot fix a missing model or
   // rejected credentials; a new model can. Billing, access and limit failures
   // keep Retry because their condition can clear.
@@ -58,8 +76,14 @@ export function FailedSessionBanner({
         data-testid="failed-session-banner"
         className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-fg-muted"
       >
-        <AlertTriangleIcon aria-hidden="true" className="size-3.5 shrink-0" />
-        <span className="min-w-0 break-words">{reason}</span>
+        {/* The icon flows with the text so a wrapped headline never strands it. */}
+        <span className="min-w-0 break-words">
+          <AlertTriangleIcon
+            aria-hidden="true"
+            className="mr-2 inline-block size-3.5 align-[-0.125rem]"
+          />
+          {headline}
+        </span>
         {detail ? (
           <details className="group min-w-0 max-w-full text-xs open:basis-full">
             <summary className="cursor-pointer select-none text-fg-subtle hover:text-fg-muted">
@@ -70,27 +94,19 @@ export function FailedSessionBanner({
             </p>
           </details>
         ) : null}
+        {freeModelLimit && !modelChanged && workspaceId ? (
+          <>
+            {offerCredits ? <BuyCreditsLink workspaceId={workspaceId} label="Add credits" /> : null}
+            {offerConnect ? (
+              <ConnectModelLink workspaceId={workspaceId} label="Connect a subscription" />
+            ) : null}
+          </>
+        ) : null}
         {billingFailure ? (
           workspaceId && canBuyCredits ? (
-            <Button asChild size="sm" variant="ghost">
-              <Link
-                to="/workspaces/$workspaceId/organization"
-                params={{ workspaceId }}
-                search={{ section: "billing" }}
-              >
-                Buy credits
-              </Link>
-            </Button>
+            <BuyCreditsLink workspaceId={workspaceId} label="Buy credits" />
           ) : workspaceId && canConnectModel ? (
-            <Button asChild size="sm" variant="ghost">
-              <Link
-                to="/workspaces/$workspaceId/settings"
-                params={{ workspaceId }}
-                search={{ section: "models" }}
-              >
-                Connect a model
-              </Link>
-            </Button>
+            <ConnectModelLink workspaceId={workspaceId} label="Connect a model" />
           ) : null
         ) : sandboxRecovery ? (
           <SandboxRecoveryActions
@@ -105,5 +121,33 @@ export function FailedSessionBanner({
         ) : null}
       </div>
     </div>
+  );
+}
+
+function BuyCreditsLink({ workspaceId, label }: { workspaceId: string; label: string }) {
+  return (
+    <Button asChild size="sm" variant="ghost">
+      <Link
+        to="/workspaces/$workspaceId/organization"
+        params={{ workspaceId }}
+        search={{ section: "billing" }}
+      >
+        {label}
+      </Link>
+    </Button>
+  );
+}
+
+function ConnectModelLink({ workspaceId, label }: { workspaceId: string; label: string }) {
+  return (
+    <Button asChild size="sm" variant="ghost">
+      <Link
+        to="/workspaces/$workspaceId/settings"
+        params={{ workspaceId }}
+        search={{ section: "models" }}
+      >
+        {label}
+      </Link>
+    </Button>
   );
 }
