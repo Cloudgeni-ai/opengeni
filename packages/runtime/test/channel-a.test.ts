@@ -344,6 +344,46 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     expect(read.truncated).toBe(false);
   });
 
+  test("large binary writes use provider bytes without oversized shell arguments", async () => {
+    const { session, root } = await makeBox();
+    const exec = session.exec?.bind(session);
+    if (!exec) throw Error("local fixture requires exec");
+    session.exec = async (args) => {
+      expect(Buffer.byteLength(args.cmd)).toBeLessThan(64 * 1024);
+      return exec(args);
+    };
+    let writes = 0;
+    session.writeFile = async ({ path, content }) => {
+      writes++;
+      writeFileSync(join(root, path.replace(/^\/workspace\//, "")), content);
+    };
+    const bytes = Buffer.alloc(2 * 1024 * 1024, 0xa7);
+    bytes[100] = 0;
+    const service = new SandboxChannelAService({ session });
+    await service.fsWrite({
+      path: "large.bin",
+      content: bytes.toString("base64"),
+      encoding: "base64",
+      overwrite: true,
+      createParents: false,
+    });
+    expect(writes).toBe(1);
+    expect(readFileSync(join(root, "large.bin"))).toEqual(bytes);
+    session.writeFile = async () => {
+      throw Error("ambiguous provider write");
+    };
+    await expect(
+      service.fsWrite({
+        path: "large.bin",
+        content: "changed".repeat(40000),
+        encoding: "utf8",
+        overwrite: true,
+        createParents: false,
+      }),
+    ).rejects.toThrow("ambiguous provider write");
+    expect(readFileSync(join(root, "large.bin"))).toEqual(bytes);
+  });
+
   test("write then read-back round-trips a BINARY file (base64)", async () => {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });

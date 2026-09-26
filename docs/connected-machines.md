@@ -740,6 +740,9 @@ machine, and does not prove that earlier operations failed.
 
 Transfers stage bounded chunks privately, verify the intended BLAKE3 digest and
 byte count, and publish only after the expected destination state is checked.
+Large Files-panel writes use provider byte transport instead of shell arguments.
+On capable Linux agents, raw replacements above 256 KiB use these same transfers,
+including binary files; an ambiguous write is never retried through a fallback.
 Every transfer request is reauthorized against the same physical connection.
 The runner pins each operation to its original nonzero session route epoch;
 different sessions may have different epochs on the same machine. This is not
