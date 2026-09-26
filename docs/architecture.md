@@ -381,12 +381,12 @@ can begin without contact. An offline machine never authorizes cold-creating a
 rival box, snapshotting it, or provider-terminating the user's computer.
 
 Structured Files exposes the selected machine's effective host-native working
-directory as `FileSystem.root`; canonical links and tree nodes share that namespace.
+directory as `FileSystem.root`; links and tree nodes share this namespace.
 Connected Machine reads accept external absolute paths under the machine account's
-OS permissions: working directories are browsing defaults, not read boundaries.
-Managed reads and structured mutations honor workspace boundaries, including `/`. Files
-requests carry capability epoch and root. The API binds one active route per
-request; target/root changes return retryable conflicts, never reinterpret paths
+OS permissions; working directories remain browsing defaults.
+Managed reads and structured mutations stay workspace-confined, including `/`.
+Requests carry capability epoch and root. The API binds one route per request;
+target/root changes return retryable conflicts instead of reinterpreting paths
 on another filesystem.
 
 Generated-session schedules follow the same explicit route: they persist an
