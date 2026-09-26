@@ -1207,7 +1207,12 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
       tabs={tabs}
       {...(activeTab !== undefined ? { activeTab } : {})}
       onActiveTabChange={selectTab}
-      {...(machine.enabled
+      // Browser and Desktop select independent workspace resources, potentially
+      // on another placement. Their own viewers report runtime status; the
+      // agent-session machine chip must not describe those resources.
+      {...(machine.enabled &&
+      activeTab !== WORKBENCH_TAB_BROWSER &&
+      activeTab !== WORKBENCH_TAB_DESKTOP
         ? {
             headerAccessory: <MachineStateChip chip={machine.chip} />,
           }
