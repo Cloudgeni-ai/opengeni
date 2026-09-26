@@ -8,6 +8,7 @@ import type {
   BrowserProtectedAuthFillCommand,
   BrowserTarget,
 } from "@opengeni/contracts";
+import { InteractionControllerError } from "@opengeni/interaction";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
@@ -34,6 +35,32 @@ const grantedViewToken = `grant.${"g".repeat(48)}`;
 const allowedOrigin = "https://app.opengeni.test";
 
 describe("BrowserControlServer", () => {
+  test.each([
+    { code: "timeout" as const, status: 504 },
+    { code: "resource_unavailable" as const, status: 503 },
+  ])("preserves retryable screenshot $code with its failed stage", async ({ code, status }) => {
+    const message = `browser screenshot ${code} during Page.captureScreenshot`;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const screenshot = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}/screenshot`,
+          { token: viewToken },
+        );
+        expect(screenshot.status).toBe(status);
+        const failure = (await screenshot.json()) as { error: unknown };
+        expect(failure.error).toEqual({ code, message, retryable: true });
+      },
+      { screenshotError: new InteractionControllerError(code, message, true) },
+    );
+  });
+
   test("delivers the exact private network route only to the browser supervisor", async () => {
     let browserContext: BrowserSupervisorDriverContext | null = null;
     await withServer(
@@ -939,6 +966,7 @@ async function withServer(
   }) => Promise<void>,
   options: {
     failStart?: boolean;
+    screenshotError?: Error;
     allowedOrigins?: readonly string[];
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
     uploadDownload?: BrowserSupervisorOptions["uploadDownload"];
@@ -1000,7 +1028,7 @@ async function withServer(
 
 function fakeDriver(
   context: BrowserSupervisorDriverContext,
-  options: { failStart?: boolean },
+  options: { failStart?: boolean; screenshotError?: Error },
 ): BrowserSupervisorDriver {
   const target: BrowserTarget = {
     id: `target-${context.browserSessionId}`,
@@ -1102,6 +1130,7 @@ function fakeDriver(
       };
     },
     async captureScreenshot() {
+      if (options.screenshotError) throw options.screenshotError;
       return frame(context, target);
     },
     async subscribeFrames() {

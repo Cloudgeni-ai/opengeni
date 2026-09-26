@@ -42,6 +42,13 @@ export class CdpTransportError extends Error {
   }
 }
 
+export class CdpCommandTimeoutError extends CdpTransportError {
+  constructor(readonly method: string) {
+    super(`CDP ${method} timed out`);
+    this.name = "CdpCommandTimeoutError";
+  }
+}
+
 type PendingCommand = {
   method: string;
   resolve: (value: unknown) => void;
@@ -150,7 +157,7 @@ export class CdpConnection {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.settlePending(id);
-        reject(new CdpTransportError(`CDP ${method} timed out`));
+        reject(new CdpCommandTimeoutError(method));
       }, timeoutMs);
       timer.unref?.();
       const abort = options.signal
