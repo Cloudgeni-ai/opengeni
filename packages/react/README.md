@@ -541,6 +541,14 @@ workspace discovery, peer switching, tabs/windows, live frames, human input,
 identity versions, interventions, diagnostics, reconnect, and lifecycle state do
 not require app-private controller glue.
 
+The browser viewer negotiates bounded typing batches from the active controller's
+short-lived attachment. Supporting helpers recheck the original controller,
+target, document and frame fence before every action; old helpers retain one
+request per action. Only queued text actions share a request (at most 16), with
+each text/input event preserved. Keys, pointer input and clipboard operations
+remain ordering barriers. A failed or uncertain action discards the queued suffix
+without replay.
+
 ```tsx
 import { OpenGeniProvider } from "@opengeni/react";
 import { BrowserViewer, ComputerViewer } from "@opengeni/react/interaction";

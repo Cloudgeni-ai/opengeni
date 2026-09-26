@@ -58,7 +58,7 @@ export type UseBrowserFrameStreamResult = {
   frame: BrowserFrame | null;
   attachment: Pick<
     BrowserSessionAttachment,
-    "browserSessionId" | "controllerGeneration" | "targetId" | "expiresAt"
+    "browserSessionId" | "controllerGeneration" | "targetId" | "expiresAt" | "fencedInputBatches"
   > | null;
   error: Error | null;
   reconnect: () => void;
@@ -378,6 +378,9 @@ export function useBrowserFrameStream(
             controllerGeneration: attachment.controllerGeneration,
             targetId: attachment.targetId,
             expiresAt: attachment.expiresAt,
+            ...(attachment.fencedInputBatches === true
+              ? { fencedInputBatches: true as const }
+              : {}),
           },
           error: null,
         }));

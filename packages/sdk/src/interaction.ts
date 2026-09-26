@@ -951,7 +951,11 @@ export type BrowserAction =
       timeoutMs?: number | undefined;
     };
 
-export type BrowserActionBatch = { type: "batch"; actions: BrowserAction[] };
+export type BrowserActionBatch = {
+  type: "batch";
+  actions: BrowserAction[];
+  fenceEachAction?: true | undefined;
+};
 
 export type InteractionError = {
   code:
@@ -1058,6 +1062,8 @@ export type BrowserSessionAttachment = {
   controllerGeneration: string;
   targetId: string;
   stream: InteractionFrameStreamAttachment<3>;
+  /** Negotiated from this attachment’s live controller, absent on older helpers. */
+  fencedInputBatches?: true | undefined;
   expiresAt: string;
 };
 

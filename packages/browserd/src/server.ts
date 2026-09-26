@@ -888,6 +888,12 @@ export class BrowserControlServer {
       if (authority.controllerGeneration !== controllerGeneration) {
         throw new ProtocolError("controller_stale", "browser controller generation is stale", 409);
       }
+      const capabilities = this.supervisor.supportsFencedInputBatches({
+        browserSessionId,
+        controllerGeneration,
+      })
+        ? { fencedInputBatches: true as const }
+        : {};
       this.pruneViewGrants(authority);
       const digest = tokenDigest(token);
       const current = authority.viewGrants.get(grantId);
@@ -895,7 +901,7 @@ export class BrowserControlServer {
         if (!sameDigest(current.digest, digest) || current.expiresAt !== expiresAt.value) {
           throw new ProtocolError("operation_conflict", "view grant id is already bound", 409);
         }
-        return success({ grantId, expiresAt: current.expiresAt });
+        return success({ grantId, expiresAt: current.expiresAt, ...capabilities });
       }
       if (authority.viewGrants.size >= MAX_VIEW_GRANTS_PER_SESSION) {
         throw new ProtocolError(
@@ -910,7 +916,7 @@ export class BrowserControlServer {
         expiresAt: expiresAt.value,
         expiresAtMs: expiresAt.milliseconds,
       });
-      return success({ grantId, expiresAt: expiresAt.value }, 201);
+      return success({ grantId, expiresAt: expiresAt.value, ...capabilities }, 201);
     });
   }
 

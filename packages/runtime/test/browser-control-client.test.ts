@@ -35,6 +35,47 @@ afterEach(async () => {
 });
 
 describe("BrowserControlClient", () => {
+  for (const capability of [undefined, true, false, "true"]) {
+    test(`validates optional input batching capability (${capability})`, async () => {
+      const server = Bun.serve({
+        port: 0,
+        async fetch(request) {
+          const body = (await request.json()) as { grantId: string; expiresAt: string };
+          return success({
+            grantId: body.grantId,
+            expiresAt: body.expiresAt,
+            ...(capability !== undefined ? { fencedInputBatches: capability } : {}),
+          });
+        },
+      });
+      const placement = await localPlacement();
+      try {
+        const client = new BrowserControlClient(placement.session, {
+          adminToken,
+          port: server.port,
+        });
+        const grant = {
+          grantId: randomUUID(),
+          token: viewToken,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        };
+        const pending = client.createViewGrant(
+          { browserSessionId: randomUUID(), controllerGeneration: "controller-1" },
+          grant,
+        );
+        if (capability === undefined || capability === true) {
+          expect(await pending).toEqual({
+            grantId: grant.grantId,
+            expiresAt: grant.expiresAt,
+            ...(capability === true ? { fencedInputBatches: true } : {}),
+          });
+        } else await expect(pending).rejects.toBeInstanceOf(BrowserControlProtocolError);
+      } finally {
+        await server.stop(true);
+      }
+    });
+  }
+
   for (const failureStage of ["fetch", "body"] as const) {
     test(`does not replay dispatched mutations after a ${failureStage} disconnect`, async () => {
       const controller = await disconnectingController(failureStage);

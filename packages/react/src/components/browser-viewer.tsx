@@ -2,6 +2,7 @@ import type {
   AttachedBrowserBridge,
   AttachedBrowserDevice,
   BrowserAction,
+  BrowserActionBatch,
   BrowserActionReceipt,
   BrowserDiagnosticBatch,
   BrowserDownload,
@@ -910,6 +911,7 @@ export function BrowserViewer({
             mutating={browser.mutating || savingProfile}
             activityLabel={savingProfile ? "Saving browser version…" : undefined}
             clipboardEnabled={browser.session?.capabilities.clipboard === true}
+            inputBatchAttachment={frames.attachment}
             onAction={async (action, frame) => {
               const receipt = frame
                 ? await browser.actFromFrame(action, frame)
@@ -1859,8 +1861,18 @@ function BrowserViewport(props: {
   observation: ReturnType<typeof useBrowserSession>["observation"];
   mutating: boolean;
   clipboardEnabled: boolean;
+  inputBatchAttachment?: {
+    browserSessionId: string;
+    controllerGeneration: string;
+    targetId: string;
+    fencedInputBatches?: true | undefined;
+    expiresAt: string;
+  } | null;
   activityLabel?: string | undefined;
-  onAction: (action: BrowserAction, frame: BrowserFrame | null) => Promise<BrowserActionReceipt>;
+  onAction: (
+    action: BrowserAction | BrowserActionBatch,
+    frame: BrowserFrame | null,
+  ) => Promise<BrowserActionReceipt>;
   onReadClipboard: () => Promise<{ text: string }>;
   onReconnect: () => void;
   reconnectLabel?: string | undefined;
@@ -1895,6 +1907,11 @@ function BrowserViewport(props: {
   const errorRef = useRef(props.onError);
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
   const actionQueueEpochRef = useRef(0);
+  const queuedTypingRef = useRef<{
+    actions: BrowserAction[];
+    frame: BrowserFrame;
+    epoch: number;
+  } | null>(null);
   const queuedFrameRef = useRef<BrowserFrame | null>(null);
   const currentFrameRef = useRef<BrowserFrame | null>(props.frame);
   const paintedFrameRef = useRef<BrowserFrame | null>(null);
@@ -1910,6 +1927,7 @@ function BrowserViewport(props: {
     if (pendingTextRef.current?.timer) clearTimeout(pendingTextRef.current.timer);
     wheelRef.current = null;
     pendingTextRef.current = null;
+    queuedTypingRef.current = null;
     pointerStartRef.current = null;
     lastClickRef.current = null;
     composingRef.current = false;
@@ -2025,11 +2043,41 @@ function BrowserViewport(props: {
     ) => {
       const epoch = actionQueueEpochRef.current;
       const dispatch = actionRef.current;
+      const attachment = props.inputBatchAttachment;
+      const canBatchTyping =
+        action.type === "type" &&
+        !after &&
+        frame &&
+        attachment?.fencedInputBatches === true &&
+        attachment.browserSessionId === frame.browserSessionId &&
+        attachment.controllerGeneration === frame.controllerGeneration &&
+        attachment.targetId === frame.targetId &&
+        Date.parse(attachment.expiresAt) > Date.now();
+      const previous = queuedTypingRef.current;
+      if (
+        canBatchTyping &&
+        previous &&
+        previous.epoch === epoch &&
+        sameFrameFence(previous.frame, frame) &&
+        previous.actions.length < 16
+      ) {
+        // Keep every existing text/input event boundary. Only share transport.
+        previous.actions.push(action);
+        return;
+      }
+      const typing = canBatchTyping ? { actions: [action], frame, epoch } : null;
+      // Every non-typing action is an ordering barrier, including keys and paste.
+      queuedTypingRef.current = typing;
       actionTailRef.current = actionTailRef.current
         .catch(() => undefined)
         .then(async () => {
           if (!mountedRef.current || epoch !== actionQueueEpochRef.current) return;
-          const receipt = await dispatch(action, frame);
+          if (queuedTypingRef.current === typing) queuedTypingRef.current = null;
+          const dispatchedAction =
+            typing && typing.actions.length > 1
+              ? { type: "batch" as const, actions: typing.actions, fenceEachAction: true as const }
+              : action;
+          const receipt = await dispatch(dispatchedAction, frame);
           if (!mountedRef.current || epoch !== actionQueueEpochRef.current) return;
           await after?.(receipt);
         })
@@ -2041,7 +2089,7 @@ function BrowserViewport(props: {
           errorRef.current(cause);
         });
     },
-    [clearBufferedInput],
+    [clearBufferedInput, props.inputBatchAttachment],
   );
 
   const point = useCallback(

@@ -2274,6 +2274,8 @@ export const BrowserActionBatch = z
   .object({
     type: z.literal("batch"),
     actions: z.array(BrowserAction).min(1).max(INTERACTION_MAX_ACTIONS_PER_BATCH),
+    /** Revalidate the original document before each action; never follow navigation. */
+    fenceEachAction: z.literal(true).optional(),
   })
   .strict()
   .superRefine((batch, context) => {
@@ -2738,6 +2740,7 @@ export const BrowserSessionAttachment = z
     controllerGeneration: opaqueGeneration,
     targetId: boundedOpaqueId,
     stream: BrowserFrameStreamAttachment,
+    fencedInputBatches: z.literal(true).optional(),
     expiresAt: z.string().datetime({ offset: true }),
   })
   .strict();

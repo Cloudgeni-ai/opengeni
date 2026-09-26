@@ -1345,6 +1345,13 @@ requires consent. Computer frames bind screenshot digest to
 controller/session/target at runtime and API; SDK verifies independently. The
 browser extension only attaches; Lightpanda supports semantic observations only.
 
+Browser attachment grants advertise `fencedInputBatches` only when the live driver
+supports it. The viewer may then transport at most 16 queued text actions together,
+preserving event boundaries and ordering barriers. `fenceEachAction` batches
+revalidate the original controller, target, document and frame before each action;
+a partial failure is uncertain and never replayed. Older helpers retain sequential
+viewer input, and ordinary explicit batches keep their existing navigation semantics.
+
 Native macOS operations drain Cocoa pools and clean up pending capture starts.
 Desktop discovery proceeds independently of semantic inspection.
 

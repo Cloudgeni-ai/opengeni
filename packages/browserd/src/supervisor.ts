@@ -184,6 +184,7 @@ export type BrowserStateCaptureInput = BrowserSessionReference & {
 };
 
 export type BrowserSupervisorDriver = BrowserInteractionDriver & {
+  readonly fencedInputBatches?: boolean;
   start(url?: string): Promise<BrowserObservation>;
   listTargets(): Promise<BrowserTarget[]>;
   openTarget(url?: string): Promise<BrowserObservation>;
@@ -1467,6 +1468,10 @@ export class BrowserSupervisor {
         "browser session is already active with different launch options",
       );
     }
+  }
+
+  supportsFencedInputBatches(reference: BrowserSessionReference): boolean {
+    return this.requireBound(reference).driver.fencedInputBatches === true;
   }
 
   private requireActive(reference: BrowserSessionReference): Runtime {
