@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { BROWSER_CONTROL_PORT } from "@opengeni/contracts";
 import { BROWSER_CONTROL_PROTOCOL_VERSION } from "./protocol";
 import { resolvePinnedAgentBrowserBinary } from "./binary";
+import { resolvePinnedHeadlessShell } from "./headless-shell";
 import { resolvePinnedLightpandaBinary } from "./lightpanda-binary";
 import {
   ExistingComputerEnvironmentAllocator,
@@ -27,6 +28,9 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
   const lightpandaBinary = config.lightpandaBinaryPath
     ? await resolvePinnedLightpandaBinary({ binaryPath: config.lightpandaBinaryPath })
     : undefined;
+  const headlessShell = config.headlessShellDirectory
+    ? await resolvePinnedHeadlessShell(config.headlessShellDirectory)
+    : undefined;
   const computerNativeBinaryPath = config.computerNativeBinaryPath
     ? await resolveExecutable(config.computerNativeBinaryPath, "computer native helper")
     : undefined;
@@ -34,6 +38,7 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
     rootDirectory: config.rootDirectory,
     ...(config.socketRootDirectory ? { socketRootDirectory: config.socketRootDirectory } : {}),
     maxSessions: config.maxSessions,
+    ...(headlessShell ? { headlessShell } : {}),
     ...(agentBrowserBinary ? { agentBrowserBinary } : {}),
     ...(lightpandaBinary ? { lightpandaBinary } : {}),
   });
@@ -150,6 +155,7 @@ type BrowserdConfig = {
   browserExecutablePath?: string;
   agentBrowserBinaryPath?: string;
   lightpandaBinaryPath?: string;
+  headlessShellDirectory?: string;
   computerNativeBinaryPath?: string;
   maxComputerSessions: number;
   computerEnvironmentMode: "existing" | "isolated_linux";
@@ -195,6 +201,9 @@ async function browserdConfig(environment: NodeJS.ProcessEnv): Promise<BrowserdC
       : {}),
     ...(environment.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
       ? { agentBrowserBinaryPath: resolve(environment.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY) }
+      : {}),
+    ...(environment.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY
+      ? { headlessShellDirectory: resolve(environment.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY) }
       : {}),
     ...(environment.OPENGENI_BROWSERD_LIGHTPANDA_BINARY
       ? { lightpandaBinaryPath: resolve(environment.OPENGENI_BROWSERD_LIGHTPANDA_BINARY) }

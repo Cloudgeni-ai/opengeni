@@ -1,3 +1,4 @@
+import { selectManagedChromiumExecutable, type VerifiedHeadlessShell } from "./headless-shell";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -244,6 +245,7 @@ export type BrowserSupervisorOptions = {
   maxSessions?: number;
   agentBrowserBinary?: ResolvedAgentBrowserBinary;
   lightpandaBinary?: ResolvedLightpandaBinary;
+  headlessShell?: VerifiedHeadlessShell;
   createDriver?: (context: BrowserSupervisorDriverContext) => Promise<BrowserSupervisorDriver>;
   uploadArtifact?: (artifactPath: string, authority: BrowserStateUploadAuthority) => Promise<void>;
   uploadDownload?: typeof uploadBrowserDownload;
@@ -333,7 +335,12 @@ export class BrowserSupervisor {
     this.createDriver =
       options.createDriver ??
       (async (context) =>
-        await createBrowserDriver(context, options.agentBrowserBinary, options.lightpandaBinary));
+        await createBrowserDriver(
+          context,
+          options.agentBrowserBinary,
+          options.lightpandaBinary,
+          options.headlessShell,
+        ));
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
     this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
   }
@@ -1455,6 +1462,7 @@ async function createBrowserDriver(
   context: BrowserSupervisorDriverContext,
   binary?: ResolvedAgentBrowserBinary,
   lightpandaBinary?: ResolvedLightpandaBinary,
+  headlessShell?: VerifiedHeadlessShell,
 ): Promise<BrowserSupervisorDriver> {
   if (context.transport.kind === "attached_chrome") {
     const attached = await createAttachedChromeTransport({
@@ -1536,6 +1544,14 @@ async function createBrowserDriver(
   if (context.linkedComputer) {
     launchArguments.push("--force-renderer-accessibility=complete");
   }
+  const browserExecutablePath = await selectManagedChromiumExecutable({
+    headed: context.headed,
+    profileDirectory: context.profileDirectory,
+    ...(context.browserExecutablePath
+      ? { browserExecutablePath: context.browserExecutablePath }
+      : {}),
+    ...(headlessShell ? { headlessShell } : {}),
+  });
   const runner = await AgentBrowserJsonRunner.create({
     namespace: "og",
     // A close followed immediately by another daemon using the same socket
@@ -1551,9 +1567,7 @@ async function createBrowserDriver(
     ...(route?.kind === "proxy" && route.proxyUrl ? { proxyUrl: route.proxyUrl } : {}),
     ...(launchArguments.length > 0 ? { launchArguments } : {}),
     ...(route?.consistency.timezone ? { timezone: route.consistency.timezone } : {}),
-    ...(context.browserExecutablePath
-      ? { browserExecutablePath: context.browserExecutablePath }
-      : {}),
+    ...(browserExecutablePath ? { browserExecutablePath } : {}),
     ...(context.launchEnvironment ? { environment: context.launchEnvironment } : {}),
     ...(binary ? { binary } : {}),
   });
