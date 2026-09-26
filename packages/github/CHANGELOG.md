@@ -1,5 +1,22 @@
 # @opengeni/github
 
+## 0.7.17
+
+### Patch Changes
+
+- 9cd1d23: Integration OAuth callbacks now land on a real page when they fail. A callback whose correctly signed state is only too old returns to that workspace's Plugins page with `reason=state_expired`; a tampered or foreign state returns to `/integrations` with `reason=state_invalid`, which the web app forwards to the current workspace. Atlassian, Google Drive, and Fiken now report those reasons (and `state_replayed` for a reused link) instead of `http_400`, `invalid_state`, `state_reused`, or `callback_failed`. Clicking Cancel at the provider reports `reason=access_denied` instead of an expired attempt. MCP, Integration Definition, social, Fiken, and personal GitHub OAuth starts default their return path to `/workspaces/:id/plugins`; Atlassian, Google Drive, and the Slack bot install keep their validated `/workspaces/:id/capabilities` path, which the web app's legacy redirect now forwards with the callback outcome. GitHub App browser routes (connect, setup, install and OAuth callbacks, installation select and configure, manifest callback) render a readable page with a way back instead of a JSON error body, including an organization policy denial and unexpected failures, keeping the status the API error handler gives. `@opengeni/github` adds `inspectSignedState`, which verifies a signed state without its age limit for explaining failures only.
+- Updated dependencies [084616e]
+- Updated dependencies [b6d65a1]
+- Updated dependencies [1a427e0]
+- Updated dependencies [d582db0]
+- Updated dependencies [6eb431b]
+- Updated dependencies [48a8774]
+- Updated dependencies [e422b62]
+- Updated dependencies [f48191e]
+- Updated dependencies [bd365b7]
+  - @opengeni/contracts@5.2.0
+  - @opengeni/config@3.0.0
+
 ## 0.7.16
 
 ### Patch Changes

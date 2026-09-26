@@ -8,20 +8,24 @@ import {
   createOrganizationApiKey,
   ensureExternalIdentity,
   grantWorkspaceAccess,
+  listOwnedConnectionAccounts,
+  withRlsContext,
   createDb,
   createSession,
   createSessionMcpServers,
   migrate,
   provisionRoles,
   revokeApiKey,
+  type Database,
   type DbClient,
 } from "@opengeni/db";
 import {
   signDelegatedAccessToken,
+  type AccessGrant,
   type Permission,
   type SessionAuthorizationPort,
 } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { listOwnConnectionAccountsForGrant, type ApiRouteDeps } from "@opengeni/core";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -173,7 +177,33 @@ function send(app: Hono, f: Awaited<ReturnType<typeof fixture>>, body: unknown =
 }
 
 describe("standalone credential rotation HTTP authority", () => {
-  test("asUser can replace its own personal binding, never another user or the service", async () => {
+  test("host-approved rotation completes nested authorization on one transaction connection", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const operations: string[] = [];
+    const app = appWith({
+      authorizeSession: async ({ operation }) => {
+        operations.push(operation);
+        return { allowed: true, relatedSessionAccess: "target" };
+      },
+    });
+    const response = await send(app, f);
+    expect(response.status).toBe(200);
+    expect(operations).toEqual([
+      "session.mcp.credentials.rotate",
+      "session.mcp.credentials.rotate",
+    ]);
+    expect(await response.json()).toMatchObject({
+      sessionId: f.session.id,
+      servers: [{ id: "external", credentialVersion: 2 }],
+    });
+    expect(
+      await admin`select id from session_command_receipts
+      where target_session_id = ${f.session.id}`,
+    ).toHaveLength(1);
+  });
+
+  test("asUser can replace its own personal binding among multiple accounts, never another user or the service", async () => {
     if (!available) return;
     const f = await fixture();
     const granted = organizationApiKeyPermissionsForAccess("full");
@@ -220,6 +250,62 @@ describe("standalone credential rotation HTTP authority", () => {
       createdBySubjectId: identities[0]!.subjectId,
       metadata: { mcpUrl: destination, resource: destination },
     });
+    await createConnection(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      subjectId: identities[0]!.subjectId,
+      providerDomain: "other.example.test",
+      kind: "oauth2",
+      credentialEncrypted: "synthetic-never-resolved",
+      createdBySubjectId: identities[0]!.subjectId,
+      metadata: { mcpUrl: "https://other.example.test/mcp" },
+    });
+    expect(
+      await listOwnedConnectionAccounts(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        subjectId: identities[0]!.subjectId,
+      }),
+    ).toHaveLength(2);
+    await withRlsContext(
+      client.db,
+      { accountId: f.accountId, workspaceId: f.workspaceId },
+      async (tx) => {
+        let inFlight = 0;
+        let maxInFlight = 0;
+        const observed = new Proxy(tx, {
+          get(target, property, receiver) {
+            if (property !== "transaction") return Reflect.get(target, property, receiver);
+            const begin = Reflect.get(target, property, target) as (
+              ...args: unknown[]
+            ) => Promise<unknown>;
+            return async (...args: unknown[]) => {
+              inFlight++;
+              maxInFlight = Math.max(maxInFlight, inFlight);
+              try {
+                if (inFlight > 1) throw new Error("overlapping RLS savepoints");
+                await new Promise((resolve) => setTimeout(resolve, 5));
+                return await begin.apply(target, args);
+              } finally {
+                inFlight--;
+              }
+            };
+          },
+        }) as Database;
+        const visible = await listOwnConnectionAccountsForGrant(observed, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          subjectId: identities[0]!.subjectId,
+          principalKind: "human_session",
+          permissions: granted,
+          metadata: {},
+        } as AccessGrant);
+        expect(
+          visible.filter((connection) => connection.subjectId === identities[0]!.subjectId),
+        ).toHaveLength(2);
+        expect(maxInFlight).toBe(1);
+      },
+    );
     const app = appWith();
     const service = new OpenGeniClient({
       baseUrl: "http://fixture",

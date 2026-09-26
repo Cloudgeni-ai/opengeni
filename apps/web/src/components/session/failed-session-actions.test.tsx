@@ -101,6 +101,98 @@ test("billing and daily-limit failures keep Retry on the same model", async () =
   }
 });
 
+test("the free model's daily limit names it and offers credits, a subscription and Retry", async () => {
+  const detail =
+    "This model's daily limit at the model provider has been reached, so automatic retries stopped. Choose another model, or try again after the limit resets.\n429 Rate limit exceeded: free-models-per-day.";
+  const daily = {
+    ...failure,
+    reason: detail.replace("\n", " "),
+    recordedDetail: detail,
+    failureCode: "provider_quota_exhausted",
+    quotaScope: "daily",
+  };
+  const banner = (props: {
+    freeModel?: boolean;
+    modelChanged?: boolean;
+    subscriptions?: { codex: boolean; supergrok: boolean };
+    canChooseModel?: boolean;
+    hasModelPicker?: boolean;
+  }) => (
+    <FailedSessionBanner
+      failure={daily}
+      actions={actions}
+      workspaceId="workspace-1"
+      canBuyCredits
+      canConnectModel
+      canChooseModel
+      subscriptions={{ codex: true, supergrok: true }}
+      {...props}
+    />
+  );
+  const container = await render(banner({ freeModel: true }));
+  const row = () => container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  const headline = () => row().querySelector("span")!.textContent;
+  const labels = () => [...row().querySelectorAll("a, button")].map((node) => node.textContent);
+  expect(headline()).toBe(
+    "The free model has reached its daily limit. Buy OpenGeni credits, connect ChatGPT or SuperGrok, or pick another model to keep going.",
+  );
+  expect(labels()).toEqual(["Buy credits", "Connect a subscription", "Retry"]);
+  expect(row().querySelector("details p")!.textContent).toBe(detail);
+
+  // A deployment without subscriptions never names them or links to them.
+  await act(async () =>
+    root!.render(banner({ freeModel: true, subscriptions: { codex: false, supergrok: false } })),
+  );
+  expect(headline()).toBe(
+    "The free model has reached its daily limit. Buy OpenGeni credits, connect a model provider, or pick another model to keep going.",
+  );
+  expect(labels()).toEqual(["Buy credits", "Connect a model", "Retry"]);
+  await act(async () =>
+    root!.render(banner({ freeModel: true, subscriptions: { codex: true, supergrok: false } })),
+  );
+  expect(headline()).toContain("connect ChatGPT, or pick another model");
+  expect(labels()).toEqual(["Buy credits", "Connect ChatGPT", "Retry"]);
+
+  // Sending or a pending Retry locks the picker briefly; the remedies hold steady.
+  await act(async () =>
+    root!.render(banner({ freeModel: true, canChooseModel: false, hasModelPicker: true })),
+  );
+  expect(headline()).toContain("or pick another model to keep going.");
+
+  // Once another model is picked, Retry runs on it and the remedies step aside.
+  await act(async () => root!.render(banner({ freeModel: true, modelChanged: true })));
+  expect(headline()).toBe("The free model has reached its daily limit.");
+  expect(labels()).toEqual(["Retry"]);
+
+  // Any other model keeps the generic daily-limit wording and actions.
+  await act(async () => root!.render(banner({ freeModel: false })));
+  expect(headline()).toBe("This model's daily limit has been reached. Choose another model below.");
+  expect(labels()).toEqual(["Retry"]);
+});
+
+test("the free model keeps ordinary wording for failures other than its daily limit", async () => {
+  const container = await render(
+    <FailedSessionBanner
+      failure={{
+        ...failure,
+        reason: "429 Too Many Requests",
+        failureCode: "provider_rate_limited",
+      }}
+      actions={actions}
+      workspaceId="workspace-1"
+      canBuyCredits
+      canConnectModel
+      canChooseModel
+      freeModel
+    />,
+  );
+  const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(row.querySelector("span")!.textContent).toBe(
+    "The model provider is rate limiting requests. Try again in a minute.",
+  );
+  expect([...row.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual(["Retry"]);
+});
+
 test("double clicks and accepted submissions never duplicate recovery", async () => {
   let settle!: (value: boolean) => void;
   let sends = 0;

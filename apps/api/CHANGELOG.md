@@ -1,5 +1,68 @@
 # @opengeni/api-router
 
+## 5.0.0
+
+### Major Changes
+
+- f48191e: Key managed sign-in, sign-up, verification, and password-reset rate limits, the address recorded on auth sessions, and every other API abuse quota on one trusted request source address, with IPv6 clients keyed on their /64. Managed auth adds explicit per-client-address limits and two-tier per-email throttles (per email and address, then per email), the browser session-set sign-in returns `Retry-After` on a per-email refusal, and the managed-auth database pool keeps serving when the server closes its connections instead of crashing the API.
+
+  Breaking: `OPENGENI_API_TRUSTED_PROXY_HOPS` (optionally narrowed by `OPENGENI_API_TRUSTED_PROXY_CIDRS`) replaces `OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS` and `Settings.mcpOauthTrustedProxyHops` is now `Settings.apiTrustedProxyHops`. API startup and runtime-artifact generation fail while the old variable is set to anything but `0`; rename it. Managed deployments behind a proxy must now set `OPENGENI_API_TRUSTED_PROXY_HOPS`: Better Auth previously read a single-value `X-Forwarded-For` by default and now ignores forwarding headers unless the hop count is declared, so without it every user shares the proxy's address and its sign-in and sign-up limits.
+
+### Minor Changes
+
+- b6d65a1: Add `OPENGENI_API_METRICS_PORT`. When it is set, the API serves `GET /metrics` only on that dedicated internal listener and never on the public API port, so an ingress that forwards every path to the API cannot publish Prometheus metrics. The listener applies the same deployment-key rules as before. Leaving it unset keeps the existing single-port behavior. The Helm chart now sets it by default (`api.metricsPort: 9464`). Upgrade note: on a cluster that enforces NetworkPolicy, only the bundled collector and `networkPolicy.monitoring` reach that port, so set `networkPolicy.monitoring` for any other Prometheus that scrapes the API. Managed-auth email verification now signs the user in on the first successful link click in the default `legacy` session-set mode, and every verification email tells a recipient who did not sign up to ignore it.
+- 1a427e0: Add the optional Jev-backed `code_search` agent tool. It finds where something is implemented, configured or decided in the workspace in one call and returns verbatim, line-numbered passages with a coverage status. It is controlled by `OPENGENI_CODE_SEARCH_MODE` (`off` by default, `opt_in`, `default_on`, or `experiment` for a fixed per-session half), the `OPENGENI_JEV_*` settings, and a per-workspace `codeSearchEnabled` setting (`null` follows the deployment). Each session freezes its decision when it is created (`sessions.code_search_enabled`, rolling migration 0520, exposed as `codeSearchEnabled` on the session), and children keep their parent's, so later setting changes never add the tool to a running session's cached prompt; only the deployment switch-off and a workspace Off, and undoing them, reach running sessions. Each call records Jev usage per workspace. The Jev key stays on the server (API and worker processes) and never reaches a sandbox or Connected Machine, which only run allowlisted read-only ripgrep and file reads. Windows Connected Machines do not get the tool. `tool_search` now lists every tool the query names exactly before BM25 results.
+- d582db0: Guard the unauthenticated local development API against browser attacks. In `local` access mode with `OPENGENI_ENVIRONMENT=local`, the API now answers only requests whose `Host` names this computer, which blocks DNS rebinding: loopback and the hosts of `OPENGENI_WEB_BASE_URL`, `OPENGENI_PUBLIC_BASE_URL`, `OPENGENI_GITHUB_APP_MANIFEST_BASE_URL`, and the new `OPENGENI_LOCAL_ALLOWED_ORIGINS` for browsers, plus sandbox-only names (`host.docker.internal` with the Docker sandbox, and the hosts of `OPENGENI_MCP_URL` and `OPENGENI_MCP_INTERNAL_URL`) that serve only the Codemode, first-party MCP, and Git broker routes and refuse browser requests. Refused requests are logged once per distinct `Host` or `Origin`. Browser requests are accepted only from the configured web origin, the API's own address, or an exact origin listed in `OPENGENI_LOCAL_ALLOWED_ORIGINS`; any other `Origin` gets 403, and local mode no longer answers with wildcard CORS. Requests without an `Origin` (the SDK, servers, sandbox callbacks) are unaffected. Managed and configured access modes, and local access mode under any other `OPENGENI_ENVIRONMENT`, are unchanged.
+
+### Patch Changes
+
+- 9cd1d23: Integration OAuth callbacks now land on a real page when they fail. A callback whose correctly signed state is only too old returns to that workspace's Plugins page with `reason=state_expired`; a tampered or foreign state returns to `/integrations` with `reason=state_invalid`, which the web app forwards to the current workspace. Atlassian, Google Drive, and Fiken now report those reasons (and `state_replayed` for a reused link) instead of `http_400`, `invalid_state`, `state_reused`, or `callback_failed`. Clicking Cancel at the provider reports `reason=access_denied` instead of an expired attempt. MCP, Integration Definition, social, Fiken, and personal GitHub OAuth starts default their return path to `/workspaces/:id/plugins`; Atlassian, Google Drive, and the Slack bot install keep their validated `/workspaces/:id/capabilities` path, which the web app's legacy redirect now forwards with the callback outcome. GitHub App browser routes (connect, setup, install and OAuth callbacks, installation select and configure, manifest callback) render a readable page with a way back instead of a JSON error body, including an organization policy denial and unexpected failures, keeping the status the API error handler gives. `@opengeni/github` adds `inspectSignedState`, which verifies a signed state without its age limit for explaining failures only.
+- 6fd328b: Restore a browser session when ending fails before controller dispatch.
+- 9b9c6df: Mark a BrowserSession lost when its controller definitively reports that the browser no longer exists during suspension.
+- fa12bd4: Keep detached NATS subscription loops from rejecting the process: a poison message or throwing consumer is dropped and logged, and a subscription error such as a permissions violation ends only that subscription instead of reaching the API's fatal unhandled-rejection boundary. A session or workspace-control SSE stream whose live subscription ends fails retryably so the client replays from Postgres, and the auth-callout, Codemode request, and agent-event responders resubscribe with bounded backoff; every unexpected end is counted in `opengeni_nats_subscription_terminations_total` and alerts. Long-lived NATS connections keep reconnecting through repeated auth errors. A freshly created sandbox that misses its command-readiness budget is terminated and replaced at most once per turn attempt after a jittered pause, with outcomes in `opengeni_sandbox_readiness_replacements_total`, and Codex/xAI capacity-wait wakes are spread by a bounded replay-safe jitter so a capacity reset no longer resumes every waiting turn at once.
+- bd365b7: Add a public, content-free `POST /v1/client-errors` beacon that counts web
+  client failures in `opengeni_client_errors_total{kind}` with per-kind admission
+  bounds, a streamed 512-byte body limit and a same-deployment `Origin` check, and
+  admit its grammar-validated route pattern and bundle revision in public
+  structured logs. The shared wire grammar is exported from
+  `@opengeni/contracts/client-error-report`.
+- Updated dependencies [f3d178b]
+- Updated dependencies [084616e]
+- Updated dependencies [9cdeef1]
+- Updated dependencies [b6d65a1]
+- Updated dependencies [1a427e0]
+- Updated dependencies [d582db0]
+- Updated dependencies [cbb7aa4]
+- Updated dependencies [9cd1d23]
+- Updated dependencies [6fd328b]
+- Updated dependencies [9b9c6df]
+- Updated dependencies [6eb431b]
+- Updated dependencies [f11a3e3]
+- Updated dependencies [48a8774]
+- Updated dependencies [a307c83]
+- Updated dependencies [51aa35e]
+- Updated dependencies [e422b62]
+- Updated dependencies [fa12bd4]
+- Updated dependencies [36e1764]
+- Updated dependencies [f2ee81e]
+- Updated dependencies [f48191e]
+- Updated dependencies [c1756ef]
+- Updated dependencies [bd365b7]
+  - @opengeni/runtime@4.1.0
+  - @opengeni/contracts@5.2.0
+  - @opengeni/config@3.0.0
+  - @opengeni/db@6.1.0
+  - @opengeni/github@0.7.17
+  - @opengeni/core@4.0.4
+  - @opengeni/storage@0.2.134
+  - @opengeni/events@0.4.33
+  - @opengeni/observability@0.8.33
+  - @opengeni/artifact-tool@0.3.33
+  - @opengeni/codemode@0.6.3
+  - @opengeni/codex@0.2.27
+  - @opengeni/documents@0.8.35
+  - @opengeni/tool-gateway@0.1.14
+
 ## 4.1.2
 
 ### Patch Changes

@@ -162,6 +162,7 @@ test("an exhausted provider quota is terminal copy that points at the model pick
     unavailableModel: false,
     retryUnhelpful: false,
     detail: daily.recordedDetail,
+    dailyLimit: true,
   });
   // Once another model is chosen the hint is dropped; Retry stays available.
   expect(failedSessionCopy(daily, false, true, true)).toMatchObject({
@@ -177,6 +178,9 @@ test("an exhausted provider quota is terminal copy that points at the model pick
   expect(failedSessionCopy(monthly, false, false, true).reason).toBe(
     "This model's monthly limit has been reached. Choose another model below.",
   );
+  // Only a daily allowance lets the banner name the deployment's free model.
+  expect(failedSessionCopy(monthly, false, false, true).dailyLimit).toBeUndefined();
+  expect(failedSessionCopy(daily, true, false, true).dailyLimit).toBeUndefined();
 
   const credits = exhausted(
     "The model provider account for this model is out of credits, so automatic retries stopped. Choose another model, or add credits with the provider and try again.",
@@ -220,6 +224,7 @@ test("an exhausted provider quota is terminal copy that points at the model pick
     unavailableModel: false,
     retryUnhelpful: false,
     detail: compactionError,
+    dailyLimit: true,
   });
   // An unknown marker value is ignored rather than trusted.
   expect(

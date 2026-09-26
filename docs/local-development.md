@@ -87,6 +87,11 @@ Turning off Connected Machines does not turn off editable artifacts. An opted-in
 relay is built before application startup, so its cold compilation does not
 compete with readiness checks on a small host.
 
+Local desktop and terminal viewers initialize their own persistent stream-signing
+secret even when Connected Machines are disabled. The launcher preserves supplied
+stream or delegation secrets; generated local/test secrets stay in the worktree's
+mode-0600 `.env` and remain stable across restarts.
+
 `bun run dev` isolates each checkout/worktree (project from the directory name,
 free host ports, loopback URL rewrite including `nats://`, `.env.runtime`
 overlay for `dev:*`/`db:*`). Copied `.env` host-port pins are ignored unless
