@@ -627,6 +627,14 @@ release requires it, runs `opengeni-agent connect` for that deployment, and leav
 the ordinary background service online. A same-version connection is additive and
 does not restart the process or interrupt existing commands. A real upgrade
 restarts once when activation requires it; subsequent connection files load live.
+
+The running agent captures its executable install path before admitting managed
+updates. Unix apply, rollback/retry, and successor exec use that stable path: a
+late executable lookup can name the old deleted inode after atomic replacement.
+Windows retains its running-image replacement mechanism. This forward fix does
+not repair an older agent already executing its previous update handoff; those
+installations may require their service manager to start the verified canonical
+executable path after the old process exits.
 `opengeni-agent run` is the explicit foreground alternative.
 
 Because the binary is shared, the current installer refuses to replace a newer
