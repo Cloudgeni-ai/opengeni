@@ -306,6 +306,15 @@ Secret lookup uses the configured `OPENGENI_MODAL_TOKEN_ID` /
 standard `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` env vars or provide a
 `~/.modal.toml` profile.
 
+Keep `OPENGENI_MODAL_IMAGE_REF` aligned with the API release's browser controller.
+The default uses the verified digest from the official desktop image publication;
+Helm's `desktop.imageRef` uses the same pin. An older controller can still speak
+protocol v1 while lacking newer actions or focused DOM reads. Those exact schema
+or route mismatches report an unsupported-controller error with an image-update
+instruction, without retrying actions or restarting a live browser. After updating
+the deployment setting, use a fresh sandbox to verify the new image; existing
+sandbox leases retain their image and open tabs.
+
 ### OpenSandbox
 
 For OpenSandbox runs, set `OPENGENI_SANDBOX_BACKEND=opensandbox`, a private

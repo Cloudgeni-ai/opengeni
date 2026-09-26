@@ -1195,6 +1195,62 @@ describe("BrowserSession frame stream", () => {
 });
 
 describe("BrowserViewer", () => {
+  test.each([true, false])(
+    "surfaces target discovery failure and retries inventory (live frames=%s)",
+    async (liveFrames) => {
+      const current = browserSession();
+      current.capabilities.liveFrames = liveFrames;
+      const currentTarget = target();
+      let fail = true;
+      let targetCalls = 0;
+      const client = fakeClient({
+        listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+        getBrowserSession: async () => current,
+        listBrowserTargets: async () => {
+          targetCalls += 1;
+          if (fail) throw new Error("Browser target discovery timed out");
+          return {
+            browserSessionId: current.id,
+            controllerGeneration: "controller-1",
+            targets: [currentTarget],
+          };
+        },
+        observeBrowserTarget: async () => observation(current.id, currentTarget),
+        attachBrowserSession: async () => attachment(currentTarget.id),
+      });
+      const rendered = await renderComponent(
+        <BrowserViewer
+          client={client}
+          workspaceId={WORKSPACE_ID}
+          sessionId={SESSION_ID}
+          webSocketFactory={(url, protocols) =>
+            new FakeBrowserSocket(url, protocols) as unknown as BrowserFrameWebSocket
+          }
+        />,
+      );
+      try {
+        await flush(30);
+        expect(rendered.container.textContent).toContain("Browser target discovery timed out");
+        expect(rendered.container.textContent).not.toContain("Semantic browser");
+        const retry = [...rendered.container.querySelectorAll("button")].find(
+          (button) => button.textContent === "Reconnect",
+        );
+        expect(retry).toBeDefined();
+        const before = targetCalls;
+        fail = false;
+        await actRun(() => retry!.click());
+        await flush(30);
+        expect(targetCalls).toBeGreaterThan(before);
+        expect(rendered.container.textContent).not.toContain("Browser target discovery timed out");
+        expect(
+          rendered.container.querySelector<HTMLInputElement>('input[aria-label="Address"]')?.value,
+        ).toBe(currentTarget.url);
+      } finally {
+        await rendered.unmount();
+      }
+    },
+  );
+
   test("keeps the frame connection warm without AX polling behind another dock tab", async () => {
     let observationCalls = 0;
     let inventoryCalls = 0;

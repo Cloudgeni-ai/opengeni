@@ -20,6 +20,8 @@ import {
   InteractionSemanticNode,
   BrowserRevisionListResponse,
   BrowserSession,
+  BrowserStorageMode,
+  browserSessionStorageMode,
   BrowserSessionMutationResponse,
   BrowserTarget,
   BrowserTargetListResponse,
@@ -319,6 +321,7 @@ const BrowserOpenInput = z
     name: z.string().trim().min(1).max(200).optional(),
     initialUrl: z.string().url().max(16_384).optional(),
     headless: z.boolean().optional(),
+    storageMode: BrowserStorageMode.optional(),
     placement: InteractionPlacement.optional(),
     identityId: z.string().uuid().optional(),
     baseRevisionId: z.string().uuid().optional(),
@@ -327,6 +330,23 @@ const BrowserOpenInput = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (
+      !value.browserSessionId &&
+      value.storageMode === "ephemeral_context" &&
+      (value.headless !== true ||
+        value.identityId ||
+        value.baseRevisionId ||
+        value.networkRouteId ||
+        value.linkedComputerSessionId ||
+        (value.placement && value.placement.kind !== "sandbox_group"))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["storageMode"],
+        message:
+          "ephemeral_context requires headless sandbox Chromium without identity, revision, route or Computer",
+      });
+    }
     if (value.browserSessionId && value.mode === "new") {
       context.addIssue({
         code: "custom",
@@ -716,7 +736,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
     description:
-      "Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser. BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Returns exact session and tab state.",
+      "Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser. BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns exact session and tab state.",
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -1507,6 +1527,8 @@ async function openBrowser(
   let created = false;
   if (value.browserSessionId) {
     session = await transport.getBrowserSession(workspaceId, value.browserSessionId);
+    if (value.storageMode && browserSessionStorageMode(session) !== value.storageMode)
+      throw new Error("existing BrowserSession storage mode does not match request");
   } else {
     const listed =
       value.mode === "new" ? { sessions: [] } : await transport.listBrowserSessions(workspaceId);
@@ -1522,6 +1544,7 @@ async function openBrowser(
             listed.sessions.filter(
               (candidate) =>
                 candidate.headless === requestedHeadless &&
+                browserSessionStorageMode(candidate) === (value.storageMode ?? "private_profile") &&
                 compatibleInteractionPlacement(candidate.placement, value.placement) &&
                 (value.identityId === undefined || candidate.identityId === value.identityId) &&
                 (value.baseRevisionId === undefined ||
@@ -1544,6 +1567,7 @@ async function openBrowser(
           ...(value.name ? { name: value.name } : {}),
           ...(value.initialUrl ? { initialUrl: value.initialUrl } : {}),
           headless: requestedHeadless,
+          ...(value.storageMode ? { storageMode: value.storageMode } : {}),
           ...(value.placement ? { placement: value.placement } : {}),
           ...(value.identityId ? { identityId: value.identityId } : {}),
           ...(value.baseRevisionId ? { baseRevisionId: value.baseRevisionId } : {}),

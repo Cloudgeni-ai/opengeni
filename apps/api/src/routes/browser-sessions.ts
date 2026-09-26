@@ -1,3 +1,7 @@
+import {
+  assertEphemeralBrowserCreateEnabled,
+  ephemeralBrowserPartition,
+} from "../browser-ephemeral";
 import { randomUUID } from "node:crypto";
 import {
   environmentsEncryptionKeyBytes,
@@ -7,6 +11,8 @@ import {
 } from "@opengeni/config";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
+  EPHEMERAL_CHROMIUM_DRIVER_ID,
+  browserSessionStorageMode,
   BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
   BROWSER_CONTROL_PORT,
   BROWSER_CONTROL_PROTOCOL_VERSION,
@@ -123,6 +129,7 @@ import {
   listBrowserSessions,
   listAttachedBrowserDevices,
   prepareBrowserSessionCreate,
+  markEphemeralBrowserSessionLost,
   prepareExternalAuth,
   prepareBrowserDownloadSave,
   prepareBrowserSessionEnd,
@@ -336,6 +343,10 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     const authority = browserAuthorityRoot(deps);
 
     try {
+      assertEphemeralBrowserCreateEnabled(
+        request,
+        deps.settings.experimentalBrowserContextPoolEnabled,
+      );
       const existing = await findBrowserSessionControlRecordByOperation(deps.db, {
         accountId: grant.accountId,
         workspaceId,
@@ -505,7 +516,12 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                         tokenGeneration: record.tokenGeneration,
                         ...tokens,
                         headed: !preparedSession.headless,
-                        transport: browserRuntimeTransport(preparedSession, placement.transport),
+                        transport: browserRuntimeTransport(
+                          preparedSession,
+                          placement.transport,
+                          placement.placementInstanceId,
+                          authority,
+                        ),
                         ...(linkedComputer ? { linkedComputer } : {}),
                         ...(networkRoute ? { networkRoute } : {}),
                         ...(request.initialUrl ? { initialUrl: request.initialUrl } : {}),
@@ -1023,7 +1039,14 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         browserSessionId,
         "session.read",
         "browser.read",
-        async ({ sessionClient }) => await sessionClient.capture(targetId, captureOptions),
+        async ({ sessionClient, record }) => {
+          if (!record.session.capabilities.screenshots) {
+            throw new BrowserControlUnsupportedError(
+              "This browser engine does not render page screenshots; use semantic observation",
+            );
+          }
+          return await sessionClient.capture(targetId, captureOptions);
+        },
       );
       return browserScreenshotResponse(frame);
     },
@@ -2771,6 +2794,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     operation: ChannelAOperation,
     waitSignal: AbortSignal,
     callback: (placement: BrowserPlacement) => Promise<T>,
+    allowOperationReplay = true,
   ): Promise<T> {
     if (expectedPlacement?.kind === "attached_device") {
       waitSignal.throwIfAborted();
@@ -2863,6 +2887,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         waitSignal,
         operation,
         retryControllerTransport: operation === "browser.read" || operation === "browser.action",
+        allowOperationReplay,
       },
       async (handle) => {
         if (expectedPlacement?.kind === "sandbox_group") {
@@ -3182,7 +3207,8 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         throw new BrowserSessionStateError("BrowserSession controller authority changed");
       }
       const safelyReplayable =
-        channelOperation === "browser.read" || channelOperation === "browser.action";
+        browserSessionStorageMode(record.session) !== "ephemeral_context" &&
+        (channelOperation === "browser.read" || channelOperation === "browser.action");
       let controllerTransportFailed = false;
       const controllerRecoveryState = { attempted: false };
       const run = async (
@@ -3220,6 +3246,30 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         try {
           result = await callback(controller);
         } catch (error) {
+          if (
+            browserSessionStorageMode(record.session) === "ephemeral_context" &&
+            (isMissingBrowserControllerSession(error) ||
+              (error instanceof BrowserControlRequestError &&
+                error.error.code === "controller_lost"))
+          ) {
+            const retired = await markEphemeralBrowserSessionLost(deps.db, {
+              accountId: grant.accountId,
+              workspaceId,
+              browserSessionId,
+              controllerGeneration: binding.controllerGeneration,
+            });
+            if (retired)
+              await releaseInteractionHolder(
+                deps,
+                grant,
+                workspaceId,
+                browserSessionId,
+                record.controllerHostSandboxGroupId,
+              );
+            throw new BrowserSessionStateError(
+              "Ephemeral browser context was lost; create a new BrowserSession. No identity or operation was replayed.",
+            );
+          }
           if (!recoverMissing || !isMissingBrowserControllerSession(error)) throw error;
           await recoverActiveBrowserController(
             deps,
@@ -3269,6 +3319,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                 () => placement,
               ),
             );
+          if (browserSessionStorageMode(record.session) === "ephemeral_context") return await use();
           return await withControllerTransportRecovery({
             channelOperation,
             placementKind: placement.placement.kind,
@@ -3304,6 +3355,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             },
           });
         },
+        browserSessionStorageMode(record.session) !== "ephemeral_context",
       );
     } catch (error) {
       throw browserRouteError(error);
@@ -3338,6 +3390,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     client: BrowserControlClient,
     tokens: ReturnType<typeof deriveBrowserSessionControllerTokens>,
   ): Promise<void> {
+    if (browserSessionStorageMode(record.session) === "ephemeral_context") {
+      throw new BrowserSessionStateError(
+        "Ephemeral browser context was lost; create a new BrowserSession. Its identity and operations cannot be restored or replayed.",
+      );
+    }
     const linkedComputer = await ensureLinkedComputerController(
       routeDeps,
       grant,
@@ -3450,6 +3507,11 @@ function browserCreateInput(
   request: CreateBrowserSessionRequestValue,
   placement: InteractionPlacement,
 ) {
+  if (request.storageMode === "ephemeral_context" && placement.kind !== "sandbox_group") {
+    throw new BrowserControlUnsupportedError(
+      "Ephemeral contexts require a managed sandbox placement",
+    );
+  }
   const attached = placement.kind === "attached_device";
   const external = placement.kind === "external_provider";
   const engine = attached ? ("chrome" as const) : external ? ("external" as const) : request.engine;
@@ -3468,11 +3530,13 @@ function browserCreateInput(
     initialUrl: request.initialUrl ?? null,
     placement,
     driverId:
-      engine === "lightpanda"
-        ? LIGHTPANDA_DRIVER_ID
-        : external
-          ? EXTERNAL_BROWSER_DRIVER_ID
-          : BROWSER_DRIVER_ID,
+      request.storageMode === "ephemeral_context"
+        ? EPHEMERAL_CHROMIUM_DRIVER_ID
+        : engine === "lightpanda"
+          ? LIGHTPANDA_DRIVER_ID
+          : external
+            ? EXTERNAL_BROWSER_DRIVER_ID
+            : BROWSER_DRIVER_ID,
     engine,
     headless: attached ? false : request.headless,
     identityId: request.identityId ?? null,
@@ -3497,7 +3561,21 @@ function browserCreateInput(
 function browserRuntimeTransport(
   session: BrowserSessionValue,
   transport: PlacementBrowserTransport,
+  placementInstanceId?: string,
+  rootSecret?: string,
 ): PlacementBrowserTransport {
+  if (browserSessionStorageMode(session) === "ephemeral_context") {
+    if (transport.kind !== "managed" || !placementInstanceId || !rootSecret) {
+      throw new BrowserControlUnsupportedError(
+        "Ephemeral contexts cannot recover or change their placement",
+      );
+    }
+    return {
+      kind: "managed",
+      engine: "chromium",
+      ephemeralPartition: ephemeralBrowserPartition(session, placementInstanceId, rootSecret),
+    };
+  }
   if (transport.kind !== "managed") return transport;
   return {
     kind: "managed",
@@ -3557,6 +3635,11 @@ function assertCreateReplay(
   if (request.placement && !sameInteractionPlacement(request.placement, session.placement)) {
     throw new BrowserSessionOperationConflictError(
       "BrowserSession create operation is bound to another placement",
+    );
+  }
+  if (request.storageMode !== browserSessionStorageMode(session)) {
+    throw new BrowserSessionOperationConflictError(
+      "BrowserSession create operation is bound to another storage mode",
     );
   }
   const expectedEngine =

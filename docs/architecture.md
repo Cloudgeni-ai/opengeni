@@ -1337,14 +1337,13 @@ Postgres state under workspace RLS, then check the existing one-use nonce.
 ### 7.5 Artifacts, browser control, and managed computer sessions
 
 Editable artifacts use `@opengeni/artifact-tool` and durable collaboration.
-Attempt-scoped `BrowserSession` and `ComputerSession` tools run through
+Attempt-scoped `BrowserSession`/`ComputerSession` tools use
 `@opengeni/interaction` and `@opengeni/browserd` on the selected sandbox or
-machine. Agent browser views are bounded; focused reads and stills use
-authenticated session/controller/target routing. SDK/viewer retain full
+machine. Bounded reads and stills authenticate session/controller/target routing. SDK/viewer retain full
 observations. Code Mode receives a local image handle. Human computer control
 requires consent. Computer frames bind screenshot digest to
 controller/session/target at runtime and API; SDK verifies independently. The
-browser extension only attaches.
+browser extension only attaches; Lightpanda supports semantic observations only.
 
 Native macOS operations drain Cocoa pools and clean up pending capture starts.
 Desktop discovery proceeds independently of semantic inspection.
@@ -1692,7 +1691,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Sandbox backend or provider registry | `packages/runtime/src/sandbox/providers/`, `packages/contracts/src/index.ts` | §3.9 and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes |
 | Lease, snapshot, reaper, or active target | `apps/worker/src/activities/sandbox-lease.ts`, `packages/runtime/src/sandbox/routing/` | §8 and [`connected-machines.md`](connected-machines.md) |
 | Connected Machine agent or protocol | `agent/`, `agent/proto/opengeni_agent.proto`, `packages/runtime/src/sandbox/selfhosted/` | [`connected-machines.md`](connected-machines.md) |
-| Browser or computer interaction | `packages/interaction/`, `packages/browserd/`, `apps/browser-extension/` | [`connected-machines.md`](connected-machines.md) |
+| Browser or computer interaction | `packages/interaction/`, `packages/browserd/`, `apps/browser-extension/` | [`connected-machines.md`](connected-machines.md), [experimental context pooling](design/ephemeral-chromium-context-pool.md) |
 
 ### Knowledge, artifacts, integrations, and clients
 

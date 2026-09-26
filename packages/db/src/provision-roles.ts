@@ -1602,6 +1602,20 @@ BEGIN
         ${literal(schema)}, ${literal(role)}
       );
     END IF;
+    -- The trial-credit kill switch setter is operator-only (migration owner).
+    -- Reprovisioning repairs any accidental runtime or PUBLIC grant.
+    IF to_regprocedure(
+      format('%I.set_verified_signup_trial_credits_enabled(boolean,text,text)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.set_verified_signup_trial_credits_enabled(boolean, text, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.set_verified_signup_trial_credits_enabled(boolean, text, text) FROM %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
     IF to_regprocedure(
       format('%I.open_private_session_create_capability(uuid,uuid,uuid,text)', ${literal(schema)})
     ) IS NOT NULL THEN
@@ -2100,6 +2114,13 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.sandbox_recovery_rollout FROM PUBLIC;
       REVOKE ALL (singleton, consent_enabled, release_evidence) ON TABLE opengeni_private.sandbox_recovery_rollout FROM PUBLIC;
       EXECUTE format('GRANT SELECT ON TABLE opengeni_private.sandbox_recovery_rollout TO %I', ${literal(role)});
+    END IF;
+    IF to_regclass('opengeni_private.verified_signup_trial_switch_revisions') IS NOT NULL THEN
+      -- Read-only for the operator gauge. Only the owner-only audited setter
+      -- appends revisions; runtime identities and PUBLIC never write them.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.verified_signup_trial_switch_revisions FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.verified_signup_trial_switch_revisions FROM PUBLIC;
+      EXECUTE format('GRANT SELECT ON TABLE opengeni_private.verified_signup_trial_switch_revisions TO %I', ${literal(role)});
     END IF;
     IF to_regclass('opengeni_private.organization_usage_read_capabilities') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM %I', ${literal(role)});
