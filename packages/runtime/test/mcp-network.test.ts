@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import { CODEMODE_ARGUMENTS_MAX_BYTES } from "@opengeni/contracts";
 import {
   MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS,
+  MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES,
   MCP_MAX_INBOUND_REQUEST_BYTES,
   MCP_MAX_SELECTED_SERVERS,
   MCP_MAX_TOOL_RESULT_BYTES,
@@ -360,6 +361,32 @@ describe("MCP network and payload boundary", () => {
         MCP_MAX_INBOUND_REQUEST_BYTES,
       ),
     ).rejects.toBeInstanceOf(McpPayloadTooLargeError);
+  });
+
+  test("one provider can use the existing aggregate entry allowance without truncation", () => {
+    const tools = Array.from({ length: MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES }, (_, index) => ({
+      name: `tool_${index}`,
+    }));
+    expect(assertMcpToolListWithinBounds(tools)).toBe(tools);
+    const budget = new McpAggregateToolListBudget();
+    expect(budget.replace("large-provider", tools)).toBe(tools);
+    expect(budget.snapshot().entries).toBe(tools.length);
+    expect(budget.replace("large-provider", tools)).toBe(tools);
+    expect(() => budget.replace("another-provider", [{ name: "extra" }])).toThrow(
+      McpPayloadTooLargeError,
+    );
+    expect(budget.snapshot().entries).toBe(tools.length);
+    expect(() => assertMcpToolListWithinBounds([...tools, { name: "extra" }])).toThrow(
+      "4096-entry safety limit",
+    );
+    expect(() =>
+      assertMcpToolListWithinBounds(
+        Array.from({ length: 50 }, (_, index) => ({
+          name: `large_${index}`,
+          description: "x".repeat(100_000),
+        })),
+      ),
+    ).toThrow(McpPayloadTooLargeError);
   });
 
   test("bounds selected servers and atomically replaces aggregate relist contributions", () => {

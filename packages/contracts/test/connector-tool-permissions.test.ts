@@ -1,6 +1,22 @@
 import { expect, test } from "bun:test";
 import { UpdateConnectorToolPermissionsRequest } from "../src/connector-tool-permissions";
 
+test("an explicit permission update can name the full catalog allowance", () => {
+  const request = {
+    connectionId: "connection",
+    target: "tools",
+    permission: "ask",
+    toolNames: Array.from({ length: 4096 }, (_, index) => `tool_${index}`),
+  };
+  expect(UpdateConnectorToolPermissionsRequest.safeParse(request).success).toBe(true);
+  expect(
+    UpdateConnectorToolPermissionsRequest.safeParse({
+      ...request,
+      toolNames: [...request.toolNames, "extra"],
+    }).success,
+  ).toBe(false);
+});
+
 test("connector defaults require an explicit target and cannot be named as tool overrides", () => {
   const common = { connectionId: "connection", permission: "allow" };
   expect(

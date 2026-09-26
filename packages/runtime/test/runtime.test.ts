@@ -10933,6 +10933,27 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("best-effort discovery preserves a bounded catalog with more than 1000 tools", async () => {
+    const names = Array.from({ length: 1_100 }, (_, index) => `catalog_tool_${index}`);
+    const provider = startTestMcpServer({ toolsForAuthorization: () => names });
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({ mcpServers: [{ id: "catalog", url: provider.url }] }),
+        [{ kind: "mcp", id: "catalog", optional: true }],
+      );
+      try {
+        const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
+        const exposed = new Set(tools.map((tool) => tool.name));
+        for (const name of names) expect(exposed.has(`catalog__${name}`)).toBe(true);
+        expect(provider.calls).toEqual([]);
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      provider.close();
+    }
+  });
+
   test("best-effort server whose tools/list throws a NON-auth error also degrades, not just auth", async () => {
     // Rider on the auth fix: the invariant is generic — an OPTIONAL server that is
     // unavailable for ANY reason (here a provider 500, no connectionRef, so no

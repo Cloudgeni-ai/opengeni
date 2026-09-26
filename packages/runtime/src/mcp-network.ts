@@ -1,5 +1,5 @@
 import type { Settings } from "@opengeni/config";
-import { CODEMODE_ARGUMENTS_MAX_BYTES } from "@opengeni/contracts";
+import { CODEMODE_ARGUMENTS_MAX_BYTES, MCP_MAX_CATALOG_TOOL_ENTRIES } from "@opengeni/contracts";
 import {
   isNonPublicAddress,
   pinnedFetch,
@@ -18,7 +18,11 @@ export const MCP_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 export const MCP_MAX_INBOUND_REQUEST_BYTES = CODEMODE_ARGUMENTS_MAX_BYTES + 64 * 1024;
 export const MCP_MAX_TOOL_DEFINITION_BYTES = 128 * 1024;
 export const MCP_MAX_TOOL_LIST_BYTES = 4 * 1024 * 1024;
-export const MCP_MAX_TOOL_LIST_ENTRIES = 1_000;
+export const MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES = MCP_MAX_CATALOG_TOOL_ENTRIES;
+// One provider may use the available catalog allowance. The shared budget
+// still accounts for every provider together; a separate lower count ceiling
+// silently excluded otherwise bounded catalogs from best-effort discovery.
+export const MCP_MAX_TOOL_LIST_ENTRIES = MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES;
 export const MCP_MAX_TOOL_RESULT_BYTES = 1024 * 1024;
 export const MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES = 256 * 1024;
 export const MCP_MAX_SELECTED_SERVERS = 64;
@@ -27,7 +31,6 @@ export const MCP_MAX_CONCURRENT_SERVER_OPERATIONS = 8;
 // It defaults to 10 seconds and can otherwise preempt a larger per-server
 // transport timeout before that server finishes its own handshake.
 export const MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS = 10_000;
-export const MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES = 4_096;
 export const MCP_MAX_AGGREGATE_TOOL_LIST_BYTES = 16 * 1024 * 1024;
 
 export const MCP_REPLAY_SAFE_METHODS = [
@@ -394,8 +397,9 @@ export class McpPayloadTooLargeError extends Error {
     readonly label: string,
     readonly actualBytes: number,
     readonly maxBytes: number,
+    readonly unit: "byte" | "entry" = "byte",
   ) {
-    super(`${label} exceeds the ${maxBytes}-byte safety limit`);
+    super(`${label} exceeds the ${maxBytes}-${unit} safety limit`);
     this.name = "McpPayloadTooLargeError";
   }
 }
@@ -419,7 +423,12 @@ export function assertMcpPayloadWithinBytes(value: unknown, maxBytes: number, la
 
 export function assertMcpToolListWithinBounds<T>(tools: readonly T[]): readonly T[] {
   if (tools.length > MCP_MAX_TOOL_LIST_ENTRIES) {
-    throw new McpPayloadTooLargeError("MCP tool list", tools.length, MCP_MAX_TOOL_LIST_ENTRIES);
+    throw new McpPayloadTooLargeError(
+      "MCP tool list",
+      tools.length,
+      MCP_MAX_TOOL_LIST_ENTRIES,
+      "entry",
+    );
   }
   for (const tool of tools) {
     const toolBytes = mcpSerializedSizeBytes(tool);
@@ -447,6 +456,7 @@ export function assertMcpServerSelectionWithinBounds<T>(servers: readonly T[]): 
       "selected MCP server count",
       servers.length,
       MCP_MAX_SELECTED_SERVERS,
+      "entry",
     );
   }
   return servers;
@@ -495,7 +505,7 @@ export class McpAggregateToolListBudget {
     const previous = this.contributions.get(sourceId) ?? { entries: 0, bytes: 0 };
     const nextEntries = this.totalEntries - previous.entries + contribution.entries;
     if (nextEntries > this.maxEntries) {
-      throw new McpPayloadTooLargeError(this.label, nextEntries, this.maxEntries);
+      throw new McpPayloadTooLargeError(this.label, nextEntries, this.maxEntries, "entry");
     }
     const nextBytes = this.totalBytes - previous.bytes + contribution.bytes;
     if (nextBytes > this.maxBytes) {
