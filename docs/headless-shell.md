@@ -43,5 +43,17 @@ profile, downloads, proxy configuration, process teardown and CDP adapter remain
 in use. Disable opt-in only after ending or moving shell sessions to a placement
 with the matching bundle. No profile is automatically converted or deleted.
 
+Headless shell does not persist session cookies itself. Controlled profile capture
+adds a private cookie capsule inside the authenticated, encrypted profile archive;
+it restores session cookies before loading saved tabs. The capsule never becomes
+a plaintext profile file, public manifest or tool result. Persistent cookies and
+other browser storage continue to use the Chromium profile.
+
+An unexpected shell process loss cannot safely reconstruct newer session cookies.
+The controller therefore refuses automatic recovery for shell sessions instead
+of silently restarting with missing login state. Restore an explicitly saved
+profile revision or start a new session. This limitation does not apply to the
+ordinary Chromium recovery path.
+
 This path remains opt-in pending broader product acceptance. Resource savings
 vary with page complexity; it is not a promise of a fixed memory reduction.
