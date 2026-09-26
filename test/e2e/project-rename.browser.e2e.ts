@@ -136,3 +136,21 @@ test("production project menu renames, guards saves, and preserves failed drafts
   await capture("project-rename-success");
   expect(pageErrors).toEqual([]);
 }, 30_000);
+
+test("an off-page project keeps its first-page retry visible", async () => {
+  await page.evaluate(() => {
+    sessionStorage.setItem("rename-qa-fail-channel-page", "00000000-0000-4000-8000-000000000002");
+  });
+  await page.reload();
+  const bugfixes = page.getByRole("group", { name: "Bugfixes", exact: true });
+  const retry = bugfixes.getByRole("button", { name: "Retry older sessions in Bugfixes" });
+  await retry.waitFor();
+  expect(await bugfixes.getByText("Bugfix conversation 1").count()).toBe(0);
+  await capture("project-folders-first-page-retry", false);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await capture("project-folders-first-page-retry-mobile", false);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await retry.click();
+  await bugfixes.getByText("Bugfix conversation 50").waitFor();
+  expect(pageErrors).toEqual([]);
+}, 30_000);

@@ -49,9 +49,11 @@ const bugfixSessions = Array.from({ length: 55 }, (_, i) =>
 export const evidence = {
   calls: [] as unknown[],
   pageCalls: [] as unknown[],
+  pageFailureChannelId: sessionStorage.getItem("rename-qa-fail-channel-page"),
   fail: false,
   delay: 0,
 };
+sessionStorage.removeItem("rename-qa-fail-channel-page");
 export const client = {
   getSession: async () => null,
   streamEvents: async function* () {},
@@ -72,6 +74,14 @@ export const client = {
       cursor: options.cursor,
       limit: options.limit,
     });
+    if (
+      evidence.pageFailureChannelId !== null &&
+      options.channelId === evidence.pageFailureChannelId &&
+      !options.cursor
+    ) {
+      evidence.pageFailureChannelId = null;
+      throw new Error("Project page failed once");
+    }
     const rows =
       options.channelId === undefined
         ? [...defaultSessions, ...projectSessions, ...bugfixSessions]

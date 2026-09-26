@@ -1297,9 +1297,28 @@ export function SessionList() {
                 compareSessionBrowse(a.session, b.session, browseSortBy),
               ),
             }))
-            .filter((section) => showEmptyGroups || section.sessions.length > 0)
+            .filter((section) => {
+              if (showEmptyGroups || section.sessions.length > 0) return true;
+              const key = sessionPaginationProjectGroup(section.channelId, section.name).key;
+              const continuation = activeSessionContinuation(
+                groupContinuations.get(key) ?? emptySessionContinuation(pageGeneration),
+                pageGeneration,
+              );
+              // An off-page project still needs a visible retry when its first
+              // independent read fails (and a loading state while it starts).
+              return continuation.failed || groupLoadingGenerations.get(key) === pageGeneration;
+            })
         : [],
-    [channelMode, forest, channels, browseSortBy, showEmptyGroups],
+    [
+      channelMode,
+      forest,
+      channels,
+      browseSortBy,
+      showEmptyGroups,
+      groupContinuations,
+      groupLoadingGenerations,
+      pageGeneration,
+    ],
   );
   // Workstreams open on first paint. A user collapse is local interaction
   // state; new or newly loaded sections therefore remain open by default.
