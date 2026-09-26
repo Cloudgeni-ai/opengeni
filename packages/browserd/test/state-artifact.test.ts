@@ -21,12 +21,26 @@ describe("encrypted browser profile artifacts", () => {
       const restored = join(directory, "restored");
       await mkdir(join(profile, "Default", "IndexedDB"), { recursive: true });
       await mkdir(join(profile, "Default", "Cache"), { recursive: true });
+      await mkdir(join(profile, "Default", "IndexedDB", "OptGuideOnDeviceModel"), {
+        recursive: true,
+      });
+      await mkdir(join(profile, "OptGuideOnDeviceModel", "model-version"), {
+        recursive: true,
+      });
       await Promise.all([
         writeFile(join(profile, "Local State"), "local-state"),
         writeFile(join(profile, "Default", "Cookies"), Buffer.from([0, 1, 2, 3, 255])),
         writeFile(join(profile, "Default", "IndexedDB", "state.db"), "durable-state"),
         writeFile(join(profile, "Default", "empty"), ""),
+        writeFile(
+          join(profile, "Default", "IndexedDB", "OptGuideOnDeviceModel", "state"),
+          "site-state",
+        ),
         writeFile(join(profile, "Default", "Cache", "discard-me"), "cache"),
+        writeFile(
+          join(profile, "OptGuideOnDeviceModel", "model-version", "weights.bin"),
+          "disposable-model",
+        ),
         writeFile(join(profile, "SingletonLock"), "runtime-lock"),
       ]);
 
@@ -39,8 +53,8 @@ describe("encrypted browser profile artifacts", () => {
       });
       expect(captured).toMatchObject({
         format: BROWSER_PROFILE_ARTIFACT_FORMAT,
-        fileCount: 4,
-        profileBytes: 29,
+        fileCount: 5,
+        profileBytes: 39,
       });
       expect(captured.artifactDigest).toMatch(/^[0-9a-f]{64}$/u);
       expect(captured.contentDigest).toMatch(/^[0-9a-f]{64}$/u);
@@ -64,6 +78,13 @@ describe("encrypted browser profile artifacts", () => {
         "durable-state",
       );
       expect(await exists(join(restored, "Default", "Cache"))).toBe(false);
+      expect(await exists(join(restored, "OptGuideOnDeviceModel"))).toBe(false);
+      expect(
+        await readFile(
+          join(restored, "Default", "IndexedDB", "OptGuideOnDeviceModel", "state"),
+          "utf8",
+        ),
+      ).toBe("site-state");
       expect(await exists(join(restored, "SingletonLock"))).toBe(false);
     });
   });
