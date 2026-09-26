@@ -12,7 +12,9 @@ test.each([
   [1, true],
   [1000, false],
   [60000, false],
-] as const)("editor uses transactional writes for %i lines (create: %p)", async (lines, create) => {
+  [60000, false, true],
+  [60000, true, true],
+] as const)("%i-line write (create %p/raw %p)", async (lines, create, raw = false) => {
   setSelfhostedApplyDiff(applyDiff);
   const path = "/workspace/large.md";
   const original = "# Before\n" + "Synthetic document line.\n".repeat(lines);
@@ -33,6 +35,7 @@ test.each([
       const op = request.op;
       let response: ControlResponse;
       if (op?.$case === "opStart" && op.opStart.op?.$case === "fsWrite") {
+        expect(op.opStart.op.fsWrite.createParents).toBe(!raw);
         transferId = request.requestId;
         expectedDigest = op.opStart.op.fsWrite.contentDigest;
         expect(op.opStart.op.fsWrite.expectedBaseDigest).toBe(
@@ -120,7 +123,12 @@ test.each([
       observations.push(`${event.op}:${event.outcome}`);
     },
   });
-  if (create)
+  const rawContent = Buffer.from(original.replace("# Before", "# After") + "\0binary\xff");
+  if (raw) {
+    expect(await session.writeFile({ path, content: rawContent, createParents: false })).toBe(
+      rawContent.length,
+    );
+  } else if (create)
     await session
       .createEditor()
       .createFile({ path, diff: "+# After\n+Synthetic document line.\n" });
@@ -130,12 +138,16 @@ test.each([
       diff: "@@\n-# Before\n+# After\n Synthetic document line.",
     });
   expect(new TextDecoder().decode(await session.readFile({ path }))).toBe(
-    create ? "# After\nSynthetic document line." : original.replace("# Before", "# After"),
+    raw
+      ? rawContent.toString("utf8")
+      : create
+        ? "# After\nSynthetic document line."
+        : original.replace("# Before", "# After"),
   );
   expect(observations).toContain("opStart:ok");
   expect(observations).toContain("writeChunk:ok");
   expect(observations).toContain("opQuery:ok");
-  expect(observations).toContain("fsWrite:ok");
+  if (!raw) expect(observations).toContain("fsWrite:ok");
 });
 
 test("an oversized outbound write is a payload fault, not a disconnected machine", async () => {

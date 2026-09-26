@@ -1074,27 +1074,34 @@ export class SandboxChannelAService {
         rejectFinalSymlink: true,
       });
     }
-    // base64-decode heredoc — raw + binary capable, single round-trip, last-
-    // writer-wins (the I4 default; no read-modify-write race because we write
-    // the whole file). A non-existent parent with createParents:false surfaces a
-    // non-zero exit -> 400.
-    const b64 = bytes.toString("base64");
-    const { exitCode, stderr } = await this.run({
-      cmd: `printf %s ${shellQuote(b64)} | base64 -d > ${shellQuote(abs)}`,
-    });
-    if (exitCode !== null && exitCode !== 0) {
-      // createEditor fallback for text when exec-write failed and we have a
-      // text payload (binary cannot go through apply-patch).
-      if (req.encoding !== "base64" && this.session.createEditor) {
-        const ok = await this.tryEditorWrite(abs, req.content);
-        if (!ok)
+    // Large payloads must not become a shell argument. Provider writes carry
+    // bytes out of band; native agents use a verified chunked transaction.
+    // A failed mutation is never replayed through a second write path.
+    if (bytes.byteLength > 64 * 1024 && !this.runAs && this.session.writeFile) {
+      await this.session.writeFile({ path: abs, content: bytes, createParents: req.createParents });
+    } else {
+      // base64-decode heredoc — raw + binary capable, single round-trip, last-
+      // writer-wins (the I4 default; no read-modify-write race because we write
+      // the whole file). A non-existent parent with createParents:false surfaces a
+      // non-zero exit -> 400.
+      const b64 = bytes.toString("base64");
+      const { exitCode, stderr } = await this.run({
+        cmd: `printf %s ${shellQuote(b64)} | base64 -d > ${shellQuote(abs)}`,
+      });
+      if (exitCode !== null && exitCode !== 0) {
+        // createEditor fallback for text when exec-write failed and we have a
+        // text payload (binary cannot go through apply-patch).
+        if (req.encoding !== "base64" && this.session.createEditor) {
+          const ok = await this.tryEditorWrite(abs, req.content);
+          if (!ok)
+            throw new ChannelAValidationError(
+              `failed to write ${path}: ${stderr || `exit ${exitCode}`}`,
+            );
+        } else {
           throw new ChannelAValidationError(
             `failed to write ${path}: ${stderr || `exit ${exitCode}`}`,
           );
-      } else {
-        throw new ChannelAValidationError(
-          `failed to write ${path}: ${stderr || `exit ${exitCode}`}`,
-        );
+        }
       }
     }
     this.revision++;

@@ -17,16 +17,18 @@ if (process.env.OPENGENI_REQUIRE_NATIVE_FS_TEST === "1" && !existsSync(binary)) 
   throw new Error("Required native transactional filesystem fixture was not built");
 }
 
-for (const [lines, interrupt] of [
+for (const [lines, interrupt, raw = false] of [
   [1, false],
   [1, true],
   [1000, false],
   [1000, true],
   [80000, false],
   [80000, true],
+  [80000, false, true],
+  [80000, true, true],
 ] as const) {
   test.skipIf(process.platform !== "linux" || !existsSync(binary))(
-    `TypeScript editor drives native transactional files (${lines} lines): ${interrupt ? "abandoned staging cleanup" : "verified replacement"}`,
+    `TypeScript ${raw ? "raw writer" : "editor"} drives native transactional files (${lines} lines): ${interrupt ? "abandoned staging cleanup" : "verified replacement"}`,
     async () => {
       setSelfhostedApplyDiff(applyDiff);
       const root = await mkdtemp(join(tmpdir(), "opengeni-native-write-"));
@@ -94,10 +96,16 @@ for (const [lines, interrupt] of [
           controlRpc: rpc,
           transactionalFsWriteSupported: true,
         });
-        const update = session.createEditor().updateFile({
-          path,
-          diff: "@@\n-# Before\n+# After\n Synthetic cross-language fixture.",
-        });
+        const update = raw
+          ? session.writeFile({
+              path,
+              content: original.replace("# Before", "# After"),
+              createParents: false,
+            })
+          : session.createEditor().updateFile({
+              path,
+              diff: "@@\n-# Before\n+# After\n Synthetic cross-language fixture.",
+            });
         if (interrupt) await expect(update).rejects.toThrow("Cancellation");
         else await update;
         expect(await readFile(path, "utf8")).toBe(

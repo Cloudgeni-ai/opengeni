@@ -35,6 +35,7 @@ export async function transferEditorFile(input: {
   path: string;
   content: Uint8Array;
   baseContent?: Uint8Array;
+  createParents?: boolean;
   request: (requestId: string, op: NonNullable<ControlRequest["op"]>) => Promise<ControlResponse>;
 }): Promise<{ recovered: boolean }> {
   const opId = `fsw-${crypto.randomUUID()}`;
@@ -98,7 +99,7 @@ export async function transferEditorFile(input: {
           $case: "fsWrite",
           fsWrite: {
             path: input.path,
-            createParents: true,
+            createParents: input.createParents ?? true,
             mode: 0,
             expectedBaseDigest:
               input.baseContent === undefined ? "" : fileContentDigest(input.baseContent),

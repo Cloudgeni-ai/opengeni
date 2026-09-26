@@ -1521,7 +1521,7 @@ supervised commands keep separate proof. Details:
 `docs/design/modal-workspace-durability-2026-09-23.md`.
 
 Desktop/browser images and daemons release separately. Desktop/terminal data
-use the relay; the control plane retains authority. Large edits require
+use the relay; the control plane retains authority. Large file writes require
 connection-fenced transactional transfers and verified receipts, never blind replay.
 
 Canonical: `packages/runtime/src/sandbox/`,
