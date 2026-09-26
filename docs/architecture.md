@@ -1339,18 +1339,13 @@ Postgres state under workspace RLS, then check the existing one-use nonce.
 Editable artifacts use `@opengeni/artifact-tool` and durable collaboration.
 Attempt-scoped `BrowserSession`/`ComputerSession` tools use
 `@opengeni/interaction` and `@opengeni/browserd` on the selected sandbox or
-machine. Bounded reads and stills authenticate session/controller/target routing. SDK/viewer retain full
-observations. Code Mode receives a local image handle. Human computer control
-requires consent. Computer frames bind screenshot digest to
-controller/session/target at runtime and API; SDK verifies independently. The
-browser extension only attaches; Lightpanda supports semantic observations only.
+machine. Bounded reads/stills authenticate session/controller/target. SDK/viewer retain
+full observations; Code Mode receives local image handles. Human computer control
+requires consent. Computer frames bind screenshot digest to controller/session/target;
+runtime, API and SDK independently verify. The browser extension only attaches;
+Lightpanda supports semantic observations only.
 
-Browser attachment grants advertise `fencedInputBatches` only when the live driver
-supports it. The viewer may then transport at most 16 queued text actions together,
-preserving event boundaries and ordering barriers. `fenceEachAction` batches
-revalidate the original controller, target, document and frame before each action;
-a partial failure is uncertain and never replayed. Older helpers retain sequential
-viewer input, and ordinary explicit batches keep their existing navigation semantics.
+Typing batches: [React](../packages/react/README.md).
 
 Native macOS operations drain Cocoa pools and clean up pending capture starts.
 Desktop discovery proceeds independently of semantic inspection.
