@@ -899,7 +899,7 @@ export class SandboxChannelAService {
       `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       rejectLink,
       `target=$(opengeni_realpath_existing ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+      `case "$target" in "$root"|"\${root%/}/"*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
       `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `printf '__OPENGENI_FS_CONFINED_OK__'`,
     ].join("; ");
@@ -929,7 +929,7 @@ export class SandboxChannelAService {
       `parent=$(dirname -- ${shellQuote(abs)})`,
       locateParent,
       `target=$(opengeni_realpath_existing "$probe") || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+      `case "$target" in "$root"|"\${root%/}/"*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
       requireParent,
       `printf '__OPENGENI_FS_CONFINED_OK__'`,
     ].join("; ");
@@ -980,7 +980,7 @@ export class SandboxChannelAService {
       `target=$(opengeni_realpath_existing ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       ...(this.fileReadScope === "workspace"
         ? [
-            `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+            `case "$target" in "$root"|"\${root%/}/"*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
           ]
         : []),
       `test -f "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
@@ -1274,7 +1274,7 @@ export class SandboxChannelAService {
       `if test ! -e "$destination" && test ! -L "$destination"; then printf %s ${shellQuote(absentMarker)}; exit 0; fi`,
       `test -f "$destination" && test ! -L "$destination" || { printf %s ${shellQuote(escapeMarker)}; exit 68; }`,
       `target=$(opengeni_realpath_existing "$destination") || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`,
-      `case "$target" in "$root"|"$root"/*) ;; *) printf %s ${shellQuote(escapeMarker)}; exit 67 ;; esac`,
+      `case "$target" in "$root"|"\${root%/}/"*) ;; *) printf %s ${shellQuote(escapeMarker)}; exit 67 ;; esac`,
       `bytes=$(wc -c <"$target" | tr -d ' \\n') || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`,
       `digest=$(opengeni_sha256_file "$target") || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`,
       `if test "$bytes" != ${shellQuote(String(req.sizeBytes))} || test "$digest" != ${shellQuote(expectedSha256)}; then printf %s ${shellQuote(absentMarker)}; exit 0; fi`,
@@ -1411,7 +1411,7 @@ export class SandboxChannelAService {
       `test ! -L "$destination" || { printf %s ${shellQuote(escapeMarker)}; exit 68; }`,
       `cd -P -- "$parent" || { printf %s ${shellQuote(missingMarker)}; exit 66; }`,
       "parent_real=$(pwd -P)",
-      `case "$parent_real" in "$root"|"$root"/*) ;; *) printf %s ${shellQuote(escapeMarker)}; exit 67 ;; esac`,
+      `case "$parent_real" in "$root"|"\${root%/}/"*) ;; *) printf %s ${shellQuote(escapeMarker)}; exit 67 ;; esac`,
       'opengeni_target_matches() { test -f "$target" && test ! -L "$target" || return 1; bytes=$(wc -c <"$target" | tr -d " \\n") || return 1; test "$bytes" = ' +
         shellQuote(String(req.sizeBytes)) +
         ' || return 1; digest=$(opengeni_sha256_file "$target") || return 1; test "$digest" = ' +
@@ -1837,7 +1837,7 @@ export class SandboxChannelAService {
       'exec 5<"$file" || exit 66',
       "root=$(pwd -P) || exit 66",
       'target=$(opengeni_realpath_existing "$file") || exit 66',
-      'case "$target" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
+      'case "$target" in "$root"|"${root%/}/"*) ;; *) exit 67 ;; esac',
       'test ! -L "$file" && test -f "$file" || exit 66',
       "opened3_identity=$(opengeni_fd_identity 3) || exit 66",
       "opened4_identity=$(opengeni_fd_identity 4) || exit 66",
@@ -1879,7 +1879,7 @@ export class SandboxChannelAService {
       '    exec 5<"$file" || exit 66',
       "    root=$(pwd -P) || exit 66",
       '    target_path=$(opengeni_realpath_existing "$file") || exit 66',
-      '    case "$target_path" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
+      '    case "$target_path" in "$root"|"${root%/}/"*) ;; *) exit 67 ;; esac',
       '    test ! -L "$file" && test -f "$file" || exit 66',
       "    opened3_identity=$(opengeni_fd_identity 3) || exit 66",
       "    opened4_identity=$(opengeni_fd_identity 4) || exit 66",
@@ -2953,7 +2953,7 @@ export class SandboxChannelAService {
         `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
         rejectLink,
         `target=$(opengeni_realpath_existing ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-        `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+        `case "$target" in "$root"|"\${root%/}/"*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
         `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
         `cd -P -- "$target"`,
         `printf ${shellQuote(successPrefix)}`,

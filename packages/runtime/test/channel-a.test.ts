@@ -24,6 +24,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -322,6 +323,41 @@ function framedConfinedOutput(command: string, payload = "", status = 0, prelude
 }
 
 describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
+  test("a filesystem-root workspace permits real child file operations", async () => {
+    const directory = realpathSync(mkdtempSync(join(tmpdir(), "opengeni-root-workspace-")));
+    temporaryRoots.push(directory);
+    const relative = directory.slice(1);
+    const session = makeModalLikeExecOnlySession("/").session;
+    const svc = new SandboxChannelAService({ session, workspaceRoot: "/" });
+    const path = `${relative}/document.txt`;
+    await svc.fsWrite({
+      path,
+      content: "root workspace proof",
+      encoding: "utf8",
+      overwrite: false,
+      createParents: false,
+    });
+    expect(readFileSync(join(directory, "document.txt"), "utf8")).toBe("root workspace proof");
+    expect((await svc.fsRead({ path, encoding: "utf8", maxBytes: 1024 })).content).toBe(
+      "root workspace proof",
+    );
+    const listing = await svc.fsList({
+      path: relative,
+      depth: 1,
+      maxEntries: 10,
+      includeHidden: true,
+    });
+    expect(listing.root.children?.some((entry) => entry.name === "document.txt")).toBe(true);
+    await svc.fsMove({
+      path,
+      newPath: `${relative}/moved.txt`,
+      overwrite: false,
+      createParents: false,
+    });
+    await svc.fsDelete({ path: `${relative}/moved.txt`, recursive: false });
+    expect(existsSync(join(directory, "moved.txt"))).toBe(false);
+  });
+
   test("write then read-back round-trips text", async () => {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });
