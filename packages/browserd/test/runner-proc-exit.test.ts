@@ -68,7 +68,17 @@ const unrelated = spawn(join(root, "unrelated-profile"));
 try {
   if (code === "ESRCH") {
     await runner.terminate();
-    assert.notEqual(await owned.exited, 0);
+    let exitTimer;
+    try {
+      assert.notEqual(await Promise.race([
+        owned.exited,
+        new Promise((_, reject) => {
+          exitTimer = setTimeout(() => reject(new Error("owned process did not exit")), 3_000);
+        }),
+      ]), 0);
+    } finally {
+      clearTimeout(exitTimer);
+    }
     assert.throws(() => process.kill(owned.pid, 0));
     process.kill(unrelated.pid, 0);
     console.log("owned stopped; unrelated alive");
