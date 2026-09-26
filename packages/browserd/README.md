@@ -18,6 +18,19 @@ before dispatch; restart settles a prepared operation as failed and a dispatched
 operation as `outcome_unknown`, without replaying either command. Session state is
 retained for restore unless its lifecycle owner explicitly ends and removes it.
 
+A batch is not a transaction. If an action completes and a later action has a
+definite failure, its receipt remains `outcome_unknown` and reports the completed
+action count and later error code; this is not evidence of controller loss.
+Re-observe the target before continuing, and do not replay the batch. A definite
+failure on the first action still returns `failed` with its original error code.
+
+For custom listboxes, `press` with a locator explicitly focuses that element
+before sending the key. After opening a menu, omit the locator to navigate its
+existing focus within the same fenced target, inspect the intended focused
+option, then confirm. Re-targeting the trigger can reset focus or fail when the
+open menu hides that trigger from the accessibility tree. The `select` action
+requires a native HTML select; an ARIA combobox role alone is not sufficient.
+
 The compiled `opengeni-browserd` placement service exposes the supervisor through
 one versioned HTTP/WebSocket protocol on port 7682. An owner-only file supplies
 the placement admin credential; each session receives independently rotatable

@@ -1,6 +1,8 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { RunRawModelStreamEvent, ToolCallError, Usage } from "@openai/agents-core";
+import { ModalCommandStartPreDispatchUnavailableError } from "../../../packages/runtime/src/sandbox/providers/modal-command-router-wire";
+import { RoutingMutationOutcomeUnknownError } from "../../../packages/runtime/src/sandbox/routing/routing-session";
 import { ModelItem } from "@openai/agents-core/types";
 import {
   withWorkspaceGatewayCredential,
@@ -3550,7 +3552,10 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(establishes).toBe(1);
   });
 
-  test("command-readiness timeout creates at most one sandbox for the turn", async () => {
+  // resumeBoxForTurn owns the single proven fresh-box replacement internally
+  // (see sandbox-resume.test.ts). A readiness timeout that reaches the
+  // provisioner is terminal for the turn and must not start another establish.
+  test("a terminal command-readiness timeout is never re-provisioned by the turn", async () => {
     let establishes = 0;
     let failures = 0;
     const timeout = new SandboxExecReadinessTimeoutError("modal", 60_000, {
@@ -5617,35 +5622,72 @@ describe("transient provider error classifier", () => {
     }
   });
 
-  test("classifies exact Modal TaskExecStart DNS failure as typed same-turn recovery", () => {
-    const details =
-      "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host:443";
-    const clientError = Object.assign(
-      new Error(
-        `/modal.task_command_router.TaskCommandRouter/TaskExecStart UNAVAILABLE: ${details}`,
-      ),
-      {
-        name: "ClientError",
-        path: "/modal.task_command_router.TaskCommandRouter/TaskExecStart",
-        code: 14,
-        details,
-      },
-    );
-    const wrapped = new ToolCallError("Failed to run function tools", clientError);
+  test("server-originated TaskExecStart DNS text never authorizes same-turn recovery", () => {
+    for (const details of [
+      "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host:443",
+      "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host",
+    ]) {
+      const clientError = Object.assign(
+        new Error(
+          `/modal.task_command_router.TaskCommandRouter/TaskExecStart UNAVAILABLE: ${details}`,
+        ),
+        {
+          name: "ClientError",
+          path: "/modal.task_command_router.TaskCommandRouter/TaskExecStart",
+          code: 14,
+          details,
+        },
+      );
+      const wrapped = new ToolCallError("Failed to run function tools", clientError);
 
-    expect(isTransientProviderError(wrapped)).toBe(false);
-    expect(agentRunFailurePayload(wrapped)).toEqual({
-      error:
-        "The managed sandbox command transport was temporarily unreachable before the command started. The same turn will retry after a short delay.",
+      expect(isTransientProviderError(wrapped)).toBe(false);
+      expect(agentRunFailurePayload(wrapped).code).not.toBe("sandbox_command_start_unavailable");
+      expect(
+        providerRecoveryResult({
+          failureCode: "sandbox_command_start_unavailable",
+          attemptNumber: 1,
+        }),
+      ).toEqual({ status: "recovering", continueDelayMs: 2_000 });
+    }
+  });
+
+  test("recovers only a client pre-dispatch failure within a finite retry budget", async () => {
+    const proven = await ModalCommandStartPreDispatchUnavailableError.ensureReady({
+      waitForReady: (_deadline: number, callback: (error: Error) => void) =>
+        callback(new Error("not ready")),
+    } as never).catch((error) => error);
+    expect(proven).toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
+    const wrapped = new ToolCallError("Failed to run function tools", proven);
+    expect(agentRunFailurePayload(wrapped)).toMatchObject({
       code: "sandbox_command_start_unavailable",
       retryable: true,
     });
     expect(
       providerRecoveryResult({
         failureCode: "sandbox_command_start_unavailable",
-        attemptNumber: 1,
+        attemptNumber: MAX_AUTOMATIC_PROVIDER_RECOVERIES + 1,
       }),
-    ).toEqual({ status: "recovering", continueDelayMs: 2_000 });
+    ).toMatchObject({ status: "exhausted" });
+    const ambiguous = new ToolCallError(
+      "Failed to run function tools",
+      Object.assign(new Error("ambiguous start"), { code: 14 }),
+    );
+    expect(agentRunFailurePayload(ambiguous).code).not.toBe("sandbox_command_start_unavailable");
+    const statusTagged = Object.assign(new Error("request rejected", { cause: proven }), {
+      status: 503,
+    });
+    const mixed = new AggregateError([wrapped, ambiguous], "parallel tools failed");
+    expect(agentRunFailurePayload(statusTagged).code).not.toBe("sandbox_command_start_unavailable");
+    expect(agentRunFailurePayload(mixed).code).not.toBe("sandbox_command_start_unavailable");
+    const retained = new RoutingMutationOutcomeUnknownError("execCommand", "release unresolved", {
+      cause: proven,
+      retainedProcess: { id: crypto.randomUUID(), providerSessionId: 7 },
+    });
+    const outcome = agentRunFailurePayload(
+      new ToolCallError("Failed to run function tools", retained),
+    );
+    expect(outcome.code).not.toBe("sandbox_command_start_unavailable");
+    expect(outcome.retryable).not.toBe(true);
   });
 
   test("keeps status-tagged, mixed-sibling, and shutdown Modal failures terminal", () => {

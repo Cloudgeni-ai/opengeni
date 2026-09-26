@@ -94,6 +94,7 @@ import { cn } from "@/lib/utils";
 import { findPickerRow, payerSummaryForModel, type PickerModelRow } from "@/lib/model-policy";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { ScheduledTask, ScheduledTaskRun, Session } from "@/types";
+import type { DefaultModelSelection } from "@opengeni/sdk";
 
 /**
  * Per-card run-history state. Loading, failure, and "loaded and genuinely
@@ -167,6 +168,14 @@ export function SchedulesRoute({
   const navigate = useNavigate();
   const client = context.client;
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
+  // New schedules follow the workspace's resolved default model (saved default,
+  // connected subscription, credits, deployment default) until someone picks a
+  // model, and are then saved without one so each run resolves it afresh.
+  const scheduleModelDefaults = {
+    model: modelCatalog.defaultSelection?.model ?? context.model,
+    reasoningEffort: modelCatalog.defaultSelection?.reasoningEffort ?? context.reasoningEffort,
+    modelFollowsDefault: true,
+  };
   const fleet = useWorkspaceMachines({ pollIntervalMs: MACHINES_COMPOSER_POLL_MS });
   const [list, setList] = useState<ScheduleListSnapshot>(EMPTY_LIST);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -677,8 +686,7 @@ export function SchedulesRoute({
                 taskId={task.id}
                 key={task.id}
                 initialState={formStateFromScheduledTask(task, {
-                  model: context.model,
-                  reasoningEffort: context.reasoningEffort,
+                  ...scheduleModelDefaults,
                   defaultSandboxBackend: context.clientConfig.defaultSandboxBackend,
                   defaultMachineSandboxId,
                 })}
@@ -692,6 +700,7 @@ export function SchedulesRoute({
                 machinesError={fleet.error}
                 defaultSandboxBackend={context.clientConfig.defaultSandboxBackend ?? "modal"}
                 modelRows={modelCatalog.rows}
+                defaultModelSelection={modelCatalog.defaultSelection}
                 modelsLoading={modelCatalog.loading}
                 modelsError={modelCatalog.error}
                 onSubmit={(form) => void saveTask(task, form)}
@@ -741,14 +750,12 @@ export function SchedulesRoute({
             initialState={
               recurringSourceSessionId
                 ? recurringSessionTaskFormState(recurringSourceSessionId, canAttachOpenGeniTool, {
-                    model: context.model,
-                    reasoningEffort: context.reasoningEffort,
+                    ...scheduleModelDefaults,
                     defaultSandboxBackend: context.clientConfig.defaultSandboxBackend,
                     defaultMachineSandboxId,
                   })
                 : newScheduledTaskFormState(canAttachOpenGeniTool, [], {
-                    model: context.model,
-                    reasoningEffort: context.reasoningEffort,
+                    ...scheduleModelDefaults,
                     defaultSandboxBackend: context.clientConfig.defaultSandboxBackend,
                     defaultMachineSandboxId,
                   })
@@ -763,6 +770,7 @@ export function SchedulesRoute({
             machinesError={fleet.error}
             defaultSandboxBackend={context.clientConfig.defaultSandboxBackend ?? "modal"}
             modelRows={modelCatalog.rows}
+            defaultModelSelection={modelCatalog.defaultSelection}
             modelsLoading={modelCatalog.loading}
             modelsError={modelCatalog.error}
             onSubmit={(form) => void createTask(form)}
@@ -1332,6 +1340,8 @@ function ScheduledTaskForm(props: {
   machinesError: Error | null;
   defaultSandboxBackend: NonNullable<ScheduledTask["agentConfig"]["sandboxBackend"]>;
   modelRows: PickerModelRow[];
+  /** Server-resolved default shown while the form follows it. */
+  defaultModelSelection: DefaultModelSelection | null;
   modelsLoading: boolean;
   modelsError: string | null;
   onSubmit: (form: ScheduledTaskFormState) => void;
@@ -1361,6 +1371,9 @@ function ScheduledTaskForm(props: {
       selectedIds,
     },
     context.workspaceCapabilityCatalog,
+    context.accessContext === null
+      ? null
+      : hasWorkspacePermission(context.accessContext, props.workspaceId, "connections:read"),
     connectionAccountChoices(props.initialState.connectionAccounts ?? []),
   );
   const [learningOpen, setLearningOpen] = useState(false);
@@ -1451,7 +1464,22 @@ function ScheduledTaskForm(props: {
         : "Continue an existing chat";
   const modelLabel = props.modelsLoading
     ? "Loading model"
-    : (selectedModel?.label ?? form.model ?? "Default model");
+    : `${selectedModel?.label ?? form.model ?? "Default model"}${form.modelFollowsDefault ? " (default)" : ""}`;
+  const followedDefault = form.modelFollowsDefault ? props.defaultModelSelection : null;
+  useEffect(() => {
+    if (!followedDefault) return;
+    setForm((current) =>
+      current.modelFollowsDefault &&
+      (current.model !== followedDefault.model ||
+        current.reasoningEffort !== followedDefault.reasoningEffort)
+        ? {
+            ...current,
+            model: followedDefault.model,
+            reasoningEffort: followedDefault.reasoningEffort,
+          }
+        : current,
+    );
+  }, [followedDefault]);
   const billingLabel = selectedModel
     ? payerSummaryForModel(selectedModel.catalog)
     : "Payment source unavailable";
@@ -1509,8 +1537,12 @@ function ScheduledTaskForm(props: {
             disabled={props.busy}
             loading={props.modelsLoading}
             error={props.modelsError}
-            onModelChange={(model) => update("model", model)}
-            onEffortChange={(effort) => update("reasoningEffort", effort)}
+            onModelChange={(model) =>
+              setForm((current) => ({ ...current, model, modelFollowsDefault: false }))
+            }
+            onEffortChange={(reasoningEffort) =>
+              setForm((current) => ({ ...current, reasoningEffort, modelFollowsDefault: false }))
+            }
             onLatencyModeChange={() => {}}
           />
         </div>
@@ -1738,13 +1770,15 @@ function ScheduledTaskForm(props: {
           <Notice
             tone="failed"
             action={
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => void connectionAccounts.refresh()}
-              >
-                Retry
-              </Button>
+              connectionAccounts.accessDenied ? undefined : (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => void connectionAccounts.refresh()}
+                >
+                  Retry
+                </Button>
+              )
             }
           >
             {connectionAccounts.error}

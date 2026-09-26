@@ -940,6 +940,64 @@ describe("BrowserSession React resources", () => {
 });
 
 describe("BrowserSession frame stream", () => {
+  test("detaches media while the page is hidden and reconnects on return", async () => {
+    const originalVisibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    let visibility: DocumentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    const sockets: FakeBrowserSocket[] = [];
+    let attachCalls = 0;
+    const client = fakeClient({
+      attachBrowserSession: async (_workspaceId, _browserSessionId, request) => {
+        attachCalls += 1;
+        return attachment(request.targetId);
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useBrowserFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          browserSessionId: BROWSER_SESSION_ID,
+          targetId: "target-1",
+          webSocketFactory: (url, protocols) => {
+            const socket = new FakeBrowserSocket(url, protocols);
+            sockets.push(socket);
+            return socket as unknown as BrowserFrameWebSocket;
+          },
+        }),
+      undefined,
+    );
+    try {
+      await flush(10);
+      expect(attachCalls).toBe(1);
+      expect(sockets).toHaveLength(1);
+
+      visibility = "hidden";
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+      await flush(2_050);
+      expect(sockets[0]?.closed).toBe(true);
+      expect(hook.result.current.state).toBe("idle");
+      expect(attachCalls).toBe(1);
+
+      visibility = "visible";
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+      await flush(10);
+      expect(attachCalls).toBe(2);
+      expect(sockets).toHaveLength(2);
+      expect(sockets[1]?.closed).toBe(false);
+    } finally {
+      await hook.unmount();
+      if (originalVisibility) {
+        Object.defineProperty(document, "visibilityState", originalVisibility);
+      } else {
+        Reflect.deleteProperty(document, "visibilityState");
+      }
+    }
+  });
+
   test("keeps grants in protocols, accepts latest frames, and clears on target switch", async () => {
     const sockets: FakeBrowserSocket[] = [];
     const attachCalls: string[] = [];
@@ -1595,7 +1653,7 @@ describe("BrowserViewer", () => {
     await rendered.unmount();
   });
 
-  test("wakes a selected suspended browser before touching its controller", async () => {
+  test("keeps a selected suspended browser asleep until explicitly opened", async () => {
     const suspended: BrowserSession = {
       ...browserSession(),
       lifecycle: "suspended",
@@ -1640,6 +1698,15 @@ describe("BrowserViewer", () => {
     );
     await flush(40);
 
+    expect(sequence).toEqual([]);
+    expect(rendered.container.textContent).toContain("Browser is sleeping");
+    const open = [...rendered.container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Open browser",
+    );
+    expect(open).toBeDefined();
+    await actRun(() => open!.click());
+    await flush(40);
+
     expect(sequence[0]).toBe("resume");
     expect(sequence).toContain("targets");
     expect(sequence.indexOf("targets")).toBeGreaterThan(sequence.indexOf("resume"));
@@ -1678,6 +1745,14 @@ describe("BrowserViewer", () => {
         }
       />,
     );
+    await flush(30);
+
+    expect(operationIds).toEqual([]);
+    const open = [...rendered.container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Open browser",
+    );
+    expect(open).toBeDefined();
+    await actRun(() => open!.click());
     await flush(30);
 
     expect(rendered.container.textContent).toContain("Browser could not reopen");

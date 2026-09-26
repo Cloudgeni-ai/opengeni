@@ -35,7 +35,12 @@ export async function selectGitHubConnectAccount(
       {
         openPopup(url) {
           popup.location.replace(url);
-          return { close };
+          return {
+            close,
+            get closed() {
+              return popup.closed;
+            },
+          };
         },
         redirect() {
           throw new Error("GitHub selection requires its reserved popup");

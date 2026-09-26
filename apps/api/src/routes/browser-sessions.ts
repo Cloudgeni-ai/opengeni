@@ -93,6 +93,8 @@ import {
   dispatchExternalAuth,
   dispatchProtectedAuthFill,
   failBrowserSessionOperation,
+  failPreparedBrowserSessionEnd,
+  failPreparedBrowserSessionSuspend,
   failBrowserSessionResume,
   failBrowserSessionResumePreparation,
   failBrowserSessionSuspension,
@@ -228,6 +230,7 @@ import {
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 import { sanitizeFilename } from "./files";
+import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
 const LIGHTPANDA_DRIVER_ID = "opengeni.lightpanda.cdp.v1";
@@ -2119,6 +2122,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       const request = await parseJsonBody(context, BrowserSessionLifecycleRequest);
       const startedAtMs = performance.now();
       const origin = requestOrigin(context, deps.settings);
+      let preparedForDispatch = false;
       try {
         const before = await getBrowserSessionControlRecord(deps.db, {
           accountId: grant.accountId,
@@ -2169,6 +2173,8 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           observeLifecycleResult(deps.observability, startedAtMs, parsed);
           return context.json(parsed, 200);
         }
+
+        preparedForDispatch = true;
 
         const record = await getBrowserSessionControlRecord(deps.db, {
           accountId: grant.accountId,
@@ -2331,6 +2337,15 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         observeLifecycleResult(deps.observability, startedAtMs, parsed);
         return context.json(parsed, 200);
       } catch (error) {
+        if (preparedForDispatch) {
+          await failPreparedBrowserSessionSuspend(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+            operationId: request.operationId,
+            error: interactionFailure(error),
+          });
+        }
         throw browserRouteError(error);
       }
     },
@@ -2594,6 +2609,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       const request = await parseJsonBody(context, BrowserSessionLifecycleRequest);
       const startedAtMs = performance.now();
       const origin = requestOrigin(context, deps.settings);
+      let endPreparation: {
+        restoreLifecycle: BrowserSessionValue["lifecycle"];
+        restoreFailureCode: string | null;
+        expectedControllerGeneration: string | null;
+      } | null = null;
       try {
         const before = await getBrowserSessionControlRecord(deps.db, {
           accountId: grant.accountId,
@@ -2608,6 +2628,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           browserSessionId,
           operationId: request.operationId,
           actorSubjectId: grant.subjectId,
+          expectedLifecycle: before.session.lifecycle,
+          expectedFailureCode: before.session.failureCode,
+          expectedControllerGeneration: before.session.controller?.controllerGeneration ?? null,
         });
         if (isTerminalOperation(prepared.operation.state)) {
           if (prepared.operation.state === "completed") {
@@ -2622,6 +2645,13 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           const parsed = BrowserSessionMutationResponse.parse(prepared);
           observeLifecycleResult(deps.observability, startedAtMs, parsed);
           return context.json(parsed, 200);
+        }
+        if (before.session.lifecycle !== "ending") {
+          endPreparation = {
+            restoreLifecycle: before.session.lifecycle,
+            restoreFailureCode: before.session.failureCode,
+            expectedControllerGeneration: before.session.controller?.controllerGeneration ?? null,
+          };
         }
 
         const record = await getBrowserSessionControlRecord(deps.db, {
@@ -2716,6 +2746,16 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         observeLifecycleResult(deps.observability, startedAtMs, parsed);
         return context.json(parsed, 200);
       } catch (error) {
+        if (endPreparation) {
+          await failPreparedBrowserSessionEnd(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+            operationId: request.operationId,
+            ...endPreparation,
+            error: interactionFailure(error),
+          });
+        }
         throw browserRouteError(error);
       }
     },
@@ -4105,6 +4145,7 @@ async function settleBrowserSessionSuspensionCaptureFailure(
   return await failBrowserSessionSuspension(deps.db, {
     ...input,
     ...(outcomeUnknown ? { state: "outcome_unknown" as const } : {}),
+    missingControllerSession: error.status === 404 && isMissingBrowserControllerSession(error),
     error: error.error,
   });
 }
@@ -4281,6 +4322,7 @@ export function browserScreenshotResponse(
       "cache-control": "no-store",
       "content-type": frame.mediaType,
       "x-opengeni-browser-frame": frame.metadataHeader,
+      ...USER_CONTENT_SECURITY_HEADERS,
     },
   });
 }

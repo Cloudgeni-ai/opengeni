@@ -53,6 +53,7 @@ const InteractiveContext = createContext<{
   streaming?: boolean | undefined;
   render?: (block: MarkdownInteractiveBlock) => ReactNode;
   renderImage?: (image: { src: string; alt: string }) => ReactNode;
+  suppressImages?: boolean;
 }>({ source: "" });
 
 export type MarkdownProps = {
@@ -61,6 +62,8 @@ export type MarkdownProps = {
   /** Reveals a bounded source excerpt; closing Find retains it until explicit restore. */
   searchTarget?: TimelineSearchTarget | null | undefined;
   renderImage?: ((image: { src: string; alt: string }) => ReactNode) | undefined;
+  /** Show alt text without loading image URLs (e.g. in search previews). */
+  suppressImages?: boolean | undefined;
   /** Host opt-in for assistant-authored interactive fences. */
   renderInteractiveBlock?: ((block: MarkdownInteractiveBlock) => ReactNode) | undefined;
   children: string;
@@ -399,7 +402,9 @@ export function retainedImageId(src: string): string | null {
   );
 }
 function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
-  const { renderImage } = useContext(InteractiveContext);
+  const { renderImage, suppressImages } = useContext(InteractiveContext);
+  if (suppressImages)
+    return <span data-og-image-placeholder="">{alt || "Image"} (preview unavailable)</span>;
   if (!src) return <span>{alt ?? "Image unavailable"}</span>;
   if (retainedImageId(src))
     return renderImage ? (
@@ -592,6 +597,7 @@ function MarkdownImpl({
   onSandboxFile,
   renderInteractiveBlock,
   renderImage,
+  suppressImages,
 }: MarkdownProps) {
   // Tip-ink engine for THIS body: created on the first streaming render, kept
   // through a short linger after the stream ends (so the last age window can
@@ -692,8 +698,9 @@ function MarkdownImpl({
       streaming,
       ...(renderInteractiveBlock ? { render: renderInteractiveBlock } : {}),
       ...(renderImage ? { renderImage } : {}),
+      ...(suppressImages ? { suppressImages } : {}),
     }),
-    [children, streaming, renderInteractiveBlock, renderImage],
+    [children, streaming, renderInteractiveBlock, renderImage, suppressImages],
   );
 
   // `min-w-0` lets the prose shrink inside flex parents (message bubbles) so

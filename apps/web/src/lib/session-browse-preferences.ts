@@ -14,6 +14,20 @@ export const DEFAULT_SESSION_BROWSE_PREFERENCES: SessionBrowsePreferences = {
   showEmptyGroups: false,
 };
 
+/**
+ * True only when the view differs from the default. The default view must not
+ * look filtered: a new person with no sessions sees the real empty state, not
+ * "No sessions match this view".
+ */
+export function sessionBrowsePreferencesCustomized(value: SessionBrowsePreferences): boolean {
+  return (
+    value.groupBy !== DEFAULT_SESSION_BROWSE_PREFERENCES.groupBy ||
+    value.sortBy !== DEFAULT_SESSION_BROWSE_PREFERENCES.sortBy ||
+    value.status !== DEFAULT_SESSION_BROWSE_PREFERENCES.status ||
+    value.showEmptyGroups !== DEFAULT_SESSION_BROWSE_PREFERENCES.showEmptyGroups
+  );
+}
+
 const SESSION_BROWSE_PREFERENCE_VERSION = 1;
 const DEFAULT_SESSION_BROWSE_GROUP_BY = DEFAULT_SESSION_BROWSE_PREFERENCES.groupBy;
 

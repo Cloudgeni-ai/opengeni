@@ -334,6 +334,7 @@ export type PresentationProjectionEditorProps = Omit<
 
 export type PresentationProjectionArtifactSurfaceProps = PresentationProjectionEditorProps & {
   title?: string | undefined;
+  showHeader?: boolean | undefined;
   subtitle?: ReactNode | undefined;
   actions?: ReactNode | undefined;
   busy?: boolean | undefined;
@@ -360,6 +361,7 @@ export type PresentationEditorProps = {
 
 export type PresentationArtifactSurfaceProps = PresentationEditorProps & {
   title?: string | undefined;
+  showHeader?: boolean | undefined;
   subtitle?: ReactNode | undefined;
   actions?: ReactNode | undefined;
   busy?: boolean | undefined;
@@ -1819,6 +1821,7 @@ function PresentationEditorCore({
 export function PresentationArtifactSurface({
   presentation,
   title = "Presentation",
+  showHeader,
   subtitle,
   actions,
   busy,
@@ -1830,6 +1833,7 @@ export function PresentationArtifactSurface({
     <ArtifactSurface
       modality="presentation"
       title={title}
+      showHeader={showHeader}
       subtitle={subtitle ?? `${count} slide${count === 1 ? "" : "s"}`}
       actions={actions}
       busy={busy}
@@ -1844,6 +1848,7 @@ export function PresentationArtifactSurface({
 export function PresentationProjectionArtifactSurface({
   projection,
   title = "Presentation",
+  showHeader,
   subtitle,
   actions,
   busy,
@@ -1855,6 +1860,7 @@ export function PresentationProjectionArtifactSurface({
     <ArtifactSurface
       modality="presentation"
       title={title}
+      showHeader={showHeader}
       subtitle={subtitle ?? `${count} slide${count === 1 ? "" : "s"}`}
       actions={actions}
       busy={busy}

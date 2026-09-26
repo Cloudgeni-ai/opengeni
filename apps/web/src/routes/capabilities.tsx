@@ -1,8 +1,10 @@
 import type { SkillSummary } from "@opengeni/sdk";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
 import { ConnectionCatalog, McpConnectionCard } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
 import { ConnectionLogo } from "@opengeni/react/connect";
+import { ConnectionAccessNotice } from "@/components/capabilities/connection-access-notice";
 import {
   catalogServiceIdentity,
   mergeConnectionServices,
@@ -74,6 +76,7 @@ import {
 import { PageHeader } from "@/components/common";
 import { PrReviewSetupCard } from "@/components/capabilities/pr-review-setup-card";
 import { Button } from "@/components/ui/button";
+import { Notice } from "@/components/ui/notice";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
 import {
@@ -96,7 +99,10 @@ import {
   type ConnectionHealth,
   type SheetSelection,
 } from "@/lib/capabilities";
-import { mcpOAuthCallbackFailureMessage } from "@/lib/mcp-oauth";
+import {
+  mcpOAuthCallbackFailureMessage,
+  oauthCallbackReasonMessage,
+} from "@/lib/oauth-callback-messages";
 import {
   personalGitHubOAuthFailureMessage,
   personalGitHubOAuthReturn,
@@ -115,6 +121,8 @@ const CustomApiSetupDialog = lazy(async () => {
 
 import {
   catalogStatusForChip,
+  connectionAccessChip,
+  connectionAccessModel,
   type IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
 
@@ -127,7 +135,19 @@ import type {
   SkillUninstallPreview,
 } from "@/types";
 
+// Served from this chunk so `/integrations` adds no route chunk of its own.
+export { IntegrationsReturnRoute } from "@/routes/capabilities-legacy-redirect";
+
 const PAGE_SIZE = 48;
+
+/** Keep the OAuth-return connection read alive even when the catalog read fails. */
+export function fetchOAuthReturnRows(
+  client: Pick<OpenGeniBrowserClient, "listCapabilities">,
+  workspaceId: string,
+  fetchConnections: () => Promise<ConnectionMetadata[] | null>,
+) {
+  return Promise.all([client.listCapabilities(workspaceId), fetchConnections()]);
+}
 
 export function canManageApiIntegrations(
   accessContext: AccessContext | null,
@@ -168,8 +188,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     setItems,
     connections,
     connectionsLoadFailed,
+    connectionsAccessDenied,
     replaceConnection,
-    adoptConnections,
+    fetchConnections,
     apiIntegrationDefinitions,
     apiIntegrationInstances,
     socialConnections,
@@ -226,6 +247,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     [catalogActionTarget, searchingAll, activeTab],
   );
   const [sheetError, setSheetError] = useState<string | null>(null);
+  // A callback outcome that names no catalog item (for example a stale link
+  // forwarded from `/integrations`) stays on the page until dismissed, so the
+  // explanation and the way to retry don't vanish with a toast.
+  const [callbackNotice, setCallbackNotice] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   // Which integration's detail sheet is open (one sheet, one open id).
   const [openIntegration, setOpenIntegration] = useState<string | null>(() => {
@@ -299,6 +324,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     [client],
   );
   const connectionsLoaded = connections !== null;
+  const connectionsRetryable = connectionsLoadFailed && !connectionsAccessDenied;
   const canManageApiIntegrationInstances = canManageApiIntegrations(
     context.accessContext,
     workspaceId,
@@ -326,7 +352,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     workspaceId,
     connections,
     connectionsLoaded,
-    connectionsLoadFailed,
+    connectionsLoadFailed: connectionsRetryable,
     refresh,
     replaceConnection,
     definitions: apiIntegrationDefinitions,
@@ -338,7 +364,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     workspaceId,
     connections,
     connectionsLoaded,
-    connectionsLoadFailed,
+    connectionsLoadFailed: connectionsRetryable,
     refresh,
     replaceConnection,
   });
@@ -380,15 +406,20 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     refreshRevision: catalogData.revision,
   });
   const integrations = [
-    slack,
+    { ...slack, model: connectionAccessModel(slack.model, connectionsAccessDenied) },
     github,
-    googleDrive,
-    atlassian,
+    { ...googleDrive, model: connectionAccessModel(googleDrive.model, connectionsAccessDenied) },
+    { ...atlassian, model: connectionAccessModel(atlassian.model, connectionsAccessDenied) },
     outlookMail,
     outlookCalendar,
     outlookContacts,
     oneDrive,
   ];
+  const connectorChip = (item: CapabilityCatalogItem) =>
+    connectionAccessChip(
+      capabilityStateChip(item, connectionHealth(item, connections ?? [], connectionsLoaded)),
+      connectionsAccessDenied,
+    );
   const connectionServices = mergeConnectionServices([
     ...integrations.map(({ model }) => ({
       id: model.id,
@@ -445,13 +476,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             catalogServiceIdentity(item.id, item.name, item.providerDomain).id === "slack"
               ? "Let OpenGeni read and send Slack messages as you."
               : (item.description ?? undefined),
-          status: capabilityStateChip(
-            item,
-            connectionHealth(item, connections ?? [], connectionsLoaded),
-          ).label,
-          state: catalogStatusForChip(
-            capabilityStateChip(item, connectionHealth(item, connections ?? [], connectionsLoaded)),
-          ),
+          status: connectorChip(item).label,
+          state: catalogStatusForChip(connectorChip(item)),
           connected: item.enabled,
           onOpen: () => openItem(item),
         },
@@ -533,11 +559,15 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       })()
     : [];
   const canManageSocial = canManageSlackReactionSummon(context.accessContext, workspaceId);
+  const canReadConnections =
+    context.accessContext === null
+      ? null
+      : hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
 
   useEffect(() => {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId]);
+  }, [client, workspaceId, canReadConnections]);
 
   const fikenOAuthHandled = useRef(false);
   useEffect(() => {
@@ -558,7 +588,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             ? "The Fiken authorization was declined."
             : reason === "no_api_company"
               ? "The Fiken account has API access to no company. Order API module access in Fiken first."
-              : "Try again, or connect with a personal API token instead.",
+              : // An expired or reused link is not a reason to switch to a token.
+                (oauthCallbackReasonMessage(reason) ??
+                "Try again, or connect with a personal API token instead."),
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -952,10 +984,11 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     }
     const reason = params.get("reason");
     const item = itemId ? (items.find((candidate) => candidate.id === itemId) ?? null) : null;
+    const message =
+      oauthCallbackReasonMessage(reason) ??
+      (reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.");
     if (item) {
-      setSheetError(
-        reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.",
-      );
+      setSheetError(message);
       setSelected({
         id: item.id,
         registry: false,
@@ -963,7 +996,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         snapshot: item,
       });
     } else {
-      toast.error("Connection failed", { description: reason ?? undefined });
+      setCallbackNotice(message);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, items, setQuery]);
@@ -1008,7 +1041,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           snapshot: item,
         });
       } else {
-        toast.error("Connection failed", { description: message });
+        setCallbackNotice(message);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1085,15 +1118,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     try {
       // Resolve the item from a FRESH catalog fetch: a registry item persisted
       // moments before the redirect won't be in the pre-redirect snapshot.
-      const [catalog, conns] = await Promise.all([
-        client.listCapabilities(workspaceId),
-        client.listConnections(workspaceId).catch(() => null),
-      ]);
+      const [catalog, conns] = await fetchOAuthReturnRows(client, workspaceId, fetchConnections);
       freshItems = catalog.items;
       setItems(catalog.items);
-      // Don't clobber previously-loaded connections with null on a failed refetch
-      // (that would flip healthy items to "unverified" until the next reload).
-      if (conns !== null) adoptConnections(conns);
       const item =
         (itemId ? catalog.items.find((candidate) => candidate.id === itemId) : undefined) ?? null;
       const action = oauthResumeAction(item, connectionId);
@@ -1253,6 +1280,42 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           description="Connect your favorite tools and extend OpenGeni's capabilities."
         />
 
+        {(connectionsAccessDenied ||
+          (context.accessContext?.workspaceGrants.some(
+            (grant) => grant.workspaceId === workspaceId,
+          ) &&
+            !hasWorkspacePermission(context.accessContext, workspaceId, "connections:read"))) && (
+          <ConnectionAccessNotice />
+        )}
+
+        {callbackNotice ? (
+          <Notice tone="failed" title="Couldn't finish connecting" className="mt-4">
+            <p role="alert">{callbackNotice}</p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setCallbackNotice(null);
+                  setQuery("");
+                  setActiveTab("connections");
+                }}
+              >
+                Show connections
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => setCallbackNotice(null)}
+              >
+                Dismiss
+              </Button>
+            </div>
+          </Notice>
+        ) : null}
+
         <PluginSearch query={query} onQueryChange={setQuery} scope={activeTab} />
         <CatalogActionContext.Provider value={catalogToolbar}>
           <Tabs
@@ -1316,10 +1379,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                             .map((item) => ({
                               id: item.id,
                               name: item.name,
-                              status: capabilityStateChip(
-                                item,
-                                connectionHealth(item, connections ?? [], connectionsLoaded),
-                              ).label,
+                              status: connectorChip(item).label,
                               logoSrc: logoUrl(item),
                               onOpen: () => openItem(item),
                             })),

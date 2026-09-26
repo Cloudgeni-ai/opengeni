@@ -15,6 +15,8 @@ import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { installModalCommandSession } from "./modal-command-session";
 import { ModalCommandControl } from "./modal-command-control";
+import { ModalCommandStartPreDispatchUnavailableError } from "./modal-command-router-wire";
+import { isRoutingMutationOutcomeUnknownError } from "../routing/routing-session";
 import type { ModalClient } from "modal";
 import { ModalProcessObservationUnavailableError, SandboxConfigError } from "../errors";
 export { ModalProcessObservationUnavailableError } from "../errors";
@@ -207,9 +209,6 @@ const MODAL_EXEC_STDIN_WRITE_PATH =
   "/modal.task_command_router.TaskCommandRouter/TaskExecStdinWrite";
 const MODAL_EXEC_ALREADY_COMPLETED_DETAILS =
   /^Exec has already completed; stdin is no longer accepting writes(?: \(Error code: [A-Z0-9]+\))?$/;
-const MODAL_TASK_EXEC_START_PATH = "/modal.task_command_router.TaskCommandRouter/TaskExecStart";
-const MODAL_TASK_EXEC_START_DNS_RESOLUTION_DETAILS =
-  /^Name resolution failed for target dns:task-[a-z0-9]+\.w\.modal\.host:443$/;
 const MODAL_TASK_EXEC_START_ERROR_MAX_DEPTH = 8;
 const MODAL_TASK_EXEC_START_ERROR_MAX_NODES = 64;
 const MODAL_TASK_EXEC_START_ERROR_MAX_AGGREGATE_ERRORS = 32;
@@ -234,24 +233,13 @@ function hasContradictoryModalHttpStatus(record: Record<string, unknown>): boole
   return values.some((value) => modalHttpStatus(value) !== null);
 }
 
-function isModalTaskExecStartDnsResolutionLeaf(record: Record<string, unknown>): boolean {
-  return (
-    record.name === "ClientError" &&
-    record.path === MODAL_TASK_EXEC_START_PATH &&
-    (record.code === 14 || record.code === "UNAVAILABLE") &&
-    typeof record.details === "string" &&
-    MODAL_TASK_EXEC_START_DNS_RESOLUTION_DETAILS.test(record.details)
-  );
-}
-
 /**
- * Modal exhausted its own retries before failing to resolve the exact command
- * router DNS name, so TaskExecStart never connected and replay is safe. Keep
- * this fail-closed across Agents SDK wrappers: every reachable structural leaf
- * must be that exact ClientError with no HTTP status metadata, and any incomplete
- * or mixed graph is rejected.
+ * Only the native client's pre-dispatch readiness gate proves Start was not
+ * sent. Server-controlled gRPC/SDK status and DNS-looking details prove nothing.
+ * Any retained or outcome-unknown routing boundary vetoes recovery even when
+ * it contains a genuine pre-dispatch error among its causes.
  */
-export function isModalTaskExecStartDnsResolutionError(error: unknown): boolean {
+export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown): boolean {
   const pending: Array<{ depth: number; value: unknown }> = [{ depth: 0, value: error }];
   const seen = new WeakSet<object>();
   let inspected = 0;
@@ -270,7 +258,15 @@ export function isModalTaskExecStartDnsResolutionError(error: unknown): boolean 
     let nested: unknown[];
     try {
       const record = current.value as Record<string, unknown>;
+      if (isRoutingMutationOutcomeUnknownError(current.value)) return false;
       if (hasContradictoryModalHttpStatus(record)) return false;
+
+      // This instance is created only by the client's readiness gate before
+      // Start dispatch; an RPC's own status or details never enters this path.
+      if (current.value instanceof ModalCommandStartPreDispatchUnavailableError) {
+        matchingLeaves += 1;
+        continue;
+      }
 
       nested = [];
       for (const key of ["cause", "error"] as const) {
@@ -290,11 +286,7 @@ export function isModalTaskExecStartDnsResolutionError(error: unknown): boolean 
         nested.push(...errors);
       }
 
-      if (nested.length === 0) {
-        if (!isModalTaskExecStartDnsResolutionLeaf(record)) return false;
-        matchingLeaves += 1;
-        continue;
-      }
+      if (nested.length === 0) return false;
     } catch {
       return false;
     }

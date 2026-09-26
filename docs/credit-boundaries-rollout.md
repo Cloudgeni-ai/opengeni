@@ -73,6 +73,16 @@ person proof, so monitor grants and abuse before scaling the offer.
    revision to be published; pending or rejected review drafts are not charged.
    Then expand gradually using operator review.
 
+   If paid Knowledge embedding is turned back to `usage_only` (or `shadow`), an
+   unfinished generation that already froze `credits` keeps its completed batches
+   and tariff, but defers further embedding, chunk appends, usage and debits.
+   Source and keyword access remain available. The existing retry backoff
+   continues until paid embedding is restored, at which point the generation
+   resumes using its original rate (even if the configured rate has changed).
+   Completing it under a different billing policy requires explicit reconciliation;
+   the rollback switch does not silently reprice it. Generations frozen as
+   `usage_only` or `shadow` remain on their original policy.
+
 Do not treat a `shadow` estimate as a debit or a provider bill. Leave quotas
 independent of tariff: an exhausted monthly chunk cap is not `awaiting_funding`.
 On any billing mismatch, set the affected resource mode back to `usage_only` and

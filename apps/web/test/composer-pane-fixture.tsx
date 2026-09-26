@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { useState, type ReactNode } from "react";
 import { NewSessionRealtimeControl } from "@opengeni/react/realtime";
 import { ComposerMobilePlus } from "../src/components/composer-mobile-plus";
+import { NewSessionDraftSyncNotice } from "../src/components/new-session-draft-sync-notice";
 import { ModelPicker } from "../src/components/pickers";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import {
@@ -16,6 +17,8 @@ import {
 import "../src/styles.css";
 
 const newSession = new URLSearchParams(location.search).has("new-session");
+const sendingPreview = new URLSearchParams(location.search).has("sending");
+const attachmentPreview = new URLSearchParams(location.search).has("attachment");
 
 function PickerFixture({ leading, label }: { leading?: ReactNode; label: string }) {
   return (
@@ -47,13 +50,47 @@ const voiceModel = {
 
 function Fixture() {
   const [settings, setSettings] = useState({});
+  const [message, setMessage] = useState(
+    newSession ? "Can you help me integrate an AI chat in the analytics dashboard?" : "",
+  );
+  const [sent, setSent] = useState(false);
   return (
     <TooltipProvider>
-      <main style={{ width: 448, margin: newSession ? "30vh auto 0" : 24 }}>
+      <main
+        style={{ width: "min(448px, calc(100vw - 32px))", margin: newSession ? "30vh auto 0" : 24 }}
+      >
         <ChatComposer
           responsiveBasis="container"
-          composer={idleComposer()}
-          attachments={emptyAttachments()}
+          composer={idleComposer({
+            value: message,
+            setValue: setMessage,
+            hasDraftContent: () => message.length > 0,
+            sending: sendingPreview,
+            canSend: newSession && !sendingPreview && message.trim().length > 0,
+            // Preview-only delivery: exercise the production composer affordance
+            // without creating a session in the fixture.
+            send: async () => {
+              setSent(true);
+              return true;
+            },
+          })}
+          disabled={sendingPreview}
+          attachments={
+            attachmentPreview
+              ? {
+                  ...emptyAttachments(),
+                  attachments: [
+                    {
+                      id: "fixture-attachment",
+                      name: "dashboard-spec.pdf",
+                      contentType: "application/pdf",
+                      sizeBytes: 2048,
+                      status: "ready",
+                    },
+                  ],
+                }
+              : emptyAttachments()
+          }
           attachButtonClassName="hidden"
           controlsLeading={
             <>
@@ -119,6 +156,10 @@ function Fixture() {
             </>
           }
         />
+        {newSession && new URLSearchParams(location.search).has("sync-conflict") ? (
+          <NewSessionDraftSyncNotice />
+        ) : null}
+        {sent ? <p role="status">Preview only: Send was pressed.</p> : null}
       </main>
     </TooltipProvider>
   );

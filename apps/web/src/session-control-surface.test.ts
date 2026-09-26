@@ -5,6 +5,38 @@ async function source(path: string): Promise<string> {
 }
 
 describe("session control surface architecture", () => {
+  test("all three account-inventory callsites pass the live tri-state read grant", async () => {
+    for (const [path, workspace] of [
+      ["routes/session.tsx", "props.session.workspaceId"],
+      ["routes/sessions-index.tsx", "workspaceId"],
+      ["routes/schedules.tsx", "props.workspaceId"],
+    ] as const) {
+      const route = await source(path);
+      const start = route.indexOf("const connectionAccounts = useConnectionAccounts(");
+      expect(start).toBeGreaterThan(-1);
+      const call = route.slice(start, route.indexOf("\n  );", start));
+      expect(call).toContain("context.accessContext === null");
+      expect(call).toContain("hasWorkspacePermission(");
+      expect(call).toContain("context.accessContext,");
+      expect(call).toContain(workspace);
+      expect(call).toContain('"connections:read"');
+    }
+  });
+
+  test("new-session Send stays available when background draft saving conflicts", async () => {
+    const route = await source("routes/sessions-index.tsx");
+    expect(route).toContain("draftConflict: null,");
+    expect(route).toContain("newSessionDraft.flushForSend(submittedSnapshot)");
+    expect(route).toContain("<NewSessionDraftSyncNotice />");
+    expect(route).toContain("newSessionDraft.isCurrentSignature(visibleSignature)");
+    expect(route).toContain("suspendAutosave: submitting");
+    expect(route).toContain("disabled={newSessionDraft.loading || submitting}");
+    expect(route).toContain("if (!outcomeUnknown) await preserveNewerLocalDraft()");
+    expect(route).not.toContain("newSessionDraft.conflict ||");
+    expect(route).not.toContain("!newSessionDraft.conflict &&");
+    expect(route).not.toContain("newSessionDraft.conflict !== null ||");
+  });
+
   test("new and existing composers use the same popover pattern", async () => {
     const newSession = await source("routes/sessions-index.tsx");
     const existingSession = await source("routes/session.tsx");
@@ -505,6 +537,21 @@ describe("session control surface architecture", () => {
     expect(rail).toContain("workspaceId={workspaceId}");
     expect(rail).toContain("open={searchOpen}");
     expect(rail).toContain("onOpenChange={setSearchOpen}");
+  });
+
+  test("the established-session Variable Set editor stays behind its lazy panel", async () => {
+    // A direct session load must not carry the editor: the "+" menu mounts it
+    // on demand (see test/e2e/session-lazy-panels.browser.e2e.ts).
+    const route = await source("routes/session.tsx");
+    expect(route).toContain('from "@/components/session/session-variable-set-picker-panel"');
+    expect(route).not.toContain('from "@/components/session/session-variable-set-picker"');
+    const panel = await source("components/session/session-variable-set-picker-panel.tsx");
+    expect(panel).toContain('import("@/components/session/session-variable-set-picker")');
+    // Only a type-only import of the implementation module is allowed.
+    expect(panel).not.toMatch(
+      /^import (?!type )[^;]*from "@\/components\/session\/session-variable-set-picker";/m,
+    );
+    expect(panel).toContain(".catch(() => ({ default: SessionVariableSetPickerLoadFailed }))");
   });
 
   test("the retired client-side queue model is gone", async () => {

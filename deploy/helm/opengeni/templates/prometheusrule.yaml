@@ -183,7 +183,7 @@ spec:
             severity: critical
           annotations:
             summary: OpenGeni has a durable recovering session with no active attempt for more than 10 minutes
-            description: Inspect the bounded state label. quiescence_missing requires exact Temporal activity-loss and writer-settlement proof; projection_stale is safe to replay through the exact idempotent quiescence receipt transaction.
+            description: Inspect the bounded state label. quiescence_missing requires exact Temporal activity-loss and writer-settlement proof; projection_stale is safe to replay through the exact idempotent quiescence receipt transaction. A session paused by its own, an ancestor, or its workspace control is not counted as projection_stale until it is resumed.
         - alert: OpenGeniSessionRecoveryMonitorStale
           expr: |
             absent(opengeni_session_recovery_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"}) == 1
@@ -866,6 +866,15 @@ spec:
           annotations:
             summary: OpenGeni live-publish p99 exceeds 500ms (delivery path)
             description: The best-effort NATS live fan-out p99 is above 500ms for 10m — live delivery is degraded (events stay durable and reconcile on stream replay).
+        - alert: OpenGeniNatsSubscriptionTerminated
+          expr: |
+            sum by (kind, recovery) (increase(opengeni_nats_subscription_terminations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: An OpenGeni NATS {{ "{{ $labels.kind }}" }} subscription ended while still held
+            description: The broker ended a live subscription, for example with a permissions violation. SSE consumers fail retryably and replay from Postgres; the auth-callout, Codemode request, and agent-event responders resubscribe with bounded backoff (at most about 31s apart). A counter that keeps rising means resubscribes keep failing; for kind auth_callout every Connected Machine connect is denied until it recovers. Inspect the api/worker "NATS subscription ended" warnings and the NATS server permissions for that account.
         # ── Context / compaction ─────────────────────────────────────────────
         - alert: OpenGeniCompactionNotFiring
           # The control worker projects the latest exact-attempt compaction

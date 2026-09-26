@@ -6,6 +6,7 @@ export type ModelContextInstructionLayerId =
   | "workspace_memory"
   | "skill_catalog"
   | "codemode"
+  | "code_search"
   | "git_bindings"
   | "builtin_skills"
   | "genesis_title"

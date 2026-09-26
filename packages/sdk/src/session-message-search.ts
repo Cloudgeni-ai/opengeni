@@ -37,3 +37,11 @@ export type SessionMessageSearchResponse = {
   /** True only on exhaustion. Concurrent mutations require a fresh traversal. */
   countIsExact: boolean;
 };
+
+/** Exact selected event reference from a search match; no payload fields are read. */
+export type SessionMessagePreviewReference = { eventId: string; sequence: number };
+
+/** A complete visible message, or an explicit over-12,000-UTF-16-unit result. */
+export type SessionMessagePreview =
+  | { status: "available"; text: string }
+  | { status: "unavailable" };

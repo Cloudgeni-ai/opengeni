@@ -15,7 +15,9 @@ use thiserror::Error;
 use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 
-use crate::cli::{CodemodeAction, CodemodeArgs, CodemodeCallArgs, CodemodeListArgs};
+use crate::cli::{
+    CodemodeAction, CodemodeArgs, CodemodeCallArgs, CodemodeListArgs, DocumentIdKind,
+};
 use opengeni_agent_proto::v1::{self, ControlRequest, ExecRequest};
 
 const URL_ENV: &str = "OPENGENI_CODEMODE_URL";
@@ -25,8 +27,8 @@ const TOKEN_FILE_ENV: &str = "OPENGENI_CODEMODE_TOKEN_FILE";
 // packages/codemode/test/native-api-contract.test.ts pins this mirror to contracts.
 const API_CONTRACT_HEADER: &str = "x-opengeni-api-contract";
 const API_CONTRACT_REVISION: &str = "2026-09-plugins-and-skills-v1";
-/// Absolute installed binary path exposed only to an attempt-scoped child that
-/// already carries Codemode authority. This avoids every PATH/runtime guess.
+/// Executable path for the exact running binary, exposed only to an
+/// attempt-scoped child that already carries Codemode authority.
 pub const NATIVE_CLIENT_ENV: &str = "OPENGENI_CODEMODE_NATIVE_CLIENT";
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 64 * 1024;
@@ -41,15 +43,29 @@ pub fn expose_native_client(request: &mut ExecRequest) {
     if !request.env.contains_key(URL_ENV) || !request.env.contains_key(TOKEN_ENV) {
         return;
     }
-    let Ok(executable) = std::env::current_exe() else {
+    let Some(executable) = running_native_client_path() else {
         return;
     };
-    let executable = executable.canonicalize().unwrap_or(executable);
     if let Some(executable) = executable.to_str() {
         request
             .env
             .insert(NATIVE_CLIENT_ENV.to_string(), executable.to_string());
     }
+}
+
+fn running_native_client_path() -> Option<PathBuf> {
+    // Linux reports an unlinked running executable as "/path/agent (deleted)".
+    // A child cannot execute that literal path, and the replacement at
+    // /path/agent may be a different release. The proc link remains bound to
+    // this exact running binary until the agent exits.
+    #[cfg(target_os = "linux")]
+    {
+        let running = PathBuf::from(format!("/proc/{}/exe", std::process::id()));
+        if running.is_file() {
+            return Some(running);
+        }
+    }
+    std::env::current_exe().ok()?.canonicalize().ok()
 }
 
 /// Bind an attempt-scoped Codemode exec to the deployment origin of the exact
@@ -160,6 +176,10 @@ impl CodemodeError {
 /// Run one native Codemode command. Discovery is compact text by default;
 /// `list --json`, `list --full`, and `show` provide explicit JSON output.
 pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
+    if let CodemodeAction::DocumentId { kind, namespace } = &args.action {
+        println!("{}", json!({ "id": document_id(*kind, *namespace) }));
+        return Ok(());
+    }
     if matches!(args.action, CodemodeAction::Doctor) {
         let report = doctor_report();
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -209,8 +229,26 @@ pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
             );
         }
         CodemodeAction::Doctor => unreachable!("doctor returned before client construction"),
+        CodemodeAction::DocumentId { .. } => {
+            unreachable!("ID helper returned before client construction")
+        }
     }
     Ok(())
+}
+
+/// Mirrors openGeni.artifacts.ids.document: uint64 namespace, nonzero random
+/// JS-safe counter, and the modality's canonical object prefix. IDs are names,
+/// not authority; the normal artifact edit fence still applies.
+fn document_id(kind: DocumentIdKind, namespace: u64) -> String {
+    const MAX_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
+    loop {
+        let bytes = *Uuid::new_v4().as_bytes();
+        let counter = u64::from_be_bytes(bytes[8..16].try_into().expect("eight UUID bytes"))
+            & MAX_SAFE_INTEGER;
+        if counter > 0 && counter < MAX_SAFE_INTEGER {
+            return format!("{}/{namespace:016x}{counter:016x}", kind.prefix());
+        }
+    }
 }
 
 impl From<serde_json::Error> for CodemodeError {
@@ -763,6 +801,47 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
 
+    #[test]
+    fn document_ids_preserve_namespace_and_sdk_counter_contract() {
+        for (kind, prefix) in [
+            (DocumentIdKind::Paragraph, "p"),
+            (DocumentIdKind::Table, "dt"),
+            (DocumentIdKind::PageBreak, "pb"),
+            (DocumentIdKind::Section, "sec"),
+            (DocumentIdKind::Header, "hdr"),
+            (DocumentIdKind::Footer, "ftr"),
+            (DocumentIdKind::Comment, "dc"),
+            (DocumentIdKind::TrackedChange, "chg"),
+        ] {
+            for namespace in [0, 1, 9_007_199_254_740_993, u64::MAX] {
+                let mut ids = std::collections::HashSet::new();
+                for _ in 0..100 {
+                    let id = document_id(kind, namespace);
+                    let (actual_prefix, payload) = id.split_once('/').unwrap();
+                    assert_eq!(actual_prefix, prefix);
+                    assert_eq!(payload.len(), 32);
+                    assert_eq!(u64::from_str_radix(&payload[..16], 16).unwrap(), namespace);
+                    let counter = u64::from_str_radix(&payload[16..], 16).unwrap();
+                    assert!((1..((1_u64 << 53) - 1)).contains(&counter));
+                    assert!(ids.insert(id));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn document_id_is_an_offline_operation() {
+        // No client construction, catalog fetch, enrollment or mutation.
+        run(CodemodeArgs {
+            action: CodemodeAction::DocumentId {
+                kind: DocumentIdKind::Paragraph,
+                namespace: u64::MAX,
+            },
+        })
+        .await
+        .unwrap();
+    }
+
     fn catalog(entries: Vec<CatalogEntry>) -> Catalog {
         Catalog {
             attempt_id: "11111111-1111-4111-8111-111111111111".to_string(),
@@ -1201,6 +1280,18 @@ mod tests {
         let executable = ordinary.env.get(NATIVE_CLIENT_ENV).expect("native client");
         assert!(std::path::Path::new(executable).is_absolute());
         assert!(!executable.contains("attempt-secret"));
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(executable, &format!("/proc/{}/exe", std::process::id()));
+            assert!(std::process::Command::new(executable)
+                // Unit tests execute the Rust test harness, which accepts
+                // --list; the production CLI accepts --version instead.
+                .arg("--list")
+                .output()
+                .expect("execute the proc link")
+                .status
+                .success());
+        }
     }
 
     #[test]

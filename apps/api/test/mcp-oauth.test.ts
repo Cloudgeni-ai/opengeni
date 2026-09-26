@@ -327,7 +327,7 @@ describe("MCP OAuth protocol", () => {
       ...depsWithRows(),
       settings: testSettings({
         mcpOauthEnabled: true,
-        mcpOauthTrustedProxyHops: 1,
+        apiTrustedProxyHops: 1,
         publicBaseUrl: "https://api.example.test",
       }),
       db: {

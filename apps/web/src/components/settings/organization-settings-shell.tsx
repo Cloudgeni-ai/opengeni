@@ -20,6 +20,8 @@ import {
   settingsNavItemClass,
 } from "./settings-sidebar";
 import type { OrganizationAdminSection } from "@/lib/organization-admin";
+import { ContentPage } from "@/components/ui/content-layout";
+import { SettingsPageHeader } from "./settings-layout";
 
 type OrganizationSettingsItem = {
   id: OrganizationAdminSection;
@@ -141,20 +143,15 @@ export function OrganizationSettingsShell({
         </nav>
       </SettingsSidebar>
 
-      <main
-        id="organization-settings-content"
-        className="min-h-0 min-w-0 overflow-y-auto overscroll-y-contain px-4 py-5 sm:px-8 lg:px-12 lg:py-10"
-      >
-        <div className="mx-auto max-w-5xl">
-          <header className="border-b border-border pb-5">
-            <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.14em] text-brand">
-              {organizationLabel}
-            </p>
-            <h1 className="text-2xl font-semibold tracking-tight">{copy.title}</h1>
-            <p className="mt-1.5 text-sm text-fg-muted">{copy.description}</p>
-          </header>
-          <div className="py-6">{children}</div>
-        </div>
+      <main id="organization-settings-content" className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <ContentPage width="standard">
+          <SettingsPageHeader
+            title={copy.title}
+            description={copy.description}
+            context={organizationLabel}
+          />
+          <div className="py-7">{children}</div>
+        </ContentPage>
       </main>
     </div>
   );

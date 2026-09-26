@@ -662,6 +662,51 @@ describe("observability", () => {
       expect(JSON.parse(observed[1]!)).not.toHaveProperty(key);
   });
 
+  test("Knowledge indexing logs keep the reviewed class, code, status, and SQLSTATE only", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    const sentinel = "private-knowledge-value";
+    try {
+      const obs = createObservability(
+        { ...settings, observabilityStructuredLogs: true },
+        { component: "worker-control" },
+      );
+      obs.warn("Knowledge indexing batch deferred", {
+        errorClass: "KnowledgeIndexOperationError",
+        errorCode: "knowledge_index_persistence_failed",
+        origin: "db",
+        sqlState: "40001",
+        revisionId: "0ffbda8c-11c6-49dc-b636-b15a58163753",
+        body: sentinel,
+      });
+      obs.warn("Knowledge indexing batch deferred", {
+        errorClass: "KnowledgeIndexOperationError",
+        errorCode: "knowledge_index_embedding_failed",
+        origin: "worker",
+        status: 503,
+        sqlState: sentinel,
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      errorClass: "KnowledgeIndexOperationError",
+      errorCode: "knowledge_index_persistence_failed",
+      origin: "db",
+      sqlState: "40001",
+    });
+    expect(JSON.parse(observed[1]!)).toMatchObject({
+      errorClass: "KnowledgeIndexOperationError",
+      errorCode: "knowledge_index_embedding_failed",
+      origin: "worker",
+      status: 503,
+    });
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("sqlState");
+    expect(observed.join(" ")).not.toContain(sentinel);
+    expect(observed.join(" ")).not.toContain("0ffbda8c-11c6-49dc-b636-b15a58163753");
+  });
+
   test("keeps safe retry context in structured startup logs", () => {
     const observed: string[] = [];
     const originalWarn = console.warn;
@@ -782,6 +827,42 @@ describe("observability", () => {
     });
     expect(JSON.parse(observed[0]!)).not.toHaveProperty("workspaceId");
     expect(JSON.parse(observed[1]!)).not.toHaveProperty("sandboxLeaseKey");
+  });
+
+  test("public structured logs admit web client route patterns, never concrete paths", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.warn("valid", {
+        surface: "web",
+        reason: "chunk_load",
+        clientRoute: "/workspaces/$workspaceId/sessions/$sessionId",
+        clientRevision: "0123456789abcdef0123456789abcdef01234567",
+      });
+      obs.warn("concrete", {
+        clientRoute: "/workspaces/3f2a9c1e-0000-4000-8000-000000000001/sessions",
+        clientRevision: "rev with spaces",
+      });
+      obs.warn("unknown", { clientRoute: "unknown", clientRevision: "dev" });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      message: "valid",
+      surface: "web",
+      reason: "chunk_load",
+      clientRoute: "/workspaces/$workspaceId/sessions/$sessionId",
+      clientRevision: "0123456789abcdef0123456789abcdef01234567",
+    });
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("clientRoute");
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("clientRevision");
+    expect(JSON.parse(observed[2]!)).toMatchObject({
+      clientRoute: "unknown",
+      clientRevision: "dev",
+    });
   });
 
   test("public structured logs retain only grammar-validated request correlation ids", () => {

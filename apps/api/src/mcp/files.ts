@@ -9,6 +9,7 @@ import {
 } from "@opengeni/core";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
+import { userContentSignedGetUrlOptions } from "../http/user-content";
 
 /** Dedicated file MCP surface. The broad `opengeni` server never registers it. */
 export function buildFilesMcpServer(
@@ -63,7 +64,10 @@ export function buildFilesMcpServer(
         if (file.status !== "ready") {
           throw new Error(`file is ${file.status}`);
         }
-        const signed = await deps.objectStorage.createGetUrl({ key: file.objectKey });
+        const signed = await deps.objectStorage.createGetUrl({
+          key: file.objectKey,
+          ...userContentSignedGetUrlOptions(file.contentType, file.filename),
+        });
         // Principal-facing signed URL issuance is a metadata-only audit
         // fact, awaited before the URL leaves the platform. Never the URL/key.
         await recordAuditEvent(deps.db, {

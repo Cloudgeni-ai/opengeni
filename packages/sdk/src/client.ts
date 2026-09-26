@@ -2,6 +2,8 @@ import type { ArtifactCatalogListOptions, ArtifactCatalogListResponse } from "./
 import type {
   SessionMessageSearchRequest,
   SessionMessageSearchResponse,
+  SessionMessagePreview,
+  SessionMessagePreviewReference,
 } from "./session-message-search";
 import type {
   KnowledgeOriginalFileDownload,
@@ -1333,6 +1335,25 @@ export class OpenGeniClient {
         ...(request.limit !== undefined ? { limit: String(request.limit) } : {}),
         ...(request.cursor !== undefined ? { cursor: request.cursor } : {}),
       },
+      options,
+    );
+  }
+
+  /** Read one selected search result's complete visible text when <=12,000
+   * UTF-16 units. Stale, duplicate or non-message references fail with 404.
+   * The response never includes audit payload fields such as modelContext.
+   */
+  async getSessionMessagePreview(
+    workspaceId: string,
+    sessionId: string,
+    reference: SessionMessagePreviewReference,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<SessionMessagePreview> {
+    return this.requestJson<SessionMessagePreview>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/events/${encodeURIComponent(reference.eventId)}/message-preview`,
+      undefined,
+      { sequence: String(reference.sequence) },
       options,
     );
   }
@@ -6367,9 +6388,12 @@ export class OpenGeniClient {
   ): Promise<RetainedScreenshotDownload> {
     const metadata = await this.getSessionRetainedArtifact(workspaceId, sessionId, artifactId);
     if (!metadata.available) return { metadata, bytes: null };
+    const supportedScreenshot =
+      (metadata.kind === "computer_screenshot" && metadata.contentType === "image/png") ||
+      (metadata.kind === "browser_screenshot" &&
+        ["image/png", "image/jpeg", "image/webp"].includes(metadata.contentType));
     if (
-      metadata.kind !== "computer_screenshot" ||
-      metadata.contentType !== "image/png" ||
+      !supportedScreenshot ||
       !metadata.dimensions ||
       metadata.originalBytes <= 0 ||
       metadata.originalBytes > COMPUTER_SCREENSHOT_MAX_BYTES

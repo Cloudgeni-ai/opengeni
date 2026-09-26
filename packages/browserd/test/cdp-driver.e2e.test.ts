@@ -90,6 +90,63 @@ headedE2e(
 );
 
 e2e(
+  "preserves partial batch uncertainty without claiming controller loss or replaying actions",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-partial-");
+    const browserSessionId = randomUUID();
+    const controllerGeneration = `controller-${randomUUID()}`;
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `partial_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    try {
+      const initial = await driver.start(
+        dataUrl(`<!doctype html><title>Partial batch</title>
+        <button onclick="this.textContent = 'Already opened'; document.querySelector('p').textContent = 'Actions 1'">Open menu</button>
+        <p>Actions 0</p>`),
+      );
+      const locator = { kind: "role", role: "button", name: "Open menu", exact: true } as const;
+      const operation = command(initial, {
+        type: "batch",
+        actions: [
+          { type: "click", locator },
+          { type: "click", locator },
+        ],
+      });
+      const receipt = await controller.run(operation);
+      expect(receipt.state).toBe("outcome_unknown");
+      expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
+      expect(receipt.error?.message).toContain("1 action");
+      expect(receipt.error?.message).toContain("locator_not_found");
+      expect(names(await driver.observe(initial.target.id))).toContain("Actions 1");
+      expect(await controller.run(operation)).toEqual(receipt);
+      expect(names(await driver.observe(initial.target.id))).toContain("Actions 1");
+      const firstActionFailure = await controller.run(command(initial, { type: "click", locator }));
+      expect(firstActionFailure.state).toBe("failed");
+      expect(firstActionFailure.error?.code).toBe("locator_not_found");
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+e2e(
   "drives independent Chrome targets through the target-scoped causal controller",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-cdp-");

@@ -11,6 +11,7 @@ import {
   prepareWorkspaceArtifactContent,
   type PreparedWorkspaceArtifactContent,
 } from "./workspace-artifact-content";
+import { userContentSignedGetUrlOptions } from "./http/user-content";
 type Storage = NonNullable<ObjectStorageDependency>;
 export const MAX_SITE_SOURCE_BYTES = 64 * 1024 * 1024;
 
@@ -205,7 +206,13 @@ export async function workspaceArtifactDownloads(
   audience: "sandbox" | "public",
 ) {
   const [html, source] = await Promise.all([
-    storage.createGetUrl({ key: ref.contentKey, audience }),
+    // Site HTML runs publisher scripts; opened directly from storage it would
+    // render outside the console's opaque-origin frame, so it downloads.
+    storage.createGetUrl({
+      key: ref.contentKey,
+      audience,
+      ...userContentSignedGetUrlOptions("text/html", "site.html"),
+    }),
     ref.sourceKey ? storage.createGetUrl({ key: ref.sourceKey, audience }) : null,
   ]);
   return {

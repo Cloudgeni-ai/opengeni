@@ -20,7 +20,7 @@ import {
   deriveOrganizationUserSetupToken,
   organizationUserSetupRequestFingerprint,
 } from "../src/auth/organization-user-setup";
-import { hashManagedAuthPassword } from "../src/auth/managed-auth";
+import { createManagedAuth, hashManagedAuthPassword } from "../src/auth/managed-auth";
 import {
   PublicSetupRateLimiter,
   registerManagedOnboardingRoutes,
@@ -483,4 +483,123 @@ describe("managed organization onboarding", () => {
     expect(unavailable.status).toBe(200);
     expect(await unavailable.json()).toEqual({ state: "unavailable" });
   }, 120_000);
+
+  test("the first verification click signs the new user in once, straight into setup", async () => {
+    if (!shared || !client) return;
+    const sent: Array<{ kind: string; to: string; text: string }> = [];
+    const app = createApp({
+      settings,
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as never,
+      managedEmailTransport: {
+        sender: "OpenGeni <auth@mail.opengeni.ai>",
+        idempotency: { scope: "test-provider-v1:verify-sign-in", retentionSeconds: 86_400 },
+        send: async (message) => {
+          sent.push({ kind: message.kind, to: message.to, text: message.text });
+          return { status: "sent", providerMessageId: `test-${sent.length}` };
+        },
+      },
+    });
+    const email = `verify-signin-${crypto.randomUUID()}@example.test`;
+    const signup = await app.request("/v1/auth/sign-up/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Mary Jackson", email, password: "password1234" }),
+    });
+    expect(signup.status).toBe(200);
+    expect(
+      signup.headers.getSetCookie().some((value) => value.includes("better-auth.session_token=")),
+    ).toBe(false);
+
+    // Follow the exact link the user receives.
+    const verification = sent.find(
+      (message) => message.kind === "email_verification" && message.to === email,
+    );
+    expect(verification).toBeTruthy();
+    const link = new URL(verification!.text.match(/https?:\/\/\S+/u)![0]);
+    expect(link.pathname).toBe("/v1/auth/verify-email");
+    const verificationPath = `${link.pathname}${link.search}`;
+    const verified = await app.request(verificationPath);
+    expect(verified.status).toBe(302);
+    expect(verified.headers.get("location")).toBe("/");
+    const cookie = verified.headers
+      .getSetCookie()
+      .find((value) => value.includes("better-auth.session_token="));
+    expect(cookie).toBeTruthy();
+    const onboarding = await app.request("/v1/auth/organization-onboarding", {
+      headers: { cookie: cookie!.split(";", 1)[0]! },
+    });
+    expect(onboarding.status).toBe(200);
+    expect(await onboarding.json()).toEqual({ state: "required" });
+
+    // A second click (or a mail scanner that already followed the link) only
+    // redirects; the link never mints a second session.
+    const replay = await app.request(verificationPath);
+    expect(replay.status).toBe(302);
+    expect(
+      replay.headers.getSetCookie().some((value) => value.includes("better-auth.session_token=")),
+    ).toBe(false);
+    const [sessions] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from auth_sessions session
+      join auth_users auth_user on auth_user.id = session.user_id
+      where lower(auth_user.email) = lower(${email})`;
+    expect(sessions?.count).toBe(1);
+  }, 120_000);
+
+  test("session-set modes keep verification sign-in inside the isolated browser transaction", () => {
+    const transport = { send: async () => undefined } as never;
+    for (const mode of ["dual", "broker"] as const) {
+      const auth = createManagedAuth(
+        { ...settings, managedAuthSessionSetMode: mode },
+        {} as never,
+        transport,
+      )!;
+      expect(auth.options.emailVerification?.autoSignInAfterVerification).toBe(false);
+    }
+    const legacy = createManagedAuth(settings, {} as never, transport)!;
+    expect(legacy.options.emailVerification?.autoSignInAfterVerification).toBe(true);
+  });
+
+  test("every verification email tells an unsolicited recipient to ignore it", async () => {
+    // The link signs its clicker in, so a recipient who never signed up must
+    // be told not to use it.
+    const sent: Array<{ kind: string; to: string; text: string; html?: string }> = [];
+    const auth = createManagedAuth(settings, {} as never, {
+      sender: "OpenGeni <auth@mail.opengeni.ai>",
+      idempotency: { scope: "test-provider-v1:verify-ignore", retentionSeconds: 86_400 },
+      send: async (message) => {
+        sent.push(message);
+        return { status: "sent", providerMessageId: `test-${sent.length}` };
+      },
+    })!;
+    const user = {
+      id: crypto.randomUUID(),
+      email: "unsolicited@example.test",
+      emailVerified: false,
+      name: "Unsolicited",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await auth.options.emailVerification!.sendVerificationEmail!({
+      user,
+      url: "http://opengeni.test/v1/auth/verify-email?token=signup",
+      token: "signup",
+    });
+    // A repeated sign-up for the same unverified email re-sends verification.
+    await auth.options.emailAndPassword!.onExistingUserSignUp!({ user });
+    expect(sent.map((message) => message.kind)).toEqual([
+      "email_verification",
+      "email_verification",
+    ]);
+    const ignore = "If you did not create an OpenGeni account, ignore this email.";
+    for (const message of sent) {
+      expect(message.to).toBe(user.email);
+      expect(message.text).toContain(ignore);
+      expect(message.html).toContain(ignore);
+      // The link stays the first whitespace-delimited URL in the text body.
+      const link = new URL(message.text.match(/https?:\/\/\S+/u)![0]);
+      expect(link.pathname).toBe("/v1/auth/verify-email");
+    }
+  });
 });

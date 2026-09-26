@@ -2,6 +2,7 @@ import {
   GitHubActionPoliciesResponse,
   GitHubActionPolicyActorState,
   GitHubAppManifestCreate,
+  OrganizationIntegrationDeniedError,
   UpdateGitHubActionPolicyRequest,
   type AccessGrant,
   type GitHubInstallationBindingCandidate,
@@ -32,6 +33,7 @@ import {
   GitHubPublicRepositoryVerificationError,
   githubAppMissingSettings,
   githubOAuthAuthorizeUrl,
+  inspectSignedState,
   organizationAppManifestUrl,
   personalAppManifestUrl,
   readSignedState,
@@ -40,9 +42,10 @@ import {
   type GitHubSignedStatePayload,
   verifySignedState,
 } from "@opengeni/github";
-import type { Context, Hono } from "hono";
+import type { Context, Hono, MiddlewareHandler } from "hono";
 import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   githubAppActionPolicyActor,
   hasPermission,
@@ -72,6 +75,7 @@ import {
   assertPersonalConnectionOwnerPrincipal,
   requireLegacyOAuthActor,
 } from "../connection-ownership";
+import { workspaceIntegrationsPathForUntrusted } from "../integrations/oauth-client";
 import { listPersonalGitHubConnections } from "../integrations/personal-github";
 import {
   integrationCommitGrant,
@@ -82,6 +86,14 @@ import {
   isConsistentGitHubBindingProof,
 } from "../integrations/github-installation-proof";
 import {
+  githubConnectFailureHtml,
+  githubInstallationChooserHtml,
+  githubSetupPendingHtml,
+  githubSetupSuccessHtml,
+  githubSuccessHtml,
+  type GitHubConnectFailure,
+} from "./github-browser-pages";
+import {
   completeGitHubAppConnect,
   isGitHubAppConnectState,
 } from "../integrations/github-app-connect";
@@ -90,8 +102,61 @@ const githubStateCookie = "opengeni_github_state";
 const githubBindingStateMaxAgeSeconds = 10 * 60;
 const legacyInstallationChooserDisabledMessage =
   "The legacy repository-admin GitHub installation chooser is disabled; use the GitHub owner-consent connect flow";
+/**
+ * GitHub routes a browser navigates to (not the JSON API). A page-load link
+ * opened after it expired, GitHub's Cancel button, or a non-owner all land on
+ * one of these, so their failures render a readable page instead of JSON.
+ */
+const GITHUB_BROWSER_ROUTES = [
+  "/v1/workspaces/:workspaceId/github/connect",
+  "/v1/workspaces/:workspaceId/github/installations/select",
+  "/v1/workspaces/:workspaceId/github/installations/:installationId/configure",
+  "/v1/github/app-manifest/callback",
+  "/v1/github/setup",
+  "/v1/github/install/callback",
+  "/v1/github/oauth/callback",
+] as const;
+
+/** An HTTP failure that already knows which browser page explains it. */
+class GitHubBrowserFailure extends HTTPException {
+  constructor(
+    status: 400 | 403,
+    message: string,
+    readonly failure: GitHubConnectFailure,
+  ) {
+    super(status, { message });
+    this.name = "GitHubBrowserFailure";
+  }
+}
+
 export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings, githubStateSecret } = deps;
+  // Registered before the routes so it wraps them. The status code is kept, so
+  // automation still sees the same outcome; only the body becomes a page. Every
+  // failure is rendered, not only HTTP ones: an organization policy denial or an
+  // unexpected fault must not reach the browser as the JSON error envelope.
+  const browserFailurePage: MiddlewareHandler = async (c, next) => {
+    let failure: unknown;
+    let handledStatus: number | undefined;
+    try {
+      await next();
+      if (!c.error) return;
+      failure = c.error;
+      // The app error handler has already answered this failure.
+      handledStatus = c.res.status;
+    } catch (error) {
+      failure = error;
+    }
+    c.res = c.html(
+      githubConnectFailureHtml(
+        githubBrowserFailureKind(failure),
+        githubFailureReturnUrl(deps, c),
+        githubBrowserFailureDetail(failure),
+      ),
+      githubBrowserFailureStatus(failure, handledStatus) as ContentfulStatusCode,
+    );
+  };
+  for (const path of GITHUB_BROWSER_ROUTES) app.use(path, browserFailurePage);
 
   app.get("/v1/workspaces/:workspaceId/github/app", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -580,6 +645,9 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     const code = c.req.query("code");
     const state = c.req.query("state");
+    if (c.req.query("error") === "access_denied") {
+      throw new GitHubBrowserFailure(400, "GitHub authorization was cancelled", "cancelled");
+    }
     if (!code) {
       throw new HTTPException(400, { message: "missing GitHub OAuth code" });
     }
@@ -981,7 +1049,7 @@ function githubAuthorityHttpError(error: unknown): HTTPException {
   }
   if (error instanceof GitHubInstallationAuthorityError) {
     if (error.reason === "authority_denied") {
-      return new HTTPException(403, { message: error.message });
+      return new GitHubBrowserFailure(403, error.message, "not_owner");
     }
     if (error.reason === "installation_missing") {
       return new HTTPException(404, { message: error.message });
@@ -1051,39 +1119,6 @@ function isSecureRequest(c: Context, deps: ApiRouteDeps): boolean {
   );
 }
 
-function githubSuccessHtml(envLines: string[]): string {
-  const envText = envLines.join("\n");
-  const escaped = escapeHtml(envText);
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App Created</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(760px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px;line-height:1.2}p{margin:0 0 18px;color:#d4d4d8}.env-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:22px 0 8px}.env-header h2{margin:0;font-size:13px;line-height:1.2;text-transform:uppercase;letter-spacing:.08em;color:#a1a1aa}pre{white-space:pre-wrap;word-break:break-word;max-height:380px;overflow:auto;background:#09090b;border:1px solid #27272a;border-radius:8px;padding:16px;font-size:13px;line-height:1.5}button{display:inline-flex;align-items:center;justify-content:center;min-height:36px;border-radius:6px;border:1px solid #3f3f46;padding:0 12px;background:#f4f4f5;color:#09090b;font:600 14px system-ui,sans-serif;cursor:pointer}button:disabled{cursor:not-allowed;opacity:.7}</style></head><body><main><h1>GitHub App created</h1><p>Add these values to .env, then restart API and worker.</p><div class="env-header"><h2>Environment variables</h2><button id="copy-env" type="button">Copy env</button></div><pre id="env-lines">${escaped}</pre><script>(()=>{const button=document.getElementById("copy-env");const env=document.getElementById("env-lines");async function copyText(text){if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);return;}const area=document.createElement("textarea");area.value=text;area.setAttribute("readonly","");area.style.position="fixed";area.style.inset="-9999px";document.body.append(area);area.select();document.execCommand("copy");area.remove();}button?.addEventListener("click",async()=>{try{await copyText(env?.textContent||"");button.textContent="Copied";setTimeout(()=>button.textContent="Copy env",1600);}catch{button.textContent="Copy failed";setTimeout(()=>button.textContent="Copy env",2200);}});})();</script></main></body></html>`;
-}
-
-function githubSetupSuccessHtml(account: string, returnUrl: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App Connected</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px;line-height:1.2}p{margin:0 0 18px;color:#d4d4d8}.button{display:inline-flex;align-items:center;justify-content:center;min-height:36px;border-radius:6px;border:1px solid #3f3f46;padding:0 12px;background:#f4f4f5;color:#09090b;font:600 14px system-ui,sans-serif;text-decoration:none}</style></head><body><main><h1>GitHub App connected</h1><p>${escapeHtml(account)} is now available to this OpenGeni workspace through an explicit repository allowlist.</p><a class="button" href="${escapeHtml(returnUrl)}">Back to OpenGeni</a></main></body></html>`;
-}
-
-function githubInstallationChooserHtml(
-  candidates: GitHubInstallationBindingCandidate[],
-  state: string,
-  workspaceId: string,
-  baseUrl: string,
-): string {
-  const action = `${baseUrl}/v1/workspaces/${encodeURIComponent(workspaceId)}/github/installations/select`;
-  const options = candidates
-    .map(({ installation, authorityKind }, index) => {
-      const account = escapeHtml(
-        installation.accountLogin ?? `installation ${installation.installationId}`,
-      );
-      const label = authorityKind === "personal_owner" ? "Personal account" : "Organization owner";
-      return `<label class="option"><input type="radio" name="installation_id" value="${installation.installationId}" required${candidates.length === 1 && index === 0 ? " checked" : ""}><span><strong>${account}</strong><small>${label}</small></span></label>`;
-    })
-    .join("");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Choose GitHub installation</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:12px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px}p{margin:0 0 18px;color:#d4d4d8}.options{display:grid;gap:8px;margin-bottom:18px}.option{display:flex;align-items:center;gap:12px;border:1px solid #3f3f46;border-radius:8px;padding:12px;cursor:pointer}.option span{display:grid;gap:2px}.option small{color:#a1a1aa}button{min-height:38px;border-radius:7px;border:1px solid #3f3f46;padding:0 14px;background:#f4f4f5;color:#09090b;font:600 14px system-ui,sans-serif;cursor:pointer}.secondary{margin-left:8px;background:transparent;color:#f4f4f5}</style></head><body><main><h1>Choose a GitHub account</h1><p>These accounts already have the OpenGeni GitHub App installed and GitHub proved you are the personal owner or an active organization owner.</p><form method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><div class="options">${options}</div><button type="submit">Connect selected</button><button class="secondary" type="submit" name="installation_id" value="new" formnovalidate>Install on another account</button></form></main></body></html>`;
-}
-
-function githubSetupPendingHtml(): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App Requested</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px;line-height:1.2}p{margin:0;color:#d4d4d8}</style></head><body><main><h1>GitHub App request sent</h1><p>A GitHub organization owner must approve the installation. OpenGeni has not created a workspace binding.</p></main></body></html>`;
-}
-
 function parsePositiveInteger(value: string | undefined | null): number | null {
   if (!value || !/^\d+$/.test(value)) {
     return null;
@@ -1095,20 +1130,6 @@ function parsePositiveInteger(value: string | undefined | null): number | null {
 function isFreshGitHubBindingState(payload: GitHubSignedStatePayload): boolean {
   const age = Math.floor(Date.now() / 1_000) - payload.iat;
   return age >= 0 && age < githubBindingStateMaxAgeSeconds;
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(
-    /[&<>"']/g,
-    (char) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;",
-      })[char] ?? char,
-  );
 }
 
 function openGeniReturnUrl(
@@ -1131,4 +1152,56 @@ function openGeniReturnUrl(
 
 function openGeniBaseUrl(settings: ApiRouteDeps["settings"], c: Context): string {
   return githubBrowserBaseUrl(settings, new URL(c.req.url).origin);
+}
+
+/** The status the app error handler gives this failure; the page keeps it. */
+function githubBrowserFailureStatus(error: unknown, handledStatus: number | undefined): number {
+  if (error instanceof HTTPException) return error.status;
+  if (error instanceof OrganizationIntegrationDeniedError) return 403;
+  // An unexpected fault keeps whatever the error handler answered (500 by default).
+  return handledStatus ?? 500;
+}
+
+function githubBrowserFailureKind(error: unknown): GitHubConnectFailure {
+  if (error instanceof OrganizationIntegrationDeniedError) return "policy_denied";
+  if (!(error instanceof HTTPException)) return "failed";
+  if (error instanceof GitHubBrowserFailure) return error.failure;
+  if (error.status === 401) return "signed_out";
+  if (error.status === 403) return "forbidden";
+  // Every signed-state rejection names its state; they all mean "start again".
+  if (error.status === 400 && /\bstate\b/iu.test(error.message)) return "expired";
+  return "failed";
+}
+
+/**
+ * Human-authored HTTP messages only; configuration errors carry a JSON
+ * envelope. Anything else (an unexpected fault) shows no detail.
+ */
+function githubBrowserFailureDetail(error: unknown): string | null {
+  if (!(error instanceof HTTPException)) return null;
+  if (error instanceof GitHubBrowserFailure && error.failure === "cancelled") return null;
+  try {
+    const parsed = JSON.parse(error.message) as { message?: unknown };
+    return typeof parsed?.message === "string" ? parsed.message : null;
+  } catch {
+    return error.message || null;
+  }
+}
+
+/**
+ * The failure page links back to the workspace integrations page when the
+ * request names a workspace (its path, or a correctly signed state even if it
+ * aged out); otherwise to the OpenGeni home. This is only a link target, so an
+ * expired state is acceptable evidence of where the user came from.
+ */
+function githubFailureReturnUrl(deps: ApiRouteDeps, c: Context): string {
+  const baseUrl = (
+    deps.settings.webBaseUrl ??
+    (openGeniBaseUrl(deps.settings, c) || new URL(c.req.url).origin)
+  ).replace(/\/+$/u, "");
+  const rawState = c.req.query("state");
+  const candidate =
+    c.req.param("workspaceId") ??
+    (rawState ? inspectSignedState(rawState, deps.githubStateSecret)?.workspaceId : undefined);
+  return `${baseUrl}${workspaceIntegrationsPathForUntrusted(candidate) ?? "/"}`;
 }

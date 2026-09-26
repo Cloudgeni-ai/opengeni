@@ -21,6 +21,14 @@ pub struct RelayConfig {
     #[arg(long, env = "OPENGENI_RELAY_BIND", default_value = "0.0.0.0:8443")]
     pub bind: String,
 
+    /// An optional dedicated internal `host:port` for the Prometheus exposition.
+    /// When set, `GET /metrics` is served ONLY on this listener and never on
+    /// [`bind`](Self::bind), so an ingress that forwards every path of the public
+    /// wss host to the relay cannot publish the metrics. It must use a different
+    /// port than `bind`. Unset (or empty) keeps `/metrics` on the wss listener.
+    #[arg(long, env = "OPENGENI_RELAY_METRICS_BIND")]
+    pub metrics_bind: Option<String>,
+
     /// The HMAC secret the relay verifies the VIEWER's `ogs_` stream token with
     /// (the control plane's `resolveStreamTokenSecret`). Required for a viewer to
     /// connect; NEVER logged.
@@ -59,6 +67,17 @@ pub struct RelayConfig {
 }
 
 impl RelayConfig {
+    /// The dedicated metrics listener bind, when one is configured. An empty or
+    /// blank value counts as unset, so a templated-but-empty env var keeps the
+    /// single-listener layout instead of failing to bind.
+    #[must_use]
+    pub fn metrics_listener_bind(&self) -> Option<&str> {
+        self.metrics_bind
+            .as_deref()
+            .map(str::trim)
+            .filter(|bind| !bind.is_empty())
+    }
+
     /// The secret the relay verifies the agent's `ogr_` producer token with: the
     /// explicit relay-token secret, else the stream-token secret (a single secret
     /// backing both planes).
@@ -82,6 +101,7 @@ impl RelayConfig {
     pub fn for_test(secret: &str) -> Self {
         Self {
             bind: "127.0.0.1:0".to_string(),
+            metrics_bind: None,
             stream_token_secret: secret.to_string(),
             relay_token_secret: secret.to_string(),
             ring_frames: 64,
@@ -104,5 +124,24 @@ mod tests {
         assert_eq!(cfg.effective_relay_token_secret(), "shared");
         cfg.relay_token_secret = "explicit".to_string();
         assert_eq!(cfg.effective_relay_token_secret(), "explicit");
+    }
+
+    #[test]
+    fn metrics_listener_is_opt_in_and_ignores_blank_values() {
+        let mut cfg = RelayConfig::for_test("shared");
+        assert_eq!(cfg.metrics_listener_bind(), None);
+        cfg.metrics_bind = Some("  ".to_string());
+        assert_eq!(cfg.metrics_listener_bind(), None);
+        cfg.metrics_bind = Some("0.0.0.0:9464".to_string());
+        assert_eq!(cfg.metrics_listener_bind(), Some("0.0.0.0:9464"));
+    }
+
+    #[test]
+    fn metrics_listener_bind_is_a_cli_flag() {
+        // The explicit flag wins over OPENGENI_RELAY_METRICS_BIND, so this holds
+        // whatever the ambient environment carries.
+        let cfg = RelayConfig::try_parse_from(["opengeni-relay", "--metrics-bind", "0.0.0.0:9464"])
+            .unwrap();
+        assert_eq!(cfg.metrics_listener_bind(), Some("0.0.0.0:9464"));
     }
 }

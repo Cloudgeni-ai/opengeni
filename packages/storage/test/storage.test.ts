@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { generateKeyPairSync } from "node:crypto";
 import { getSettings } from "@opengeni/config";
 import { RETAINED_OUTPUT_MAX_PAGE_BYTES, type FileAsset } from "@opengeni/contracts";
 import { createObjectStorage, DOWNLOAD_URL_TTL_SECONDS, UPLOAD_URL_TTL_SECONDS } from "../src";
@@ -164,6 +165,64 @@ describe("object storage adapters", () => {
 
     expect(storage?.backend).toBe("aws-s3");
     expect(storage?.bucket).toBe("opengeni-files");
+  });
+
+  test("signs a Content-Disposition response override only when one is requested", async () => {
+    const disposition = "attachment; filename=\"_.html\"; filename*=UTF-8''%E6%8A%A5%E5%91%8A.html";
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const providers: Array<{
+      env: NodeJS.ProcessEnv;
+      parameter: string;
+    }> = [
+      {
+        env: {
+          OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
+          OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
+          OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "minioadmin",
+          OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "minioadmin",
+        },
+        parameter: "response-content-disposition",
+      },
+      {
+        env: {
+          OPENGENI_OBJECT_STORAGE_BACKEND: "azure-blob",
+          OPENGENI_OBJECT_STORAGE_BUCKET: "opengeni-files",
+          OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME: "opengeni",
+          OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY:
+            Buffer.from("test-storage-key").toString("base64"),
+        },
+        parameter: "rscd",
+      },
+      {
+        env: {
+          OPENGENI_OBJECT_STORAGE_BACKEND: "gcs",
+          OPENGENI_OBJECT_STORAGE_BUCKET: "opengeni-files",
+          OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID: "opengeni-test",
+          OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON: JSON.stringify({
+            type: "service_account",
+            client_email: "signer@opengeni-test.iam.gserviceaccount.com",
+            private_key: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+          }),
+        },
+        parameter: "response-content-disposition",
+      },
+    ];
+    for (const { env, parameter } of providers) {
+      const storage = withEnv(env, () => createObjectStorage(getSettings()))!;
+      const forced = await storage.createGetUrl({
+        key: "files/file-id/original/report.html",
+        responseContentDisposition: disposition,
+      });
+      expect({
+        backend: storage.backend,
+        value: new URL(forced.url).searchParams.get(parameter),
+      }).toEqual({ backend: storage.backend, value: disposition });
+      const plain = await storage.createGetUrl({ key: "files/file-id/original/report.html" });
+      expect({
+        backend: storage.backend,
+        value: new URL(plain.url).searchParams.get(parameter),
+      }).toEqual({ backend: storage.backend, value: null });
+    }
   });
 
   test("creates GCS storage from provider-neutral settings", () => {

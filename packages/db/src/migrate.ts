@@ -264,8 +264,13 @@ export async function executeMigrationFile(
     // makes a fresh database capable of applying maintenance migration 0138
     // and later migrations capable of crossing the 0352 sessions policy
     // without a process-global PGOPTIONS escape hatch.
+    // Bound ordinary DDL lock acquisition in that same implicit transaction.
+    // The migration body follows this preamble, so its own SET LOCAL can still
+    // override the default; a lock timeout aborts the whole body before the
+    // caller writes its separate success receipt.
     await sql.unsafe(
       `SELECT
+  pg_catalog.set_config('lock_timeout', '5s', true),
   pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
   pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true);\n${file === "0434_ordered_model_history.sql" ? "SET CONSTRAINTS ALL IMMEDIATE;\n" : ""}${sqlText}`,
     );

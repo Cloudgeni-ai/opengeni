@@ -838,21 +838,7 @@ function BrowserScreenshotRenderer(props: ToolRendererProps) {
   );
 }
 
-function RetainedSessionImageDisclosure({
-  artifact,
-  load,
-  title,
-  caption,
-  noun,
-  icon,
-  lightboxLabel,
-  batched,
-  failed,
-  cancelled,
-  filename,
-  defaultOpen,
-  children,
-}: {
+type RetainedSessionImageDisclosureProps = {
   artifact: RetainedArtifactReference;
   load: ToolRendererProps["loadRetainedArtifact"];
   title: string;
@@ -866,7 +852,41 @@ function RetainedSessionImageDisclosure({
   filename?: string;
   defaultOpen?: boolean;
   children?: ReactNode;
-}) {
+};
+
+function RetainedSessionImageDisclosure(props: RetainedSessionImageDisclosureProps) {
+  const compact = useContext(CompactActivityContext);
+  // The rolling progress label has no screenshot loader by design. Do not run
+  // the full image hook there: it would report the missing loader as an error.
+  if (compact) {
+    return (
+      <ActivityDisclosure
+        icon={props.icon}
+        title={props.title}
+        compactPreview={null}
+        failed={props.failed}
+        cancelled={props.cancelled}
+      />
+    );
+  }
+  return <LoadedRetainedSessionImageDisclosure {...props} />;
+}
+
+function LoadedRetainedSessionImageDisclosure({
+  artifact,
+  load,
+  title,
+  caption,
+  noun,
+  icon,
+  lightboxLabel,
+  batched,
+  failed,
+  cancelled,
+  filename,
+  defaultOpen,
+  children,
+}: RetainedSessionImageDisclosureProps) {
   const state = useRetainedImageObjectUrl(artifact, load);
   const downloadFilename = filename ?? retainedImageFilename(artifact);
 

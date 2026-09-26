@@ -1,5 +1,5 @@
 import { attachSessionCapability } from "./attach-session-capability";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SessionMcpCapabilityCard, type AuthNeededItem } from "@opengeni/react";
 import { CheckIcon, Loader2Icon } from "lucide-react";
 import { useAppContext } from "@/context";
@@ -10,6 +10,7 @@ import { capabilityLogoSource } from "./capability-logo-source";
 import { DetailBody, type ConnectAction } from "./capability-detail-sheet";
 import { performCapabilityAction } from "./perform-capability-action";
 import { useCapabilitiesCatalog } from "./use-capabilities-catalog";
+import { SessionCustomMcpCard } from "./session-custom-mcp-card";
 import { capabilityConnectPlan, capabilityErrorToast, connectionHealth } from "@/lib/capabilities";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import type { CapabilityCatalogItem } from "@/types";
@@ -30,7 +31,37 @@ type SessionCapabilityCardProps = {
 
 export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   const context = useAppContext();
-  const capability = props.item.capability;
+  const [registered, setRegistered] = useState<{ id: string; restoreFocus: boolean } | null>(null);
+  const onRegistered = useCallback(
+    (id: string, restoreFocus: boolean) => setRegistered({ id, restoreFocus }),
+    [],
+  );
+  if (props.item.setupRequest && !registered) {
+    return (
+      <SessionCustomMcpCard
+        key={`${props.workspaceId}:${props.item.id}`}
+        item={props.item}
+        workspaceId={props.workspaceId}
+        onRegistered={onRegistered}
+      />
+    );
+  }
+  const item = registered
+    ? {
+        ...props.item,
+        setupRequest: null,
+        capability: {
+          id: registered.id,
+          name: props.item.setupRequest!.name,
+          kind: "mcp" as const,
+          source: "manual" as const,
+          action: "connect" as const,
+          rationale: props.item.setupRequest!.rationale,
+          requiredVariables: [],
+        },
+      }
+    : props.item;
+  const capability = item.capability;
   const resolved = context.workspaceCapabilityCatalog.find((entry) => entry.id === capability?.id);
   if (capability && resolved?.kind === "mcp" && resolved.authKind === "oauth2") {
     return (
@@ -48,8 +79,10 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   }
   return (
     <ScopedSessionCapabilityCard
-      key={`${props.workspaceId}:${props.sessionId}:${props.item.capability!.id}`}
+      key={`${props.workspaceId}:${props.sessionId}:${capability!.id}`}
       {...props}
+      item={item}
+      restoreFocus={registered?.restoreFocus ?? false}
     />
   );
 }
@@ -59,26 +92,106 @@ function ScopedSessionCapabilityCard({
   workspaceId,
   sessionId,
   onConfigured,
-}: SessionCapabilityCardProps) {
+  restoreFocus = false,
+}: SessionCapabilityCardProps & { restoreFocus?: boolean }) {
   const context = useAppContext();
+  const refreshGitHub = context.refreshGitHub;
   const recommendation = item.capability!;
   const [expanded, setExpanded] = useState(false);
   const [complete, setComplete] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [githubError, setGithubError] = useState<string | null>(null);
   const [resolvedItem, setResolvedItem] = useState<CapabilityCatalogItem | null>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLElement>(null);
+  const githubInFlight = useRef(false);
+  const githubRequestSequence = useRef(0);
+  const active = useRef(true);
+  const github = recommendation.id === "api:github-app";
+  useEffect(() => {
+    if (!restoreFocus) return;
+    // The review dialog's opener is removed when the new connection card
+    // replaces it. Focus the next actionable control after Radix closes it.
+    const frame = requestAnimationFrame(() => opener.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [restoreFocus]);
+  useEffect(() => {
+    active.current = true;
+    return () => {
+      active.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (github && context.githubStatus) setComplete(context.githubStatus.status === "bound");
+  }, [github, context.githubStatus]);
+  useEffect(() => {
+    if (!github) return;
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (!event.persisted || !githubInFlight.current) return;
+      // A cancelled authorization can restore this exact React tree from the
+      // back/forward cache. Its prior request must not navigate or settle a
+      // newer attempt after the card becomes usable again.
+      githubRequestSequence.current += 1;
+      githubInFlight.current = false;
+      setBusy(false);
+      void refreshGitHub(workspaceId);
+    };
+    window.addEventListener("pageshow", onPageShow);
+    return () => window.removeEventListener("pageshow", onPageShow);
+  }, [github, refreshGitHub, workspaceId]);
   const catalogItem =
     resolvedItem ??
     context.workspaceCapabilityCatalog.find((entry) => entry.id === recommendation.id);
   const logo = catalogItem
     ? capabilityLogoSource(catalogItem, (path) => context.client.catalogAssetUrl(path))
-    : null;
+    : github
+      ? capabilityLogoSource({ id: recommendation.id, logoAssetPath: null }, () => null)
+      : null;
   const close = () => {
     setExpanded(false);
   };
   const skill = recommendation.kind === "skill";
   const apiKey = catalogItem ? capabilityConnectPlan(catalogItem).mode === "api_key" : false;
+  async function connectGitHub() {
+    if (githubInFlight.current) return;
+    const requestSequence = ++githubRequestSequence.current;
+    githubInFlight.current = true;
+    setBusy(true);
+    setGithubError(null);
+    let navigating = false;
+    try {
+      const status = await context.client.getGitHubApp(workspaceId, {
+        returnPath: `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
+      });
+      if (!active.current || requestSequence !== githubRequestSequence.current) return;
+      if (status.status === "bound") {
+        setComplete(true);
+        void context.refreshGitHub(workspaceId);
+        return;
+      }
+      if (!status.linkUrl)
+        throw new Error(
+          status.configured
+            ? "Your account cannot manage this workspace's GitHub connection."
+            : "GitHub is not configured on this deployment.",
+        );
+      navigating = true;
+      window.location.assign(status.linkUrl);
+    } catch (failure) {
+      navigating = false;
+      if (active.current && requestSequence === githubRequestSequence.current) {
+        setGithubError(
+          failure instanceof Error ? failure.message : "Couldn't start GitHub setup. Try again.",
+        );
+        setExpanded(true);
+      }
+    } finally {
+      if (requestSequence === githubRequestSequence.current && !navigating) {
+        githubInFlight.current = false;
+        if (active.current) setBusy(false);
+      }
+    }
+  }
   return (
     <SessionCapabilityFrame
       name={catalogItem?.name ?? recommendation.name}
@@ -89,39 +202,40 @@ function ScopedSessionCapabilityCard({
       skill={skill}
       expanded={expanded}
       complete={complete}
+      completeLabel={github ? "Connected to this workspace" : undefined}
       actionLabel={
-        catalogItem?.enabled
-          ? "Review"
-          : skill
-            ? "Review skill"
-            : apiKey
-              ? "Add API key"
-              : `Connect ${catalogItem?.name ?? recommendation.name}`
+        github && busy
+          ? "Opening GitHub…"
+          : catalogItem?.enabled
+            ? "Review"
+            : skill
+              ? "Review skill"
+              : apiKey
+                ? "Add API key"
+                : `Connect ${catalogItem?.name ?? recommendation.name}`
       }
+      opensDialog={!github}
       note={
-        skill
-          ? "Skill content is reviewed separately from permission to use any integration."
-          : apiKey
-            ? "Add credentials in the protected form, not in a chat message."
-            : "Review access before signing in. You'll return to this conversation after authorization."
+        github
+          ? "Choose which account and repositories this workspace can access on GitHub."
+          : skill
+            ? "Skill content is reviewed separately from permission to use any integration."
+            : apiKey
+              ? "Add credentials in the protected form, not in a chat message."
+              : "Review access before signing in. You'll return to this conversation after authorization."
       }
-      onOpen={() => setExpanded(true)}
+      onOpen={() => (github ? void connectGitHub() : setExpanded(true))}
       onClose={close}
       busy={busy}
       opener={opener}
       cardRef={cardRef}
     >
-      {recommendation.id === "api:github-app" ? (
+      {github ? (
         <SessionGitHubSetup
           busy={busy}
-          setBusy={setBusy}
-          workspaceId={workspaceId}
-          sessionId={sessionId}
+          error={githubError}
+          onRetry={() => void connectGitHub()}
           onClose={close}
-          onComplete={() => {
-            setComplete(true);
-            close();
-          }}
         />
       ) : recommendation.id === "mcp:codex_apps" ? (
         <SessionCodexAppsSetup
@@ -179,19 +293,88 @@ function SessionCapabilitySetup({
 }) {
   const context = useAppContext();
   const catalog = useCapabilitiesCatalog(workspaceId);
+  const canReadConnections =
+    context.accessContext === null
+      ? null
+      : hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
   const [error, setError] = useState<string | null>(null);
+  const [authInspection, setAuthInspection] = useState<{
+    id: string;
+    url: string;
+    kind: "oauth2" | "none" | "unknown";
+  } | null>(null);
   const inFlight = useRef(false);
-  const scope = useRef({ client: context.client, workspaceId, sessionId, alive: true });
-  scope.current = { client: context.client, workspaceId, sessionId, alive: true };
+  const scope = useRef({
+    client: context.client,
+    workspaceId,
+    sessionId,
+    canReadConnections,
+    alive: true,
+  });
+  if (
+    scope.current.client !== context.client ||
+    scope.current.workspaceId !== workspaceId ||
+    scope.current.sessionId !== sessionId ||
+    scope.current.canReadConnections !== canReadConnections
+  ) {
+    scope.current = {
+      client: context.client,
+      workspaceId,
+      sessionId,
+      canReadConnections,
+      alive: true,
+    };
+  }
   useEffect(() => {
+    const activeScope = scope.current;
     void catalog.refresh();
     return () => {
-      scope.current.alive = false;
+      activeScope.alive = false;
     };
-    // Catalog refresh is intentionally invoked once per mounted scope.
+    // Refetch on a live read-grant change; the hook masks prior rows during render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context.client, workspaceId, sessionId]);
-  const item = catalog.items.find((entry) => entry.id === capabilityId);
+  }, [context.client, workspaceId, sessionId, canReadConnections]);
+  const rawItem = catalog.items.find((entry) => entry.id === capabilityId);
+  const rawItemId = rawItem?.id;
+  const inspectUrl = rawItem?.mcpUrl ?? rawItem?.endpointUrl;
+  const needsAuthInspection =
+    rawItem?.kind === "mcp" &&
+    !rawItem.enabled &&
+    capabilityConnectPlan(rawItem).mode === "setup_required" &&
+    Boolean(inspectUrl);
+  useEffect(() => {
+    if (!needsAuthInspection || !rawItemId || !inspectUrl) return;
+    let active = true;
+    setAuthInspection(null);
+    void context.client.inspectMcpAuthentication(workspaceId, inspectUrl).then(
+      (result) => {
+        if (active) setAuthInspection({ id: rawItemId, url: inspectUrl, kind: result.kind });
+      },
+      () => {
+        if (active) setAuthInspection({ id: rawItemId, url: inspectUrl, kind: "unknown" });
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [context.client, workspaceId, rawItemId, inspectUrl, needsAuthInspection]);
+  const item = useMemo(() => {
+    if (!rawItem || !needsAuthInspection) return rawItem;
+    const inspection =
+      authInspection?.id === rawItem.id && authInspection.url === inspectUrl
+        ? authInspection.kind
+        : "checking";
+    return {
+      ...rawItem,
+      authKind:
+        inspection === "oauth2"
+          ? ("oauth2" as const)
+          : inspection === "none"
+            ? ("none" as const)
+            : null,
+      metadata: { ...rawItem.metadata, authDiscovery: inspection },
+    };
+  }, [rawItem, needsAuthInspection, inspectUrl, authInspection]);
   useEffect(() => {
     if (item) onResolvedItem(item);
   }, [item, onResolvedItem]);
@@ -204,11 +387,7 @@ function SessionCapabilitySetup({
     setBusy(true);
     setError(null);
     const invocation = scope.current;
-    const current = () =>
-      scope.current.alive &&
-      scope.current.client === invocation.client &&
-      scope.current.workspaceId === invocation.workspaceId &&
-      scope.current.sessionId === invocation.sessionId;
+    const current = () => scope.current === invocation && invocation.alive;
     try {
       await performCapabilityAction(
         {
@@ -266,11 +445,7 @@ function SessionCapabilitySetup({
     setBusy(true);
     setError(null);
     const invocation = scope.current;
-    const current = () =>
-      scope.current.alive &&
-      scope.current.client === invocation.client &&
-      scope.current.workspaceId === invocation.workspaceId &&
-      scope.current.sessionId === invocation.sessionId;
+    const current = () => scope.current === invocation && invocation.alive;
     try {
       await attachSessionCapability(context.client, workspaceId, sessionId, item, current);
       if (current()) await onConfigured?.();
@@ -352,60 +527,15 @@ function SessionCapabilitySetup({
 
 function SessionGitHubSetup({
   busy,
-  setBusy,
-  workspaceId,
-  sessionId,
+  error,
+  onRetry,
   onClose,
-  onComplete,
 }: {
   busy: boolean;
-  setBusy: (busy: boolean) => void;
-  workspaceId: string;
-  sessionId: string;
+  error: string | null;
+  onRetry: () => void;
   onClose: () => void;
-  onComplete: () => void;
 }) {
-  const { client } = useAppContext();
-  const [error, setError] = useState<string | null>(null);
-  const active = useRef(true);
-  const inFlight = useRef(false);
-  useEffect(
-    () => () => {
-      active.current = false;
-    },
-    [],
-  );
-  async function connect() {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    setBusy(true);
-    setError(null);
-    try {
-      const status = await client.getGitHubApp(workspaceId, {
-        returnPath: `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
-      });
-      if (!active.current) return;
-      if (status.status === "bound") {
-        onComplete();
-        return;
-      }
-      if (!status.linkUrl)
-        throw new Error(
-          status.configured
-            ? "Your account cannot manage this workspace's GitHub connection."
-            : "GitHub is not configured on this deployment.",
-        );
-      window.location.assign(status.linkUrl);
-    } catch (failure) {
-      if (active.current)
-        setError(
-          failure instanceof Error ? failure.message : "Couldn't start GitHub setup. Try again.",
-        );
-    } finally {
-      inFlight.current = false;
-      if (active.current) setBusy(false);
-    }
-  }
   return (
     <div className="space-y-3 p-6 sm:p-8">
       <p className="text-xs leading-[1.7] text-fg-muted">
@@ -417,8 +547,8 @@ function SessionGitHubSetup({
         <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>
           Cancel
         </Button>
-        <Button size="sm" disabled={busy} onClick={() => void connect()}>
-          {busy ? <Loader2Icon className="animate-spin" /> : null}Continue to GitHub
+        <Button size="sm" disabled={busy} onClick={onRetry}>
+          {busy ? <Loader2Icon className="animate-spin" /> : null}Try again
         </Button>
       </div>
     </div>

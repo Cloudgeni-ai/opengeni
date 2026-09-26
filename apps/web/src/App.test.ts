@@ -1147,7 +1147,20 @@ describe("api key permission options", () => {
     const wildcardOnly = delegableApiKeyPermissions(["workspace:admin"]);
     expect(wildcardOnly.has("secrets:read")).toBe(false);
     expect(wildcardOnly).toEqual(
-      new Set(Permission.options.filter((permission) => permission !== "secrets:read")),
+      new Set(
+        Permission.options.filter(
+          (permission) =>
+            ![
+              "secrets:read",
+              "members:manage",
+              "account:read",
+              "account:admin",
+              "workspace:create",
+              "billing:read",
+              "billing:manage",
+            ].includes(permission),
+        ),
+      ),
     );
 
     expect(
@@ -1635,6 +1648,50 @@ describe("summarizeSessionFailure", () => {
     expect(summary.reason).toBe("Provider exploded");
     expect(summary.failedAt).toBe(event(5, "turn.failed", {}).occurredAt);
     expect(summary.consecutiveRecoveryCount).toBeNull();
+  });
+
+  test("keeps the exact recorded text and code beside the humanized reason", () => {
+    // The worker records provider 401s uncoded, with the SDK's own text.
+    const raw = "401 Incorrect API key provided: sk-****abcd.";
+    const summary = summarizeSessionFailure(
+      [event(1, "turn.failed", { error: raw, detail: raw })],
+      "failed",
+    );
+    expect(summary.reason).toContain("rejected this deployment's engine credentials");
+    expect(summary.recordedDetail).toBe(raw);
+    expect(summary.failureCode).toBeUndefined();
+    const diagnostics = summarizeSessionFailure([], "failed", {
+      eventId: "event-9",
+      turnId: "turn-9",
+      sequence: 9,
+      occurredAt: "2026-09-20T08:00:00.000Z",
+      payload: {
+        error: "Model provider rate limit hit.",
+        code: "provider_rate_limited",
+        lastRetryableError: "429 Slow down",
+      },
+    });
+    expect(diagnostics.recordedDetail).toBe("Model provider rate limit hit.\n429 Slow down");
+    expect(diagnostics.failureCode).toBe("provider_rate_limited");
+    expect(diagnostics.quotaScope).toBeUndefined();
+    // The closed quota marker survives both the timeline and the detail projection.
+    const quotaPayload = {
+      error: "compaction summarization failed: quota",
+      code: "context_compaction_failed",
+      quotaScope: "daily",
+    };
+    expect(
+      summarizeSessionFailure([event(1, "turn.failed", quotaPayload)], "failed").quotaScope,
+    ).toBe("daily");
+    expect(
+      summarizeSessionFailure([], "failed", {
+        eventId: "event-10",
+        turnId: "turn-10",
+        sequence: 10,
+        occurredAt: "2026-09-20T08:00:00.000Z",
+        payload: quotaPayload,
+      }).quotaScope,
+    ).toBe("daily");
   });
 
   test("preserves provider-internal failure reasons like the timeline does", () => {

@@ -267,8 +267,8 @@
     {
       "id": 10,
       "type": "stat",
-      "title": "Warming timeouts / orphan sweeps",
-      "description": "Increases in the selected range. Both should normally remain zero.",
+      "title": "Warming timeouts / readiness replacements / orphan sweeps",
+      "description": "Increases in the selected range. All should normally remain zero. A replaced fresh box that missed command readiness is counted once as a warming timeout and once by its replacement outcome.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
@@ -301,6 +301,13 @@
           "refId": "B",
           "expr": "sum(increase(opengeni_sandbox_orphans_terminated_total[$__range])) or vector(0)",
           "legendFormat": "orphans terminated",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (outcome) (increase(opengeni_sandbox_readiness_replacements_total[$__range]))",
+          "legendFormat": "readiness replacement {{outcome}}",
           "editorMode": "code",
           "range": true
         }

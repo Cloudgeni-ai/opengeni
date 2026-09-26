@@ -13,6 +13,7 @@
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
 
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
+//   /integrations?…                          → workspace-less OAuth callback → current workspace /plugins
 //   /workspaces/:id/schedules                → scheduled tasks + run history
 //   /workspaces/:id/documents                → document bases + search
 //   /workspaces/:id/memory                   → durable workspace memory
@@ -35,7 +36,9 @@ import {
   lazyRouteComponent,
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@/components/common";
+import { NotFoundPanel, RootRouteErrorPanel, routerErrorOptions } from "@/components/route-error";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
+import { routePatternFromMatches, routePatternFromRoutes } from "@/lib/client-error-reporting";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
 import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
@@ -73,6 +76,10 @@ export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from 
 const LazyCapabilitiesRoute = lazyRouteComponent(
   () => import("@/routes/capabilities"),
   "CapabilitiesRoute",
+);
+const LazyIntegrationsReturnRoute = lazyRouteComponent(
+  () => import("@/routes/capabilities"),
+  "IntegrationsReturnRoute",
 );
 const LazyAgentsRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentsRoute");
 const LazyAgentTopologyPreviewRoute = lazyRouteComponent(
@@ -160,7 +167,8 @@ const LazyComposerChromeGalleryRoute = lazyRouteComponent(
 
 const rootRoute = createRootRoute({
   component: RootRouteComponent,
-  notFoundComponent: NotFoundRoute,
+  errorComponent: RootRouteErrorPanel,
+  notFoundComponent: NotFoundPanel,
 });
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -195,6 +203,13 @@ const billingReturnRoute = createRoute({
     return checkout ? { checkout } : {};
   },
   component: BillingReturnRoute,
+});
+// Integration callbacks whose state names no workspace land here (see the API's
+// INTEGRATIONS_FALLBACK_PATH); forward them to the current workspace's Plugins.
+const integrationsReturnRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "integrations",
+  component: LazyIntegrationsReturnRoute,
 });
 // Self-hosted device-flow APPROVE page (design 11 §B). Top-level (sibling of
 // /billing, NOT workspace-scoped): the agent prints `${origin}/device?user_code=…`
@@ -500,6 +515,7 @@ const routeTree = rootRoute.addChildren([
   indexRoute,
   sessionDeepLinkRoute,
   billingReturnRoute,
+  integrationsReturnRoute,
   deviceRoute,
   resetPasswordRoute,
   identityLinkRoute,
@@ -541,7 +557,28 @@ const routeTree = rootRoute.addChildren([
 // component, a cold lazy workspace page suspends through WorkspaceShell and is
 // caught only by the root Outlet, briefly replacing the rail along with the
 // canvas. The leaf boundary keeps the persistent workspace chrome mounted.
-const router = createRouter({ routeTree, ...ROUTER_PENDING_OPTIONS });
+// The default error component likewise gives every match its own styled
+// boundary, so a failing page keeps the workspace rail instead of replacing
+// the whole app; the root route supplies the app canvas for its own failures.
+const router = createRouter({
+  routeTree,
+  ...ROUTER_PENDING_OPTIONS,
+  ...routerErrorOptions(() => appRoutePattern()),
+});
+
+/** The matched route pattern (for example `/workspaces/$workspaceId/sessions`), never the URL. */
+export function appRoutePattern(): string {
+  return routePatternFromMatches(router.state.matches);
+}
+
+/**
+ * The pattern of the route the router is showing or still loading. A lazy
+ * route chunk fails while its navigation is pending, before `state.matches`
+ * names the destination, so the chunk-load report uses the latest location.
+ */
+export function appDestinationRoutePattern(): string {
+  return routePatternFromRoutes(router.getMatchedRoutes(router.latestLocation.pathname)[0]);
+}
 
 declare module "@tanstack/react-router" {
   interface Register {
@@ -837,15 +874,6 @@ function BillingReturnRoute() {
       params={{ workspaceId }}
       search={checkout ? { checkout } : {}}
       replace
-    />
-  );
-}
-
-function NotFoundRoute() {
-  return (
-    <ProblemPanel
-      title="Page not found"
-      description="This page doesn't exist. Open a workspace to continue."
     />
   );
 }

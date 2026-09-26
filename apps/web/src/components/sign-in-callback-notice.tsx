@@ -3,13 +3,25 @@ import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
 import {
   clearSignInChangeFeedback,
+  isVerificationLinkCallbackError,
   readSignInCallbackError,
   readSignInChangeFeedback,
   signInFeedbackEvent,
 } from "@/lib/sign-in-feedback";
 
 /** Retain login feedback through the landing-workspace redirect, but never integration callbacks. */
-export function SignInCallbackNotice({ userId }: { userId: string | null }) {
+export function SignInCallbackNotice({
+  userId,
+  verificationLinkError = "notice",
+}: {
+  userId: string | null;
+  /**
+   * Who reports an expired or invalid email-verification link: this notice, no
+   * one yet (the session is still loading), or the signed-out auth panel, whose
+   * resend form replaces this notice for good.
+   */
+  verificationLinkError?: "notice" | "pending" | "auth-panel";
+}) {
   const [message, setMessage] = useState(() =>
     window.location.pathname === "/" || window.location.pathname === "/settings/security"
       ? (readSignInCallbackError(window.location.search) ??
@@ -23,6 +35,11 @@ export function SignInCallbackNotice({ userId }: { userId: string | null }) {
       window.location.pathname === "/" &&
       new URLSearchParams(window.location.search).get("signInMethod") === "connected",
   );
+  const linkError = isVerificationLinkCallbackError(message);
+  useEffect(() => {
+    if (linkError && verificationLinkError === "auth-panel") setMessage(null);
+  }, [linkError, verificationLinkError]);
+  const shownMessage = linkError && verificationLinkError !== "notice" ? null : message;
   const [receipt, setReceipt] = useState(readSignInChangeFeedback);
   useEffect(() => {
     const update = () => setReceipt(readSignInChangeFeedback());
@@ -30,12 +47,12 @@ export function SignInCallbackNotice({ userId }: { userId: string | null }) {
     return () => window.removeEventListener(signInFeedbackEvent, update);
   }, []);
   const ownReceipt = receipt && (userId === null || receipt.userId === userId) ? receipt : null;
-  if (!message && !ownReceipt && !returned) return null;
+  if (!shownMessage && !ownReceipt && !returned) return null;
   return (
     <div role="alert" className="mx-auto w-full max-w-3xl px-4 pt-3">
       <Notice
-        tone={message ? "failed" : "info"}
-        title={message ? "Sign-in needs attention" : "Review your sign-in methods"}
+        tone={shownMessage ? "failed" : "info"}
+        title={shownMessage ? "Sign-in needs attention" : "Review your sign-in methods"}
         action={
           <Button
             variant="ghost"
@@ -50,7 +67,7 @@ export function SignInCallbackNotice({ userId }: { userId: string | null }) {
           </Button>
         }
       >
-        {message ?? ownReceipt?.message ?? (
+        {shownMessage ?? ownReceipt?.message ?? (
           <>
             The provider returned to OpenGeni. Sign in with an existing method if asked, then review
             your current connections in{" "}

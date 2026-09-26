@@ -16,11 +16,17 @@ import {
   type CompactionProviderRejection,
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
-  isModalTaskExecStartDnsResolutionError,
+  isModalTaskExecStartPreDispatchUnavailableError,
+  isRoutingMutationOutcomeUnknownError,
   RoutingWorkspaceRootChangedError,
   SandboxMaterializationVerificationError,
   materializationVerificationDiagnostic,
   type MaterializationVerificationDiagnostic,
+  PROVIDER_QUOTA_EXHAUSTED_CODE,
+  type ProviderQuotaExhaustion,
+  type ProviderQuotaScope,
+  classifyProviderQuotaError,
+  providerQuotaExhaustedMessage,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
 } from "@opengeni/runtime";
@@ -33,6 +39,7 @@ import { CODEX_USAGE_EXHAUSTED_PCT } from "../codex-rotation";
 import { RetainedAttachmentTransportLimitError } from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
 import {
+  CODEX_USAGE_LIMIT_ERROR_TYPE,
   CodexReloginRequired,
   classifyCodexEncryptedArtifactRejection,
   classifyCodexResponseTimeoutError,
@@ -613,6 +620,14 @@ export function compactionFailureReasonFromError(error: unknown): string {
       `the model provider rejected the compaction request (${describeCompactionProviderRejection(rejection)}). Active history was preserved. ${COMPACTION_PROVIDER_REJECTION_GUIDANCE}`,
     );
   }
+  // An exhausted provider quota is not retried (see agentRunFailurePayload),
+  // so name the refusal plainly instead of the raw diagnostic envelope.
+  const quota = classifyProviderQuotaExhaustionError(error);
+  if (quota) {
+    return compactionFailureReason(
+      `${providerQuotaExhaustedMessage(quota.scope)} Active history was preserved.`,
+    );
+  }
   if (
     error instanceof CompactionProviderResponseError ||
     error instanceof EmptyCompactionSummaryError
@@ -639,8 +654,12 @@ export function compactionFailureTurnEventPayload(
   recovery: "user_message";
   compacted: false;
   providerRejection?: CompactionProviderRejection;
+  quotaScope?: ProviderQuotaScope;
 } {
   const rejection = compactionProviderRejection(error);
+  // The same closed marker as a `provider_quota_exhausted` turn failure, so
+  // clients can name the exhausted limit and offer another model here too.
+  const quota = rejection ? null : classifyProviderQuotaExhaustionError(error);
   return {
     error: overrides.error ?? compactionFailureReasonFromError(error),
     code: "context_compaction_failed",
@@ -648,6 +667,7 @@ export function compactionFailureTurnEventPayload(
     recovery: "user_message",
     compacted: false,
     ...(rejection ? { providerRejection: rejection } : {}),
+    ...(quota ? { quotaScope: quota.scope } : {}),
   };
 }
 
@@ -845,6 +865,27 @@ export function isTransientProviderError(error: unknown): boolean {
   );
 }
 
+/** An explicit `usage_limit_reached` type or code string anywhere on the error chain. */
+function hasCodexUsageLimitType(error: unknown): boolean {
+  return collectErrorStrings(error).some((value) => value.includes(CODEX_USAGE_LIMIT_ERROR_TYPE));
+}
+
+/**
+ * Recognize an exhausted API-key provider quota (a daily or monthly allowance,
+ * a free-tier day cap, or an account out of credits) as distinct from an
+ * ordinary per-minute rate limit. Retrying within the bounded same-turn budget
+ * cannot succeed, so the turn fails promptly instead. Subscription transports
+ * own their quota semantics through credential rotation and durable capacity
+ * waits, so a Codex or SuperGrok transport error never classifies here.
+ */
+export function classifyProviderQuotaExhaustionError(
+  error: unknown,
+): ProviderQuotaExhaustion | null {
+  if (isCodexTransportError(error) || isXaiSubscriptionTransportError(error)) return null;
+  // The same reader the OpenAI SDK retry veto uses, so the two never disagree.
+  return classifyProviderQuotaError(error);
+}
+
 export type XaiCredentialFailure = {
   kind: "auth" | "forbidden" | "rate_limit";
   cooldownMs: number | null;
@@ -951,6 +992,7 @@ function baseAgentRunFailurePayload(
   historyPersistenceStage?: MandatoryHistoryPersistenceStage;
   mcpTransportDiagnostic?: McpTransportRequestFailureDiagnostic;
   materializationDiagnostic?: MaterializationVerificationDiagnostic;
+  quotaScope?: ProviderQuotaScope;
 } {
   if (error instanceof SandboxMaterializationVerificationError) {
     return {
@@ -1022,10 +1064,13 @@ function baseAgentRunFailurePayload(
       retryable: true,
     };
   }
-  if (isModalTaskExecStartDnsResolutionError(error)) {
+  if (
+    !isRoutingMutationOutcomeUnknownError(error) &&
+    isModalTaskExecStartPreDispatchUnavailableError(error)
+  ) {
     return {
       error:
-        "The managed sandbox command transport was temporarily unreachable before the command started. The same turn will retry after a short delay.",
+        "The managed sandbox command router was not ready before the command was sent. The same turn will retry after a short delay.",
       code: "sandbox_command_start_unavailable",
       retryable: true,
     };
@@ -1100,8 +1145,11 @@ function baseAgentRunFailurePayload(
   // `usage_limit_reached` shape must still outrank generic 429 retryability.
   // Credential quarantine/failover remains separately provenance-gated by
   // `isCodexTransportError`; this branch only chooses the truthful user payload.
+  // The looser "429 ... usage limit" wording counts only on a Codex transport
+  // error: an API-key provider's 429 that says "usage limit" is provider quota
+  // evidence, not a ChatGPT/Codex subscription cap.
   const usageLimit = classifyCodexUsageLimitError(error);
-  if (usageLimit) {
+  if (usageLimit && (isCodexTransportError(error) || hasCodexUsageLimitType(error))) {
     return codexUsageLimitFailurePayload(usageLimit, message);
   }
   const codexTimeout = classifyCodexResponseTimeoutError(error, {
@@ -1151,6 +1199,20 @@ function baseAgentRunFailurePayload(
         "The model provider ended its response ambiguously. Partial output was not accepted as complete; the same turn will retry from durable history.",
       code: UNKNOWN_MODEL_FINISH_REASON_CODE,
       retryable: true,
+    };
+  }
+  // An exhausted quota also arrives as HTTP 429 (or 402), but no retry within
+  // the finite same-turn budget can succeed. Fail the turn promptly with a
+  // distinct code so the client can offer another model; ordinary short rate
+  // limits fall through to the retryable branch below.
+  const quota = classifyProviderQuotaExhaustionError(error);
+  if (quota) {
+    return {
+      error: providerQuotaExhaustedMessage(quota.scope),
+      code: PROVIDER_QUOTA_EXHAUSTED_CODE,
+      retryable: false,
+      quotaScope: quota.scope,
+      ...(message ? { detail: message } : {}),
     };
   }
   if (

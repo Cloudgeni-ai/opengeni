@@ -403,10 +403,12 @@ describe("standalone context compaction execution", () => {
       forbiddenRuntimeCalls += 1;
       throw new Error("standalone compaction entered the agent/sandbox runtime");
     };
+    let compactionRequest: { messages?: Array<{ role?: string; content?: string }> } | undefined;
     const fakeClient = {
       chat: {
         completions: {
-          create: async () => {
+          create: async (request: { messages?: Array<{ role?: string; content?: string }> }) => {
+            compactionRequest = request;
             compactionCalls += 1;
             return {
               id: "chatcmpl-compaction",
@@ -421,6 +423,7 @@ describe("standalone context compaction execution", () => {
                     content:
                       "The user is building a correct queue and the implementation is in progress.",
                   },
+                  finish_reason: "stop",
                 },
               ],
             };
@@ -480,6 +483,8 @@ describe("standalone context compaction execution", () => {
     const turn = await getSessionTurn(client.db, grant.workspaceId!, result.turnId);
     expect(turn?.source).toBe("compaction");
     expect(compactionCalls).toBe(1);
+    expect(compactionRequest?.messages?.[0]).toMatchObject({ role: "system" });
+    expect(compactionRequest?.messages?.at(-1)).toMatchObject({ role: "user" });
     expect(forbiddenRuntimeCalls).toBe(0);
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       false,
@@ -699,7 +704,7 @@ describe("standalone context compaction execution", () => {
 
     const outcome = await maybeCompactContext(
       client.db,
-      testSettings({ contextWindowTokens: 10_000 }),
+      testSettings({ contextWindowTokens: 100_000 }),
       {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
@@ -789,7 +794,7 @@ describe("standalone context compaction execution", () => {
 
     const outcome = await maybeCompactContext(
       client.db,
-      testSettings({ contextWindowTokens: 10_000 }),
+      testSettings({ contextWindowTokens: 100_000 }),
       {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
@@ -1507,6 +1512,7 @@ describe("standalone context compaction execution", () => {
                       message: {
                         content: "The prior work was compacted before changing direction.",
                       },
+                      finish_reason: "stop",
                     },
                   ],
                 };
@@ -2758,7 +2764,7 @@ describe("standalone context compaction execution", () => {
     ).toEqual(originalItems);
   });
 
-  test("matches Codex's overflow floor by trying the checkpoint prompt alone once", async () => {
+  test("preserves history instead of summarizing a checkpoint prompt alone", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
@@ -2827,11 +2833,12 @@ describe("standalone context compaction execution", () => {
         },
         { force: true, clearRequestedCompaction: true, trigger: "operator" },
       ),
-    ).rejects.toBe(overflow);
+    ).rejects.toMatchObject({
+      name: "EmptyCompactionSummaryError",
+      diagnostics: { stage: "portable_input_budget", reason: "no_history_fit" },
+    });
 
-    // Codex counts the synthesized checkpoint prompt in its input length. Our
-    // active-history lengths 1 -> 0 therefore equal Codex input lengths 2 -> 1.
-    expect(inputLengths).toEqual([2, 1]);
+    expect(inputLengths).toEqual([2]);
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       true,
     );

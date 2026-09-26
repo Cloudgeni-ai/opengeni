@@ -26,7 +26,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { LoadErrorState } from "@/components/common";
+import { CopyableMono, LoadErrorState } from "@/components/common";
 import { PermissionGroupPicker } from "@/components/permission-picker";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -1012,6 +1012,10 @@ export function OrganizationOverviewSection(props: {
               <PencilIcon className="size-3.5" /> Rename
             </Button>
           ) : null}
+        </div>
+        <div className="flex min-w-0 max-w-lg items-center gap-3">
+          <span className="shrink-0 text-xs text-fg-subtle">Organization ID</span>
+          <CopyableMono value={overview.organization.id} />
         </div>
         <div className="grid grid-cols-1 divide-y divide-border border-y border-border sm:grid-cols-3 sm:divide-x sm:divide-y-0">
           <Metric label="Shared workspaces" value={overview.workspaces.length} />

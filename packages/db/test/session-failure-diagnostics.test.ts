@@ -107,6 +107,29 @@ test("detail failure survives timeline paging and later pre-claim failure replac
     projection: { truncatedFields: ["error"] },
   });
   expect(new TextEncoder().encode(JSON.stringify(projected)).length).toBeLessThan(40 * 1024);
+  expect(projected.payload).not.toHaveProperty("quotaScope");
+  // The closed exhausted-quota marker projects only as one of its literal values.
+  for (const [quotaScope, expected] of [
+    ["daily", "daily"],
+    ["credits", "credits"],
+    ["weekly", undefined],
+    [{ scope: "daily" }, undefined],
+  ] as const) {
+    await appendSessionEventsAndUpdateSession(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      [
+        {
+          type: "turn.failed",
+          payload: { error: "quota", code: "context_compaction_failed", quotaScope },
+        },
+      ],
+      { status: "failed" },
+    );
+    const quotaPayload = (await read())!.failureDiagnostics!.payload as Record<string, unknown>;
+    expect(quotaPayload.quotaScope).toBe(expected);
+  }
   const escaped = Object.fromEntries(
     ["error", "message", "detail", "lastRetryableError", "code", "status"].map((key) => [
       key,

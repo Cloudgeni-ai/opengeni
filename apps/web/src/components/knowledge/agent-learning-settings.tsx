@@ -1,3 +1,4 @@
+import { DEFAULT_AGENT_LEARNING } from "@opengeni/contracts";
 import type {
   AgentLearningCategory,
   AgentLearningContext,
@@ -208,7 +209,7 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
               value={record.settings[key] ?? "inherit"}
               compact={props.compact}
               allowInherit={!!props.source}
-              defaultMode={defaults?.settings[key] ?? "review_first"}
+              defaultMode={defaults?.settings[key] ?? DEFAULT_AGENT_LEARNING[key]}
               onChange={(mode) => void save(key, mode)}
             />
           </div>

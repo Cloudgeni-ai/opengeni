@@ -18,8 +18,8 @@ export type AgentLearningDefaults = z.infer<typeof AgentLearningDefaults>;
 
 export const DEFAULT_AGENT_LEARNING: Readonly<AgentLearningDefaults> = Object.freeze({
   knowledge: "automatic",
-  instructions: "review_first",
-  skills: "review_first",
+  instructions: "automatic",
+  skills: "automatic",
 });
 
 /** An absent category inherits. `inherit` is a reset request, not persisted policy. */

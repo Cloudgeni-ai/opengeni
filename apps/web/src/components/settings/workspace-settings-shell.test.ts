@@ -9,9 +9,18 @@ const nextWorkspaceId = "22222222-2222-4222-8222-222222222222";
 const fallbackWorkspaceId = "33333333-3333-4333-8333-333333333333";
 const navigate = mock((_options: unknown) => undefined);
 const resetSessionView = mock(() => undefined);
+let workspacePermissions: string[] = [];
 
 mock.module("@/context", () => ({
-  useAppContext: () => ({ resetSessionView, workspaces: [{ id: fallbackWorkspaceId }] }),
+  useAppContext: () => ({
+    resetSessionView,
+    workspaces: [{ id: fallbackWorkspaceId }],
+    accessContext: {
+      workspaceGrants: [
+        { workspaceId: "11111111-1111-4111-8111-111111111111", permissions: workspacePermissions },
+      ],
+    },
+  }),
 }));
 
 mock.module("@tanstack/react-router", () => ({
@@ -62,6 +71,7 @@ afterAll(() => {
 beforeEach(() => {
   navigate.mockClear();
   resetSessionView.mockClear();
+  workspacePermissions = [];
 });
 
 async function renderShell(
@@ -95,6 +105,25 @@ async function renderShell(
 }
 
 describe("workspace management navigation", () => {
+  test("shows Memory consistently and limits Insights navigation to admins", async () => {
+    const member = await renderShell({ kind: "settings", section: "general" });
+    try {
+      expect(member.container.textContent).toContain("Memory");
+      expect(member.container.textContent).not.toContain("Insights");
+    } finally {
+      await member.unmount();
+    }
+
+    workspacePermissions = ["workspace:admin"];
+    const admin = await renderShell({ kind: "settings", section: "general" });
+    try {
+      expect(admin.container.textContent).toContain("Insights");
+      expect(admin.container.textContent).toContain("Memory");
+    } finally {
+      await admin.unmount();
+    }
+  });
+
   test("keeps Agent Knowledge out of the settings sidebar", async () => {
     const view = await renderShell({ kind: "settings", section: "learning" });
     try {

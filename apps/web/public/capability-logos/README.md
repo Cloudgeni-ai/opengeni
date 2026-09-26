@@ -1,6 +1,6 @@
 # First-party capability marks
 
-These three bundled marks cover first-party catalog rows that do not pass
+These four bundled marks cover first-party catalog rows that do not pass
 through the integrations.sh import, so they cannot receive a vendored registry
 `logoAssetPath`. The web app serves them from its own immutable deployment; it
 never hotlinks a provider or relies on a third-party host at runtime.

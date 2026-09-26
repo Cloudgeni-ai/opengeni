@@ -37,6 +37,26 @@ artifactId: document.id, inspectionReceiptId }]` with the completion evidence to
 If the document changes, inspect it again and use the new receipt. Include the
 returned artifact reference in the user handoff.
 
+## Native Connected Machine ID helper
+
+When the JavaScript client is unavailable, the native client can generate IDs
+offline. Inspect the document summary with the artifact tools first. Copy its
+exact decimal `idNamespace` string into `DOCUMENT_NAMESPACE`, then run:
+
+```sh
+"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode document-id paragraph "$DOCUMENT_NAMESPACE"
+```
+
+The result is JSON with an `id` field. Kinds are `paragraph`, `table`, `page-break`,
+`section`, `header`, `footer`, `comment`, and `tracked-change`. The helper uses the
+same ID format as `openGeni.artifacts.ids.document`; it needs no credentials or
+network and does not mutate an artifact. Keep uint64 namespaces as decimal strings,
+not JavaScript numbers. Direct apply calls still require the inspected
+`headSequence` and `stateHash`. Reuse inspected IDs for existing objects.
+If the installed native client lacks `document-id`, use the deployment-selected
+JavaScript helper when available; otherwise report the missing client capability
+rather than inventing IDs or claiming an edit succeeded.
+
 ## Authoring example
 
 ```js

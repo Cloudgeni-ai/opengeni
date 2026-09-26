@@ -103,13 +103,28 @@ export function apiKeyPermissionGroups(): PermissionGroup[] {
   return cachedApiKeyPermissionGroups;
 }
 
-// Mirrors the API's ensureDelegablePermissions: a workspace:admin grant can
-// delegate everything, any other grant only its own permissions.
-export function delegableApiKeyPermissions(grantPermissions: readonly string[]): Set<string> {
+// Mirrors the API's ensureDelegablePermissions: workspace:admin delegates most
+// workspace scopes, but high-trust scopes require literal grants in the right
+// authority (workspace or organization). Other grants delegate only themselves.
+export function delegableApiKeyPermissions(
+  grantPermissions: readonly string[],
+  accountGrantPermissions: readonly string[] = [],
+): Set<string> {
   if (grantPermissions.includes("workspace:admin")) {
+    const accountLiteralPermissions = new Set<string>([
+      "account:read",
+      "account:admin",
+      "workspace:create",
+      "billing:read",
+      "billing:manage",
+    ]);
+    const workspaceLiteralPermissions = new Set<string>(["members:manage", "secrets:read"]);
     return new Set<string>(
       Permission.options.filter(
-        (permission) => permission !== "secrets:read" || grantPermissions.includes("secrets:read"),
+        (permission) =>
+          (!accountLiteralPermissions.has(permission) ||
+            accountGrantPermissions.includes(permission)) &&
+          (!workspaceLiteralPermissions.has(permission) || grantPermissions.includes(permission)),
       ),
     );
   }
@@ -224,6 +239,7 @@ export const defaultWorkspaceMemberPermissions = new Set<string>([
   "scheduled_tasks:manage",
   "scheduled_tasks:run",
   "github:use",
+  "connections:read",
   "variable-sets:list",
   "variable-sets:read",
   "variable-sets:write",
@@ -323,6 +339,11 @@ export function hasWorkspacePermission(
     (grant.permissions.includes(permission) ||
       (permission !== "secrets:read" && grant.permissions.includes("workspace:admin"))),
   );
+}
+
+/** An authorization failure needs an access explanation, not a retry prompt. */
+export function isWorkspacePermissionDenied(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "status" in error && error.status === 403);
 }
 
 export function hasAccountPermission(

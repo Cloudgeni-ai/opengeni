@@ -25,6 +25,7 @@ import { toast } from "sonner";
 
 import { ConnectionPill, CopyableMono, InfoRow, InspectorSection } from "@/components/common";
 import { ModelContextInspectorPane } from "@/components/session/model-context-inspector";
+import { sessionSandboxLabel } from "@/components/session/sandbox-switcher";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -174,8 +175,9 @@ export function SessionInspector(props: {
   const activeMachine =
     fleet.machines.find((machine) => machine.active && machine.kind === "selfhosted") ?? null;
   // Compute context, honestly: don't fall back to the home backend while the
-  // fleet is still resolving — that reads "modal" even when a machine runs the
-  // turn. Show a loading/unavailable note until we actually know.
+  // fleet is still resolving - that reads "Cloud sandbox" even when a machine
+  // runs the turn. Show a loading/unavailable note until we actually know. The
+  // home box uses the neutral label, never its hosting vendor.
   const computeUnknown = fleet.machines.length === 0 && (fleet.loading || Boolean(fleet.error));
   const computeLabel = activeMachine ? "Machine" : "Sandbox";
   const computeValue = activeMachine
@@ -184,7 +186,7 @@ export function SessionInspector(props: {
       ? fleet.loading
         ? "Checking…"
         : "Unavailable"
-      : props.session.sandboxBackend;
+      : sessionSandboxLabel(props.session.sandboxBackend);
   const displayEvents = props.events;
   const sortedEvents = [...displayEvents].sort((a, b) => b.sequence - a.sequence);
   const lifecycleEvents = [...displayEvents]

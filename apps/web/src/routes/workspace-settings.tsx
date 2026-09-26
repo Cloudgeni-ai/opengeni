@@ -8,10 +8,10 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowUpRightIcon,
   CopyIcon,
-  KeyRoundIcon,
   Loader2Icon,
   PencilIcon,
   PlusIcon,
+  SearchCodeIcon,
   ShrinkIcon,
   Trash2Icon,
   TriangleAlertIcon,
@@ -37,6 +37,7 @@ import {
   WorkspaceSettingsContent,
   type WorkspaceSettingsSection,
 } from "@/components/settings/workspace-settings-shell";
+import { SettingsSection } from "@/components/settings/settings-layout";
 import {
   useOrganizationWorkspaceAdministration,
   type OrganizationWorkspaceAdministration,
@@ -167,7 +168,13 @@ function OperationalWorkspaceSettingsRoute({
   const workspaceGrant =
     context.accessContext.workspaceGrants.find((grant) => grant.workspaceId === workspaceId) ??
     null;
-  const delegablePermissions = delegableApiKeyPermissions(workspaceGrant?.permissions ?? []);
+  const accountGrant = context.accessContext.accountGrants.find(
+    (grant) => grant.accountId === workspaceGrant?.accountId,
+  );
+  const delegablePermissions = delegableApiKeyPermissions(
+    workspaceGrant?.permissions ?? [],
+    accountGrant?.permissions ?? [],
+  );
   const requestedPermissions = [...selectedPermissions].filter((permission) =>
     delegablePermissions.has(permission),
   );
@@ -340,26 +347,14 @@ function OperationalWorkspaceSettingsRoute({
 
   return (
     <WorkspaceSettingsContent section={section}>
-      <section className="grid min-w-0 gap-6 text-left">
+      <div className="grid min-w-0 gap-9 text-left">
         {section === "general" ? (
           <>
-            <section className="grid max-w-3xl gap-4 border-b border-border pb-5">
-              <div className="flex min-w-0 items-start justify-between gap-4">
-                <div className="min-w-0">
-                  <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-                    Workspace
-                  </p>
-                  <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-2">
-                    <h2 className="truncate text-lg font-semibold tracking-tight text-fg">
-                      {activeWorkspace?.name ?? "Workspace"}
-                    </h2>
-                    {personal ? <PersonalWorkspaceBadge /> : null}
-                  </div>
-                  <p className="mt-1 text-xs text-fg-muted">
-                    {personal ? "Private workspace" : "Shared workspace"} in {organizationLabel}
-                  </p>
-                </div>
-                {canRename && !nameEditing ? (
+            <SettingsSection
+              id="workspace-identity-heading"
+              title="Workspace identity"
+              action={
+                canRename && !nameEditing ? (
                   <Button
                     type="button"
                     size="sm"
@@ -371,11 +366,21 @@ function OperationalWorkspaceSettingsRoute({
                     <PencilIcon className="size-3.5" />
                     Rename
                   </Button>
-                ) : null}
+                ) : null
+              }
+            >
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <p className="min-w-0 truncate text-lg font-semibold tracking-tight text-fg">
+                  {activeWorkspace?.name ?? "Workspace"}
+                </p>
+                {personal ? <PersonalWorkspaceBadge /> : null}
               </div>
+              <p className="mt-1 text-xs text-fg-muted">
+                {personal ? "Private workspace" : "Shared workspace"} in {organizationLabel}
+              </p>
               {nameEditing && canRename ? (
                 <form
-                  className="grid max-w-xl gap-3 rounded-lg border border-border bg-surface/45 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"
+                  className="mt-4 grid max-w-xl gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"
                   onSubmit={(event) => {
                     event.preventDefault();
                     void submitRename();
@@ -423,7 +428,7 @@ function OperationalWorkspaceSettingsRoute({
                   </div>
                 </form>
               ) : null}
-            </section>
+            </SettingsSection>
 
             {activeWorkspace ? (
               <WorkspaceRuntimeControl
@@ -450,16 +455,12 @@ function OperationalWorkspaceSettingsRoute({
 
             {personal ? <PersonalWorkspaceNotice organizationLabel={organizationLabel} /> : null}
 
-            <section aria-labelledby="workspace-preferences-heading" className="grid min-w-0 gap-2">
-              <div>
-                <h2 id="workspace-preferences-heading" className="text-sm font-medium">
-                  Session defaults
-                </h2>
-                <p className="mt-1 text-xs text-fg-muted">
-                  Applied when someone starts a new session in this workspace.
-                </p>
-              </div>
-              <div className="divide-y divide-border/70 rounded-lg border border-border px-3">
+            <SettingsSection
+              id="workspace-preferences-heading"
+              title="Session defaults"
+              description="Applied when someone starts a new session in this workspace."
+            >
+              <div className="divide-y divide-border/70">
                 <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
                 <VideoGenerationPreferenceRow
                   workspaceId={workspaceId}
@@ -470,8 +471,9 @@ function OperationalWorkspaceSettingsRoute({
                   workspaceId={workspaceId}
                   canManage={canManageSettings}
                 />
+                <CodeSearchPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
               </div>
-            </section>
+            </SettingsSection>
 
             <NativeIdentityLinkAccounts workspaceId={workspaceId} />
           </>
@@ -492,65 +494,51 @@ function OperationalWorkspaceSettingsRoute({
         ) : null}
 
         {section === "plugins" ? (
-          <>
-            <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-4">
-              <div>
-                <h2 className="text-sm font-medium">Manage capabilities</h2>
-                <p className="mt-1 text-xs text-fg-muted">
-                  Manage Plugins, Skills, and integrations on the Capabilities page.
-                </p>
-              </div>
+          <SettingsSection
+            id="workspace-capabilities-heading"
+            title="Manage capabilities"
+            description="Manage Plugins, Skills, and integrations on the Capabilities page."
+            action={
               <Button asChild type="button" variant="secondary" size="sm">
                 <Link to="/workspaces/$workspaceId/plugins" params={{ workspaceId }}>
                   Open Capabilities
                   <ArrowUpRightIcon className="size-3.5" />
                 </Link>
               </Button>
-            </section>
+            }
+          >
             <WorkspaceCapabilityDefaults
               workspaceId={workspaceId}
               canManage={canManageSettings}
               kind="plugins"
             />
-          </>
+          </SettingsSection>
         ) : null}
 
         {section === "models" ? (
           <>
-            <section className="grid gap-2">
-              <div>
-                <h2 className="text-sm font-medium">Default model</h2>
-                <p className="mt-1 text-xs text-fg-muted">
-                  Used when a new session does not choose a different model.
-                </p>
-              </div>
-              <div className="rounded-lg border border-border px-3">
-                <DefaultSessionModelPreferenceRow
-                  key={`default-model:${workspaceId}:${gatewayRevision}`}
-                  workspaceId={workspaceId}
-                  canManage={canManageSettings}
-                />
-              </div>
-            </section>
-            <section className="grid gap-2" aria-labelledby="model-connections-heading">
-              <div>
-                <h2 id="model-connections-heading" className="text-sm font-medium">
-                  Connections
-                </h2>
-                <p className="mt-1 text-xs leading-5 text-fg-muted">
-                  Connect subscriptions or provider accounts for this workspace. Your organization
-                  can also make connections available here. Choose model access on each connected
-                  account.
-                </p>
+            <div className="border-b border-border/70 pb-3">
+              <DefaultSessionModelPreferenceRow
+                key={`default-model:${workspaceId}:${gatewayRevision}`}
+                workspaceId={workspaceId}
+                canManage={canManageSettings}
+              />
+            </div>
+            <SettingsSection
+              id="model-connections-heading"
+              title="Connections"
+              description="Connect subscriptions or provider accounts for this workspace. Your organization can also make connections available here. Choose model access on each connected account."
+              action={
                 <Link
                   to="/workspaces/$workspaceId/organization"
                   params={{ workspaceId }}
                   search={{ section: "models" }}
-                  className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
+                  className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
                 >
                   Manage organization connections <ArrowUpRightIcon className="size-3.5" />
                 </Link>
-              </div>
+              }
+            >
               <div className="min-w-0">
                 {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
                 <CodexSubscriptionsCard
@@ -576,7 +564,7 @@ function OperationalWorkspaceSettingsRoute({
                   onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
                 />
               </div>
-            </section>
+            </SettingsSection>
             <ModelAccessPolicySection
               key={`model-access:${workspaceId}:${gatewayRevision}`}
               workspaceId={workspaceId}
@@ -586,202 +574,210 @@ function OperationalWorkspaceSettingsRoute({
         ) : null}
 
         {section === "api-keys" ? (
-          <section className="grid gap-4">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h2 className="flex items-center gap-2 text-sm font-medium">
-                  <KeyRoundIcon className="size-3.5 text-brand" />
-                  OpenGeni API keys
-                </h2>
-                <p className="mt-1 text-xs text-fg-muted">
-                  Workspace-scoped keys for calling OpenGeni from another product.
-                </p>
-              </div>
-              {canManageApiKeys ? (
-                <Button type="button" size="sm" onClick={() => setCreateKeyOpen(true)}>
-                  <PlusIcon className="size-3.5" />
-                  Create API key
-                </Button>
-              ) : null}
-            </div>
-            {createdToken ? (
-              <Notice tone="success" title="Copy this token now — it won't be shown again.">
-                <div className="mt-2 flex min-w-0 items-center gap-2">
-                  <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1.5 text-xs text-fg">
-                    {createdToken}
-                  </code>
+          <SettingsSection
+            id="workspace-api-keys-heading"
+            title="Workspace keys"
+            action={
+              <>
+                <span className="text-xs text-fg-subtle">
+                  {!apiKeysLoaded
+                    ? "Loading…"
+                    : activeApiKeyCount === 0
+                      ? "No active keys"
+                      : `${activeApiKeyCount} active`}
+                </span>
+                {canManageApiKeys ? (
                   <Button
                     type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label="Copy token"
-                    onClick={() => void copyToken(createdToken)}
+                    size="sm"
+                    onClick={() => {
+                      setSelectedPermissions(
+                        new Set(
+                          [...defaultApiKeyPermissions].filter((permission) =>
+                            delegablePermissions.has(permission),
+                          ),
+                        ),
+                      );
+                      setCreateKeyOpen(true);
+                    }}
                   >
-                    <CopyIcon className="size-3.5" />
+                    <PlusIcon className="size-3.5" />
+                    Create API key
                   </Button>
-                </div>
-              </Notice>
-            ) : null}
-            <div className="flex items-center justify-between gap-3">
-              <h3 className="text-xs font-medium text-fg-muted">Keys</h3>
-              <span className="text-2xs text-fg-subtle">
-                {!apiKeysLoaded
-                  ? "Loading…"
-                  : activeApiKeyCount === 0
-                    ? "No active keys"
-                    : `${activeApiKeyCount} active`}
-              </span>
-            </div>
-            <div className="divide-y divide-border/70 overflow-hidden rounded-lg border border-border">
-              {apiKeysError ? (
-                <div className="p-2">
-                  <LoadErrorState
-                    title="Couldn't load API keys"
-                    error={apiKeysError}
-                    onRetry={() => void refreshApiKeys()}
-                  />
-                </div>
-              ) : !apiKeysLoaded ? (
-                <>
-                  {[0, 1].map((key) => (
-                    <div key={key} className="flex items-center justify-between gap-3 px-3 py-2">
-                      <div className="min-w-0 space-y-1.5">
-                        <Skeleton className="h-4 w-32" />
-                        <Skeleton className="h-3 w-24" />
-                      </div>
-                      <Skeleton className="h-8 w-20 rounded-md" />
-                    </div>
-                  ))}
-                </>
-              ) : apiKeys.length === 0 ? (
-                <div className="p-2">
-                  <EmptyState
-                    title="No API keys yet"
-                    description={
-                      canManageApiKeys
-                        ? "Create a key to call OpenGeni from another product."
-                        : "Keys created here call OpenGeni from another product."
-                    }
-                  />
-                </div>
-              ) : (
-                apiKeys.map((apiKey) => (
-                  <div
-                    key={apiKey.id}
-                    className="flex min-w-0 items-center justify-between gap-3 px-3 py-2"
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">{apiKey.name}</div>
-                      {apiKey.description ? (
-                        <div className="truncate text-xs text-fg-muted">{apiKey.description}</div>
-                      ) : null}
-                      <div className="truncate text-2xs text-fg-subtle">
-                        {apiKey.prefix}… · {apiKey.revokedAt ? "revoked" : "active"}
-                      </div>
-                    </div>
+                ) : null}
+              </>
+            }
+          >
+            <div className="grid gap-4">
+              {createdToken ? (
+                <Notice tone="success" title="Copy this token now — it won't be shown again.">
+                  <div className="mt-2 flex min-w-0 items-center gap-2">
+                    <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1.5 text-xs text-fg">
+                      {createdToken}
+                    </code>
                     <Button
                       type="button"
                       variant="ghost"
-                      size="sm"
-                      disabled={busy || Boolean(apiKey.revokedAt)}
-                      onClick={() => setRevokingKey(apiKey)}
+                      size="icon-sm"
+                      aria-label="Copy token"
+                      onClick={() => void copyToken(createdToken)}
                     >
-                      <Trash2Icon className="size-3.5" />
-                      Revoke
+                      <CopyIcon className="size-3.5" />
                     </Button>
                   </div>
-                ))
-              )}
-            </div>
-            {!canManageApiKeys ? (
-              <p className="text-xs text-fg-subtle">
-                You don't have permission to manage API keys here.
-              </p>
-            ) : null}
-
-            <Dialog open={createKeyOpen} onOpenChange={setCreateKeyOpen}>
-              <DialogContent className="max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-h-[85vh] sm:max-w-2xl">
-                <DialogHeader>
-                  <DialogTitle>Create API key</DialogTitle>
-                  <DialogDescription>
-                    Create a workspace-scoped key and choose what it can access.
-                  </DialogDescription>
-                </DialogHeader>
-                <div className="grid min-h-0 gap-5 overflow-y-auto px-1">
-                  <div className="grid gap-4">
-                    <div className="grid gap-2">
-                      <Label htmlFor="api-key-name">Name</Label>
-                      <Input
-                        id="api-key-name"
-                        suppressAutofill
-                        autoFocus
-                        value={apiKeyName}
-                        onChange={(event) => setApiKeyName(event.target.value)}
-                        placeholder="Default API key"
-                      />
-                    </div>
-                    <div className="grid gap-2">
-                      <Label htmlFor="api-key-description">Description</Label>
-                      <Textarea
-                        id="api-key-description"
-                        value={apiKeyDescription}
-                        onChange={(event) => setApiKeyDescription(event.target.value)}
-                        placeholder="What will this key be used for?"
-                        maxLength={500}
-                        rows={3}
-                      />
-                    </div>
+                </Notice>
+              ) : null}
+              <div className="divide-y divide-border/70">
+                {apiKeysError ? (
+                  <div>
+                    <LoadErrorState
+                      title="Couldn't load API keys"
+                      error={apiKeysError}
+                      onRetry={() => void refreshApiKeys()}
+                    />
                   </div>
-                  <section className="grid gap-3" aria-labelledby="api-key-permissions-heading">
-                    <div className="flex flex-wrap items-end justify-between gap-2">
-                      <div>
-                        <h3 id="api-key-permissions-heading" className="text-sm font-medium">
-                          Permissions
-                        </h3>
-                        <p className="mt-1 text-xs text-fg-muted">
-                          A key can only carry permissions your own grant can delegate.
-                        </p>
+                ) : !apiKeysLoaded ? (
+                  <>
+                    {[0, 1].map((key) => (
+                      <div key={key} className="flex items-center justify-between gap-3 py-3">
+                        <div className="min-w-0 space-y-1.5">
+                          <Skeleton className="h-4 w-32" />
+                          <Skeleton className="h-3 w-24" />
+                        </div>
+                        <Skeleton className="h-8 w-20 rounded-md" />
+                      </div>
+                    ))}
+                  </>
+                ) : apiKeys.length === 0 ? (
+                  <div>
+                    <EmptyState
+                      title="No API keys yet"
+                      description={
+                        canManageApiKeys
+                          ? "Create a key to call OpenGeni from another product."
+                          : "Keys created here call OpenGeni from another product."
+                      }
+                    />
+                  </div>
+                ) : (
+                  apiKeys.map((apiKey) => (
+                    <div
+                      key={apiKey.id}
+                      className="flex min-w-0 items-center justify-between gap-3 py-3"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium">{apiKey.name}</div>
+                        {apiKey.description ? (
+                          <div className="truncate text-xs text-fg-muted">{apiKey.description}</div>
+                        ) : null}
+                        <div className="truncate text-2xs text-fg-subtle">
+                          {apiKey.prefix}… · {apiKey.revokedAt ? "revoked" : "active"}
+                        </div>
                       </div>
                       <Button
                         type="button"
                         variant="ghost"
                         size="sm"
-                        disabled={delegablePermissions.size === 0}
-                        onClick={() => setSelectedPermissions(new Set(delegablePermissions))}
+                        disabled={busy || Boolean(apiKey.revokedAt)}
+                        onClick={() => setRevokingKey(apiKey)}
                       >
-                        Select all delegable
+                        <Trash2Icon className="size-3.5" />
+                        Revoke
                       </Button>
                     </div>
-                    <PermissionGroupPicker
-                      groups={apiKeyPermissionGroups()}
-                      selected={selectedPermissions}
-                      delegable={delegablePermissions}
+                  ))
+                )}
+              </div>
+              {!canManageApiKeys ? (
+                <p className="text-xs text-fg-subtle">
+                  You don't have permission to manage API keys here.
+                </p>
+              ) : null}
+
+              <Dialog open={createKeyOpen} onOpenChange={setCreateKeyOpen}>
+                <DialogContent className="max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-h-[85vh] sm:max-w-2xl">
+                  <DialogHeader>
+                    <DialogTitle>Create API key</DialogTitle>
+                    <DialogDescription>
+                      Create a workspace-scoped key and choose what it can access.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="grid min-h-0 gap-5 overflow-y-auto px-1">
+                    <div className="grid gap-4">
+                      <div className="grid gap-2">
+                        <Label htmlFor="api-key-name">Name</Label>
+                        <Input
+                          id="api-key-name"
+                          suppressAutofill
+                          autoFocus
+                          value={apiKeyName}
+                          onChange={(event) => setApiKeyName(event.target.value)}
+                          placeholder="Default API key"
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="api-key-description">Description</Label>
+                        <Textarea
+                          id="api-key-description"
+                          value={apiKeyDescription}
+                          onChange={(event) => setApiKeyDescription(event.target.value)}
+                          placeholder="What will this key be used for?"
+                          maxLength={500}
+                          rows={3}
+                        />
+                      </div>
+                    </div>
+                    <section className="grid gap-3" aria-labelledby="api-key-permissions-heading">
+                      <div className="flex flex-wrap items-end justify-between gap-2">
+                        <div>
+                          <h3 id="api-key-permissions-heading" className="text-sm font-medium">
+                            Permissions
+                          </h3>
+                          <p className="mt-1 text-xs text-fg-muted">
+                            A key can only carry permissions your own grant can delegate.
+                          </p>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={delegablePermissions.size === 0}
+                          onClick={() => setSelectedPermissions(new Set(delegablePermissions))}
+                        >
+                          Select all delegable
+                        </Button>
+                      </div>
+                      <PermissionGroupPicker
+                        groups={apiKeyPermissionGroups()}
+                        selected={new Set(requestedPermissions)}
+                        delegable={delegablePermissions}
+                        disabled={busy}
+                        onToggle={togglePermission}
+                      />
+                    </section>
+                  </div>
+                  <DialogFooter>
+                    <Button
+                      type="button"
+                      variant="ghost"
                       disabled={busy}
-                      onToggle={togglePermission}
-                    />
-                  </section>
-                </div>
-                <DialogFooter>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() => setCreateKeyOpen(false)}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    type="button"
-                    disabled={busy || !apiKeyName.trim() || requestedPermissions.length === 0}
-                    onClick={() => void createKey()}
-                  >
-                    {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
-                    Create API key
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
-          </section>
+                      onClick={() => setCreateKeyOpen(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      disabled={busy || !apiKeyName.trim() || requestedPermissions.length === 0}
+                      onClick={() => void createKey()}
+                    >
+                      {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+                      Create API key
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </div>
+          </SettingsSection>
         ) : null}
 
         <ConfirmDialog
@@ -801,7 +797,7 @@ function OperationalWorkspaceSettingsRoute({
             onDelete={deleteWorkspace}
           />
         ) : null}
-      </section>
+      </div>
     </WorkspaceSettingsContent>
   );
 }
@@ -1017,20 +1013,20 @@ function OrganizationManagedWorkspaceSettings({
 
   return (
     <WorkspaceSettingsContent section={section}>
-      <section className="grid min-w-0 gap-6 text-left">
+      <div className="grid min-w-0 gap-9 text-left">
         <Notice tone="muted" title="Organization management mode">
           You can manage this shared workspace, but this does not give you access to its chats,
           files, credentials, or integrations.
         </Notice>
 
         {section === "general" ? (
-          <section className="grid gap-3 rounded-lg border border-border p-4">
-            <div>
-              <h2 className="text-sm font-medium">Workspace name</h2>
-              <p className="mt-1 text-xs text-fg-muted">Shown to everyone with workspace access.</p>
-            </div>
+          <SettingsSection
+            id="managed-workspace-name-heading"
+            title="Workspace name"
+            description="Shown to everyone with workspace access."
+          >
             <form
-              className="flex flex-wrap items-end gap-2"
+              className="flex flex-wrap items-end gap-3"
               onSubmit={(event) => {
                 event.preventDefault();
                 void rename();
@@ -1054,123 +1050,125 @@ function OrganizationManagedWorkspaceSettings({
                 Save name
               </Button>
             </form>
-          </section>
+          </SettingsSection>
         ) : null}
 
         {section === "members" ? (
-          <section className="grid gap-4">
-            <div>
-              <h2 className="text-sm font-medium">People with access</h2>
-              <p className="mt-1 text-xs text-fg-muted">
-                Workspace access is separate from organization administration.
-              </p>
-            </div>
-            {candidates.length > 0 ? (
-              <div className="flex flex-wrap items-end gap-2 rounded-lg border border-border p-3">
-                <label className="grid min-w-56 flex-1 gap-1 text-xs text-fg-muted">
-                  Organization member
-                  <Select
-                    value={selectedMembershipId}
-                    onChange={(event) => setSelectedMembershipId(event.target.value)}
-                    disabled={busy}
+          <SettingsSection
+            id="managed-workspace-members-heading"
+            title="People with access"
+            description="Workspace access is separate from organization administration."
+          >
+            <div className="grid gap-4">
+              {candidates.length > 0 ? (
+                <div className="flex flex-wrap items-end gap-3">
+                  <label className="grid min-w-56 flex-1 gap-1 text-xs text-fg-muted">
+                    Organization member
+                    <Select
+                      value={selectedMembershipId}
+                      onChange={(event) => setSelectedMembershipId(event.target.value)}
+                      disabled={busy}
+                    >
+                      <option value="">Choose a person…</option>
+                      {candidates.map((member) => (
+                        <option key={member.id} value={member.id}>
+                          {member.name ?? member.email ?? "Member"}
+                        </option>
+                      ))}
+                    </Select>
+                  </label>
+                  <label className="grid min-w-40 gap-1 text-xs text-fg-muted">
+                    Access
+                    <Select
+                      value={selectedRole}
+                      onChange={(event) =>
+                        setSelectedRole(event.target.value as typeof selectedRole)
+                      }
+                      disabled={busy}
+                    >
+                      {overview.roles.map((role) => (
+                        <option key={role.role} value={role.role}>
+                          {role.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </label>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={busy || !selectedMembershipId}
+                    onClick={() => void addMember()}
                   >
-                    <option value="">Choose a person…</option>
-                    {candidates.map((member) => (
-                      <option key={member.id} value={member.id}>
-                        {member.name ?? member.email ?? "Member"}
-                      </option>
-                    ))}
-                  </Select>
-                </label>
-                <label className="grid min-w-40 gap-1 text-xs text-fg-muted">
-                  Access
-                  <Select
-                    value={selectedRole}
-                    onChange={(event) => setSelectedRole(event.target.value as typeof selectedRole)}
-                    disabled={busy}
-                  >
-                    {overview.roles.map((role) => (
-                      <option key={role.role} value={role.role}>
-                        {role.label}
-                      </option>
-                    ))}
-                  </Select>
-                </label>
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={busy || !selectedMembershipId}
-                  onClick={() => void addMember()}
-                >
-                  Add access
-                </Button>
-              </div>
-            ) : null}
-            {membersLoading ? (
-              <p role="status" className="text-xs text-fg-muted">
-                Loading organization members…
-              </p>
-            ) : workspace.members.length === 0 ? (
-              <EmptyState
-                title="No one has access"
-                description="Add an organization member to this workspace."
-              />
-            ) : (
-              <div className="divide-y divide-border overflow-hidden rounded-lg border border-border">
-                {workspace.members.map((member) => (
-                  <div
-                    key={member.membershipId}
-                    className="flex flex-wrap items-center gap-3 px-3 py-3"
-                  >
-                    <div className="min-w-48 flex-1">
-                      <p className="truncate text-sm font-medium">
-                        {managedWorkspaceMemberLabel(member)}
-                      </p>
-                      <p className="text-2xs capitalize text-fg-subtle">{member.principalKind}</p>
+                    Add access
+                  </Button>
+                </div>
+              ) : null}
+              {membersLoading ? (
+                <p role="status" className="text-xs text-fg-muted">
+                  Loading organization members…
+                </p>
+              ) : workspace.members.length === 0 ? (
+                <EmptyState
+                  title="No one has access"
+                  description="Add an organization member to this workspace."
+                />
+              ) : (
+                <div className="divide-y divide-border">
+                  {workspace.members.map((member) => (
+                    <div
+                      key={member.membershipId}
+                      className="flex flex-wrap items-center gap-3 py-3"
+                    >
+                      <div className="min-w-48 flex-1">
+                        <p className="truncate text-sm font-medium">
+                          {managedWorkspaceMemberLabel(member)}
+                        </p>
+                        <p className="text-2xs capitalize text-fg-subtle">{member.principalKind}</p>
+                      </div>
+                      {member.organizationMembershipId && member.principalKind === "human" ? (
+                        <Select
+                          className="w-44"
+                          value={member.role}
+                          disabled={busy}
+                          onChange={(event) =>
+                            void setMemberRole(
+                              member,
+                              event.target.value as "viewer" | "member" | "admin",
+                            )
+                          }
+                        >
+                          {member.role === "custom" ? (
+                            <option value="custom" disabled>
+                              Custom access
+                            </option>
+                          ) : null}
+                          {overview.roles.map((role) => (
+                            <option key={role.role} value={role.role}>
+                              {role.label}
+                            </option>
+                          ))}
+                        </Select>
+                      ) : (
+                        <span className="text-xs capitalize text-fg-muted">{member.role}</span>
+                      )}
+                      {member.organizationMembershipId &&
+                      member.subjectId !== context.accessContext.subjectId ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={busy}
+                          onClick={() => setRemoving(member)}
+                        >
+                          Remove
+                        </Button>
+                      ) : null}
                     </div>
-                    {member.organizationMembershipId && member.principalKind === "human" ? (
-                      <Select
-                        className="w-44"
-                        value={member.role}
-                        disabled={busy}
-                        onChange={(event) =>
-                          void setMemberRole(
-                            member,
-                            event.target.value as "viewer" | "member" | "admin",
-                          )
-                        }
-                      >
-                        {member.role === "custom" ? (
-                          <option value="custom" disabled>
-                            Custom access
-                          </option>
-                        ) : null}
-                        {overview.roles.map((role) => (
-                          <option key={role.role} value={role.role}>
-                            {role.label}
-                          </option>
-                        ))}
-                      </Select>
-                    ) : (
-                      <span className="text-xs capitalize text-fg-muted">{member.role}</span>
-                    )}
-                    {member.organizationMembershipId &&
-                    member.subjectId !== context.accessContext.subjectId ? (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={busy}
-                        onClick={() => setRemoving(member)}
-                      >
-                        Remove
-                      </Button>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
+                  ))}
+                </div>
+              )}
+            </div>
+          </SettingsSection>
         ) : null}
 
         {section === "danger" ? (
@@ -1192,7 +1190,7 @@ function OrganizationManagedWorkspaceSettings({
           confirmLabel="Remove access"
           onConfirm={removeMember}
         />
-      </section>
+      </div>
     </WorkspaceSettingsContent>
   );
 }
@@ -1276,6 +1274,80 @@ function CodexCompactionPreferenceRow({
       saving={saving}
       onToggle={() => void toggle(!portable)}
     />
+  );
+}
+
+/**
+ * Jev-backed code_search agent tool. Shown only when the deployment offers it.
+ * "Default" follows the deployment (which may give the tool to half of all
+ * sessions during an experiment). Each session keeps the choice it was created
+ * with, so its cached prompt stays stable; Off also pauses the tool in running
+ * sessions until it is switched back.
+ */
+function CodeSearchPreferenceRow({
+  workspaceId,
+  canManage,
+}: {
+  workspaceId: string;
+  canManage: boolean;
+}) {
+  const context = useAppContext();
+  const capability = context.clientConfig.codeSearch;
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const explicit = workspace?.settings?.codeSearchEnabled;
+  const value = explicit === true ? "on" : explicit === false ? "off" : "default";
+  const [saving, setSaving] = useState(false);
+  if (capability?.available !== true) return null;
+  const defaultLabel =
+    capability.workspaceDefault === "on"
+      ? "Default · on"
+      : capability.workspaceDefault === "split"
+        ? "Default · half of sessions"
+        : "Default · off";
+
+  async function choose(next: "default" | "on" | "off") {
+    if (next === value) return;
+    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
+    setSaving(true);
+    try {
+      const updated = await context.updateWorkspaceSettings(workspaceId, {
+        codeSearchEnabled: next === "default" ? null : next === "on",
+      });
+      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+        toast.success("Fast code search updated");
+      }
+    } catch {
+      if (context.ownsWorkspaceInvocation(workspaceId, acceptedTransition))
+        toast.error("Couldn’t update fast code search");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="flex min-h-10 items-center gap-3 px-1 py-1.5">
+      <SearchCodeIcon className="size-3.5 shrink-0 text-brand" />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium">Fast code search</div>
+        <p className="truncate text-2xs text-fg-subtle">
+          Agents find code in one step with TypeSafe Jev. Applies to new sessions; Off also pauses
+          it in running ones.
+        </p>
+      </div>
+      {saving ? <Loader2Icon className="size-3.5 shrink-0 animate-spin text-fg-subtle" /> : null}
+      <Select
+        aria-label="Fast code search"
+        value={value}
+        disabled={!canManage || saving}
+        onChange={(event) => void choose(event.currentTarget.value as "default" | "on" | "off")}
+        className="h-7 w-44 py-0 text-xs"
+      >
+        <option value="default">{defaultLabel}</option>
+        <option value="on">On</option>
+        <option value="off">Off</option>
+      </Select>
+    </div>
   );
 }
 

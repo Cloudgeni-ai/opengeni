@@ -948,6 +948,8 @@ describe("SDK / contracts parity", () => {
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);
     const humanInputPolicy: UpdateWorkspaceSettingsRequest = { agentHumanInputEnabled: false };
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(humanInputPolicy).success).toBe(true);
+    const codeSearchPolicy: UpdateWorkspaceSettingsRequest = { codeSearchEnabled: true };
+    expect(ContractUpdateWorkspaceSettingsRequest.safeParse(codeSearchPolicy).success).toBe(true);
     const slackReactionSummon: UpdateWorkspaceSettingsRequest = {
       slackReactionSummon: {
         enabled: true,

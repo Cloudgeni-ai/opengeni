@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { StrictMode } from "react";
 import type { OpenGeniClient, CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/sdk";
 import { matchingActiveMcpConnections } from "../src/mcp-connection-status";
-import { actRun, registerDom, renderComponent } from "./render-hook";
+import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 registerDom();
 const { McpConnectionCard } = await import("../src/components/session-mcp-capability-card");
 
@@ -102,6 +102,527 @@ test("connection status retains exact workspace account ownership and endpoint",
   expect(matchingActiveMcpConnections(item, [{ ...connection, status: "revoked" }])).toHaveLength(
     0,
   );
+});
+
+test("stopping sign-in restores retry without waiting for an unresponsive backend", async () => {
+  const disconnected = {
+    ...item,
+    id: "service-cancel",
+    enabled: false,
+    connectionRef: null,
+  } as CapabilityCatalogItem;
+  const authorize = {
+    id: "attempt-cancel",
+    workspaceId: "workspace",
+    providerId: "mcp-oauth",
+    ownership: "workspace" as const,
+    revision: 2,
+    state: "requires_user_action" as const,
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "connection" as const,
+    nextAction: { type: "authorize" as const, url: "https://service.example/authorize" },
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  const client = {
+    listCapabilities: async () => ({ items: [disconnected] }),
+    connectTransport: () => ({
+      begin: async () => ({
+        ...authorize,
+        revision: 1,
+        state: "credential_input" as const,
+        nextAction: { type: "credentials" as const, fields: [] },
+      }),
+      advance: async () => authorize,
+      // Simulate a backend read that ignores abort and never responds. The
+      // poller's abort wrapper must still return the dialog to a usable state.
+      get: async () => await new Promise<never>(() => {}),
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  let popupClosed = false;
+  window.open = (() => ({
+    opener: null,
+    get closed() {
+      return popupClosed;
+    },
+    location: { replace() {} },
+    close() {
+      popupClosed = true;
+    },
+  })) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId="service-cancel"
+      name="Example service"
+      returnUrl="https://host.example/"
+      dialogOnly
+    />,
+  );
+  try {
+    await flush();
+    const continueButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Continue to Example service",
+    );
+    expect(continueButton).toBeDefined();
+    await actRun(() => continueButton!.click());
+    await flush();
+    expect(document.body.textContent).toContain("Finish signing in with Example service");
+    expect(document.querySelector('button[aria-label="Close connection setup"]')).not.toBeNull();
+    const stop = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Stop waiting",
+    );
+    await actRun(() => stop!.click());
+    await flush();
+    expect(document.body.textContent).toContain("Sign-in window closed");
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(document.querySelector('[role="status"]')?.textContent).toContain(
+      "Sign-in window closed",
+    );
+    expect(document.querySelector('button[aria-label="Close connection setup"]')).not.toBeNull();
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});
+
+test("a stalled connection reconciliation can close and reopen the inline card", async () => {
+  const disconnected = {
+    ...item,
+    id: "service-reconcile",
+    enabled: false,
+    connectionRef: null,
+  } as CapabilityCatalogItem;
+  const authorized = {
+    id: "attempt-reconcile",
+    workspaceId: "workspace",
+    providerId: "mcp-oauth",
+    ownership: "workspace" as const,
+    revision: 2,
+    state: "complete" as const,
+    credentialsCommitted: true,
+    integrationInstalled: false,
+    completionRequirement: "connection" as const,
+    nextAction: { type: "none" as const },
+    expiresAt: "2030-01-01T00:00:00Z",
+    account: {
+      id: "account",
+      providerId: "mcp-oauth",
+      label: "Example service",
+      ownership: "workspace" as const,
+      status: "connected" as const,
+    },
+  };
+  let loads = 0;
+  let recoveries = 0;
+  const client = {
+    listCapabilities: async () => {
+      loads++;
+      return { items: [disconnected] };
+    },
+    listConnections: async () => await new Promise<never>(() => {}),
+    connectTransport: () => ({
+      begin: async () => ({
+        ...authorized,
+        revision: 1,
+        state: "credential_input" as const,
+        credentialsCommitted: false,
+        nextAction: { type: "credentials" as const, fields: [] },
+      }),
+      advance: async () => ({
+        ...authorized,
+        state: "requires_user_action" as const,
+        credentialsCommitted: false,
+        nextAction: { type: "authorize" as const, url: "https://service.example/authorize" },
+      }),
+      get: async () => {
+        recoveries++;
+        return authorized;
+      },
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => ({
+    opener: null,
+    closed: false,
+    location: { replace() {} },
+    close() {},
+  })) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId="service-reconcile"
+      name="Example service"
+      returnUrl="https://host.example/"
+    />,
+  );
+  try {
+    await flush();
+    const cardButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Connect Example service",
+    );
+    await actRun(() => cardButton!.click());
+    await flush();
+    const continueButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Continue to Example service",
+    );
+    await actRun(() => continueButton!.click());
+    await flush();
+    expect(document.body.textContent).toContain("Finishing your connection…");
+    expect(document.body.textContent).not.toContain("Stop waiting");
+    const close = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close connection setup"]',
+    );
+    expect(close).not.toBeNull();
+    await actRun(() => close!.click());
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    const beforeReopen = loads;
+    await actRun(() => cardButton!.click());
+    await flush();
+    expect(loads).toBeGreaterThan(beforeReopen);
+    expect(recoveries).toBeGreaterThan(1);
+    expect(document.body.textContent).toContain("Finishing your connection…");
+    expect(document.querySelector('button[aria-label="Close connection setup"]')).not.toBeNull();
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});
+
+test("a failed authorization retries with a fresh attempt", async () => {
+  const disconnected = {
+    ...item,
+    id: "service-failed-auth",
+    enabled: false,
+    connectionRef: null,
+  } as CapabilityCatalogItem;
+  const begins: string[] = [];
+  let recoveries = 0;
+  const client = {
+    listCapabilities: async () => ({ items: [disconnected] }),
+    connectTransport: () => ({
+      begin: async (_workspace: string, input: { idempotencyKey: string }) => {
+        begins.push(input.idempotencyKey);
+        return {
+          id: `attempt-${begins.length}`,
+          workspaceId: "workspace",
+          providerId: "mcp-oauth",
+          ownership: "workspace" as const,
+          revision: 1,
+          state: "credential_input" as const,
+          credentialsCommitted: false,
+          integrationInstalled: false,
+          completionRequirement: "connection" as const,
+          nextAction: { type: "credentials" as const, fields: [] },
+          expiresAt: "2030-01-01T00:00:00Z",
+        };
+      },
+      advance: async (_workspace: string, id: string) => ({
+        id,
+        workspaceId: "workspace",
+        providerId: "mcp-oauth",
+        ownership: "workspace" as const,
+        revision: 2,
+        state: "requires_user_action" as const,
+        credentialsCommitted: false,
+        integrationInstalled: false,
+        completionRequirement: "connection" as const,
+        nextAction: { type: "authorize" as const, url: "https://service.example/authorize" },
+        expiresAt: "2030-01-01T00:00:00Z",
+      }),
+      get: async (_workspace: string, id: string) => {
+        recoveries++;
+        return {
+          id,
+          workspaceId: "workspace",
+          providerId: "mcp-oauth",
+          ownership: "workspace" as const,
+          revision: 3,
+          state: "failed" as const,
+          credentialsCommitted: false,
+          integrationInstalled: false,
+          completionRequirement: "connection" as const,
+          nextAction: { type: "none" as const },
+          expiresAt: "2030-01-01T00:00:00Z",
+        };
+      },
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => ({
+    opener: null,
+    closed: false,
+    location: { replace() {} },
+    close() {},
+  })) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId="service-failed-auth"
+      name="Example service"
+      returnUrl="https://host.example/"
+    />,
+  );
+  try {
+    await flush();
+    const click = async (label: string) => {
+      const button = [...document.querySelectorAll("button")].find(
+        (node) => node.textContent === label,
+      );
+      expect(button).toBeDefined();
+      await actRun(() => button!.click());
+      await flush();
+    };
+    await click("Connect Example service");
+    await click("Continue to Example service");
+    expect(document.body.textContent).toContain("Sign-in did not finish");
+    const close = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close connection setup"]',
+    );
+    await actRun(() => close!.click());
+    await click("Connect Example service");
+    expect(recoveries).toBeGreaterThan(1);
+    await click("Try signing in again");
+    expect(begins).toHaveLength(2);
+    expect(begins[1]).not.toBe(begins[0]);
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});
+
+test("changing ownership after closing a pending start uses a new idempotency key", async () => {
+  const disconnected = {
+    ...item,
+    id: "service-ownership-retry",
+    enabled: false,
+    connectionRef: null,
+  } as CapabilityCatalogItem;
+  const begins: { ownership: string; key: string }[] = [];
+  const client = {
+    listCapabilities: async () => ({ items: [disconnected] }),
+    connectTransport: () => ({
+      begin: async (_workspace: string, input: { ownership: string; idempotencyKey: string }) => {
+        if (
+          begins.some(
+            (entry) => entry.key === input.idempotencyKey && entry.ownership !== input.ownership,
+          )
+        )
+          throw new Error("Connect idempotency key was reused with different input");
+        begins.push({ ownership: input.ownership, key: input.idempotencyKey });
+        if (begins.length === 1) return await new Promise<never>(() => {});
+        return {
+          id: "attempt-personal",
+          workspaceId: "workspace",
+          providerId: "mcp-oauth",
+          ownership: "personal" as const,
+          revision: 1,
+          state: "credential_input" as const,
+          credentialsCommitted: false,
+          integrationInstalled: false,
+          completionRequirement: "connection" as const,
+          nextAction: { type: "credentials" as const, fields: [] },
+          expiresAt: "2030-01-01T00:00:00Z",
+        };
+      },
+      advance: async (_workspace: string, id: string) => ({
+        id,
+        workspaceId: "workspace",
+        providerId: "mcp-oauth",
+        ownership: "personal" as const,
+        revision: 2,
+        state: "requires_user_action" as const,
+        credentialsCommitted: false,
+        integrationInstalled: false,
+        completionRequirement: "connection" as const,
+        nextAction: { type: "authorize" as const, url: "https://service.example/authorize" },
+        expiresAt: "2030-01-01T00:00:00Z",
+      }),
+      get: async (_workspace: string, id: string) => ({
+        id,
+        workspaceId: "workspace",
+        providerId: "mcp-oauth",
+        ownership: "personal" as const,
+        revision: 3,
+        state: "failed" as const,
+        credentialsCommitted: false,
+        integrationInstalled: false,
+        completionRequirement: "connection" as const,
+        nextAction: { type: "none" as const },
+        expiresAt: "2030-01-01T00:00:00Z",
+      }),
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => ({
+    opener: null,
+    closed: false,
+    location: { replace() {} },
+    close() {},
+  })) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId="service-ownership-retry"
+      name="Example service"
+      returnUrl="https://host.example/"
+    />,
+  );
+  try {
+    await flush();
+    const opener = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Connect Example service",
+    );
+    await actRun(() => opener!.click());
+    await flush();
+    const continueButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Continue to Example service",
+    );
+    await actRun(() => continueButton!.click());
+    await flush();
+    expect(begins).toHaveLength(1);
+    expect(document.body.textContent).toContain("Preparing your connection…");
+    const close = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close connection setup"]',
+    );
+    await actRun(() => close!.click());
+    await actRun(() => opener!.click());
+    await flush();
+    const personal = [...document.querySelectorAll<HTMLInputElement>('input[type="radio"]')].find(
+      (input) => input.parentElement?.textContent?.includes("Only me"),
+    );
+    expect(personal).toBeDefined();
+    await actRun(() => personal!.click());
+    const continueAgain = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Continue to Example service",
+    );
+    await actRun(() => continueAgain!.click());
+    await flush();
+    expect(begins).toHaveLength(2);
+    expect(begins.map(({ ownership }) => ownership)).toEqual(["workspace", "personal"]);
+    expect(begins[1]!.key).not.toBe(begins[0]!.key);
+    expect(document.body.textContent).not.toContain("idempotency key was reused");
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});
+
+test("changing ownership after reopening an authorization starts a new attempt", async () => {
+  const disconnected = {
+    ...item,
+    id: "service-recovered-ownership",
+    enabled: false,
+    connectionRef: null,
+  } as CapabilityCatalogItem;
+  const begins: { ownership: string; key: string }[] = [];
+  let reads = 0;
+  let popups = 0;
+  const authorize = (id: string, ownership: "workspace" | "personal") => ({
+    id,
+    workspaceId: "workspace",
+    providerId: "mcp-oauth",
+    ownership,
+    revision: 2,
+    state: "requires_user_action" as const,
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "connection" as const,
+    nextAction: { type: "authorize" as const, url: "https://service.example/authorize" },
+    expiresAt: "2030-01-01T00:00:00Z",
+  });
+  const client = {
+    listCapabilities: async () => ({ items: [disconnected] }),
+    connectTransport: () => ({
+      begin: async (
+        _workspace: string,
+        input: { ownership: "workspace" | "personal"; idempotencyKey: string },
+      ) => {
+        begins.push({ ownership: input.ownership, key: input.idempotencyKey });
+        return {
+          ...authorize(`attempt-${begins.length}`, input.ownership),
+          revision: 1,
+          state: "credential_input" as const,
+          nextAction: { type: "credentials" as const, fields: [] },
+        };
+      },
+      advance: async (_workspace: string, id: string) =>
+        authorize(id, id === "attempt-1" ? "workspace" : "personal"),
+      get: async (_workspace: string, id: string) => {
+        reads++;
+        if (reads === 1) return await new Promise<never>(() => {});
+        if (reads === 2) return authorize(id, "workspace");
+        return {
+          ...authorize(id, "personal"),
+          revision: 3,
+          state: "failed" as const,
+          nextAction: { type: "none" as const },
+        };
+      },
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => {
+    popups++;
+    return {
+      opener: null,
+      closed: false,
+      location: { replace() {} },
+      close() {},
+    };
+  }) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId="service-recovered-ownership"
+      name="Example service"
+      returnUrl="https://host.example/"
+    />,
+  );
+  try {
+    await flush();
+    const opener = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Connect Example service",
+    );
+    await actRun(() => opener!.click());
+    await flush();
+    const continueButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Continue to Example service",
+    );
+    await actRun(() => continueButton!.click());
+    await flush();
+    expect(reads).toBeGreaterThan(0);
+    expect(document.body.textContent).toContain("Finish signing in with Example service");
+    const close = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close connection setup"]',
+    );
+    await actRun(() => close!.click());
+    await actRun(() => opener!.click());
+    await flush();
+    expect(reads).toBeGreaterThan(1);
+    const personal = [...document.querySelectorAll<HTMLInputElement>('input[type="radio"]')].find(
+      (input) => input.parentElement?.textContent?.includes("Only me"),
+    );
+    await actRun(() => personal!.click());
+    expect(personal!.checked).toBe(true);
+    const continueAgain = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Continue to Example service",
+    );
+    await actRun(() => continueAgain!.click());
+    await flush();
+    expect(begins.map(({ ownership }) => ownership)).toEqual(["workspace", "personal"]);
+    expect(begins[1]!.key).not.toBe(begins[0]!.key);
+    expect(popups).toBe(2);
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
 });
 
 test("personal setup reads sender accounts without conversation grants or consent", async () => {

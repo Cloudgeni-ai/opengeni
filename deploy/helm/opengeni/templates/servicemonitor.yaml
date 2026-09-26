@@ -18,8 +18,12 @@ spec:
     matchLabels:
       {{- include "opengeni.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: api
+      {{- if .Values.api.metricsPort }}
+      opengeni.ai/metrics-endpoint: "true"
+      {{- end }}
   endpoints:
-    - port: http
+    {{- /* The internal listener when api.metricsPort is set; http only in the legacy configuration. */}}
+    - port: {{ if .Values.api.metricsPort }}metrics{{ else }}http{{ end }}
       path: {{ ((.Values.observability).metrics).path | default "/metrics" | quote }}
       interval: {{ ((.Values.observability).serviceMonitor).interval | default "30s" | quote }}
       scrapeTimeout: {{ ((.Values.observability).serviceMonitor).scrapeTimeout | default "10s" | quote }}
@@ -30,6 +34,14 @@ spec:
           targetLabel: release
         - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_component]
           targetLabel: opengeni_workload_component
+        {{- if .Values.api.metricsPort }}
+        # Keep the API series identity of the public API Service, so alerts and
+        # dashboards keyed on service/job continue to match the moved target.
+        - targetLabel: service
+          replacement: {{ include "opengeni.fullname" . }}-api
+        - targetLabel: job
+          replacement: {{ include "opengeni.fullname" . }}-api
+        {{- end }}
 {{- end }}
 {{- if and .Values.worker.enabled ((.Values.observability).serviceMonitor).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 {{- range $role := list "control" "turns" }}
@@ -88,9 +100,12 @@ spec:
     matchLabels:
       {{- include "opengeni.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: relay
+      {{- if .Values.relay.metricsPort }}
+      opengeni.ai/metrics-endpoint: "true"
+      {{- end }}
   endpoints:
-    # The relay exposes a Prometheus exposition at GET /metrics on the wss port.
-    - port: wss
+    {{- /* The relay exposes GET /metrics on its internal listener when relay.metricsPort is set; on the wss port only in the legacy configuration. */}}
+    - port: {{ if .Values.relay.metricsPort }}metrics{{ else }}wss{{ end }}
       path: /metrics
       interval: {{ ((.Values.observability).serviceMonitor).interval | default "30s" | quote }}
       scrapeTimeout: {{ ((.Values.observability).serviceMonitor).scrapeTimeout | default "10s" | quote }}
@@ -99,4 +114,12 @@ spec:
           targetLabel: namespace
         - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_instance]
           targetLabel: release
+        {{- if .Values.relay.metricsPort }}
+        # Keep the relay series identity of the public relay Service, so alerts
+        # and dashboards keyed on service/job continue to match the moved target.
+        - targetLabel: service
+          replacement: {{ include "opengeni.fullname" . }}-relay
+        - targetLabel: job
+          replacement: {{ include "opengeni.fullname" . }}-relay
+        {{- end }}
 {{- end }}

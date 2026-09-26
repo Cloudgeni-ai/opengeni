@@ -54,6 +54,14 @@ prepares source content with provider ACLs and durable checkpoints;
 passages. The agent selects findings and saves them with `knowledge_save`.
 No separate ingestion workflow decides what the company should remember.
 
+A failed vector-index batch keeps its last completed projection and the durable
+queue retries it with backoff. The stored job reason stays the SQL lifecycle's
+fixed `embedding_unavailable` code; the worker warning carries only the
+content-free cause: `knowledge_index_embedding_failed` with the provider HTTP
+status, `knowledge_index_persistence_failed` with the SQLSTATE when a
+PostgreSQL error caused it, `knowledge_index_usage_limit_reached`, or
+`knowledge_index_failed` for any other worker-side failure.
+
 Review-first source content and findings belong to the same run's review batch.
 The source tool may read that run's pending content so the agent can finish its
 work; ordinary retrieval still excludes pending revisions. Source-job settlement
@@ -124,6 +132,46 @@ cannot become accepted answers. An unavailable prepare tool falls back to
 ordinary search in both views and collection browsing, without widening the
 task's selected tools or permissions.
 
+### Model-visible discovery results
+
+`knowledge_search` (first-party and Docs MCP) and `knowledge_prepare_save`
+return the complete contract to every caller: HTTP, the SDK, Codemode scripts
+and other programmatic callers receive the exact bytes. Only a model tool call
+receives a compact copy, projected in the worker at the per-caller seam
+(`projectAttemptToolResultForCaller` with
+`packages/runtime/src/knowledge-model-projection.ts`), never in the API tool.
+It is the same JSON without bookkeeping or repeated text:
+
+- kept: entry and collection IDs, `version` (the `expectedVersion` for an
+  update), `revision.id` (for evidence pins), scope, `revision.outcome` and
+  collection `view`, titles, kinds, group and parent IDs, descriptions, excerpts
+  with their offsets, index status, `complete`, and every pagination cursor;
+- removed: timestamps, rank score, revision number and lineage, creating
+  session and review batch, and a collection descriptor's `revisionId`;
+- removed only when equal to the default or to another shown field:
+  `archived: false`, `change: "upsert"`, `sourceKind: null`,
+  `descriptionTruncated: false`, `revision.entryId` equal to `id`, and
+  `publishedRevisionId`/`latestRevisionId` equal to `revision.id` (so a pending
+  revision above the published one, or a missing published revision, stays
+  visible);
+- `revision.preview`, the first 512 characters of the content, is omitted only
+  when it is empty or a content excerpt starting at offset 0 already begins with
+  it. The title never counts, because a short content such as a decision's
+  answer can appear inside its title and still be the only place it is stated.
+  A preview with unique text, such as when the best excerpt is a later chunk or
+  there is no excerpt, is kept in full. Every excerpt, including title
+  excerpts, is kept. Nothing is truncated.
+
+An error, structured content, or a result that does not strictly match the
+contract passes through unchanged. The model call's history item and timeline
+event record the compact copy the model received; past tool outputs are never
+re-rendered. MCP transport bounds the exact result to 1 MiB before this
+projection, so compaction only shrinks results that already fit; a result that
+is still over 1 MiB for the model spills its exact bytes like any tool. On contract-valid fixtures sized to staging medians
+(`packages/runtime/test/knowledge-model-projection.test.ts`), an eight-entry
+search result shrinks from 17.9 KB to 10.0 KB (44%) and a save preparation
+from 21.7 KB to 14.1 KB (35%).
+
 ## Personal and shared Knowledge
 
 Personal and workspace Knowledge use the same schema, tools, versioning and
@@ -190,8 +238,12 @@ All finding types share retrieval, review, permissions and revision history.
 | Destination | New-workspace default | Storage authority |
 | --- | --- | --- |
 | Knowledge | Automatic | Knowledge entries and revisions |
-| Workspace instructions | Review first | Native instruction revisions and active heads |
-| Skills | Review first | Native Skill folders, revisions and lifecycle receipts |
+| Workspace instructions | Automatic | Native instruction revisions and active heads |
+| Skills | Automatic | Native Skill folders, revisions and lifecycle receipts |
+
+These defaults apply when no saved workspace or personal policy exists. Saved
+choices (including Review first and Off), context overrides, and accepted-turn
+snapshots are unchanged; no existing policy is migrated.
 
 Each destination supports **Automatic**, **Review first** and **Off**. These
 control agent authoring and publication. Off does not remove existing Knowledge,

@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "f0f8def1e225efb37e50e7b6890905e9004590ce2d12c2b0e321a30cc788fdc7"
+      "sha256": "077e8c657213facd1fabde9c9b123441795d7df3d38671969da630ef34468948"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -582,6 +582,12 @@
       "job": "deployment",
       "step": "Install dependencies",
       "sha256": "c002a6d527c30937cac224d77e729583974d8a4fba6e2e515a2b56231aa499a4"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "deployment",
+      "step": "Run deployment tests",
+      "sha256": "5bac221388baf52eb50e5863cf586318021c041939697f8f683533f9d6b4f1b1"
     },
     {
       "workflow": ".github/workflows/ci.yml",

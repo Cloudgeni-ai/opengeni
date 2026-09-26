@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
+import { status } from "@grpc/grpc-js";
+import { ModalCommandRouterWire } from "../src/sandbox/providers/modal-command-router-wire";
+import { isModalTaskExecStartPreDispatchUnavailableError } from "../src/sandbox/providers/modal";
 import {
   buildAgentCapabilities,
   buildOpenGeniAgent,
@@ -26,6 +29,71 @@ describe("portable local compaction capability boundary", () => {
 });
 
 describe("turn sandbox-tool cancellation boundary", () => {
+  test("the production shell tool propagates pre-dispatch proof, not DNS-shaped server replies", async () => {
+    const host = "task-fbhzq89jcdq2rfyqsxjs1uuk3.w.modal.host";
+    const details = `Name resolution failed for target dns:${host}:443`;
+    const wire = new ModalCommandRouterWire({ url: `https://${host}`, jwt: "test-token" });
+    let ready = false;
+    Object.defineProperty(wire, "client", {
+      value: {
+        waitForReady: (_deadline: number, callback: (error?: Error) => void) =>
+          callback(ready ? undefined : new Error("channel not ready")),
+        close: () => {},
+      },
+    });
+    let calls = 0;
+    Object.defineProperty(wire, "unary", {
+      value: async () => {
+        calls++;
+        throw Object.assign(new Error(`14 UNAVAILABLE: ${details}`), {
+          code: status.UNAVAILABLE,
+          details,
+        });
+      },
+      configurable: true,
+    });
+    const caps = buildAgentCapabilities(testSettings({ sandboxBackend: "modal" }), []);
+    const shell = caps.find((cap) => cap.type === "shell")!;
+    const session = {
+      execCommand: async () =>
+        wire.start({
+          taskId: "task-test",
+          execId: "exec-test",
+          commandArgs: ["true"],
+          workdir: "/tmp",
+          env: {},
+        }),
+    };
+    const tool = shell
+      .clone()
+      .bind(session as never)
+      .tools()
+      .find((candidate) => candidate.name === "exec_command");
+    expect(tool?.type).toBe("function");
+    if (!tool || tool.type !== "function") throw new Error("No shell tool");
+    try {
+      const failure = await tool
+        .invoke({} as never, JSON.stringify({ cmd: "true" }))
+        .catch((error: unknown) => error);
+      expect(isModalTaskExecStartPreDispatchUnavailableError(failure)).toBe(true);
+      expect(calls).toBe(0);
+      ready = true;
+      Object.defineProperty(wire, "unary", {
+        value: async () => {
+          calls++;
+          throw Object.assign(new Error(`14 UNAVAILABLE: ${details}`), {
+            code: status.UNAVAILABLE,
+            details,
+          });
+        },
+      });
+      expect(await tool.invoke({} as never, JSON.stringify({ cmd: "true" }))).toContain(details);
+      expect(calls).toBe(1);
+    } finally {
+      wire.close();
+    }
+  });
+
   test("buildOpenGeniAgent installs and exposes one shared physical tool fence", async () => {
     const abort = new AbortController();
     let fence: TurnToolCancellationFence | null = null;

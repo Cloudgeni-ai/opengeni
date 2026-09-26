@@ -62,6 +62,7 @@ const forwardMigrations = [
   "0501_session_sharing_execution.sql",
   "0510_knowledge_index_funding_wait.sql",
   "0511_knowledge_visible_index_status.sql",
+  "0515_autonomous_learning_defaults.sql",
 ];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;

@@ -66,6 +66,13 @@ import {
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { buildOpenGeniMcpServer } from "../../apps/api/src/mcp/server";
 import {
+  checkoutSessionEvent,
+  foreignPaymentCheckoutSession,
+  foreignSubscriptionCheckoutSession,
+  openGeniCheckoutMetadata,
+  openGeniCheckoutSession,
+} from "../../apps/api/test/fixtures/stripe-checkout-events";
+import {
   settingsWithCodexCredential,
   settingsWithEnabledCapabilityMcpServers,
   settingsWithSessionMcpServersForRun,
@@ -2393,6 +2400,148 @@ describe("API component integration", () => {
     expect(duplicate.status).toBe(200);
     expect(await duplicate.json()).toEqual({ received: true, duplicate: true });
     expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(25_000_000);
+  });
+
+  test("Stripe webhooks acknowledge foreign checkouts and credit delayed payments once paid", async () => {
+    const webhookSecret = "whsec_test_webhook_checkout_lifecycle";
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "managed",
+        billingMode: "stripe",
+        betterAuthSecret: "test-better-auth-secret-32-bytes",
+        publicBaseUrl: "http://127.0.0.1:3000",
+        stripeSecretKey: "sk_test_fake",
+        stripeWebhookSecret: webhookSecret,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const context = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "test:stripe-webhook-checkout-lifecycle",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Stripe checkout lifecycle test",
+      workspaceExternalSource: "test:stripe-webhook-checkout-lifecycle",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Stripe checkout lifecycle workspace",
+      subjectId: "test:stripe-webhook-checkout-lifecycle",
+    });
+    const accountId = context.defaultAccountId!;
+    const balance = async () => (await getBillingBalance(dbClient.db, accountId)).balanceMicros;
+    const post = async (event: Record<string, unknown>) => {
+      const response = await postStripeEvent(app, webhookSecret, event);
+      if (response.status !== 200) {
+        throw new Error(
+          `${String(event.type)} webhook failed: ${response.status} ${await response.text()}`,
+        );
+      }
+      return await response.json();
+    };
+
+    // Other products on the same Stripe account: acknowledged, recorded as
+    // processed (a redelivery is a duplicate), and never credited.
+    const foreignPayment = checkoutSessionEvent(
+      "checkout.session.completed",
+      foreignPaymentCheckoutSession(),
+    );
+    expect(await post(foreignPayment)).toEqual({ received: true });
+    expect(await post(foreignPayment)).toEqual({ received: true, duplicate: true });
+    expect(
+      await post(
+        checkoutSessionEvent("checkout.session.completed", foreignSubscriptionCheckoutSession()),
+      ),
+    ).toEqual({ received: true });
+    expect(
+      await post(
+        checkoutSessionEvent(
+          "checkout.session.async_payment_succeeded",
+          foreignPaymentCheckoutSession(),
+        ),
+      ),
+    ).toEqual({ received: true });
+    expect(await balance()).toBe(0);
+
+    // A paid OpenGeni checkout for an account this deployment does not hold,
+    // such as another OpenGeni deployment sharing the Stripe account: retrying
+    // cannot succeed, so it is acknowledged rather than failed for days.
+    const absentAccountId = crypto.randomUUID();
+    expect(
+      await post(
+        checkoutSessionEvent(
+          "checkout.session.completed",
+          openGeniCheckoutSession({
+            metadata: openGeniCheckoutMetadata({ accountId: absentAccountId }),
+            paymentStatus: "paid",
+          }),
+        ),
+      ),
+    ).toEqual({ received: true });
+    expect((await getBillingBalance(dbClient.db, absentAccountId)).balanceMicros).toBe(0);
+
+    // A delayed payment method that later fails: nothing is granted.
+    const failedMetadata = openGeniCheckoutMetadata({ accountId, amountCents: 1000 });
+    const failedSessionId = `cs_test_a1failed${crypto.randomUUID().replaceAll("-", "")}`;
+    expect(
+      await post(
+        checkoutSessionEvent(
+          "checkout.session.completed",
+          openGeniCheckoutSession({
+            metadata: failedMetadata,
+            paymentStatus: "unpaid",
+            delayed: true,
+            sessionId: failedSessionId,
+          }),
+        ),
+      ),
+    ).toEqual({ received: true });
+    expect(
+      await post(
+        checkoutSessionEvent(
+          "checkout.session.async_payment_failed",
+          openGeniCheckoutSession({
+            metadata: failedMetadata,
+            paymentStatus: "unpaid",
+            delayed: true,
+            sessionId: failedSessionId,
+          }),
+        ),
+      ),
+    ).toEqual({ received: true });
+    expect(await balance()).toBe(0);
+
+    // A delayed payment method that later succeeds: credited exactly once,
+    // when Stripe reports the payment paid.
+    const paidMetadata = openGeniCheckoutMetadata({ accountId, amountCents: 2500 });
+    const paidSessionId = `cs_test_a1paid${crypto.randomUUID().replaceAll("-", "")}`;
+    const delayedSession = (paymentStatus: "paid" | "unpaid") =>
+      openGeniCheckoutSession({
+        metadata: paidMetadata,
+        paymentStatus,
+        delayed: true,
+        sessionId: paidSessionId,
+      });
+    expect(
+      await post(checkoutSessionEvent("checkout.session.completed", delayedSession("unpaid"))),
+    ).toEqual({ received: true });
+    expect(await balance()).toBe(0);
+    expect(
+      await post(
+        checkoutSessionEvent("checkout.session.async_payment_succeeded", delayedSession("paid")),
+      ),
+    ).toEqual({ received: true });
+    expect(await balance()).toBe(25_000_000);
+    // A second paid notification for the same session reuses the checkout's
+    // ledger idempotency key and grants nothing more.
+    expect(
+      await post(
+        checkoutSessionEvent("checkout.session.async_payment_succeeded", delayedSession("paid")),
+      ),
+    ).toEqual({ received: true });
+    expect(
+      await post(checkoutSessionEvent("checkout.session.completed", delayedSession("paid"))),
+    ).toEqual({ received: true });
+    expect(await balance()).toBe(25_000_000);
   });
 
   test("rejects unknown MCP tool refs during session create", async () => {
@@ -5029,7 +5178,7 @@ describe("API component integration", () => {
       { headers: { cookie: oauthCookie } },
     );
     expect(callback.status).toBe(200);
-    expect(await callback.text()).toContain("GitHub App connected");
+    expect(await callback.text()).toContain("GitHub connected");
 
     const replay = await app.request(
       `/v1/github/oauth/callback?code=replayed-owner-code&state=${encodeURIComponent(oauthState)}`,

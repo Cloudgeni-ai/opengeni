@@ -1300,7 +1300,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     expect(installed.skillReceipt).not.toHaveProperty("portableInstall");
   }, 30_000);
 
-  test("no policy means Require approval; agent reads are fenced and descriptors omit bodies", async () => {
+  test("no policy means Automatic; agent reads are fenced and descriptors omit bodies", async () => {
     if (!client) return;
     const f = await fixture(null);
     await assertSkillReadAttempt(client.db, f.agent);
@@ -1310,6 +1310,23 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
         actor: { ...f.agent.actor, executionGeneration: 2 },
       }),
     ).rejects.toThrow("exact live attempt");
+    const applied = await saveSkill(client.db, { ...f.input, ...f.agent });
+    expect(applied.outcome).toBe("applied");
+    const descriptors = await listSkillDescriptors(client.db, f.context);
+    expect(descriptors).toHaveLength(1);
+    expect(descriptors[0]).not.toHaveProperty("files");
+    expect(descriptors[0]?.id).toBe(applied.skillId);
+    const invalid = await shared!.admin`select skill_files_valid(${JSON.stringify([
+      { path: "SKILL.md", content: "main" },
+      { path: "a", content: "file" },
+      { path: "a/b", content: "nested" },
+    ])}::jsonb) AS valid`;
+    expect(invalid[0]?.valid).toBe(false);
+  });
+
+  test("explicit Review first keeps agent Skills pending until human approval", async () => {
+    if (!client) return;
+    const f = await fixture("suggest");
     const pending = await saveSkill(client.db, { ...f.input, ...f.agent });
     expect(pending.outcome).toBe("pending");
     expect(await listSkillDescriptors(client.db, f.context)).toEqual([]);
@@ -1327,12 +1344,6 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     expect(descriptors).toHaveLength(1);
     expect(descriptors[0]).not.toHaveProperty("files");
     expect(descriptors[0]?.id).toBe(pending.skillId);
-    const invalid = await shared!.admin`select skill_files_valid(${JSON.stringify([
-      { path: "SKILL.md", content: "main" },
-      { path: "a", content: "file" },
-      { path: "a/b", content: "nested" },
-    ])}::jsonb) AS valid`;
-    expect(invalid[0]?.valid).toBe(false);
   });
 
   test("human bypasses Off, roundtrips files, retries exactly, CAS conflicts and restore creates history", async () => {

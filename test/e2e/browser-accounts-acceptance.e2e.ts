@@ -55,6 +55,12 @@ import {
   sanitizeRaceResult,
 } from "./browser-account-race-diagnostics";
 
+// The model-access step leads with credits the organization already holds, or
+// the included default model when the deployment provides one, otherwise it
+// asks how to power chats.
+const MODEL_ACCESS_HEADING =
+  /^(Choose how to power your chats|Start chatting for free|Start chatting with OpenGeni credits|You’re ready to chat)$/;
+const MODEL_ACCESS_CONTINUE = /^(Skip for now|Start chatting( for free)?)$/;
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
 const PASSWORD = "Browser-accounts-password-1234";
@@ -2073,8 +2079,8 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
     }
     await page.getByLabel("Organization name").fill(account.organizationName);
     await page.getByRole("button", { name: "Create organization" }).click();
-    await page.getByRole("heading", { name: "Choose how to power your chats" }).waitFor();
-    await page.getByRole("button", { name: "Skip for now" }).click();
+    await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
+    await page.getByRole("button", { name: MODEL_ACCESS_CONTINUE }).click();
     await page.waitForURL(
       /\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\/|$)/iu,
       { timeout: 30_000 },

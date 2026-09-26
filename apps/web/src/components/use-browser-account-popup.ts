@@ -9,6 +9,7 @@ import {
   accountAuthPopupPath,
   postAccountAuthPopupAcknowledgement,
 } from "@/lib/browser-account-popup";
+import { signupReturnPath } from "@/lib/signup-attribution";
 
 type PendingPopup = {
   popup: Window;
@@ -147,7 +148,10 @@ export function useBrowserAccountPopup(): BrowserAccountPopupController {
         }
         startingPopupRef.current = null;
         pendingRef.current = { popup, transactionId: transaction.id };
-        popup.location.replace(accountAuthPopupPath(transaction.id));
+        // An Add window may create a new account through a social provider;
+        // carry this page's in-memory first-touch campaign tokens into it.
+        const path = accountAuthPopupPath(transaction.id);
+        popup.location.replace(transaction.kind === "add" ? signupReturnPath(path) : path);
       })
       .catch((error) => {
         if (startingPopupRef.current === popup) startingPopupRef.current = null;

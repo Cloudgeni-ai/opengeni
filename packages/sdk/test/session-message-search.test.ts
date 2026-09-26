@@ -116,3 +116,34 @@ test("workspace grouping is explicitly serialized without changing default Find"
   expect(requests[0]!.searchParams.get("groupBy")).toBe("session");
   expect(requests[1]!.searchParams.has("groupBy")).toBe(false);
 });
+
+test("selected preview is browser-compatible and sends only the exact identity and cancellation", async () => {
+  const controller = new AbortController();
+  const calls: URL[] = [];
+  const client = new OpenGeniBrowserClient({
+    baseUrl: "https://example.test",
+    fetch: async (input, init) => {
+      calls.push(new URL(String(input)));
+      expect(init?.method).toBe("GET");
+      expect(init?.signal).toBe(controller.signal);
+      return new Response(JSON.stringify({ status: "available", text: "complete 🙂 text" }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+  expect(typeof OpenGeniClient.prototype.getSessionMessagePreview).toBe("function");
+  const result: SDK.SessionMessagePreview = await client.getSessionMessagePreview(
+    "workspace",
+    "session",
+    { eventId: "event", sequence: 42 },
+    { signal: controller.signal },
+  );
+  const rootResult: Root.SessionMessagePreview = result;
+  const browserResult: Browser.SessionMessagePreview = rootResult;
+  expect(browserResult).toEqual({ status: "available", text: "complete 🙂 text" });
+  expect(calls).toHaveLength(1);
+  expect(calls[0]!.pathname).toBe(
+    "/v1/workspaces/workspace/sessions/session/events/event/message-preview",
+  );
+  expect(Object.fromEntries(calls[0]!.searchParams)).toEqual({ sequence: "42" });
+});

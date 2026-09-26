@@ -55,7 +55,10 @@ Provider-specific status tools remain read-only and do not synthesize cards.
 
 Progressive discovery uses the same authorized deferred pool on Codex-native,
 OpenAI-native, and generic-dispatch transports. Keyword search is ranked, not
-exhaustive. `tool_list` is a query-independent fallback: it returns compact
+exhaustive. Tools whose exact name (with an underscore) appears in the query
+come first, before the keyword ranking, and the result grows to include all of
+them. Past search results are stored as they were returned and never re-run,
+so this ordering changes new searches only, not any cached prompt. `tool_list` is a query-independent fallback: it returns compact
 names and description previews, with a default page of 20, a maximum of 40,
 and a 16 KiB response budget. Follow `nextCursor` until null, preserving the
 optional literal `namePrefix` filter. An invalid cursor requires restarting
@@ -117,6 +120,11 @@ First-party OpenGeni MCP Knowledge tools:
 
 Search published and pending entries before saving; reuse entry IDs and versions
 for corrections and collections across sources. See [Knowledge](knowledge.md).
+A model call to `knowledge_search` or `knowledge_prepare_save` receives a
+compact copy without bookkeeping or repeated preview text, keeping every ID,
+version, status, title, description and excerpt; Codemode and other callers
+receive the exact result. See
+[model-visible discovery results](knowledge.md#model-visible-discovery-results).
 The retired Memory and reviewed-claim tools are not registered for new work.
 
 First-party OpenGeni MCP company-profile tools (separate organization policy):

@@ -130,9 +130,36 @@ export type ManagedAuthLoginTransaction = z.infer<typeof ManagedAuthLoginTransac
 export const ManagedAuthSocialProvider = z.enum(["google", "github"]);
 export type ManagedAuthSocialProvider = z.infer<typeof ManagedAuthSocialProvider>;
 
+/**
+ * Mirrors `SignupAttribution` from `./signup-attribution` (a contract test pins
+ * them together). Declared here, not imported, so the browser session-set
+ * client does not pull the attribution module into a new shared web chunk.
+ */
+const SocialStartAttributionValue = z
+  .string()
+  .trim()
+  .min(1)
+  .max(100)
+  .regex(/^[A-Za-z0-9._~+-]+$/);
+const SocialStartAttribution = z
+  .object({
+    utmSource: SocialStartAttributionValue.optional(),
+    utmMedium: SocialStartAttributionValue.optional(),
+    utmCampaign: SocialStartAttributionValue.optional(),
+    utmContent: SocialStartAttributionValue.optional(),
+    ref: SocialStartAttributionValue.optional(),
+  })
+  .strict();
+
 export const StartManagedAuthSocialTransactionRequest = ManagedAuthOperationIdentity.extend({
   transactionId: z.string().uuid(),
   provider: ManagedAuthSocialProvider,
+  /**
+   * Optional untrusted first-touch campaign tokens, used only by the
+   * content-free sign-up acquisition counter when this start creates a new
+   * account. Invalid attribution is dropped rather than failing the sign-in.
+   */
+  attribution: SocialStartAttribution.optional().catch(undefined),
 });
 export type StartManagedAuthSocialTransactionRequest = z.infer<
   typeof StartManagedAuthSocialTransactionRequest

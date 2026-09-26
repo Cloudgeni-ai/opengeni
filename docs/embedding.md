@@ -577,7 +577,11 @@ environment delta. The runtime stores each token at
 `OPENGENI_GIT_CREDENTIALS_DIR/<sha256(binding-id)>-token`, installs a Git
 credential helper that selects by protocol + host + path with
 `credential.useHttpPath`, and resets broader helpers so an unbound remote cannot
-fall through to a sibling credential. Provider aliases (including
+fall through to a sibling credential. Because that setup rewrites the executing
+user's `$HOME/.opengeni` and global Git configuration, the generated scripts exit
+without writing anything unless the runtime's sandbox lifecycle hook marks the
+command with `OPENGENI_GIT_PROVISIONING_TARGET=sandbox`; running an exported
+script builder directly on a host fails closed. Provider aliases (including
 `OPENGENI_GIT_TOKEN_FILE`) are written only while that provider has exactly one
 binding; they are removed when a second appears. `gh`, `glab`, and `az` select
 an explicit `OPENGENI_GIT_BINDING`, then the current repository's `origin`, then
@@ -1077,6 +1081,8 @@ Canonical sources: `EventBus` / `createNatsEventBus` in `packages/events/src/ind
 API and worker must share the same broker-backed EventBus binding. The production implementation is `createNatsEventBus(natsUrl, auth?)`; it handles session fanout, selfhosted request/reply, and agent events over one managed NATS connection. Postgres remains the durable event log, but live SSE depends on worker publishes reaching API subscribers cross-process.
 
 Every supported binding must expose `sessionEventDurableFanout` version 1. Its `subscribeRecovery` callback fires with a monotonically increasing generation only after the local subscriber transport and subscriptions have recovered. Session SSE coalesces that signal into its serialized Postgres reconciliation tail, so messages accepted by the broker while this API instance was disconnected cannot strand an already-open client. The worker refuses to start or become ready without this capability, the API reports failed readiness and refuses a session SSE stream without it, and durable title fanout checks it before claiming an outbox row.
+
+`subscribe` and `subscribeWorkspaceControl` accept an optional `{ onTerminated }`. A binding whose transport subscription can end while the consumer still holds it (for example a broker permissions violation) must call it once so session and workspace-control SSE fail retryably and the client reconnects and replays from Postgres, instead of receiving heartbeats and nothing else. A binding that never ends a held subscription may ignore it. The NATS binding also resubscribes its process-lifetime responders (auth callout, Codemode requests, agent-event ingestion) with bounded backoff and counts every unexpected end in `opengeni_nats_subscription_terminations_total{kind,recovery}`.
 
 `publishConfirmed` remains optional for embedded brokers. When absent, the required `publish()` promise is the durable outbox acknowledgement and must resolve only after broker acceptance; failures must reject. This publish-only compatibility is supported only together with `sessionEventDurableFanout` v1. A formerly conforming custom bus that cannot notify subscriber recovery is intentionally no longer supported: add the capability before rolling this application version, rather than acknowledging publications that an API subscriber may have missed.
 

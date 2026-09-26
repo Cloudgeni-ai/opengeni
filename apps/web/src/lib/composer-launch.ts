@@ -16,6 +16,11 @@ export type ComposerLaunchSearch = {
   channelId?: string;
   /** One installed session-selected Skill to freeze onto the new session. */
   skillCapabilityId?: string;
+  /**
+   * `?modelSource=default`: the model/effort/latency carry the resolved default
+   * (a credit purchase return), not the person's choice.
+   */
+  followDefault?: true;
 };
 
 /** Stable empty search — safe default prop (no per-render object literal). */
@@ -44,6 +49,7 @@ export function parseComposerLaunchSearch(search: Record<string, unknown>): Comp
       out.channelId = search.channelId;
     }
   }
+  if (search.modelSource === "default") out.followDefault = true;
   if (typeof search.skillCapabilityId === "string") {
     const skillCapabilityId = search.skillCapabilityId.trim();
     if (skillCapabilityId.length > 0 && skillCapabilityId.length <= 512) {
@@ -68,7 +74,24 @@ export function composerLaunchSearchKey(launch: ComposerLaunchSearch): string | 
     latency: launch.latency ?? null,
     realtime: launch.realtime ?? null,
     skillCapabilityId: launch.skillCapabilityId ?? null,
+    followDefault: launch.followDefault ?? false,
   });
+}
+
+/**
+ * The new-chat draft's model-policy marker after a URL launch applies its
+ * policy. A launch that carries the resolved default keeps following the
+ * default, so a later subscription connect or saved workspace default still
+ * replaces it; any other launch policy is the person's choice. `undefined` is
+ * an older server that reports no marker and gets none back.
+ */
+export function modelProvidedAfterLaunch(
+  launch: ComposerLaunchSearch,
+  current: boolean | undefined,
+): boolean | undefined {
+  if (!launch.model && !launch.effort && !launch.latency) return current;
+  if (launch.followDefault) return current === undefined ? undefined : false;
+  return true;
 }
 
 /** Keep durable launch attachments after model/effort/latency are applied locally. */

@@ -1004,6 +1004,91 @@ test("workspace-control SSE reconnects across a legitimate sparse revision gap",
   await reader.cancel();
 });
 
+test("a live subscription that ends under an open stream fails it retryably for durable replay", async () => {
+  durableEvents = [event(1)];
+  durableReads.length = 0;
+  durableControlEvents = [controlEvent(1)];
+  durableControlReads.length = 0;
+  const sessionTerminations: Array<(error: unknown) => void> = [];
+  let sessionReleased = 0;
+  const sessionResponse = await sseSessionStream(
+    fakeDb as never,
+    sessionEventBus({
+      subscribe: async (
+        _workspaceId: string,
+        _sessionId: string,
+        _onEvents: unknown,
+        options?: { onTerminated?: (error: unknown) => void },
+      ) => {
+        if (options?.onTerminated) sessionTerminations.push(options.onTerminated);
+        return () => {
+          sessionReleased += 1;
+        };
+      },
+    }),
+    WORKSPACE_ID,
+    SESSION_ID,
+    0,
+    new AbortController().signal,
+    { heartbeatIntervalMs: 1_000, stallTimeoutMs: 1_000 },
+  );
+  const sessionReader = sessionResponse.body!.getReader();
+  expect(
+    (await readSessionEvents(sessionReader, 1)).map((candidate) => candidate.sequence),
+  ).toEqual([1]);
+  expect(sessionTerminations).toHaveLength(1);
+  sessionTerminations[0]!(Object.assign(new Error("permissions violation"), { code: "PERM" }));
+  // The heartbeat-only stream would otherwise stay open while receiving
+  // nothing; the retryable failure makes the client reconnect and replay.
+  const sessionFailure = await readUntilFailure(sessionReader);
+  expect(sessionFailure).toBeInstanceOf(TypeError);
+  expect((sessionFailure as Error).message).toBe("session live fanout subscription ended");
+  expect(sessionReleased).toBe(1);
+
+  const controlTerminations: Array<(error: unknown) => void> = [];
+  let controlReleased = 0;
+  const controlResponse = await sseWorkspaceControlStream(
+    fakeDb as never,
+    {
+      subscribeWorkspaceControl: async (
+        _workspaceId: string,
+        _onEvent: unknown,
+        options?: { onTerminated?: (error: unknown) => void },
+      ) => {
+        if (options?.onTerminated) controlTerminations.push(options.onTerminated);
+        return () => {
+          controlReleased += 1;
+        };
+      },
+    } as unknown as EventBus,
+    WORKSPACE_ID,
+    0,
+    new AbortController().signal,
+    { heartbeatIntervalMs: 1_000, stallTimeoutMs: 1_000 },
+  );
+  const controlReader = controlResponse.body!.getReader();
+  expect(
+    (await readControlEvents(controlReader, 1)).map((candidate) => candidate.sequence),
+  ).toEqual([1]);
+  expect(controlTerminations).toHaveLength(1);
+  controlTerminations[0]!(new Error("subscription closed"));
+  const controlFailure = await readUntilFailure(controlReader);
+  expect(controlFailure).toBeInstanceOf(TypeError);
+  expect((controlFailure as Error).message).toBe("workspace control live subscription ended");
+  expect(controlReleased).toBe(1);
+});
+
+async function readUntilFailure(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<unknown> {
+  for (;;) {
+    try {
+      const { done } = await reader.read();
+      if (done) return null;
+    } catch (error) {
+      return error;
+    }
+  }
+}
+
 async function readSequences(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   count: number,

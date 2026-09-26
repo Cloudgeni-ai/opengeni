@@ -263,8 +263,11 @@ describe("Google Drive OAuth isolation proof", () => {
     for (const candidate of [foreignFlow, { ...foreignFlow, kind: "atlassian_oauth" }]) {
       const refused = await callback(google.fetch, createSignedState(STATE_SECRET, candidate));
       expect(refused.status).toBe(302);
-      expect(refused.headers.get("location")).toContain("google_drive=error");
-      expect(refused.headers.get("location")).toContain("reason=http_400");
+      // Correctly signed, so it may name its own workspace page, but never
+      // anything its payload chose.
+      expect(refused.headers.get("location")).toBe(
+        `http://127.0.0.1:3000/workspaces/${authority.workspaceId}/plugins?google_drive=error&reason=state_invalid`,
+      );
     }
     // Refused before any provider traffic, and nothing was written.
     expect(google.requests).toHaveLength(0);
@@ -348,6 +351,8 @@ describe("Google Drive OAuth isolation proof", () => {
     expect(JSON.stringify(payload)).not.toContain(REFRESH_TOKEN);
     expect(JSON.stringify(payload)).not.toContain(CLIENT_SECRET);
 
+    // A correctly signed state that its flow rejects never supplies its own
+    // return path. It may land only on the UUID-checked workspace Plugins page.
     const maliciousReturn = createSignedState(STATE_SECRET, {
       ...payload,
       returnPath: "https://attacker.invalid/oauth-capture",
@@ -355,7 +360,7 @@ describe("Google Drive OAuth isolation proof", () => {
     const rejectedReturn = await callback(google.fetch, maliciousReturn, "error=access_denied");
     expect(rejectedReturn.status).toBe(302);
     expect(rejectedReturn.headers.get("location")).toBe(
-      "http://127.0.0.1:3000/integrations?google_drive=error&reason=http_400",
+      `http://127.0.0.1:3000/workspaces/${authority.workspaceId}/plugins?google_drive=error&reason=state_invalid`,
     );
     expect(google.requests).toHaveLength(0);
 
@@ -365,7 +370,7 @@ describe("Google Drive OAuth isolation proof", () => {
     });
     const rejectedReconnect = await callback(google.fetch, unpairedReconnect);
     expect(rejectedReconnect.headers.get("location")).toBe(
-      "http://127.0.0.1:3000/integrations?google_drive=error&reason=http_400",
+      `http://127.0.0.1:3000/workspaces/${authority.workspaceId}/plugins?google_drive=error&reason=state_invalid`,
     );
     expect(google.requests).toHaveLength(0);
 
@@ -393,7 +398,7 @@ describe("Google Drive OAuth isolation proof", () => {
 
     const replay = await callback(google.fetch, state!);
     expect(replay.headers.get("location")).toBe(
-      `http://127.0.0.1:3000/workspaces/${authority.workspaceId}/capabilities?google_drive=error&reason=http_400`,
+      `http://127.0.0.1:3000/workspaces/${authority.workspaceId}/capabilities?google_drive=error&reason=state_replayed`,
     );
     expect(
       google.requests.filter((request) => request.url === "https://oauth2.googleapis.com/token"),
@@ -409,14 +414,22 @@ describe("Google Drive OAuth isolation proof", () => {
     ).searchParams.get("state")!;
     const payload = readSignedState(state, STATE_SECRET) as Record<string, unknown>;
 
+    // An authentic but aged link names its workspace, so it returns there and
+    // says it expired. It still authorizes nothing.
     const expired = createSignedState(STATE_SECRET, payload, Math.floor(Date.now() / 1000) - 601);
     expect((await callback(google.fetch, expired)).headers.get("location")).toBe(
-      "http://127.0.0.1:3000/integrations?google_drive=error&reason=http_400",
+      `http://127.0.0.1:3000/workspaces/${authority.workspaceId}/plugins?google_drive=error&reason=state_expired`,
     );
+    // A tampered or foreign-secret state names no trustworthy workspace.
     const tampered = `${state.slice(0, -1)}${state.endsWith("a") ? "b" : "a"}`;
     expect((await callback(google.fetch, tampered)).headers.get("location")).toBe(
-      "http://127.0.0.1:3000/integrations?google_drive=error&reason=http_400",
+      "http://127.0.0.1:3000/integrations?google_drive=error&reason=state_invalid",
     );
+    const foreign = createSignedState("another-deployment-secret", payload);
+    expect((await callback(google.fetch, foreign)).headers.get("location")).toBe(
+      "http://127.0.0.1:3000/integrations?google_drive=error&reason=state_invalid",
+    );
+    expect(google.requests).toHaveLength(0);
 
     const otherAccount = await freshAuthority();
     const accountMismatch = createSignedState(STATE_SECRET, {

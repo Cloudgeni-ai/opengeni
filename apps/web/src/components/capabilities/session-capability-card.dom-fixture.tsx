@@ -20,6 +20,7 @@ const catalogItem = CapabilityCatalogItem.parse({
 let personal = false;
 let liveCatalogItem = catalogItem;
 let enabled = false;
+let createdCatalogItem: CapabilityCatalogItem | null = null;
 let connections: unknown[] = [];
 const row = {
   id: "connection",
@@ -36,6 +37,12 @@ const updateConnection = mock(async () => row);
 const enableCapability = mock(async () => {
   enabled = true;
 });
+const getGitHubApp = mock(async () => ({
+  status: "unbound",
+  configured: true,
+  linkUrl: "https://api.example.test/github/connect",
+}));
+const refreshGitHub = mock(async () => {});
 const context = {
   client: {
     connectTransport: () => ({}),
@@ -54,14 +61,30 @@ const context = {
               }
             : {}),
         },
+        ...(createdCatalogItem ? [createdCatalogItem] : []),
       ],
     }),
+    createCapability: mock(
+      async (_workspaceId: string, input: { name: string; endpointUrl: string }) => {
+        createdCatalogItem = CapabilityCatalogItem.parse({
+          id: "mcp:reviewed",
+          kind: "mcp",
+          source: "manual",
+          name: input.name,
+          endpointUrl: input.endpointUrl,
+          runtime: { available: true, mcpServerId: "reviewed" },
+        });
+        return createdCatalogItem;
+      },
+    ),
+    inspectMcpAuthentication: mock(async () => ({ kind: "none" as const })),
     listConnections: async () => connections,
     listSocialConnections: async () => [],
     listSlackInstallationBindings: async () => [],
     listIntegrationDefinitions: async () => ({ definitions: [] }),
     listApiIntegrations: async () => ({ integrations: [] }),
     catalogAssetUrl: (path: string) => path,
+    getGitHubApp,
     createConnection,
     updateConnection,
     enableCapability,
@@ -76,8 +99,12 @@ const context = {
     }),
   },
   workspaceCapabilityCatalog: [catalogItem],
+  githubStatus: null as { status: string } | null,
+  refreshGitHub,
   refreshWorkspaceMcpServers: async () => {},
-  accessContext: { workspaceGrants: [] },
+  accessContext: {
+    workspaceGrants: [{ workspaceId: "workspace", permissions: ["connections:read"] }],
+  },
 };
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({ toast: { success: () => {}, error: () => {} } }));
@@ -114,6 +141,7 @@ async function render(
   cachedCatalogItem = catalogItem,
   missingGrant = false,
   visibility: "private" | "workspace" = "workspace",
+  noticeOverride: AuthNeededItem = item,
 ) {
   personal = personalAccount;
   liveCatalogItem = currentCatalogItem;
@@ -126,7 +154,7 @@ async function render(
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  let notice = item;
+  let notice = noticeOverride;
   if (missingGrant) {
     const startupEvents = [
       {
@@ -215,6 +243,228 @@ function button(container: HTMLElement, label: string) {
 }
 
 describe("conversation connection card", () => {
+  test("reviews an agent-suggested URL before a human adds the MCP catalog entry", async () => {
+    createdCatalogItem = null;
+    context.client.createCapability.mockClear();
+    const suggested = {
+      ...item,
+      id: "custom-mcp-notice",
+      capability: null,
+      providerDomain: "mcp.example.test",
+      setupRequest: {
+        kind: "mcp" as const,
+        name: "Internal Tools",
+        endpointUrl: "https://mcp.example.test/mcp",
+        rationale: "Find the records you asked about.",
+      },
+    } as AuthNeededItem;
+    const h = await render(false, catalogItem, catalogItem, false, "workspace", suggested);
+    try {
+      expect(h.host.textContent).toContain("Find the records you asked about.");
+      expect(context.client.createCapability).not.toHaveBeenCalled();
+      await act(async () => {
+        button(h.host, "Review server").click();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+      expect(h.host.querySelector('[data-state="setup"]')).not.toBeNull();
+      expect(h.container.textContent).toContain("Server URL");
+      expect(button(h.container, "Add MCP server").disabled).toBe(true);
+      expect(h.container.textContent).toContain("A workspace admin needs to add this server");
+      context.accessContext.workspaceGrants = [
+        { workspaceId: "workspace", permissions: ["capabilities:manage", "connections:read"] },
+      ];
+      await h.rerender("workspace");
+      expect(button(h.container, "Add MCP server").disabled).toBe(false);
+      await act(async () => button(h.container, "Add MCP server").click());
+      expect(context.client.createCapability).toHaveBeenCalledTimes(1);
+      expect(context.client.createCapability).toHaveBeenCalledWith("workspace", {
+        kind: "mcp",
+        source: "manual",
+        name: "Internal Tools",
+        endpointUrl: "https://mcp.example.test/mcp",
+      });
+      expect(h.host.textContent).toContain("Connect Internal Tools");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 40)));
+      expect(document.activeElement).toBe(button(h.container, "Connect Internal Tools"));
+      await act(async () => button(h.container, "Connect Internal Tools").click());
+      expect(h.container.textContent).toContain("Add to workspace");
+    } finally {
+      context.accessContext.workspaceGrants = [
+        { workspaceId: "workspace", permissions: ["connections:read"] },
+      ];
+      createdCatalogItem = null;
+      await h.close();
+    }
+  });
+
+  test("a viewer returning after an admin adds the proposed server sees the connection action", async () => {
+    createdCatalogItem = CapabilityCatalogItem.parse({
+      id: "mcp:reviewed",
+      kind: "mcp",
+      source: "manual",
+      name: "Internal Tools",
+      endpointUrl: "https://mcp.example.test/mcp",
+      runtime: { available: true, mcpServerId: "reviewed" },
+    });
+    context.accessContext.workspaceGrants = [
+      { workspaceId: "workspace", permissions: ["connections:read"] },
+    ];
+    context.client.createCapability.mockClear();
+    const suggested = {
+      ...item,
+      id: "custom-mcp-notice-return",
+      capability: null,
+      providerDomain: "mcp.example.test",
+      setupRequest: {
+        kind: "mcp" as const,
+        name: "Internal Tools",
+        endpointUrl: "https://mcp.example.test/mcp",
+        rationale: "Find the requested records.",
+      },
+    } as AuthNeededItem;
+    const h = await render(false, catalogItem, catalogItem, false, "workspace", suggested);
+    try {
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(h.host.textContent).toContain("Connect Internal Tools");
+      expect(h.host.textContent).not.toContain("A workspace admin needs to add this server");
+      expect(context.client.createCapability).not.toHaveBeenCalled();
+    } finally {
+      createdCatalogItem = null;
+      await h.close();
+    }
+  });
+  const githubItem = {
+    ...catalogItem,
+    id: "api:github-app",
+    kind: "api" as const,
+    name: "GitHub App",
+    providerDomain: "github.com",
+  };
+  const githubNotice = {
+    ...item,
+    capability: {
+      ...item.capability!,
+      id: "api:github-app",
+      kind: "api" as const,
+      name: "GitHub App",
+    },
+  } as AuthNeededItem;
+
+  test("GitHub's bundled logo and verified binding persist in the conversation card", async () => {
+    context.githubStatus = { status: "bound" };
+    const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
+    try {
+      // Happy DOM cannot serve static assets; the source path is checked in
+      // capability-logo-source.test.ts, while this verifies the live card state.
+      expect(h.container.querySelector('[data-state="complete"]')).not.toBeNull();
+      expect(h.container.textContent).toContain("Connected to this workspace");
+      expect(h.container.textContent).not.toContain("Available in this conversation");
+      expect(h.container.textContent).not.toContain("Connect GitHub App");
+    } finally {
+      await h.close();
+      context.githubStatus = null;
+    }
+  });
+
+  test("a returning GitHub binding refreshes the existing card, including later disconnection", async () => {
+    context.githubStatus = { status: "unbound" };
+    const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
+    try {
+      expect(h.container.querySelector('[data-state="suggested"]')).not.toBeNull();
+      context.githubStatus = { status: "bound" };
+      await h.rerender("workspace");
+      expect(h.container.querySelector('[data-state="complete"]')).not.toBeNull();
+      context.githubStatus = { status: "unbound" };
+      await h.rerender("workspace");
+      expect(h.container.querySelector('[data-state="suggested"]')).not.toBeNull();
+    } finally {
+      await h.close();
+      context.githubStatus = null;
+    }
+  });
+
+  test("GitHub starts on one click, visibly waits, ignores a second click, and confirms a binding", async () => {
+    context.githubStatus = null;
+    getGitHubApp.mockClear();
+    refreshGitHub.mockClear();
+    let resolveStatus!: (value: Awaited<ReturnType<typeof getGitHubApp>>) => void;
+    getGitHubApp.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveStatus = resolve;
+        }),
+    );
+    const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
+    try {
+      await act(async () => button(h.container, "Connect GitHub App").click());
+      const waiting = button(h.container, "Opening GitHub…");
+      expect(waiting.disabled).toBe(true);
+      expect(getGitHubApp).toHaveBeenCalledTimes(1);
+      await act(async () => waiting.click());
+      expect(getGitHubApp).toHaveBeenCalledTimes(1);
+      expect(getGitHubApp).toHaveBeenCalledWith("workspace", {
+        returnPath: "/workspaces/workspace/sessions/session",
+      });
+      await act(async () => {
+        resolveStatus({ status: "bound", configured: true, linkUrl: "" });
+      });
+      expect(h.container.querySelector('[data-state="complete"]')).not.toBeNull();
+      expect(h.container.textContent).toContain("Connected to this workspace");
+      expect(refreshGitHub).toHaveBeenCalledTimes(1);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a BFCache return unlocks GitHub and ignores an old pending status response", async () => {
+    context.githubStatus = null;
+    refreshGitHub.mockClear();
+    let resolveOldStatus!: (value: Awaited<ReturnType<typeof getGitHubApp>>) => void;
+    getGitHubApp.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOldStatus = resolve;
+        }),
+    );
+    const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
+    try {
+      await act(async () => button(h.container, "Connect GitHub App").click());
+      expect(button(h.container, "Opening GitHub…").disabled).toBe(true);
+      await act(async () => {
+        const restored = new Event("pageshow") as PageTransitionEvent;
+        Object.defineProperty(restored, "persisted", { value: true });
+        window.dispatchEvent(restored);
+      });
+      expect(button(h.container, "Connect GitHub App").disabled).toBe(false);
+      expect(refreshGitHub).toHaveBeenCalledWith("workspace");
+      await act(async () => resolveOldStatus({ status: "bound", configured: true, linkUrl: "" }));
+      expect(h.container.querySelector('[data-state="suggested"]')).not.toBeNull();
+      getGitHubApp.mockImplementationOnce(async () => ({
+        status: "bound",
+        configured: true,
+        linkUrl: "",
+      }));
+      await act(async () => button(h.container, "Connect GitHub App").click());
+      expect(h.container.querySelector('[data-state="complete"]')).not.toBeNull();
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("GitHub's failed start offers a retry in the existing dialog", async () => {
+    getGitHubApp.mockImplementationOnce(async () => {
+      throw new Error("Temporary status failure");
+    });
+    const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
+    try {
+      await act(async () => button(h.container, "Connect GitHub App").click());
+      expect(h.container.textContent).toContain("Temporary status failure");
+      expect(button(h.container, "Try again")).toBeDefined();
+    } finally {
+      await h.close();
+    }
+  });
+
   test("OAuth CTA retains the live provider name after renamed setup is opened and cancelled", async () => {
     const cached = { ...catalogItem, authKind: "oauth2" as const };
     const h = await render(false, { ...cached, name: "Current Example" }, cached);
@@ -271,6 +521,30 @@ describe("conversation connection card", () => {
     expect(createConnection).not.toHaveBeenCalled();
     expect(enableCapability).not.toHaveBeenCalled();
     await h.close();
+  });
+  test("an open connection card masks its connected account when read access is revoked", async () => {
+    const h = await render(true);
+    try {
+      await act(async () => button(h.container, "Add API key").click());
+      expect(button(h.container, "Add tools").disabled).toBe(false);
+      context.accessContext.workspaceGrants = [];
+      await h.rerender("workspace");
+      expect(
+        [...h.container.querySelectorAll("button")].some((node) =>
+          node.textContent?.includes("Add tools"),
+        ),
+      ).toBe(false);
+      context.accessContext.workspaceGrants = [
+        { workspaceId: "workspace", permissions: ["connections:read"] },
+      ];
+      await h.rerender("workspace");
+      expect(button(h.container, "Add tools").disabled).toBe(false);
+    } finally {
+      context.accessContext.workspaceGrants = [
+        { workspaceId: "workspace", permissions: ["connections:read"] },
+      ];
+      await h.close();
+    }
   });
   test("switching workspace discards the open dialog and its credential draft", async () => {
     const h = await render();

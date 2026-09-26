@@ -357,7 +357,12 @@ async function handleStripeWebhookEvent(
 ): Promise<void> {
   switch (event.type) {
     case "checkout.session.completed":
-      await handleCheckoutSessionCompleted(deps, event);
+    case "checkout.session.async_payment_succeeded":
+      await handleCheckoutSessionPayment(deps, event);
+      return;
+    case "checkout.session.async_payment_failed":
+      // A delayed payment method failed. Completion reported it `unpaid`, so
+      // no credit was granted and there is nothing to reverse.
       return;
     case "checkout.session.expired":
     case "payment_intent.succeeded":
@@ -393,15 +398,69 @@ async function handleStripeWebhookEvent(
   }
 }
 
-async function handleCheckoutSessionCompleted(
+export type StripeCheckoutCreditDecision =
+  | { action: "grant"; credit: CheckoutCreditMetadata }
+  | { action: "ignore"; reason: "foreign_checkout" | "not_payment_mode" | "payment_not_paid" };
+
+/**
+ * Decides whether a Checkout Session webhook grants OpenGeni credits.
+ *
+ * Sessions created outside OpenGeni on the same Stripe account carry no
+ * `opengeni_` metadata and are acknowledged without effect. An OpenGeni
+ * session with malformed credit metadata still throws so the failure stays
+ * visible. Credits are granted only once Stripe reports the payment `paid`:
+ * on `checkout.session.completed` for immediate methods, or on
+ * `checkout.session.async_payment_succeeded` for delayed methods, whose
+ * completion event arrives `unpaid`. Both events carry the same session
+ * metadata, so the ledger idempotency key grants at most once.
+ */
+export function stripeCheckoutCreditDecision(
+  session: Stripe.Checkout.Session,
+): StripeCheckoutCreditDecision {
+  if (!Object.keys(session.metadata ?? {}).some((key) => key.startsWith("opengeni_"))) {
+    return { action: "ignore", reason: "foreign_checkout" };
+  }
+  if (session.mode !== "payment") {
+    return { action: "ignore", reason: "not_payment_mode" };
+  }
+  if (session.payment_status !== "paid") {
+    return { action: "ignore", reason: "payment_not_paid" };
+  }
+  return {
+    action: "grant",
+    credit: creditMetadata(session.metadata, `Stripe checkout session ${session.id}`),
+  };
+}
+
+async function handleCheckoutSessionPayment(
   deps: ApiRouteDeps,
   event: Stripe.Event,
 ): Promise<void> {
   const session = event.data.object as Stripe.Checkout.Session;
-  if (session.mode !== "payment" || session.payment_status !== "paid") {
+  const decision = stripeCheckoutCreditDecision(session);
+  if (decision.action === "ignore") {
+    if (decision.reason === "foreign_checkout") {
+      console.info("[api] stripe webhook ignored a checkout session not created by OpenGeni", {
+        stripeEventType: event.type,
+        livemode: event.livemode,
+      });
+    }
     return;
   }
-  const credit = creditMetadata(session.metadata, `Stripe checkout session ${session.id}`);
+  const credit = decision.credit;
+  if (!(await getManagedAccount(deps.db, credit.accountId))) {
+    // Another OpenGeni deployment sharing the Stripe account (or an account
+    // removed before a delayed payment settled). Retrying cannot succeed, so
+    // acknowledge instead of failing the delivery for days.
+    console.info(
+      "[api] stripe webhook ignored a checkout session for an account not in this deployment",
+      {
+        stripeEventType: event.type,
+        livemode: event.livemode,
+      },
+    );
+    return;
+  }
   const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
   if (customerId) {
     await upsertBillingCustomer(deps.db, {
@@ -616,16 +675,18 @@ async function metadataForDispute(
     : charge.metadata;
 }
 
-function creditMetadata(
-  metadata: Stripe.Metadata | null | undefined,
-  label: string,
-): {
+export type CheckoutCreditMetadata = {
   accountId: string;
   amountMicros: number;
   idempotencyKey: string;
   amountUsd?: string;
   packageId?: string;
-} {
+};
+
+function creditMetadata(
+  metadata: Stripe.Metadata | null | undefined,
+  label: string,
+): CheckoutCreditMetadata {
   const accountId = metadata?.opengeni_account_id;
   const amountMicros = Number(metadata?.opengeni_credit_micros);
   const idempotencyKey = metadata?.opengeni_credit_idempotency_key;

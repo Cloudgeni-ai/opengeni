@@ -570,6 +570,11 @@ import {
   childWaitingCapacityDedupeKey,
   childWaitingCapacitySummary,
 } from "./child-lifecycle-notices";
+import { codeSearchDeploymentPolicyForCreate } from "./code-search-policy";
+import {
+  resolveSessionCodeSearchEnabled,
+  type CodeSearchDeploymentPolicy,
+} from "@opengeni/contracts/code-search";
 import {
   autoResumeGoalPausedByCapInTransaction,
   SESSION_GOAL_CAP_PAUSED_REASON,
@@ -606,6 +611,7 @@ import {
 
 export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
+export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
 export * from "./session-control";
 export * from "./session-queue-commands";
 export * from "./session-realtime";
@@ -5532,6 +5538,16 @@ export async function getBillingBalance(db: Database, accountId: string): Promis
       updatedAt: new Date().toISOString(),
     };
   });
+}
+
+/**
+ * Whether the organization holds a positive OpenGeni credit balance, whatever
+ * its source: a purchase, an operator grant, a test credit, or the one-time
+ * verified-signup trial grant. It turns false again once usage brings the
+ * balance to zero or below. Read-only; it never gates credit admission.
+ */
+export async function organizationHoldsCredits(db: Database, accountId: string): Promise<boolean> {
+  return (await getBillingBalance(db, accountId)).balanceMicros > 0;
 }
 
 export async function countScheduledTasksForWorkspace(
@@ -32532,6 +32548,8 @@ export type SessionCreateInput = {
   /** Typed Memory selector (migration 0427); omitted means the workspace layer. */
   memoryScope?: SessionMemoryScope;
   parentSessionId?: string | null;
+  /** Freezes a new root session's code_search decision; omitted uses the boot-installed policy. */
+  codeSearchDeploymentPolicy?: CodeSearchDeploymentPolicy;
   createIdempotencyKey?: string | null;
   /** Exact explicit installed-Skill selection used for keyed-create replay. */
   selectedInstalledSkillIds?: string[];
@@ -32677,6 +32695,21 @@ function mapSessionSpawnDenial(
     idempotencyKey: row.idempotencyKey ?? null,
     createdAt: row.createdAt.toISOString(),
   };
+}
+
+async function parentSessionCodeSearchEnabled(
+  tx: Database,
+  workspaceId: string,
+  parentSessionId: string,
+): Promise<boolean> {
+  const [parent] = await tx
+    .select({ codeSearchEnabled: schema.sessions.codeSearchEnabled })
+    .from(schema.sessions)
+    .where(
+      and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, parentSessionId)),
+    )
+    .limit(1);
+  return parent?.codeSearchEnabled === true;
 }
 
 async function resolveSessionDepthDecision(
@@ -33160,6 +33193,15 @@ async function createSessionInTransaction(
       ? input.createdByActor.turnId
       : null
     : null;
+  // Frozen once (migration 0520). A child keeps its parent's decision, so one
+  // session tree stays in one experiment arm; a root session decides its own.
+  const codeSearchEnabled = input.parentSessionId
+    ? await parentSessionCodeSearchEnabled(tx, input.workspaceId, input.parentSessionId)
+    : resolveSessionCodeSearchEnabled(
+        workspace.settings,
+        input.codeSearchDeploymentPolicy ?? codeSearchDeploymentPolicyForCreate(),
+        id,
+      );
   let insertedRows: (typeof schema.sessions.$inferSelect)[];
   let privateCreateCapabilityId: string | null = null;
   let privateCreateOwnerMembershipId: string | null = null;
@@ -33307,6 +33349,7 @@ async function createSessionInTransaction(
               (isCodexBilledModel(input.model)
                 ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
                 : "portable"),
+            codeSearchEnabled,
             status: "queued",
           },
           "initialMessage",
@@ -36449,7 +36492,10 @@ async function sessionFailureDiagnostics(
     ${sql.join(boundedFields, sql`, `)},
     'providerRecoveryCount', case when jsonb_typeof(${schema.sessionEvents.payload}->'providerRecoveryCount') = 'number'
       and length((${schema.sessionEvents.payload}->'providerRecoveryCount')::text) <= 16
-      then ${schema.sessionEvents.payload}->'providerRecoveryCount' else 'null'::jsonb end)`;
+      then ${schema.sessionEvents.payload}->'providerRecoveryCount' else 'null'::jsonb end,
+    'quotaScope', case when jsonb_typeof(${schema.sessionEvents.payload}->'quotaScope') = 'string'
+      and ${schema.sessionEvents.payload}->>'quotaScope' in ('daily', 'monthly', 'credits', 'quota')
+      then ${schema.sessionEvents.payload}->'quotaScope' else 'null'::jsonb end)`;
   const latest = async (type: string) => {
     const [row] = await db
       .select({
@@ -36465,8 +36511,11 @@ async function sessionFailureDiagnostics(
       .orderBy(desc(schema.sessionEvents.sequence))
       .limit(1);
     if (!row) return null;
+    // The closed exhausted-provider-quota marker is projected only as one of
+    // its four literal values, so it adds no unbounded text.
     const payload: Record<string, unknown> = {
       providerRecoveryCount: row.payload.providerRecoveryCount,
+      ...(typeof row.payload.quotaScope === "string" ? { quotaScope: row.payload.quotaScope } : {}),
     };
     const truncatedFields: string[] = [];
     for (const field of diagnosticFields) {
@@ -42788,6 +42837,7 @@ export async function recordSkippedContextCompaction(
     reason:
       | "no_history"
       | "replacement_not_smaller"
+      | "replacement_exceeds_model_budget"
       | "replacement_unchanged"
       | "summarization_failed";
     /**
@@ -50707,6 +50757,12 @@ export async function enrollUnobservableCommandIdleDrain(
     const deadlineStopGraceMs = SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS;
     const deadlineRotation =
       initial.rotationReason === "provider_deadline" && initial.rotationRequestedAt !== null;
+    // Normal completion closes an attempt without the interruption-only
+    // quiesced_at receipt. A failed/interrupted owner without that receipt must
+    // remain fenced; a completed and closed owner has finished its own writes.
+    const settledOwnerAt = sql`coalesce(attempt.quiesced_at,
+      case when attempt.state = 'closed' and attempt.outcome = 'completed'
+        then attempt.closed_at else null end)`;
     // Preserve process -> admission -> lease ordering used by settlement.
     const processes = await rawRows<{
       id: string;
@@ -50728,7 +50784,7 @@ export async function enrollUnobservableCommandIdleDrain(
             or (
               process.last_reconcile_outcome = 'provider_error'
               and process.reconcile_attempts >= 5
-              and attempt.quiesced_at is not null
+              and ${settledOwnerAt} is not null
               and exists (
                 select 1 from session_background_commands command
                 where command.retained_process_id = process.id
@@ -50747,8 +50803,8 @@ export async function enrollUnobservableCommandIdleDrain(
               and process.reconcile_attempts >= 1
               and (
                 (process.owner_actor_kind = 'turn' and attempt.state = 'closed'
-                  and attempt.quiesced_at is not null
-                  and greatest(attempt.quiesced_at, process.started_at) < now() -
+                  and ${settledOwnerAt} is not null
+                  and greatest(${settledOwnerAt}, process.started_at) < now() -
                     (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
                 or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
                   and process.started_at < now() -
@@ -50768,8 +50824,8 @@ export async function enrollUnobservableCommandIdleDrain(
               and process.deadline_cancellation_requested_at < now() -
                 (${deadlineStopGraceMs}::bigint * interval '1 millisecond')
               and (
-                (process.owner_actor_kind = 'turn' and attempt.quiesced_at is not null
-                  and greatest(attempt.quiesced_at, process.started_at) < now() -
+                (process.owner_actor_kind = 'turn' and ${settledOwnerAt} is not null
+                  and greatest(${settledOwnerAt}, process.started_at) < now() -
                     (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
                 or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
                   and process.started_at < now() -
@@ -63265,10 +63321,7 @@ export async function updateSessionGoalWithEvent(
           proposalId: null,
         };
       }
-      const shouldApply =
-        input.actor === "api" ||
-        existing.mutationPolicy === "autonomous_adaptation" ||
-        (existing.mutationPolicy === "preserve_intent" && changeKind === "refinement");
+      const shouldApply = input.actor === "api" || existing.mutationPolicy !== "review_changes";
       if (!shouldApply) {
         const [proposal] = await tx
           .insert(schema.sessionGoalRevisions)
@@ -80665,6 +80718,7 @@ function mapSession(
       row.codexCompactionMode === "remote_v2" || row.codexCompactionMode === "portable"
         ? row.codexCompactionMode
         : "portable",
+    codeSearchEnabled: row.codeSearchEnabled === true,
     ...pin,
     ...attention,
     ...archive,

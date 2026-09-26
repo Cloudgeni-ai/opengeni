@@ -9,6 +9,13 @@ const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const REVALIDATE_CACHE_CONTROL = "no-cache";
 const SHORT_CACHE_CONTROL = "public, max-age=3600";
 const DEMO_API_PREFIX = "/demo-api";
+// Baseline hardening for every response the shell itself serves. Framing and
+// CSP stay unset on purpose: the console supports embedding (docs/embedding.md).
+// A route-specific value, such as the setup page's no-referrer, wins.
+const SHELL_SECURITY_HEADERS = {
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "strict-origin-when-cross-origin",
+} as const;
 const HOP_BY_HOP_HEADERS = [
   "connection",
   "keep-alive",
@@ -30,7 +37,26 @@ export type DemoApiProxyOptions = {
 
 export type WebHandlerOptions = {
   demoApiProxy?: DemoApiProxyOptions | undefined;
+  /**
+   * Public browser origin of this console. Link-preview crawlers require an
+   * absolute og:image URL, and a static shell cannot know where it is served,
+   * so the handler resolves root-relative preview URLs against this origin.
+   * Without one the shell keeps its relative URLs, which browsers accept but
+   * some crawlers ignore. Never derived from request headers, which a client
+   * controls.
+   */
+  publicOrigin?: string | undefined;
 };
+
+type RenderedShell = { html: Uint8Array<ArrayBuffer>; gzip: Uint8Array<ArrayBuffer> };
+
+// Root-relative content URLs in the link-preview tags a crawler dereferences.
+const LINK_PREVIEW_URL_META =
+  /(<meta\s+(?:property|name)="(?:og:image|twitter:image)"\s+content=")(\/(?!\/)[^"]*")/gu;
+// A missing top-level file such as /favicon.ico or /robots.txt must not be
+// answered with the SPA shell: browsers and crawlers would treat the HTML as
+// the requested icon, manifest, or policy. HTML paths keep the SPA fallback.
+const ROOT_STATIC_FILE_PATTERN = /^\/[^/]+\.[A-Za-z0-9]+$/u;
 
 export function createWebHandler(
   root = resolve(import.meta.dir, "../dist"),
@@ -38,12 +64,24 @@ export function createWebHandler(
 ) {
   const distRoot = resolve(root);
   const indexPath = resolve(distRoot, "index.html");
+  // Normalize to a bare origin so nothing but scheme, host, and port can reach
+  // the rendered HTML attribute.
+  const publicOrigin =
+    options.publicOrigin === undefined ? undefined : httpOrigin(options.publicOrigin);
+  if (options.publicOrigin !== undefined && !publicOrigin) {
+    throw new Error("publicOrigin must be an absolute http(s) URL");
+  }
+  let renderedShell: Promise<RenderedShell> | null = null;
 
   return async function webHandler(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === DEMO_API_PREFIX || url.pathname.startsWith(`${DEMO_API_PREFIX}/`)) {
       return proxyDemoApi(request, url, options.demoApiProxy);
     }
+    return withShellSecurityHeaders(await serveShell(request, url));
+  };
+
+  async function serveShell(request: Request, url: URL): Promise<Response> {
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("Method Not Allowed", {
         status: 405,
@@ -67,18 +105,98 @@ export function createWebHandler(
       return new Response("Bad Request", { status: 400 });
     }
 
+    if (requestedPath === indexPath) {
+      return serveShellIndex(request, REVALIDATE_CACHE_CONTROL);
+    }
     const requestedFile = Bun.file(requestedPath);
     if (await requestedFile.exists()) {
       return serveFile(request, requestedPath, cacheControlFor(staticPath));
     }
-    if (pathname.startsWith("/assets/") || pathname.startsWith("/react-demo/")) {
+    if (
+      pathname.startsWith("/assets/") ||
+      pathname.startsWith("/react-demo/") ||
+      (ROOT_STATIC_FILE_PATTERN.test(pathname) && extname(pathname) !== ".html")
+    ) {
       return new Response("Not Found", { status: 404 });
     }
     if (pathname === SETUP_ACCOUNT_PATH) {
-      return serveFile(request, indexPath, "no-store", SETUP_ACCOUNT_RESPONSE_HEADERS);
+      return serveShellIndex(request, "no-store", SETUP_ACCOUNT_RESPONSE_HEADERS);
     }
-    return serveFile(request, indexPath, REVALIDATE_CACHE_CONTROL);
-  };
+    return serveShellIndex(request, REVALIDATE_CACHE_CONTROL);
+  }
+
+  async function serveShellIndex(
+    request: Request,
+    cacheControl: string,
+    extraHeaders?: HeadersInit,
+  ): Promise<Response> {
+    if (!publicOrigin) return serveFile(request, indexPath, cacheControl, extraHeaders);
+    if (!(await Bun.file(indexPath).exists())) {
+      return new Response("Not Found", { status: 404 });
+    }
+    // The built shell is immutable for the life of the process: render it once.
+    renderedShell ??= renderShell(indexPath, publicOrigin).catch((error: unknown) => {
+      renderedShell = null;
+      throw error;
+    });
+    const shell = await renderedShell;
+    const gzip =
+      !request.headers.has("range") &&
+      acceptsEncoding(request.headers.get("accept-encoding"), "gzip");
+    const body = gzip ? shell.gzip : shell.html;
+    const headers = new Headers({
+      ...Object.fromEntries(new Headers(extraHeaders)),
+      "cache-control": cacheControl,
+      "content-type": "text/html;charset=utf-8",
+      vary: "Accept-Encoding",
+    });
+    if (gzip) headers.set("content-encoding", "gzip");
+    if (request.method === "HEAD") {
+      headers.set("content-length", String(body.byteLength));
+      return new Response(null, { headers });
+    }
+    return new Response(body, { headers });
+  }
+}
+
+async function renderShell(indexPath: string, origin: string): Promise<RenderedShell> {
+  const html = new TextEncoder().encode(
+    withAbsoluteLinkPreviewUrls(await Bun.file(indexPath).text(), origin),
+  );
+  return { html, gzip: Bun.gzipSync(html, { level: 9 }) };
+}
+
+/** Resolves root-relative link-preview URLs in the app shell against `origin`. */
+export function withAbsoluteLinkPreviewUrls(html: string, origin: string): string {
+  return html.replace(
+    LINK_PREVIEW_URL_META,
+    (_match, prefix: string, path: string) => `${prefix}${origin}${path}`,
+  );
+}
+
+/**
+ * The console's public browser origin: the web origin when the web app and API
+ * use separate origins, otherwise the shared public origin. Anything that is
+ * not an absolute http(s) URL leaves link-preview URLs relative.
+ */
+export function publicWebOriginFromEnvironment(
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  const configured = env.OPENGENI_WEB_BASE_URL?.trim() || env.OPENGENI_PUBLIC_BASE_URL?.trim();
+  return configured ? httpOrigin(configured) : undefined;
+}
+
+function httpOrigin(value: string): string | undefined {
+  if (!URL.canParse(value)) return undefined;
+  const url = new URL(value);
+  return url.protocol === "https:" || url.protocol === "http:" ? url.origin : undefined;
+}
+
+function withShellSecurityHeaders(response: Response): Response {
+  for (const [name, value] of Object.entries(SHELL_SECURITY_HEADERS)) {
+    if (!response.headers.has(name)) response.headers.set(name, value);
+  }
+  return response;
 }
 
 async function proxyDemoApi(
@@ -280,7 +398,10 @@ if (import.meta.main) {
   Bun.serve({
     hostname,
     port,
-    fetch: createWebHandler(undefined, { demoApiProxy: demoApiProxyFromEnvironment() }),
+    fetch: createWebHandler(undefined, {
+      demoApiProxy: demoApiProxyFromEnvironment(),
+      publicOrigin: publicWebOriginFromEnvironment(),
+    }),
   });
   console.log(`OpenGeni web listening on http://${hostname}:${port}`);
 }

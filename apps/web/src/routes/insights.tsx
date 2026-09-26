@@ -1,11 +1,12 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { XIcon } from "lucide-react";
+import { BarChart3Icon, XIcon } from "lucide-react";
 import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
 
 import { AreaChart, UsageMeter } from "@/components/insights/charts";
 import { CausalSheet } from "@/components/insights/causal-sheet";
 import { CountUp } from "@/components/insights/count-up";
+import { PageHeader } from "@/components/common";
 import {
   RANGE_OPTIONS,
   backendLabel,
@@ -38,7 +39,12 @@ import {
   parseInsightsSearch,
   type InsightsSearch,
 } from "@/components/insights/search";
-import { ContentPage } from "@/components/ui/content-layout";
+import { Button } from "@/components/ui/button";
+import { ContentPage, DataScroller } from "@/components/ui/content-layout";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Notice } from "@/components/ui/notice";
+import { Select } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
@@ -133,6 +139,7 @@ export function InsightsRoute({
   const [loadedFilters, setLoadedFilters] = useState<InsightsFilters>(filters);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [retry, setRetry] = useState(0);
   const [scopeLabels, setScopeLabels] = useState<Record<string, string>>({});
 
   const update = (change: SelectionChange) => {
@@ -176,7 +183,7 @@ export function InsightsRoute({
       cancelled = true;
       controller.abort();
     };
-  }, [canRead, context.client, filters, range, workspaceId]);
+  }, [canRead, context.client, filters, range, retry, workspaceId]);
 
   // Remember session titles seen in any snapshot so scope chips stay readable after narrowing.
   useEffect(() => {
@@ -252,20 +259,57 @@ export function InsightsRoute({
     return true;
   });
 
+  const heading = (
+    <PageHeader
+      icon={<BarChart3Icon className="size-4" />}
+      title="Insights"
+      description={`Usage and activity in ${workspace?.name ?? "this workspace"}.`}
+    />
+  );
+
   if (!canRead || (loadError && !snapshot)) {
     return (
-      <ContentPage width="wide" data-insights className="gap-4">
-        <h1 className="text-xl font-semibold tracking-tight text-fg">Workspace insights</h1>
-        <p className="text-sm text-fg-muted">{loadError ?? "Unavailable."}</p>
+      <ContentPage width="wide" data-insights className="gap-6">
+        {heading}
+        <div role="alert">
+          <Notice
+            tone={canRead ? "failed" : "muted"}
+            title={canRead ? "Insights couldn't load" : "Workspace access required"}
+            action={
+              canRead ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setRetry((value) => value + 1)}
+                >
+                  Retry
+                </Button>
+              ) : undefined
+            }
+          >
+            {canRead
+              ? `Try again to load workspace usage. ${loadError}`
+              : "Workspace admin permission is required to view Insights."}
+          </Notice>
+        </div>
       </ContentPage>
     );
   }
 
   if ((!snapshot && loading) || !snap || !totals || !deltas || !view || !diagnostics) {
     return (
-      <ContentPage width="wide" data-insights className="gap-4">
-        <h1 className="text-xl font-semibold tracking-tight text-fg">Workspace insights</h1>
-        <p className="text-sm text-fg-muted">Loading rollups…</p>
+      <ContentPage width="wide" data-insights className="gap-6">
+        {heading}
+        <div role="status" aria-label="Loading workspace insights" className="grid gap-3">
+          <span className="text-sm text-fg-muted">Loading workspace usage…</span>
+          <div aria-hidden="true" className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Skeleton className="h-32 sm:col-span-2" />
+            <Skeleton className="h-32" />
+            <Skeleton className="h-32" />
+          </div>
+          <Skeleton aria-hidden="true" className="h-56" />
+        </div>
       </ContentPage>
     );
   }
@@ -323,91 +367,113 @@ export function InsightsRoute({
     calls > 0 && known === 0 ? null : value;
 
   return (
-    <ContentPage width="wide" data-insights className="gap-8">
-      <motion.header
-        initial={reduceMotion ? false : { opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-        className="flex flex-col gap-4 border-b border-border pb-5"
-      >
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="min-w-0">
-            <p className="text-2xs font-medium uppercase tracking-[0.14em] text-fg-subtle">
-              {workspace?.name ?? "Workspace"}
-            </p>
-            <h1 className="mt-1 text-xl font-semibold tracking-tight text-fg">Insights</h1>
+    <ContentPage width="wide" data-insights className="gap-7 sm:gap-9">
+      {heading}
+      <div className="grid min-w-0 gap-3">
+        <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+          <div className="flex min-w-0 flex-wrap items-end gap-3">
+            <FilterSelect
+              label="Provider"
+              value={filters.provider}
+              onChange={setProvider}
+              options={[
+                { value: "all", label: "All providers" },
+                ...view.availableProviders.map((p) => ({ value: p, label: providerLabel(p) })),
+              ]}
+            />
+            <FilterSelect
+              label="Model"
+              value={filters.model}
+              onChange={(next) => update({ model: next })}
+              options={[
+                { value: "all", label: "All models" },
+                ...view.availableModels.map((m) => ({ value: m, label: m })),
+              ]}
+            />
+            {filters.rootSessionId ? (
+              <ScopeChip
+                icon={<GitBranchIcon className="size-3" />}
+                kind="Root session"
+                label={scopeLabels[filters.rootSessionId] ?? shortId(filters.rootSessionId)}
+                onRemove={() => update({ rootSessionId: null })}
+              />
+            ) : null}
+            {filters.sessionId ? (
+              <ScopeChip
+                icon={<MessageSquareIcon className="size-3" />}
+                kind="Session"
+                label={scopeLabels[filters.sessionId] ?? shortId(filters.sessionId)}
+                onRemove={() => update({ sessionId: null })}
+              />
+            ) : null}
+            {filtered ? (
+              <Button type="button" variant="ghost" size="sm" onClick={clearFilters}>
+                <XIcon className="size-3.5" />
+                Clear filters
+              </Button>
+            ) : null}
           </div>
           <RangeControl value={range} onChange={(next) => update({ range: next })} />
         </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <FilterSelect
-            label="Provider"
-            value={filters.provider}
-            onChange={setProvider}
-            options={[
-              { value: "all", label: "All providers" },
-              ...view.availableProviders.map((p) => ({ value: p, label: providerLabel(p) })),
-            ]}
-          />
-          <FilterSelect
-            label="Model"
-            value={filters.model}
-            onChange={(next) => update({ model: next })}
-            options={[
-              { value: "all", label: "All models" },
-              ...view.availableModels.map((m) => ({ value: m, label: m })),
-            ]}
-          />
-          {filters.rootSessionId ? (
-            <ScopeChip
-              icon={<GitBranchIcon className="size-3" />}
-              kind="Root session"
-              label={scopeLabels[filters.rootSessionId] ?? shortId(filters.rootSessionId)}
-              onRemove={() => update({ rootSessionId: null })}
-            />
-          ) : null}
-          {filters.sessionId ? (
-            <ScopeChip
-              icon={<MessageSquareIcon className="size-3" />}
-              kind="Session"
-              label={scopeLabels[filters.sessionId] ?? shortId(filters.sessionId)}
-              onRemove={() => update({ sessionId: null })}
-            />
-          ) : null}
-          {filtered ? (
-            <button
-              type="button"
-              onClick={clearFilters}
-              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1.5 text-2xs text-fg-muted hover:bg-surface-2 hover:text-fg"
-            >
-              <XIcon className="size-3" />
-              Clear all
-            </button>
-          ) : null}
-          {loading ? (
-            <span className="text-2xs text-fg-subtle" role="status">
-              {showingPreviousSelection ? "Refreshing… showing previous selection" : "Refreshing…"}
-            </span>
-          ) : null}
-          <p className="ml-auto text-2xs text-fg-subtle" data-insights-freshness>
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 text-xs text-fg-muted">
+          <span role="status">
+            {loading
+              ? showingPreviousSelection
+                ? "Refreshing… showing previous selection"
+                : "Refreshing…"
+              : null}
+          </span>
+          <span data-insights-freshness>
             {snap.dataThrough
               ? `Data through ${formatUtcTimestamp(snap.dataThrough)}`
               : "No model calls recorded yet"}
-          </p>
+          </span>
         </div>
         {snap.facetsTruncated ? (
-          <p className="text-2xs text-fg-subtle">
+          <p className="text-xs text-fg-subtle">
             Filter menus list the first {snap.facets.length.toLocaleString()} provider/model pairs;
             more exist in this window.
           </p>
         ) : null}
-      </motion.header>
+      </div>
 
       {loadError ? (
-        <div className="rounded-lg border border-status-failed/30 bg-status-failed/5 px-3 py-2 text-xs text-status-failed">
-          Refresh failed; showing the last successful selection and snapshot. {loadError}
+        <div role="alert">
+          <Notice
+            tone="failed"
+            title="Couldn't refresh insights"
+            action={
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setRetry((value) => value + 1)}
+              >
+                Retry
+              </Button>
+            }
+          >
+            Showing the last successful selection. {loadError}
+          </Notice>
         </div>
+      ) : null}
+
+      {snap.modelCalls === 0 ? (
+        <EmptyState
+          title={filtered ? "No calls match these filters" : "No model calls in this window"}
+          description={
+            filtered
+              ? "Choose another provider, model, or session to see usage."
+              : "Model usage will appear here after this workspace makes a call. Other workspace activity may still appear below."
+          }
+          action={
+            filtered ? (
+              <Button type="button" variant="outline" size="sm" onClick={clearFilters}>
+                Clear filters
+              </Button>
+            ) : undefined
+          }
+        />
       ) : null}
 
       <Section
@@ -418,34 +484,40 @@ export function InsightsRoute({
           </p>
         }
       >
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1.9fr)]">
           <Metric
+            featured
             label="Credits spent"
             value={formatUsd(totals.creditUsd)}
             delta={`${formatPctDelta(deltas.modelPct, snap.priorLabel)} · ${totals.creditPaidCalls.toLocaleString()} credit-paid calls`}
           />
-          <Metric label="External spend · estimate" value={externalValue} delta={externalDetail} />
-          <Metric
-            label="Tokens"
-            value={formatTokens(totals.totalTokens)}
-            delta={`${formatPctDelta(deltas.tokensPct, snap.priorLabel)} · ${snap.modelCalls.toLocaleString()} calls${totals.tokenCoveragePct < 100 ? ` · ${totals.tokenCoveragePct}% reported` : ""}`}
-          />
-          <Metric
-            label="Cache hit"
-            value={formatCachePct(totals.cacheHitPct)}
-            delta={`${cacheDelta}${totals.cacheHitPct !== null && totals.cacheCoveragePct < 100 ? ` · ${totals.cacheCoveragePct}% of calls reported` : ""}`}
-            tone={totals.cacheHitPct !== null && totals.cacheHitPct >= 60 ? "good" : "neutral"}
-          />
+          <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <Metric
+              label="External spend · estimate"
+              value={externalValue}
+              delta={externalDetail}
+            />
+            <Metric
+              label="Tokens"
+              value={formatTokens(totals.totalTokens)}
+              delta={`${formatPctDelta(deltas.tokensPct, snap.priorLabel)} · ${snap.modelCalls.toLocaleString()} calls${totals.tokenCoveragePct < 100 ? ` · ${totals.tokenCoveragePct}% reported` : ""}`}
+            />
+            <Metric
+              label="Cache hit"
+              value={formatCachePct(totals.cacheHitPct)}
+              delta={`${cacheDelta}${totals.cacheHitPct !== null && totals.cacheCoveragePct < 100 ? ` · ${totals.cacheCoveragePct}% of calls reported` : ""}`}
+              tone={totals.cacheHitPct !== null && totals.cacheHitPct >= 60 ? "good" : "neutral"}
+            />
+          </div>
         </div>
         {totals.ledgerGapUsd !== null && Math.abs(totals.ledgerGapUsd) >= 0.01 ? (
-          <p
-            className="rounded-md border border-status-waiting/30 bg-status-waiting/5 px-3 py-2 text-2xs leading-5 text-fg-muted"
-            data-insights-ledger-gap
-          >
-            {totals.ledgerGapUsd > 0
-              ? `Per-model breakdowns cover ${formatUsd(totals.creditPaidUsd)} of the ${formatUsd(totals.creditUsd)} charged. ${formatUsd(totals.ledgerGapUsd)} has no per-call record yet; recent gaps are rebuilt automatically from each call's usage event.`
-              : `Per-call records exceed the ${formatUsd(totals.creditUsd)} charged in this window by ${formatUsd(-totals.ledgerGapUsd)}.`}
-          </p>
+          <div data-insights-ledger-gap>
+            <Notice tone="waiting" title="Breakdown coverage">
+              {totals.ledgerGapUsd > 0
+                ? `Per-model breakdowns cover ${formatUsd(totals.creditPaidUsd, 2)} of the ${formatUsd(totals.creditUsd, 2)} charged. ${formatUsd(totals.ledgerGapUsd, 2)} has no per-call record yet; recent gaps are rebuilt automatically from each call's usage event.`
+                : `Per-call records exceed the ${formatUsd(totals.creditUsd, 2)} charged in this window by ${formatUsd(-totals.ledgerGapUsd, 2)}.`}
+            </Notice>
+          </div>
         ) : null}
         {filtered ? (
           <p className="text-2xs text-fg-subtle">
@@ -623,7 +695,7 @@ export function InsightsRoute({
         title="By model"
         aside={<p>Click a row to filter · credit-paid rows show charged credits</p>}
       >
-        <div className="overflow-x-auto rounded-lg border border-border">
+        <DataScroller aria-label="Usage by model" className="border border-border">
           <table className="min-w-full text-left text-xs">
             <thead className="border-b border-border bg-surface/50 text-fg-subtle">
               <tr>
@@ -654,7 +726,17 @@ export function InsightsRoute({
                     onClick={() => update({ provider: row.provider, model: row.model })}
                   >
                     <td className="whitespace-nowrap px-3 py-2.5">
-                      <p className="font-medium text-fg">{row.model}</p>
+                      <button
+                        type="button"
+                        aria-label={`Filter by ${row.model} from ${providerLabel(row.provider)}`}
+                        className="rounded text-left font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          update({ provider: row.provider, model: row.model });
+                        }}
+                      >
+                        {row.model}
+                      </button>
                       <p className="text-2xs text-fg-subtle">{providerLabel(row.provider)}</p>
                     </td>
                     <td className="whitespace-nowrap px-3 py-2.5">
@@ -709,7 +791,7 @@ export function InsightsRoute({
               ) : null}
             </tbody>
           </table>
-        </div>
+        </DataScroller>
 
         {providers.length > 1 ? (
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
@@ -758,7 +840,7 @@ export function InsightsRoute({
           </p>
         }
       >
-        <div className="overflow-x-auto rounded-lg border border-border">
+        <DataScroller aria-label="Usage by root session" className="border border-border">
           <table className="min-w-full text-left text-xs">
             <thead className="border-b border-border bg-surface/50 text-fg-subtle">
               <tr>
@@ -795,7 +877,21 @@ export function InsightsRoute({
                     }}
                   >
                     <td className="max-w-72 truncate px-3 py-2.5 font-medium text-fg">
-                      {driver.label}
+                      {rootId && !selected ? (
+                        <button
+                          type="button"
+                          aria-label={`Scope to root session ${driver.label}`}
+                          className="max-w-full truncate rounded text-left text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            scopeToRoot(rootId, driver.label);
+                          }}
+                        >
+                          {driver.label}
+                        </button>
+                      ) : (
+                        driver.label
+                      )}
                     </td>
                     <Num>{formatTokens(driver.tokens)}</Num>
                     <Num>{driver.pctOfTokens}%</Num>
@@ -840,7 +936,7 @@ export function InsightsRoute({
               ) : null}
             </tbody>
           </table>
-        </div>
+        </DataScroller>
       </Section>
 
       <Section
@@ -853,7 +949,7 @@ export function InsightsRoute({
           </p>
         }
       >
-        <div className="overflow-x-auto rounded-lg border border-border">
+        <DataScroller aria-label="Recent model calls" className="border border-border">
           <table className="min-w-full text-left text-xs">
             <thead className="border-b border-border bg-surface/50 text-fg-subtle">
               <tr>
@@ -939,7 +1035,7 @@ export function InsightsRoute({
               ) : null}
             </tbody>
           </table>
-        </div>
+        </DataScroller>
       </Section>
 
       <Section title="Schedules">
@@ -947,7 +1043,7 @@ export function InsightsRoute({
           Attribution covers turns whose initiator carried a scheduled run id. Goal continuations
           without that lineage remain session usage rather than schedule usage.
         </p>
-        <div className="overflow-x-auto rounded-lg border border-border">
+        <DataScroller aria-label="Schedule usage" className="border border-border">
           <table className="min-w-full text-left text-xs">
             <thead className="border-b border-border bg-surface/50 text-fg-subtle">
               <tr>
@@ -997,7 +1093,7 @@ export function InsightsRoute({
               ) : null}
             </tbody>
           </table>
-        </div>
+        </DataScroller>
       </Section>
 
       <Section
@@ -1043,7 +1139,7 @@ export function InsightsRoute({
             delta="Historical calls may be unavailable"
           />
         </div>
-        <div className="overflow-x-auto rounded-lg border border-border">
+        <DataScroller aria-label="Prompt context sources" className="border border-border">
           <table className="min-w-full text-left text-xs">
             <thead className="border-b border-border bg-surface/50 text-fg-subtle">
               <tr>
@@ -1082,7 +1178,7 @@ export function InsightsRoute({
               ) : null}
             </tbody>
           </table>
-        </div>
+        </DataScroller>
       </Section>
 
       <Section title="Sandbox usage" aside={filtered ? <p>Workspace-wide</p> : undefined}>
@@ -1248,7 +1344,7 @@ export function InsightsRoute({
             </button>
           ))}
         </div>
-        <div className="overflow-x-auto rounded-lg border border-border">
+        <DataScroller aria-label="Live sessions" className="border border-border">
           <table className="min-w-full text-left text-xs">
             <thead className="border-b border-border bg-surface/50 text-fg-subtle">
               <tr>
@@ -1270,7 +1366,17 @@ export function InsightsRoute({
                     <td className="px-3 py-2.5">
                       <div className="flex items-center gap-2">
                         <StateDot state={row.state} />
-                        <span className="font-medium text-fg">{row.title}</span>
+                        <button
+                          type="button"
+                          aria-label={`Scope to session ${row.title}`}
+                          className="rounded text-left font-medium text-fg hover:text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            scopeToSession(row.id, row.title);
+                          }}
+                        >
+                          {row.title}
+                        </button>
                       </div>
                     </td>
                     <td className="px-3 py-2.5 font-mono text-2xs text-fg-muted">
@@ -1294,7 +1400,7 @@ export function InsightsRoute({
               ) : null}
             </tbody>
           </table>
-        </div>
+        </DataScroller>
       </Section>
 
       <Section title="Caps" aside={filtered ? <p>Workspace-wide</p> : undefined}>
@@ -1593,7 +1699,7 @@ function MeasureControl(props: {
 }) {
   return (
     <div
-      role="tablist"
+      role="group"
       aria-label="Usage measure"
       className="inline-flex rounded-lg border border-border bg-surface/50 p-0.5"
     >
@@ -1608,11 +1714,10 @@ function MeasureControl(props: {
           <button
             key={id}
             type="button"
-            role="tab"
-            aria-selected={active}
+            aria-pressed={active}
             onClick={() => props.onChange(id)}
             className={cn(
-              "relative rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+              "relative min-h-8 rounded-md px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
               active ? "text-fg" : "text-fg-muted hover:text-fg",
             )}
           >
@@ -1634,7 +1739,7 @@ function MeasureControl(props: {
 function RangeControl(props: { value: InsightsRange; onChange: (range: InsightsRange) => void }) {
   return (
     <div
-      role="tablist"
+      role="group"
       aria-label="Time range"
       className="inline-flex rounded-lg border border-border bg-surface/50 p-0.5"
     >
@@ -1644,11 +1749,10 @@ function RangeControl(props: { value: InsightsRange; onChange: (range: InsightsR
           <button
             key={option.id}
             type="button"
-            role="tab"
-            aria-selected={active}
+            aria-pressed={active}
             onClick={() => props.onChange(option.id)}
             className={cn(
-              "relative rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+              "relative min-h-8 rounded-md px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
               active ? "text-fg" : "text-fg-muted hover:text-fg",
             )}
           >
@@ -1675,29 +1779,29 @@ function FilterSelect(props: {
   options: Array<{ value: string; label: string }>;
 }) {
   return (
-    <label className="inline-flex items-center gap-2 text-2xs text-fg-subtle">
-      <span className="sr-only">{props.label}</span>
-      <select
+    <label className="grid min-w-0 gap-1 text-xs font-medium text-fg-muted">
+      <span>{props.label}</span>
+      <Select
         value={props.value}
         onChange={(e) => props.onChange(e.target.value)}
-        className="h-8 rounded-md border border-border bg-surface/50 px-2 text-xs text-fg outline-none focus-visible:border-brand/50"
+        className="max-w-52 text-xs"
       >
         {props.options.map((opt) => (
           <option key={opt.value} value={opt.value}>
             {opt.label}
           </option>
         ))}
-      </select>
+      </Select>
     </label>
   );
 }
 
 function Section(props: { title: string; aside?: ReactNode; children: ReactNode }) {
   return (
-    <section className="grid gap-3">
+    <section className="grid min-w-0 gap-4 border-t border-border pt-6">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="text-sm font-semibold tracking-[-0.02em] text-fg">{props.title}</h2>
-        {props.aside ? <div className="text-2xs text-fg-subtle">{props.aside}</div> : null}
+        <h2 className="text-base font-semibold tracking-tight text-fg">{props.title}</h2>
+        {props.aside ? <div className="text-xs text-fg-subtle">{props.aside}</div> : null}
       </div>
       {props.children}
     </section>
@@ -1709,13 +1813,22 @@ function Metric(props: {
   value: ReactNode;
   delta: string;
   tone?: "warn" | "neutral" | "good";
+  featured?: boolean;
 }) {
   return (
-    <div className="rounded-lg border border-border bg-surface/40 px-3.5 py-3">
-      <p className="text-2xs font-medium text-fg-subtle">{props.label}</p>
+    <div
+      className={cn(
+        "flex min-w-0 flex-col justify-center rounded-lg border",
+        props.featured
+          ? "border-brand/25 bg-brand/[0.06] px-5 py-5"
+          : "border-border bg-surface/35 px-3.5 py-3",
+      )}
+    >
+      <p className="text-xs font-medium text-fg-muted">{props.label}</p>
       <p
         className={cn(
-          "mt-1.5 text-2xl font-semibold tracking-[-0.03em] tabular-nums",
+          "mt-1.5 break-words font-semibold tracking-tight tabular-nums",
+          props.featured ? "text-3xl sm:text-4xl" : "text-xl",
           props.tone === "warn" && "text-status-failed",
           props.tone === "good" && "text-status-running",
           (props.tone == null || props.tone === "neutral") && "text-fg",
@@ -1723,7 +1836,7 @@ function Metric(props: {
       >
         {props.value}
       </p>
-      <p className="mt-1 line-clamp-2 text-2xs tabular-nums text-fg-muted">{props.delta}</p>
+      <p className="mt-2 text-xs leading-5 tabular-nums text-fg-muted">{props.delta}</p>
     </div>
   );
 }

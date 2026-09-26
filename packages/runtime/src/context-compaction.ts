@@ -43,6 +43,10 @@ export type CompactionItem = Record<string, unknown>;
 export const COMPACTION_SUMMARY_MARKER = "opengeni_context_summary";
 
 export const SUMMARY_BUFFER_TOKENS = 20_000;
+/** Leave input room on models whose entire context is smaller than the normal reserve. */
+export function compactionSummaryOutputTokens(contextWindowTokens: number): number {
+  return Math.min(SUMMARY_BUFFER_TOKENS, Math.max(1, Math.floor(contextWindowTokens / 4)));
+}
 // A single cumulative budget for all retained real user messages, matching
 // Codex core's build_compacted_history_with_limit (not a per-message allowance).
 export const COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000;
@@ -1243,7 +1247,7 @@ export class EmptyCompactionSummaryError extends Error {
   constructor(diagnostics: Record<string, unknown> = {}) {
     const compact = JSON.stringify(diagnostics).slice(0, 2_000);
     super(
-      `Compaction summarizer returned no assistant text; active history was preserved${compact ? ` (${compact})` : ""}`,
+      `Compaction could not produce a usable checkpoint; active history was preserved${compact ? ` (${compact})` : ""}`,
     );
     this.name = "EmptyCompactionSummaryError";
     this.diagnostics = diagnostics;
@@ -1520,8 +1524,16 @@ export function omitOpaqueArtifactsFromPortableCompactionHistory(
     }
     if (type === "reasoning" && hasOpaqueProviderArtifact(item)) {
       const projected = projectRejectedReasoningArtifact(item);
+      if (Object.keys(projected).length === 1) {
+        changed = true;
+        continue;
+      }
       changed ||= projected !== item;
       out.push(projected as CompactionItem);
+      continue;
+    }
+    if (type === "reasoning" && Object.keys(item).length === 1) {
+      changed = true;
       continue;
     }
     out.push(item);
@@ -1605,16 +1617,20 @@ function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
 
 /**
  * Build the active history after compaction:
- * the newest real user messages that fit one cumulative 20k-token budget
+ * the newest real user messages that fit one cumulative, model-bounded budget
  * (prior summaries excluded, retained images preserved) plus one marked summary item.
  */
 export function buildCompactionReplacementHistory(
   items: readonly CompactionItem[],
   summaryBody: string,
   retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
+  retainedMessageBudgetTokens = COMPACT_USER_MESSAGE_MAX_TOKENS,
 ): CompactionItem[] {
   const retainedReversed: CompactionItem[] = [];
-  let remaining = COMPACT_USER_MESSAGE_MAX_TOKENS;
+  let remaining = Math.max(
+    0,
+    Math.min(COMPACT_USER_MESSAGE_MAX_TOKENS, retainedMessageBudgetTokens),
+  );
   for (let index = items.length - 1; index >= 0 && remaining > 0; index -= 1) {
     const item = items[index]!;
     if (!isUserMessage(item) || isCompactionSummary(item) || isAttachmentCatalog(item)) {

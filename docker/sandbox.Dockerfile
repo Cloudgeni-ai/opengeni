@@ -118,6 +118,7 @@ COPY packages/documents/package.json packages/documents/package.json
 COPY packages/events/package.json packages/events/package.json
 COPY packages/github/package.json packages/github/package.json
 COPY packages/interaction/package.json packages/interaction/package.json
+COPY packages/jev/package.json packages/jev/package.json
 COPY packages/network/package.json packages/network/package.json
 COPY packages/observability/package.json packages/observability/package.json
 COPY packages/ogtool/package.json packages/ogtool/package.json
@@ -286,6 +287,9 @@ FROM python:3.12-slim
 ARG TERRAFORM_VERSION=1.13.3
 ARG GLAB_VERSION=1.109.0
 ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6
+ARG UV_VERSION=0.12.18
+ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1"
+ARG OPENGENI_PYTHON_EXCLUDE_NEWER=2026-09-25T00:00:00Z
 ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
 ARG OPENGENI_CHROMIUM_VERSION=151.0.7922.108-1~deb13u1
@@ -436,6 +440,47 @@ RUN set -eux; \
     curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${tarch}" -o /usr/local/bin/ttyd; \
     chmod 0755 /usr/local/bin/ttyd; \
     ttyd --version
+
+# Agent Python toolchain, identical in docker/sandbox.Dockerfile and
+# docker/desktop.Dockerfile. A distro Python (the desktop image's Debian 13
+# python3) is PEP 668 "externally managed", so a bare `pip install` is refused.
+# This is a disposable single-tenant box, so pip and uv may install into the
+# system interpreter. Both write under /usr/local, and uv puts the whole
+# preinstalled closure there (it ignores Debian's /usr/lib/python3), so a later
+# upgrade never has to touch a distro-owned copy. Neither install command passes
+# an override flag, which proves the pip.conf and uv.toml settings. The pip and
+# uv caches live in /var/cache, outside the snapshotted HOME=/workspace, because
+# installed packages under /usr/local are per-box anyway. --exclude-newer freezes
+# the transitive closure to what PyPI had published at that instant, so every
+# rebuild of either image resolves the same versions.
+RUN set -eux; \
+    printf '[global]\nbreak-system-packages = true\nroot-user-action = ignore\ncache-dir = /var/cache/pip\n' > /etc/pip.conf; \
+    install -d -m 0755 /etc/uv; \
+    printf 'cache-dir = "/var/cache/uv"\n\n[pip]\nbreak-system-packages = true\n' > /etc/uv/uv.toml; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "${arch}" in \
+      amd64) uv_arch="x86_64"; expected="89eadd7c76fc063887959510d5ba0ab1264dfd5f1143b925ddb73021a40acf16" ;; \
+      arm64|aarch64) uv_arch="aarch64"; expected="afb6291f3f0a6b4521fc67b947822506c41dde5b60d2189dd8f3695b2ac8c9e7" ;; \
+      *) echo "unsupported architecture=${arch}" >&2; exit 1 ;; \
+    esac; \
+    uv_dir="uv-${uv_arch}-unknown-linux-gnu"; \
+    archive="/tmp/${uv_dir}.tar.gz"; \
+    curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL \
+      "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${uv_dir}.tar.gz" \
+      -o "$archive"; \
+    echo "$expected  $archive" | sha256sum -c -; \
+    tar -xzf "$archive" -C /tmp; \
+    install -m 0755 "/tmp/${uv_dir}/uv" "/tmp/${uv_dir}/uvx" /usr/local/bin/; \
+    rm -rf "$archive" "/tmp/${uv_dir}"; \
+    test "$(uv --version | cut -d' ' -f2)" = "${UV_VERSION}"; \
+    test "$(uv cache dir)" = /var/cache/uv; \
+    test "$(python3 -m pip cache dir)" = /var/cache/pip; \
+    uv pip install --system --no-cache --compile-bytecode --only-binary :all: \
+      --exclude-newer "${OPENGENI_PYTHON_EXCLUDE_NEWER}" ${OPENGENI_PYTHON_PACKAGES}; \
+    python3 -m pip install --no-cache-dir --no-index --dry-run ${OPENGENI_PYTHON_PACKAGES}; \
+    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, pytest, requests'; \
+    pytest --version; \
+    rm -rf /root/.cache /var/cache/pip /var/cache/uv
 
 # Checkov's large target-native Python closure is independent of the serial
 # final-image toolchain. Build it in parallel, then retain the existing final

@@ -154,6 +154,10 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
     sessionRequired: true,
     allOf: ["workspace:read"],
   },
+  custom_mcp_setup_request: {
+    sessionRequired: true,
+    allOf: ["workspace:read"],
+  },
   github_connect_link: { allOf: ["github:use"] },
   github_repositories_list: { allOf: ["github:use"] },
   social_connections_list: { allOf: ["connections:read"] },

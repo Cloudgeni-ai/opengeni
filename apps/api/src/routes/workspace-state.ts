@@ -24,6 +24,7 @@ import { HTTPException } from "hono/http-exception";
 
 import { serializeWorkspaceStateExport } from "../workspace-state-export";
 import { projectWorkspaceState } from "../workspace-state-projection";
+import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 
 async function readWorkspaceState(
   deps: ApiRouteDeps,
@@ -135,6 +136,9 @@ export function registerWorkspaceStateRoutes(app: Hono, deps: ApiRouteDeps): voi
       "content-disposition",
       `attachment; filename="workspace-state-${workspaceId}-sanitized.json"`,
     );
+    for (const [name, value] of Object.entries(USER_CONTENT_SECURITY_HEADERS)) {
+      context.header(name, value);
+    }
     return context.body(serializeWorkspaceStateExport(state));
   });
 }

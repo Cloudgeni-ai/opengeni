@@ -12,7 +12,11 @@ export type SessionCapabilityFrameProps = {
   skill: boolean;
   expanded: boolean;
   complete: boolean;
+  /** Completion copy must reflect the provider's actual scope of access. */
+  completeLabel?: string;
   actionLabel: string;
+  /** Direct navigation actions should not announce a dialog on the card. */
+  opensDialog?: boolean;
   note: string;
   onOpen(): void;
   onClose(): void;
@@ -48,7 +52,9 @@ export function SessionCapabilityFrame({
   skill,
   expanded,
   complete,
+  completeLabel,
   actionLabel,
+  opensDialog = true,
   note,
   onOpen,
   onClose,
@@ -90,7 +96,8 @@ export function SessionCapabilityFrame({
         </div>
         {complete ? (
           <p role="status" className="og-session-capability-copy">
-            {skill ? "Installed · Workspace" : "Connected · Available in this conversation"}
+            {completeLabel ??
+              (skill ? "Installed · Workspace" : "Connected · Available in this conversation")}
           </p>
         ) : (
           <>
@@ -104,8 +111,9 @@ export function SessionCapabilityFrame({
                 ref={buttonRef}
                 type="button"
                 onClick={onOpen}
-                aria-haspopup="dialog"
-                aria-expanded={expanded}
+                disabled={busy}
+                aria-haspopup={opensDialog ? "dialog" : undefined}
+                aria-expanded={opensDialog ? expanded : undefined}
               >
                 {actionLabel}
               </button>

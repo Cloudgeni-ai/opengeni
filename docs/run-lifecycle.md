@@ -95,10 +95,16 @@ tool and permission policy permits `set_session_title`, the production runtime
 removes that operation from the model-visible catalog for the attempt and starts
 one bounded, tool-less title request beside the ordinary response stream. The
 sidecar uses the same resolved provider and credential authority, receives only
-a bounded conversation opener, and is metered as its own model call. The main
-agent does not wait for a title tool result or make a title follow-up model call.
-When the main stream reaches normal settlement, the worker waits for the
-already-running bounded sidecar and joins it without cancelling. Exceptional or
+a bounded conversation opener, and is metered as its own model call. It requests
+the model's lowest runnable reasoning effort with a 512-token output budget,
+which leaves room for reasoning before the title. A response stopped by that
+limit keeps only whole words; if reasoning still uses the whole budget, no title
+is saved and a later eligible turn retries. Inline `<think>` reasoning before the
+answer is dropped. Every provider route sends one direct request outside the
+agent runner, as the compaction summarizer does. The main agent does not wait
+for a title tool result or make a title follow-up model call. When the main
+stream reaches normal settlement, the worker waits for the already-running
+bounded sidecar and joins it without cancelling. Exceptional or
 cancelled exits abort and join any still-pending sidecar. A completed candidate
 then uses the canonical title mutation, which updates the session row and
 appends `session.title_set`. Generation or persistence failure leaves the safe
@@ -106,11 +112,22 @@ pending marker in place, and a human title remains protected from every later
 automatic write. Historical fallback sessions therefore self-heal on their
 next eligible model turn.
 
+The managed OpenRouter free route sends no title request at all. A turn whose
+resolved provider is the deployment-funded OpenRouter provider serving an
+upstream `:free` variant (`isManagedOpenRouterFreeRoute`) spends one deployment
+key's OpenRouter per-minute and per-day request limits, which every user's
+turns share, so the attempt starts no sidecar, promotes no title tool, and
+keeps `set_session_title` out of its catalog while the pending marker remains.
+Web, SDK, and Slack keep showing the safe prompt preview. The next eligible turn
+on any other route, including a workspace or organization OpenRouter
+connection, titles the session.
+
 `OpenGeniRuntime.generateSessionTitle` is a rolling-compatible optional seam.
 Older or custom runtimes that do not implement it retain the prior attempt-local
 `set_session_title` tool plus one-shot model instruction, so an embedding host
 does not silently lose automatic naming during an upgrade. That compatibility
-path remains serialized; the production runtime takes the parallel path.
+path remains serialized; the production runtime takes the parallel path. Neither
+path runs on the managed OpenRouter free route.
 
 Ordinary Send acknowledges locally before transport completion. The composer
 freezes the exact text, annotations, resources, settings, and one
@@ -589,12 +606,14 @@ duration-based caps on legitimate run length; fix the pathology instead.
 Recoverable conditions preserve context instead of failing the session, so a
 long run survives them. Retryable provider connectivity, 5xx failures, and typed
 required-MCP connectivity failures resume the same accepted turn after a pacing
-delay. The exact Modal `TaskExecStart` `ClientError` for DNS resolution of a
-`task-*.w.modal.host:443` command router is also recovery-safe after Modal's own
-ten `UNAVAILABLE` retries: DNS failed before the command transport connected, so
-OpenGeni resumes the same accepted turn through the connectivity backoff.
-Generic `TaskExecStart` `UNAVAILABLE`, mixed failure batches, message-only
-lookalikes, any attached HTTP status metadata, and the exact
+delay. Native Modal `TaskExecStart` recovery is safe only when the client-side
+channel-readiness gate fails before issuing the RPC. This also covers resolver
+failure for no-port `task-*.w.modal.host` URLs without trusting DNS-shaped
+server replies. After exact never-started reservation settlement, OpenGeni
+resumes the same accepted turn through bounded connectivity backoff. Retained
+or outcome-unknown routing errors veto recovery even if their causes look safe.
+Generic `TaskExecStart` `UNAVAILABLE`, server-supplied DNS text, mixed failure
+batches, message-only lookalikes, HTTP status metadata, and the exact
 `FAILED_PRECONDITION: Modal Sandbox is shutting down` condition remain
 non-retryable because pre-command safety is not proven. Required first-party
 connect/tools-list also treats a rolling API
@@ -670,7 +689,32 @@ therefore starts the next outage at the first backoff step instead of consuming
 a lifetime budget for a long-running turn.
 An explicit provider retry hint is a lower bound. Rate limits use the provider's
 `Retry-After` when present and otherwise wait 60 s; other retryable classes keep
-their existing pacing. Failed session detail includes a bounded `failureDiagnostics` projection through
+their existing pacing.
+An exhausted API-key provider quota is not a rate limit and is never retried:
+a daily or monthly allowance (OpenRouter `free-models-per-day`, requests or
+tokens per day), a used-up quota (`insufficient_quota`, "exceeded your current
+quota", a reached usage limit), an account out of credits (HTTP 402,
+"insufficient balance", `billing_hard_limit_reached`), or a 429 whose own
+provider retry hint exceeds 15 minutes fails the turn at once with
+`provider_quota_exhausted`, `retryable: false`, a `quotaScope` of `daily`,
+`monthly`, `credits` or `quota`, plain-language copy, and the provider text as
+`detail`. Ordinary short limits stay `provider_rate_limited` and retryable: an
+explicit per-minute window (including snake_case metric ids such as Vertex
+`requests_per_minute_per_project`), quota wording whose provider retry hint is at
+most 60 s (Gemini reports per-minute limits with the same "exceeded your current
+quota" sentence), and Google's bare `RESOURCE_EXHAUSTED`, which Google sends
+with every 429 including short dynamic-shared-quota refusals.
+`@opengeni/runtime`'s `provider-quota.ts` is the single classifier and evidence
+reader (`classifyProviderQuotaError`): clients with OpenAI SDK retries enabled
+classify a 429 as the exact `APIError` the SDK will throw and mark an exhausted
+one `x-should-retry: false`, so the SDK veto and the worker never disagree about
+one response. Codex and SuperGrok subscription transports keep their own quota
+semantics (credential rotation and durable capacity waits) and never classify
+here; the loose "429 ... usage limit" Codex cap wording counts as a Codex cap
+only on a Codex transport error or an explicit `usage_limit_reached` type. A
+quota refusal of a compaction request likewise ends as a terminal
+`context_compaction_failed` with active history preserved instead of retrying,
+and carries the same closed `quotaScope` marker. Failed session detail includes a bounded `failureDiagnostics` projection through
 its durable event cursor. The browser uses it independently of retained timeline
 pages; a newer accepted live failure supersedes it while detail refreshes. The
 banner displays `providerRecoveryCount` only as the final consecutive automatic
@@ -1445,10 +1489,28 @@ provider instance as soon as create/restore returns, then gives Modal's command
 router a separate 60-second readiness budget before publishing the lease warm.
 The two failures retain different typed stages, group and instance identities,
 and truthful durations; a command-readiness failure is never rewritten as a
-600-second provider-capacity failure. It terminates the unpublished instance,
-rolls only the exact warming epoch back to cold, and fails the turn rather than
-rapidly creating sibling boxes. Any later display/setup failure follows the same
-owned cleanup path.
+600-second provider-capacity failure. It terminates the unpublished instance
+and rolls only the exact warming epoch back to cold. When that instance was
+freshly created by the elected spawner (not an attached, resumed, or
+provider-continuity box) and the provider confirmed its termination, the same
+turn re-enters ordinary lease admission after a jittered 2 to 10 second pause,
+because boxes created in one burst tend to miss readiness together and their
+replacements must not re-synchronize. The budget is one replacement per turn
+attempt, shared by the eager establish and every lazy-provisioner retry of that
+attempt, so a typed lease supersession cannot multiply it. The replacement goes
+through the normal epoch-fenced cold->warming CAS (or attaches to a sibling that
+won it), records its own provider instance before readiness, and replays
+nothing: no model- or tool-visible work ran on the discarded box. An
+archive-restored box is replaced the same way: its failed rematerialization
+leaves the lease cold with a retryable `degraded` restore of the same durable
+revision for the pause, and the replacement re-rematerializes that revision
+under a new rematerialization id. A second readiness miss, a spent budget, an
+unconfirmed termination, or cancellation during the pause fails the turn rather
+than rapidly creating sibling boxes. `opengeni_sandbox_readiness_replacements_total`
+(`outcome`: `replaced`, `failed_again`, `replacement_failed`, `cancelled`,
+`budget_spent`) separates replaced boxes from failed turns; the first miss is
+still counted by `opengeni_sandbox_warming_timeouts_total`. Any later
+display/setup failure follows the same owned cleanup path.
 
 After a managed lease is warm, immutable Sandbox Environment setup has a second, setup-specific
 single-flight boundary. One worker claims the exact `(lease epoch, provider
@@ -1574,6 +1636,13 @@ Model switching is not offered as a filesystem repair. A post-consent observatio
 or authorization failure returns only an unknown-outcome envelope, never newly
 unauthorized session state or a false rejection. The browser retains its immutable
 request, performs read-only status checks, and never resubmits automatically.
+A browser whose recovery read is refused with 403 (not the canonical managed-human
+cookie session, or no session control) treats the lane as not applicable, like an
+unsupported projection: no failed-check notice and no polling, while a
+nonstructural failure keeps its ordinary remedies, still fenced by the Retry
+endpoint. A browser that retains a consent request never takes that shortcut: a
+403 read after consent keeps the fail-closed notice, the retained request, and
+read-only status checks.
 
 Every later agent build reads the durable consent receipt and includes its exact
 filesystem-discontinuity warning in session instructions. This warning is outside
@@ -1897,7 +1966,8 @@ For scheduled provider-deadline rotation, legacy commands have a separate
 two-minute cancellation grace. A PTY receives one Ctrl-C; non-PTY stdin is not
 a signal, so the worker records cancellation intent without writing Ctrl-C
 bytes. After that grace, exact process holders may be enrolled even without
-exit proof if the owner is closed and quiesced (or its direct request returned),
+exit proof if the owner has a quiescence receipt or is normally completed and
+closed (or its direct request returned),
 and no unrelated holder or mutation admission remains. An outstanding
 reconciliation claim does not grant writer authority or block this deadline
 capture. The provider is terminated only after the current workspace generation
@@ -1907,8 +1977,9 @@ starts its own grace. This path does not apply to idle or operator rotation.
 
 The same containment path covers an explicitly stopping managed command after
 at least five provider-error observations. Its cancellation request and owner
-quiescence must both predate idle grace; an absent quiescence receipt is not
-accepted for this path. Provider errors alone never enroll a running command.
+quiescence (or normal completion and closed timestamp) must both predate idle
+grace. A failed/interrupted owner without a quiescence receipt remains blocked;
+provider errors alone never enroll a running command.
 All sandbox-group activity, other-holder and child-admission exclusions remain
 in force, and only verified provider termination settles an unknown result as
 lost. A failed checkpoint leaves the provider and holders intact for retry.
@@ -2181,6 +2252,23 @@ logical turn and settled scheduled occurrences fail closed as unsupported;
 idle credit exhaustion is not a failed-session retry boundary. A committed
 operation replays before mutable model/billing checks, even after work advances.
 
+The web failure banner is presentation over the stored event, which it never
+rewrites. Uncoded provider failures and `provider_rate_limited` /
+`provider_unavailable` / `provider_quota_exhausted` get short plain-language copy
+(rejected credentials, provider billing or access, a used-up daily limit, quota,
+rate limiting) with the exact recorded text behind a Details toggle. A closed
+`quotaScope` marker, on a quota turn failure or a quota-refused compaction, picks
+the daily, monthly, credits or quota copy directly; the `failureDiagnostics`
+projection carries it only as one of those four literals. Every
+billing, access, limit and quota class points at the model picker ("Choose
+another model below.") while the session still has the failed model selected. A bare leading HTTP status is
+classified only for 401, 402, 403 and 429; any other status keeps its recorded
+wording. Retry stays hidden only for rejected credentials, and only while the
+same model is selected: it stays hidden for that failure on that model even
+after the key is fixed, when a new message re-runs the work. Billing, access,
+daily-limit and quota failures keep Retry, because each condition can clear.
+Failures with any other worker code keep their authored wording.
+
 A genuinely new `user.message` can still transition failed → queued and start a
 new turn from stored history. This is a different intent from Try again, and
 clients must not manufacture such a message for retry. Only `cancelled` — an
@@ -2297,6 +2385,12 @@ audit reads may return it, so it is never a secret boundary.
    `session_attempt_codemode_calls` is unchanged. See
    `packages/runtime/src/tool-result-spill.ts` and
    `apps/worker/src/activities/agent-turn/tool-result-spill.ts`.
+   The same per-caller seam applies model-only projections:
+   a model call to `knowledge_search` or `knowledge_prepare_save` receives a
+   compact copy without bookkeeping or repeated preview text, and its history
+   item and event record that copy, while Codemode receives the exact executor
+   result. See
+   [model-visible discovery results](knowledge.md#model-visible-discovery-results).
    User attachment rows store stable file references, not inline bytes. Active
    messages reconstruct the same authorized receipt and supported image content
    across turns and before compaction. File metadata is batch-authorized once
@@ -2609,7 +2703,11 @@ timestamp. Their labels are limited to the closed provider/backend/outcome and,
 where applicable, phase/count/cache vocabularies; session, turn, request,
 credential, and content values remain only in authenticated durable events.
 Operation durations can nest and overlap; summing them does not produce a
-critical path. `runtime_stream_initialization` measures the enclosing runtime
+critical path. A definite path miss answering a read-only first routed sandbox
+operation (usually repository skill discovery listing an absent
+`.agents/skills`) records the `model_prepare_sandbox_first_routed_*` phases as
+completed; the per-operation sandbox metric keeps its separate `not_found`
+outcome, and writes never qualify. `runtime_stream_initialization` measures the enclosing runtime
 entry, not provider network dispatch. Background MCP connection/catalog work
 starts immediately but does not gate the first request; its measurements use
 `opengeni_tool_background_preparation_duration_seconds` instead of startup

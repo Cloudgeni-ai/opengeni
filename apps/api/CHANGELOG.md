@@ -1,5 +1,50 @@
 # @opengeni/api-router
 
+## 4.1.2
+
+### Patch Changes
+
+- f4192b2: Restore an active browser session when a suspension fails before controller dispatch.
+- Updated dependencies [6de2d5d]
+- Updated dependencies [f4192b2]
+  - @opengeni/runtime@4.0.3
+  - @opengeni/db@6.0.3
+  - @opengeni/core@4.0.3
+  - @opengeni/documents@0.8.34
+  - @opengeni/events@0.4.32
+
+## 4.1.1
+
+### Patch Changes
+
+- 8ae84ec: Preserve Fiken's connection-derived catalog status so session OAuth completion
+  can attach its tools. Distinguish connected integrations awaiting human tool
+  selection from connections needing reconnection, and report readiness only for
+  Fiken tools available in the current attempt.
+- Updated dependencies [31cf6ac]
+- Updated dependencies [c41aecd]
+- Updated dependencies [23f4717]
+- Updated dependencies [8ae84ec]
+- Updated dependencies [d0b5efd]
+- Updated dependencies [c41aecd]
+- Updated dependencies [e65a4ac]
+- Updated dependencies [7217a79]
+- Updated dependencies [22b2dd5]
+  - @opengeni/config@2.1.1
+  - @opengeni/contracts@5.1.1
+  - @opengeni/core@4.0.2
+  - @opengeni/codex@0.2.26
+  - @opengeni/runtime@4.0.2
+  - @opengeni/db@6.0.2
+  - @opengeni/documents@0.8.33
+  - @opengeni/github@0.7.16
+  - @opengeni/storage@0.2.133
+  - @opengeni/codemode@0.6.2
+  - @opengeni/artifact-tool@0.3.32
+  - @opengeni/events@0.4.31
+  - @opengeni/observability@0.8.32
+  - @opengeni/tool-gateway@0.1.13
+
 ## 4.1.0
 
 ### Minor Changes
