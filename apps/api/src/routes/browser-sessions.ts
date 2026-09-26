@@ -198,7 +198,9 @@ import {
   controllerCacheAllowsHostFetch,
   controllerCachedUrlIsUsable,
   shouldPersistControllerDataPlaneUrl,
+  isRetryableControllerTransport,
   withCachedController,
+  withControllerTransportRecovery,
 } from "../controller-data-plane";
 import { filterInteractionSessionsForGrant } from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
@@ -3179,10 +3181,17 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       if (!admitted) {
         throw new BrowserSessionStateError("BrowserSession controller authority changed");
       }
-      const run = async (placement: BrowserPlacement): Promise<T> => {
+      const safelyReplayable =
+        channelOperation === "browser.read" || channelOperation === "browser.action";
+      let controllerTransportFailed = false;
+      let controllerRecoveryAttempted = false;
+      const run = async (
+        placement: BrowserPlacement,
+        provisionedClient?: BrowserControlClient,
+      ): Promise<T> => {
         // An active binding already proves browserd was provisioned. Reusing
         // it avoids restarting/checking the sidecar on every live input.
-        const client = connectController(deps, grant, record, placement);
+        const client = provisionedClient ?? connectController(deps, grant, record, placement);
         const tokens = deriveBrowserSessionControllerTokens({
           rootSecret: browserAuthorityRoot(deps),
           accountId: grant.accountId,
@@ -3230,15 +3239,10 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         try {
           return await run(cached);
         } catch (error) {
-          const safelyReplayable =
-            channelOperation === "browser.read" || channelOperation === "browser.action";
-          if (
-            !safelyReplayable ||
-            (!(error instanceof BrowserControlTransportError) &&
-              !(error instanceof BrowserControlRequestError && error.retryable))
-          ) {
+          if (!safelyReplayable || !isRetryableControllerTransport(error)) {
             throw error;
           }
+          controllerTransportFailed = true;
           await recordLeaseControllerDataPlaneUrl(deps.db, {
             accountId: grant.accountId,
             workspaceId,
@@ -3258,12 +3262,51 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         binding.placementInstanceId,
         channelOperation,
         context.req.raw.signal,
-        async (placement) =>
-          await run(
-            await cacheBrowserControllerPlacement(grant, workspaceId, placement).catch(
-              () => placement,
-            ),
-          ),
+        async (placement) => {
+          const use = async () =>
+            await run(
+              await cacheBrowserControllerPlacement(grant, workspaceId, placement).catch(
+                () => placement,
+              ),
+            );
+          if (
+            !safelyReplayable ||
+            placement.placement.kind !== "sandbox_group" ||
+            controllerRecoveryAttempted
+          ) {
+            return await use();
+          }
+          return await withControllerTransportRecovery({
+            transportAlreadyFailed: controllerTransportFailed,
+            use,
+            recover: async () => {
+              // Channel A may refresh its provider handle. Keep sidecar recovery
+              // bounded across those retries and retain the exec-capable session.
+              controllerRecoveryAttempted = true;
+              if (
+                !(await touchBrowserSessionController(deps.db, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  browserSessionId,
+                  controllerGeneration: binding.controllerGeneration,
+                }))
+              ) {
+                throw new BrowserSessionStateError("BrowserSession controller authority changed");
+              }
+              const client = await provisionController(
+                deps,
+                grant,
+                record,
+                placement,
+                requestOrigin(context, deps.settings),
+              );
+              await cacheBrowserControllerPlacement(grant, workspaceId, placement).catch(
+                () => placement,
+              );
+              return await run(placement, client);
+            },
+          });
+        },
       );
     } catch (error) {
       throw browserRouteError(error);

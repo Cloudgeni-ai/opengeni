@@ -9,7 +9,110 @@ import {
   isOpenSandboxSignedControllerUrl,
   shouldPersistControllerDataPlaneUrl,
   withCachedController,
+  withControllerTransportRecovery,
 } from "../src/controller-data-plane";
+
+describe("withControllerTransportRecovery", () => {
+  test("does not provision a healthy active controller", async () => {
+    let provisions = 0;
+    expect(
+      await withControllerTransportRecovery({
+        transportAlreadyFailed: false,
+        use: async () => "healthy",
+        recover: async () => {
+          provisions += 1;
+          return "recovered";
+        },
+      }),
+    ).toBe("healthy");
+    expect(provisions).toBe(0);
+  });
+
+  test("restarts once when a fresh placement still reaches a stopped sidecar", async () => {
+    const calls: string[] = [];
+    expect(
+      await withControllerTransportRecovery({
+        transportAlreadyFailed: false,
+        use: async () => {
+          calls.push("fresh-tunnel");
+          throw new BrowserControlTransportError("sidecar stopped");
+        },
+        recover: async () => {
+          calls.push("ensure-sidecar", "recover-bound-session", "read");
+          return "recovered";
+        },
+      }),
+    ).toBe("recovered");
+    expect(calls).toEqual(["fresh-tunnel", "ensure-sidecar", "recover-bound-session", "read"]);
+  });
+
+  test("provisions immediately after the cached tunnel already failed", async () => {
+    const calls: string[] = [];
+    expect(
+      await withControllerTransportRecovery({
+        transportAlreadyFailed: true,
+        use: async () => {
+          calls.push("dead-tunnel");
+          throw new BrowserControlTransportError("stopped");
+        },
+        recover: async () => {
+          calls.push("ensure-sidecar");
+          return "recovered";
+        },
+      }),
+    ).toBe("recovered");
+    expect(calls).toEqual(["ensure-sidecar"]);
+  });
+
+  test("never retries a failed recovery", async () => {
+    const error = new BrowserControlTransportError("still unavailable");
+    let provisions = 0;
+    await expect(
+      withControllerTransportRecovery({
+        transportAlreadyFailed: false,
+        use: async () => {
+          throw error;
+        },
+        recover: async () => {
+          provisions += 1;
+          throw error;
+        },
+      }),
+    ).rejects.toBe(error);
+    expect(provisions).toBe(1);
+  });
+
+  test("leaves semantic failures with the active-session caller", async () => {
+    for (const error of [
+      new Error("invalid response"),
+      new BrowserControlRequestError(404, {
+        code: "resource_unavailable",
+        message: "BrowserSession controller session is absent",
+        retryable: false,
+      }),
+      new BrowserControlRequestError(409, {
+        code: "operation_conflict",
+        message: "uncertain mutation",
+        retryable: false,
+      }),
+    ]) {
+      let provisions = 0;
+      await expect(
+        withControllerTransportRecovery({
+          transportAlreadyFailed: false,
+          use: async () => {
+            throw error;
+          },
+          recover: async () => {
+            provisions += 1;
+            return "recovered";
+          },
+        }),
+      ).rejects.toBe(error);
+      expect(provisions).toBe(0);
+    }
+  });
+});
 
 describe("withCachedController", () => {
   test("uses a healthy cached endpoint without provisioning", async () => {

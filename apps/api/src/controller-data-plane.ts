@@ -80,3 +80,21 @@ export function isRetryableControllerTransport(error: unknown): boolean {
     (error instanceof BrowserControlRequestError && error.retryable)
   );
 }
+
+/** A stopped sidecar needs provisioning on its original, fenced placement,
+ * rather than another resolution of the same dead tunnel. Callers must admit
+ * only replayable operations; recovery and its operation are attempted once. */
+export async function withControllerTransportRecovery<T>(options: {
+  transportAlreadyFailed: boolean;
+  use: () => Promise<T>;
+  recover: () => Promise<T>;
+}): Promise<T> {
+  if (!options.transportAlreadyFailed) {
+    try {
+      return await options.use();
+    } catch (error) {
+      if (!isRetryableControllerTransport(error)) throw error;
+    }
+  }
+  return await options.recover();
+}
