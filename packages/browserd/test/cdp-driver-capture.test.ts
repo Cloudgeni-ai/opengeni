@@ -16,6 +16,9 @@ test("Lightpanda rejects screenshots before CDP can return placeholder pixels", 
       code: "unsupported",
       message: "Lightpanda does not render page screenshots; use semantic observation",
     });
+    await expect(fixture.driver.subscribeFrames("target-1")).rejects.toMatchObject({
+      code: "unsupported",
+    });
     expect(fixture.calls).toHaveLength(0);
     expect((await fixture.driver.observe("target-1")).semantic?.kind).toBe("snapshot");
   } finally {

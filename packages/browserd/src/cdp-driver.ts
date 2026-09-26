@@ -865,7 +865,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       browserSessionId: this.browserSessionId,
       targetId,
     });
-    if (!this.frameStreaming) {
+    if (this.engine === "lightpanda" || !this.frameStreaming) {
       throw new InteractionDefiniteDriverError(
         "unsupported",
         "this browser engine does not support live frame streaming",
