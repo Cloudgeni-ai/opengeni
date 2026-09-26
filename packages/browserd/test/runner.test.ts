@@ -1,10 +1,23 @@
 import { describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { constants } from "node:fs";
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import {
   AgentBrowserJsonRunner,
   browserLaunchArguments,
   browserProfileCryptoPolicy,
+  reapManagedBrowserProcesses,
 } from "../src/runner";
 
 describe("managed browser profile cryptography", () => {
@@ -21,6 +34,14 @@ describe("managed browser profile cryptography", () => {
     expect(browserLaunchArguments("win32")).toBe(
       "--restore-last-session,--disable-background-timer-throttling,--disable-renderer-backgrounding",
     );
+  });
+
+  test("uses presentation-independent screenshots only for headed Linux browsers", () => {
+    const feature = "--enable-features=CDPScreenshotNewSurface";
+    expect(browserLaunchArguments("linux", [], true)).toContain(feature);
+    expect(browserLaunchArguments("linux", [], false)).not.toContain(feature);
+    expect(browserLaunchArguments("darwin", [], true)).not.toContain(feature);
+    expect(browserLaunchArguments("win32", [], true)).not.toContain(feature);
   });
 
   test.skipIf(process.platform !== "darwin")(
@@ -115,6 +136,86 @@ describe("managed browser profile cryptography", () => {
     }
   });
 
+  for (const headed of [true, false]) {
+    test.skipIf(process.platform !== "linux")(
+      `drains noisy managed ${headed ? "headed" : "headless"} Chrome stderr without blocking its process`,
+      async () => {
+        const root = await mkdtemp("/tmp/og-chrome-stderr-");
+        const browserPath = join(root, "fixture chrome");
+        const binaryPath = join(root, "fixture-agent-browser");
+        const unreadStderrPath = join(root, "unread-stderr.fifo");
+        expect(spawnSync("mkfifo", ["-m", "600", unreadStderrPath]).status).toBe(0);
+        const unreadStderr = await open(unreadStderrPath, constants.O_RDWR);
+        await writeFile(
+          browserPath,
+          '#!/bin/sh\nset -e\ni=0\nwhile [ "$i" -lt 256 ]; do\n  printf "%01024d" 0 >&2\n  i=$((i + 1))\ndone\nprintf "END_MARKER\\n" >&2\nprintf "%s\\n" "$1"\n',
+          { mode: 0o700 },
+        );
+        await writeFile(
+          binaryPath,
+          `#!/usr/bin/env bun\nconsole.log(JSON.stringify({ success: true, data: process.env.AGENT_BROWSER_EXECUTABLE_PATH, error: null }));\n`,
+          { mode: 0o700 },
+        );
+        const runner = await AgentBrowserJsonRunner.create({
+          namespace: "og",
+          sessionName: "stderr",
+          socketDirectory: join(root, "socket"),
+          profileDirectory: join(root, "profile"),
+          downloadDirectory: join(root, "downloads"),
+          screenshotDirectory: join(root, "screenshots"),
+          headed,
+          browserExecutablePath: browserPath,
+          binary: {
+            path: binaryPath,
+            name: "agent-browser-linux-x64",
+            version: "0.33.2",
+            sha256: "fixture",
+          },
+        });
+        try {
+          const wrapper = await runner.run<string>(["get", "cdp-url"]);
+          const child = Bun.spawn([wrapper, "forwarded"], {
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: unreadStderr.fd,
+          });
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const exit = await Promise.race([
+            child.exited,
+            new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(() => {
+                child.kill("SIGKILL");
+                reject(new Error("Chrome stderr drain blocked the browser executable"));
+              }, 3_000);
+            }),
+          ]).finally(() => clearTimeout(timer));
+          expect(exit).toBe(0);
+          expect(await new Response(child.stdout).text()).toBe("forwarded\n");
+          const log = join(root, "chrome-launch", "chrome-stderr.log");
+          let content = new Uint8Array();
+          for (let attempt = 0; attempt < 20; attempt += 1) {
+            content = new Uint8Array(await readFile(log));
+            if (Buffer.from(content).toString().endsWith("END_MARKER\n")) break;
+            await Bun.sleep(10);
+          }
+          expect(content.byteLength).toBe(64 * 1024);
+          expect(Buffer.from(content).toString().endsWith("END_MARKER\n")).toBe(true);
+          expect((await stat(wrapper)).mode & 0o777).toBe(0o700);
+          const fifo = (await readdir(join(root, "chrome-launch"))).find((name) =>
+            name.endsWith(".stderr.fifo"),
+          );
+          expect(fifo).toBeDefined();
+          expect((await stat(join(root, "chrome-launch", fifo!))).mode & 0o777).toBe(0o600);
+          await runner.terminate();
+          expect(await readdir(join(root, "chrome-launch"))).toEqual(["chrome-stderr.log"]);
+        } finally {
+          await unreadStderr.close();
+          await rm(root, { recursive: true, force: true });
+        }
+      },
+    );
+  }
+
   test.skipIf(process.platform !== "linux")(
     "terminates the exact managed Linux browser left behind by daemon shutdown",
     async () => {
@@ -155,6 +256,30 @@ describe("managed browser profile cryptography", () => {
           browser.kill("SIGKILL");
           await browser.exited;
         }
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform !== "linux")(
+    "reaps stale private Chrome launch pipes without deleting bounded diagnostics",
+    async () => {
+      const root = await mkdtemp("/tmp/og-chrome-launch-reap-");
+      const launch = join(
+        root,
+        "sessions",
+        "11111111-1111-4111-8111-111111111111",
+        "chrome-launch",
+      );
+      const id = "22222222-2222-4222-8222-222222222222";
+      await mkdir(launch, { recursive: true, mode: 0o700 });
+      await writeFile(join(launch, `${id}.sh`), "stale");
+      await writeFile(join(launch, `${id}.stderr.fifo`), "stale");
+      await writeFile(join(launch, "chrome-stderr.log"), "bounded diagnostic");
+      try {
+        await reapManagedBrowserProcesses(root);
+        expect(await readdir(launch)).toEqual(["chrome-stderr.log"]);
+      } finally {
         await rm(root, { recursive: true, force: true });
       }
     },
