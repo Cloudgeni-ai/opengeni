@@ -363,9 +363,8 @@ and `packages/sdk/test/contract-parity.test.ts`.
 
 ### 3.8 A Connected Machine is first-class primary compute
 
-A Connected Machine (`selfhosted` internally) is the user's computer. When selected
-for a turn, agents run there directly; OpenGeni creates, leases, and bills no hidden sandbox.
-See [native lifecycle](../agent/README.md#distribution) for coordinated Linux browser shutdown.
+Agents run directly on the user's Connected Machine (`selfhosted`); OpenGeni creates no sandbox.
+Browser shutdown: [native lifecycle](../agent/README.md#distribution).
 
 The machine owns its filesystem, Git authentication, environment, and long-lived
 platform credentials. OpenGeni neither clones repositories nor installs durable
