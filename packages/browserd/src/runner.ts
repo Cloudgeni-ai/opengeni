@@ -751,7 +751,10 @@ async function findLinuxManagedBrowserProcess(
       argv = await linuxProcessArguments(pid);
       resolvedExecutable = await realpath(await readlink(`/proc/${pid}/exe`));
     } catch (error) {
-      if (["EACCES", "ENOENT", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+      // A process can exit after readdir or while procfs is reading its cmdline.
+      if (
+        ["EACCES", "ENOENT", "EPERM", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")
+      ) {
         continue;
       }
       throw error;
