@@ -193,23 +193,26 @@ async function listOwnConnectionMetadata(
   input: { accountId: string; workspaceId: string; subjectId: string },
 ): Promise<ConnectionMetadata[]> {
   const accounts = await listOwnedConnectionAccounts(db, input);
-  const connections = await Promise.all(
-    accounts.map(async (account) => {
-      const connection = await getConnectionMetadata(
-        db,
-        account.originWorkspaceId,
-        account.connectionId,
-        input.subjectId,
-      );
-      return connection?.accountId === input.accountId &&
-        connection.subjectId === input.subjectId &&
-        connection.authorityId != null &&
-        connection.status === "active"
-        ? connection
-        : null;
-    }),
-  );
-  return connections.filter((connection) => connection !== null);
+  const connections: ConnectionMetadata[] = [];
+  // The caller may supply a transaction handle (for example, credential
+  // rotation). Each metadata read opens a nested RLS savepoint on that same
+  // connection, so these reads must not overlap.
+  for (const account of accounts) {
+    const connection = await getConnectionMetadata(
+      db,
+      account.originWorkspaceId,
+      account.connectionId,
+      input.subjectId,
+    );
+    if (
+      connection?.accountId === input.accountId &&
+      connection.subjectId === input.subjectId &&
+      connection.authorityId != null &&
+      connection.status === "active"
+    )
+      connections.push(connection);
+  }
+  return connections;
 }
 
 export async function authorizedSocialConnectionsForGrant(input: {
