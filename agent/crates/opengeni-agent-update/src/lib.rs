@@ -303,6 +303,7 @@ impl PendingUpdate {
     ///
     /// [`UpdateError::Io`] on a filesystem failure.
     pub fn apply_to(&self, install_path: &Path) -> UpdateResult<PathBuf> {
+        #[cfg(target_os = "macos")]
         reject_bundle_binary_replacement(install_path)?;
         swap_binary(install_path, &self.bytes)
     }
@@ -315,6 +316,7 @@ impl PendingUpdate {
     /// Returns an I/O error if backup or replacement fails.
     #[cfg(unix)]
     pub fn apply_running_at(&self, install_path: &Path) -> UpdateResult<PathBuf> {
+        #[cfg(target_os = "macos")]
         reject_bundle_binary_replacement(install_path)?;
         replace_running_exe_at(install_path, &self.bytes)
     }
@@ -326,9 +328,12 @@ impl PendingUpdate {
     ///
     /// [`UpdateError::Io`] if the swap fails.
     pub fn apply_running(&self) -> UpdateResult<PathBuf> {
-        let path = std::env::current_exe()
-            .map_err(|error| UpdateError::io("current executable", error))?;
-        reject_bundle_binary_replacement(&path)?;
+        #[cfg(target_os = "macos")]
+        {
+            let path = std::env::current_exe()
+                .map_err(|error| UpdateError::io("current executable", error))?;
+            reject_bundle_binary_replacement(&path)?;
+        }
         replace_running_exe(&self.bytes)
     }
 
@@ -348,8 +353,8 @@ impl PendingUpdate {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn reject_bundle_binary_replacement(install_path: &Path) -> UpdateResult<()> {
-    #[cfg(target_os = "macos")]
     if install_path
         .ancestors()
         .any(|path| path.extension().is_some_and(|ext| ext == "app"))
@@ -358,7 +363,6 @@ fn reject_bundle_binary_replacement(install_path: &Path) -> UpdateResult<()> {
             "an app-bundle install requires a complete signed app update".to_string(),
         ));
     }
-    let _ = install_path;
     Ok(())
 }
 
