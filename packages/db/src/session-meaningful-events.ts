@@ -75,6 +75,30 @@ export function meaningfulSessionSequenceSql(
     ), 0)`;
 }
 
+/** The child's newest meaningful turn outcome: a result-bearing final answer or
+ * a failure. Only a `turn.completed` row here is the child's current answer; an
+ * older answer behind a newer failure is never reported as the result. The
+ * index probe is bounded before the type filter, and only the one selected row's
+ * payload is read. */
+export function childLatestTurnOutcomeSql(workspaceId: SQLWrapper, sessionId: SQLWrapper): SQL {
+  return sql`with recent as materialized (
+    select meaningful.sequence, meaningful.type from session_events meaningful
+    where meaningful.workspace_id = ${workspaceId} and meaningful.session_id = ${sessionId}
+      and ${meaningfulSessionEventSql("meaningful")}
+    order by meaningful.sequence desc limit 64
+  ), latest as (
+    select recent.sequence, recent.type from recent
+    where recent.type in ('turn.completed', 'turn.failed')
+    order by recent.sequence desc limit 1
+  )
+  select outcome.sequence, outcome.type, outcome.payload,
+    outcome.payload_codec_version as "payloadCodecVersion"
+  from latest
+  join session_events outcome
+    on outcome.workspace_id = ${workspaceId} and outcome.session_id = ${sessionId}
+      and outcome.sequence = latest.sequence`;
+}
+
 /** Bound indexed candidate rows BEFORE testing payload size/completeness. Without
  * this boundary, a long run of oversized answers can cause an unbounded scan. */
 export function childLifecycleEvidenceCandidatesSql(

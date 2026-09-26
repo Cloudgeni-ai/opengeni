@@ -7,6 +7,8 @@ export {
 } from "./session-file-attachments";
 import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
+  childTerminalResultFinalAnswer,
+  type ChildTerminalResultFinalAnswer,
   SKILL_CATALOG_CONTEXT_PREFIX,
   SandboxRecoverySelection,
   SandboxRecoveryResponse,
@@ -25,6 +27,7 @@ import {
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 import {
+  childLatestTurnOutcomeSql,
   childLifecycleEvidenceCandidatesSql,
   completeMeaningfulSessionEventSql,
   meaningfulSessionEventSql,
@@ -66767,6 +66770,24 @@ function consumedChildLifecycleSessionIds(
     // The row's kind and its payload discriminator are written together; narrow
     // on the discriminator so the shared field access is typed rather than cast.
     if (!payload || !isChildLifecycleSystemUpdatePayload(payload)) continue;
+    // An untruncated final answer is exact content of the child's answer event;
+    // claim still verifies it against that retained event before acknowledging.
+    if (payload.type === "child_terminal_result") {
+      const answer = payload.finalAnswer;
+      if (
+        answer &&
+        answer.truncated === false &&
+        answer.sequence > 0 &&
+        answer.sequence <= POSTGRES_INT_MAX
+      ) {
+        children.push({
+          sessionId: payload.childSessionId,
+          sequence: answer.sequence,
+          type: "turn.completed",
+          payload: { output: answer.text },
+        });
+      }
+    }
     const evidence = payload.childEventEvidence;
     if (!Array.isArray(evidence) || evidence.length > 32) continue;
     for (const event of evidence) {
@@ -66931,6 +66952,162 @@ export async function acknowledgeConsumedChildEvents(
   await withWorkspaceRls(db, input.workspaceId, async (tx) => {
     await acknowledgeConsumedChildSequencesInTransaction(tx, input);
   });
+}
+
+/**
+ * The parent's exact live attempt has just received a direct child's complete
+ * final answer from a read tool. A still-pending idle `child_terminal_result`
+ * reporting that answer (or an older one) would only start another inference
+ * that repeats it, so it is superseded, like a terminal `command_read`
+ * suppresses its pending command notification. The canonical row stays as
+ * audit truth; claimed history is never touched. The caller proves the read
+ * returned whole content; this transaction proves the attempt is still the
+ * session's current one and that each sequence is a result-bearing answer.
+ */
+export async function supersedeConsumedChildTerminalResults(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    children: readonly { sessionId: string; sequences: readonly number[] }[];
+  },
+): Promise<{ supersededUpdateIds: string[]; events: SessionEvent[] }> {
+  const children = input.children
+    .map((child) => ({
+      sessionId: child.sessionId,
+      sequences: [
+        ...new Set(
+          child.sequences.filter(
+            (value) => Number.isSafeInteger(value) && value > 0 && value <= POSTGRES_INT_MAX,
+          ),
+        ),
+      ],
+    }))
+    .filter((child) => UUID_PATTERN.test(child.sessionId) && child.sequences.length > 0)
+    .sort((a, b) => a.sessionId.localeCompare(b.sessionId));
+  if (children.length === 0) return { supersededUpdateIds: [], events: [] };
+  return await withSessionActivityRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (
+          !session ||
+          session.accountId !== input.accountId ||
+          session.activeTurnId !== input.turnId
+        ) {
+          return { supersededUpdateIds: [], events: [] };
+        }
+        const [attempt] = await tx
+          .select({ id: schema.sessionTurnAttempts.id })
+          .from(schema.sessionTurnAttempts)
+          .where(
+            and(
+              eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+              eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+              eq(schema.sessionTurnAttempts.turnId, input.turnId),
+              eq(schema.sessionTurnAttempts.id, input.attemptId),
+              eq(schema.sessionTurnAttempts.executionGeneration, input.executionGeneration),
+              inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+            ),
+          )
+          .limit(1);
+        if (!attempt) return { supersededUpdateIds: [], events: [] };
+        const supersededUpdateIds: string[] = [];
+        for (const child of children) {
+          // Only a returned result-bearing answer proves consumption; a
+          // commentary message or goal fact read alongside it does not.
+          const [answer] = await tx
+            .select({
+              sequence: sql<number>`max(${schema.sessionEvents.sequence})::int`,
+            })
+            .from(schema.sessionEvents)
+            .innerJoin(
+              schema.sessions,
+              and(
+                eq(schema.sessions.workspaceId, schema.sessionEvents.workspaceId),
+                eq(schema.sessions.id, schema.sessionEvents.sessionId),
+                eq(schema.sessions.parentSessionId, input.sessionId),
+              ),
+            )
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                eq(schema.sessionEvents.sessionId, child.sessionId),
+                eq(schema.sessionEvents.type, "turn.completed"),
+                inArray(schema.sessionEvents.sequence, child.sequences),
+                completeMeaningfulSessionEventSql("session_events"),
+              ),
+            );
+          const consumedThrough = answer?.sequence ?? null;
+          if (consumedThrough === null) continue;
+          const rows = await tx
+            .update(schema.sessionSystemUpdates)
+            .set({ state: "superseded" })
+            .where(
+              and(
+                eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+                eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                eq(schema.sessionSystemUpdates.kind, "child_terminal_result"),
+                eq(schema.sessionSystemUpdates.sourceId, child.sessionId),
+                eq(schema.sessionSystemUpdates.state, "pending"),
+                eq(schema.sessionSystemUpdates.classification, "success"),
+                sql`${schema.sessionSystemUpdates.payload} ->> 'status' = 'idle'`,
+                sql`jsonb_typeof(${schema.sessionSystemUpdates.payload} -> 'finalAnswer' -> 'sequence') = 'number'`,
+                sql`(${schema.sessionSystemUpdates.payload} -> 'finalAnswer' ->> 'sequence')::numeric <= ${consumedThrough}`,
+              ),
+            )
+            .returning({ id: schema.sessionSystemUpdates.id });
+          supersededUpdateIds.push(...rows.map((row) => row.id));
+        }
+        if (supersededUpdateIds.length === 0) return { supersededUpdateIds, events: [] };
+        supersededUpdateIds.sort();
+        const now = new Date();
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type: "system.update.cancelled",
+                payload: {
+                  updateIds: supersededUpdateIds,
+                  count: supersededUpdateIds.length,
+                  reason: "consumed_by_parent_read",
+                },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        if (!event) throw new Error("Failed to append consumed child result event");
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+        return { supersededUpdateIds, events: [mapEvent(event)] };
+      }),
+  );
 }
 
 /** Bounded operator reconciliation, dry-run by default. No timestamps, session
@@ -73060,6 +73237,14 @@ export async function settleSessionIdleWithParentOutbox(
         } as const;
       }
       const dedupeKey = `child-completion:${session.id}:${episodeKey}`;
+      // Freeze the child's answer with the boundary that reports it, so the
+      // parent's wake is the result itself and a reaper-delivered row carries
+      // the same content as an immediately delivered one.
+      const finalAnswer = await childFinalAnswerTx(
+        tx as unknown as Database,
+        workspaceId,
+        session.id,
+      );
       await enqueueChildLifecycleNoticeOutboxTx(tx as unknown as Database, workspaceId, session, {
         dedupeKey,
         kind: "child_terminal_result",
@@ -73069,6 +73254,7 @@ export async function settleSessionIdleWithParentOutbox(
           type: "child_terminal_result",
           childSessionId: session.id,
           status: "idle",
+          ...(finalAnswer ? { finalAnswer } : {}),
         },
       });
       return {
@@ -73079,6 +73265,37 @@ export async function settleSessionIdleWithParentOutbox(
         events,
       } as const;
     });
+  });
+}
+
+/**
+ * The child's current final answer for its idle terminal result. Null when its
+ * newest turn outcome is a failure, when it has no answer text, or when the
+ * stored answer row is itself only a retained preview: the parent then reads
+ * the child's events instead of receiving a partial copy presented as whole.
+ */
+async function childFinalAnswerTx(
+  tx: Database,
+  workspaceId: string,
+  childSessionId: string,
+): Promise<ChildTerminalResultFinalAnswer | null> {
+  const [outcome] = await rawRows<{
+    sequence: number;
+    type: string;
+    payload: unknown;
+    payloadCodecVersion: number | null;
+  }>(tx, childLatestTurnOutcomeSql(sql`${workspaceId}::uuid`, sql`${childSessionId}::uuid`));
+  if (!outcome || outcome.type !== "turn.completed") return null;
+  const payload = logicalChildReadEvent(outcome).payload;
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  const truncation = record.truncation as { truncated?: unknown } | null | undefined;
+  if (truncation?.truncated === true || record.sourceOmitted === true) return null;
+  if (typeof record.output !== "string" || record.output.length === 0) return null;
+  return childTerminalResultFinalAnswer({
+    childSessionId,
+    sequence: Number(outcome.sequence),
+    output: record.output,
   });
 }
 
@@ -76641,16 +76858,24 @@ async function enqueueChildLifecycleNoticeOutboxTx(
   // Oversized evidence is omitted, not truncated and then called consumed.
   // Bound index candidates before payload filters, and prefer the newest complete
   // result within the total budget. Explicit reads handle omitted evidence.
-  const candidates = await rawRows<{
-    sequence: number;
-    type: string;
-    payload: unknown;
-    payloadCodecVersion: number | null;
-  }>(tx, childLifecycleEvidenceCandidatesSql(sql`${workspaceId}::uuid`, sql`${session.id}::uuid`));
-  const noticePayload = {
-    ...input.payload,
-    childEventEvidence: boundedChildLifecycleEvidence(candidates),
-  };
+  // A terminal result that carries the child's final answer needs no second
+  // copy: an untruncated answer is itself the consumption evidence.
+  const carriesFinalAnswer =
+    input.kind === "child_terminal_result" && input.payload.finalAnswer !== undefined;
+  const candidates = carriesFinalAnswer
+    ? []
+    : await rawRows<{
+        sequence: number;
+        type: string;
+        payload: unknown;
+        payloadCodecVersion: number | null;
+      }>(
+        tx,
+        childLifecycleEvidenceCandidatesSql(sql`${workspaceId}::uuid`, sql`${session.id}::uuid`),
+      );
+  const noticePayload = carriesFinalAnswer
+    ? input.payload
+    : { ...input.payload, childEventEvidence: boundedChildLifecycleEvidence(candidates) };
   const inserted = await tx
     .insert(schema.sessionSystemUpdateOutbox)
     .values(

@@ -167,7 +167,9 @@ an agent to test a preview server without waiting for it to exit.
 `wait_for_input` persists a turn and deadline; input or timeout resumes execution.
 Acknowledgment cannot strand eligible input or due waits. `Session.inputWait`
 drives working/recheck UI separately from unread. `session_wait`/`command_wait`
-are in-turn reads. See [durable-agent-inputs.md](durable-agent-inputs.md).
+are in-turn reads. An idle child's terminal result carries its bounded final
+answer, so a parent waiting out of turn needs no follow-up read. See
+[durable-agent-inputs.md](durable-agent-inputs.md).
 
 Canonical: `apps/worker/src/activities/agent-turn/`,
 `apps/worker/src/activities/session-state.ts`, and

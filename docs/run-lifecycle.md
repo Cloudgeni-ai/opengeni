@@ -1314,9 +1314,16 @@ by itself. A result arriving while the parent turn is live remains available to
 that turn's ordinary loop.
 The provider-neutral coordination contract creates a child only for concrete,
 bounded, independently useful work with a defined integration point. Parent
-work must stay disjoint from the delegated scope. A parent joining a child uses
-`session_wait` with `waitFor: "completion"` before committing or publishing
-dependent work. `goal.completed` is a durable goal fact, not proof that the
+work must stay disjoint from the delegated scope. A child costs minutes and its
+own large context, so the contract prefers a direct answer for small work and a
+`session_send_message` follow-up to an existing child over another spawn. For
+multi-minute work with nothing else to advance, the parent calls `wait_for_input`
+right after spawning; the child's terminal result wakes it and carries the
+bounded final answer (`payload.finalAnswer`), which the parent uses directly,
+reading the child's results only when that copy is absent or truncated. A
+`session_get` snapshot between waits is not new evidence. A parent joining a
+short child inside its turn uses `session_wait` with `waitFor: "completion"`
+before committing or publishing dependent work. `goal.completed` is a durable goal fact, not proof that the
 child has emitted its final result. Completed commentary messages, maintenance
 turns, and continuation segment settlements are also ignored until an ordinary
 result-bearing turn settles. The ordinary `waitFor: "change"` mode remains

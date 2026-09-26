@@ -64,13 +64,20 @@ export async function notifyParentOfChildIdle(
       return;
     }
     const goal = await getSessionGoal(svc.db, workspaceId, childSessionId);
-    // Sacred user pause: if the MANAGER's own goal was paused by the user, the
-    // wake must not tell it to "resume it now" — that instruction is exactly
-    // what re-arms the loop the user just stopped. Suppress the resume nudge and
-    // tell the agent to stay paused. Paired with the goal_set reactivation
-    // guard so a nudge that slips through still cannot revive the goal.
     const clientEventId = `child-completion:${childSessionId}:${episodeKey}`;
-    const payload = childCompletionPayload(child, goal);
+    // The idle settlement committed this row with the child's frozen final
+    // answer. Enrichment adds the goal facts on top of that content; it never
+    // replaces what the producing transaction froze.
+    const committed = await getSessionSystemUpdateOutboxByDedupeKey(svc.db, {
+      accountId: child.accountId,
+      workspaceId,
+      dedupeKey: clientEventId,
+    });
+    const payload = childCompletionPayload(
+      child,
+      goal,
+      committed?.payload.type === "child_terminal_result" ? committed.payload : null,
+    );
     const personalConnectionDelegations = await getSessionParentPersonalConnectionDelegations(
       svc.db,
       workspaceId,
@@ -445,8 +452,10 @@ export async function reconcilePendingSessionWorkflowWakes(
 function childCompletionPayload(
   child: Session,
   goal: SessionGoal | null,
+  committed: Extract<SessionSystemUpdatePayload, { type: "child_terminal_result" }> | null,
 ): Extract<SessionSystemUpdatePayload, { type: "child_terminal_result" }> {
   return {
+    ...committed,
     type: "child_terminal_result",
     childSessionId: child.id,
     status: "idle",
@@ -465,11 +474,10 @@ function childCompletionPayload(
 }
 
 /**
- * The worker-specific lines for one child (what happened + its goal), WITHOUT
- * the trailing "what to do next" instruction. Kept separate so N child
- * completions can be coalesced into one internal-update inference: the DB layer
- * stores each child's summary and rebuilds a single numbered digest with one
- * shared trailing instruction instead of running N model calls.
+ * The short status line for one child (what happened + its goal). It is also
+ * the timeline preview, so it carries no instructions: the parent reads the
+ * child's answer from the typed payload, and the operational contract says how
+ * to use it. N completions coalesce into one internal-update inference.
  */
 export function childCompletionSummary(
   child: Session,
@@ -502,15 +510,4 @@ export function childCompletionSummary(
     }
   }
   return lines.join("\n");
-}
-
-/**
- * The single trailing instruction appended to a child-completion (or digest)
- * inference. Suppresses the "resume it now" nudge when the manager's own goal
- * was paused by the user (paired with the goal_set reactivation guard).
- */
-export function childCompletionTrailing(parentGoalUserPaused: boolean): string {
-  return parentGoalUserPaused
-    ? "Read each worker's session events/notebook output for its result. This session was paused by the user — do NOT resume or replace your goal; summarize the result for the user and remain paused."
-    : "Read each worker's session events/notebook output for its result, then continue. If your own goal was paused awaiting these workers, resume it now.";
 }
