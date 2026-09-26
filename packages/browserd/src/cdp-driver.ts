@@ -772,6 +772,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     targetId: string,
     options: BrowserScreenshotOptions = {},
   ): Promise<BrowserImageFrame> {
+    // Lightpanda 0.3.5 implements this CDP method with an embedded static PNG,
+    // not pixels from the current page. Never publish it as visual evidence.
+    if (this.engine === "lightpanda") {
+      throw new InteractionControllerError(
+        "unsupported",
+        "Lightpanda does not render page screenshots; use semantic observation",
+      );
+    }
     const normalized = normalizeScreenshotOptions(options);
     return await this.withTarget(
       targetId,

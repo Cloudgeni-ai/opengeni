@@ -411,7 +411,7 @@ describe("durable BrowserSession lifecycle", () => {
     });
     expect(LIGHTPANDA_BROWSER_SESSION_CAPABILITIES).toMatchObject({
       semanticObservation: true,
-      screenshots: true,
+      screenshots: false,
       liveFrames: false,
       downloads: false,
       privateCheckpoint: false,

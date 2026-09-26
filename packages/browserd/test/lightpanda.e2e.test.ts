@@ -47,9 +47,9 @@ e2e("runs Lightpanda as an exact capability-scoped managed browser", async () =>
       transport: { kind: "managed", engine: "lightpanda" },
     });
     expect(semanticNames(created.observation)).toContain("Lightpanda fixture");
-    expect((await supervisor.screenshot(reference, created.observation.target.id)).mediaType).toBe(
-      "image/png",
-    );
+    await expect(
+      supervisor.screenshot(reference, created.observation.target.id),
+    ).rejects.toMatchObject({ code: "unsupported" });
 
     const receipt = await supervisor.action(
       navigateCommand(created.observation, `http://127.0.0.1:${page.port}/next`),

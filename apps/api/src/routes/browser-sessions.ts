@@ -1021,7 +1021,14 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         browserSessionId,
         "session.read",
         "browser.read",
-        async ({ sessionClient }) => await sessionClient.capture(targetId, captureOptions),
+        async ({ sessionClient, record }) => {
+          if (!record.session.capabilities.screenshots) {
+            throw new BrowserControlUnsupportedError(
+              "This browser engine does not render page screenshots; use semantic observation",
+            );
+          }
+          return await sessionClient.capture(targetId, captureOptions);
+        },
       );
       return browserScreenshotResponse(frame);
     },
