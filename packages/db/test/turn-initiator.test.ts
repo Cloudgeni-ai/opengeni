@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  renderMessageSentAtForModel,
 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
@@ -1140,7 +1141,10 @@ describe("immutable session turn initiators", () => {
         .orderBy(schema.sessionHistoryItems.position),
     );
     expect(attachedHistory.map(({ item }) => item.role)).toEqual(["user", "system"]);
-    expect(attachedHistory[0]?.item.content).toBe("Keep this human task authoritative.");
+    expect(attachedHistory[0]?.item.content).toEqual([
+      { type: "input_text", text: renderMessageSentAtForModel(attachedClaim.turn.createdAt) },
+      { type: "input_text", text: "Keep this human task authoritative." },
+    ]);
     expect(attachedHistory[1]?.item.content).toContain("[OpenGeni internal updates]");
     expect(attachedHistory[1]?.item.content).not.toContain("[OpenGeni scheduled task occurrence]");
 

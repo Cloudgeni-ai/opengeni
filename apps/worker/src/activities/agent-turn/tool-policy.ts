@@ -84,6 +84,44 @@ export function structuredToolTransportForTurn(
 }
 
 /**
+ * `text.verbosity: "low"` is the Codex CLI default for its GPT-5-family models
+ * and keeps final answers short. Send it only where the wire is known to accept
+ * it: the ChatGPT/Codex subscription backend and direct OpenAI Responses.
+ * Azure, Gateways, xAI, other OpenAI-compatible endpoints and chat wires keep
+ * their provider default. The result depends only on the route and model, so a
+ * session sends the same value on every request until its model changes, and a
+ * model change already starts a new prompt-cache prefix.
+ */
+export function textVerbosityForTurn(
+  resolvedModel: {
+    provider: {
+      id: string;
+      kind: ResolvedModelProvider["kind"];
+      api: ModelProviderApi;
+      builtin: boolean;
+      baseUrl?: string | undefined;
+    };
+  } | null,
+  upstreamModelId: string,
+): "low" | undefined {
+  if (resolvedModel?.provider.api !== "responses") return undefined;
+  const provider = resolvedModel.provider;
+  const acceptsVerbosity =
+    provider.kind === "codex-subscription" ||
+    (provider.builtin && provider.id === "openai" && isDirectOpenAiApiBaseUrl(provider.baseUrl));
+  return acceptsVerbosity && modelAcceptsTextVerbosity(upstreamModelId) ? "low" : undefined;
+}
+
+// GPT-5 and later accept low/medium/high. Earlier models and the -codex and
+// -chat variants accept only the default, so a non-default value is rejected.
+function modelAcceptsTextVerbosity(upstreamModelId: string): boolean {
+  return (
+    /^gpt-(?:[5-9]|[1-9]\d)(?:[.-]|$)/.test(upstreamModelId) &&
+    !/-(?:codex|chat)(?:-|$)/.test(upstreamModelId)
+  );
+}
+
+/**
  * Progressive tool disclosure is universal for supported OpenGeni turns; only
  * its contained transport differs. Codex keeps its native path, built-in direct
  * OpenAI/Azure Responses use native client tool search, and every other ordinary
