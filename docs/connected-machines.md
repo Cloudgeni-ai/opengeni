@@ -845,6 +845,10 @@ utilities from the agent's `PATH`, with standard `/usr/bin` and `/bin` fallbacks
 so Linux distributions with nonstandard installation paths are supported.
 Attached browsers are unaffected.
 
+During initial window layout, an observation may have `viewport: null` while
+semantic content remains available. Subsequent observations report the measured
+geometry when valid; the controller does not substitute guessed dimensions.
+
 Attached Chrome is an explicit user-profile choice, never an automatic fallback
 for an unavailable managed browser. A new attached BrowserSession creates a new
 background tab rather than navigating an existing personal tab. Reuse honors
