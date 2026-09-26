@@ -3744,6 +3744,19 @@ export function evaluateRuntimeDatabasePosture(
       violations.push("organization usage aggregate capability is missing or unsafe");
     }
   }
+  const organizationModelUsageRoutine = posture.privateRoutines.find(
+    (routine) =>
+      routine.name ===
+      "organization_model_usage_summary(uuid, timestamp with time zone, timestamp with time zone, uuid)",
+  );
+  if (
+    organizationModelUsageRoutine &&
+    (!organizationModelUsageRoutine.securityDefiner ||
+      organizationModelUsageRoutine.publicExecute ||
+      organizationModelUsageRoutine.owner !== tableByName.get("model_call_facts")?.owner)
+  ) {
+    violations.push("organization model usage aggregate has unsafe owner or runtime privileges");
+  }
 
   for (const routine of posture.privateRoutines) {
     if (routine.owner === expectedRole) {

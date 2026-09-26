@@ -161,6 +161,9 @@ describe("release schema contract", () => {
     const insightsScopedFactProjection = completeSourceContract.migrations.some(
       (migration) => migration.path === "0519_insights_scoped_fact_projection.sql",
     );
+    const organizationModelUsage = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0520_organization_model_usage.sql",
+    );
     const controlRevisionFrontier = completeSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -394,6 +397,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (organizationModelUsage ? 1 : 0) +
         (insightsScopedFactProjection ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
@@ -681,6 +685,7 @@ describe("release schema contract", () => {
       ...(insightsScopedFactProjection
         ? { latestMigration: "0519_insights_scoped_fact_projection.sql" }
         : {}),
+      ...(organizationModelUsage ? { latestMigration: "0520_organization_model_usage.sql" } : {}),
     });
     expect(
       completeSourceContract.migrations.at(
@@ -691,7 +696,8 @@ describe("release schema contract", () => {
           Number(knowledgeIndexFundingWait) -
           Number(knowledgeVisibleIndexStatus) -
           Number(insightsFactReadsHashJoin) -
-          Number(insightsScopedFactProjection),
+          Number(insightsScopedFactProjection) -
+          Number(organizationModelUsage),
       ),
     ).toMatchObject({
       path: backgroundCommandText
@@ -811,7 +817,8 @@ describe("release schema contract", () => {
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
-            Number(insightsScopedFactProjection),
+            Number(insightsScopedFactProjection) -
+            Number(organizationModelUsage),
         ),
       ).toMatchObject({
         path: "0507_integration_oauth_pending_states.sql",
@@ -826,7 +833,8 @@ describe("release schema contract", () => {
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
-            Number(insightsScopedFactProjection),
+            Number(insightsScopedFactProjection) -
+            Number(organizationModelUsage),
         ),
       ).toMatchObject({
         path: "0508_deadline_command_workspace_capture.sql",
@@ -840,7 +848,8 @@ describe("release schema contract", () => {
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
-            Number(insightsScopedFactProjection),
+            Number(insightsScopedFactProjection) -
+            Number(organizationModelUsage),
         ),
       ).toMatchObject({
         path: "0509_verified_signup_trial_credits.sql",
@@ -853,7 +862,8 @@ describe("release schema contract", () => {
           -1 -
             Number(knowledgeVisibleIndexStatus) -
             Number(insightsFactReadsHashJoin) -
-            Number(insightsScopedFactProjection),
+            Number(insightsScopedFactProjection) -
+            Number(organizationModelUsage),
         ),
       ).toMatchObject({
         path: "0510_knowledge_index_funding_wait.sql",
@@ -863,7 +873,10 @@ describe("release schema contract", () => {
     if (knowledgeVisibleIndexStatus) {
       expect(
         completeSourceContract.migrations.at(
-          -1 - Number(insightsFactReadsHashJoin) - Number(insightsScopedFactProjection),
+          -1 -
+            Number(insightsFactReadsHashJoin) -
+            Number(insightsScopedFactProjection) -
+            Number(organizationModelUsage),
         ),
       ).toMatchObject({
         path: "0511_knowledge_visible_index_status.sql",
@@ -872,15 +885,25 @@ describe("release schema contract", () => {
     }
     if (insightsFactReadsHashJoin) {
       expect(
-        completeSourceContract.migrations.at(-1 - Number(insightsScopedFactProjection)),
+        completeSourceContract.migrations.at(
+          -1 - Number(insightsScopedFactProjection) - Number(organizationModelUsage),
+        ),
       ).toMatchObject({
         path: "0512_insights_fact_reads_hash_join.sql",
         deploymentMode: "rolling",
       });
     }
     if (insightsScopedFactProjection) {
-      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+      expect(
+        completeSourceContract.migrations.at(-1 - Number(organizationModelUsage)),
+      ).toMatchObject({
         path: "0519_insights_scoped_fact_projection.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (organizationModelUsage) {
+      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+        path: "0520_organization_model_usage.sql",
         deploymentMode: "rolling",
       });
     }
@@ -2001,6 +2024,9 @@ describe("release schema contract", () => {
     const insightsScopedFactProjection = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0519_insights_scoped_fact_projection.sql",
     );
+    const organizationModelUsage = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0520_organization_model_usage.sql",
+    );
     const controlRevisionFrontier = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -2625,6 +2651,7 @@ describe("release schema contract", () => {
       "0511_knowledge_visible_index_status.sql",
       "0512_insights_fact_reads_hash_join.sql",
       "0519_insights_scoped_fact_projection.sql",
+      "0520_organization_model_usage.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -3213,8 +3240,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0519_insights_scoped_fact_projection.sql",
       };
+    if (organizationModelUsage)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0520_organization_model_usage.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (organizationModelUsage ? 1 : 0) +
         (insightsScopedFactProjection ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
@@ -3704,6 +3737,7 @@ describe("release schema contract", () => {
       ...(insightsScopedFactProjection
         ? { latestMigration: "0519_insights_scoped_fact_projection.sql" }
         : {}),
+      ...(organizationModelUsage ? { latestMigration: "0520_organization_model_usage.sql" } : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport

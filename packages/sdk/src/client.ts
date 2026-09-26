@@ -8021,6 +8021,27 @@ export class OpenGeniClient {
     );
   }
 
+  async getOrganizationModelUsage(
+    options: {
+      accountId: string;
+      period?: import("@opengeni/contracts").OrganizationUsagePeriod;
+      afterWorkspaceId?: string;
+    },
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<import("@opengeni/contracts").OrganizationModelUsage> {
+    return await this.requestJson(
+      "GET",
+      "/v1/billing/usage-models",
+      undefined,
+      {
+        accountId: options.accountId,
+        period: options.period ?? "month",
+        ...(options.afterWorkspaceId ? { afterWorkspaceId: options.afterWorkspaceId } : {}),
+      },
+      requestOptions,
+    );
+  }
+
   async getOrganizationUsageWorkspacePage(
     options: {
       accountId: string;

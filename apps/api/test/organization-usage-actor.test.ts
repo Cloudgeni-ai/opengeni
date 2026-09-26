@@ -31,7 +31,7 @@ import { registerBillingRoutes } from "../src/routes/billing";
 const secret = "organization-usage-http-actor-regression";
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
-const paths = ["usage-summary", "usage-workspaces"] as const;
+const paths = ["usage-summary", "usage-workspaces", "usage-models"] as const;
 
 async function token(
   subjectId: string,
@@ -61,7 +61,7 @@ function url(path: (typeof paths)[number], account = accountId, until = new Date
 }
 
 describe("organization usage HTTP actor binding", () => {
-  test("both HTTP reads install only the verified caller in the transaction; query spoofing cannot supply an initiator", async () => {
+  test("every HTTP read installs only the verified caller in the transaction; query spoofing cannot supply an initiator", async () => {
     const dialect = new PgDialect();
     const observations: Array<{ subject: string; human: string }> = [];
     const db = {
@@ -83,6 +83,21 @@ describe("organization usage HTTP actor binding", () => {
               return [{ account_id: account, workspace_id: workspace }];
             if (sql.includes("current_setting('opengeni.subject_id'"))
               return [{ subject_id: subject }];
+            if (sql.includes("opengeni_private.organization_model_usage_summary(")) {
+              observations.push({ subject, human });
+              return [
+                {
+                  summary: {
+                    billing: [],
+                    models: [],
+                    modelsTruncated: false,
+                    workspaces: [],
+                    personal: { workspacesWithUsage: "0", billing: [] },
+                    nextWorkspaceCursor: null,
+                  },
+                },
+              ];
+            }
             if (sql.includes("opengeni_private.organization_usage_summary(")) {
               observations.push({ subject, human });
               return [
@@ -105,10 +120,10 @@ describe("organization usage HTTP actor binding", () => {
         expect(observations.at(-1)).toEqual({ subject, human: "" });
       }
     }
-    expect(observations).toHaveLength(4);
+    expect(observations).toHaveLength(6);
   });
 
-  test("both endpoints independently deny absent billing authority and cross-account selection before DB access", async () => {
+  test("every endpoint independently denies absent billing authority and cross-account selection before DB access", async () => {
     const db = new Proxy(
       {},
       {

@@ -3,6 +3,7 @@ import {
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
+  OrganizationModelUsageQuery,
   OrganizationUsageQuery,
   OrganizationUsageWorkspacePageQuery,
   type AccessContext,
@@ -16,6 +17,7 @@ import {
   hasCreditLedgerEntry,
   isStripeWebhookProcessed,
   listUsageEvents,
+  getOrganizationModelUsage,
   getOrganizationUsageSummary,
   getOrganizationUsageWorkspacePage,
   withSessionRlsActorContext,
@@ -87,6 +89,19 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     return await withBillingUsageActor(deps, context, accountId, async () =>
       c.json(await getOrganizationUsageWorkspacePage(deps.db, { accountId, ...parsed.data })),
+    );
+  });
+
+  app.get("/v1/billing/usage-models", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    const parsed = OrganizationModelUsageQuery.safeParse(c.req.query());
+    if (!parsed.success)
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid model usage query",
+      });
+    return await withBillingUsageActor(deps, context, accountId, async () =>
+      c.json(await getOrganizationModelUsage(deps.db, { accountId, ...parsed.data })),
     );
   });
 

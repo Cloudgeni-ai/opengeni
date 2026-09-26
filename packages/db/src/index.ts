@@ -5150,6 +5150,7 @@ export async function recordModelCallFact(
 }
 
 export {
+  getOrganizationModelUsage,
   getOrganizationUsageSummary,
   getOrganizationUsageWorkspacePage,
   organizationUsageWindow,

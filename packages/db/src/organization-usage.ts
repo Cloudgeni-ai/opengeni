@@ -1,4 +1,6 @@
 import {
+  OrganizationModelUsage,
+  OrganizationModelUsageQuery,
   OrganizationUsageQuery,
   OrganizationUsageSummary,
   OrganizationUsageWorkspacePage,
@@ -79,5 +81,37 @@ async function readOrganizationUsage(
     ) as summary`);
     const rows = Array.isArray(result) ? result : (result as { rows: unknown[] }).rows;
     return (rows[0] as { summary: Record<string, unknown> }).summary;
+  });
+}
+
+/**
+ * Organization model-call breakdown from per-call facts: credit-paid versus
+ * externally billed totals, top models, one page of shared workspaces, and one
+ * aggregate for every Personal workspace. Must use the writable primary.
+ */
+export async function getOrganizationModelUsage(
+  db: Database,
+  input: UsageInput & { afterWorkspaceId?: string | undefined },
+  now = new Date(),
+): Promise<OrganizationModelUsage> {
+  const query = OrganizationModelUsageQuery.parse(input);
+  const window = organizationUsageWindow(query.period, now);
+  const summary = await withAccountRls(db, input.accountId, async (scopedDb) => {
+    await scopedDb.execute(sql`select set_config('statement_timeout', '10s', true)`);
+    await scopedDb.execute(sql`select set_config('work_mem', '64MB', true)`);
+    const result =
+      await scopedDb.execute(sql`select opengeni_private.organization_model_usage_summary(
+      ${input.accountId}::uuid, ${window.since}::timestamptz, ${window.until}::timestamptz,
+      ${query.afterWorkspaceId ?? null}::uuid
+    ) as summary`);
+    const rows = Array.isArray(result) ? result : (result as { rows: unknown[] }).rows;
+    return (rows[0] as { summary: Record<string, unknown> }).summary;
+  });
+  return OrganizationModelUsage.parse({
+    ...summary,
+    accountId: input.accountId,
+    period: query.period,
+    since: window.since,
+    until: window.until,
   });
 }
