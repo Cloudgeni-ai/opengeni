@@ -421,12 +421,19 @@ export function BrowserViewer({
   useEffect(() => {
     setHasLiveFrame(frameIsLive);
   }, [frameIsLive]);
-  const supportsLiveFrames = browser.session?.capabilities.liveFrames === true;
-  const displayConnectionState = supportsLiveFrames
-    ? frames.state === "live" && !displayedFrame
-      ? "connecting"
-      : frames.state
-    : "semantic";
+  const supportsLiveFrames =
+    (browser.session ?? selectedRegistrySession)?.capabilities.liveFrames === true;
+  const connectionError = frames.error ?? browser.error;
+  const displayConnectionState =
+    connectionError && !frameIsLive
+      ? "error"
+      : !browser.session
+        ? "connecting"
+        : supportsLiveFrames
+          ? frames.state === "live" && !displayedFrame
+            ? "connecting"
+            : frames.state
+          : "semantic";
   const selectedProfile = useMemo(
     () =>
       profiles.identities.find(
@@ -898,7 +905,7 @@ export function BrowserViewer({
             frame={displayedFrame}
             connectionState={displayConnectionState}
             supportsLiveFrames={supportsLiveFrames}
-            connectionError={frames.error}
+            connectionError={connectionError}
             observation={browser.observation}
             mutating={browser.mutating || savingProfile}
             activityLabel={savingProfile ? "Saving browser version…" : undefined}
@@ -920,7 +927,10 @@ export function BrowserViewer({
                       createBrowser({ kind: "attached", device: replacementChromeDevice });
                     }
                   }
-                : frames.reconnect
+                : () => {
+                    void browser.refresh();
+                    frames.reconnect();
+                  }
             }
             reconnectLabel={
               (attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)) &&
@@ -2333,7 +2343,7 @@ function SemanticBrowserFallback(props: {
         <div className="flex items-center gap-2">
           {props.error ? (
             <CircleAlertIcon className="size-4 text-og-status-error" />
-          ) : !props.supportsLiveFrames ? (
+          ) : props.connectionState === "semantic" ? (
             <ZapIcon className="size-4 text-og-muted" />
           ) : (
             <LoaderCircleIcon className="size-4 animate-spin text-og-muted" />
@@ -2342,10 +2352,12 @@ function SemanticBrowserFallback(props: {
             {generationLoss
               ? "Chrome reconnected—open a fresh browser/desktop."
               : props.error
-                ? "Live view disconnected"
-                : props.supportsLiveFrames
-                  ? browserConnectionLabel(props.connectionState)
-                  : "Semantic browser"}
+                ? props.supportsLiveFrames
+                  ? "Live view disconnected"
+                  : "Browser unavailable"
+                : props.connectionState === "semantic"
+                  ? "Semantic browser"
+                  : browserConnectionLabel(props.connectionState)}
           </p>
         </div>
         {props.error || props.reconnectMessage ? (
@@ -2379,7 +2391,7 @@ function SemanticBrowserFallback(props: {
             </div>
           </div>
         ) : null}
-        {props.error && props.supportsLiveFrames && (!generationLoss || props.reconnectLabel) ? (
+        {props.error && (!generationLoss || props.reconnectLabel) ? (
           <button
             type="button"
             onClick={props.onReconnect}
