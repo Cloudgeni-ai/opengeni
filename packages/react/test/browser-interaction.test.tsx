@@ -1043,6 +1043,67 @@ describe("BrowserSession frame stream", () => {
     await hook.unmount();
   });
 
+  test("accepts a restarted frame sequence after each attachment renewal", async () => {
+    const sockets: FakeBrowserSocket[] = [];
+    const renewals: Array<() => void> = [];
+    const originalSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+      if (typeof handler === "function" && (delay ?? 0) >= 100_000) {
+        renewals.push(() => handler(...args));
+      }
+      return originalSetTimeout(handler, delay, ...args);
+    }) as typeof setTimeout;
+    let attachmentCalls = 0;
+    const client = fakeClient({
+      attachBrowserSession: async (_workspaceId, _browserSessionId, request) => {
+        attachmentCalls += 1;
+        return attachment(request.targetId);
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useBrowserFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          browserSessionId: BROWSER_SESSION_ID,
+          targetId: "target-1",
+          webSocketFactory: (url, protocols) => {
+            const socket = new FakeBrowserSocket(url, protocols);
+            sockets.push(socket);
+            return socket as unknown as BrowserFrameWebSocket;
+          },
+        }),
+      undefined,
+    );
+    try {
+      await flush(10);
+      expect(attachmentCalls).toBe(1);
+      await dispatch(sockets[0]!, "open");
+      await dispatch(sockets[0]!, "message", { data: frameMessage("target-1", 900).buffer });
+      expect(hook.result.current.frame?.sequence).toBe(900);
+
+      for (const sequence of [1, 2]) {
+        await actRun(() => renewals.shift()!());
+        await flush(10);
+        expect(attachmentCalls).toBe(sequence + 1);
+        const socket = sockets[sequence]!;
+        expect(sockets[sequence - 1]?.closed).toBe(true);
+        await dispatch(socket, "open");
+        await dispatch(socket, "message", { data: frameMessage("target-1", sequence).buffer });
+        expect(hook.result.current.frame?.sequence).toBe(sequence);
+        await dispatch(socket, "message", { data: frameMessage("target-1", sequence - 1).buffer });
+        expect(hook.result.current.frame?.sequence).toBe(sequence);
+        await dispatch(sockets[sequence - 1]!, "message", {
+          data: frameMessage("target-1", 1_000 + sequence).buffer,
+        });
+        expect(hook.result.current.frame?.sequence).toBe(sequence);
+      }
+    } finally {
+      await hook.unmount();
+      globalThis.setTimeout = originalSetTimeout;
+    }
+  });
+
   test("rejects a frame from a controller generation outside the attachment", async () => {
     let socket: FakeBrowserSocket | null = null;
     const client = fakeClient({
