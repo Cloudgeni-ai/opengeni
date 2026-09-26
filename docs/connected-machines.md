@@ -729,10 +729,12 @@ organization access and defaults to personal. Organization publication is
 available only to account administrators. Machines and Sandbox Environments display the
 resulting scope in their list cards so wider publication is never implicit.
 
-## Large file edits
+## Transactional file edits
 
-The editor uses transactional transfers for large text edits when the exact live
-agent advertises `transactional_fs_write`. This is separate from `op_stream`;
+The editor uses transactional transfers for text creation and in-place updates,
+including small files, when the exact live agent advertises
+`transactional_fs_write`. Small in-place updates must not bypass staging: a
+direct write can be interrupted after truncating the destination. This is separate from `op_stream`;
 older agents retain their existing single-message write behavior. An outbound
 message-size rejection is reported as a request-size fault, not an offline
 machine, and does not prove that earlier operations failed.
@@ -770,6 +772,10 @@ both paths before retrying.
 The source check and subsequent deletion are not conditional deletion; unrelated
 writers can still change the source between those steps. This is not a
 metadata-preserving filesystem rename.
+Small moves retain the legacy direct-write path so they do not acquire a new
+read requirement on a write-only destination. They do not have transactional
+publication guarantees. Legacy agents without transactional support also retain
+their existing direct-write behavior; inspect the destination after any timeout.
 
 Deploy matching protocol/runtime packages and a compatible native agent before
 expecting transactional support. Changing transport limits is not required.
@@ -809,12 +815,33 @@ See the [`@opengeni/react` README](../packages/react/README.md) for wiring.
 
 ### Interaction runtime reliability
 
+Connected Machine BrowserSessions can explicitly request `engine: "lightpanda"`
+for headless semantic work. Chromium remains the default. This requires the
+pinned Lightpanda executable configured on the native agent through
+`OPENGENI_BROWSERD_LIGHTPANDA_BINARY`; browserd verifies the platform-specific
+digest in `packages/browserd/src/lightpanda-binary.ts` before use. Standard native
+agent releases do not currently embed this optional executable. A missing or
+incompatible executable fails the request; it never falls back to Chromium.
+Provision it only on supported Linux or macOS platforms, preserving the source
+and license obligations of the upstream release.
+
+This engine does not provide rendered screenshots, live viewing, desktop input,
+Chromium profile identities, or a linked ComputerSession. Use Chromium for
+visual/mobile testing and human interaction. Browser authority, per-session
+isolation, and source-placement fences remain identical for both engines.
+
 Managed BrowserSessions own browser lifetime across tool calls. A browser daemon
 launched by a shell command remains subject to that command's containment and
 cleanup; repeating its CLI session name does not retain its process. Explicit
 Connected Machine interaction creation must match the source session's current
 placement. Move the session first; a creation mismatch is a 422, while an existing
 resource on a retired placement retains the terminal stale-resource fence.
+
+Managed Chrome on Linux drains browser stderr through a private launch
+wrapper. The last 64 KiB are retained in the session's owner-only
+`chrome-launch/chrome-stderr.log`; launcher and pipe files are removed on browser
+shutdown. This prevents a full Chrome stderr pipe from blocking CDP while keeping
+startup diagnostics bounded. Attached browsers are unaffected.
 
 Attached Chrome is an explicit user-profile choice, never an automatic fallback
 for an unavailable managed browser. A new attached BrowserSession creates a new

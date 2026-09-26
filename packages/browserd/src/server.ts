@@ -21,6 +21,7 @@ import {
   type InteractionError,
 } from "@opengeni/contracts";
 import { InteractionControllerError, InteractionDefiniteDriverError } from "@opengeni/interaction";
+import { CdpCommandTimeoutError, CdpTransportError } from "./cdp";
 import type { ComputerFrameSubscription, ComputerFrameStreamOptions } from "./computer-media";
 import {
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
@@ -363,7 +364,11 @@ export class BrowserControlServer {
     );
     const reference = binding(authority);
     if (segments.length === 4 && segments[3] === "targets") {
-      if (request.method === "GET") return success(await this.supervisor.listTargets(reference));
+      if (request.method === "GET") {
+        return await browserReadResponse("target inventory", () =>
+          this.supervisor.listTargets(reference),
+        );
+      }
       if (request.method === "POST") {
         const body = await readJsonObject(request);
         assertOnlyKeys(body, ["url"]);
@@ -522,7 +527,9 @@ export class BrowserControlServer {
       return success(await this.supervisor.selectTarget(reference, targetId));
     }
     if (operation === "observation" && request.method === "GET") {
-      return success(await this.supervisor.observe(reference, targetId));
+      return await browserReadResponse("observation", () =>
+        this.supervisor.observe(reference, targetId),
+      );
     }
     if (operation === "state" && request.method === "GET") {
       return success(await this.supervisor.targetState(reference, targetId));
@@ -881,6 +888,12 @@ export class BrowserControlServer {
       if (authority.controllerGeneration !== controllerGeneration) {
         throw new ProtocolError("controller_stale", "browser controller generation is stale", 409);
       }
+      const capabilities = this.supervisor.supportsFencedInputBatches({
+        browserSessionId,
+        controllerGeneration,
+      })
+        ? { fencedInputBatches: true as const }
+        : {};
       this.pruneViewGrants(authority);
       const digest = tokenDigest(token);
       const current = authority.viewGrants.get(grantId);
@@ -888,7 +901,7 @@ export class BrowserControlServer {
         if (!sameDigest(current.digest, digest) || current.expiresAt !== expiresAt.value) {
           throw new ProtocolError("operation_conflict", "view grant id is already bound", 409);
         }
-        return success({ grantId, expiresAt: current.expiresAt });
+        return success({ grantId, expiresAt: current.expiresAt, ...capabilities });
       }
       if (authority.viewGrants.size >= MAX_VIEW_GRANTS_PER_SESSION) {
         throw new ProtocolError(
@@ -903,7 +916,7 @@ export class BrowserControlServer {
         expiresAt: expiresAt.value,
         expiresAtMs: expiresAt.milliseconds,
       });
-      return success({ grantId, expiresAt: expiresAt.value }, 201);
+      return success({ grantId, expiresAt: expiresAt.value, ...capabilities }, 201);
     });
   }
 
@@ -1640,6 +1653,27 @@ class ProtocolError extends Error {
   }
 }
 
+// Only explicitly read-only browser routes may translate an uncertain CDP
+// transport result into a retryable read. Never apply this to target creation,
+// selection, closure, or journaled action dispatch; those may already have run.
+async function browserReadResponse(
+  operation: "target inventory" | "observation",
+  read: () => Promise<unknown>,
+): Promise<Response> {
+  try {
+    return success(await read());
+  } catch (error) {
+    if (!(error instanceof CdpTransportError)) throw error;
+    const timeout = error instanceof CdpCommandTimeoutError;
+    return failure(
+      timeout ? "timeout" : "resource_unavailable",
+      `browser ${operation} ${timeout ? "timed out" : "unavailable"}`,
+      true,
+      timeout ? 504 : 503,
+    );
+  }
+}
+
 function protocolResponse(error: unknown): Response {
   if (error instanceof ProtocolError)
     return failure(error.code, error.message, error.retryable, error.status);
@@ -1980,7 +2014,7 @@ function parseBrowserTransport(
     throw new ProtocolError("invalid_action", "browser transport is invalid", 400);
   }
   if (value.kind === "managed") {
-    assertOnlyKeys(value, ["kind", "engine"]);
+    assertOnlyKeys(value, ["kind", "engine", "ephemeralPartition"]);
     if (
       value.engine !== undefined &&
       value.engine !== "chromium" &&
@@ -1988,7 +2022,18 @@ function parseBrowserTransport(
     ) {
       throw new ProtocolError("invalid_action", "managed browser engine is unsupported", 400);
     }
-    return { kind: "managed", engine: value.engine ?? "chromium" };
+    if (
+      value.ephemeralPartition !== undefined &&
+      (typeof value.ephemeralPartition !== "string" ||
+        !/^[0-9a-f]{64}$/u.test(value.ephemeralPartition))
+    ) {
+      throw new ProtocolError("invalid_action", "ephemeral browser partition is invalid", 400);
+    }
+    return {
+      kind: "managed",
+      engine: value.engine ?? "chromium",
+      ...(value.ephemeralPartition ? { ephemeralPartition: value.ephemeralPartition } : {}),
+    };
   }
   if (value.kind === "external_provider") {
     assertOnlyKeys(value, [

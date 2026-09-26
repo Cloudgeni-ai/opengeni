@@ -7,11 +7,16 @@ import { applyDiff } from "@openai/agents";
 import { setSelfhostedApplyDiff } from "../src/sandbox/selfhosted/session";
 import { MockAgentResponder, SelfhostedSession } from "../src/sandbox";
 
-test("a tiny editor diff can update a file larger than the control message budget", async () => {
+test.each([
+  [1, false],
+  [1, true],
+  [1000, false],
+  [60000, false],
+] as const)("editor uses transactional writes for %i lines (create: %p)", async (lines, create) => {
   setSelfhostedApplyDiff(applyDiff);
   const path = "/workspace/large.md";
-  const original = "# Before\n" + "Synthetic document line.\n".repeat(60000);
-  const agent = new MockAgentResponder({ files: { [path]: original } });
+  const original = "# Before\n" + "Synthetic document line.\n".repeat(lines);
+  const agent = new MockAgentResponder({ files: create ? {} : { [path]: original } });
   let transferId = "";
   let expectedDigest = "";
   const chunks: Uint8Array[] = [];
@@ -31,8 +36,9 @@ test("a tiny editor diff can update a file larger than the control message budge
         transferId = request.requestId;
         expectedDigest = op.opStart.op.fsWrite.contentDigest;
         expect(op.opStart.op.fsWrite.expectedBaseDigest).toBe(
-          fileContentDigest(new TextEncoder().encode(original)),
+          create ? "" : fileContentDigest(new TextEncoder().encode(original)),
         );
+        expect(op.opStart.op.fsWrite.expectedAbsent).toBe(create);
         response = ControlResponse.fromPartial({
           requestId: request.requestId,
           result: {
@@ -114,12 +120,17 @@ test("a tiny editor diff can update a file larger than the control message budge
       observations.push(`${event.op}:${event.outcome}`);
     },
   });
-  await session.createEditor().updateFile({
-    path,
-    diff: "@@\n-# Before\n+# After\n Synthetic document line.",
-  });
+  if (create)
+    await session
+      .createEditor()
+      .createFile({ path, diff: "+# After\n+Synthetic document line.\n" });
+  else
+    await session.createEditor().updateFile({
+      path,
+      diff: "@@\n-# Before\n+# After\n Synthetic document line.",
+    });
   expect(new TextDecoder().decode(await session.readFile({ path }))).toBe(
-    original.replace("# Before", "# After"),
+    create ? "# After\nSynthetic document line." : original.replace("# Before", "# After"),
   );
   expect(observations).toContain("opStart:ok");
   expect(observations).toContain("writeChunk:ok");
@@ -193,6 +204,41 @@ test("an old agent keeps accepting edits within its existing message budget", as
     original.replace("# Before", "# After"),
   );
   expect(agent.requests.some(({ req }) => req.op?.$case === "opStart")).toBe(false);
+});
+
+test("a small edit never falls back to a truncating write when transactional admission fails", async () => {
+  setSelfhostedApplyDiff(applyDiff);
+  const path = "/workspace/small.txt";
+  const original = "before\n";
+  const agent = new MockAgentResponder({ files: { [path]: original } });
+  const requests: string[] = [];
+  const session = new SelfhostedSession({
+    workspaceId: "11111111-1111-4111-8111-111111111111",
+    agentId: "synthetic-agent",
+    connectionInstanceId: "22222222-2222-4222-8222-222222222222",
+    workspaceRoot: "/workspace",
+    controlRpc: {
+      async request(subject, request, options) {
+        requests.push(request.op?.$case ?? "none");
+        if (request.op?.$case === "opStart" || request.op?.$case === "opQuery") {
+          return ControlResponse.fromPartial({
+            requestId: request.requestId,
+            error: { code: ErrorCode.ERROR_CODE_FENCED, message: "connection fenced" },
+          });
+        }
+        return agent.request(subject, request, options);
+      },
+    },
+    relay: { host: "relay.test", port: 443, tls: true },
+    epoch: 1,
+    transactionalFsWriteSupported: true,
+  });
+  await expect(
+    session.createEditor().updateFile({ path, diff: "@@\n-before\n+after" }),
+  ).rejects.toThrow("connection fenced");
+  expect(new TextDecoder().decode(await session.readFile({ path }))).toBe(original);
+  expect(requests.filter((op) => op === "opStart")).toHaveLength(1);
+  expect(requests).not.toContain("fsWrite");
 });
 
 for (const failure of [

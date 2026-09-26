@@ -9,11 +9,113 @@ import type {
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
-import { AgentBrowserDriver, AgentBrowserJsonRunner, imageDimensions } from "../src";
+import {
+  AgentBrowserDriver,
+  AgentBrowserJsonRunner,
+  imageDimensions,
+  resolvePinnedAgentBrowserBinary,
+} from "../src";
 import { CdpConnection } from "../src/cdp";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 const headedE2e = process.env.OPENGENI_BROWSERD_HEADED_E2E === "1" ? test : test.skip;
+
+headedE2e(
+  "streams a mobile headed tab continuously while another tab stays foregrounded",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-hidden-stream-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `hidden_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: true,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+      foregroundManagedTabs: true,
+    });
+    let cdp: CdpConnection | null = null;
+    let frames: import("../src").BrowserFrameSubscription | null = null;
+    try {
+      const initial = await driver.start(
+        dataUrl(
+          '<!doctype html><meta name="viewport" content="width=device-width"><title>Hidden form</title><input aria-label="Name">',
+        ),
+      );
+      const typed = await driver.dispatch(
+        command(initial, {
+          type: "type",
+          locator: { kind: "role", role: "textbox", name: "Name" },
+          text: "Preserved input",
+        }),
+      );
+      const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+      cdp = await CdpConnection.connect(endpoint.cdpUrl);
+      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: typed.target.id,
+        flatten: true,
+      });
+      await cdp.send(
+        "Emulation.setDeviceMetricsOverride",
+        {
+          width: 390,
+          height: 844,
+          deviceScaleFactor: 1,
+          mobile: true,
+        },
+        { sessionId: attached.sessionId },
+      );
+      frames = await driver.subscribeFrames(typed.target.id, { format: "jpeg" });
+      const iterator = frames[Symbol.asyncIterator]();
+      let latest = await frameWithin(iterator, 3_000);
+      const foreground = await driver.openTarget(fixture("Foreground"));
+      const deadline = Date.now() + 60_000;
+      let received = 0;
+      while (Date.now() < deadline) {
+        latest = await frameAfter(iterator, latest.sequence, 3_000);
+        expect(latest).toMatchObject({
+          targetId: typed.target.id,
+          targetGeneration: typed.target.targetGeneration,
+          documentGeneration: typed.target.documentGeneration,
+          width: 390,
+          height: 844,
+        });
+        received += 1;
+      }
+      expect(received).toBeGreaterThan(50);
+      const state = await cdp.send<{ result: { value: { visibility: string; value: string } } }>(
+        "Runtime.evaluate",
+        {
+          expression:
+            "({visibility:document.visibilityState,value:document.querySelector('input').value})",
+          returnByValue: true,
+        },
+        { sessionId: attached.sessionId, timeoutMs: 2_000 },
+      );
+      expect(state.result.value).toEqual({ visibility: "hidden", value: "Preserved input" });
+      expect(await driver.listTargets()).toContainEqual(foreground.target);
+    } finally {
+      await frames?.close();
+      cdp?.close();
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
 
 headedE2e(
   "foregrounds a headed managed tab before frame-scheduled interaction",
@@ -87,6 +189,83 @@ headedE2e(
     }
   },
   60_000,
+);
+
+e2e(
+  "keeps scaled mobile frames stable during pointer interaction",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-scale-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: "scale_" + randomUUID().slice(0, 8),
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+    });
+    let frames: Awaited<ReturnType<typeof driver.subscribeFrames>> | undefined;
+    try {
+      let observation = await driver.start(
+        dataUrl(`<!doctype html><meta name="viewport" content="width=device-width">
+      <body style="margin:0"><div style="width:469px;height:1400px">
+      <button style="position:absolute;left:200px;top:400px;width:30px;height:30px" onclick="this.textContent='Hit'">Aim</button></div>`),
+      );
+      observation = await driver.dispatch(
+        command(observation, {
+          type: "viewport",
+          width: 390,
+          height: 844,
+          mobile: true,
+          deviceScaleFactor: 1,
+        }),
+      );
+      frames = await driver.subscribeFrames(observation.target.id, {
+        format: "jpeg",
+        maxWidth: 1280,
+        maxHeight: 900,
+      });
+      const iterator = frames[Symbol.asyncIterator]();
+      const first = await frameWithin(iterator, 3_000);
+      for (let index = 0; index < 20; index += 1) {
+        const frame = await frameWithin(iterator, 3_000);
+        expect([frame.width, frame.height, frame.deviceScaleFactor]).toEqual([
+          first.width,
+          first.height,
+          first.deviceScaleFactor,
+        ]);
+        expect(frame.documentGeneration).toBe(first.documentGeneration);
+      }
+      // The button center in the streamed image converts back through its published
+      // scale, exactly as the human browser surface sends viewport pointer actions.
+      const pixelX = Math.round(215 * first.deviceScaleFactor);
+      const pixelY = Math.round(415 * first.deviceScaleFactor);
+      const clicked = await driver.dispatch(
+        command(observation, {
+          type: "pointer",
+          action: "click",
+          x: pixelX / first.deviceScaleFactor,
+          y: pixelY / first.deviceScaleFactor,
+        }),
+      );
+      expect(names(clicked)).toContain("Hit");
+      expect(first.width).toBeLessThanOrEqual(1280);
+      expect(first.height).toBeLessThanOrEqual(900);
+    } finally {
+      await frames?.close();
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  30_000,
 );
 
 e2e(
@@ -818,3 +997,146 @@ async function frameAfter(
   }
   throw new Error("browser frame did not advance");
 }
+
+headedE2e(
+  "reads real native select options without rewriting the page and preserves selection events",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-select-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: "sel_" + randomUUID().slice(0, 8),
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: true,
+    });
+    let detachOnResolve = false;
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+      foregroundManagedTabs: true,
+      connect: async (endpoint) => {
+        const connection = await CdpConnection.connect(endpoint);
+        return {
+          send: async <T = Record<string, unknown>>(
+            method: string,
+            params?: Readonly<Record<string, unknown>>,
+            options?: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal },
+          ): Promise<T> => {
+            if (detachOnResolve && method === "DOM.resolveNode" && params?.executionContextId) {
+              detachOnResolve = false;
+              await connection.send(
+                "Runtime.evaluate",
+                { expression: "document.querySelector('select').remove()" },
+                options,
+              );
+              await connection.send("HeapProfiler.collectGarbage", {}, options);
+            }
+            return await connection.send<T>(method, params, options);
+          },
+          on: connection.on.bind(connection),
+          waitForEvent: connection.waitForEvent.bind(connection),
+          close: connection.close.bind(connection),
+        };
+      },
+    });
+    const focused = (view: BrowserObservation): InteractionSemanticNodeValue | undefined => {
+      const queue = view.semantic?.kind === "snapshot" ? [...view.semantic.roots] : [];
+      while (queue.length) {
+        const node = queue.pop()!;
+        if (node.ref === view.focusedRef) return node;
+        if (node.children) queue.push(...node.children);
+      }
+    };
+    try {
+      let view = await driver.start(
+        dataUrl(
+          '<style>select{position:absolute;left:10px;top:40px;width:200px;height:40px}button{position:absolute;left:10px;top:150px;width:200px;height:40px}</style><button onclick="this.textContent=\'Counter 1\'">Counter 0</button><label>Priority<select id="priority" oninput="document.querySelector(\'p\').textContent += \' input:\' + this.value" onchange="document.querySelector(\'p\').textContent += \' change:\' + this.value"><option value="low">Low</option><optgroup label="More"><option value="high">High</option><option value="blocked" disabled>Blocked</option></optgroup></select></label><p>Events</p>',
+        ),
+      );
+      view = await driver.dispatch(
+        command(view, { type: "pointer", action: "click", x: 110, y: 60 }),
+      );
+      expect(focused(view)?.native?.data).toEqual({
+        kind: "native-select",
+        multiple: false,
+        disabled: false,
+        options: [
+          { value: "low", label: "Low", selected: true, disabled: false },
+          { value: "high", label: "High", selected: false, disabled: false },
+          { value: "blocked", label: "Blocked", selected: false, disabled: true },
+        ],
+      });
+      const ref = view.focusedRef!;
+      await expect(
+        driver.dispatch(
+          command(view, {
+            type: "select",
+            locator: { kind: "ref", ref },
+            values: ["blocked"],
+          }),
+        ),
+      ).rejects.toThrow("not a selectable control");
+      view = await driver.dispatch(
+        command(view, { type: "select", locator: { kind: "ref", ref }, values: ["high"] }),
+      );
+      expect(names(view)).toContain("Events input:high change:high");
+      view = await driver.dispatch(
+        command(view, { type: "pointer", action: "click", x: 110, y: 170 }),
+      );
+      expect(names(view)).toContain("Counter 1");
+      expect(
+        (
+          await driver.readDom(view.target.id, {
+            kind: "count",
+            selector: "select",
+            expectedTargetGeneration: view.target.targetGeneration,
+            expectedDocumentGeneration: view.target.documentGeneration!,
+            expectedFrameId: view.frameId!,
+          })
+        ).count,
+      ).toBe(1);
+      view = await driver.dispatch(
+        command(view, { type: "pointer", action: "click", x: 110, y: 60 }),
+      );
+      detachOnResolve = true;
+      view = await driver.observe(view.target.id);
+      expect(detachOnResolve).toBe(false);
+      expect(focused(view)?.native).toBeUndefined();
+      expect((await driver.captureScreenshot(view.target.id)).data.byteLength).toBeGreaterThan(100);
+      expect(names(await driver.observe(view.target.id))).toContain("Counter 1");
+      view = await driver.dispatch(
+        command(view, {
+          type: "navigate",
+          url: dataUrl(
+            "<div data-private><label>Private<select><option>Private option</option></select></label></div>",
+          ),
+        }),
+      );
+      view = await driver.dispatch(
+        command(view, { type: "click", locator: { kind: "label", text: "Private" } }),
+      );
+      expect(focused(view)?.native).toBeUndefined();
+      view = await driver.dispatch(
+        command(view, {
+          type: "navigate",
+          url: dataUrl(
+            "<label>Many<select>" +
+              Array.from({ length: 201 }, (_, i) => "<option>" + i + "</option>").join("") +
+              "</select></label>",
+          ),
+        }),
+      );
+      view = await driver.dispatch(
+        command(view, { type: "click", locator: { kind: "label", text: "Many" } }),
+      );
+      expect(focused(view)?.native).toBeUndefined();
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60000,
+);

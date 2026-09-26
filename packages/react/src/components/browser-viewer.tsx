@@ -2,6 +2,7 @@ import type {
   AttachedBrowserBridge,
   AttachedBrowserDevice,
   BrowserAction,
+  BrowserActionBatch,
   BrowserActionReceipt,
   BrowserDiagnosticBatch,
   BrowserDownload,
@@ -73,6 +74,7 @@ import { isSourcePlacementChangedError } from "../lib/interaction-errors";
 import type { EmbeddedBrowserInteractionClientOverride } from "../session-context";
 import { browserKey, HUMAN_BROWSER_HOME_URL, normalizeBrowserAddress } from "./browser-input";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
+import { BrowserSelectControl } from "./browser-select-control";
 
 export type BrowserViewerNotification = {
   kind: "error" | "info";
@@ -421,12 +423,19 @@ export function BrowserViewer({
   useEffect(() => {
     setHasLiveFrame(frameIsLive);
   }, [frameIsLive]);
-  const supportsLiveFrames = browser.session?.capabilities.liveFrames === true;
-  const displayConnectionState = supportsLiveFrames
-    ? frames.state === "live" && !displayedFrame
-      ? "connecting"
-      : frames.state
-    : "semantic";
+  const supportsLiveFrames =
+    (browser.session ?? selectedRegistrySession)?.capabilities.liveFrames === true;
+  const connectionError = frames.error ?? browser.error;
+  const displayConnectionState =
+    connectionError && !frameIsLive
+      ? "error"
+      : !browser.session
+        ? "connecting"
+        : supportsLiveFrames
+          ? frames.state === "live" && !displayedFrame
+            ? "connecting"
+            : frames.state
+          : "semantic";
   const selectedProfile = useMemo(
     () =>
       profiles.identities.find(
@@ -898,11 +907,12 @@ export function BrowserViewer({
             frame={displayedFrame}
             connectionState={displayConnectionState}
             supportsLiveFrames={supportsLiveFrames}
-            connectionError={frames.error}
+            connectionError={connectionError}
             observation={browser.observation}
             mutating={browser.mutating || savingProfile}
             activityLabel={savingProfile ? "Saving browser version…" : undefined}
             clipboardEnabled={browser.session?.capabilities.clipboard === true}
+            inputBatchAttachment={frames.attachment}
             onAction={async (action, frame) => {
               const receipt = frame
                 ? await browser.actFromFrame(action, frame)
@@ -913,6 +923,8 @@ export function BrowserViewer({
               return receipt;
             }}
             onReadClipboard={browser.readClipboard}
+            onObserveForInput={browser.observeForInput}
+            onSelectFromObservation={browser.actFromObservation}
             onReconnect={
               attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)
                 ? () => {
@@ -920,7 +932,10 @@ export function BrowserViewer({
                       createBrowser({ kind: "attached", device: replacementChromeDevice });
                     }
                   }
-                : frames.reconnect
+                : () => {
+                    void browser.refresh();
+                    frames.reconnect();
+                  }
             }
             reconnectLabel={
               (attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)) &&
@@ -1849,9 +1864,24 @@ function BrowserViewport(props: {
   observation: ReturnType<typeof useBrowserSession>["observation"];
   mutating: boolean;
   clipboardEnabled: boolean;
+  inputBatchAttachment?: {
+    browserSessionId: string;
+    controllerGeneration: string;
+    targetId: string;
+    fencedInputBatches?: true | undefined;
+    expiresAt: string;
+  } | null;
   activityLabel?: string | undefined;
-  onAction: (action: BrowserAction, frame: BrowserFrame | null) => Promise<BrowserActionReceipt>;
+  onAction: (
+    action: BrowserAction | BrowserActionBatch,
+    frame: BrowserFrame | null,
+  ) => Promise<BrowserActionReceipt>;
   onReadClipboard: () => Promise<{ text: string }>;
+  onObserveForInput: () => Promise<BrowserObservation>;
+  onSelectFromObservation: (
+    action: BrowserAction,
+    observation: BrowserObservation,
+  ) => Promise<BrowserActionReceipt>;
   onReconnect: () => void;
   reconnectLabel?: string | undefined;
   reconnectMessage?: string | undefined;
@@ -1885,6 +1915,11 @@ function BrowserViewport(props: {
   const errorRef = useRef(props.onError);
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
   const actionQueueEpochRef = useRef(0);
+  const queuedTypingRef = useRef<{
+    actions: BrowserAction[];
+    frame: BrowserFrame;
+    epoch: number;
+  } | null>(null);
   const queuedFrameRef = useRef<BrowserFrame | null>(null);
   const currentFrameRef = useRef<BrowserFrame | null>(props.frame);
   const paintedFrameRef = useRef<BrowserFrame | null>(null);
@@ -1900,6 +1935,7 @@ function BrowserViewport(props: {
     if (pendingTextRef.current?.timer) clearTimeout(pendingTextRef.current.timer);
     wheelRef.current = null;
     pendingTextRef.current = null;
+    queuedTypingRef.current = null;
     pointerStartRef.current = null;
     lastClickRef.current = null;
     composingRef.current = false;
@@ -2015,11 +2051,41 @@ function BrowserViewport(props: {
     ) => {
       const epoch = actionQueueEpochRef.current;
       const dispatch = actionRef.current;
+      const attachment = props.inputBatchAttachment;
+      const canBatchTyping =
+        action.type === "type" &&
+        !after &&
+        frame &&
+        attachment?.fencedInputBatches === true &&
+        attachment.browserSessionId === frame.browserSessionId &&
+        attachment.controllerGeneration === frame.controllerGeneration &&
+        attachment.targetId === frame.targetId &&
+        Date.parse(attachment.expiresAt) > Date.now();
+      const previous = queuedTypingRef.current;
+      if (
+        canBatchTyping &&
+        previous &&
+        previous.epoch === epoch &&
+        sameFrameFence(previous.frame, frame) &&
+        previous.actions.length < 16
+      ) {
+        // Keep every existing text/input event boundary. Only share transport.
+        previous.actions.push(action);
+        return;
+      }
+      const typing = canBatchTyping ? { actions: [action], frame, epoch } : null;
+      // Every non-typing action is an ordering barrier, including keys and paste.
+      queuedTypingRef.current = typing;
       actionTailRef.current = actionTailRef.current
         .catch(() => undefined)
         .then(async () => {
           if (!mountedRef.current || epoch !== actionQueueEpochRef.current) return;
-          const receipt = await dispatch(action, frame);
+          if (queuedTypingRef.current === typing) queuedTypingRef.current = null;
+          const dispatchedAction =
+            typing && typing.actions.length > 1
+              ? { type: "batch" as const, actions: typing.actions, fenceEachAction: true as const }
+              : action;
+          const receipt = await dispatch(dispatchedAction, frame);
           if (!mountedRef.current || epoch !== actionQueueEpochRef.current) return;
           await after?.(receipt);
         })
@@ -2031,7 +2097,7 @@ function BrowserViewport(props: {
           errorRef.current(cause);
         });
     },
-    [clearBufferedInput],
+    [clearBufferedInput, props.inputBatchAttachment],
   );
 
   const point = useCallback(
@@ -2301,6 +2367,18 @@ function BrowserViewport(props: {
           reconnectMessage={props.reconnectMessage}
         />
       ) : null}
+      {showCanvas ? (
+        <BrowserSelectControl
+          observe={async () => {
+            flushPendingText();
+            flushPendingWheel();
+            await actionTailRef.current;
+            if (!mountedRef.current) throw new Error("The browser page changed.");
+            return await props.onObserveForInput();
+          }}
+          act={props.onSelectFromObservation}
+        />
+      ) : null}
       {props.mutating ? (
         <div className="pointer-events-none absolute right-3 top-3 flex items-center gap-1.5 rounded-full border border-white/10 bg-black/65 px-2.5 py-1 text-[11px] text-white/80 backdrop-blur">
           <LoaderCircleIcon className="size-3 animate-spin" /> {props.activityLabel ?? "Acting"}
@@ -2333,7 +2411,7 @@ function SemanticBrowserFallback(props: {
         <div className="flex items-center gap-2">
           {props.error ? (
             <CircleAlertIcon className="size-4 text-og-status-error" />
-          ) : !props.supportsLiveFrames ? (
+          ) : props.connectionState === "semantic" ? (
             <ZapIcon className="size-4 text-og-muted" />
           ) : (
             <LoaderCircleIcon className="size-4 animate-spin text-og-muted" />
@@ -2342,10 +2420,12 @@ function SemanticBrowserFallback(props: {
             {generationLoss
               ? "Chrome reconnected—open a fresh browser/desktop."
               : props.error
-                ? "Live view disconnected"
-                : props.supportsLiveFrames
-                  ? browserConnectionLabel(props.connectionState)
-                  : "Semantic browser"}
+                ? props.supportsLiveFrames
+                  ? "Live view disconnected"
+                  : "Browser unavailable"
+                : props.connectionState === "semantic"
+                  ? "Semantic browser"
+                  : browserConnectionLabel(props.connectionState)}
           </p>
         </div>
         {props.error || props.reconnectMessage ? (
@@ -2379,7 +2459,7 @@ function SemanticBrowserFallback(props: {
             </div>
           </div>
         ) : null}
-        {props.error && props.supportsLiveFrames && (!generationLoss || props.reconnectLabel) ? (
+        {props.error && (!generationLoss || props.reconnectLabel) ? (
           <button
             type="button"
             onClick={props.onReconnect}

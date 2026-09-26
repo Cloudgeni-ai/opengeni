@@ -202,6 +202,11 @@ export const BrowserSessionCapabilities = z
   .strict();
 export type BrowserSessionCapabilities = z.infer<typeof BrowserSessionCapabilities>;
 
+/** Versioned persistent discriminator for experimental disposable contexts. */
+export { EPHEMERAL_CHROMIUM_DRIVER_ID, browserSessionStorageMode } from "./browser-storage";
+export const BrowserStorageMode = z.enum(["private_profile", "ephemeral_context"]);
+export type BrowserStorageMode = z.infer<typeof BrowserStorageMode>;
+
 export const BrowserSession = z
   .object({
     id: z.string().uuid(),
@@ -2269,6 +2274,8 @@ export const BrowserActionBatch = z
   .object({
     type: z.literal("batch"),
     actions: z.array(BrowserAction).min(1).max(INTERACTION_MAX_ACTIONS_PER_BATCH),
+    /** Revalidate the original document before each action; never follow navigation. */
+    fenceEachAction: z.literal(true).optional(),
   })
   .strict()
   .superRefine((batch, context) => {
@@ -2492,6 +2499,7 @@ export const CreateBrowserSessionRequest = z
     name: z.string().trim().min(1).max(200).optional(),
     initialUrl: boundedUrl.optional(),
     headless: z.boolean().default(true),
+    storageMode: BrowserStorageMode.default("private_profile"),
     /** Managed engine choice. Attached Chrome continues to derive its engine
      * from the selected device rather than accepting an impersonated value. */
     engine: z.enum(["chromium", "lightpanda"]).default("chromium"),
@@ -2503,6 +2511,23 @@ export const CreateBrowserSessionRequest = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (
+      value.storageMode === "ephemeral_context" &&
+      (!value.headless ||
+        value.engine !== "chromium" ||
+        value.identityId ||
+        value.baseRevisionId ||
+        value.networkRouteId ||
+        value.linkedComputerSessionId ||
+        (value.placement && value.placement.kind !== "sandbox_group"))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["storageMode"],
+        message:
+          "ephemeral contexts require headless managed sandbox Chromium without identity, revision, route or Computer",
+      });
+    }
     if (value.baseRevisionId && !value.identityId) {
       context.addIssue({
         code: "custom",
@@ -2715,6 +2740,7 @@ export const BrowserSessionAttachment = z
     controllerGeneration: opaqueGeneration,
     targetId: boundedOpaqueId,
     stream: BrowserFrameStreamAttachment,
+    fencedInputBatches: z.literal(true).optional(),
     expiresAt: z.string().datetime({ offset: true }),
   })
   .strict();

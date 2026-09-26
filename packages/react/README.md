@@ -541,6 +541,14 @@ workspace discovery, peer switching, tabs/windows, live frames, human input,
 identity versions, interventions, diagnostics, reconnect, and lifecycle state do
 not require app-private controller glue.
 
+The browser viewer negotiates bounded typing batches from the active controller's
+short-lived attachment. Supporting helpers recheck the original controller,
+target, document and frame fence before every action; old helpers retain one
+request per action. Only queued text actions share a request (at most 16), with
+each text/input event preserved. Keys, pointer input and clipboard operations
+remain ordering barriers. A failed or uncertain action discards the queued suffix
+without replay.
+
 ```tsx
 import { OpenGeniProvider } from "@opengeni/react";
 import { BrowserViewer, ComputerViewer } from "@opengeni/react/interaction";
@@ -565,6 +573,14 @@ browser. A headed managed browser can receive `createLinkedComputer`; the
 returned ComputerSession must be the exact placement/window the browser uses.
 `onOpenComputer` then changes the host layout to that resource—it must not open a
 lookalike desktop. Closing either viewer never ends its durable resource.
+
+Native dropdown popups may not appear in page frames. After focusing a dropdown,
+the human can use **Choose option** to read its choices and select through the
+normal browser action API. The viewer reads only on demand and retains that
+observation's target/document/frame fence. Private, oversized, or ambiguous
+choices remain unavailable; the page's keyboard controls still work. This
+fallback requires a controller with focused native-select metadata support and
+does not rewrite the page or capture the desktop.
 
 The provider opens one shared workspace interaction-revision stream and every
 catalog refreshes only when its revision advances; hidden or disconnected pages

@@ -35,6 +35,7 @@ import {
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
   type BrowserProtectedAuthObservation as BrowserProtectedAuthObservationValue,
   type BrowserTarget as BrowserTargetValue,
+  type InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import {
   InteractionControllerError,
@@ -150,6 +151,7 @@ export type BrowserExternalAuthDispatchResult = {
 };
 
 export type BrowserCdpConnection = {
+  onDisconnect?: (listener: () => void) => () => void;
   send<T = Record<string, unknown>>(
     method: string,
     params?: Readonly<Record<string, unknown>>,
@@ -169,6 +171,7 @@ export type BrowserCdpConnection = {
 };
 
 type TargetInfo = {
+  browserContextId: string | null;
   targetId: string;
   type: string;
   title: string;
@@ -200,7 +203,7 @@ type TargetScreencast = {
   options: NormalizedBrowserFrameStreamOptions;
   sequence: number;
   lastFrameAt: number;
-  captureDeviceScaleFactor: number | null;
+  captureScale: { width: number; height: number; scale: number } | null;
   fallbackAbort: AbortController;
   capturePromise: Promise<void> | null;
   subscriptions: Map<string, LatestBrowserFrameSubscription>;
@@ -281,6 +284,8 @@ export type AgentBrowserDriverOptions = {
   frameStreaming?: boolean;
   emulation?: BrowserSessionEmulation;
   permissionControl?: boolean;
+  /** Experimental ephemeral context lease. Never a durable browser profile. */
+  browserContextId?: string;
   /** Headless shell has no chrome://version page. Read its real Client Hints
    * from a controller-intercepted secure-origin document instead. */
   userAgentMetadataSource?: "chrome_internal" | "intercepted_local";
@@ -332,6 +337,7 @@ function hasBrowserEmulation(
  * connection and keeps an independent causal queue for every target.
  */
 export class AgentBrowserDriver implements BrowserInteractionDriver {
+  readonly fencedInputBatches = true;
   private readonly browserSessionId: string;
   private readonly controllerGeneration: string;
   private readonly runner: BrowserCommandRunner;
@@ -348,6 +354,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly frameStreaming: boolean;
   private readonly emulation: BrowserSessionEmulation | null;
   private readonly permissionControl: boolean;
+  private readonly browserContextId: string | undefined;
+  private readonly ownedDownloads = new Set<string>();
   private readonly userAgentMetadataSource: "chrome_internal" | "intercepted_local";
   private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
   private readonly resolveWorkspaceFiles:
@@ -379,6 +387,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private headlessSessionCookies: HeadlessSessionCookies | null;
 
   constructor(options: AgentBrowserDriverOptions) {
+    if (
+      options.browserContextId !== undefined &&
+      (!options.browserContextId ||
+        options.targetLifecycle !== "cdp" ||
+        options.foregroundManagedTabs ||
+        options.runner.externalAuth ||
+        (options.engine !== undefined && options.engine !== "chromium"))
+    ) {
+      throw new Error(
+        "ephemeral contexts require Chromium CDP lifecycle without foreground or external auth",
+      );
+    }
+    this.browserContextId = options.browserContextId;
     this.browserSessionId = options.browserSessionId;
     this.controllerGeneration = options.controllerGeneration;
     this.runner = options.runner;
@@ -429,7 +450,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection = await this.ensureConnection();
       const created = await connection.send<{ targetId?: unknown }>(
         "Target.createTarget",
-        { url: "about:blank", background: true },
+        { url: "about:blank", background: true, ...this.contextScope() },
         { timeoutMs: BROWSER_START_TIMEOUT_MS },
       );
       launched = {
@@ -446,7 +467,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (!page) {
         const created = await connection.send<{ targetId?: unknown }>(
           "Target.createTarget",
-          { url: "about:blank", background: true },
+          { url: "about:blank", background: true, ...this.contextScope() },
           { timeoutMs: BROWSER_START_TIMEOUT_MS },
         );
         if (typeof created.targetId !== "string") {
@@ -506,6 +527,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const connection = await this.ensureConnection();
     const deferNavigation = this.emulation !== null && url !== "about:blank";
     const result = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
+      ...this.contextScope(),
       url: deferNavigation ? "about:blank" : url,
       background: true,
     });
@@ -548,6 +570,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     for (const unsubscribe of this.browserUnsubscribe.splice(0)) unsubscribe();
     for (const targetId of [...this.states.keys()]) this.removeState(targetId);
     this.firstSeenAt.clear();
+    this.ownedDownloads.clear();
     const connection = this.connection;
     this.connection = null;
     this.connectionPromise = null;
@@ -591,6 +614,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async runtimeSnapshot(): Promise<BrowserRuntimeSnapshot> {
+    if (this.browserContextId) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        "ephemeral browser contexts cannot capture or restore durable profiles",
+      );
+    }
     const targets = await this.listTargets();
     const tabs = targets
       .filter((target) => target.kind === "page" || target.kind === "popup")
@@ -817,6 +846,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     targetId: string,
     options: BrowserScreenshotOptions = {},
   ): Promise<BrowserImageFrame> {
+    // Lightpanda 0.3.5 implements this CDP method with an embedded static PNG,
+    // not pixels from the current page. Never publish it as visual evidence.
+    if (this.engine === "lightpanda") {
+      throw new InteractionControllerError(
+        "unsupported",
+        "Lightpanda does not render page screenshots; use semantic observation",
+      );
+    }
     const normalized = normalizeScreenshotOptions(options);
     return await this.withTarget(
       targetId,
@@ -902,7 +939,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       browserSessionId: this.browserSessionId,
       targetId,
     });
-    if (!this.frameStreaming) {
+    if (this.engine === "lightpanda" || !this.frameStreaming) {
       throw new InteractionDefiniteDriverError(
         "unsupported",
         "this browser engine does not support live frame streaming",
@@ -922,7 +959,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           options: normalized,
           sequence: 0,
           lastFrameAt: 0,
-          captureDeviceScaleFactor: null,
+          captureScale: null,
           fallbackAbort: new AbortController(),
           capturePromise: null,
           subscriptions: new Map(),
@@ -1009,6 +1046,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         let completedActions = 0;
         for (const action of actions) {
           try {
+            if (
+              completedActions > 0 &&
+              command.action.type === "batch" &&
+              command.action.fenceEachAction
+            ) {
+              await this.refreshFrame(state);
+              this.assertExpectedGenerations(command, state);
+            }
             await this.dispatchAction(state, action, command.operationId);
             completedActions += 1;
             if (state.dialog) {
@@ -1258,6 +1303,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       this.userAgent = typeof version.userAgent === "string" ? version.userAgent : "";
       if (this.downloadDirectory) {
         await connection.send("Browser.setDownloadBehavior", {
+          ...this.contextScope(),
           behavior: "allowAndName",
           downloadPath: this.downloadDirectory,
           eventsEnabled: true,
@@ -1265,6 +1311,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       if (this.emulation?.geolocation) {
         await connection.send("Browser.grantPermissions", {
+          ...this.contextScope(),
           permissions: ["geolocation"],
         });
       }
@@ -1278,8 +1325,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           const state = [...this.states.values()].find(
             (candidate) => candidate.frame.id === frameId,
           );
+          // Browser download events are process-wide. Unknown frames must not
+          // become downloads belonging to another context.
+          if (this.browserContextId && !state) return;
           if (this.downloadEvents) {
             const guid = typeof event.params.guid === "string" ? event.params.guid : "";
+            if (this.browserContextId) this.ownedDownloads.add(guid);
             const suggestedFilename =
               typeof event.params.suggestedFilename === "string"
                 ? event.params.suggestedFilename
@@ -1308,6 +1359,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         connection.on("Browser.downloadProgress", (event) => {
           if (!this.downloadEvents) return;
           const guid = typeof event.params.guid === "string" ? event.params.guid : "";
+          if (this.browserContextId && !this.ownedDownloads.has(guid)) return;
           const state = event.params.state;
           if (state !== "inProgress" && state !== "completed" && state !== "canceled") return;
           const receivedBytes = event.params.receivedBytes;
@@ -1327,8 +1379,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               totalBytes: typeof totalBytes === "number" ? totalBytes : null,
             })
             .then(async ({ cancelReason }) => {
+              if (state !== "inProgress") this.ownedDownloads.delete(guid);
               if (!cancelReason) return;
-              await connection.send("Browser.cancelDownload", { guid }).catch(() => undefined);
+              await connection
+                .send("Browser.cancelDownload", { guid, ...this.contextScope() })
+                .catch(() => undefined);
               await this.downloadEvents?.reject(guid, cancelReason);
             })
             .catch(() => undefined);
@@ -1364,6 +1419,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     let targets = visiblePageTargets(await this.targetInfos(connection));
     if (targets.length === 0) {
       const created = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
+        ...this.contextScope(),
         url: "about:blank",
         background: true,
       });
@@ -1760,6 +1816,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     connection: BrowserCdpConnection,
   ): Promise<BrowserUserAgentMetadata> {
     const created = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
+      ...this.contextScope(),
       url: "about:blank",
       hidden: true,
     });
@@ -1839,6 +1896,52 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         : state.dialog
           ? emptyAccessibilitySnapshot()
           : await this.refreshAccessibility(state);
+    const focused = accessibility.focusedRef
+      ? accessibility.entriesByRef.get(accessibility.focusedRef)
+      : null;
+    if (!state.dialog && focused?.actions.includes("select") && focused.frameId) {
+      // Native popup windows are absent from page screenshots. Expose only the
+      // focused control, through the same isolated-world redaction and budget
+      // as focused DOM reads; never alter the page to draw a fake popup.
+      let read: unknown = null;
+      try {
+        read = await this.callOnNode(
+          state,
+          focused.backendDOMNodeId,
+          DOM_READ_FUNCTION,
+          [{ value: 16_384 }, { value: [] }, { value: true }],
+          { isolatedFrameId: focused.frameId },
+        );
+      } catch (error) {
+        // This optional projection may lose its node after the AX snapshot.
+        // Omit choices in that case; transport/context failures still propagate.
+        const disappeared =
+          (error instanceof CdpProtocolError &&
+            error.method === "DOM.resolveNode" &&
+            error.code === -32000 &&
+            error.message === "No node with given id found") ||
+          (error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found");
+        if (!disappeared) throw error;
+      }
+      if (
+        isRecord(read) &&
+        read.redacted === null &&
+        read.truncated === false &&
+        isRecord(read.select)
+      ) {
+        const visit = (nodes: typeof accessibility.roots): void => {
+          for (const node of nodes) {
+            if (node.ref === focused.ref)
+              node.native = {
+                platform: "dom",
+                data: read.select as NonNullable<InteractionSemanticNodeValue["native"]>["data"],
+              };
+            if (node.children) visit(node.children);
+          }
+        };
+        visit(accessibility.roots);
+      }
+    }
     return BrowserObservation.parse({
       protocolVersion: INTERACTION_PROTOCOL_VERSION,
       observationId: `observation-${this.createId()}`,
@@ -2087,12 +2190,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       const metrics = await this.layoutMetrics(state, FRAME_CAPTURE_TIMEOUT_MS);
       const viewport = metrics.viewport;
-      const estimatedDeviceScaleFactor = expected.captureDeviceScaleFactor ?? 1;
-      let scale = Math.min(
-        1,
-        expected.options.maxWidth / (viewport.width * estimatedDeviceScaleFactor),
-        expected.options.maxHeight / (viewport.height * estimatedDeviceScaleFactor),
-      );
+      // Reuse the accepted clip scale for this viewport. Inferring a new device
+      // scale from rounded image pixels feeds quantization back into every frame
+      // and makes an unchanged mobile viewport oscillate in size.
+      const previous = expected.captureScale;
+      let scale =
+        previous?.width === viewport.width && previous.height === viewport.height
+          ? previous.scale
+          : Math.min(
+              1,
+              expected.options.maxWidth / viewport.width,
+              expected.options.maxHeight / viewport.height,
+            );
       let data: Uint8Array<ArrayBufferLike> = new Uint8Array();
       let dimensions = { width: 0, height: 0 };
       for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -2135,7 +2244,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       if (state.screencasts.get(expected.key) !== expected || this.protectedAuthQuiet(state))
         return;
-      expected.captureDeviceScaleFactor = finiteScale(dimensions.width / (viewport.width * scale));
+      expected.captureScale = { width: viewport.width, height: viewport.height, scale };
       const frame = this.imageFrame({
         state,
         sequence: ++expected.sequence,
@@ -2463,6 +2572,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         });
         return;
       case "viewport":
+        for (const stream of state.screencasts.values()) stream.captureScale = null;
         if (this.engine === "lightpanda") {
           throw new InteractionDefiniteDriverError(
             "unsupported",
@@ -2694,6 +2804,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await (
         await this.ensureConnection()
       ).send("Browser.setPermission", {
+        ...this.contextScope(),
         permission: { name: CDP_PERMISSION_NAMES[action.permission] },
         setting: action.setting,
         origin,
@@ -3546,11 +3657,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     );
   }
 
+  private contextScope(): { browserContextId?: string } {
+    return this.browserContextId ? { browserContextId: this.browserContextId } : {};
+  }
+
   private async targetInfos(connection: BrowserCdpConnection): Promise<TargetInfo[]> {
     const response = await connection.send<{ targetInfos?: unknown }>("Target.getTargets");
     if (!Array.isArray(response.targetInfos))
       throw new Error("CDP returned an invalid target list");
-    return response.targetInfos.map(normalizeTargetInfo);
+    return response.targetInfos
+      .map(normalizeTargetInfo)
+      .filter(
+        (target) =>
+          this.browserContextId === undefined || target.browserContextId === this.browserContextId,
+      );
   }
 
   private async requireTargetInfo(
@@ -3714,6 +3834,7 @@ function normalizeTargetInfo(value: unknown): TargetInfo {
     throw new Error("CDP returned an invalid target");
   }
   return {
+    browserContextId: typeof value.browserContextId === "string" ? value.browserContextId : null,
     targetId: value.targetId,
     type: value.type,
     title: typeof value.title === "string" ? value.title : "",
@@ -3911,8 +4032,11 @@ const CHECKED_FUNCTION = `function() {
 }`;
 
 const SELECT_OPTIONS_FUNCTION = `function(values) {
-  if (!(this instanceof HTMLSelectElement)) return false;
+  if (!(this instanceof HTMLSelectElement) || this.matches(":disabled")) return false;
   const selected = new Set(values.map(String));
+  const choices = Array.from(this.options).filter(option => selected.has(option.value) || selected.has(option.label));
+  if (values.some(value => !choices.some(option => option.value === String(value) || option.label === String(value)))) return false;
+  if ((!this.multiple && choices.length > 1) || choices.some(option => !option.selected && (option.disabled || option.closest("optgroup[disabled]")))) return false;
   for (const option of this.options) option.selected = selected.has(option.value) || selected.has(option.label);
   this.dispatchEvent(new Event("input", { bubbles: true }));
   this.dispatchEvent(new Event("change", { bubbles: true }));
@@ -3926,7 +4050,7 @@ const SCROLL_FUNCTION = `function(deltaX, deltaY) {
 
 /** Fixed browser-side projection. Every field shares one character budget, so
  * a huge page cannot turn a focused query into an unbounded CDP payload. */
-const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes) {
+const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect) {
   const element = this && this.nodeType === 1 ? this : this?.parentElement;
   if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false };
   const privateSelector = "[data-private], [data-sensitive], [data-opengeni-private]";
@@ -3971,7 +4095,15 @@ const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes) {
   for (const attribute of requestedAttributes) {
     if (allowed.has(attribute)) attributes[attribute] = bounded(element.getAttribute(attribute));
   }
-  return { ok: true, text, value, attributes, redacted: null, truncated };
+  let select = null;
+  if (includeSelect && element instanceof HTMLSelectElement && element.options.length <= 200) {
+    select = { kind: "native-select", multiple: element.multiple, disabled: element.matches(":disabled"),
+      options: Array.from(element.options, (option) => ({
+        value: bounded(option.value), label: bounded(option.label), selected: option.selected,
+        disabled: option.disabled || Boolean(option.closest("optgroup[disabled]"))
+      })) };
+  }
+  return { ok: true, text, value, attributes, redacted: null, truncated, select };
 }`;
 
 /** Attribute and pseudo selectors would turn count/not-found into a secret-value oracle. */

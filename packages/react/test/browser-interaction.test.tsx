@@ -1043,6 +1043,67 @@ describe("BrowserSession frame stream", () => {
     await hook.unmount();
   });
 
+  test("accepts a restarted frame sequence after each attachment renewal", async () => {
+    const sockets: FakeBrowserSocket[] = [];
+    const renewals: Array<() => void> = [];
+    const originalSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+      if (typeof handler === "function" && (delay ?? 0) >= 100_000) {
+        renewals.push(() => handler(...args));
+      }
+      return originalSetTimeout(handler, delay, ...args);
+    }) as typeof setTimeout;
+    let attachmentCalls = 0;
+    const client = fakeClient({
+      attachBrowserSession: async (_workspaceId, _browserSessionId, request) => {
+        attachmentCalls += 1;
+        return attachment(request.targetId);
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useBrowserFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          browserSessionId: BROWSER_SESSION_ID,
+          targetId: "target-1",
+          webSocketFactory: (url, protocols) => {
+            const socket = new FakeBrowserSocket(url, protocols);
+            sockets.push(socket);
+            return socket as unknown as BrowserFrameWebSocket;
+          },
+        }),
+      undefined,
+    );
+    try {
+      await flush(10);
+      expect(attachmentCalls).toBe(1);
+      await dispatch(sockets[0]!, "open");
+      await dispatch(sockets[0]!, "message", { data: frameMessage("target-1", 900).buffer });
+      expect(hook.result.current.frame?.sequence).toBe(900);
+
+      for (const sequence of [1, 2]) {
+        await actRun(() => renewals.shift()!());
+        await flush(10);
+        expect(attachmentCalls).toBe(sequence + 1);
+        const socket = sockets[sequence]!;
+        expect(sockets[sequence - 1]?.closed).toBe(true);
+        await dispatch(socket, "open");
+        await dispatch(socket, "message", { data: frameMessage("target-1", sequence).buffer });
+        expect(hook.result.current.frame?.sequence).toBe(sequence);
+        await dispatch(socket, "message", { data: frameMessage("target-1", sequence - 1).buffer });
+        expect(hook.result.current.frame?.sequence).toBe(sequence);
+        await dispatch(sockets[sequence - 1]!, "message", {
+          data: frameMessage("target-1", 1_000 + sequence).buffer,
+        });
+        expect(hook.result.current.frame?.sequence).toBe(sequence);
+      }
+    } finally {
+      await hook.unmount();
+      globalThis.setTimeout = originalSetTimeout;
+    }
+  });
+
   test("rejects a frame from a controller generation outside the attachment", async () => {
     let socket: FakeBrowserSocket | null = null;
     const client = fakeClient({
@@ -1195,6 +1256,62 @@ describe("BrowserSession frame stream", () => {
 });
 
 describe("BrowserViewer", () => {
+  test.each([true, false])(
+    "surfaces target discovery failure and retries inventory (live frames=%s)",
+    async (liveFrames) => {
+      const current = browserSession();
+      current.capabilities.liveFrames = liveFrames;
+      const currentTarget = target();
+      let fail = true;
+      let targetCalls = 0;
+      const client = fakeClient({
+        listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+        getBrowserSession: async () => current,
+        listBrowserTargets: async () => {
+          targetCalls += 1;
+          if (fail) throw new Error("Browser target discovery timed out");
+          return {
+            browserSessionId: current.id,
+            controllerGeneration: "controller-1",
+            targets: [currentTarget],
+          };
+        },
+        observeBrowserTarget: async () => observation(current.id, currentTarget),
+        attachBrowserSession: async () => attachment(currentTarget.id),
+      });
+      const rendered = await renderComponent(
+        <BrowserViewer
+          client={client}
+          workspaceId={WORKSPACE_ID}
+          sessionId={SESSION_ID}
+          webSocketFactory={(url, protocols) =>
+            new FakeBrowserSocket(url, protocols) as unknown as BrowserFrameWebSocket
+          }
+        />,
+      );
+      try {
+        await flush(30);
+        expect(rendered.container.textContent).toContain("Browser target discovery timed out");
+        expect(rendered.container.textContent).not.toContain("Semantic browser");
+        const retry = [...rendered.container.querySelectorAll("button")].find(
+          (button) => button.textContent === "Reconnect",
+        );
+        expect(retry).toBeDefined();
+        const before = targetCalls;
+        fail = false;
+        await actRun(() => retry!.click());
+        await flush(30);
+        expect(targetCalls).toBeGreaterThan(before);
+        expect(rendered.container.textContent).not.toContain("Browser target discovery timed out");
+        expect(
+          rendered.container.querySelector<HTMLInputElement>('input[aria-label="Address"]')?.value,
+        ).toBe(currentTarget.url);
+      } finally {
+        await rendered.unmount();
+      }
+    },
+  );
+
   test("keeps the frame connection warm without AX polling behind another dock tab", async () => {
     let observationCalls = 0;
     let inventoryCalls = 0;
@@ -1994,6 +2111,110 @@ describe("BrowserViewer", () => {
       });
       await flush();
       expect(document.activeElement).not.toBe(fixture.keyboard);
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
+  for (const supported of [false, true]) {
+    test(`batches queued typing only with a negotiated helper (${supported})`, async () => {
+      const canvasMock = mockBrowserCanvas();
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let calls = 0;
+      const fixture = await renderViewerInputFixture(async (request, current) => {
+        if (++calls === 1) await blocked;
+        return receipt(current, request.operationId);
+      }, supported);
+      const type = async (text: string) => {
+        await actRun(() => {
+          fixture.keyboard.value = text;
+          fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true, data: text }));
+        });
+        await flush(25);
+      };
+      try {
+        await fixture.frame(1);
+        await type("a");
+        await type("b");
+        await fixture.frame(2, { frameId: "frame-1" });
+        await type("c");
+        await actRun(() =>
+          fixture.keyboard.dispatchEvent(
+            new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+          ),
+        );
+        await type("d");
+        await type("e");
+        expect(fixture.actions).toHaveLength(1);
+        release();
+        await flush(80);
+        expect(fixture.actions.map((request) => request.action)).toEqual(
+          supported
+            ? [
+                { type: "type", text: "a" },
+                {
+                  type: "batch",
+                  fenceEachAction: true,
+                  actions: [
+                    { type: "type", text: "b" },
+                    { type: "type", text: "c" },
+                  ],
+                },
+                { type: "press", key: "Enter" },
+                {
+                  type: "batch",
+                  fenceEachAction: true,
+                  actions: [
+                    { type: "type", text: "d" },
+                    { type: "type", text: "e" },
+                  ],
+                },
+              ]
+            : [
+                { type: "type", text: "a" },
+                { type: "type", text: "b" },
+                { type: "type", text: "c" },
+                { type: "press", key: "Enter" },
+                { type: "type", text: "d" },
+                { type: "type", text: "e" },
+              ],
+        );
+      } finally {
+        release();
+        await fixture.rendered.unmount();
+        canvasMock.restore();
+      }
+    });
+  }
+
+  test("discards buffered typing batches behind an uncertain action without retry", async () => {
+    const canvasMock = mockBrowserCanvas();
+    let reject!: (error: Error) => void;
+    const blocked = new Promise<void>((_resolve, fail) => {
+      reject = fail;
+    });
+    const fixture = await renderViewerInputFixture(async () => {
+      await blocked;
+      throw new Error("unreachable");
+    }, true);
+    try {
+      await fixture.frame(1);
+      for (const text of ["a", "b", "c"]) {
+        await actRun(() => {
+          fixture.keyboard.value = text;
+          fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true, data: text }));
+        });
+        await flush(25);
+      }
+      reject(new Error("Outcome unknown"));
+      await flush(50);
+      expect(fixture.actions.map((request) => request.action)).toEqual([
+        { type: "type", text: "a" },
+      ]);
     } finally {
       await fixture.rendered.unmount();
       canvasMock.restore();
@@ -3001,6 +3222,7 @@ async function renderViewerInputFixture(
     request: BrowserActionRequest,
     current: BrowserObservation,
   ) => Promise<BrowserActionReceipt>,
+  fencedInputBatches = false,
 ) {
   const current = browserSession();
   let currentTarget = target();
@@ -3021,7 +3243,10 @@ async function renderViewerInputFixture(
       targets: [currentTarget, secondTarget],
     }),
     observeBrowserTarget: async () => observation(BROWSER_SESSION_ID, currentTarget),
-    attachBrowserSession: async () => attachment(currentTarget.id),
+    attachBrowserSession: async () => ({
+      ...attachment(currentTarget.id),
+      ...(fencedInputBatches ? { fencedInputBatches: true as const } : {}),
+    }),
     selectBrowserTarget: async () => {
       currentTarget = { ...secondTarget, selected: true };
       return observation(BROWSER_SESSION_ID, currentTarget);
@@ -3118,3 +3343,57 @@ function frameMessage(
   message.set(png, 4 + encodedMetadata.byteLength);
   return message;
 }
+
+test("native option input keeps its captured frame fence and rejects a changed target", async () => {
+  let currentTarget = target();
+  const requests: BrowserActionRequest[] = [];
+  const observed = observation(BROWSER_SESSION_ID, currentTarget);
+  const client = fakeClient({
+    getBrowserSession: async () => browserSession(),
+    listBrowserTargets: async () => ({
+      browserSessionId: BROWSER_SESSION_ID,
+      controllerGeneration: "controller-1",
+      targets: [currentTarget],
+    }),
+    observeBrowserTarget: async () => observation(BROWSER_SESSION_ID, currentTarget),
+    actInBrowser: async (_workspace, _browser, request) => {
+      requests.push(request);
+      return receipt(observed, request.operationId);
+    },
+  });
+  const hook = await renderHook(
+    () =>
+      useBrowserSession({
+        client,
+        workspaceId: WORKSPACE_ID,
+        browserSessionId: BROWSER_SESSION_ID,
+      }),
+    undefined,
+  );
+  try {
+    await flush();
+    const captured = await hook.result.current.observeForInput();
+    const action = {
+      type: "select",
+      locator: { kind: "ref", ref: "select-1" },
+      values: ["high"],
+    } as const;
+    await actRun(() =>
+      hook.result.current.actFromObservation({ ...action, values: [...action.values] }, captured),
+    );
+    expect(requests[0]).toMatchObject({
+      targetId: captured.target.id,
+      expectedTargetGeneration: captured.target.targetGeneration,
+      expectedDocumentGeneration: captured.target.documentGeneration,
+      expectedFrameId: captured.frameId,
+    });
+    currentTarget = { ...currentTarget, documentGeneration: "new-document" };
+    await actRun(() => hook.result.current.refresh());
+    await expect(
+      hook.result.current.actFromObservation({ ...action, values: [...action.values] }, captured),
+    ).rejects.toThrow("page changed");
+    expect(requests).toHaveLength(1);
+  } finally {
+    await hook.unmount();
+  }
+});

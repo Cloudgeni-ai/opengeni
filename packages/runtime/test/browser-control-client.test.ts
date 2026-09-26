@@ -35,6 +35,47 @@ afterEach(async () => {
 });
 
 describe("BrowserControlClient", () => {
+  for (const capability of [undefined, true, false, "true"]) {
+    test(`validates optional input batching capability (${capability})`, async () => {
+      const server = Bun.serve({
+        port: 0,
+        async fetch(request) {
+          const body = (await request.json()) as { grantId: string; expiresAt: string };
+          return success({
+            grantId: body.grantId,
+            expiresAt: body.expiresAt,
+            ...(capability !== undefined ? { fencedInputBatches: capability } : {}),
+          });
+        },
+      });
+      const placement = await localPlacement();
+      try {
+        const client = new BrowserControlClient(placement.session, {
+          adminToken,
+          port: server.port,
+        });
+        const grant = {
+          grantId: randomUUID(),
+          token: viewToken,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        };
+        const pending = client.createViewGrant(
+          { browserSessionId: randomUUID(), controllerGeneration: "controller-1" },
+          grant,
+        );
+        if (capability === undefined || capability === true) {
+          expect(await pending).toEqual({
+            grantId: grant.grantId,
+            expiresAt: grant.expiresAt,
+            ...(capability === true ? { fencedInputBatches: true } : {}),
+          });
+        } else await expect(pending).rejects.toBeInstanceOf(BrowserControlProtocolError);
+      } finally {
+        await server.stop(true);
+      }
+    });
+  }
+
   for (const failureStage of ["fetch", "body"] as const) {
     test(`does not replay dispatched mutations after a ${failureStage} disconnect`, async () => {
       const controller = await disconnectingController(failureStage);
@@ -268,6 +309,86 @@ describe("BrowserControlClient", () => {
         await expect(invoke()).rejects.toBeInstanceOf(BrowserControlProtocolError);
         expect(requests - beforeMalformed).toBe(1);
       }
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("reports legacy controller schema and DOM routes without replaying or restarting", async () => {
+    const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+    const requests: string[] = [];
+    let rejected = { status: 400, code: "invalid_action", message: "browser action is invalid" };
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        requests.push(`${request.method} ${new URL(request.url).pathname}`);
+        return failure(rejected.status, rejected.code, rejected.message);
+      },
+    });
+    const client = new BrowserControlClient(
+      {
+        resolveExposedPort: async () => ({ host: "127.0.0.1", port: server.port, tls: false }),
+        exec: async () => {
+          throw new Error("must preserve the existing controller");
+        },
+      },
+      { adminToken },
+    );
+    const browser = client.sessionClient({ reference, controlToken, viewToken });
+    const command = {
+      protocolVersion: 1 as const,
+      operationId: randomUUID(),
+      ...reference,
+      targetId: "target-1",
+      expectedTargetGeneration: "target-1",
+      expectedDocumentGeneration: "document-1",
+      expectedFrameId: "frame-1",
+      actor: { kind: "system" as const, subjectId: "test" },
+      action: { type: "viewport" as const, width: 390, height: 844, mobile: true },
+    };
+    const read = {
+      kind: "element" as const,
+      locator: { kind: "css" as const, selector: "#name" },
+      expectedTargetGeneration: command.expectedTargetGeneration,
+      expectedDocumentGeneration: command.expectedDocumentGeneration,
+      expectedFrameId: command.expectedFrameId,
+    };
+    try {
+      await expect(browser.action(command)).rejects.toMatchObject({
+        status: 409,
+        error: {
+          code: "unsupported",
+          retryable: false,
+          message: expect.stringContaining("controller image"),
+        },
+      });
+      rejected = { status: 404, code: "resource_not_found", message: "route not found" };
+      await expect(browser.readDom(command.targetId, read)).rejects.toMatchObject({
+        status: 409,
+        error: {
+          code: "unsupported",
+          retryable: false,
+          message: expect.stringContaining("focused DOM reads"),
+        },
+      });
+      expect(requests).toHaveLength(2);
+      for (const error of [
+        { status: 404, code: "target_not_found", message: "browser target not found" },
+        { status: 404, code: "resource_not_found", message: "browser session not found" },
+        { status: 403, code: "permission_denied", message: "protected authentication is active" },
+      ]) {
+        rejected = error;
+        await expect(browser.readDom(command.targetId, read)).rejects.toMatchObject({
+          status: error.status,
+          error: { code: error.code, message: error.message },
+        });
+      }
+      rejected = { status: 400, code: "invalid_action", message: "browser element is covered" };
+      await expect(browser.action(command)).rejects.toMatchObject({
+        status: 400,
+        error: { code: rejected.code, message: rejected.message },
+      });
+      expect(requests).toHaveLength(6);
     } finally {
       server.stop(true);
     }

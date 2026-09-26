@@ -300,7 +300,7 @@ export type PlacementBrowserNetworkRoute = {
 };
 
 export type PlacementBrowserTransport =
-  | { kind: "managed"; engine?: "chromium" | "lightpanda" }
+  | { kind: "managed"; engine?: "chromium" | "lightpanda"; ephemeralPartition?: string }
   | {
       kind: "external_provider";
       providerId: "browserbase" | "kernel";
@@ -322,6 +322,7 @@ export type PlacementBrowserTransport =
     };
 
 export type BrowserViewGrant = {
+  fencedInputBatches?: true;
   grantId: string;
   expiresAt: string;
 };
@@ -434,6 +435,14 @@ export class BrowserControlRequestError extends Error {
 
 export class BrowserControlUnsupportedError extends Error {
   readonly name = "BrowserControlUnsupportedError";
+}
+
+function browserControllerCompatibilityError(feature: string): BrowserControlRequestError {
+  return new BrowserControlRequestError(409, {
+    code: "unsupported",
+    message: `browser controller does not support ${feature}; update the placement's controller image to match this OpenGeni release`,
+    retryable: false,
+  });
 }
 
 /** Install one placement-stable admin credential and start the pinned controller. */
@@ -710,7 +719,16 @@ export class BrowserControlClient {
     if (!isRecord(data) || data.grantId !== grantId || data.expiresAt !== expiresAt) {
       throw new BrowserControlProtocolError("browser controller returned malformed view grant");
     }
-    return { grantId, expiresAt };
+    if (data.fencedInputBatches !== undefined && data.fencedInputBatches !== true) {
+      throw new BrowserControlProtocolError(
+        "browser controller returned invalid input batching capability",
+      );
+    }
+    return {
+      grantId,
+      expiresAt,
+      ...(data.fencedInputBatches === true ? { fencedInputBatches: true } : {}),
+    };
   }
 
   async createComputerViewGrant(
@@ -1525,14 +1543,28 @@ export class BrowserControlSessionClient {
     requestInput: BrowserDomReadRequestValue,
   ): Promise<BrowserDomReadResponseValue> {
     const request = BrowserDomReadRequest.parse(requestInput);
-    const result = BrowserDomReadResponse.parse(
-      await this.parent.requestForSession({
+    let data: unknown;
+    try {
+      data = await this.parent.requestForSession({
         method: "POST",
         path: this.targetPath(targetId, "dom-read"),
         token: this.viewToken,
         body: request,
-      }),
-    );
+      });
+    } catch (error) {
+      // Protocol v1 predates focused DOM reads. Distinguish that exact legacy
+      // route response from a missing target/session; neither is safe to retry.
+      if (
+        error instanceof BrowserControlRequestError &&
+        error.status === 404 &&
+        error.error.code === "resource_not_found" &&
+        error.error.message === "route not found"
+      ) {
+        throw browserControllerCompatibilityError("focused DOM reads");
+      }
+      throw error;
+    }
+    const result = BrowserDomReadResponse.parse(data);
     if (
       result.browserSessionId !== this.reference.browserSessionId ||
       result.controllerGeneration !== this.reference.controllerGeneration ||
@@ -1594,14 +1626,29 @@ export class BrowserControlSessionClient {
     ) {
       throw new BrowserControlProtocolError("browser action targets another controller binding");
     }
-    return BrowserActionReceipt.parse(
-      await this.parent.requestForSession({
+    let data: unknown;
+    try {
+      data = await this.parent.requestForSession({
         method: "POST",
         path: this.path("actions"),
         token: this.controlToken,
         body: parsed,
-      }),
-    );
+      });
+    } catch (error) {
+      // This command already passed the release's schema. The controller's
+      // exact parser rejection proves a schema mismatch, not invalid tool use.
+      // Do not replay the action, restart the controller, or lose live tabs.
+      if (
+        error instanceof BrowserControlRequestError &&
+        error.status === 400 &&
+        error.error.code === "invalid_action" &&
+        error.error.message === "browser action is invalid"
+      ) {
+        throw browserControllerCompatibilityError("this browser action");
+      }
+      throw error;
+    }
+    return BrowserActionReceipt.parse(data);
   }
 
   /** API-broker-only file authority path. Signed read URLs are materialized by
@@ -2369,7 +2416,13 @@ function placementBrowserTransport(input: PlacementBrowserTransport): PlacementB
     ) {
       throw new BrowserControlProtocolError("managed browser engine is invalid");
     }
-    return { kind: "managed", engine: input.engine ?? "chromium" };
+    if (input.ephemeralPartition !== undefined && !SHA256_PATTERN.test(input.ephemeralPartition))
+      throw new Error("ephemeral browser partition is invalid");
+    return {
+      kind: "managed",
+      engine: input.engine ?? "chromium",
+      ...(input.ephemeralPartition ? { ephemeralPartition: input.ephemeralPartition } : {}),
+    };
   }
   if (input.kind === "external_provider") {
     if (input.providerId !== "browserbase" && input.providerId !== "kernel") {

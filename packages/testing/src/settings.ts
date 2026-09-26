@@ -284,6 +284,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     blaxelTtl: undefined,
     cloudflareWorkerUrl: undefined,
     cloudflareApiKey: undefined,
+    experimentalBrowserContextPoolEnabled: false,
     browserbaseApiKey: undefined,
     kernelApiKey: undefined,
     kernelEndpoint: undefined,

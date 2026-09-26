@@ -4,6 +4,8 @@ import { testSettings } from "@opengeni/testing";
 import {
   initializeWorkerOutcomeMetrics,
   recordCreditBalanceGauges,
+  recordVerifiedSignupTrialDeploymentFlagGauge,
+  recordVerifiedSignupTrialSwitchGauge,
   recordWorkerDeathRecoveryMetrics,
   TurnLifecycleMetrics,
 } from "../src/observability-metrics";
@@ -117,6 +119,39 @@ describe("turn lifecycle metrics", () => {
     expect(metrics).toMatch(
       new RegExp(`opengeni_credit_balance_micros\\{[^}]*account_id="${accountB}"[^}]*\\} 0`),
     );
+  });
+
+  test("records the verified signup trial runtime switch as a 0/1 gauge", async () => {
+    const observability = createObservability(testSettings(), { component: "worker-control" });
+
+    recordVerifiedSignupTrialSwitchGauge(observability, true);
+    let metrics = await observability.prometheusMetrics();
+    expect(metrics).toContain(
+      "# HELP opengeni_verified_signup_trial_credits_runtime_enabled Whether the runtime switch allows new verified signup trial credit grants (1) or blocks them (0).",
+    );
+    expect(metrics).toMatch(/opengeni_verified_signup_trial_credits_runtime_enabled\{[^}]*\} 1/);
+
+    recordVerifiedSignupTrialSwitchGauge(observability, false);
+    metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_verified_signup_trial_credits_runtime_enabled\{[^}]*\} 0/);
+  });
+
+  test("records the verified signup trial deployment master opt-in as its own 0/1 gauge", async () => {
+    const observability = createObservability(testSettings(), { component: "worker-control" });
+
+    recordVerifiedSignupTrialSwitchGauge(observability, true);
+    recordVerifiedSignupTrialDeploymentFlagGauge(observability, false);
+    let metrics = await observability.prometheusMetrics();
+    expect(metrics).toContain(
+      "# HELP opengeni_verified_signup_trial_credits_deployment_enabled Whether the OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in is on (1) or off (0) in this deployment's configuration.",
+    );
+    // A live runtime switch alone must not read as an active trial.
+    expect(metrics).toMatch(/opengeni_verified_signup_trial_credits_deployment_enabled\{[^}]*\} 0/);
+    expect(metrics).toMatch(/opengeni_verified_signup_trial_credits_runtime_enabled\{[^}]*\} 1/);
+
+    recordVerifiedSignupTrialDeploymentFlagGauge(observability, true);
+    metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_verified_signup_trial_credits_deployment_enabled\{[^}]*\} 1/);
   });
 
   test("records fenced worker-death recovery and terminal exhaustion outcomes", async () => {
