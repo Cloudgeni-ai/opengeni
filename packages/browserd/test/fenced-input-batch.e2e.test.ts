@@ -43,8 +43,10 @@ e2e(
       driver,
     });
     let cdp: CdpConnection | null = null;
+    // Autofocus runs asynchronously; the fixture must establish its editing
+    // target before testing raw typing, including after navigation in a batch.
     const fixture = () =>
-      `data:text/html,${encodeURIComponent('<!doctype html><title>Typing proof</title><input autofocus aria-label="Text"><script>globalThis.events=[]; for(const type of ["beforeinput","input"])document.querySelector("input").addEventListener(type,e=>events.push([e.type,e.data]));</script>')}`;
+      `data:text/html,${encodeURIComponent('<!doctype html><title>Typing proof</title><input aria-label="Text"><script>globalThis.events=[]; for(const type of ["beforeinput","input"])document.querySelector("input").addEventListener(type,e=>events.push([e.type,e.data]));document.querySelector("input").focus();</script>')}`;
     const command = (
       observation: BrowserObservation,
       action: BrowserActionCommand["action"],
@@ -77,6 +79,9 @@ e2e(
             { sessionId: attached.sessionId },
           )
         ).result.value;
+      expect(await evaluate('document.activeElement === document.querySelector("input")')).toBe(
+        true,
+      );
       const input = command(initial, {
         type: "batch",
         fenceEachAction: true,
