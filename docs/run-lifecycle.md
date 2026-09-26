@@ -2286,7 +2286,10 @@ session's durable wake revision. An active goal has a second, goal-owned
 monotonic wake/observed pair: terminal settlement advances it in the same
 transaction as the workflow wake, and continuation materialization observes it
 only alongside the typed update, event pair, usage fact, session transition,
-and successor workflow wake. Single-target producers signal directly;
+and successor workflow wake. Single-target producers signal directly, including
+an internal update that coalesces into a still-undelivered, often future-dated
+revision such as a `wait_for_input` deadline, so it never waits for the
+10-second dispatcher tick;
 recursive controls trigger the bounded dispatcher once without loading the
 affected tree into API memory. Successful delivery acknowledges the exact
 revision, and the dispatcher retries only due unacknowledged rows.
