@@ -33,6 +33,7 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      enableServiceLinks: false
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
       {{- if $priorityClassName }}
