@@ -30,6 +30,8 @@ test("Lightpanda create retries retain their legacy digest without accepting cha
     ...input,
     capabilities: { ...input.capabilities, screenshots: true },
   });
+  // Computed by the pre-correction version 4 implementation.
+  expect(legacyDigest).toBe("b6cea0271b4727af2da292336d9a9487bea9fb66c4c30bf87008cc6007c0f531");
   expect(browserSessionCreateRequestDigest(input)).toBe(legacyDigest);
   expect(browserSessionCreateRequestDigest({ ...input, name: "Other browser" })).not.toBe(
     legacyDigest,
