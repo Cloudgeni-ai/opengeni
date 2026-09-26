@@ -11,7 +11,9 @@ import {
   createDb,
   createSession,
   enqueueSessionTurn,
+  getOrCreateSessionSystemUpdateOutbox,
   getSessionHistoryItems,
+  getSessionSystemUpdateOutboxByDedupeKey,
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
   settleSessionIdleWithParentOutbox,
@@ -115,6 +117,20 @@ async function startSession(
 type Started = Awaited<ReturnType<typeof startSession>>;
 
 async function completeTurn(grant: Grant, started: Started, output: string): Promise<void> {
+  await settleTurn(grant, started, [
+    { type: "agent.message.completed" as const, payload: { text: output } },
+    { type: "turn.completed" as const, payload: { output } },
+  ]);
+}
+
+async function settleTurn(
+  grant: Grant,
+  started: Started,
+  events: Array<{
+    type: "agent.message.completed" | "turn.completed";
+    payload: Record<string, unknown>;
+  }>,
+): Promise<void> {
   const settled = await applySessionTurnSettlement(client.db, grant.workspaceId, {
     sessionId: started.session.id,
     turnId: started.turn.id,
@@ -123,12 +139,31 @@ async function completeTurn(grant: Grant, started: Started, output: string): Pro
     turnStatus: "completed",
     sessionStatus: "idle",
     activeTurnId: null,
-    events: [
-      { type: "agent.message.completed" as const, payload: { text: output } },
-      { type: "turn.completed" as const, payload: { output } },
-    ],
+    events,
   });
   expect(settled.action).toBe("settled");
+}
+
+/** A new message to an idle session, claimed as its next turn. */
+async function nextTurn(grant: Grant, started: Started, prompt: string): Promise<Started> {
+  await enqueueSessionTurn(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId: started.session.id,
+    triggerEventId: crypto.randomUUID(),
+    temporalWorkflowId: `session-${started.session.id}`,
+    source: "user",
+    prompt,
+    resources: [],
+    tools: [],
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+    metadata: {},
+    initiator: { kind: "subject", subjectId: grant.subjectId },
+  });
+  return { session: started.session, ...(await claim(grant, started.session.id)) };
 }
 
 function notifyServices(): NotifyServices {
@@ -183,24 +218,7 @@ async function acknowledgedSequence(subjectId: string, sessionId: string): Promi
 /** The exact durable model memory row the parent's next inference receives. */
 async function claimedParentBatch(grant: Grant, parent: Started, childSessionId: string) {
   await completeTurn(grant, parent, "Delegated the work.");
-  await enqueueSessionTurn(client.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    sessionId: parent.session.id,
-    triggerEventId: crypto.randomUUID(),
-    temporalWorkflowId: `session-${parent.session.id}`,
-    source: "user",
-    prompt: "what did the worker find?",
-    resources: [],
-    tools: [],
-    model: "scripted-model",
-    reasoningEffort: "medium",
-    latencyMode: "standard",
-    sandboxBackend: "none",
-    metadata: {},
-    initiator: { kind: "subject", subjectId: grant.subjectId },
-  });
-  await claim(grant, parent.session.id);
+  await nextTurn(grant, parent, "what did the worker find?");
   const history = await getSessionHistoryItems(client.db, grant.workspaceId, parent.session.id);
   const batch = history
     .map(({ item }) => item.content)
@@ -308,5 +326,72 @@ describe("child_terminal_result carries the child's final answer", () => {
     );
     expect(pending?.kind).toBe("child_terminal_result");
     expect(pending?.payload).not.toHaveProperty("finalAnswer");
+  });
+
+  test("a newer task that stopped at a segment limit reports no answer, not the older one", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "Run both tasks." });
+    const child = await startSession(grant, { message: "Task A.", parent });
+    await completeTurn(grant, child, "Answer to task A.");
+    const taskB = await nextTurn(grant, child, "Task B.");
+    // What the worker settles when a goal-less turn exhausts its budget.
+    await settleTurn(grant, taskB, [
+      {
+        type: "turn.completed",
+        payload: { output: "", segmentLimit: "budget_exhausted", detail: "Budget exhausted." },
+      },
+    ]);
+
+    await markChildIdle(grant, child);
+
+    const [pending] = await listOutstandingSessionSystemUpdates(
+      client.db,
+      grant.workspaceId,
+      parent.session.id,
+    );
+    expect(pending?.kind).toBe("child_terminal_result");
+    expect(pending?.payload).not.toHaveProperty("finalAnswer");
+  });
+
+  test("enrichment never replaces the answer the idle settlement froze", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "Find the owner." });
+    const child = await startSession(grant, { message: "Look it up.", parent });
+    const answer = "The owner is the platform team.";
+    await completeTurn(grant, child, answer);
+    const settled = await settleSessionIdleWithParentOutbox(
+      client.db,
+      grant.workspaceId,
+      child.session.id,
+    );
+    if (settled.action !== "settled" || !settled.notifyParent) {
+      throw new Error("child idle boundary did not notify its parent");
+    }
+    const dedupeKey = `child-completion:${child.session.id}:${settled.episodeKey}`;
+    const committed = await getSessionSystemUpdateOutboxByDedupeKey(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      dedupeKey,
+    });
+    if (!committed) throw new Error("idle settlement committed no outbox row");
+    expect(committed.payload).toHaveProperty("finalAnswer.text", answer);
+
+    // An enrichment built without the committed content (a failed read of the
+    // row, or an older enricher) adds its facts but keeps the frozen answer.
+    const { id: _id, status: _status, ...row } = committed;
+    const enriched = await getOrCreateSessionSystemUpdateOutbox(client.db, {
+      ...row,
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: child.session.id,
+        status: "idle",
+        goal: { status: "complete", text: "Find the owner." },
+      },
+    });
+
+    expect(enriched.payload).toMatchObject({
+      finalAnswer: { text: answer, truncated: false },
+      goal: { status: "complete" },
+    });
   });
 });

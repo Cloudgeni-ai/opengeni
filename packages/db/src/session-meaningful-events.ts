@@ -77,10 +77,12 @@ export function meaningfulSessionSequenceSql(
 
 /** The child's newest ordinary turn outcome. Only a result-bearing
  * `turn.completed` here is the child's current answer: an older answer behind a
- * newer failed, cancelled, or superseded turn is never reported as the result.
- * Maintenance and continuation-segment settlements are not outcomes. Each type
- * probe walks the (workspace, session, type, sequence) index backwards, and only
- * the one selected row's payload is returned. */
+ * newer failed, cancelled, superseded, or segment-limited turn is never
+ * reported as the result. A segment-limit completion (`max_turns`,
+ * `budget_exhausted`) is the outcome of the turn that stopped there, and its
+ * empty output means "no answer". Only standalone maintenance is not an
+ * outcome. Each type probe walks the (workspace, session, type, sequence) index
+ * backwards, and only the one selected row's payload is returned. */
 export function childLatestTurnOutcomeSql(workspaceId: SQLWrapper, sessionId: SQLWrapper): SQL {
   return sql`with latest as (
     select outcome.sequence from session_events outcome
@@ -88,8 +90,7 @@ export function childLatestTurnOutcomeSql(workspaceId: SQLWrapper, sessionId: SQ
       and outcome.type in ('turn.completed', 'turn.failed', 'turn.cancelled', 'turn.superseded')
       and outcome.duplicate_of_event_id is null
       and (outcome.turn_association is null or outcome.turn_association = 'current')
-      and (outcome.type <> 'turn.completed'
-        or not (outcome.payload ?| array['maintenance', 'segmentLimit']))
+      and (outcome.type <> 'turn.completed' or not (outcome.payload ? 'maintenance'))
     order by outcome.sequence desc limit 1
   )
   select outcome.sequence, outcome.type, outcome.payload,

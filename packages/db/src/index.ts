@@ -529,6 +529,7 @@ import {
   SessionControlInvariantError,
   updateSessionCommandReceiptResult,
   type SessionTurnAttemptOutcome,
+  WorkspaceControlBusyError,
   type WorkspaceControlRow,
 } from "./session-control";
 import { ensureManagedHumanPersonalWorkspace } from "./managed-human-provisioning";
@@ -66957,12 +66958,15 @@ export async function acknowledgeConsumedChildEvents(
 /**
  * The parent's exact live attempt has just received a direct child's complete
  * final answer from a read tool. A still-pending idle `child_terminal_result`
- * reporting that answer (or an older one) would only start another inference
- * that repeats it, so it is superseded, like a terminal `command_read`
- * suppresses its pending command notification. The canonical row stays as
- * audit truth; claimed history is never touched. The caller proves the read
- * returned whole content; this transaction proves the attempt is still the
- * session's current one and that each sequence is a result-bearing answer.
+ * reporting exactly that answer would only start another inference that
+ * repeats it, so it is superseded, like a terminal `command_read` suppresses
+ * its pending command notification. A pending result that reports a different
+ * answer (an older one the parent skipped past) stays pending. The canonical
+ * row stays as audit truth; claimed history is never touched. The caller proves
+ * the read returned whole content; this transaction proves the attempt is still
+ * the session's current one and that each sequence is a result-bearing answer.
+ * It is best effort: a busy workspace control prefix skips it, and the result
+ * is then delivered normally.
  */
 export async function supersedeConsumedChildTerminalResults(
   db: Database,
@@ -67012,124 +67016,139 @@ export async function supersedeConsumedChildTerminalResults(
     return row;
   });
   if (!candidate) return { supersededUpdateIds: [], events: [] };
-  return await withSessionActivityRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
-          workspaceId: input.workspaceId,
-          controlLock: "share",
-          sessionIds: [input.sessionId],
-        });
-        const session = locks.sessions[0];
-        if (
-          !session ||
-          session.accountId !== input.accountId ||
-          session.activeTurnId !== input.turnId
-        ) {
-          return { supersededUpdateIds: [], events: [] };
-        }
-        const [attempt] = await tx
-          .select({ id: schema.sessionTurnAttempts.id })
-          .from(schema.sessionTurnAttempts)
-          .where(
-            and(
-              eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
-              eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
-              eq(schema.sessionTurnAttempts.turnId, input.turnId),
-              eq(schema.sessionTurnAttempts.id, input.attemptId),
-              eq(schema.sessionTurnAttempts.executionGeneration, input.executionGeneration),
-              inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
-            ),
-          )
-          .limit(1);
-        if (!attempt) return { supersededUpdateIds: [], events: [] };
-        const supersededUpdateIds: string[] = [];
-        for (const child of children) {
-          // Only a returned result-bearing answer proves consumption; a
-          // commentary message or goal fact read alongside it does not.
-          const [answer] = await tx
-            .select({
-              sequence: sql<number>`max(${schema.sessionEvents.sequence})::int`,
-            })
-            .from(schema.sessionEvents)
-            .innerJoin(
-              schema.sessions,
-              and(
-                eq(schema.sessions.workspaceId, schema.sessionEvents.workspaceId),
-                eq(schema.sessions.id, schema.sessionEvents.sessionId),
-                eq(schema.sessions.parentSessionId, input.sessionId),
-              ),
-            )
+  try {
+    return await withSessionActivityRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (tx) => {
+          // A request-scoped writer: bound the shared control prefix wait.
+          await lockWorkspaceInferenceControl(
+            tx as unknown as Database,
+            input.workspaceId,
+            "share",
+            {
+              lockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
+            },
+          );
+          const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            controlLock: "none",
+            sessionIds: [input.sessionId],
+          });
+          const session = locks.sessions[0];
+          if (
+            !session ||
+            session.accountId !== input.accountId ||
+            session.activeTurnId !== input.turnId
+          ) {
+            return { supersededUpdateIds: [], events: [] };
+          }
+          const [attempt] = await tx
+            .select({ id: schema.sessionTurnAttempts.id })
+            .from(schema.sessionTurnAttempts)
             .where(
               and(
-                eq(schema.sessionEvents.workspaceId, input.workspaceId),
-                eq(schema.sessionEvents.sessionId, child.sessionId),
-                eq(schema.sessionEvents.type, "turn.completed"),
-                inArray(schema.sessionEvents.sequence, child.sequences),
-                completeMeaningfulSessionEventSql("session_events"),
+                eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+                eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+                eq(schema.sessionTurnAttempts.turnId, input.turnId),
+                eq(schema.sessionTurnAttempts.id, input.attemptId),
+                eq(schema.sessionTurnAttempts.executionGeneration, input.executionGeneration),
+                inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+              ),
+            )
+            .limit(1);
+          if (!attempt) return { supersededUpdateIds: [], events: [] };
+          const supersededUpdateIds: string[] = [];
+          for (const child of children) {
+            // Only a returned result-bearing answer proves consumption; a
+            // commentary message or goal fact read alongside it does not.
+            const answers = await tx
+              .select({ sequence: schema.sessionEvents.sequence })
+              .from(schema.sessionEvents)
+              .innerJoin(
+                schema.sessions,
+                and(
+                  eq(schema.sessions.workspaceId, schema.sessionEvents.workspaceId),
+                  eq(schema.sessions.id, schema.sessionEvents.sessionId),
+                  eq(schema.sessions.parentSessionId, input.sessionId),
+                ),
+              )
+              .where(
+                and(
+                  eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                  eq(schema.sessionEvents.sessionId, child.sessionId),
+                  eq(schema.sessionEvents.type, "turn.completed"),
+                  inArray(schema.sessionEvents.sequence, child.sequences),
+                  completeMeaningfulSessionEventSql("session_events"),
+                ),
+              );
+            const consumed = answers.map((answer) => Number(answer.sequence));
+            if (consumed.length === 0) continue;
+            const rows = await tx
+              .update(schema.sessionSystemUpdates)
+              .set({ state: "superseded" })
+              .where(
+                and(
+                  eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+                  eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                  eq(schema.sessionSystemUpdates.kind, "child_terminal_result"),
+                  eq(schema.sessionSystemUpdates.sourceId, child.sessionId),
+                  eq(schema.sessionSystemUpdates.state, "pending"),
+                  eq(schema.sessionSystemUpdates.classification, "success"),
+                  sql`${schema.sessionSystemUpdates.payload} ->> 'status' = 'idle'`,
+                  sql`jsonb_typeof(${schema.sessionSystemUpdates.payload} -> 'finalAnswer' -> 'sequence') = 'number'`,
+                  sql`(${schema.sessionSystemUpdates.payload} -> 'finalAnswer' ->> 'sequence')::numeric in (${sql.join(
+                    consumed.map((sequence) => sql`${sequence}`),
+                    sql`, `,
+                  )})`,
+                ),
+              )
+              .returning({ id: schema.sessionSystemUpdates.id });
+            supersededUpdateIds.push(...rows.map((row) => row.id));
+          }
+          if (supersededUpdateIds.length === 0) return { supersededUpdateIds, events: [] };
+          supersededUpdateIds.sort();
+          const now = new Date();
+          const [event] = await tx
+            .insert(schema.sessionEvents)
+            .values(
+              withLosslessContentWriteVersion(
+                {
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: session.lastSequence + 1,
+                  type: "system.update.cancelled",
+                  payload: {
+                    updateIds: supersededUpdateIds,
+                    count: supersededUpdateIds.length,
+                    reason: "consumed_by_parent_read",
+                  },
+                  occurredAt: now,
+                },
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
+            .returning();
+          if (!event) throw new Error("Failed to append consumed child result event");
+          await tx
+            .update(schema.sessions)
+            .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
               ),
             );
-          const consumedThrough = answer?.sequence ?? null;
-          if (consumedThrough === null) continue;
-          const rows = await tx
-            .update(schema.sessionSystemUpdates)
-            .set({ state: "superseded" })
-            .where(
-              and(
-                eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
-                eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
-                eq(schema.sessionSystemUpdates.kind, "child_terminal_result"),
-                eq(schema.sessionSystemUpdates.sourceId, child.sessionId),
-                eq(schema.sessionSystemUpdates.state, "pending"),
-                eq(schema.sessionSystemUpdates.classification, "success"),
-                sql`${schema.sessionSystemUpdates.payload} ->> 'status' = 'idle'`,
-                sql`jsonb_typeof(${schema.sessionSystemUpdates.payload} -> 'finalAnswer' -> 'sequence') = 'number'`,
-                sql`(${schema.sessionSystemUpdates.payload} -> 'finalAnswer' ->> 'sequence')::numeric <= ${consumedThrough}`,
-              ),
-            )
-            .returning({ id: schema.sessionSystemUpdates.id });
-          supersededUpdateIds.push(...rows.map((row) => row.id));
-        }
-        if (supersededUpdateIds.length === 0) return { supersededUpdateIds, events: [] };
-        supersededUpdateIds.sort();
-        const now = new Date();
-        const [event] = await tx
-          .insert(schema.sessionEvents)
-          .values(
-            withLosslessContentWriteVersion(
-              {
-                accountId: session.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                sequence: session.lastSequence + 1,
-                type: "system.update.cancelled",
-                payload: {
-                  updateIds: supersededUpdateIds,
-                  count: supersededUpdateIds.length,
-                  reason: "consumed_by_parent_read",
-                },
-                occurredAt: now,
-              },
-              "payload",
-              "payloadCodecVersion",
-            ),
-          )
-          .returning();
-        if (!event) throw new Error("Failed to append consumed child result event");
-        await tx
-          .update(schema.sessions)
-          .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          );
-        return { supersededUpdateIds, events: [mapEvent(event)] };
-      }),
-  );
+          return { supersededUpdateIds, events: [mapEvent(event)] };
+        }),
+    );
+  } catch (error) {
+    if (error instanceof WorkspaceControlBusyError) return { supersededUpdateIds: [], events: [] };
+    throw error;
+  }
 }
 
 /** Bounded operator reconciliation, dry-run by default. No timestamps, session
@@ -73292,9 +73311,10 @@ export async function settleSessionIdleWithParentOutbox(
 
 /**
  * The child's current final answer for its idle terminal result. Null when its
- * newest turn ended without an answer, when it has no answer text, or when the
- * stored answer row is itself only a retained preview: the parent then reads
- * the child's events instead of receiving a partial copy presented as whole.
+ * newest turn ended without an answer (including one that stopped at a segment
+ * limit), when it has no answer text, or when the stored answer row is itself
+ * only a retained preview: the parent then reads the child's events instead of
+ * receiving an older answer or a partial copy presented as the result.
  */
 async function childFinalAnswerTx(
   tx: Database,
@@ -73313,21 +73333,13 @@ async function childFinalAnswerTx(
   const record = payload as Record<string, unknown>;
   const truncation = record.truncation as { truncated?: unknown } | null | undefined;
   if (truncation?.truncated === true || record.sourceOmitted === true) return null;
+  if (Object.hasOwn(record, "segmentLimit")) return null;
   if (typeof record.output !== "string" || record.output.length === 0) return null;
   return childTerminalResultFinalAnswer({
     childSessionId,
     sequence: Number(outcome.sequence),
     output: record.output,
   });
-}
-
-export function buildChildCompletionDigest(summaries: string[], trailing: string): string {
-  if (summaries.length <= 1) {
-    return [summaries[0] ?? "", "", trailing].join("\n");
-  }
-  const header = `${summaries.length} worker sessions you spawned reached a terminal state:`;
-  const numbered = summaries.map((summary, index) => `${index + 1}. ${summary}`).join("\n\n");
-  return [header, "", numbered, "", trailing].join("\n");
 }
 
 export async function setTemporalWorkflowId(
@@ -77905,6 +77917,28 @@ export async function getOrCreateSessionSystemUpdateOutbox(
         "System-update outbox source and target sessions must exist in the same workspace",
       );
     }
+    // The producing lifecycle transaction may already have committed this row
+    // with content only it could freeze (the child's final answer, or its
+    // consumption evidence). Enrichment adds facts on top of that content and
+    // never replaces it, under the same row lock the upsert takes.
+    const [committed] = await scopedDb
+      .select({
+        kind: schema.sessionSystemUpdateOutbox.kind,
+        payload: schema.sessionSystemUpdateOutbox.payload,
+        payloadCodecVersion: schema.sessionSystemUpdateOutbox.payloadCodecVersion,
+      })
+      .from(schema.sessionSystemUpdateOutbox)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdateOutbox.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdateOutbox.dedupeKey, input.dedupeKey),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    const payload = committed
+      ? withCommittedChildResultContent(committed, input.payload)
+      : input.payload;
     const [row] = await scopedDb
       .insert(schema.sessionSystemUpdateOutbox)
       .values(
@@ -77920,7 +77954,7 @@ export async function getOrCreateSessionSystemUpdateOutbox(
               classification: input.classification,
               sourceId: input.sourceId,
               summary: input.summary,
-              payload: input.payload,
+              payload,
               lineage: input.lineage,
               personalConnectionDelegations: input.personalConnectionDelegations,
               mcpAccountBindings: input.mcpAccountBindings,
@@ -77945,7 +77979,7 @@ export async function getOrCreateSessionSystemUpdateOutbox(
               classification: input.classification,
               sourceId: input.sourceId,
               summary: input.summary,
-              payload: input.payload,
+              payload,
               updatedAt: new Date(),
             },
             "summary",
@@ -78006,6 +78040,32 @@ export async function getOrCreateSessionSystemUpdateOutbox(
       ),
     };
   });
+}
+
+/** Content the child's own lifecycle transaction froze into its terminal
+ * result. A committed payload that no longer parses is rewritten from the
+ * enrichment alone, as before this content existed. */
+const COMMITTED_CHILD_RESULT_CONTENT_KEYS = ["finalAnswer", "childEventEvidence"] as const;
+
+function withCommittedChildResultContent(
+  committed: { kind: string; payload: unknown; payloadCodecVersion: number | null },
+  enrichment: ChildLifecycleOutboxPayload,
+): ChildLifecycleOutboxPayload {
+  let stored: Record<string, unknown>;
+  try {
+    stored = parseChildLifecycleOutboxPayload(
+      fromPostgresLosslessJson(committed.payload, committed.payloadCodecVersion),
+      committed.kind,
+    ).payload as Record<string, unknown>;
+  } catch {
+    return enrichment;
+  }
+  if (stored.type !== enrichment.type) return enrichment;
+  const merged: Record<string, unknown> = { ...enrichment };
+  for (const key of COMMITTED_CHILD_RESULT_CONTENT_KEYS) {
+    if (Object.hasOwn(stored, key) && !Object.hasOwn(merged, key)) merged[key] = stored[key];
+  }
+  return merged as ChildLifecycleOutboxPayload;
 }
 
 export async function markSessionSystemUpdateOutboxFailed(

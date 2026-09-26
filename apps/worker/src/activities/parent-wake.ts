@@ -66,20 +66,8 @@ export async function notifyParentOfChildIdle(
     const goal = await getSessionGoal(svc.db, workspaceId, childSessionId);
     const clientEventId = `child-completion:${childSessionId}:${episodeKey}`;
     // The idle settlement committed this row with the child's frozen final
-    // answer. Enrichment adds the goal facts on top of that content; it never
-    // replaces what the producing transaction froze.
-    // An unreadable committed row must not block delivery; enrich from scratch
-    // as before.
-    const committed = await getSessionSystemUpdateOutboxByDedupeKey(svc.db, {
-      accountId: child.accountId,
-      workspaceId,
-      dedupeKey: clientEventId,
-    }).catch(() => null);
-    const payload = childCompletionPayload(
-      child,
-      goal,
-      committed?.payload.type === "child_terminal_result" ? committed.payload : null,
-    );
+    // answer. This adds the goal facts; the upsert keeps the frozen content.
+    const payload = childCompletionPayload(child, goal);
     const personalConnectionDelegations = await getSessionParentPersonalConnectionDelegations(
       svc.db,
       workspaceId,
@@ -454,10 +442,8 @@ export async function reconcilePendingSessionWorkflowWakes(
 function childCompletionPayload(
   child: Session,
   goal: SessionGoal | null,
-  committed: Extract<SessionSystemUpdatePayload, { type: "child_terminal_result" }> | null,
 ): Extract<SessionSystemUpdatePayload, { type: "child_terminal_result" }> {
   return {
-    ...committed,
     type: "child_terminal_result",
     childSessionId: child.id,
     status: "idle",

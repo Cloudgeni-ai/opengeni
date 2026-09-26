@@ -12,6 +12,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  enqueueSessionTurn,
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
   markSessionSystemUpdateOutboxDeliveredInTransaction,
@@ -161,6 +162,56 @@ async function childAnswersIntoBusyParent(
   answer: string,
 ): Promise<Attempt> {
   const child = await start(ws, "Look this up.", parent);
+  await answerAndDeliver(ws, child, answer);
+  const pending = await listOutstandingSessionSystemUpdates(
+    client.db,
+    ws.workspaceId,
+    parent.sessionId,
+  );
+  expect(pending.map((update) => update.kind)).toEqual(["child_terminal_result"]);
+  return child;
+}
+
+/** The parent sends the idle child another task, which the child claims. */
+async function nextChildTask(ws: Workspace, child: Attempt, prompt: string): Promise<Attempt> {
+  await enqueueSessionTurn(client.db, {
+    accountId: ws.accountId,
+    workspaceId: ws.workspaceId,
+    sessionId: child.sessionId,
+    triggerEventId: crypto.randomUUID(),
+    temporalWorkflowId: `session-${child.sessionId}`,
+    source: "user",
+    prompt,
+    resources: [],
+    tools: [],
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+    metadata: {},
+    initiator: { kind: "subject", subjectId: ws.subjectId },
+  });
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(client.db, ws.workspaceId, {
+    sessionId: child.sessionId,
+    workflowId: `session-${child.sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: `dispatch-${crypto.randomUUID()}`,
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") throw new Error("child turn was not claimed");
+  return {
+    sessionId: child.sessionId,
+    turnId: claimed.turn.id,
+    attemptId,
+    executionGeneration: claimed.turn.executionGeneration,
+    triggerEventId: claimed.turn.triggerEventId,
+  };
+}
+
+/** The child's claimed turn answers, and its idle result reaches the parent. */
+async function answerAndDeliver(ws: Workspace, child: Attempt, answer: string): Promise<void> {
   const settled = await applySessionTurnSettlement(client.db, ws.workspaceId, {
     sessionId: child.sessionId,
     turnId: child.turnId,
@@ -195,13 +246,6 @@ async function childAnswersIntoBusyParent(
       },
     );
   }
-  const pending = await listOutstandingSessionSystemUpdates(
-    client.db,
-    ws.workspaceId,
-    parent.sessionId,
-  );
-  expect(pending.map((update) => update.kind)).toEqual(["child_terminal_result"]);
-  return child;
 }
 
 function agentMcp(ws: Workspace, attempt: Attempt) {
@@ -369,5 +413,41 @@ describe("a parent read that returns a child's whole answer consumes its pending
     expect(accepted.supersededUpdateIds).toHaveLength(1);
     expect(accepted.events.map((event) => event.type)).toEqual(["system.update.cancelled"]);
     expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
+  });
+
+  test("reading a newer answer leaves an older unread result pending", async () => {
+    const ws = await workspace();
+    const parent = await start(ws, "Run both checks.");
+    const child = await childAnswersIntoBusyParent(ws, parent, "Check A passed.");
+    await answerAndDeliver(
+      ws,
+      await nextChildTask(ws, child, "Now run check B."),
+      "Check B failed on the replica.",
+    );
+    const results = async () =>
+      await shared.admin<Array<{ sequence: number; state: string }>>`
+        select (payload -> 'finalAnswer' ->> 'sequence')::int as sequence, state
+        from session_system_updates
+        where session_id = ${parent.sessionId} and kind = 'child_terminal_result'
+        order by sequence`;
+    const [first, second] = await results();
+    expect([first?.state, second?.state]).toEqual(["pending", "pending"]);
+
+    // The parent read only answer B (for example from a cursor past answer A).
+    const read = await supersedeConsumedChildTerminalResults(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sessionId: parent.sessionId,
+      turnId: parent.turnId,
+      attemptId: parent.attemptId,
+      executionGeneration: parent.executionGeneration,
+      children: [{ sessionId: child.sessionId, sequences: [second!.sequence] }],
+    });
+
+    expect(read.supersededUpdateIds).toHaveLength(1);
+    expect(await results()).toEqual([
+      { sequence: first!.sequence, state: "pending" },
+      { sequence: second!.sequence, state: "superseded" },
+    ]);
   });
 });

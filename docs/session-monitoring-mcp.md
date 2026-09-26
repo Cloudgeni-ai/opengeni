@@ -40,8 +40,8 @@ are restricted to complete answers; use complete result/debug reads for detailed
 failures or human-input content. No read changes append-only history or observes
 background-command completion. A complete final-answer read by the parent's exact
 live attempt does supersede that child's still-pending idle terminal result for
-the same or an older answer (`consumed_by_parent_read`), so it does not start
-another inference that repeats it; see
+exactly that answer (`consumed_by_parent_read`), so it does not start another
+inference that repeats it; a pending result for a different answer stays; see
 [`durable-agent-inputs.md`](durable-agent-inputs.md).
 
 An explicit mark-unread records the current raw event position as an intent
