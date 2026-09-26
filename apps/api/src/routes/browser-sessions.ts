@@ -3501,7 +3501,7 @@ function sourcePlacementChangedApiError(interactionResource: "browser_session"):
   });
 }
 
-function browserCreateInput(
+export function browserCreateInput(
   grant: AccessGrant,
   workspaceId: string,
   request: CreateBrowserSessionRequestValue,
@@ -3515,9 +3515,13 @@ function browserCreateInput(
   const attached = placement.kind === "attached_device";
   const external = placement.kind === "external_provider";
   const engine = attached ? ("chrome" as const) : external ? ("external" as const) : request.engine;
-  if (engine === "lightpanda" && placement.kind !== "sandbox_group") {
+  if (
+    request.engine === "lightpanda" &&
+    placement.kind !== "sandbox_group" &&
+    placement.kind !== "connected_machine"
+  ) {
     throw new BrowserControlUnsupportedError(
-      "Lightpanda is currently available only in managed agent sandboxes",
+      "Lightpanda requires a managed sandbox or Connected Machine browser placement",
     );
   }
   return {
