@@ -65,6 +65,18 @@ export function BrowserSelectControl(props: {
   const [error, setError] = useState<string | null>(null);
   const [values, setValues] = useState<string[]>([]);
   const request = useRef(0);
+  // An immutable observation may contain duplicate values and labels.
+  // Keep each option's identity stable while its selection state rerenders.
+  const optionKeys = useRef(new WeakMap<NativeOption, number>());
+  const nextOptionKey = useRef(0);
+  const optionKey = (option: NativeOption) => {
+    let key = optionKeys.current.get(option);
+    if (key === undefined) {
+      key = ++nextOptionKey.current;
+      optionKeys.current.set(option, key);
+    }
+    return key;
+  };
   useEffect(
     () => () => {
       request.current += 1;
@@ -165,13 +177,13 @@ export function BrowserSelectControl(props: {
             <p>This control is disabled.</p>
           ) : (
             <>
-              {selected.control.options.map((option, index) => {
+              {selected.control.options.map((option) => {
                 // Existing select actions accept value OR label. Refuse collisions
                 // rather than choosing an unintended duplicate or another label.
                 const ambiguous = ambiguousValue(option.value);
                 const disabled = busy || option.disabled || ambiguous;
                 return selected.control.multiple ? (
-                  <label key={index} className="my-1 flex items-center gap-2">
+                  <label key={optionKey(option)} className="my-1 flex items-center gap-2">
                     <input
                       type="checkbox"
                       disabled={disabled}
@@ -189,7 +201,7 @@ export function BrowserSelectControl(props: {
                   </label>
                 ) : (
                   <button
-                    key={index}
+                    key={optionKey(option)}
                     type="button"
                     disabled={disabled}
                     aria-pressed={option.selected}
