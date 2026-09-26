@@ -8,6 +8,8 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-computer-native")]
 
 mod adapter;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod captured_frames;
 mod clipboard;
 mod model;
 mod rpc;

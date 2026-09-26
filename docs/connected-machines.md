@@ -146,6 +146,13 @@ to another window or screen. `macos_autorelease` exercises the actual helper wit
 Objective-C missing-pool diagnostics enabled; run this ignored test explicitly
 in an unlocked local GUI session.
 
+Native window and screen pointer input uses the exact painted frame's encoded
+dimensions. Continuous capture retains superseded frame metadata for at most
+two seconds, bounded to 32 frames per target and 512 per adapter, so a newer
+capture does not reject a pending viewer click. A latest still screenshot keeps
+its existing authority during agent planning. Input clears retained frames;
+target generation, native identity and current placement checks remain enforced.
+
 On macOS, runner restart waits for the previous launchd label to disappear before
 accepting a replacement. A matching program path on a retiring job is not proof
 that the replacement started.

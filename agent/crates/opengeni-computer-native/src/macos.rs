@@ -24,6 +24,7 @@ use sha2::{Digest as _, Sha256};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
+use crate::captured_frames::CapturedFrames;
 use crate::clipboard::NativeClipboardController;
 use crate::tree::semantic_roots_equivalent;
 use crate::{
@@ -36,7 +37,6 @@ use crate::{
     NativeTargetKind, RawSemanticNode, SemanticSnapshotIndex,
 };
 
-const MAX_WINDOW_FRAME_FENCES: usize = 512;
 const MUTATION_SETTLE_DELAYS: [Duration; 4] = [
     Duration::ZERO,
     Duration::from_millis(16),
@@ -73,13 +73,43 @@ struct ScreenFrameFence {
 
 #[derive(Clone)]
 struct WindowFrameFence {
-    sequence: u64,
     frame_id: String,
     target_generation: String,
     window_id: u32,
     bounds: MacRect,
     width: u32,
     height: u32,
+}
+
+impl WindowFrameFence {
+    fn matches(&self, record: &TargetRecord) -> bool {
+        self.target_generation == record.target.target_generation
+            && record.native.window_id == Some(self.window_id)
+            && record
+                .native
+                .bounds
+                .is_some_and(|bounds| rect_nearly_equal(bounds, self.bounds, 2.0))
+    }
+}
+
+enum FrameFence {
+    Window(WindowFrameFence),
+    Screen(ScreenFrameFence),
+}
+
+impl FrameFence {
+    fn window(&self) -> Option<&WindowFrameFence> {
+        match self {
+            Self::Window(frame) => Some(frame),
+            Self::Screen(_) => None,
+        }
+    }
+    fn screen(&self) -> Option<&ScreenFrameFence> {
+        match self {
+            Self::Screen(frame) => Some(frame),
+            Self::Window(_) => None,
+        }
+    }
 }
 
 struct LiveCapture {
@@ -97,8 +127,7 @@ pub(crate) struct AxComputerAdapter {
     ax: StdMutex<Option<Arc<MacAxController>>>,
     targets: RwLock<BTreeMap<String, TargetRecord>>,
     latest: RwLock<BTreeMap<String, StoredObservation>>,
-    latest_screen_frames: RwLock<BTreeMap<String, ScreenFrameFence>>,
-    latest_window_frames: RwLock<BTreeMap<String, WindowFrameFence>>,
+    captured_frames: RwLock<CapturedFrames<FrameFence>>,
     live_captures: StdMutex<BTreeMap<String, LiveCapture>>,
     live_capture_lifecycle: Mutex<()>,
     clipboard: Option<NativeClipboardController>,
@@ -131,8 +160,7 @@ impl AxComputerAdapter {
             ax: StdMutex::new(ax),
             targets: RwLock::new(BTreeMap::new()),
             latest: RwLock::new(BTreeMap::new()),
-            latest_screen_frames: RwLock::new(BTreeMap::new()),
-            latest_window_frames: RwLock::new(BTreeMap::new()),
+            captured_frames: RwLock::new(CapturedFrames::new()),
             live_captures: StdMutex::new(BTreeMap::new()),
             live_capture_lifecycle: Mutex::new(()),
             clipboard: NativeClipboardController::open().ok(),
@@ -250,10 +278,11 @@ impl AxComputerAdapter {
     async fn screen_observation(&self, target: NativeTarget) -> NativeObservation {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let frame_id = self
-            .latest_screen_frames
+            .captured_frames
             .read()
             .await
-            .get(&target.id)
+            .latest(&target.id)
+            .and_then(FrameFence::screen)
             .filter(|frame| frame.target_generation == target.target_generation)
             .map(|frame| frame.frame_id.clone());
         NativeObservation {
@@ -339,10 +368,11 @@ impl AxComputerAdapter {
         }
         let window_id = record.native.window_id?;
         let bounds = record.native.bounds?;
-        self.latest_window_frames
+        self.captured_frames
             .read()
             .await
-            .get(&record.target.id)
+            .latest(&record.target.id)
+            .and_then(FrameFence::window)
             .filter(|frame| {
                 frame.target_generation == record.target.target_generation
                     && frame.window_id == window_id
@@ -375,8 +405,7 @@ impl AxComputerAdapter {
     }
 
     async fn invalidate_frames(&self) {
-        self.latest_screen_frames.write().await.clear();
-        self.latest_window_frames.write().await.clear();
+        self.captured_frames.write().await.clear();
     }
 
     async fn capture_screen(
@@ -423,14 +452,15 @@ impl AxComputerAdapter {
         let (bytes, mime_type, width, height) =
             encode_frame(&captured.rgba, captured.width, captured.height, options)?;
         let frame_id = self.next_frame_id();
-        self.latest_screen_frames.write().await.insert(
+        self.captured_frames.write().await.insert(
             record.target.id.clone(),
-            ScreenFrameFence {
+            frame_id.clone(),
+            FrameFence::Screen(ScreenFrameFence {
                 frame_id: frame_id.clone(),
                 target_generation: record.target.target_generation.clone(),
                 width,
                 height,
-            },
+            }),
         );
         Ok(captured_frame(
             frame_id,
@@ -500,29 +530,19 @@ impl AxComputerAdapter {
         )?;
         let sequence = self.frame_sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let frame_id = format!("f_{}_{}", self.incarnation.simple(), sequence);
-        let mut frames = self.latest_window_frames.write().await;
+        let mut frames = self.captured_frames.write().await;
         frames.insert(
             record.target.id.clone(),
-            WindowFrameFence {
-                sequence,
+            frame_id.clone(),
+            FrameFence::Window(WindowFrameFence {
                 frame_id: frame_id.clone(),
                 target_generation: record.target.target_generation.clone(),
                 window_id: captured.window_id,
                 bounds: captured.bounds,
                 width,
                 height,
-            },
+            }),
         );
-        while frames.len() > MAX_WINDOW_FRAME_FENCES {
-            let oldest = frames
-                .iter()
-                .min_by_key(|(_, frame)| frame.sequence)
-                .map(|(target_id, _)| target_id.clone());
-            let Some(oldest) = oldest else {
-                break;
-            };
-            frames.remove(&oldest);
-        }
         drop(frames);
         Ok(captured_frame(
             frame_id,
@@ -582,9 +602,10 @@ impl AxComputerAdapter {
                 end_y,
                 ..
             } => {
-                let frames = self.latest_screen_frames.read().await;
+                let frames = self.captured_frames.read().await;
                 let frame = frames
-                    .get(&command.target_id)
+                    .get(&command.target_id, frame_id)
+                    .and_then(FrameFence::screen)
                     .ok_or_else(|| stale_frame("macOS screen"))?;
                 if command.expected_frame_id.as_deref() != Some(frame_id)
                     || frame.frame_id != *frame_id
@@ -631,10 +652,14 @@ impl AxComputerAdapter {
             ));
         }
         let frame = self
-            .latest_window_frames
+            .captured_frames
             .read()
             .await
-            .get(&command.target_id)
+            .get(
+                &command.target_id,
+                command.expected_frame_id.as_deref().unwrap_or(""),
+            )
+            .and_then(FrameFence::window)
             .cloned()
             .ok_or_else(|| stale_frame("macOS window"))?;
         let NativeAction::Pointer {
@@ -652,12 +677,7 @@ impl AxComputerAdapter {
         };
         if command.expected_frame_id.as_deref() != Some(frame_id)
             || frame.frame_id != *frame_id
-            || frame.target_generation != command.expected_target_generation
-            || record.native.window_id != Some(frame.window_id)
-            || record
-                .native
-                .bounds
-                .is_none_or(|bounds| !rect_nearly_equal(bounds, frame.bounds, 2.0))
+            || !frame.matches(&record)
         {
             return Err(stale_frame("macOS window"));
         }
@@ -1216,10 +1236,14 @@ impl ComputerAdapter for AxComputerAdapter {
             let _seat = self.input_seat.lock().await;
             self.validate_screen(command, &screen).await?;
             let frame = if matches!(command.action, NativeAction::Pointer { .. }) {
-                self.latest_screen_frames
+                self.captured_frames
                     .read()
                     .await
-                    .get(&command.target_id)
+                    .get(
+                        &command.target_id,
+                        command.expected_frame_id.as_deref().unwrap_or(""),
+                    )
+                    .and_then(FrameFence::screen)
                     .cloned()
             } else {
                 None
@@ -1803,6 +1827,49 @@ mod capability_tests {
             ax_only_initial.target.target_generation,
             ax_only_changed.target.target_generation
         );
+    }
+
+    #[test]
+    fn painted_window_frame_survives_capture_but_not_identity_or_placement_changes() {
+        let record = target_record(window_target(Some(77), "Fixture", 10.0));
+        let frame = WindowFrameFence {
+            frame_id: "painted".into(),
+            target_generation: record.target.target_generation.clone(),
+            window_id: 77,
+            bounds: record.native.bounds.unwrap(),
+            width: 400,
+            height: 300,
+        };
+        let mut frames = CapturedFrames::new();
+        frames.insert(
+            record.target.id.clone(),
+            "painted".into(),
+            FrameFence::Window(frame.clone()),
+        );
+        frames.insert(
+            record.target.id.clone(),
+            "new".into(),
+            FrameFence::Window(WindowFrameFence {
+                frame_id: "new".into(),
+                width: 800,
+                height: 600,
+                ..frame
+            }),
+        );
+        let painted = frames
+            .get(&record.target.id, "painted")
+            .and_then(FrameFence::window)
+            .unwrap();
+        assert_eq!((painted.width, painted.height), (400, 300));
+        assert!(painted.matches(&record));
+        assert!(!painted.matches(&target_record(window_target(Some(78), "Fixture", 10.0))));
+        assert!(!painted.matches(&target_record(window_target(Some(77), "Fixture", 13.0))));
+        let mut resized = record.clone();
+        resized.native.bounds.as_mut().unwrap().width += 4.0;
+        assert!(!painted.matches(&resized));
+        let mut replaced = record.native;
+        replaced.process_generation = "launch-2".into();
+        assert!(!painted.matches(&target_record(replaced)));
     }
 
     #[test]
