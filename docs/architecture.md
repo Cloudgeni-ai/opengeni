@@ -1115,6 +1115,8 @@ One installed agent process may maintain independent connections to multiple
 OpenGeni deployments and workspaces while sharing the physical machine's host
 capacity and OS containment. The relay carries live terminal and desktop bytes;
 it is stateless beyond active channels and does not own session or lease truth.
+Install routes may serve baked binaries for `latest`; explicit version pins
+resolve binary assets and signatures from the immutable release archive.
 
 Canonical: [`../agent/README.md`](../agent/README.md) and
 [`connected-machines.md`](connected-machines.md).
