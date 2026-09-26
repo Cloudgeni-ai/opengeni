@@ -1972,15 +1972,17 @@ function BrowserViewport(props: {
   }, []);
 
   useLayoutEffect(() => {
+    const keyboardInput = inputRef.current;
+    const focusHandoff = props.focusHandoffRef;
     mountedRef.current = true;
-    if (props.focusHandoffRef.current === props.focusScope) {
-      inputRef.current?.focus({ preventScroll: true });
+    if (focusHandoff.current === props.focusScope) {
+      keyboardInput?.focus({ preventScroll: true });
     }
-    props.focusHandoffRef.current = null;
+    focusHandoff.current = null;
     return () => {
       // Only a same-target replacement may inherit focus the keyboard sink owned.
-      if (document.activeElement === inputRef.current) {
-        props.focusHandoffRef.current = props.focusScope;
+      if (document.activeElement === keyboardInput) {
+        focusHandoff.current = props.focusScope;
       }
       mountedRef.current = false;
       actionQueueEpochRef.current += 1;
