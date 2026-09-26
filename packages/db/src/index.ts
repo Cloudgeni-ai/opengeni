@@ -59422,6 +59422,8 @@ export async function setEnrollmentDisplayState(
     enrollmentId: string;
     hasDisplay: boolean;
     desktopUnavailableReason: string | null;
+    /** Live snapshots update the desktop bit without rewriting release/update metadata. */
+    runtimeDesktop?: boolean;
     /** When present, fence the update to the exact still-live runner. */
     connectionInstanceId?: string;
   },
@@ -59435,6 +59437,12 @@ export async function setEnrollmentDisplayState(
         .set({
           hasDisplay: input.hasDisplay,
           desktopUnavailableReason: input.desktopUnavailableReason,
+          ...(input.runtimeDesktop !== undefined
+            ? {
+                agentCapabilities: sql`coalesce(${schema.enrollments.agentCapabilities}, '{}'::jsonb)
+                  || jsonb_build_object('desktop', ${input.runtimeDesktop}::boolean)`,
+              }
+            : {}),
           updatedAt: new Date(),
         })
         .where(
@@ -59454,6 +59462,11 @@ export async function setEnrollmentDisplayState(
             or(
               ne(schema.enrollments.hasDisplay, input.hasDisplay),
               sql`${schema.enrollments.desktopUnavailableReason} IS DISTINCT FROM ${input.desktopUnavailableReason}`,
+              ...(input.runtimeDesktop !== undefined
+                ? [
+                    sql`${schema.enrollments.agentCapabilities}->'desktop' IS DISTINCT FROM to_jsonb(${input.runtimeDesktop}::boolean)`,
+                  ]
+                : []),
             ),
           ),
         )
