@@ -1258,6 +1258,23 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
     });
   if (error instanceof SelfhostedControlError && error.agentOffline)
     return new HTTPException(409, { message: error.message, cause: error });
+  if (error instanceof SelfhostedControlError && error.payloadTooLarge) {
+    const outbound = error.detail.direction === "request";
+    // Project only the bounded direction. Native free-form diagnostics can
+    // contain file contents or private paths. A large reply is not evidence
+    // that the operation failed before execution, and must not invite replay.
+    return new ApiHttpError(outbound ? 413 : 502, {
+      code: "limit_exceeded",
+      message: outbound
+        ? "The request exceeds the connected machine's per-message size limit. Large file content requires a machine that supports bounded file transfers."
+        : "The connected machine's reply exceeds its per-message size limit. The operation may have completed; inspect its result before repeating it. Read large files in bounded ranges.",
+      retryable: false,
+      details: {
+        code: "machine_transport_payload_too_large",
+        direction: outbound ? "request" : "response",
+      },
+    });
+  }
   if (error instanceof ChannelAUnavailableError)
     return new HTTPException(503, { message: error.message });
   if (error instanceof ChannelAValidationError)
@@ -1320,6 +1337,13 @@ export function channelAOperationFailureDiagnostic(
       reason: "provider_read_busy",
       status: 503,
       errorCode: "sandbox_channel_a_provider_busy",
+    };
+  }
+  if (error instanceof SelfhostedControlError && error.payloadTooLarge) {
+    return {
+      reason: error.detail.direction === "request" ? "request_rejected" : "provider_unavailable",
+      status: error.detail.direction === "request" ? 413 : 502,
+      errorCode: "sandbox_channel_a_operation_failed",
     };
   }
   if (error instanceof SandboxImageConflictError || error instanceof SandboxRigConflictError) {
