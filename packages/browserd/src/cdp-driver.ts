@@ -271,6 +271,9 @@ export type AgentBrowserDriverOptions = {
   frameStreaming?: boolean;
   emulation?: BrowserSessionEmulation;
   permissionControl?: boolean;
+  /** Headless shell has no chrome://version page. Read its real Client Hints
+   * from a controller-intercepted secure-origin document instead. */
+  userAgentMetadataSource?: "chrome_internal" | "intercepted_local";
 };
 
 export type BrowserSessionEmulation = {
@@ -332,6 +335,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly frameStreaming: boolean;
   private readonly emulation: BrowserSessionEmulation | null;
   private readonly permissionControl: boolean;
+  private readonly userAgentMetadataSource: "chrome_internal" | "intercepted_local";
   private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
   private readonly resolveWorkspaceFiles:
     | ((operationId: string, workspaceFileIds: readonly string[]) => Promise<readonly string[]>)
@@ -373,6 +377,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.frameStreaming = options.frameStreaming ?? true;
     this.emulation = hasBrowserEmulation(options.emulation) ? options.emulation : null;
     this.permissionControl = options.permissionControl ?? true;
+    this.userAgentMetadataSource = options.userAgentMetadataSource ?? "chrome_internal";
     this.resolveWorkspaceFiles = options.resolveWorkspaceFiles;
     this.downloadDirectory = options.downloadDirectory
       ? resolvePath(options.downloadDirectory)
@@ -1735,7 +1740,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         connection.send("Page.enable", {}, { sessionId: attached.sessionId }),
         connection.send("Runtime.enable", {}, { sessionId: attached.sessionId }),
       ]);
-      await this.navigateForUserAgentMetadata(connection, attached.sessionId, "chrome://version/");
+      if (this.userAgentMetadataSource === "intercepted_local") {
+        await this.navigateToInterceptedMetadataDocument(connection, attached.sessionId);
+      } else {
+        await this.navigateForUserAgentMetadata(
+          connection,
+          attached.sessionId,
+          "chrome://version/",
+        );
+      }
       const evaluated = await connection.send<{
         result?: unknown;
         exceptionDetails?: unknown;
@@ -1776,6 +1789,61 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (closeError) throw closeError;
     if (!metadata) throw new Error("browser returned no User-Agent metadata");
     return metadata;
+  }
+
+  private async navigateToInterceptedMetadataDocument(
+    connection: BrowserCdpConnection,
+    sessionId: string,
+  ): Promise<void> {
+    // localhost is a potentially trustworthy origin, exposing actual UA Client
+    // Hints. Every request on this private hidden target is intercepted before
+    // network dispatch; no host server, external URL or fabricated UA is used.
+    const url = "http://localhost/__opengeni_browser_metadata__";
+    await connection.send(
+      "Fetch.enable",
+      {
+        patterns: [{ urlPattern: "*", requestStage: "Request" }],
+      },
+      { sessionId },
+    );
+    const abort = new AbortController();
+    const paused = connection.waitForEvent("Fetch.requestPaused", {
+      sessionId,
+      timeoutMs: 5_000,
+      signal: abort.signal,
+    });
+    const navigation = this.navigateForUserAgentMetadata(connection, sessionId, url);
+    void navigation.catch(() => abort.abort());
+    try {
+      const event = await paused;
+      const requestId = event.params.requestId;
+      if (typeof requestId !== "string")
+        throw new Error("browser metadata request has no identity");
+      if (!isRecord(event.params.request) || event.params.request.url !== url) {
+        await connection.send(
+          "Fetch.failRequest",
+          { requestId, errorReason: "Aborted" },
+          { sessionId },
+        );
+        throw new Error("browser metadata target requested an unexpected URL");
+      }
+      await connection.send(
+        "Fetch.fulfillRequest",
+        {
+          requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: "Content-Type", value: "text/html; charset=utf-8" }],
+          body: Buffer.from("<!doctype html><title>Browser metadata</title>").toString("base64"),
+        },
+        { sessionId },
+      );
+      await navigation;
+    } finally {
+      abort.abort();
+      // The caller closes the entire hidden target on every outcome. Leave a
+      // failed interception paused until that close rather than permit egress.
+      await navigation.catch(() => undefined);
+    }
   }
 
   private async navigateForUserAgentMetadata(

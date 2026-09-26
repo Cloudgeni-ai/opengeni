@@ -1579,6 +1579,9 @@ async function createBrowserDriver(
     controllerGeneration: context.controllerGeneration,
     runner,
     foregroundManagedTabs: context.headed,
+    ...(headlessShell && browserExecutablePath === headlessShell.path
+      ? { userAgentMetadataSource: "intercepted_local" as const }
+      : {}),
     downloadDirectory: context.downloadDirectory,
     ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
     resolveWorkspaceFiles: context.resolveWorkspaceFiles,

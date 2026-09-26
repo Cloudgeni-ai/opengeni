@@ -96,6 +96,7 @@ e2e(
       browserSessionId,
       controllerGeneration,
       runner,
+      ...(headlessShell ? { userAgentMetadataSource: "intercepted_local" as const } : {}),
       downloadDirectory: downloadStore.filesDirectory,
       downloadEvents: {
         begin: downloadStore.begin.bind(downloadStore),
