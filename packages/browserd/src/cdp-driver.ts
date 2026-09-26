@@ -337,6 +337,7 @@ function hasBrowserEmulation(
  * connection and keeps an independent causal queue for every target.
  */
 export class AgentBrowserDriver implements BrowserInteractionDriver {
+  readonly fencedInputBatches = true;
   private readonly browserSessionId: string;
   private readonly controllerGeneration: string;
   private readonly runner: BrowserCommandRunner;
@@ -1045,6 +1046,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         let completedActions = 0;
         for (const action of actions) {
           try {
+            if (
+              completedActions > 0 &&
+              command.action.type === "batch" &&
+              command.action.fenceEachAction
+            ) {
+              await this.refreshFrame(state);
+              this.assertExpectedGenerations(command, state);
+            }
             await this.dispatchAction(state, action, command.operationId);
             completedActions += 1;
             if (state.dialog) {

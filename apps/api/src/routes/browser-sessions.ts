@@ -1849,7 +1849,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             browserSessionId,
             controllerGeneration: binding.controllerGeneration,
           };
-          await client.createViewGrant(reference, {
+          const viewGrant = await client.createViewGrant(reference, {
             grantId,
             token,
             expiresAt,
@@ -1941,6 +1941,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             controllerGeneration: binding.controllerGeneration,
             targetId: request.targetId,
             stream,
+            ...(viewGrant.fencedInputBatches === true ? { fencedInputBatches: true } : {}),
             expiresAt,
           });
         },

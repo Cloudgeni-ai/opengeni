@@ -2117,6 +2117,110 @@ describe("BrowserViewer", () => {
     }
   });
 
+  for (const supported of [false, true]) {
+    test(`batches queued typing only with a negotiated helper (${supported})`, async () => {
+      const canvasMock = mockBrowserCanvas();
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let calls = 0;
+      const fixture = await renderViewerInputFixture(async (request, current) => {
+        if (++calls === 1) await blocked;
+        return receipt(current, request.operationId);
+      }, supported);
+      const type = async (text: string) => {
+        await actRun(() => {
+          fixture.keyboard.value = text;
+          fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true, data: text }));
+        });
+        await flush(25);
+      };
+      try {
+        await fixture.frame(1);
+        await type("a");
+        await type("b");
+        await fixture.frame(2, { frameId: "frame-1" });
+        await type("c");
+        await actRun(() =>
+          fixture.keyboard.dispatchEvent(
+            new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+          ),
+        );
+        await type("d");
+        await type("e");
+        expect(fixture.actions).toHaveLength(1);
+        release();
+        await flush(80);
+        expect(fixture.actions.map((request) => request.action)).toEqual(
+          supported
+            ? [
+                { type: "type", text: "a" },
+                {
+                  type: "batch",
+                  fenceEachAction: true,
+                  actions: [
+                    { type: "type", text: "b" },
+                    { type: "type", text: "c" },
+                  ],
+                },
+                { type: "press", key: "Enter" },
+                {
+                  type: "batch",
+                  fenceEachAction: true,
+                  actions: [
+                    { type: "type", text: "d" },
+                    { type: "type", text: "e" },
+                  ],
+                },
+              ]
+            : [
+                { type: "type", text: "a" },
+                { type: "type", text: "b" },
+                { type: "type", text: "c" },
+                { type: "press", key: "Enter" },
+                { type: "type", text: "d" },
+                { type: "type", text: "e" },
+              ],
+        );
+      } finally {
+        release();
+        await fixture.rendered.unmount();
+        canvasMock.restore();
+      }
+    });
+  }
+
+  test("discards buffered typing batches behind an uncertain action without retry", async () => {
+    const canvasMock = mockBrowserCanvas();
+    let reject!: (error: Error) => void;
+    const blocked = new Promise<void>((_resolve, fail) => {
+      reject = fail;
+    });
+    const fixture = await renderViewerInputFixture(async () => {
+      await blocked;
+      throw new Error("unreachable");
+    }, true);
+    try {
+      await fixture.frame(1);
+      for (const text of ["a", "b", "c"]) {
+        await actRun(() => {
+          fixture.keyboard.value = text;
+          fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true, data: text }));
+        });
+        await flush(25);
+      }
+      reject(new Error("Outcome unknown"));
+      await flush(50);
+      expect(fixture.actions.map((request) => request.action)).toEqual([
+        { type: "type", text: "a" },
+      ]);
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
   test("preserves a wheel burst across painted frame updates and before a key", async () => {
     const canvasMock = mockBrowserCanvas();
     const fixture = await renderViewerInputFixture();
@@ -3118,6 +3222,7 @@ async function renderViewerInputFixture(
     request: BrowserActionRequest,
     current: BrowserObservation,
   ) => Promise<BrowserActionReceipt>,
+  fencedInputBatches = false,
 ) {
   const current = browserSession();
   let currentTarget = target();
@@ -3138,7 +3243,10 @@ async function renderViewerInputFixture(
       targets: [currentTarget, secondTarget],
     }),
     observeBrowserTarget: async () => observation(BROWSER_SESSION_ID, currentTarget),
-    attachBrowserSession: async () => attachment(currentTarget.id),
+    attachBrowserSession: async () => ({
+      ...attachment(currentTarget.id),
+      ...(fencedInputBatches ? { fencedInputBatches: true as const } : {}),
+    }),
     selectBrowserTarget: async () => {
       currentTarget = { ...secondTarget, selected: true };
       return observation(BROWSER_SESSION_ID, currentTarget);

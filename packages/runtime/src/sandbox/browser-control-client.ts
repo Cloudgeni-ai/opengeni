@@ -322,6 +322,7 @@ export type PlacementBrowserTransport =
     };
 
 export type BrowserViewGrant = {
+  fencedInputBatches?: true;
   grantId: string;
   expiresAt: string;
 };
@@ -718,7 +719,16 @@ export class BrowserControlClient {
     if (!isRecord(data) || data.grantId !== grantId || data.expiresAt !== expiresAt) {
       throw new BrowserControlProtocolError("browser controller returned malformed view grant");
     }
-    return { grantId, expiresAt };
+    if (data.fencedInputBatches !== undefined && data.fencedInputBatches !== true) {
+      throw new BrowserControlProtocolError(
+        "browser controller returned invalid input batching capability",
+      );
+    }
+    return {
+      grantId,
+      expiresAt,
+      ...(data.fencedInputBatches === true ? { fencedInputBatches: true } : {}),
+    };
   }
 
   async createComputerViewGrant(

@@ -834,6 +834,38 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  for (const supported of [false, true]) {
+    test(`negotiates fenced typing from the active driver (${supported})`, async () => {
+      await withServer(
+        async ({ server, reference }) => {
+          await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          });
+          const grantId = randomUUID();
+          const body = {
+            grantId,
+            controllerGeneration: reference.controllerGeneration,
+            token: grantedViewToken,
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          };
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const result = await json(
+              await request(
+                server,
+                `/v1/browser-sessions/${reference.browserSessionId}/view-grants`,
+                { method: "POST", token: adminToken, body },
+              ),
+            );
+            expect(result.data.fencedInputBatches).toBe(supported ? true : undefined);
+          }
+        },
+        { fencedInputBatches: supported },
+      );
+    });
+  }
+
   test("uses bounded expiring grants for browser frame viewers", async () => {
     await withServer(async ({ server, reference }) => {
       const created = await request(server, "/v1/browser-sessions", {
@@ -1098,6 +1130,7 @@ async function withServer(
     reference: { browserSessionId: string; controllerGeneration: string };
   }) => Promise<void>,
   options: {
+    fencedInputBatches?: boolean;
     failStart?: boolean;
     screenshotError?: Error;
     beforeDriverOperation?: (
@@ -1165,6 +1198,7 @@ async function withServer(
 function fakeDriver(
   context: BrowserSupervisorDriverContext,
   options: {
+    fencedInputBatches?: boolean;
     failStart?: boolean;
     screenshotError?: Error;
     beforeDriverOperation?: (
@@ -1205,6 +1239,7 @@ function fakeDriver(
     observedAt: "2026-08-09T12:00:00.000Z",
   });
   return {
+    fencedInputBatches: options.fencedInputBatches === true,
     async start(url) {
       if (options.failStart) throw new Error("private-driver-detail");
       target.url = url ?? "about:blank";
