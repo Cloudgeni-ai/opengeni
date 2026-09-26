@@ -1,3 +1,7 @@
+import {
+  navigateBrowserMetadataDocument,
+  navigateToInterceptedMetadataDocument,
+} from "./browser-metadata";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
 import {
@@ -1741,13 +1745,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         connection.send("Runtime.enable", {}, { sessionId: attached.sessionId }),
       ]);
       if (this.userAgentMetadataSource === "intercepted_local") {
-        await this.navigateToInterceptedMetadataDocument(connection, attached.sessionId);
+        await navigateToInterceptedMetadataDocument(connection, attached.sessionId);
       } else {
-        await this.navigateForUserAgentMetadata(
-          connection,
-          attached.sessionId,
-          "chrome://version/",
-        );
+        await navigateBrowserMetadataDocument(connection, attached.sessionId, "chrome://version/");
       }
       const evaluated = await connection.send<{
         result?: unknown;
@@ -1789,84 +1789,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (closeError) throw closeError;
     if (!metadata) throw new Error("browser returned no User-Agent metadata");
     return metadata;
-  }
-
-  private async navigateToInterceptedMetadataDocument(
-    connection: BrowserCdpConnection,
-    sessionId: string,
-  ): Promise<void> {
-    // localhost is a potentially trustworthy origin, exposing actual UA Client
-    // Hints. Every request on this private hidden target is intercepted before
-    // network dispatch; no host server, external URL or fabricated UA is used.
-    const url = "http://localhost/__opengeni_browser_metadata__";
-    await connection.send(
-      "Fetch.enable",
-      {
-        patterns: [{ urlPattern: "*", requestStage: "Request" }],
-      },
-      { sessionId },
-    );
-    const abort = new AbortController();
-    const paused = connection.waitForEvent("Fetch.requestPaused", {
-      sessionId,
-      timeoutMs: 5_000,
-      signal: abort.signal,
-    });
-    const navigation = this.navigateForUserAgentMetadata(connection, sessionId, url);
-    void navigation.catch(() => abort.abort());
-    try {
-      const event = await paused;
-      const requestId = event.params.requestId;
-      if (typeof requestId !== "string")
-        throw new Error("browser metadata request has no identity");
-      if (!isRecord(event.params.request) || event.params.request.url !== url) {
-        await connection.send(
-          "Fetch.failRequest",
-          { requestId, errorReason: "Aborted" },
-          { sessionId },
-        );
-        throw new Error("browser metadata target requested an unexpected URL");
-      }
-      await connection.send(
-        "Fetch.fulfillRequest",
-        {
-          requestId,
-          responseCode: 200,
-          responseHeaders: [{ name: "Content-Type", value: "text/html; charset=utf-8" }],
-          body: Buffer.from("<!doctype html><title>Browser metadata</title>").toString("base64"),
-        },
-        { sessionId },
-      );
-      await navigation;
-    } finally {
-      abort.abort();
-      // The caller closes the entire hidden target on every outcome. Leave a
-      // failed interception paused until that close rather than permit egress.
-      await navigation.catch(() => undefined);
-    }
-  }
-
-  private async navigateForUserAgentMetadata(
-    connection: BrowserCdpConnection,
-    sessionId: string,
-    url: string,
-  ): Promise<void> {
-    const loaded = connection.waitForEvent("Page.loadEventFired", {
-      sessionId,
-      timeoutMs: 5_000,
-    });
-    let navigation: { errorText?: unknown };
-    try {
-      navigation = await connection.send("Page.navigate", { url }, { sessionId });
-    } catch (error) {
-      await loaded.catch(() => undefined);
-      throw error;
-    }
-    if (typeof navigation.errorText === "string" && navigation.errorText) {
-      await loaded.catch(() => undefined);
-      throw new Error(`browser metadata navigation failed: ${navigation.errorText}`);
-    }
-    await loaded;
   }
 
   private async observeUnlocked(
