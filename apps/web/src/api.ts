@@ -506,9 +506,10 @@ function isForegroundApiRequest(
   try {
     const raw = typeof Request !== "undefined" && input instanceof Request ? input.url : input;
     const base = typeof window === "undefined" ? "http://opengeni.local" : window.location.href;
+    // Prioritize finite reads without pausing live events behind mutations.
+    // A held attention acknowledgement must still receive a newer frontier.
     return (
-      new URL(String(raw), base).pathname.startsWith("/v1/") &&
-      !new Set(["HEAD", "OPTIONS"]).has(requestMethod(input, init))
+      new URL(String(raw), base).pathname.startsWith("/v1/") && requestMethod(input, init) === "GET"
     );
   } catch {
     return false;

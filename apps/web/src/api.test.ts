@@ -365,6 +365,73 @@ describe("web API auth helpers", () => {
     }
   });
 
+  test("keeps live events flowing while an attention mutation is pending", async () => {
+    const originalFetch = globalThis.fetch;
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
+    let mutationController!: ReadableStreamDefaultController<Uint8Array>;
+    let streamDispatches = 0;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: new URL("https://api.example.test/workspaces/current"),
+      },
+    });
+    Object.defineProperty(performance, "getEntriesByType", {
+      configurable: true,
+      value: () => [],
+    });
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      if (new URL(String(input)).pathname.endsWith("/attention")) {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              mutationController = controller;
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      streamDispatches += 1;
+      return new Response(": connected\n\n", {
+        headers: {
+          "content-type": "application/vnd.opengeni.sse-batch",
+          "content-length": "13",
+        },
+      });
+    }) as unknown as typeof fetch;
+    try {
+      configureManagedActorEpoch("pending-attention");
+      const mutation = managedActorFetch("https://api.example.test/v1/sessions/current/attention", {
+        method: "PUT",
+        body: "{}",
+      });
+      void mutation.catch(() => {});
+      await Promise.resolve();
+      const stream = managedActorFetch(
+        "https://api.example.test/v1/workspaces/current/live-events/stream",
+        {
+          headers: { accept: "text/event-stream" },
+        },
+      );
+      void stream.catch(() => {});
+      await Promise.resolve();
+      expect(streamDispatches).toBe(1);
+      mutationController.enqueue(new TextEncoder().encode("{}"));
+      mutationController.close();
+      await (await mutation).body!.cancel();
+      await (await stream).body!.cancel();
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      if (entriesDescriptor)
+        Object.defineProperty(performance, "getEntriesByType", entriesDescriptor);
+      else Reflect.deleteProperty(performance, "getEntriesByType");
+    }
+  });
+
   test("bounds a stream while it waits for foreground API reads", async () => {
     jest.useFakeTimers();
     const originalFetch = globalThis.fetch;
