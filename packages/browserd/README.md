@@ -80,9 +80,12 @@ The runtime starts the service idempotently under a placement lock, authenticate
 readiness using the file-only admin credential, refuses a foreign listener, and
 stops only the exact recorded executable/PID.
 
-Sandbox startup places the service below a dedicated `tini -s` subreaper.
+Sandbox startup places the service below `opengeni-command-supervisor service`.
 Provider exec processes may bypass the image's entrypoint init; the local
 subreaper collects detached browser descendants after crashes and normal close.
+When browserd exits, including SIGKILL, it terminates and reaps remaining
+descendants before exiting itself. Killing the supervisor itself is outside
+this guarantee and requires sandbox teardown.
 The PID file continues to identify browserd itself, preserving authenticated
 readiness and exact-process shutdown checks.
 

@@ -11,7 +11,7 @@ ROOT="${OPENGENI_BROWSERD_ROOT:-${RUN}/state}"
 PID_FILE="${RUN}/browserd.pid"
 LOG_FILE="${RUN}/browserd.log"
 BIN=/usr/local/bin/opengeni-browserd
-REAPER=/usr/bin/tini
+REAPER=/usr/local/bin/opengeni-command-supervisor
 BROWSER_EXECUTABLE="${OPENGENI_BROWSERD_BROWSER_EXECUTABLE:-}"
 COMPUTER_NATIVE_BINARY="${OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY:-}"
 STARTUP_TIMEOUT_SECONDS="${OPENGENI_BROWSERD_STARTUP_TIMEOUT_SECONDS:-30}"
@@ -100,7 +100,7 @@ fi
 # Provider exec processes need not descend from the image entrypoint's init.
 # Keep a subreaper directly above this service so detached browser descendants
 # are reaped after normal close or a crash, even with a non-reaping provider PID1.
-setsid "$REAPER" -s -- env \
+setsid "$REAPER" service -- env \
   OPENGENI_BROWSERD_ROOT="$ROOT" \
   OPENGENI_BROWSERD_ADMIN_TOKEN_FILE="$TOKEN_FILE" \
   OPENGENI_BROWSERD_HOSTNAME="0.0.0.0" \
