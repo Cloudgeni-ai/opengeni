@@ -3223,6 +3223,7 @@ async function renderViewerInputFixture(
     current: BrowserObservation,
   ) => Promise<BrowserActionReceipt>,
   fencedInputBatches = false,
+  focusedInputObservations = false,
 ) {
   const current = browserSession();
   let currentTarget = target();
@@ -3246,6 +3247,7 @@ async function renderViewerInputFixture(
     attachBrowserSession: async () => ({
       ...attachment(currentTarget.id),
       ...(fencedInputBatches ? { fencedInputBatches: true as const } : {}),
+      ...(focusedInputObservations ? { focusedInputObservations: true as const } : {}),
     }),
     selectBrowserTarget: async () => {
       currentTarget = { ...secondTarget, selected: true };
@@ -3510,3 +3512,118 @@ for (const switchTarget of [false, true]) {
     }
   });
 }
+
+function nativeSelectObservation(view: BrowserObservation): BrowserObservation {
+  return {
+    ...view,
+    focusedRef: "priority",
+    semantic: {
+      kind: "snapshot",
+      nodeCount: 1,
+      roots: [
+        {
+          ref: "priority",
+          role: "combobox",
+          name: "Priority",
+          states: ["focused"],
+          actions: ["select"],
+          native: {
+            platform: "dom",
+            data: {
+              kind: "native-select",
+              multiple: false,
+              disabled: false,
+              options: [
+                { value: "low", label: "Low", selected: true, disabled: false },
+                { value: "high", label: "High", selected: false, disabled: false },
+              ],
+            },
+          },
+        },
+      ],
+    },
+  };
+}
+
+async function clickFixtureCanvas(fixture: Awaited<ReturnType<typeof renderViewerInputFixture>>) {
+  await actRun(() => {
+    for (const type of ["pointerdown", "pointerup"])
+      fixture.canvas.dispatchEvent(
+        new MouseEvent(type, {
+          bubbles: true,
+          button: 0,
+          clientX: 25,
+          clientY: 25,
+        }),
+      );
+  });
+  await flush();
+}
+
+for (const negotiated of [false, true]) {
+  test(`native popup discovery respects the live controller capability (${negotiated})`, async () => {
+    const canvas = mockBrowserCanvas();
+    const fixture = await renderViewerInputFixture(
+      async (request, view) => ({
+        ...receipt(view, request.operationId),
+        observation: request.observationMode === "input" ? nativeSelectObservation(view) : null,
+      }),
+      false,
+      negotiated,
+    );
+    try {
+      await fixture.frame(1);
+      await clickFixtureCanvas(fixture);
+      expect(fixture.actions[0]?.observationMode).toBe(negotiated ? "input" : "none");
+      const panel = fixture.rendered.container.querySelector(
+        'section[aria-label="Page selection options"]',
+      );
+      expect(Boolean(panel)).toBe(negotiated);
+      if (negotiated) {
+        const high = [...panel!.querySelectorAll("button")].find((b) => b.textContent === "High")!;
+        await actRun(() => high.click());
+        await flush();
+        expect(fixture.actions[1]).toMatchObject({
+          observationMode: "none",
+          action: { type: "select", locator: { kind: "ref", ref: "priority" }, values: ["high"] },
+          expectedFrameId: "frame-document-1",
+        });
+        expect(fixture.rendered.container.querySelector("section")).toBeNull();
+        expect(document.activeElement).toBe(fixture.keyboard);
+      }
+    } finally {
+      await fixture.rendered.unmount();
+      canvas.restore();
+    }
+  });
+}
+
+test("late dropdown metadata cannot reopen after newer canvas input", async () => {
+  const canvas = mockBrowserCanvas();
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const fixture = await renderViewerInputFixture(
+    async (request, view) => {
+      if (request.observationMode === "input") await pending;
+      return { ...receipt(view, request.operationId), observation: nativeSelectObservation(view) };
+    },
+    false,
+    true,
+  );
+  try {
+    await fixture.frame(1);
+    await clickFixtureCanvas(fixture);
+    await actRun(() => fixture.canvas.dispatchEvent(browserWheel(10)));
+    await actRun(() => release());
+    await flush(60);
+    expect(
+      fixture.rendered.container.querySelector('section[aria-label="Page selection options"]'),
+    ).toBeNull();
+  } finally {
+    release();
+    await fixture.rendered.unmount();
+    canvas.restore();
+  }
+});

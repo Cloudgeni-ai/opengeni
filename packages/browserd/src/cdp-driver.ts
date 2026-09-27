@@ -338,6 +338,9 @@ function hasBrowserEmulation(
  */
 export class AgentBrowserDriver implements BrowserInteractionDriver {
   readonly fencedInputBatches = true;
+  get focusedInputObservations(): boolean {
+    return this.engine !== "lightpanda";
+  }
   private readonly browserSessionId: string;
   private readonly controllerGeneration: string;
   private readonly runner: BrowserCommandRunner;
@@ -1028,6 +1031,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     commandInput: BrowserActionCommandValue & { observationMode: "none" },
   ): Promise<null>;
   async dispatch(
+    commandInput: BrowserActionCommandValue & { observationMode: "input" },
+  ): Promise<BrowserObservationValue | null>;
+  async dispatch(
     commandInput: BrowserActionCommandValue & { observationMode?: "full" },
   ): Promise<BrowserObservationValue>;
   async dispatch(commandInput: BrowserActionCommandValue): Promise<BrowserObservationValue>;
@@ -1085,6 +1091,48 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           }
         }
         if (command.observationMode === "none") return null;
+        if (command.observationMode === "input") {
+          // A live viewer already has pixels. Only native dropdowns need the
+          // semantic options that Chromium's page stream cannot paint. Keep
+          // ordinary clicks off the full accessibility/snapshot path.
+          if (
+            command.action.type !== "pointer" ||
+            command.action.action !== "click" ||
+            (command.action.button !== undefined && command.action.button !== "left") ||
+            state.dialog ||
+            this.protectedAuthQuiet(state) ||
+            !this.focusedInputObservations
+          )
+            return null;
+          try {
+            if (!(await this.mayHaveFocusedNativeSelect(state))) return null;
+            const currentInfo = await this.requireTargetInfo(
+              await this.ensureConnection(),
+              info.targetId,
+            );
+            const observed = await this.observeUnlocked(state, currentInfo);
+            // A focused iframe is a hint only. The authoritative AX focus and
+            // redacted DOM metadata must actually identify a native select.
+            const pending = [
+              ...(observed.semantic?.kind === "snapshot" ? observed.semantic.roots : []),
+            ];
+            while (pending.length) {
+              const node = pending.pop()!;
+              if (node.children) pending.push(...node.children);
+              if (
+                node.ref === observed.focusedRef &&
+                node.native?.platform === "dom" &&
+                isRecord(node.native.data) &&
+                node.native.data.kind === "native-select"
+              )
+                return observed;
+            }
+          } catch {
+            // The click already completed. An optional focus read must never
+            // turn it into a failed mutation or invite a duplicate click.
+          }
+          return null;
+        }
         const currentInfo = await this.requireTargetInfo(
           await this.ensureConnection(),
           info.targetId,
@@ -1963,6 +2011,32 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       dialog: state.dialog,
       observedAt: this.timestamp(),
     });
+  }
+
+  private async mayHaveFocusedNativeSelect(state: TargetState): Promise<boolean> {
+    const world = await this.sendTarget<{ executionContextId?: number }>(
+      state,
+      "Page.createIsolatedWorld",
+      { frameId: state.frame.id, worldName: "opengeni-dom-read" },
+      { timeoutMs: 500 },
+    );
+    if (!Number.isSafeInteger(world.executionContextId)) return false;
+    const result = await this.sendTarget<{ result?: { value?: unknown } }>(
+      state,
+      "Runtime.evaluate",
+      {
+        contextId: world.executionContextId,
+        expression: `(() => {
+          let element = document.activeElement;
+          for (let depth = 0; depth < 32 && element?.shadowRoot?.activeElement; depth++)
+            element = element.shadowRoot.activeElement;
+          return ["SELECT", "IFRAME", "FRAME"].includes(element?.tagName);
+        })()`,
+        returnByValue: true,
+      },
+      { timeoutMs: 500 },
+    );
+    return result.result?.value === true;
   }
 
   private async refreshAccessibility(state: TargetState): Promise<CdpAccessibilitySnapshot> {

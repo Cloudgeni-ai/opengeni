@@ -922,8 +922,23 @@ export function BrowserViewer({
             clipboardEnabled={browser.session?.capabilities.clipboard === true}
             inputBatchAttachment={frames.attachment}
             onAction={async (action, frame) => {
+              const focusedInput =
+                frame &&
+                action.type === "pointer" &&
+                action.action === "click" &&
+                (action.button === undefined || action.button === "left") &&
+                frames.attachment?.focusedInputObservations === true &&
+                frames.attachment.browserSessionId === frame.browserSessionId &&
+                frames.attachment.controllerGeneration === frame.controllerGeneration &&
+                frames.attachment.targetId === frame.targetId &&
+                Date.parse(frames.attachment.expiresAt) > Date.now();
               const receipt = frame
-                ? await browser.actFromFrame(action, frame)
+                ? await browser.actFromFrame(
+                    action,
+                    frame,
+                    undefined,
+                    focusedInput ? "input" : "none",
+                  )
                 : await browser.act(action);
               if (receipt.state !== "completed") {
                 throw new Error(receipt.error?.message ?? "Browser input did not complete.");
@@ -1901,6 +1916,15 @@ function BrowserViewport(props: {
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const [selectPopup, setSelectPopup] = useState<{
+    observation: BrowserObservation | null;
+    anchor: { x: number; y: number } | null;
+  } | null>(null);
+  const inputSequenceRef = useRef(0);
+  const dismissSelectPopup = useCallback(() => {
+    inputSequenceRef.current += 1;
+    setSelectPopup({ observation: null, anchor: null });
+  }, []);
   const composingRef = useRef(false);
   const pointerStartRef = useRef<PointerStart | null>(null);
   const lastClickRef = useRef<{
@@ -1943,6 +1967,7 @@ function BrowserViewport(props: {
   errorRef.current = props.onError;
 
   const clearBufferedInput = useCallback(() => {
+    dismissSelectPopup();
     if (wheelRef.current?.timer) clearTimeout(wheelRef.current.timer);
     if (pendingTextRef.current?.timer) clearTimeout(pendingTextRef.current.timer);
     wheelRef.current = null;
@@ -1952,7 +1977,7 @@ function BrowserViewport(props: {
     lastClickRef.current = null;
     composingRef.current = false;
     if (inputRef.current) inputRef.current.value = "";
-  }, []);
+  }, [dismissSelectPopup]);
 
   const paintQueuedFrames = useCallback(() => {
     if (decodingFrameRef.current) return;
@@ -2060,7 +2085,10 @@ function BrowserViewport(props: {
       action: BrowserAction,
       frame: BrowserFrameInputFence | null,
       after?: (receipt: BrowserActionReceipt) => Promise<void>,
+      selectAnchor?: { x: number; y: number },
     ) => {
+      const inputSequence = ++inputSequenceRef.current;
+      setSelectPopup({ observation: null, anchor: null });
       // Detach image bytes even when the caller supplied a complete painted frame.
       frame = frame
         ? {
@@ -2112,6 +2140,9 @@ function BrowserViewport(props: {
           // frame from that render even when its input fence contains no bytes.
           const receipt = await actionRef.current(dispatchedAction, frame);
           if (!mountedRef.current || epoch !== actionQueueEpochRef.current) return;
+          if (selectAnchor && receipt.observation && inputSequence === inputSequenceRef.current) {
+            setSelectPopup({ observation: receipt.observation, anchor: selectAnchor });
+          }
           await after?.(receipt);
         })
         .catch((cause) => {
@@ -2169,6 +2200,7 @@ function BrowserViewport(props: {
     // default, Chrome immediately moves focus back to the document and all
     // subsequent typing/paste is silently lost.
     event.preventDefault();
+    dismissSelectPopup();
     flushPendingWheel();
     flushPendingText();
     pointerStartRef.current = {
@@ -2219,7 +2251,15 @@ function BrowserViewport(props: {
       return;
     }
     lastClickRef.current = { at: now, x: to.x, y: to.y, frame: start.frame };
-    enqueue({ type: "pointer", action: "click", x: to.x, y: to.y }, start.frame);
+    const viewportBounds = canvasRef.current?.parentElement?.getBoundingClientRect();
+    enqueue(
+      { type: "pointer", action: "click", x: to.x, y: to.y },
+      start.frame,
+      undefined,
+      viewportBounds
+        ? { x: event.clientX - viewportBounds.left, y: event.clientY - viewportBounds.top + 8 }
+        : undefined,
+    );
   };
 
   const contextMenu = (event: MouseEvent<HTMLCanvasElement>) => {
@@ -2234,6 +2274,7 @@ function BrowserViewport(props: {
   };
 
   const wheel = (event: WheelEvent<HTMLCanvasElement>) => {
+    dismissSelectPopup();
     const frame = paintedFrameRef.current;
     if (!frame) return;
     const at = point(frame, event.clientX, event.clientY);
@@ -2262,6 +2303,7 @@ function BrowserViewport(props: {
   };
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    dismissSelectPopup();
     flushPendingWheel();
     const command = event.metaKey || event.ctrlKey;
     if (
@@ -2316,6 +2358,7 @@ function BrowserViewport(props: {
   };
 
   const input = (value: string, nativeComposing = false) => {
+    dismissSelectPopup();
     if (composingRef.current || nativeComposing) return;
     if (!value) return;
     flushPendingWheel();
@@ -2395,6 +2438,8 @@ function BrowserViewport(props: {
       ) : null}
       {showCanvas ? (
         <BrowserSelectControl
+          activation={selectPopup}
+          onDismiss={() => inputRef.current?.focus({ preventScroll: true })}
           observe={async () => {
             flushPendingText();
             flushPendingWheel();
