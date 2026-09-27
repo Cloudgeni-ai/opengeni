@@ -433,14 +433,14 @@ function OptionRow({ option }: { option: IntegrationOption }) {
     );
   } else if (option.kind === "choice") {
     control = (
-      <span className="inline-flex w-fit">
+      <div className="w-[200px] max-w-full">
         <Select
           aria-label={option.label}
           aria-describedby={describedBy(option.disclosureId)}
           value={option.value}
           disabled={option.disabled || option.busy}
           onChange={(event) => option.onChange(event.target.value)}
-          className="h-8 w-auto min-w-[180px] rounded-[10px] bg-surface"
+          className="h-8 w-full min-w-[180px] rounded-[10px] bg-surface"
         >
           {option.choices.map((choice) => (
             <option key={choice.value} value={choice.value} disabled={choice.disabled}>
@@ -448,7 +448,7 @@ function OptionRow({ option }: { option: IntegrationOption }) {
             </option>
           ))}
         </Select>
-      </span>
+      </div>
     );
   } else {
     control = (

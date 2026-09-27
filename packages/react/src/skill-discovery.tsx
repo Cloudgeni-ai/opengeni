@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { createDiscoveryCache } from "./discovery-cache";
 import { BookOpenIcon } from "lucide-react";
 import { CapabilityCatalogRow, type CapabilityCatalogStatus } from "./capability-catalog-row";
@@ -34,6 +34,12 @@ export type SkillDiscoveryProps = {
   resultLimit?: number;
   onShowMore?: () => void;
   onSearch?: (() => void) | undefined;
+  /** Display name for a registry slug ("agent-browser" -> "Agent browser"). Defaults to the slug. */
+  formatName?: (name: string) => string;
+  /** The line under a remote skill ("From vercel-labs on skills.sh"). Defaults to the source. */
+  formatSource?: (source: string) => string;
+  /** The row tile. Defaults to a bare book glyph. */
+  icon?: ReactNode;
 };
 
 /** Host-owned query and import flow; browse presentation is reusable independently. */
@@ -56,7 +62,7 @@ export function SkillDiscovery(props: SkillDiscoveryProps) {
         ) : null}
       </header>
       {!query ? (
-        <p>Agent skills from skills.sh. Search above for another topic.</p>
+        <p>Popular on skills.sh</p>
       ) : query.length < 2 ? (
         <p>Enter at least two characters to search skills.sh.</p>
       ) : null}
@@ -69,6 +75,8 @@ export function SkillDiscovery(props: SkillDiscoveryProps) {
   );
 }
 
+const keepText = (value: string) => value;
+const DEFAULT_ICON = <BookOpenIcon aria-hidden="true" />;
 const EMPTY_LOCAL_SKILLS: NonNullable<SkillDiscoveryProps["localSkills"]> = [];
 const EMPTY_INSTALLED_SKILLS: NonNullable<SkillDiscoveryProps["installedSkills"]> = [];
 
@@ -82,6 +90,9 @@ function DiscoveryResults({
   onShowMore,
   localSkills = EMPTY_LOCAL_SKILLS,
   installedSkills = EMPTY_INSTALLED_SKILLS,
+  formatName = keepText,
+  formatSource = keepText,
+  icon = DEFAULT_ICON,
 }: SkillDiscoveryProps) {
   const cacheKey = JSON.stringify([workspaceId, query]);
   const cached = discoveryCache.peek(client, cacheKey);
@@ -140,7 +151,7 @@ function DiscoveryResults({
             key={skill.id}
             name={skill.name}
             description={skill.description}
-            icon={<BookOpenIcon aria-hidden="true" />}
+            icon={icon}
             status={skill.status ?? "added"}
             statusLabel={skill.statusLabel}
             onOpen={skill.onOpen}
@@ -163,9 +174,9 @@ function DiscoveryResults({
               <CapabilityCatalogRow
                 key={skill.id}
                 disabled={!canManage}
-                name={skill.name}
-                description={skill.source}
-                icon={<BookOpenIcon aria-hidden="true" />}
+                name={formatName(skill.name)}
+                description={formatSource(skill.source)}
+                icon={icon}
                 status={!canManage ? "unavailable" : installed ? "added" : "available"}
                 statusLabel={
                   !canManage ? "Admin required" : installed ? "Installed" : "Available to add"
@@ -190,7 +201,7 @@ function DiscoveryResults({
         </div>
       ) : null}
       {result && !remoteSkills.length && !localSkills.length && !loading && !error ? (
-        <p role="status">No skills found. Try a different search.</p>
+        <p role="status">{`No matches for “${query}”.`}</p>
       ) : null}
     </div>
   );

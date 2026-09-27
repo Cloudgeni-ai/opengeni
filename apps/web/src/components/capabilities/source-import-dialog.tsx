@@ -9,10 +9,15 @@ import {
   SearchIcon,
   SparklesIcon,
 } from "lucide-react";
-import type { FormEvent, ReactNode } from "react";
+import { useEffect, useRef, type FormEvent, type ReactNode } from "react";
 
 import { Markdown } from "@opengeni/react";
+import {
+  CapabilitySlotPage,
+  useCapabilityPageSlot,
+} from "@/components/capabilities/capability-page-slot";
 import { customApiConnectionLabel } from "@/components/capabilities/custom-api-flow";
+import { SkillSourcePage } from "@/components/capabilities/skill-source-page";
 import {
   pluginComponentConnections,
   sourceImportValidationError,
@@ -60,6 +65,57 @@ export function SourceImportDialog({
   const review = state.skillPreview || state.pluginPreview;
   const validationError = sourceImportValidationError(state);
 
+  // Opening a skill from the catalog is a page (`?open=skill-source:<url>`),
+  // not a dialog. The URL-paste import stays a short dialog.
+  const slot = useCapabilityPageSlot();
+  const asPage = slot !== null && state.directPreview === true && state.kind === "skill";
+  const pageKey = `skill-source:${state.url.trim()}`;
+  const pageOpened = useRef(false);
+  const slotKey = slot?.openKey ?? null;
+  useEffect(() => {
+    if (!slot) return;
+    if (state.open && asPage && state.url.trim()) {
+      if (slotKey === pageKey) {
+        pageOpened.current = true;
+      } else if (!pageOpened.current) {
+        pageOpened.current = true;
+        slot.open(pageKey);
+      } else {
+        // Back or another page: the preview ends with its page.
+        pageOpened.current = false;
+        onOpenChange(false);
+      }
+      return;
+    }
+    if (pageOpened.current && slotKey === pageKey) slot.close({ replace: true });
+    else if (!state.open && slotKey?.startsWith("skill-source:")) slot.close({ replace: true });
+    pageOpened.current = false;
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- follows the URL and the draft only
+  }, [slotKey, state.open, asPage, pageKey]);
+
+  if (asPage) {
+    return (
+      <CapabilitySlotPage pageKey={pageKey}>
+        <SkillSourcePage
+          url={state.url}
+          preview={state.skillPreview}
+          loading={state.phase === "previewing"}
+          installing={state.phase === "installing"}
+          error={state.error}
+          validationError={state.skillPreview ? validationError : null}
+          canManage={canManage}
+          onInstall={onInstall}
+          onRetry={onPreview}
+          onBack={() => {
+            pageOpened.current = false;
+            onOpenChange(false);
+            slot.close();
+          }}
+        />
+      </CapabilitySlotPage>
+    );
+  }
+
   function submitSource(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!busy) onPreview();
@@ -78,15 +134,15 @@ export function SourceImportDialog({
               : state.directPreview
                 ? "Skill preview"
                 : state.intent === "update"
-                  ? `Review ${state.kind === "skill" ? "Skill" : "Plugin"} update`
-                  : "Import Skill or Plugin"}
+                  ? `Review ${state.kind === "skill" ? "skill" : "plugin"} update`
+                  : "Import from a URL"}
           </DialogTitle>
           <DialogDescription>
             {state.skillPreview
               ? `${state.skillPreview.owner}/${state.skillPreview.repository}`
               : state.directPreview
                 ? ""
-                : "Import from a URL."}
+                : "Paste a link to a skill or plugin."}
           </DialogDescription>
         </DialogHeader>
 
@@ -113,15 +169,15 @@ export function SourceImportDialog({
                   <KindChoice
                     selected={state.kind === "skill"}
                     icon={<SparklesIcon className="size-4" />}
-                    title="Skill folder"
+                    title="Skill"
                     description="GitHub folder, SKILL.md, repository, or skills.sh URL"
                     onClick={() => onKindChange("skill")}
                   />
                   <KindChoice
                     selected={state.kind === "plugin"}
                     icon={<PuzzleIcon className="size-4" />}
-                    title="Plugin manifest"
-                    description="A portable manifest containing Skills, Integrations, or MCP references"
+                    title="Plugin"
+                    description="A plugin manifest: a bundle of skills and connections"
                     onClick={() => onKindChange("plugin")}
                   />
                 </div>
@@ -162,7 +218,7 @@ export function SourceImportDialog({
                 ) : (
                   <SearchIcon />
                 )}
-                Detect and preview
+                Preview
               </Button>
             </DialogFooter>
           </form>

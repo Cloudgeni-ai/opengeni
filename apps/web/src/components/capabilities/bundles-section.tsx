@@ -16,7 +16,11 @@ import {
   type BundleRow,
 } from "@/components/capabilities/bundles";
 import { IntegrationRow } from "@/components/capabilities/integration-row";
-import { IntegrationSheet } from "@/components/capabilities/integration-sheet";
+import {
+  CapabilitySlotPage,
+  useCapabilityPageSlot,
+} from "@/components/capabilities/capability-page-slot";
+import { InstalledPackagePage } from "@/components/capabilities/package-page";
 
 import { isWorkspaceImportedSkill } from "@/components/capabilities/source-import-flow";
 import { useSourcePackages } from "@/components/capabilities/use-source-packages";
@@ -87,7 +91,15 @@ export function BundlesSection({
     restoreFocusFallbackRef: removalFallbackRef,
     ...(onShowCategory ? { onManageSkills: () => onShowCategory("skills") } : {}),
   });
-  const [openSheetId, setOpenSheetId] = useState<string | null>(null);
+  // An installed package opens as its own page: in Capabilities through the
+  // route's page slot (`?open=package:<row id>`), elsewhere in place.
+  const slot = useCapabilityPageSlot();
+  const [localOpenId, setLocalOpenId] = useState<string | null>(null);
+  const openSheetId = slot
+    ? slot.openKey?.startsWith("package:")
+      ? slot.openKey.slice("package:".length)
+      : null
+    : localOpenId;
   useEffect(() => {
     if (!importSkillRef) return;
     importSkillRef.current = source.importSkill;
@@ -165,8 +177,13 @@ export function BundlesSection({
   );
   // Resolved from the whole list, not the filtered one: narrowing the search
   // while a sheet is open must not yank the sheet closed.
-  const openSheetModel =
-    rows.find((row) => row.detail.kind === "sheet" && row.id === openSheetId)?.detail ?? null;
+  const openRow = rows.find((row) => row.detail.kind === "sheet" && row.id === openSheetId) ?? null;
+  // A removed package has no page: return to the catalog once the list says so.
+  useEffect(() => {
+    if (!slot || !openSheetId || openRow || source.loading) return;
+    slot.close({ replace: true });
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- the slot object changes every render
+  }, [openSheetId, openRow, source.loading]);
 
   const loading = source.loading;
   // A load that failed says nothing about what is installed. The error banner
@@ -181,8 +198,17 @@ export function BundlesSection({
    * a time, and cancelling returns the reader to the list they came from.
    */
   function leaveSheet(action: () => void) {
-    setOpenSheetId(null);
+    // Update review and removal confirmation open as centred dialogs over the page.
     action();
+  }
+  function closePackage() {
+    if (slot) slot.close();
+    else setLocalOpenId(null);
+    const opener = openerRef.current;
+    openerRef.current = null;
+    queueMicrotask(() => {
+      if (opener?.isConnected) opener.focus();
+    });
   }
 
   function open(row: BundleRow, element: EventTarget | null) {
@@ -192,7 +218,8 @@ export function BundlesSection({
     openerRef.current =
       element instanceof HTMLElement && element !== document.body ? element : null;
     if (row.detail.kind === "sheet") {
-      setOpenSheetId(row.id);
+      if (slot) slot.open(`package:${row.id}`);
+      else setLocalOpenId(row.id);
       return;
     }
 
@@ -359,6 +386,14 @@ export function BundlesSection({
           {discoveryEnabled ? (
             <PluginDiscovery
               installedPlugins={source.plugins}
+              manage={(plugin) => ({
+                busy: source.busyKey === `plugin:${plugin.pluginKey}`,
+                onUpdate: () => source.updatePlugin(plugin),
+                onRemove: () => source.removePlugin(plugin),
+                ...(plugin.sourceUrl
+                  ? {}
+                  : { updateUnavailableReason: "This plugin didn't keep its source link." }),
+              })}
               onManageInstalled={(plugin, element) => {
                 const row = rows.find((candidate) => candidate.id === `plugin:${plugin.pluginKey}`);
                 if (row) open(row, element);
@@ -381,6 +416,14 @@ export function BundlesSection({
             ? { resultLimit: 6, onShowMore: () => onShowCategory("plugins") }
             : {})}
           installedPlugins={source.plugins}
+          manage={(plugin) => ({
+            busy: source.busyKey === `plugin:${plugin.pluginKey}`,
+            onUpdate: () => source.updatePlugin(plugin),
+            onRemove: () => source.removePlugin(plugin),
+            ...(plugin.sourceUrl
+              ? {}
+              : { updateUnavailableReason: "This plugin didn't keep its source link." }),
+          })}
           onOpenConnection={onOpenCatalogItem}
           client={client}
           workspaceId={workspaceId}
@@ -392,14 +435,24 @@ export function BundlesSection({
           }}
         />
       ) : null}
-      <IntegrationSheet
-        model={openSheetModel?.kind === "sheet" ? openSheetModel.model : null}
-        open={openSheetModel?.kind === "sheet"}
-        restoreFocusRef={openerRef}
-        onOpenChange={(next) => {
-          if (!next) setOpenSheetId(null);
-        }}
-      />
+      {openRow && openRow.detail.kind === "sheet" ? (
+        slot ? (
+          <CapabilitySlotPage pageKey={`package:${openRow.id}`}>
+            <InstalledPackagePage
+              row={openRow}
+              model={openRow.detail.model}
+              onBack={closePackage}
+            />
+          </CapabilitySlotPage>
+        ) : (
+          <InstalledPackagePage
+            row={openRow}
+            model={openRow.detail.model}
+            onBack={closePackage}
+            backLabel="Skills"
+          />
+        )
+      ) : null}
 
       {source.dialogs}
     </section>

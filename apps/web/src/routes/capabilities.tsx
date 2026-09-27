@@ -6,6 +6,7 @@ import { ConnectionCatalog, McpConnectionCard } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
 import { CapabilityMark } from "@/components/capabilities/capability-page";
 import { CatalogItemPage } from "@/components/capabilities/catalog-item-page";
+import { humanizeName } from "@/components/capabilities/skill-copy";
 import {
   CapabilityPageSlotContext,
   type CapabilityPageSlotValue,
@@ -1855,7 +1856,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       )
                       .map((skill) => ({
                         id: skill.id,
-                        name: skill.title || skill.stableKey,
+                        name: skill.title || humanizeName(skill.stableKey),
                         status: skill.pendingRevisionIds.length
                           ? "attention"
                           : skill.activeRevisionId
