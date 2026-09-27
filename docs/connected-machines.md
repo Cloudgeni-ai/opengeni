@@ -372,6 +372,15 @@ const samples = await client.machineMetricsSeries(workspaceId, enrollmentId, {
 
 ## Control liveness and backpressure
 
+`ERROR_CODE_DRAINING` is a pre-execution admission refusal, not proof that a
+machine is at capacity. Runtime errors preserve its typed cause: `agent_update`
+means a verified self-update is draining accepted work; `queue_breaker` and
+`wait_breaker` identify abnormal admission backlogs. Missing or unrecognized
+detail remains an unspecified admission refusal. The same distinction survives
+retry exhaustion and structured tool-error rendering. Update drains should be
+allowed to finish without interrupting accepted work; persistent refusals need
+admission/update-state diagnosis, not an inferred concurrency-limit increase.
+
 Machine liveness is independent of accepted host operations. The supervisor
 answers `ping` and publishes heartbeats outside command execution. Production
 admission has no ordinary fixed concurrency or queue-wait limit: its only
