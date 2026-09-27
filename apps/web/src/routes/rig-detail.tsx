@@ -415,7 +415,10 @@ export function RigDetailRoute({
               </div>
             </LineTabsContent>
             <LineTabsContent value="versions">
-              <DetailSection description="Every promoted change becomes a version. New sessions start from the active one.">
+              <DetailSection>
+                <p className="mb-4 text-sm leading-5 text-fg-muted">
+                  Every promoted change becomes a version. New sessions start from the active one.
+                </p>
                 {versions.error && versions.versions.length === 0 ? (
                   <LoadFailure
                     title="Couldn't load versions"
@@ -439,7 +442,10 @@ export function RigDetailRoute({
               </DetailSection>
             </LineTabsContent>
             <LineTabsContent value="changes">
-              <DetailSection description="Proposed changes are checked in a clean sandbox before they merge.">
+              <DetailSection>
+                <p className="mb-4 text-sm leading-5 text-fg-muted">
+                  Proposed changes are checked in a clean sandbox before they merge.
+                </p>
                 {changes.error && changes.changes.length === 0 ? (
                   <LoadFailure
                     title="Couldn't load changes"

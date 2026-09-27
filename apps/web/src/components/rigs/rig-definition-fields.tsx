@@ -160,14 +160,20 @@ export function RigDefinitionFields({
       </div>
 
       {compatible.length > 0 ? (
-        <fieldset className="flex min-w-0 flex-col gap-3">
-          <legend className="text-sm leading-5 font-medium text-fg">
-            Default variable sets
-            <span className="ml-1.5 text-xs font-normal text-fg-subtle">Optional</span>
-          </legend>
-          <p className="-mt-2 text-xs leading-4.5 text-fg-muted">
-            Added to new sessions that use this environment. A session can still change them.
-          </p>
+        <div
+          role="group"
+          aria-labelledby={`${idPrefix}-default-sets`}
+          className="flex min-w-0 flex-col gap-3"
+        >
+          <div className="min-w-0">
+            <p id={`${idPrefix}-default-sets`} className="text-sm leading-5 font-medium text-fg">
+              Default variable sets
+              <span className="ml-1.5 text-xs font-normal text-fg-subtle">Optional</span>
+            </p>
+            <p className="text-xs leading-4.5 text-fg-muted">
+              Added to new sessions that use this environment. A session can still change them.
+            </p>
+          </div>
           {compatible.map((variableSet) => (
             <CheckboxField
               key={variableSet.id}
@@ -182,7 +188,7 @@ export function RigDefinitionFields({
               onCheckedChange={(checked) => toggleVariableSet(variableSet.id, checked)}
             />
           ))}
-        </fieldset>
+        </div>
       ) : null}
     </FieldStack>
   );
