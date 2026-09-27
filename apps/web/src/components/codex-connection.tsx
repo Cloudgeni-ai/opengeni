@@ -1356,6 +1356,21 @@ export function CodexSubscriptionsCardWithClient({
                         : " · active"
                       : ""}
                 </div>
+                {account.planExcludedModels?.length ? (
+                  <div className="text-2xs text-status-waiting">
+                    {`Not included in this account's current plan: ${account.planExcludedModels
+                      .map((entry) => entry.label)
+                      .join(", ")}. Skipped for ${
+                      account.planExcludedModels.length === 1 ? "that model" : "those models"
+                    } until ${new Date(
+                      Math.min(
+                        ...account.planExcludedModels.map((entry) =>
+                          new Date(entry.retryAfter).getTime(),
+                        ),
+                      ),
+                    ).toLocaleString()}, or sooner once a plan change is seen (refresh usage after upgrading).`}
+                  </div>
+                ) : null}
                 <label
                   className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 bg-surface/50 px-2.5"
                   title="Pausing affects only new automatic selection. A current live lease continues; quota, cooldown, and relogin state still gate eligibility."

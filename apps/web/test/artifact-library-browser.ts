@@ -186,6 +186,10 @@ try {
         view,
       );
       await page.goto(`${baseUrl}/test/artifact-library.html?many=1`, { waitUntil: "networkidle" });
+      // Network idleness can precede the fixture's async React render and
+      // IntersectionObserver delivery. Observe a loaded nearby thumbnail before
+      // checking the request counts; retain the offscreen bounds below.
+      await page.getByRole("img", { name: "Gallery image 1", exact: true }).waitFor();
       const initial = await activity();
       const lastId = "77777777-7777-4777-8777-000000000059";
       assert.ok(

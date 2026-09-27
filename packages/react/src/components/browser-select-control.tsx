@@ -4,7 +4,7 @@ import type {
   BrowserObservation,
   InteractionSemanticNode,
 } from "@opengeni/sdk/interaction";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 type NativeOption = { value: string; label: string; selected: boolean; disabled: boolean };
 type NativeSelect = {
@@ -56,6 +56,11 @@ function focusedSelect(
 
 /** Human fallback for native popup windows missing from Chromium page frames. */
 export function BrowserSelectControl(props: {
+  activation?: {
+    observation: BrowserObservation | null;
+    anchor: { x: number; y: number } | null;
+  } | null;
+  onDismiss?: () => void;
   observe: () => Promise<BrowserObservation>;
   act: (action: BrowserAction, observation: BrowserObservation) => Promise<BrowserActionReceipt>;
 }) {
@@ -64,6 +69,10 @@ export function BrowserSelectControl(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [values, setValues] = useState<string[]>([]);
+  const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
+  const popupRef = useRef<HTMLDivElement | null>(null);
+  const [position, setPosition] = useState<{ x: number; y: number; height: number } | null>(null);
+  const panelRef = useRef<HTMLElement | null>(null);
   const request = useRef(0);
   // An immutable observation may contain duplicate values and labels.
   // Keep each option's identity stable while its selection state rerenders.
@@ -83,6 +92,45 @@ export function BrowserSelectControl(props: {
     },
     [],
   );
+  useEffect(() => {
+    if (props.activation === undefined) return;
+    ++request.current;
+    const observation = props.activation?.observation;
+    const selected = observation ? focusedSelect(observation) : null;
+    setSnapshot(selected && observation ? observation : null);
+    setAnchor(selected ? props.activation!.anchor : null);
+    setOpen(Boolean(selected));
+    setBusy(false);
+    setError(null);
+    setValues(
+      selected?.control.options.filter((option) => option.selected).map((option) => option.value) ??
+        [],
+    );
+  }, [props.activation]);
+  useEffect(() => {
+    if (open && !busy) panelRef.current?.focus({ preventScroll: true });
+  }, [open, busy]);
+  useLayoutEffect(() => {
+    if (!anchor || !open) {
+      setPosition(null);
+      return;
+    }
+    const place = () => {
+      const popup = popupRef.current;
+      const parent = popup?.parentElement;
+      if (!popup || !parent) return;
+      setPosition({
+        x: Math.max(12, Math.min(anchor.x, parent.clientWidth - popup.offsetWidth - 12)),
+        y: Math.max(12, Math.min(anchor.y, parent.clientHeight - popup.offsetHeight - 12)),
+        height: Math.max(48, parent.clientHeight - 60),
+      });
+    };
+    place();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(place);
+    if (popupRef.current?.parentElement) observer?.observe(popupRef.current.parentElement);
+    if (popupRef.current) observer?.observe(popupRef.current);
+    return () => observer?.disconnect();
+  }, [anchor, open, busy, snapshot, error]);
   const selected = snapshot ? focusedSelect(snapshot) : null;
   const ambiguousValue = (value: string): boolean =>
     (selected?.control.options.filter((option) => option.value === value || option.label === value)
@@ -93,6 +141,7 @@ export function BrowserSelectControl(props: {
     setBusy(true);
     setSnapshot(null);
     setError(null);
+    setAnchor(null);
     try {
       const observation = await props.observe();
       if (current !== request.current) return;
@@ -124,6 +173,7 @@ export function BrowserSelectControl(props: {
       if (current === request.current) {
         setOpen(false);
         setSnapshot(null);
+        props.onDismiss?.();
       }
     } catch (cause) {
       if (current === request.current) {
@@ -137,19 +187,45 @@ export function BrowserSelectControl(props: {
     }
   };
   return (
-    <div className="absolute bottom-3 left-3 z-10 max-w-[calc(100%-1.5rem)] text-og-control">
-      <button
-        type="button"
-        className="rounded-og-sm border border-og-border bg-og-bg px-2 py-1 text-og-fg"
-        disabled={busy}
-        onClick={() => void load()}
-        aria-expanded={open}
-      >
-        Choose option
-      </button>
+    <div
+      ref={popupRef}
+      className="absolute z-10 max-w-[calc(100%-1.5rem)] text-og-control"
+      style={
+        anchor && open
+          ? {
+              left: position?.x ?? anchor.x,
+              top: position?.y ?? anchor.y,
+            }
+          : { bottom: 12, left: 12 }
+      }
+    >
+      {!anchor || !open || error ? (
+        <button
+          type="button"
+          className="rounded-og-sm border border-og-border bg-og-bg px-2 py-1 text-og-fg"
+          disabled={busy}
+          onClick={() => void load()}
+          aria-expanded={open}
+        >
+          Choose option
+        </button>
+      ) : null}
       {open ? (
         <section
+          ref={panelRef}
+          tabIndex={-1}
           aria-label="Page selection options"
+          style={position ? { maxHeight: Math.min(288, position.height) } : undefined}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            event.stopPropagation();
+            ++request.current;
+            setOpen(false);
+            setSnapshot(null);
+            setBusy(false);
+            props.onDismiss?.();
+          }}
           className="mt-1 max-h-72 w-72 max-w-full overflow-auto rounded-og-sm border border-og-border bg-og-bg p-3 text-og-fg shadow-lg"
         >
           <div className="flex items-center justify-between gap-2">
@@ -161,6 +237,7 @@ export function BrowserSelectControl(props: {
                 ++request.current;
                 setOpen(false);
                 setSnapshot(null);
+                props.onDismiss?.();
               }}
               aria-label="Close page options"
             >

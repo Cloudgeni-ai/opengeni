@@ -15,7 +15,11 @@ message.
 3. A turn claim locks and selects a bounded group, assigns the receiving turn,
    serializes one deterministic system message, and inserts that exact message
    into `session_history_items` in the same transaction that marks every member
-   `delivered`.
+   `delivered`. The message states the batch's `deliveredAt` and each member's
+   `createdAt` as minute-precision UTC with the weekday (a scheduled occurrence
+   promoted to a user-role task carries the same `Delivered:` and `Created:`
+   lines), so a turn that no human message started still knows the current
+   time. Both values are the durable row timestamps, never the rendering clock.
    A `requires_action` resume is the one two-phase form of that boundary: the
    resumed attempt first persists the interrupted call/result pair, then
    idempotently re-enters its exact claim to attach only machine inputs whose

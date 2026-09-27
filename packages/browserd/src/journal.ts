@@ -11,6 +11,7 @@ export type SqliteBrowserOperationJournalOptions = {
   controllerGeneration: string;
   maxEntries?: number;
   maxRecordBytes?: number;
+  maxTotalReceiptBytes?: number;
 };
 
 /** Browser adapter over the one resource-neutral placement journal. */
@@ -44,6 +45,9 @@ export class SqliteBrowserOperationJournal {
       recoverRecord: recoverBrowserOperationJournalRecord,
       ...(options.maxEntries !== undefined ? { maxEntries: options.maxEntries } : {}),
       ...(options.maxRecordBytes !== undefined ? { maxRecordBytes: options.maxRecordBytes } : {}),
+      ...(options.maxTotalReceiptBytes !== undefined
+        ? { maxTotalReceiptBytes: options.maxTotalReceiptBytes }
+        : {}),
     });
     return new SqliteBrowserOperationJournal(journal);
   }
@@ -52,8 +56,19 @@ export class SqliteBrowserOperationJournal {
     this.journal.write(record);
   }
 
+  read(operationId: string): BrowserOperationJournalRecord | null {
+    return this.journal.read(operationId);
+  }
+
   loadAndRecover(settledAt?: string): BrowserOperationJournalRecord[] {
     return this.journal.loadAndRecover(settledAt);
+  }
+
+  withRecoveredRecords<T>(
+    consume: (records: Iterable<BrowserOperationJournalRecord>) => T,
+    settledAt?: string,
+  ): T {
+    return this.journal.withRecoveredRecords(consume, settledAt);
   }
 
   close(): void {

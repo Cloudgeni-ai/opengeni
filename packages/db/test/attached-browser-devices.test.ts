@@ -241,6 +241,51 @@ async function activateAttachedBrowser(
 }
 
 describe("attached browser endpoint registry", () => {
+  test("persists opaque generations beginning with base64url punctuation", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const id = crypto.randomUUID();
+    for (const [revision, generation] of ["-bridge_generation", "_bridge-generation"].entries()) {
+      const result = await reconcileAttachedBrowserInventory(client.db, {
+        ...scope,
+        snapshot: {
+          bridgeGeneration: generation,
+          revision: revision + 1,
+          devices: [device(id, "Primary Chrome", revision + 1, "extension-1")],
+        },
+      });
+      expect(result.accepted).toBe(true);
+      const inventory = await listAttachedBrowserDevices(client.db, scope);
+      expect(inventory.bridges[0]?.bridgeGeneration).toBe(generation);
+      expect(inventory.devices[0]?.connectionGeneration).toBe("extension-1");
+      expect(inventory.devices[0]?.state).toBe("connected");
+    }
+    // Exercise the database fences independently of API parsing.
+    for (const invalid of [
+      "",
+      ".invalid",
+      ":invalid",
+      "bad generation",
+      "bad/path",
+      "x".repeat(257),
+    ]) {
+      // postgres-js queries are lazy Promise subclasses. Assimilate them before
+      // Bun's rejection matcher, which otherwise waits without starting SQL.
+      await expect(
+        Promise.resolve(shared!.admin`
+          UPDATE attached_browser_inventories SET bridge_generation = ${invalid}
+          WHERE workspace_id = ${scope.workspaceId} AND enrollment_id = ${scope.enrollmentId}
+        `),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        Promise.resolve(shared!.admin`
+          UPDATE attached_browser_devices SET connection_generation = ${invalid}
+          WHERE workspace_id = ${scope.workspaceId} AND id = ${id}
+        `),
+      ).rejects.toMatchObject({ code: "23514" });
+    }
+  });
+
   test("reconciles full snapshots, ignores stale revisions, and preserves offline history", async () => {
     if (!available) return;
     const scope = await fixture();

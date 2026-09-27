@@ -1,18 +1,7 @@
-// sandbox-file-persistence: the cold-restore archive+hydrate contract.
-//
-// When a warm resume-by-id reports the box GONE (provider NotFound),
-// establishSandboxSessionFromEnvelope must:
-//   (1) create a FRESH box from the manifest — NEVER create({ snapshot }) (that
-//       throws assertCoreSnapshotUnsupported on Modal); and
-//   (2) if the lease envelope carries a persisted /workspace archive at
-//       sessionState.workspaceArchive, replay it via session.hydrateWorkspace(bytes)
-//       on the freshly-created session so /workspace is restored.
-//
-// A per-call client factory supplies a Modal-shaped fake: resume() throws
-// NotFound; create() ASSERTS it is never handed a `snapshot` arg (mirroring
-// assertCoreSnapshotUnsupported); the created session records hydrateWorkspace
-// calls. The explicit factory avoids process-global module mocks whose result
-// depends on which test imported the provider first.
+// Cold restoration must use the selected archive, attribute its only destination,
+// and verify before publication. Modal filesystem snapshots boot directly from
+// the selected Image; directory/tar archives hydrate the created destination.
+// A per-call factory avoids process-global provider mocks.
 
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -27,10 +16,12 @@ import {
   SandboxProviderContinuityUnavailableError,
 } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
+import type { ModalCreateIntent } from "../src/sandbox/providers/modal-create-boundary";
 
 const hydrateCalls: Uint8Array[] = [];
 const createArgs: Array<{ manifest?: unknown; snapshot?: unknown }> = [];
 const clientPersistenceModes: Array<string | undefined> = [];
+const clientImageIds: Array<string | undefined> = [];
 // Controls for hydrateWorkspace-throw + delete tracking.
 let hydrateWorkspaceFailuresRemaining = 0;
 let lastHydrateWorkspaceFailure: Error | null = null;
@@ -43,7 +34,11 @@ const restoreEvents: string[] = [];
 class FakeModalSandboxClient {
   backendId = "modal";
   constructor(
-    public options: { workspacePersistence: string | undefined; createFailure?: unknown },
+    public options: {
+      workspacePersistence: string | undefined;
+      imageId?: string;
+      createFailure?: unknown;
+    },
   ) {}
   async deserializeSessionState(state: Record<string, unknown>) {
     return { ...state };
@@ -63,7 +58,11 @@ class FakeModalSandboxClient {
     }
     if (this.options.createFailure !== undefined) throw this.options.createFailure;
     const session = {
-      state: { sandboxId: "sb-fresh", workspacePersistence: this.options.workspacePersistence },
+      state: {
+        sandboxId: "sb-fresh",
+        workspacePersistence: this.options.workspacePersistence,
+        imageId: this.options.imageId,
+      },
       async exec() {
         restoreEvents.push("fingerprint-exec");
         return {
@@ -118,8 +117,10 @@ function establishSandboxSessionFromEnvelope(
     ...opts,
     clientFactory: (_backend, currentSettings) => {
       clientPersistenceModes.push(currentSettings.modalWorkspacePersistence);
+      clientImageIds.push(currentSettings.modalImageId);
       return new FakeModalSandboxClient({
         workspacePersistence: currentSettings.modalWorkspacePersistence,
+        imageId: currentSettings.modalImageId,
       });
     },
   });
@@ -192,6 +193,156 @@ function modalSettings(overrides: Parameters<typeof testSettings>[0] = {}) {
 }
 
 describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
+  test("failed durable create admission prevents physical dispatch", async () => {
+    let creates = 0;
+    await expect(
+      establishRuntimeSandboxSessionFromEnvelope(modalSettings(), null, {
+        sessionId: "create-admission-failed",
+        recovery: "create-or-restore",
+        environment: {},
+        onBeforeSandboxCreate: async () => {
+          throw new Error("fence not persisted");
+        },
+        clientFactory: () => ({
+          backendId: "modal",
+          create: async () => {
+            creates++;
+            return { state: { sandboxId: "unexpected" } };
+          },
+        }),
+      }),
+    ).rejects.toThrow("fence not persisted");
+    expect(creates).toBe(0);
+  });
+
+  test("ambiguous first create cannot silently dispatch logical fallback", async () => {
+    let attempts = 0;
+    let creates = 0;
+    await expect(
+      establishRuntimeSandboxSessionFromEnvelope(
+        modalSettings({ modalImageId: "im-selected" }),
+        null,
+        {
+          sessionId: "unknown-create-fallback",
+          recovery: "create-or-restore",
+          environment: {},
+          logicalFallbackSettings: modalSettings({ modalImageId: "im-logical" }),
+          onBeforeSandboxCreate: async () => {
+            if (++attempts > 1) throw new Error("provider_create_outcome_unknown");
+          },
+          clientFactory: () => ({
+            backendId: "modal",
+            create: async () => {
+              creates++;
+              throw { status: 404 };
+            },
+          }),
+        },
+      ),
+    ).rejects.toThrow("provider_create_outcome_unknown");
+    expect(creates).toBe(1);
+    expect(attempts).toBe(2);
+  });
+
+  test("Modal preparation failure can choose the logical image before claiming; receipt is attributed once", async () => {
+    const events: string[] = [];
+    const result = await establishRuntimeSandboxSessionFromEnvelope(
+      modalSettings({ modalImageId: "im-selected" }),
+      null,
+      {
+        sessionId: "prepare-before-fence",
+        recovery: "create-or-restore",
+        environment: {},
+        logicalFallbackSettings: modalSettings({ modalImageId: "im-logical" }),
+        onBeforeSandboxCreate: async (_settings, intent) => {
+          expect(intent?.imageId).toBe("im-logical");
+          events.push("claim");
+        },
+        onSandboxCreated: async (created) => {
+          expect(created.instanceId).toBe("sb-fresh");
+          events.push("receipt");
+        },
+        clientFactory: (_backend, settings) => ({
+          backendId: "modal",
+          create: async () => {
+            throw new Error("unfenced create must not run");
+          },
+          createWithLifecycle: async (
+            args: any,
+            hooks: {
+              beforeDispatch: (intent: ModalCreateIntent) => Promise<void>;
+              onCreated: (session: unknown, intent: ModalCreateIntent) => Promise<void>;
+            },
+          ) => {
+            events.push(settings.modalImageId!);
+            if (settings.modalImageId === "im-selected") throw { status: 404 };
+            const intent = {
+              operationId: "11111111-1111-4111-8111-111111111111",
+              name: "opengeni-create-11111111-1111-4111-8111-111111111111",
+              appId: "ap-test",
+              imageId: "im-logical",
+              requestSha256: "a".repeat(64),
+            };
+            await hooks.beforeDispatch(intent);
+            const session = await new FakeModalSandboxClient({
+              workspacePersistence: "tar",
+              imageId: "im-logical",
+            }).create(args);
+            await hooks.onCreated(session, intent);
+            events.push("manifest");
+            return session;
+          },
+        }),
+      },
+    );
+    expect(result.instanceId).toBe("sb-fresh");
+    expect(events).toEqual(["im-selected", "im-logical", "claim", "receipt", "manifest"]);
+  });
+
+  test("a dispatched Modal 404 never enters logical-image fallback", async () => {
+    let claims = 0;
+    let factories = 0;
+    await expect(
+      establishRuntimeSandboxSessionFromEnvelope(
+        modalSettings({ modalImageId: "im-selected" }),
+        null,
+        {
+          sessionId: "dispatch-before-failure",
+          recovery: "create-or-restore",
+          environment: {},
+          logicalFallbackSettings: modalSettings({ modalImageId: "im-logical" }),
+          onBeforeSandboxCreate: async () => {
+            claims++;
+          },
+          clientFactory: () => {
+            factories++;
+            return {
+              backendId: "modal",
+              create: async () => {
+                throw new Error("unfenced create");
+              },
+              createWithLifecycle: async (
+                _args: unknown,
+                hooks: { beforeDispatch: (intent: ModalCreateIntent) => Promise<void> },
+              ) => {
+                await hooks.beforeDispatch({
+                  operationId: "11111111-1111-4111-8111-111111111111",
+                  name: "opengeni-create-11111111-1111-4111-8111-111111111111",
+                  appId: "ap-test",
+                  imageId: "im-selected",
+                  requestSha256: "a".repeat(64),
+                });
+                throw { status: 404 };
+              },
+            };
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ status: 404 });
+    expect(claims).toBe(1);
+    expect(factories).toBe(1);
+  });
+
   test("readWorkspaceArchiveFromEnvelopeSessionState round-trips base64 → exact bytes", () => {
     const out = readWorkspaceArchiveFromEnvelopeSessionState({ workspaceArchive: SNAPSHOT_B64 });
     expect(out).toBeInstanceOf(Uint8Array);
@@ -560,7 +711,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     expect(established.instanceId).toBe("sb-vercel-live");
   });
 
-  test("cold-restore creates a FRESH box (NO snapshot arg) and hydrates from the lease archive", async () => {
+  test("filesystem restore boots the selected image without a second provider create", async () => {
     hydrateCalls.length = 0;
     createArgs.length = 0;
     clientPersistenceModes.length = 0;
@@ -575,9 +726,8 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     expect(createArgs).toHaveLength(1);
     expect("snapshot" in createArgs[0]!).toBe(false);
     expect(createArgs[0]!.manifest).toBeDefined();
-    // (2) the persisted archive was replayed via hydrateWorkspace on the fresh box.
-    expect(hydrateCalls).toHaveLength(1);
-    expect(new TextDecoder().decode(hydrateCalls[0]!)).toBe(SNAPSHOT_REF);
+    expect(hydrateCalls).toHaveLength(0);
+    expect(clientImageIds.at(-1)).toBe("im-snap-abc");
     expect(clientPersistenceModes).toEqual(["snapshot_directory", "snapshot_filesystem"]);
     expect(established.instanceId).toBe("sb-fresh");
     expect(established.origin).toBe("restored");
@@ -625,7 +775,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     expect(createArgs).toHaveLength(0);
   });
 
-  test("attributes a hydrate replacement before restore verification runs on it", async () => {
+  test("filesystem restore attributes one destination and never calls replacement hydration", async () => {
     hydrateCalls.length = 0;
     createArgs.length = 0;
     restoreEvents.length = 0;
@@ -649,18 +799,67 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
         },
       );
 
-      expect(createdIds).toEqual(["sb-fresh", "sb-restored"]);
-      expect(restoreEvents).toEqual([
-        "attributed:sb-fresh",
-        "hydrate",
-        "attributed:sb-restored",
-        "restore-verifying",
-      ]);
-      expect(established.instanceId).toBe("sb-restored");
+      expect(createdIds).toEqual(["sb-fresh"]);
+      expect(createArgs).toHaveLength(1);
+      expect(hydrateCalls).toHaveLength(0);
+      expect(restoreEvents).toEqual(["attributed:sb-fresh", "restore-verifying"]);
+      expect(established.instanceId).toBe("sb-fresh");
     } finally {
       replaceInstanceOnHydrate = false;
     }
   });
+
+  test.each(["wrong-image", "attribution-failed"])(
+    "filesystem restore rejects %s before verification and deletes its exact destination",
+    async (failure) => {
+      const deleted: string[] = [];
+      const attributed: string[] = [];
+      let verified = false;
+      await expect(
+        establishRuntimeSandboxSessionFromEnvelope(
+          modalSettings(),
+          {
+            backendId: "modal",
+            sessionState: {
+              ...envelopeWithArchive(SNAPSHOT_B64).sessionState,
+              providerState: undefined,
+            },
+          },
+          {
+            sessionId: "sess-restore-rejected",
+            recovery: "create-or-restore",
+            environment: {},
+            onSandboxCreated: async (created) => {
+              attributed.push(created.instanceId);
+              if (failure === "attribution-failed") throw new Error("durable attribution rejected");
+            },
+            onWorkspaceRestoreVerifying: async () => {
+              verified = true;
+            },
+            clientFactory: (_, current) => ({
+              backendId: "modal",
+              async create() {
+                return {
+                  state: {
+                    sandboxId: "sb-only-destination",
+                    imageId: failure === "wrong-image" ? "im-wrong" : current.modalImageId,
+                  },
+                };
+              },
+              async delete(state: { sandboxId: string }) {
+                deleted.push(state.sandboxId);
+              },
+            }),
+          },
+        ),
+      ).rejects.toThrow(
+        failure === "wrong-image" ? "selected filesystem snapshot" : "durable attribution rejected",
+      );
+      expect(attributed).toEqual(["sb-only-destination"]);
+      expect(deleted).toEqual(["sb-only-destination"]);
+      expect(verified).toBe(false);
+    },
+  );
 
   test("cold-restore with NO archive creates a fresh box and does NOT hydrate", async () => {
     hydrateCalls.length = 0;
@@ -778,7 +977,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     expect(throttles).toEqual([{ backend: "opensandbox", operation: "create" }]);
   });
 
-  test("native archive mode remains pinned through logical image fallback", async () => {
+  test("directory archive mode remains pinned through logical image fallback", async () => {
     hydrateCalls.length = 0;
     createArgs.length = 0;
     const builtClients: Array<{
@@ -789,18 +988,18 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
       sandboxBackend: "modal",
       modalImageRef: undefined,
       modalImageId: "im-stale-rig-image",
-      modalWorkspacePersistence: "snapshot_directory",
+      modalWorkspacePersistence: "snapshot_filesystem",
     });
     const logicalFallbackSettings = testSettings({
       sandboxBackend: "modal",
       modalImageRef: undefined,
       modalImageId: "im-logical-base-image",
-      modalWorkspacePersistence: "snapshot_directory",
+      modalWorkspacePersistence: "snapshot_filesystem",
     });
 
     const established = await establishRuntimeSandboxSessionFromEnvelope(
       settings,
-      envelopeWithArchive(SNAPSHOT_B64),
+      envelopeWithArchive(DIRECTORY_SNAPSHOT_B64),
       {
         sessionId: "sess-native-mode-logical-fallback",
         recovery: "create-or-restore",
@@ -813,7 +1012,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
           });
           const restoreOfMissingImage =
             currentSettings.modalImageId === "im-stale-rig-image" &&
-            currentSettings.modalWorkspacePersistence === "snapshot_filesystem";
+            currentSettings.modalWorkspacePersistence === "snapshot_directory";
           return new FakeModalSandboxClient({
             workspacePersistence: currentSettings.modalWorkspacePersistence,
             ...(restoreOfMissingImage ? { createFailure: { status: 404 } } : {}),
@@ -823,14 +1022,64 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     );
 
     expect(builtClients).toEqual([
-      { imageId: "im-stale-rig-image", workspacePersistence: "snapshot_directory" },
       { imageId: "im-stale-rig-image", workspacePersistence: "snapshot_filesystem" },
-      { imageId: "im-logical-base-image", workspacePersistence: "snapshot_filesystem" },
+      { imageId: "im-stale-rig-image", workspacePersistence: "snapshot_directory" },
+      { imageId: "im-logical-base-image", workspacePersistence: "snapshot_directory" },
     ]);
     expect(hydrateCalls).toHaveLength(1);
     expect(established.instanceId).toBe("sb-fresh");
     expect(established.origin).toBe("restored");
   });
+
+  test.each([404, 503])(
+    "selected filesystem snapshot failure %i never falls back to a logical image or previous archive",
+    async (status) => {
+      const selected: Array<string | undefined> = [];
+      const failure = { status };
+      let creations = 0;
+      let attributed = 0;
+      let verified = 0;
+      await expect(
+        establishRuntimeSandboxSessionFromEnvelope(
+          modalSettings({ modalImageId: "im-rig", modalImageRef: "python:3.12-slim" }),
+          envelopeWithArchivePair(SNAPSHOT_B64, SNAPSHOT_PREV_B64),
+          {
+            sessionId: "sess-missing-selected-snapshot",
+            recovery: "create-or-restore",
+            environment: {},
+            logicalFallbackSettings: modalSettings({ modalImageId: "im-fallback" }),
+            onSandboxCreated: async () => {
+              attributed++;
+            },
+            onWorkspaceRestoreVerifying: async () => {
+              verified++;
+            },
+            clientFactory: (_, current) => ({
+              backendId: "modal",
+              async deserializeSessionState(state: unknown) {
+                return state;
+              },
+              async resume() {
+                throw { status: 404 };
+              },
+              async resumeExact() {
+                throw { status: 404 };
+              },
+              async create() {
+                creations++;
+                selected.push(current.modalImageId);
+                throw failure;
+              },
+            }),
+          },
+        ),
+      ).rejects.toBe(failure);
+      expect(selected).toEqual(["im-snap-abc"]);
+      expect(creations).toBe(1);
+      expect(attributed).toBe(0);
+      expect(verified).toBe(0);
+    },
+  );
 
   test("cold-restore never silently selects workspaceArchivePrev when the selected revision fails", async () => {
     hydrateCalls.length = 0;
@@ -842,7 +1091,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
       await expect(
         establishSandboxSessionFromEnvelope(
           modalSettings(),
-          envelopeWithArchivePair(SNAPSHOT_B64, SNAPSHOT_PREV_B64),
+          envelopeWithArchivePair(DIRECTORY_SNAPSHOT_B64, SNAPSHOT_PREV_B64),
           { sessionId: "sess-hydrate-prev", recovery: "create-or-restore", environment: {} },
         ),
       ).rejects.toMatchObject({ code: "archive_hydration_failed" });
@@ -864,7 +1113,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     try {
       const error = await establishSandboxSessionFromEnvelope(
         modalSettings(),
-        envelopeWithArchive(SNAPSHOT_B64),
+        envelopeWithArchive(DIRECTORY_SNAPSHOT_B64),
         {
           sessionId: "sess-hydrate-fail-closed",
           recovery: "create-or-restore",

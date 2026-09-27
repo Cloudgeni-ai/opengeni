@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   buildProfileResult,
@@ -231,11 +231,20 @@ describe("turn density profile release-gate helpers", () => {
   });
 
   test("uses one absolute deadline across sequential phases", async () => {
-    const deadlineAt = Date.now() + 25;
-    await withDeadline(Bun.sleep(10), deadlineAt, "first phase timed out");
-    await expect(withDeadline(Bun.sleep(30), deadlineAt, "wave deadline elapsed")).rejects.toThrow(
-      "wave deadline elapsed",
-    );
+    let now = 1_000;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    const deadlineAt = now + 25;
+    try {
+      expect(
+        await withDeadline(Promise.resolve("first"), deadlineAt, "first phase timed out"),
+      ).toBe("first");
+      now = deadlineAt + 1;
+      await expect(
+        withDeadline(Promise.resolve("second"), deadlineAt, "wave deadline elapsed"),
+      ).rejects.toThrow("wave deadline elapsed");
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   test("bounds cleanup independently after a post-gate activity never settles", async () => {

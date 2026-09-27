@@ -21,6 +21,58 @@ const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 const headedE2e = process.env.OPENGENI_BROWSERD_HEADED_E2E === "1" ? test : test.skip;
 
 headedE2e(
+  "opens a slow-response tab without applying the blank-document creation deadline to navigation",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-slow-tab-");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch() {
+        await Bun.sleep(6_200);
+        return new Response("<!doctype html><title>Slow tab</title><button>Ready</button>", {
+          headers: { "content-type": "text/html" },
+        });
+      },
+    });
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `slow_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: true,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+      foregroundManagedTabs: true,
+    });
+    try {
+      await driver.start(fixture("First"));
+      const opened = await driver.openTarget(String(server.url));
+      expect(opened.target.url).toBe(String(server.url));
+      expect(names(opened)).toContain("Ready");
+      expect(await driver.listTargets()).toHaveLength(2);
+    } finally {
+      server.stop(true);
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  40_000,
+);
+
+headedE2e(
   "streams a mobile headed tab continuously while another tab stays foregrounded",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-hidden-stream-");
@@ -1010,8 +1062,17 @@ headedE2e(
       downloadDirectory: join(directory, "downloads"),
       screenshotDirectory: join(directory, "screenshots"),
       headed: true,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
     });
     let detachOnResolve = false;
+    let accessibilityReads = 0;
     const driver = new AgentBrowserDriver({
       browserSessionId: randomUUID(),
       controllerGeneration: randomUUID(),
@@ -1025,6 +1086,7 @@ headedE2e(
             params?: Readonly<Record<string, unknown>>,
             options?: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal },
           ): Promise<T> => {
+            if (method.startsWith("Accessibility.get")) accessibilityReads++;
             if (detachOnResolve && method === "DOM.resolveNode" && params?.executionContextId) {
               detachOnResolve = false;
               await connection.send(
@@ -1056,9 +1118,12 @@ headedE2e(
           '<style>select{position:absolute;left:10px;top:40px;width:200px;height:40px}button{position:absolute;left:10px;top:150px;width:200px;height:40px}</style><button onclick="this.textContent=\'Counter 1\'">Counter 0</button><label>Priority<select id="priority" oninput="document.querySelector(\'p\').textContent += \' input:\' + this.value" onchange="document.querySelector(\'p\').textContent += \' change:\' + this.value"><option value="low">Low</option><optgroup label="More"><option value="high">High</option><option value="blocked" disabled>Blocked</option></optgroup></select></label><p>Events</p>',
         ),
       );
-      view = await driver.dispatch(
-        command(view, { type: "pointer", action: "click", x: 110, y: 60 }),
-      );
+      expect(driver.focusedInputObservations).toBe(true);
+      view = (await driver.dispatch({
+        ...command(view, { type: "pointer", action: "click", x: 110, y: 60 }),
+        observationMode: "input",
+      }))!;
+      expect(view).not.toBeNull();
       expect(focused(view)?.native?.data).toEqual({
         kind: "native-select",
         multiple: false,
@@ -1083,9 +1148,15 @@ headedE2e(
         command(view, { type: "select", locator: { kind: "ref", ref }, values: ["high"] }),
       );
       expect(names(view)).toContain("Events input:high change:high");
-      view = await driver.dispatch(
-        command(view, { type: "pointer", action: "click", x: 110, y: 170 }),
-      );
+      const readsBeforeOrdinaryClick = accessibilityReads;
+      expect(
+        await driver.dispatch({
+          ...command(view, { type: "pointer", action: "click", x: 110, y: 170 }),
+          observationMode: "input",
+        }),
+      ).toBeNull();
+      expect(accessibilityReads).toBe(readsBeforeOrdinaryClick);
+      view = await driver.observe(view.target.id);
       expect(names(view)).toContain("Counter 1");
       expect(
         (

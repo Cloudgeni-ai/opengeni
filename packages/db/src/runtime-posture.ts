@@ -3737,6 +3737,19 @@ export function evaluateRuntimeDatabasePosture(
     ) {
       violations.push("Modal inventory capability has unsafe owner, ACL or runtime privileges");
     }
+    const createInventory = posture.privateRoutines.find(
+      (routine) => routine.name === "list_pending_modal_provider_creates()",
+    );
+    if (
+      createInventory &&
+      (!createInventory.execute ||
+        createInventory.publicExecute ||
+        !createInventory.securityDefiner ||
+        createInventory.owner !== capability.owner ||
+        !createInventory.configuration?.includes("search_path=pg_catalog"))
+    ) {
+      violations.push("Modal create inventory has unsafe owner, ACL or runtime privileges");
+    }
   }
   if (organizationUsageCapability) {
     const capability = organizationUsageCapability;

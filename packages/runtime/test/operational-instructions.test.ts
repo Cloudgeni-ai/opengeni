@@ -279,7 +279,7 @@ describe("provider-neutral operational instructions", () => {
       "do not post a status right before `wait_for_input` unless it answers the user",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "If remaining work depends on background commands, register that session-level wait before ending your turn.",
+      "For ordinary background commands, register that session-level wait before ending your turn.",
     );
   });
 

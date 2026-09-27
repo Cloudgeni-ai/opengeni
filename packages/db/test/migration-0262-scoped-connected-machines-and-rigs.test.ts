@@ -232,7 +232,7 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
           app!,
           actor,
           async (tx) =>
-            await tx<Array<{ value: { id: string } }>>`
+            await tx<Array<{ value: { id: string; agentUpdate: Record<string, unknown> | null } }>>`
             select value from list_scoped_enrollments(
               ${actor.accountId}::uuid, ${actor.workspaceId}::uuid, null, 'active'
             ) value
@@ -242,6 +242,72 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
         new Set([machine.enrollmentId, sideMachine.enrollmentId]),
       );
       expect(await listMachines(otherB)).toHaveLength(0);
+      expect((await listMachines(ownerB)).every((row) => row.value.agentUpdate === null)).toBe(
+        true,
+      );
+
+      // Exercise the actual app-role scoped projection after all migrations,
+      // including update progress formerly discarded by list_scoped_enrollments.
+      const operationId = crypto.randomUUID();
+      const connectionInstanceId = crypto.randomUUID();
+      for (const status of ["waiting_for_idle", "failed", "succeeded"] as const) {
+        const completed = status !== "waiting_for_idle";
+        await admin.begin(async (tx) => {
+          // Only the isolated fixture owner seeds persisted progress. Reads below
+          // still run as the FORCE-RLS app role with the real human authority.
+          await tx`alter table enrollments no force row level security`;
+          await tx`
+            update enrollments set
+              agent_update_operation_id = ${operationId},
+              agent_update_status = ${status}, agent_update_target_version = '0.1.32',
+              agent_update_expected_binary_sha256 = ${"a".repeat(64)},
+              agent_update_error_code = ${status === "failed" ? "update_busy_uploads" : null},
+              agent_update_retryable = ${status === "failed"},
+              agent_update_rolled_back = ${status === "failed"},
+              agent_update_connection_instance_id = ${connectionInstanceId},
+              agent_update_connection_generation = 7,
+              agent_update_requested_at = '2026-01-01T00:00:00Z',
+              agent_update_updated_at = '2026-01-01T00:01:00Z',
+              agent_update_completed_at = ${completed ? "2026-01-01T00:01:00Z" : null}::timestamptz
+            where id = ${machine.enrollmentId}
+          `;
+          await tx`alter table enrollments force row level security`;
+        });
+        const machines = await listMachines(ownerB);
+        const update = machines.find((row) => row.value.id === machine.enrollmentId)!.value
+          .agentUpdate!;
+        expect(update).toEqual({
+          operationId,
+          status,
+          targetVersion: "0.1.32",
+          expectedBinarySha256: "a".repeat(64),
+          errorCode: status === "failed" ? "update_busy_uploads" : null,
+          retryable: status === "failed",
+          rolledBack: status === "failed",
+          connectionInstanceId,
+          connectionGeneration: 7,
+          requestedAt: "2026-01-01T00:00:00+00:00",
+          updatedAt: "2026-01-01T00:01:00+00:00",
+          completedAt: completed ? "2026-01-01T00:01:00+00:00" : null,
+        });
+        expect(
+          machines.find((row) => row.value.id === sideMachine.enrollmentId)!.value.agentUpdate,
+        ).toBeNull();
+        expect(await listMachines(otherB)).toHaveLength(0);
+        expect(
+          await asActor(
+            app,
+            otherB,
+            async (tx) =>
+              await tx`
+          select value from list_scoped_enrollments(
+            ${otherB.accountId}::uuid, ${otherB.workspaceId}::uuid,
+            ${machine.enrollmentId}::uuid, 'active'
+          ) value
+        `,
+          ),
+        ).toHaveLength(0);
+      }
       expect(
         await asActor(app, ownerB, async (tx) => {
           const [row] = await tx<Array<{ allowed: boolean }>>`

@@ -888,12 +888,18 @@ export class BrowserControlServer {
       if (authority.controllerGeneration !== controllerGeneration) {
         throw new ProtocolError("controller_stale", "browser controller generation is stale", 409);
       }
-      const capabilities = this.supervisor.supportsFencedInputBatches({
+      const reference = {
         browserSessionId,
         controllerGeneration,
-      })
-        ? { fencedInputBatches: true as const }
-        : {};
+      };
+      const capabilities = {
+        ...(this.supervisor.supportsFencedInputBatches(reference)
+          ? { fencedInputBatches: true as const }
+          : {}),
+        ...(this.supervisor.supportsFocusedInputObservations(reference)
+          ? { focusedInputObservations: true as const }
+          : {}),
+      };
       this.pruneViewGrants(authority);
       const digest = tokenDigest(token);
       const current = authority.viewGrants.get(grantId);

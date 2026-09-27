@@ -367,6 +367,8 @@ and `packages/sdk/test/contract-parity.test.ts`.
 
 Agents run directly on the user's Connected Machine (`selfhosted`); OpenGeni creates no sandbox.
 Browser shutdown: [native lifecycle](../agent/README.md#distribution).
+Mac updates preserve signed bundles; writes check ACLs
+([native writer](../agent/TRANSACTIONAL-WRITES.md)).
 
 The machine owns its filesystem, Git authentication, environment, and long-lived
 platform credentials. OpenGeni neither clones repositories nor installs durable
@@ -379,12 +381,12 @@ can begin without contact. An offline machine never authorizes cold-creating a
 rival box, snapshotting it, or provider-terminating the user's computer.
 
 Structured Files exposes the selected machine's effective host-native working
-directory as `FileSystem.root`; canonical links and tree nodes share that namespace.
+directory as `FileSystem.root`; links and tree nodes share this namespace.
 Connected Machine reads accept external absolute paths under the machine account's
-OS permissions: working directories are browsing defaults, not read boundaries.
-Managed provider reads and structured mutations remain workspace-confined. Files
-requests carry capability epoch and root. The API binds one active route per
-request; target/root changes return retryable conflicts, never reinterpret paths
+OS permissions; working directories remain browsing defaults.
+Managed reads and structured mutations stay workspace-confined, including `/`.
+Requests carry capability epoch and root. The API binds one route per request;
+target/root changes return retryable conflicts instead of reinterpreting paths
 on another filesystem.
 
 Generated-session schedules follow the same explicit route: they persist an
@@ -436,12 +438,10 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
-Historical CURRENT recovery requires same-session managed-human consent,
-checkpoint/generation CAS, singleton fencing and durable model warnings; never replay.
-Authority: `packages/core/src/application/sandbox-recovery.ts`; lifecycle:
-`packages/db/src/index.ts`; membership/GC/protocol guards: migration 0495.
-Rolling activation defaults off; permanent worker-protocol fencing applies.
-Retry checks effective routes. See [run lifecycle](run-lifecycle.md).
+Modal recovery: human consent (`packages/core/src/application/sandbox-recovery.ts`)
+or proved provider loss (`packages/db/src/index.ts`). Both require a verified
+CURRENT checkpoint, singleton, quiescence and durable warning; no command
+replay/empty reset. See migrations 0495/0526 and [run lifecycle](run-lifecycle.md).
 
 Home-compute selection proves establishment authority; invalid pointers reconcile
 visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture
@@ -494,26 +494,24 @@ Rotation recovery: [lifecycle](run-lifecycle.md).
 
 Archive capture/restore: [storage](workspace-archive-storage.md).
 
-Lease liveness, provider existence, route attachment, archive availability,
-workspace readiness, and operation availability are separate facts. A warm row
-or selected pointer alone is not proof that a command can run.
+Lease liveness, provider existence, route attachment, archives, workspace readiness,
+and operation availability are independent; a warm row does not prove executability.
 
-The effective backend behind a synthetic managed group is resolved once from
-the session policy and deployment backend. Fleet projection, swap readiness,
-viewer attachment, API-direct operations, and worker turns must use that same
-answer so a route cannot be advertised under one backend and established under
-another.
+Resolve synthetic groups' effective backend once from session policy and deployment
+configuration. Fleet, swaps, viewers, API operations and worker turns share that answer.
 
-The canonical backend enum currently contains `docker`, `modal`, `local`,
-`none`, `daytona`, `runloop`, `e2b`, `blaxel`, `cloudflare`, `vercel`,
-`selfhosted`, and `opensandbox`. The enum and provider registry—not this list—
-own exact membership and ordering.
+The contracts enum and provider registry own backend membership and ordering.
 
 Canonical: `packages/contracts/src/index.ts`,
 `packages/runtime/src/sandbox/providers/index.ts`,
 `packages/runtime/src/sandbox/routing/`,
 `apps/worker/src/activities/sandbox-lease.ts`, and
 [`connected-machines.md`](connected-machines.md).
+
+Modal creation: `sandbox/providers/modal-create-session.ts` and `modal-create-boundary.ts`
+persist an operation before dispatch and attribute its receipt before setup.
+Unknown outcomes fence replacement; historical discovery requires exact provider
+identity. Ordinary draining owns termination. See [lifecycle](run-lifecycle.md).
 
 ### 3.10 Client/server compatibility policy
 
@@ -1711,7 +1709,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |
-| Startup loading UI and timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `apps/web/src/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
+| Startup loading, compact exchange rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `apps/web/src/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
 | Standalone product integration | `packages/sdk/`, `packages/react/`, `.agents/skills/opengeni-client/` | [`product-integration.md`](product-integration.md) and [`embedding-workbench.md`](embedding-workbench.md) |
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |

@@ -1942,6 +1942,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             targetId: request.targetId,
             stream,
             ...(viewGrant.fencedInputBatches === true ? { fencedInputBatches: true } : {}),
+            ...(viewGrant.focusedInputObservations === true
+              ? { focusedInputObservations: true }
+              : {}),
             expiresAt,
           });
         },

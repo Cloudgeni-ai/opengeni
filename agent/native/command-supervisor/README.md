@@ -64,6 +64,13 @@ work handed to existing external daemons. It uses no PID namespace. PTY,
 `runAs`, other images/providers and the exact Modal image require separate
 conformance testing; this implementation alone licenses no checkpoint claim.
 
+`service -- COMMAND...` is the placement-service mode. It launches immediately,
+forwards TERM/INT to the leader, and allows 30 seconds for graceful shutdown.
+Leader exit triggers descendant TERM followed by KILL after 200 ms. It exits
+with the leader status only after kernel ECHILD; it creates no command receipt
+or control socket. This mode is for browserd, whose detached descendants must
+not outlive its controller. Retained-command `launch` semantics are unchanged.
+
 Run local native tests (Linux, C compiler, make, Python 3):
 
 ```sh

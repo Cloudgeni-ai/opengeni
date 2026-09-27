@@ -19,6 +19,10 @@ checkpoints in both provider input and returned history. The turn history sink
 checks the identities and order of its durable prefix before advancing its append
 cursor; database position conflicts succeed only for the same turn and exact
 canonical item. Provider dispatch and successful settlement require this check.
+Fresh history inserts verify their persisted representation through `RETURNING`;
+only conflicting positions require a separate read. This keeps numeric-position
+RLS scans out of the ordinary append path without weakening retry verification
+or the exact-attempt write fence.
 
 A **turn** is one logical unit of agent work inside a session: a waiting
 human/API prompt, an approval or structured-input response, or one coalesced
@@ -1014,7 +1018,18 @@ explicitly provide a durable catalog through skillCatalogInHistory.
 Workspace-managed Skill reads return current authorized content, so a read can
 observe a saved revision newer than its initial descriptor. Bundled/session Skill
 reads use the selected attempt's artifacts. Read outputs enter ordinary tool-call
-history.
+history. A repeated default `SKILL.md` read by the model returns a short
+`alreadyInContext` receipt with the current revision identity instead of the text
+when an active, call-paired `skill_read` result in this session already holds the
+same identity and exact text. The check judges each result as the current model
+receives it, after this turn's tool-output bound, so a result truncated when stored,
+truncated by a lower bound of the current model, or spilled never counts. Compaction
+marks those rows inactive, so the next read after compaction returns full text. The
+lookup only saves tokens: when it fails, the read returns full text.
+Explicit `paths` (the fresh-copy request, including `["SKILL.md"]`), `listFiles`,
+and Codemode callers always receive content. The check reads only the acting
+session's active history and leaves the tool schema, instructions, and Skill index
+unchanged, so it does not move the cached prompt prefix.
 If repository resources are attached, ordinary repository setup first makes
 their existing checkout available; runtime then indexes canonical
 `.agents/skills` and compatible `.claude/skills` directories through the bound
@@ -1598,6 +1613,8 @@ The managed browser exposes a separate public contract at
 GET is a bounded, provider-free projection. POST requires the canonical managed
 human cookie, current session-control authority, an operation UUID, explicit
 historical-checkpoint acceptance, and the exact selection returned by GET.
+The exact built-in local human may read GET to see the system-selected Retry
+route; local mode cannot submit POST consent.
 Agents, delegated/API principals, shared groups, non-Modal homes, active foreign
 routes, legacy/unregistered archives, and `archive.previous` are unsupported.
 
@@ -1666,10 +1683,73 @@ compatible workers. Pause/Cancel and settlement remain available. This public ga
 does not retrofit operator historical recovery that has no public consent receipt.
 No cancellation/reaper protocol changes are included.
 
+### Automatic continuity after a missing managed provider
+
+This is separate from human consent. Before agent construction (including
+on-demand sandbox turns), an exact live attempt may select the singleton
+session's registered CURRENT native Modal checkpoint only when the provider is
+definitively missing, the cold lease has an archive-generation mismatch, and
+no other holders, processes, mutations, pending tools or competing attempts
+remain. It records a distinct system-attributed audit and immutable per-session
+receipt before a replacement can be elected. The same attempt reuses that
+selection; stale attempts cannot change it. Retry may admit this narrowly
+recoverable route, but does not itself restore files or replay unknown effects.
+The lease pins group membership, route and CURRENT archive while selection is
+pending; restore admission recounts all group members, including private
+siblings. Only verified warm publication releases that pin.
+
+The existing cold election and native provider/artifact checks still decide
+whether a replacement becomes usable. No archive, uncertain provider, corrupt
+checkpoint, active writer or shared group remains blocked. Newer filesystem
+changes can be unavailable while conversation and external effects remain.
+Provider loss and fallback selection are also committed as audit facts before
+process-local counters; the reaper rebuilds a fresh, release-scoped alert
+inventory from those receipts if a worker exits after the transaction.
+Every agent reconstruction appends the same checkpoint-specific discontinuity
+warning to session instructions, after the stable workspace prompt prefix.
+Maintenance migration 0526 requires warning protocol v2 at attempt claim for
+every session with an automatic receipt, including after failed restoration or
+lease churn; old workers fail closed. Human-consented recovery keeps its
+independent v1 gate.
+
 New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected sandbox environment/base
 image instead of replacing the whole machine. Existing serialized sessions keep
-their recorded `snapshot_filesystem` or tar mode and remain recoverable. Warm
+their recorded `snapshot_filesystem` or tar mode and remain recoverable.
+Filesystem snapshot recovery boots the exact selected immutable Image directly,
+attributes that single destination before verification, and rejects a missing
+snapshot without falling back to the base image or an older checkpoint. It does
+not create a temporary box and ask SDK hydration to replace it. Directory and tar
+archives still hydrate the elected destination. This removes the hidden second
+create. Migration 0523 adds a durable Modal creation receipt immediately before
+the physical `SandboxCreate` RPC. The runtime's `modal-create-session.ts` owns
+creation and retains the pinned SDK's public session implementation; its
+`modal-create-boundary.ts` hook runs after image/secret preparation and before
+provider dispatch. The receipt binds the lease epoch, authenticated provider
+namespace, actual app and image IDs, selected archive revision, operation name,
+and request digest. SDK retries are disabled for that mutation. Only the matching creator can
+attribute an exact returned instance. Until then, failure rollback and both
+lease reapers preserve the operation, epoch, and checkpoint; a database trigger
+also rejects erasure by older transition paths. Orphan deletion is postponed
+while any warming Modal lease lacks a provider identity. The operation name and
+tag are created atomically with the provider box; absence from the running-box
+inventory cannot prove that creation never happened. A returned instance is
+attributed before manifest setup, including after cancellation.
+
+This receipt is a fence, not a provider idempotency or replay guarantee. Losing
+the creator and its reply can leave the lease blocked; time, a missing named
+running sandbox, and termination of some other sandbox do not unblock it.
+Logical-image fallback is allowed after a missing-image preparation failure,
+before admission starts, and refused after admission starts. The maintenance
+sweep discovers expired unknown operations in bounded batches, including
+finished provider instances. It requires the same authenticated namespace and
+one exact app, image, operation name and tag match. An atomic tenant/epoch/receipt
+comparison attributes that instance without renewing the lease or publishing
+the workspace; ordinary holder-fenced draining then owns cleanup. Discovery
+absence, ambiguity or provider failure leaves the receipt unresolved. Never
+clear it or silently create another sandbox. Cleanup rechecks the persisted
+provider namespace before interpreting a missing instance or issuing a stop.
+Warm
 checkpoint attempts use the configured interval as a hard minimum even after a
 new mutation generation; an already-complete generation never calls the
 provider again. The zero-holder drain/rotation capture bypasses that interval so
@@ -1733,6 +1813,19 @@ provider-deadline/operator rotation is retained by the DB release operation.
 Every fresh claim gets a new provider request ID; replacement attempts of an
 uninterrupted claim retain its stored ID. A workflow retry after release and
 intervening writes therefore cannot adopt an older snapshot as a newer generation.
+
+Re-arming a draining lease preserves its recorded workspace readiness. A provider
+address published during creation does not prove that workspace setup or restore
+verification completed. Both holder admission and explicit re-arm keep such a
+lease fenced until recovery settles it; they cannot promote recorded `not_ready`
+state to warm. Legacy envelopes without a recovery record retain the existing
+exact-provider-identity checks.
+
+Modal cleanup waits for the provider's terminal exit result. A stop request
+acknowledgement alone cannot settle SDK shutdown, by-ID rescue, or an orphan
+sweep. Failed or unavailable exit confirmation propagates to recovery (and is
+not reported as an orphan termination); borrowed SDK handles still leave their
+provider running. This does not establish the outcome of an unattributed create.
 
 Concurrent routed calls may all discover the same missing provider. Exactly one
 observer wins the lease-loss transition; the others receive typed `superseded`
@@ -2342,6 +2435,15 @@ Because the newest message carries the changing bytes, persistent
 `Agent.instructions` and earlier history remain prompt-cache stable. Public
 turn/queue projections and the standard timeline omit the field; full event and
 audit reads may return it, so it is never a secret boundary.
+
+The current time follows the same rule. Claim renders every accepted user-role
+message (human/API Send, Steer, realtime entries, goal continuations) with a
+separate `[Message sent Saturday 2026-09-26 07:51 UTC]` part taken from the
+turn's durable `created_at`, the acceptance time rather than the claim time, and
+persists it with the message. Delivered machine-input batches state their
+`deliveredAt` and each member's `createdAt` the same way. The model therefore
+knows the date without a tool call, nothing is computed at inference time, and
+recovery replays the stored bytes. The instructions never contain a clock.
 
 1. **`session_history_items` — conversation truth (the model-facing store).**
    Ordered, protocol-preserving SDK `AgentInputItem` JSON, exact for accepted

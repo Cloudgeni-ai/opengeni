@@ -54,6 +54,10 @@ export class SqliteBrowserProtectedAuthJournal {
     this.journal.write(record);
   }
 
+  read(operationId: string): BrowserProtectedAuthOperationJournalRecord | null {
+    return this.journal.read(operationId);
+  }
+
   loadAndRecover(settledAt?: string): BrowserProtectedAuthOperationJournalRecord[] {
     return this.journal.loadAndRecover(settledAt);
   }

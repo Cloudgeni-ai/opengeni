@@ -338,6 +338,9 @@ function hasBrowserEmulation(
  */
 export class AgentBrowserDriver implements BrowserInteractionDriver {
   readonly fencedInputBatches = true;
+  get focusedInputObservations(): boolean {
+    return this.engine !== "lightpanda";
+  }
   private readonly browserSessionId: string;
   private readonly controllerGeneration: string;
   private readonly runner: BrowserCommandRunner;
@@ -525,7 +528,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     const connection = await this.ensureConnection();
-    const deferNavigation = this.emulation !== null && url !== "about:blank";
+    // Establish the blank document and target policies before remote navigation.
+    // A slow response must use the navigation budget, not the target-creation deadline.
+    const deferNavigation = url !== "about:blank";
     const result = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
       ...this.contextScope(),
       url: deferNavigation ? "about:blank" : url,
@@ -1026,6 +1031,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     commandInput: BrowserActionCommandValue & { observationMode: "none" },
   ): Promise<null>;
   async dispatch(
+    commandInput: BrowserActionCommandValue & { observationMode: "input" },
+  ): Promise<BrowserObservationValue | null>;
+  async dispatch(
     commandInput: BrowserActionCommandValue & { observationMode?: "full" },
   ): Promise<BrowserObservationValue>;
   async dispatch(commandInput: BrowserActionCommandValue): Promise<BrowserObservationValue>;
@@ -1083,6 +1091,48 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           }
         }
         if (command.observationMode === "none") return null;
+        if (command.observationMode === "input") {
+          // A live viewer already has pixels. Only native dropdowns need the
+          // semantic options that Chromium's page stream cannot paint. Keep
+          // ordinary clicks off the full accessibility/snapshot path.
+          if (
+            command.action.type !== "pointer" ||
+            command.action.action !== "click" ||
+            (command.action.button !== undefined && command.action.button !== "left") ||
+            state.dialog ||
+            this.protectedAuthQuiet(state) ||
+            !this.focusedInputObservations
+          )
+            return null;
+          try {
+            if (!(await this.mayHaveFocusedNativeSelect(state))) return null;
+            const currentInfo = await this.requireTargetInfo(
+              await this.ensureConnection(),
+              info.targetId,
+            );
+            const observed = await this.observeUnlocked(state, currentInfo);
+            // A focused iframe is a hint only. The authoritative AX focus and
+            // redacted DOM metadata must actually identify a native select.
+            const pending = [
+              ...(observed.semantic?.kind === "snapshot" ? observed.semantic.roots : []),
+            ];
+            while (pending.length) {
+              const node = pending.pop()!;
+              if (node.children) pending.push(...node.children);
+              if (
+                node.ref === observed.focusedRef &&
+                node.native?.platform === "dom" &&
+                isRecord(node.native.data) &&
+                node.native.data.kind === "native-select"
+              )
+                return observed;
+            }
+          } catch {
+            // The click already completed. An optional focus read must never
+            // turn it into a failed mutation or invite a duplicate click.
+          }
+          return null;
+        }
         const currentInfo = await this.requireTargetInfo(
           await this.ensureConnection(),
           info.targetId,
@@ -1963,6 +2013,32 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
   }
 
+  private async mayHaveFocusedNativeSelect(state: TargetState): Promise<boolean> {
+    const world = await this.sendTarget<{ executionContextId?: number }>(
+      state,
+      "Page.createIsolatedWorld",
+      { frameId: state.frame.id, worldName: "opengeni-dom-read" },
+      { timeoutMs: 500 },
+    );
+    if (!Number.isSafeInteger(world.executionContextId)) return false;
+    const result = await this.sendTarget<{ result?: { value?: unknown } }>(
+      state,
+      "Runtime.evaluate",
+      {
+        contextId: world.executionContextId,
+        expression: `(() => {
+          let element = document.activeElement;
+          for (let depth = 0; depth < 32 && element?.shadowRoot?.activeElement; depth++)
+            element = element.shadowRoot.activeElement;
+          return ["SELECT", "IFRAME", "FRAME"].includes(element?.tagName);
+        })()`,
+        returnByValue: true,
+      },
+      { timeoutMs: 500 },
+    );
+    return result.result?.value === true;
+  }
+
   private async refreshAccessibility(state: TargetState): Promise<CdpAccessibilitySnapshot> {
     for (let attempt = 0; attempt < ACCESSIBILITY_SNAPSHOT_ATTEMPTS; attempt += 1) {
       const before = flattenFrameTree(await this.frameTree(state.sessionId));
@@ -2627,6 +2703,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           const node = await this.resolveLocator(state, action.locator);
           await this.focusNode(state, node.backendDOMNodeId);
         }
+        if (
+          action.text &&
+          this.engine === "lightpanda" &&
+          (await this.evaluate(state, LIGHTPANDA_TYPING_TARGET_EXPRESSION)) !== true
+        ) {
+          // Lightpanda 0.3.5 acknowledges insertText on contenteditable without
+          // inserting anything. Refuse before dispatch rather than certify it.
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            "Lightpanda typing requires an editable text input or textarea; use Chromium for rich-text editors",
+          );
+        }
         if (action.text)
           await this.sendActionTarget(state, "Input.insertText", {
             text: action.text,
@@ -2898,6 +2986,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       const backendDOMNodeId = await this.uniqueDomMatch(state, selector);
       return syntheticEntry(backendDOMNodeId);
     }
+    // A reference already identifies one concrete node. Revalidate that node
+    // against Chromium instead of reading every unrelated node before input.
+    // Frame/engine cases without this exact proof retain full-tree resolution.
+    if (locator.kind === "ref" && this.engine === "chromium") {
+      const cached = state.accessibility?.entriesByRef.get(locator.ref);
+      if (cached?.backendDOMNodeId != null && cached.frameId === state.frame.id) {
+        const partial = await this.resolveMainFrameReference(state, cached);
+        if (partial) return partial;
+      }
+    }
     const accessibility = await this.refreshAccessibility(state);
     if (locator.kind === "ref") {
       const entry = accessibility.entriesByRef.get(locator.ref);
@@ -2945,6 +3043,50 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     return unique;
+  }
+
+  private async resolveMainFrameReference(
+    state: TargetState,
+    previous: CdpAccessibilityEntry,
+  ): Promise<CdpAccessibilityEntry | null> {
+    const frame = state.frame;
+    let response: { nodes?: unknown };
+    try {
+      response = await this.sendTarget(state, "Accessibility.getPartialAXTree", {
+        backendNodeId: previous.backendDOMNodeId,
+        fetchRelatives: false,
+      });
+    } catch (error) {
+      // Older CDP implementations and disappeared nodes can reject this read.
+      // Full-tree resolution remains authoritative; no input has been sent.
+      if (error instanceof CdpProtocolError) return null;
+      throw error;
+    }
+    if (!Array.isArray(response.nodes)) return null;
+    await this.refreshFrame(state);
+    if (frame.id !== state.frame.id || frame.loaderId !== state.frame.loaderId) {
+      throw new InteractionDefiniteDriverError(
+        "document_stale",
+        "browser document changed while resolving the element reference",
+      );
+    }
+    const current = normalizeCdpAccessibilityTree({
+      nodes: namespaceCdpAccessibilityFrame(
+        frame.id,
+        response.nodes as CdpAxNode[],
+        `${frame.id}\0${frame.loaderId}`,
+      ),
+      controllerGeneration: this.controllerGeneration,
+      targetId: state.targetId,
+      documentGeneration: state.documentGeneration,
+    }).entriesByRef.get(previous.ref);
+    if (!current || current.backendDOMNodeId !== previous.backendDOMNodeId) {
+      throw new InteractionDefiniteDriverError(
+        "locator_not_found",
+        "browser element reference is stale or unavailable",
+      );
+    }
+    return current;
   }
 
   private async uniqueDomMatch(state: TargetState, selector: string): Promise<number> {
@@ -3367,6 +3509,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async navigateHistory(state: TargetState, direction: "back" | "forward"): Promise<void> {
+    if (this.engine === "lightpanda") {
+      // Pinned Lightpanda mixes subframe loads into its session-wide history
+      // and traverses every entry in the main frame. The CDP entries omit
+      // frame identity, so filtering URLs cannot recover safe target history.
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "Lightpanda does not support safe Back/Forward history; navigate to an explicit URL",
+      );
+    }
     const history = await this.sendActionTarget<{
       currentIndex?: unknown;
       entries?: unknown;
@@ -4205,6 +4356,13 @@ const CLEAR_PROTECTED_VALUE_FUNCTION = `function() {
   else return false;
   return true;
 }`;
+
+const LIGHTPANDA_TYPING_TARGET_EXPRESSION = `(() => {
+  const element = document.activeElement;
+  if (!(element instanceof Element) || !element.isConnected || element.disabled || element.readOnly) return false;
+  const tag = String(element.tagName || "").toLowerCase();
+  return tag === "textarea" || (tag === "input" && ["text", "search", "url", "tel", "password", "email", "number"].includes(element.type));
+})()`;
 
 const LIGHTPANDA_CLEAR_EDITABLE_FUNCTION = `function() {
   if (!(this instanceof Element) || !this.isConnected || document.activeElement !== this) return false;

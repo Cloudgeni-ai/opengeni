@@ -807,6 +807,72 @@
         }
       ],
       "gridPos": { "x": 12, "y": 91, "w": 12, "h": 8 }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Provider missing before workspace capture",
+      "description": "1 means at least one exact draining-to-cold commit with definitive provider disappearance in the trailing 30 minutes, by bounded backend. A previously published checkpoint may still be restorable. This is observed loss, independent of overdue rotation backlog.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (namespace, release, environment, backend) (clamp_max(increase(opengeni_sandbox_provider_missing_before_capture_total[30m]), 1) > 0 or clamp_max((opengeni_sandbox_provider_missing_before_capture_total unless opengeni_sandbox_provider_missing_before_capture_total offset 30m), 1))",
+          "legendFormat": "{{namespace}} / {{release}} / {{environment}} / {{backend}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 99, "w": 24, "h": 8 }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Modal checkpoint fallback selected",
+      "description": "1 means at least one previously published checkpoint was selected for Modal recovery in the trailing 30 minutes. Selection follows durable authorization but does not prove the subsequent restore succeeded; inspect archive and restore state.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (namespace, release, environment, backend) (clamp_max(increase(opengeni_sandbox_checkpoint_fallback_total{backend=\"modal\",outcome=\"selected\"}[30m]), 1) > 0 or clamp_max((opengeni_sandbox_checkpoint_fallback_total{backend=\"modal\",outcome=\"selected\"} unless opengeni_sandbox_checkpoint_fallback_total{backend=\"modal\",outcome=\"selected\"} offset 30m), 1))",
+          "legendFormat": "{{namespace}} / {{release}} / {{environment}} / {{backend}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 107, "w": 24, "h": 8 }
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "Durable recovery observations",
+      "description": "Committed provider-loss and fallback-selection counts in the last 30 minutes. Reconstructed from audit receipts after worker restarts; only fresh, release-scoped inventory is shown.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "opengeni:sandbox_recovery_observations_recent:fresh_max",
+          "legendFormat": "{{namespace}} / {{release}} / {{environment}} / {{kind}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 115, "w": 24, "h": 8 }
     }
   ]
 }

@@ -36,7 +36,7 @@ use opengeni_agent_engine::admission::{
 use opengeni_agent_engine::registry::{
     BeginOutcome, CancelOutcome, OpRegistry, QueryAnswer, RegistryConfig, RegistryCounters,
 };
-use opengeni_agent_engine::retention::{GlobalSpoolBudget, RetentionConfig};
+use opengeni_agent_engine::retention::{GlobalMemoryBudget, GlobalSpoolBudget, RetentionConfig};
 use opengeni_agent_engine::{Frame, HostCapacity, OpId};
 use opengeni_agent_platform::ContainedExec;
 use tokio::sync::{mpsc, oneshot, Notify};
@@ -81,6 +81,8 @@ const FALLBACK_FRAME_BYTES: usize = 128 * 1024;
 pub struct EngineBudgets {
     /// Per-op retention template (memory ring + spool quota + segment size).
     pub retention_per_op: RetentionConfig,
+    /// Shared in-memory record budget; excess output spills without truncation.
+    pub retention_memory_bytes: u64,
     /// The global budget for actual retained spool bytes (M2).
     pub spool_budget_bytes: u64,
     /// Circuit breaker on a legacy adapter's assembled reply buffer: far above
@@ -110,6 +112,7 @@ impl EngineBudgets {
                 // IO granularity (P), not a limit.
                 spool_segment_bytes: 8 * 1024 * 1024,
             },
+            retention_memory_bytes: (capacity.mem_available_bytes / 16).max(64 * 1024 * 1024),
             spool_budget_bytes: capacity.disk_free_bytes / 4,
             legacy_buffer_max_bytes: (capacity.mem_available_bytes / 16).max(64 * 1024 * 1024),
         }
@@ -225,6 +228,7 @@ pub struct Engine {
     capacity: RwLock<HostCapacity>,
     spool_root: PathBuf,
     spool_budget: Arc<GlobalSpoolBudget>,
+    memory_budget: Arc<GlobalMemoryBudget>,
     /// T-derived per-frame data size (from the negotiated max_payload).
     max_frame_bytes: AtomicUsize,
     /// Negotiated payload per active deployment link. The shared engine uses the
@@ -290,6 +294,7 @@ impl Engine {
             registry.tombstone_ttl_ms = v;
         }
         let spool_budget = Arc::new(GlobalSpoolBudget::new(budgets.spool_budget_bytes));
+        let memory_budget = Arc::new(GlobalMemoryBudget::new(budgets.retention_memory_bytes));
         Arc::new(Self {
             registry: Mutex::new(OpRegistry::new(registry)),
             admission: Mutex::new(AdmissionState::new(admission)),
@@ -299,6 +304,7 @@ impl Engine {
             capacity: RwLock::new(capacity),
             spool_root,
             spool_budget,
+            memory_budget,
             max_frame_bytes: AtomicUsize::new(FALLBACK_FRAME_BYTES),
             transport_payloads: Mutex::new(HashMap::new()),
             frames_dropped: AtomicU64::new(0),
@@ -327,6 +333,8 @@ impl Engine {
             budgets.retention_per_op.spool_max_bytes = v;
         }
         self.spool_budget.set_max_bytes(budgets.spool_budget_bytes);
+        self.memory_budget
+            .set_max_bytes(budgets.retention_memory_bytes);
         *self.budgets.write().expect("budgets lock") = budgets;
         *self.capacity.write().expect("capacity lock") = capacity;
     }
@@ -558,6 +566,7 @@ impl Engine {
             stdin,
             retention,
             spool_budget: self.spool_budget.clone(),
+            memory_budget: self.memory_budget.clone(),
             spool_dir: self.spool_root.join(op_dir_name(op_id)),
             deadline,
             config: JobConfig {
@@ -809,6 +818,7 @@ mod tests {
         assert_eq!(small.retention_per_op.memory_max_bytes, 16 * 1024 * 1024);
         assert_eq!(small.retention_per_op.spool_max_bytes, 256 * 1024 * 1024);
         assert_eq!(small.legacy_buffer_max_bytes, 64 * 1024 * 1024);
+        assert_eq!(small.retention_memory_bytes, 64 * 1024 * 1024);
 
         let big = EngineBudgets::derive(&HostCapacity {
             mem_available_bytes: 2 * 1024 * 1024 * 1024 * 1024,
@@ -821,6 +831,10 @@ mod tests {
             2 * 1024 * 1024 * 1024 * 1024 / 64
         );
         assert_eq!(big.spool_budget_bytes, 64 * 1024 * 1024 * 1024 * 1024 / 4);
+        assert_eq!(
+            big.retention_memory_bytes,
+            2 * 1024 * 1024 * 1024 * 1024 / 16
+        );
     }
 
     #[test]
@@ -1255,6 +1269,7 @@ mod tests {
             }
         ));
         assert_eq!(engine.spool_budget.used_bytes(), 0);
+        assert_eq!(engine.memory_budget.used_bytes(), 0);
     }
 
     #[tokio::test]
@@ -1331,6 +1346,7 @@ mod tests {
         }
         assert!(!route_alive(&engine), "route removed on the panic path");
         assert_eq!(engine.spool_budget.used_bytes(), 0);
+        assert_eq!(engine.memory_budget.used_bytes(), 0);
     }
 
     #[cfg(unix)]

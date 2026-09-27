@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPException } from "hono/http-exception";
+import { ControlRequest, ErrorCode as AgentErrorCode } from "@opengeni/agent-proto";
 import {
   SandboxImageConflictError,
   SandboxProviderReadLockUnavailableError,
@@ -16,6 +17,8 @@ import {
   BrowserControlTransportError,
   RoutingActiveRouteChangedError,
   RoutingWorkspaceRootChangedError,
+  NatsControlRpc,
+  agentErrorToControlError,
 } from "@opengeni/runtime/sandbox";
 import {
   channelAOperationFailureDiagnostic,
@@ -236,6 +239,68 @@ describe("P4.4 Channel-A route discipline", () => {
     expect((mapped as HTTPException).message).toBe(
       "Workspace files are temporarily unavailable. Retry.",
     );
+  });
+
+  test("oversized native requests preserve the transport size rejection at the API boundary", async () => {
+    let dispatched = false;
+    const rpc = new NatsControlRpc(async () => ({
+      request: async (_subject, payload) => {
+        if (payload.byteLength > 1024 * 1024) {
+          throw Object.assign(new Error("private transport diagnostic"), {
+            code: "MAX_PAYLOAD_EXCEEDED",
+          });
+        }
+        dispatched = true;
+        throw new Error("unexpected dispatch");
+      },
+    }));
+    const result = await rpc.request(
+      "agent.synthetic.rpc",
+      ControlRequest.fromPartial({
+        requestId: "synthetic-large-write",
+        op: {
+          $case: "fsWrite",
+          fsWrite: {
+            path: "/synthetic/document.txt",
+            content: new Uint8Array(1_118_000),
+          },
+        },
+      }),
+      { timeoutMs: 100 },
+    );
+    expect(dispatched).toBe(false);
+    const error = agentErrorToControlError(result.error!);
+    expect(mapChannelAError(error)).toMatchObject({
+      status: 413,
+      code: "limit_exceeded",
+      retryable: false,
+      details: { code: "machine_transport_payload_too_large", direction: "request" },
+    });
+    expect(channelAOperationFailureDiagnostic(error)).toEqual({
+      reason: "request_rejected",
+      status: 413,
+      errorCode: "sandbox_channel_a_operation_failed",
+    });
+  });
+
+  test("oversized native replies never imply that replay is safe or expose native diagnostics", () => {
+    const error = agentErrorToControlError({
+      code: AgentErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE,
+      message: "secret file contents",
+      detail: { encoded_bytes: "secret", max_payload: "secret", path: "/private/file" },
+      retryable: true,
+    });
+    const mapped = mapChannelAError(error) as HTTPException;
+    expect(mapped).toMatchObject({ status: 502, code: "limit_exceeded", retryable: false });
+    expect(mapped.message).toContain("may have completed");
+    expect(mapped.message).not.toContain("not sent");
+    expect(JSON.stringify(mapped)).not.toContain("secret");
+    expect(JSON.stringify(mapped)).not.toContain("/private/file");
+    expect(channelAOperationFailureDiagnostic(error)).toEqual({
+      reason: "provider_unavailable",
+      status: 502,
+      errorCode: "sandbox_channel_a_operation_failed",
+    });
   });
 
   test("request aborts map to a distinct 499 cancellation diagnostic", () => {

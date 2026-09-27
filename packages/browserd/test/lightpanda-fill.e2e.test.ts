@@ -108,6 +108,22 @@ e2e("Lightpanda fill replaces existing values and emits native input events", as
         }),
       ).toMatchObject({ text: JSON.stringify({ value, trusted: true }) });
     }
+    const typed = await supervisor.action({
+      ...fillCommand(observation, "#name", ""),
+      action: { type: "type", locator: { kind: "css", selector: "#name" }, text: "typed" },
+    });
+    expect(typed.state).toBe("completed");
+    observation = typed.observation!;
+    expectedEvents++;
+    expect(
+      await supervisor.readDom(reference, observation.target.id, {
+        kind: "element",
+        locator: { kind: "css", selector: "#name" },
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedDocumentGeneration: observation.target.documentGeneration!,
+        expectedFrameId: observation.frameId!,
+      }),
+    ).toMatchObject({ value: "typed" });
     for (const selector of ["#readonly", "#disabled", "#button", "#editable"]) {
       const receipt = await supervisor.action(
         fillCommand(observation, selector, "must not be inserted"),
@@ -115,6 +131,22 @@ e2e("Lightpanda fill replaces existing values and emits native input events", as
       expect(receipt.state).toBe("failed");
       expect(receipt.error?.code).toBe("invalid_action");
       observation = await supervisor.observe(reference, observation.target.id);
+      const rejectedTyping = await supervisor.action({
+        ...fillCommand(observation, selector, ""),
+        action: { type: "type", locator: { kind: "css", selector }, text: "must not be inserted" },
+      });
+      expect(rejectedTyping.state).toBe("failed");
+      expect(rejectedTyping.error?.code).toBe("invalid_action");
+      observation = await supervisor.observe(reference, observation.target.id);
+      if (selector === "#editable") {
+        const focusedTyping = await supervisor.action({
+          ...fillCommand(observation, selector, ""),
+          action: { type: "type", text: "must not be inserted" },
+        });
+        expect(focusedTyping.state).toBe("failed");
+        expect(focusedTyping.error?.code).toBe("invalid_action");
+        observation = await supervisor.observe(reference, observation.target.id);
+      }
       const fence = {
         expectedTargetGeneration: observation.target.targetGeneration,
         expectedDocumentGeneration: observation.target.documentGeneration!,

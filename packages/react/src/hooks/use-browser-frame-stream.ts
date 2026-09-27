@@ -58,7 +58,12 @@ export type UseBrowserFrameStreamResult = {
   frame: BrowserFrame | null;
   attachment: Pick<
     BrowserSessionAttachment,
-    "browserSessionId" | "controllerGeneration" | "targetId" | "expiresAt" | "fencedInputBatches"
+    | "browserSessionId"
+    | "controllerGeneration"
+    | "targetId"
+    | "expiresAt"
+    | "fencedInputBatches"
+    | "focusedInputObservations"
   > | null;
   error: Error | null;
   reconnect: () => void;
@@ -380,6 +385,9 @@ export function useBrowserFrameStream(
             expiresAt: attachment.expiresAt,
             ...(attachment.fencedInputBatches === true
               ? { fencedInputBatches: true as const }
+              : {}),
+            ...(attachment.focusedInputObservations === true
+              ? { focusedInputObservations: true as const }
               : {}),
           },
           error: null,

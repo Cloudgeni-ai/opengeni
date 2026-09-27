@@ -220,7 +220,10 @@ tenant-scoped tool over a large context snapshot.
 
 Because `modelContext` is appended in the newest user history item rather than
 composed into `Agent.instructions`, changing it does not rewrite the persistent
-provider prefix or invalidate otherwise reusable prompt-cache bytes. Initial
+provider prefix or invalidate otherwise reusable prompt-cache bytes. OpenGeni
+adds the message's acceptance time (minute-precision UTC with the weekday) to
+that same history item as its own part, so hosts do not need to put the current
+date or time in `modelContext`. Initial
 `modelContext` requires `initialMessage`; a realtime shell attaches context to a
 later delegation or finalized transcript entry instead. Values are trimmed,
 non-empty, and capped at 32768 characters.

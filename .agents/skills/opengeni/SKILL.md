@@ -274,6 +274,13 @@ every sandbox file, live mid-session remount, or an unbounded artifact system.
 
 ## Sandbox Backend Discovery
 
+Lease-owned Modal creation is fenced at `modal-create-boundary.ts`, before the
+physical RPC, and attributed through `modal-create-session.ts` before setup.
+Unknown outcomes retain their epoch/checkpoint. Historical positive discovery
+must match the same provider namespace; absence never permits replay. The
+maintenance activity attributes receipts; ordinary draining owns termination.
+See `docs/run-lifecycle.md` before changing this boundary.
+
 For sandbox pluggability or adding a backend:
 
 1. Find the current `SandboxBackend` contract.
