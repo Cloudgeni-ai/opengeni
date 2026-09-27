@@ -47,3 +47,17 @@ test("reads the fact from a tool result or its event projection", () => {
     expect(skillUseFromToolOutput(absent)).toBeNull();
   }
 });
+
+test("a reader keeps a newer writer's fact and drops only the fields it does not know", () => {
+  const newer = { ...use, packVersion: 3 };
+  expect(SkillUse.safeParse(newer).success).toBe(false);
+  const read = skillUseFromToolOutput({ content: [], _meta: { [SKILL_USE_META_KEY]: newer } });
+  expect(read).toEqual(use);
+  expect(read).not.toHaveProperty("packVersion");
+  expect(
+    skillUseFromToolOutput({
+      content: [],
+      _meta: { [SKILL_USE_META_KEY]: { ...newer, revisionId: "r-1" } },
+    }),
+  ).toBeNull();
+});

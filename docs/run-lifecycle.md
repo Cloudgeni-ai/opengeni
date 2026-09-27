@@ -1046,7 +1046,8 @@ attempt). The model output is the text part alone, so `_meta` never reaches the
 model or model history; only the `agent.toolCall.output` event projection keeps
 it. It holds no Skill text, user text, or Skill title, and it is dropped rather
 than let a result cross the 1 MiB model-visible cap. Codemode results never carry
-it.
+it. The writer's `SkillUse` schema is closed; `skillUseFromToolOutput` reads a
+stored event and drops fields a newer worker added instead of the whole fact.
 If repository resources are attached, ordinary repository setup first makes
 their existing checkout available; runtime then indexes canonical
 `.agents/skills` and compatible `.claude/skills` directories through the bound

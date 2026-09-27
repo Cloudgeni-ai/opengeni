@@ -26,42 +26,52 @@ export type SkillUseSource = z.infer<typeof SkillUseSource>;
 export const SkillReadKind = z.enum(["full", "already_in_context", "files", "list", "refused"]);
 export type SkillReadKind = z.infer<typeof SkillReadKind>;
 
+const skillUseFields = {
+  id: z.string().min(1).max(512),
+  source: SkillUseSource,
+  label: z.string().min(1).max(128).optional(),
+  /** Whole-artifact digest, for a Skill without a ledger revision. */
+  contentSha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/u)
+    .optional(),
+  /** Ledger revision of a workspace, organization, or personal Skill. */
+  revisionId: z.string().min(1).max(128).optional(),
+  kind: SkillReadKind.exclude(["refused"]),
+  /** UTF-8 bytes of the result text the read returned, before model tool-output truncation. */
+  bytes: z.number().int().nonnegative(),
+  /** The Skill appeared in the Skill index the model saw this turn. */
+  inIndex: z.boolean(),
+  /** skill_search returned this Skill earlier in the same turn attempt. */
+  searchedThisTurn: z.boolean(),
+};
+const oneProvenance = (use: {
+  contentSha256?: string | undefined;
+  revisionId?: string | undefined;
+}) => use.contentSha256 === undefined || use.revisionId === undefined;
+const oneProvenanceMessage = {
+  message: "A Skill use carries a content digest or a revision, not both",
+};
+
 /**
  * Ids, digests, and counts only. Never Skill text, user text, or a Skill's
  * title or description. `label` is reserved for a platform display label of a
- * built-in; user-authored Skills never set it.
+ * built-in; user-authored Skills never set it. This is the writer's closed
+ * shape: an unknown field fails the parse, so nothing else can be attached.
  */
-export const SkillUse = z
-  .object({
-    id: z.string().min(1).max(512),
-    source: SkillUseSource,
-    label: z.string().min(1).max(128).optional(),
-    /** Whole-artifact digest, for a Skill without a ledger revision. */
-    contentSha256: z
-      .string()
-      .regex(/^[0-9a-f]{64}$/u)
-      .optional(),
-    /** Ledger revision of a workspace, organization, or personal Skill. */
-    revisionId: z.string().min(1).max(128).optional(),
-    kind: SkillReadKind.exclude(["refused"]),
-    /** UTF-8 bytes of the text the caller received. */
-    bytes: z.number().int().nonnegative(),
-    /** The Skill appeared in the Skill index the model saw this turn. */
-    inIndex: z.boolean(),
-    /** skill_search returned this Skill earlier in the same turn attempt. */
-    searchedThisTurn: z.boolean(),
-  })
-  .strict()
-  .refine((use) => use.contentSha256 === undefined || use.revisionId === undefined, {
-    message: "A Skill use carries a content digest or a revision, not both",
-  });
+export const SkillUse = z.strictObject(skillUseFields).refine(oneProvenance, oneProvenanceMessage);
 export type SkillUse = z.infer<typeof SkillUse>;
+
+// Stored events outlive the worker that wrote them. A reader drops fields a
+// newer writer added instead of dropping the whole fact, and what it returns
+// still holds only the known, content-free fields.
+const StoredSkillUse = z.object(skillUseFields).refine(oneProvenance, oneProvenanceMessage);
 
 /** The Skill-use fact on a tool result or its event projection, when present and valid. */
 export function skillUseFromToolOutput(output: unknown): SkillUse | null {
   if (!output || typeof output !== "object" || Array.isArray(output)) return null;
   const meta = (output as { _meta?: unknown })._meta;
   if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
-  const parsed = SkillUse.safeParse((meta as Record<string, unknown>)[SKILL_USE_META_KEY]);
+  const parsed = StoredSkillUse.safeParse((meta as Record<string, unknown>)[SKILL_USE_META_KEY]);
   return parsed.success ? parsed.data : null;
 }
