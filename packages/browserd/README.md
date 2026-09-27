@@ -11,6 +11,12 @@ screenshots, and live frames. Mutations serialize per target; different targets
 remain concurrent. Live-frame subscribers share one target screencast, receive a
 latest-frame-wins stream, and every upstream frame is acknowledged immediately.
 
+Managed Chromium launches request a 64 MiB HTTP disk-cache budget instead of
+Chromium's host-disk-derived default. This bounds disposable response caching,
+not cookies, IndexedDB, service-worker storage, downloads, or total profile size.
+Chromium manages eviction; this is not a hard filesystem quota and does not
+retroactively clean running profiles. Attached human browsers are unchanged.
+
 One `BrowserSupervisor` hosts many independently fenced `BrowserSession`s on a
 placement. Each session has its own browser/profile/socket directories, driver,
 target queues, and SQLite WAL operation journal. A prepared receipt is durable

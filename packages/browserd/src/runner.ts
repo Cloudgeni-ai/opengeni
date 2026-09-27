@@ -1067,6 +1067,9 @@ export function browserLaunchArguments(
     // model downloads. Managed profiles must not each fetch gigabytes of AI
     // weights; OpenGeni's model provider is independent of Chrome's local AI.
     "--disable-features=OptimizationGuideOnDeviceModel",
+    // Chromium's free-disk-derived default can retain gigabytes per actor.
+    // Bound disposable HTTP caching without limiting cookies or site storage.
+    "--disk-cache-size=67108864",
     // Chromium's presentation-fenced screenshot path can wait indefinitely for
     // hidden headed tabs. Copy a freshly repainted surface without raising the
     // browser or changing the shared desktop's active tab.
