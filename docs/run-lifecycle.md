@@ -1670,6 +1670,16 @@ not claim restore success. Failed/stale public restores and a later loss after
 verified recovery remain explicit blockers requiring operator review; this slice
 does not introduce an abandon/reset or automatic re-consent operation.
 
+A fresh exact operator historical-checkpoint authorization may supersede a
+`verified` public recovery after a later loss. Under the existing quiescence,
+epoch, generation and revision fences, its audit receipt retains the complete
+superseded public projection before atomically clearing that projection and
+installing the new authorization marker. Permanent public consent receipts and
+their warnings remain unchanged; accepted and failed public recoveries are not
+superseded. Automatic selection still rejects every non-null public recovery.
+Operators must accept the new checkpoint gap explicitly; a previous completed
+consent is not authority for a later loss.
+
 Migration `0495_consented_sandbox_recovery.sql` is additive with DB-default-off
 consent. Activation is owner-only and follows verified immutable API/control/turn
 images and worker templates; see [deployment](deployment.md). Disabling new consent

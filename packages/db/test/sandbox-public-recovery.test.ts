@@ -5,6 +5,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import {
   acquireLease,
   authorizeAutomaticSandboxCheckpointRecovery,
+  authorizeHistoricalSandboxCheckpointRecovery,
   beginSandboxRematerialization,
   bootstrapWorkspace,
   claimSandboxCheckpointArtifactsForGc,
@@ -151,7 +152,242 @@ async function fixture() {
   return { ...input, session, leaseId, artifact, preview, request, consent, create, scope };
 }
 
+async function completeRecovery(f: Awaited<ReturnType<typeof fixture>>, holderId: string) {
+  const scope = {
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    sandboxGroupId: f.session.sandboxGroupId,
+  };
+  const elected = await acquireLease(client.db, {
+    ...scope,
+    kind: "viewer",
+    holderId,
+    backend: "modal",
+    leaseTtlMs: 60_000,
+  });
+  expect(elected.role).toBe("spawner");
+  expect(elected.lease.historicalRecoveryAuthorized).toBe(true);
+  const attempt = {
+    ...scope,
+    expectedEpoch: elected.lease.leaseEpoch,
+    rematerializationId: crypto.randomUUID(),
+  };
+  expect(await beginSandboxRematerialization(client.db, attempt)).toMatchObject({
+    status: "started",
+  });
+  await recordWarmingSandboxCreated(client.db, {
+    ...attempt,
+    instanceId: holderId,
+    resumeBackendId: "modal",
+    resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: holderId } } },
+    leaseTtlMs: 60_000,
+  });
+  await markSandboxRestoreVerifying(client.db, attempt);
+  expect(
+    await commitWarmingToWarm(client.db, {
+      ...scope,
+      expectedEpoch: attempt.expectedEpoch,
+      instanceId: holderId,
+      leaseTtlMs: 60_000,
+      rematerialization: {
+        id: attempt.rematerializationId,
+        verifiedRevision: f.request.selection.revision,
+      },
+    }),
+  ).toMatchObject({ committed: true });
+}
+
+async function completedRecoveryLostAgain() {
+  const f = await fixture();
+  await f.consent();
+  await completeRecovery(f, "first-public-restore");
+  // Simulate a later provider loss after new writes, preserving the completed
+  // public projection and its permanent command/audit receipts.
+  await shared.admin.begin(async (tx) => {
+    await tx`delete from sandbox_lease_holders where lease_id = ${f.leaseId}`;
+    await tx`update sandbox_leases set liveness = 'cold', instance_id = null,
+      refcount = 0, lease_epoch = lease_epoch + 1, workspace_generation = 50,
+      resume_state = jsonb_set(resume_state, '{opengeniRecovery}',
+        ${tx.json({
+          provider: { status: "missing", instanceId: null },
+          restore: {
+            status: "degraded",
+            retryable: false,
+            failureCode: "archive_generation_mismatch",
+          },
+          workspace: { status: "degraded" },
+        })}::jsonb)
+      where id = ${f.leaseId}`;
+  });
+  return f;
+}
+
+function operatorAuthorization(f: Awaited<ReturnType<typeof fixture>>) {
+  return {
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    sandboxGroupId: f.session.sandboxGroupId,
+    expectedEpoch: 4,
+    expectedWorkspaceGeneration: 50,
+    expectedArchiveGeneration: 10,
+    selectedRevision: f.request.selection.revision,
+    operationId: crypto.randomUUID(),
+    subjectId: "operator:second-recovery",
+    reason: "Explicit acceptance of the later generation gap",
+    acceptHistoricalCheckpoint: true as const,
+  };
+}
+
 describe("explicit singleton checkpoint recovery", () => {
+  test("a fresh operator authorization supersedes completed public recovery without losing provenance", async () => {
+    const f = await completedRecoveryLostAgain();
+    const [before] =
+      await shared.admin`select public_recovery from sandbox_leases where id = ${f.leaseId}`;
+    expect(before!.public_recovery.status).toBe("verified");
+    // A completed consent is not reusable authority for the later loss.
+    expect(
+      await acquireLease(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sandboxGroupId: f.session.sandboxGroupId,
+        kind: "viewer",
+        holderId: "before-new-authorization",
+        backend: "modal",
+        leaseTtlMs: 60_000,
+      }),
+    ).toMatchObject({ role: "blocked" });
+    const authorization = operatorAuthorization(f);
+    // Public activation is independent of the existing direct-DB operator lane.
+    await shared.admin`update opengeni_private.sandbox_recovery_rollout set consent_enabled = false`;
+    try {
+      expect(await authorizeHistoricalSandboxCheckpointRecovery(client.db, authorization)).toEqual({
+        authorized: true,
+      });
+      expect(await authorizeHistoricalSandboxCheckpointRecovery(client.db, authorization)).toEqual({
+        authorized: true,
+      });
+      const [audit] =
+        await shared.admin`select metadata, subject_id from audit_events where id = ${authorization.operationId}`;
+      expect(audit!.subject_id).toBe(authorization.subjectId);
+      expect(audit!.metadata).toMatchObject({
+        leaseId: f.leaseId,
+        leaseEpoch: 4,
+        workspaceGeneration: 50,
+        archiveGeneration: 10,
+        selectedRevision: f.request.selection.revision,
+        supersededPublicRecovery: before!.public_recovery,
+      });
+      const [after] =
+        await shared.admin`select public_recovery, resume_state, current_checkpoint_artifact_id
+        from sandbox_leases where id = ${f.leaseId}`;
+      expect(after!.public_recovery).toBeNull();
+      expect(after!.resume_state.opengeniHistoricalArchiveRecoveryId).toBe(
+        authorization.operationId,
+      );
+      expect(after!.current_checkpoint_artifact_id).toBe(f.artifact.id);
+      expect((await f.consent()).outcome).toBe("replayed");
+      expect(
+        await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id),
+      ).toContain(f.request.selection.capturedAt);
+      await completeRecovery(f, "second-operator-restore");
+      expect(await readLease(client.db, f.workspaceId, f.session.sandboxGroupId)).toMatchObject({
+        workspaceGeneration: 50,
+        archiveGeneration: 10,
+        archiveComplete: false,
+      });
+    } finally {
+      await shared.admin`update opengeni_private.sandbox_recovery_rollout set consent_enabled = true`;
+    }
+  });
+
+  test("stale operator selection cannot clear a completed public recovery", async () => {
+    const f = await completedRecoveryLostAgain();
+    const authorization = operatorAuthorization(f);
+    for (const stale of [
+      { expectedEpoch: 3 },
+      { expectedWorkspaceGeneration: 44 },
+      { expectedArchiveGeneration: 9 },
+      { selectedRevision: "stale-revision" },
+    ]) {
+      expect(
+        await authorizeHistoricalSandboxCheckpointRecovery(client.db, {
+          ...authorization,
+          ...stale,
+        }),
+      ).toEqual({ authorized: false });
+    }
+    const [row] =
+      await shared.admin`select public_recovery, resume_state from sandbox_leases where id = ${f.leaseId}`;
+    expect(row!.public_recovery.status).toBe("verified");
+    expect(row!.resume_state.opengeniHistoricalArchiveRecoveryId).toBe(f.request.operationId);
+    expect(
+      await shared.admin`select id from audit_events where id = ${authorization.operationId}`,
+    ).toHaveLength(0);
+  });
+
+  test("a conflicting audit operation cannot partially discard completed public recovery", async () => {
+    const f = await completedRecoveryLostAgain();
+    await expect(
+      authorizeHistoricalSandboxCheckpointRecovery(client.db, {
+        ...operatorAuthorization(f),
+        operationId: f.request.operationId,
+      }),
+    ).rejects.toThrow();
+    const [row] =
+      await shared.admin`select public_recovery, resume_state from sandbox_leases where id = ${f.leaseId}`;
+    expect(row!.public_recovery.status).toBe("verified");
+    expect(row!.resume_state.opengeniHistoricalArchiveRecoveryId).toBe(f.request.operationId);
+  });
+
+  test("completed public recovery still blocks automatic selection after later provider loss", async () => {
+    const f = await completedRecoveryLostAgain();
+    await enqueue(f);
+    const input = claimInput(f);
+    expect(
+      await claimSessionWorkForAttempt(client.db, f.workspaceId, {
+        ...input,
+        filesystemDiscontinuityProtocol: 2,
+      }),
+    ).toMatchObject({ action: "claimed" });
+    expect(
+      await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: f.session.id,
+        attemptId: input.attemptId,
+      }),
+    ).toEqual({ status: "not_eligible" });
+    const [row] =
+      await shared.admin`select public_recovery, resume_state from sandbox_leases where id = ${f.leaseId}`;
+    expect(row!.public_recovery.status).toBe("verified");
+    expect(row!.resume_state.opengeniHistoricalArchiveRecoveryId).toBe(f.request.operationId);
+  });
+
+  test("new operator authorization does not override accepted or failed public recovery", async () => {
+    for (const status of ["accepted", "failed"] as const) {
+      const f = await fixture();
+      await f.consent();
+      if (status === "failed") {
+        await shared.admin`update sandbox_leases set public_recovery = jsonb_set(public_recovery, '{status}', '"failed"'::jsonb) where id = ${f.leaseId}`;
+      }
+      const authorization = {
+        ...operatorAuthorization(f),
+        expectedEpoch: 3,
+        expectedWorkspaceGeneration: 44,
+      };
+      expect(await authorizeHistoricalSandboxCheckpointRecovery(client.db, authorization)).toEqual({
+        authorized: false,
+      });
+      const [row] =
+        await shared.admin`select public_recovery, resume_state from sandbox_leases where id = ${f.leaseId}`;
+      expect(row!.public_recovery.status).toBe(status);
+      expect(row!.resume_state.opengeniHistoricalArchiveRecoveryId).toBe(f.request.operationId);
+      expect(
+        await shared.admin`select id from audit_events where id = ${authorization.operationId}`,
+      ).toHaveLength(0);
+    }
+  });
+
   test("activation defaults off, app role cannot activate, and disabled DB rejects consent writes", async () => {
     const f = await fixture();
     const [role] = await client.db.execute<{ rolsuper: boolean; rolbypassrls: boolean }>(

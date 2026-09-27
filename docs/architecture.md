@@ -56,6 +56,12 @@ annotations remain stripped. See `packages/codex/src/hosted-call-status.ts` and
 Postgres commits precede notifications. NATS transports fanout, invalidations,
 request/reply and machine streams—not durable commit evidence.
 
+Historical sandbox recovery remains exact-selection authority. A new operator
+authorization can atomically supersede a verified public recovery projection,
+preserving it in the authorization audit and retaining permanent consent receipts;
+it does not reuse completed consent or broaden automatic fallback. See
+[`run-lifecycle.md`](run-lifecycle.md#explicit-same-session-historical-checkpoint-consent).
+
 `session_event_cursors` verifies appends transactionally and owns monotonic
 per-session sequencing/public `lastSequence`. Semantic writers lock sessions
 for atomic state/event commits; `sessions.last_sequence` is compatibility-only.
