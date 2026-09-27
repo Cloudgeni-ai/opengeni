@@ -181,7 +181,10 @@ that host-side restriction. Store uploads omit the development-only manifest
 
 The bridge generation is an opaque unpadded-base64url token: leading `-` and
 `_` are valid and retained verbatim in inventory and discovery. Rejecting either
-prefix strands a healthy bridge until its next generation. Extension handshake
+prefix strands a healthy bridge until its next generation. Rolling migration
+`0525_attached_browser_opaque_generations.sql` aligns both database generation
+checks with this contract; API validation alone does not restore discovery.
+Extension handshake
 timeouts and rejected readiness fences clear the exact failed port and reconnect
 with bounded backoff; late events from that port cannot invalidate a successor.
 
