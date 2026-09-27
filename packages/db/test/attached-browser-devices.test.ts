@@ -269,14 +269,20 @@ describe("attached browser endpoint registry", () => {
       "bad/path",
       "x".repeat(257),
     ]) {
-      await expect(shared!.admin`
-        UPDATE attached_browser_inventories SET bridge_generation = ${invalid}
-        WHERE workspace_id = ${scope.workspaceId} AND enrollment_id = ${scope.enrollmentId}
-      `).rejects.toMatchObject({ code: "23514" });
-      await expect(shared!.admin`
-        UPDATE attached_browser_devices SET connection_generation = ${invalid}
-        WHERE workspace_id = ${scope.workspaceId} AND id = ${id}
-      `).rejects.toMatchObject({ code: "23514" });
+      // postgres-js queries are lazy Promise subclasses. Assimilate them before
+      // Bun's rejection matcher, which otherwise waits without starting SQL.
+      await expect(
+        Promise.resolve(shared!.admin`
+          UPDATE attached_browser_inventories SET bridge_generation = ${invalid}
+          WHERE workspace_id = ${scope.workspaceId} AND enrollment_id = ${scope.enrollmentId}
+        `),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        Promise.resolve(shared!.admin`
+          UPDATE attached_browser_devices SET connection_generation = ${invalid}
+          WHERE workspace_id = ${scope.workspaceId} AND id = ${id}
+        `),
+      ).rejects.toMatchObject({ code: "23514" });
     }
   });
 
