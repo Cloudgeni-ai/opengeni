@@ -1512,11 +1512,9 @@ holder, mutation, and idle-grace checks. Records remain until termination;
 unobserved outcomes become lost. Command backoff never suppresses rotation's
 provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
 
-Retained command observation retries are capped at the exact Modal lease's
-rotation lead boundary, then at the reaper cadence. A long-lived server's
-normal exponential backoff cannot consume the checkpoint window. This only
-advances observation; cancellation, output capture and settlement still require
-their existing proofs. `apps/worker/src/retained-process-retry.ts` owns this cap.
+`apps/worker/src/retained-process-retry.ts` caps retained observation backoff at
+the exact Modal lease's rotation lead boundary, then reaper cadence; cancellation,
+capture and settlement proofs remain unchanged.
 
 Scheduled deadline rotation stops legacy commands where possible, then captures
 after bounded grace under a quiesced owner, exact lease fence, and no other
