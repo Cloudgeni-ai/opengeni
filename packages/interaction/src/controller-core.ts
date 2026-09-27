@@ -126,7 +126,7 @@ export type InteractionControllerCoreOptions<
   authority?: InteractionCoreAuthority<TCommand>;
   maxJournalEntries?: number;
   now?: () => Date;
-  initialJournal?: readonly InteractionOperationJournalRecord<TReceipt>[];
+  initialJournal?: Iterable<InteractionOperationJournalRecord<TReceipt>>;
   onJournalRecord?: (record: InteractionOperationJournalRecord<TReceipt>) => Promise<void> | void;
   /** Read the same durable journal used by onJournalRecord. Terminal receipts
    * may leave RAM only after that writer succeeds. Missing/corrupt reads fail

@@ -61,7 +61,7 @@ export type BrowserInteractionControllerOptions = {
   authority?: BrowserInteractionAuthority;
   maxJournalEntries?: number;
   now?: () => Date;
-  initialJournal?: readonly BrowserOperationJournalRecord[];
+  initialJournal?: Iterable<BrowserOperationJournalRecord>;
   onJournalRecord?: (record: BrowserOperationJournalRecord) => Promise<void> | void;
   /** Reads the same durable authority as onJournalRecord and initialJournal. */
   loadJournalRecord?: (operationId: string) => BrowserOperationJournalRecord | null;
@@ -239,7 +239,7 @@ export type BrowserProtectedAuthControllerOptions = {
   authority?: BrowserProtectedAuthAuthority;
   maxJournalEntries?: number;
   now?: () => Date;
-  initialJournal?: readonly BrowserProtectedAuthOperationJournalRecord[];
+  initialJournal?: Iterable<BrowserProtectedAuthOperationJournalRecord>;
   onJournalRecord?: (record: BrowserProtectedAuthOperationJournalRecord) => Promise<void> | void;
   /** Reads the same durable authority as onJournalRecord and initialJournal. */
   loadJournalRecord?: (operationId: string) => BrowserProtectedAuthOperationJournalRecord | null;
@@ -438,7 +438,7 @@ export type ComputerInteractionControllerOptions = {
   authority?: ComputerInteractionAuthority;
   maxJournalEntries?: number;
   now?: () => Date;
-  initialJournal?: readonly ComputerOperationJournalRecord[];
+  initialJournal?: Iterable<ComputerOperationJournalRecord>;
   onJournalRecord?: (record: ComputerOperationJournalRecord) => Promise<void> | void;
   /** Reads the same durable authority as onJournalRecord and initialJournal. */
   loadJournalRecord?: (operationId: string) => ComputerOperationJournalRecord | null;

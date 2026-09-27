@@ -960,7 +960,6 @@ export class BrowserSupervisor {
     };
     let driver: BrowserSupervisorDriver | null = null;
     try {
-      const initialJournal = journal.loadAndRecover();
       const initialProtectedAuthJournal = protectedAuthJournal.loadAndRecover();
       driver = await this.createDriver(driverContext);
       const runtime: Runtime = {
@@ -991,7 +990,7 @@ export class BrowserSupervisor {
         creationObservation: null,
         recovery: null,
       };
-      runtime.controller = this.createController(runtime, driver, initialJournal);
+      runtime.controller = this.createController(runtime, driver);
       runtime.protectedAuthController = this.createProtectedAuthController(
         runtime,
         driver,
@@ -1187,7 +1186,7 @@ export class BrowserSupervisor {
       const currentSnapshot = await driver.runtimeSnapshot();
       const currentTargets = await driver.listTargets();
       runtime.driver = driver;
-      runtime.controller = this.createController(runtime, driver, runtime.journal.loadAndRecover());
+      runtime.controller = this.createController(runtime, driver);
       runtime.protectedAuthController = this.createProtectedAuthController(
         runtime,
         driver,
@@ -1359,28 +1358,30 @@ export class BrowserSupervisor {
   private createController(
     runtime: Runtime,
     driver: BrowserSupervisorDriver,
-    initialJournal: ReturnType<SqliteBrowserOperationJournal["loadAndRecover"]>,
   ): BrowserInteractionController {
-    return new BrowserInteractionController({
-      browserSessionId: runtime.options.browserSessionId,
-      controllerGeneration: runtime.options.controllerGeneration,
-      driver,
-      initialJournal,
-      onJournalRecord: (record) => runtime.journal.write(record),
-      loadJournalRecord: (operationId) => runtime.journal.read(operationId),
-      authority: {
-        authorizeDispatch: async (command) => {
-          if (runtime.lifecycle !== "active") {
-            throw new InteractionControllerError(
-              "resource_unavailable",
-              "browser session is changing state",
-              true,
-            );
-          }
-          await runtime.options.authority?.authorizeDispatch(command);
-        },
-      },
-    });
+    return runtime.journal.withRecoveredRecords(
+      (initialJournal) =>
+        new BrowserInteractionController({
+          browserSessionId: runtime.options.browserSessionId,
+          controllerGeneration: runtime.options.controllerGeneration,
+          driver,
+          initialJournal,
+          onJournalRecord: (record) => runtime.journal.write(record),
+          loadJournalRecord: (operationId) => runtime.journal.read(operationId),
+          authority: {
+            authorizeDispatch: async (command) => {
+              if (runtime.lifecycle !== "active") {
+                throw new InteractionControllerError(
+                  "resource_unavailable",
+                  "browser session is changing state",
+                  true,
+                );
+              }
+              await runtime.options.authority?.authorizeDispatch(command);
+            },
+          },
+        }),
+    );
   }
 
   private createProtectedAuthController(

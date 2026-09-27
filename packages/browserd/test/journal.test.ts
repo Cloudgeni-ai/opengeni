@@ -118,6 +118,62 @@ describe("SqliteBrowserOperationJournal", () => {
     });
   });
 
+  test("streams recovered receipts into the controller without redispatch", async () => {
+    await withJournal(async ({ journal }) => {
+      let dispatches = 0;
+      const driver = fixtureDriver(() => {
+        dispatches++;
+      });
+      const original = new BrowserInteractionController({
+        browserSessionId,
+        controllerGeneration,
+        driver,
+        onJournalRecord: (entry) => journal.write(entry),
+        loadJournalRecord: (operationId) => journal.read(operationId),
+      });
+      const receipts = [];
+      for (let i = 1; i <= 3; i++) receipts.push(await original.run(command(id(i))));
+      await original.waitForIdle();
+      const restored = journal.withRecoveredRecords((records) => {
+        expect(Array.isArray(records)).toBe(false);
+        return new BrowserInteractionController({
+          browserSessionId,
+          controllerGeneration,
+          driver,
+          initialJournal: records,
+          onJournalRecord: (entry) => journal.write(entry),
+          loadJournalRecord: (operationId) => journal.read(operationId),
+        });
+      }, settledAt);
+      for (let i = 1; i <= 3; i++) {
+        expect(await restored.run(command(id(i)))).toEqual(receipts[i - 1]!);
+      }
+      expect(dispatches).toBe(3);
+    });
+  });
+
+  test("consumer failure rolls back recovery and cannot leave a live iterator", async () => {
+    await withJournal(async ({ journal }) => {
+      journal.write(record(id(1), "a".repeat(64), "prepared"));
+      journal.write(record(id(2), "b".repeat(64), "prepared"));
+      let escaped: Iterator<unknown> | undefined;
+      expect(() =>
+        journal.withRecoveredRecords((records) => {
+          escaped = records[Symbol.iterator]();
+          expect(escaped.next().done).toBe(false);
+          throw new Error("controller initialization failed");
+        }, settledAt),
+      ).toThrow("controller initialization failed");
+      expect(escaped?.next().done).toBe(true);
+      expect(journal.read(id(1))?.receipt.state).toBe("prepared");
+      expect(journal.read(id(2))?.receipt.state).toBe("prepared");
+      expect(() => journal.withRecoveredRecords(() => Promise.resolve(), settledAt)).toThrow(
+        "consumer must be synchronous",
+      );
+      expect(journal.read(id(1))?.receipt.state).toBe("prepared");
+    });
+  });
+
   test("rolls back earlier recovery when a later retained receipt is corrupt", async () => {
     await withJournal(async ({ path, journal }) => {
       const digest = createHash("sha256").update("recovery").digest("hex");
@@ -130,6 +186,13 @@ describe("SqliteBrowserOperationJournal", () => {
           "UPDATE interaction_operation_journal SET receipt_json = '{}' WHERE operation_id = ?",
         ).run(id(2));
         expect(() => journal.loadAndRecover(settledAt)).toThrow("byte count is corrupt");
+        let consumed = false;
+        expect(() =>
+          journal.withRecoveredRecords(() => {
+            consumed = true;
+          }, settledAt),
+        ).toThrow("byte count is corrupt");
+        expect(consumed).toBe(false);
         expect(
           db
             .query("SELECT state FROM interaction_operation_journal WHERE operation_id = ?")
