@@ -781,6 +781,106 @@ describe("BrowserSupervisor", () => {
     );
   });
 
+  test.each([false, true])(
+    "captures a lost managed profile without replaying input (lost=%s)",
+    async (lost) => {
+      let unavailable = false;
+      let factories = 0;
+      let uploads = 0;
+      let dispatches = 0;
+      await withSupervisor(
+        async ({ supervisor, contexts }) => {
+          const session = reference(42);
+          await supervisor.createSession({
+            ...session,
+            headed: false,
+            initialUrl: "https://capture.test/",
+          });
+          const profile = contexts.get(session.browserSessionId)!.profileDirectory;
+          await writeFile(join(profile, "Cookies"), "retained-authentication");
+          unavailable = lost;
+          const operationId = randomUUID();
+          const input = {
+            ...session,
+            operationId,
+            objectKey: `workspaces/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/browser-state/checkpoints/${operationId}/chromium-profile.ogbs`,
+            afterCapture: "stop" as const,
+            dataKey: Buffer.alloc(32, 8),
+            aad: Buffer.from("capture-recovery"),
+            upload: uploadAuthority(),
+          };
+          const captured = await supervisor.captureState(input);
+          expect(captured.manifest.tabs).toEqual([
+            { url: "https://capture.test/", selected: true },
+          ]);
+          expect(await readFile(join(profile, "Cookies"), "utf8")).toBe("retained-authentication");
+          expect(supervisor.listSessions()).toEqual([]);
+          expect(factories).toBe(lost ? 2 : 1);
+          expect(uploads).toBe(1);
+          expect(dispatches).toBe(0);
+          expect(await supervisor.captureState(input)).toEqual(captured);
+          expect(uploads).toBe(1);
+          expect(factories).toBe(lost ? 2 : 1);
+        },
+        {
+          onFactory: () => {
+            factories += 1;
+          },
+          uploadArtifact: async () => {
+            uploads += 1;
+          },
+          driverHooks: {
+            available: (instance) => instance > 1 || !unavailable,
+            dispatch: async () => {
+              dispatches += 1;
+            },
+          },
+        },
+      );
+    },
+  );
+
+  test("capture refuses unsafe headless-shell recovery and leaves the operation retryable", async () => {
+    let available = true;
+    let factories = 0;
+    let uploads = 0;
+    await withSupervisor(
+      async ({ supervisor }) => {
+        const session = reference(43);
+        await supervisor.createSession({ ...session, headed: false });
+        const operationId = randomUUID();
+        const input = {
+          ...session,
+          operationId,
+          objectKey: `workspaces/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/browser-state/checkpoints/${operationId}/chromium-profile.ogbs`,
+          afterCapture: "stop" as const,
+          dataKey: Buffer.alloc(32, 8),
+          aad: Buffer.from("capture-explicit-restore"),
+          upload: uploadAuthority(),
+        };
+        available = false;
+        await expect(supervisor.captureState(input)).rejects.toMatchObject({
+          code: "resource_unavailable",
+        });
+        expect(factories).toBe(1);
+        expect(uploads).toBe(0);
+        available = true;
+        await supervisor.captureState(input);
+        expect(factories).toBe(1);
+        expect(uploads).toBe(1);
+      },
+      {
+        onFactory: () => {
+          factories += 1;
+        },
+        uploadArtifact: async () => {
+          uploads += 1;
+        },
+        driverHooks: { available: () => available, requiresExplicitProfileRestore: true },
+      },
+    );
+  });
+
   test("restores one immutable profile into a fresh session and binds exact retries", async () => {
     const key = Buffer.alloc(32, 7);
     const aad = Buffer.from("workspace:identity:restored-revision", "utf8");

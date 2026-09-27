@@ -1134,6 +1134,16 @@ export class BrowserSupervisor {
     let driverClosed = false;
     let uploadDispatched = false;
     try {
+      // Capture needs a live snapshot. Recover a definitively lost managed
+      // process before entering the capture fence; explicit-restore engines
+      // still refuse this path, and no input or upload is replayed.
+      await this.recoverIfUnavailable(runtime);
+      if (runtime.lifecycle !== "active") {
+        throw new InteractionControllerError(
+          "resource_unavailable",
+          "browser session is not available for state capture",
+        );
+      }
       runtime.lifecycle = "capturing";
       await Promise.all([
         runtime.controller.waitForIdle(),
