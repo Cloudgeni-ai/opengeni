@@ -1,5 +1,12 @@
 # @opengeni/example-embedded-product
 
+## 0.0.18
+
+### Patch Changes
+
+- Updated dependencies [6cbccaa]
+  - @opengeni/react@7.3.1
+
 ## 0.0.17
 
 ### Patch Changes
