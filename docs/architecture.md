@@ -390,16 +390,13 @@ Requests carry capability epoch and root. The API binds one route per request;
 target/root changes return retryable conflicts instead of reinterpreting paths
 on another filesystem.
 
-Generated-session schedules follow the same explicit route: they persist an
-exact workspace- or organization-scoped machine target and seed the session's
-active pointer before its first turn. A targetless generated schedule cannot
-resolve to `selfhosted`; ingress rejects that configuration, and dispatch
-revalidates the frozen target rather than falling back to managed compute.
-Manual and generated creates preflight the target's current liveness and
-workspace root before insertion, then recheck durable target authority and
-commit the active pointer in the same transaction as the session row. A
-rejected target therefore leaves no queued session shell for discovery or
-parent-tree projections to mistake for live work.
+Generated-session schedules persist an exact workspace- or organization-scoped
+machine target and seed its active pointer before the first turn. Ingress
+rejects targetless `selfhosted` schedules; dispatch revalidates the frozen target
+without managed-compute fallback. Manual and generated creates preflight target
+liveness and workspace root, then recheck durable authority and atomically
+commit the active pointer with the session row. Rejection leaves no queued
+session shell in discovery or parent-tree projections.
 
 Child workers keep the ordinary low-friction rule: omitting placement shares
 the creator's box. Because a Connected Machine pointer is session-local, that
