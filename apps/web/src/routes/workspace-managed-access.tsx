@@ -16,7 +16,13 @@ import { Section } from "@/components/ui/section";
 import { useAppContext } from "@/context";
 import type { OrganizationMember, OrganizationWorkspaceAccessMember } from "@/types";
 
-import { AddPeoplePage, asRole, initialsOf, type AccessView } from "./workspace-members-section";
+import {
+  AddPeoplePage,
+  asRole,
+  FLUSH_ACCESS_LIST,
+  initialsOf,
+  type AccessView,
+} from "./workspace-members-section";
 
 type ManagedRole = "viewer" | "member" | "admin";
 
