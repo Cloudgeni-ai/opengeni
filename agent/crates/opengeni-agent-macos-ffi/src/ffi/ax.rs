@@ -8,8 +8,10 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
-use std::sync::{mpsc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -32,7 +34,7 @@ use accessibility_sys::{
 };
 use block2::RcBlock;
 use core_foundation::array::CFArray;
-use core_foundation::base::{CFGetTypeID, CFType, CFTypeRef, TCFType};
+use core_foundation::base::{CFGetTypeID, CFHash, CFType, CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::number::CFNumber;
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop, CFRunLoopSource};
@@ -61,6 +63,7 @@ const MAX_AX_NODES: usize = 5_000;
 const MAX_AX_DEPTH: usize = 64;
 const MAX_AX_OBSERVED_ELEMENTS: usize = 512;
 const MAX_AX_SNAPSHOTS_PER_PROCESS: usize = 32;
+const MAX_PENDING_AX_NOTIFICATIONS: usize = 64;
 const MAX_AX_ACTIONS_PER_NODE: usize = 64;
 const MAX_STRING_CHARS: usize = 32_768;
 const AX_CONTAINS_PROTECTED_CONTENT: &str = "AXContainsProtectedContent";
@@ -122,11 +125,23 @@ enum AxWorkerCommand {
     Shutdown,
 }
 
+// AX notifications can carry a distinct CF proxy for the registered control.
+// Retain the proxy and use CFEqual/CFHash, never its allocation address. These
+// values stay on the owning AX worker, including its bounded callback queue.
+#[derive(Clone, PartialEq, Eq)]
+struct AxIdentity(AxElement);
+
+impl Hash for AxIdentity {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        unsafe { CFHash(self.0.as_CFTypeRef()) }.hash(state);
+    }
+}
+
 struct StoredSnapshot {
     snapshot_id: String,
     target: MacTargetInfo,
     elements: HashMap<String, AxElement>,
-    notification_keys: Vec<(usize, String)>,
+    notification_keys: Vec<(AxIdentity, String)>,
 }
 
 struct AxWorkerState {
@@ -134,7 +149,8 @@ struct AxWorkerState {
     next_snapshot: u64,
     snapshots: HashMap<String, StoredSnapshot>,
     observer: Option<AxObserver>,
-    notification_rx: mpsc::Receiver<()>,
+    notification_rx: mpsc::Receiver<(AxIdentity, String)>,
+    notification_overflow: Arc<AtomicBool>,
 }
 
 struct AxObserver {
@@ -143,8 +159,8 @@ struct AxObserver {
     source: CFRunLoopSource,
     run_loop: CFRunLoop,
     context: Box<AxObserverContext>,
-    registrations: HashMap<(usize, String), ObserverRegistration>,
-    base_keys: HashSet<(usize, String)>,
+    registrations: HashMap<(AxIdentity, String), ObserverRegistration>,
+    base_keys: HashSet<(AxIdentity, String)>,
 }
 
 struct ObserverRegistration {
@@ -153,7 +169,8 @@ struct ObserverRegistration {
 }
 
 struct AxObserverContext {
-    sender: mpsc::SyncSender<()>,
+    sender: mpsc::SyncSender<(AxIdentity, String)>,
+    overflow: Arc<AtomicBool>,
 }
 
 #[repr(C)]
@@ -359,11 +376,18 @@ fn ax_worker_main(
         ))));
         return;
     }
-    // AX notifications are invalidation hints, not a lossless event log. One
-    // pending signal is sufficient and prevents a chatty app from growing an
-    // unbounded callback queue while a snapshot is being traversed.
-    let (notification_tx, notification_rx) = mpsc::sync_channel(1);
-    let observer = match AxObserver::open(pid, &app, notification_tx) {
+    // Retain bounded notification identities so a change in one observed window
+    // does not invalidate every other window in the same application. Overflow
+    // falls back to process-wide invalidation; dropped hints never authorize use
+    // of a potentially stale snapshot.
+    let (notification_tx, notification_rx) = mpsc::sync_channel(MAX_PENDING_AX_NOTIFICATIONS);
+    let notification_overflow = Arc::new(AtomicBool::new(false));
+    let observer = match AxObserver::open(
+        pid,
+        &app,
+        notification_tx,
+        Arc::clone(&notification_overflow),
+    ) {
         Ok(observer) => Some(observer),
         Err(error) => {
             let _ = ready.send(Err(error));
@@ -376,6 +400,7 @@ fn ax_worker_main(
         snapshots: HashMap::new(),
         observer,
         notification_rx,
+        notification_overflow,
     };
     let _ = ready.send(Ok(()));
     let mut last_liveness_poll = Instant::now();
@@ -424,8 +449,40 @@ impl AxWorkerState {
                 CFRunLoop::run_in_mode(kCFRunLoopDefaultMode, Duration::from_millis(1), true)
             };
         }
-        if self.notification_rx.try_iter().next().is_some() {
+        let notifications: HashSet<_> = self.notification_rx.try_iter().collect();
+        if self.notification_overflow.swap(false, Ordering::Relaxed) {
             self.invalidate_all();
+            return;
+        }
+        let mut affected = HashSet::new();
+        for notification in notifications {
+            // App-wide focus/layout changes still invalidate the whole process.
+            if self
+                .observer
+                .as_ref()
+                .is_some_and(|observer| observer.base_keys.contains(&notification))
+            {
+                self.invalidate_all();
+                return;
+            }
+            let mut matched = false;
+            for (key, snapshot) in &self.snapshots {
+                if snapshot.notification_keys.contains(&notification) {
+                    matched = true;
+                    affected.insert(key.clone());
+                }
+                if snapshot.target.kind == MacTargetKind::Application {
+                    affected.insert(key.clone());
+                }
+            }
+            // A delayed event after deregistration cannot safely be narrowed.
+            if !matched {
+                self.invalidate_all();
+                return;
+            }
+        }
+        for key in affected {
+            self.remove_snapshot(&key);
         }
     }
 
@@ -519,7 +576,12 @@ impl AxWorkerState {
 }
 
 impl AxObserver {
-    fn open(pid: i32, app: &AxElement, sender: mpsc::SyncSender<()>) -> Result<Self, MacFfiError> {
+    fn open(
+        pid: i32,
+        app: &AxElement,
+        sender: mpsc::SyncSender<(AxIdentity, String)>,
+        overflow: Arc<AtomicBool>,
+    ) -> Result<Self, MacFfiError> {
         let mut raw = core::ptr::null_mut();
         let result = unsafe { AXObserverCreate(pid, ax_observer_callback, &raw mut raw) };
         if result != kAXErrorSuccess || raw.is_null() {
@@ -544,7 +606,7 @@ impl AxObserver {
             _owner: owner,
             source,
             run_loop,
-            context: Box::new(AxObserverContext { sender }),
+            context: Box::new(AxObserverContext { sender, overflow }),
             registrations: HashMap::new(),
             base_keys: HashSet::new(),
         };
@@ -568,7 +630,7 @@ impl AxObserver {
         &mut self,
         elements: &HashMap<String, AxElement>,
         snapshot: &MacAxSnapshot,
-    ) -> Vec<(usize, String)> {
+    ) -> Vec<(AxIdentity, String)> {
         let mut keys = Vec::new();
         for (index, node) in snapshot.nodes.iter().enumerate() {
             let Some(element) = elements.get(&node.key) else {
@@ -601,8 +663,12 @@ impl AxObserver {
         keys
     }
 
-    fn register(&mut self, element: &AxElement, notification: &str) -> Option<(usize, String)> {
-        let identity = element.as_concrete_TypeRef() as usize;
+    fn register(
+        &mut self,
+        element: &AxElement,
+        notification: &str,
+    ) -> Option<(AxIdentity, String)> {
+        let identity = AxIdentity(element.clone());
         let key = (identity, notification.to_string());
         if let Some(registration) = self.registrations.get_mut(&key) {
             registration.references = registration.references.saturating_add(1);
@@ -633,7 +699,7 @@ impl AxObserver {
         Some(key)
     }
 
-    fn unregister_keys(&mut self, keys: &[(usize, String)]) {
+    fn unregister_keys(&mut self, keys: &[(AxIdentity, String)]) {
         for key in keys {
             if self.base_keys.contains(key) {
                 if let Some(registration) = self.registrations.get_mut(key) {
@@ -673,15 +739,30 @@ impl Drop for AxObserver {
 
 unsafe extern "C" fn ax_observer_callback(
     _observer: AXObserverRef,
-    _element: AXUIElementRef,
-    _notification: core_foundation::string::CFStringRef,
+    element: AXUIElementRef,
+    notification: core_foundation::string::CFStringRef,
     refcon: *mut core::ffi::c_void,
 ) {
     if refcon.is_null() {
         return;
     }
     let context: &AxObserverContext = unsafe { &*refcon.cast::<AxObserverContext>() };
-    let _ = context.sender.try_send(());
+    if element.is_null() || notification.is_null() {
+        context.overflow.store(true, Ordering::Relaxed);
+        return;
+    }
+    let notification = unsafe { CFString::wrap_under_get_rule(notification) };
+    // Retain until the owning worker drains this bounded queue.
+    if context
+        .sender
+        .try_send((
+            AxIdentity(unsafe { AxElement::wrap_under_get_rule(element) }),
+            notification.to_string(),
+        ))
+        .is_err()
+    {
+        context.overflow.store(true, Ordering::Relaxed);
+    }
 }
 
 pub(super) fn list_targets(shareable_windows: &[ShareableWindow]) -> Vec<MacTargetInfo> {
@@ -2253,4 +2334,152 @@ fn same_target(left: &MacTargetInfo, right: &MacTargetInfo) -> bool {
             (MacTargetKind::Window, Some(left), Some(right)) => left == right,
             (MacTargetKind::Window, _, _) => left.ax_window == right.ax_window,
         }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    fn fixture() -> (AxWorkerState, AxObserverContext) {
+        let (sender, notification_rx) = mpsc::sync_channel(MAX_PENDING_AX_NOTIFICATIONS);
+        let overflow = Arc::new(AtomicBool::new(false));
+        let state = AxWorkerState {
+            // Creating an AX proxy sends no actions or permission prompts.
+            app: AxElement::application(0),
+            next_snapshot: 0,
+            snapshots: HashMap::new(),
+            observer: None,
+            notification_rx,
+            notification_overflow: Arc::clone(&overflow),
+        };
+        (state, AxObserverContext { sender, overflow })
+    }
+
+    fn snapshot(element: i32, kind: MacTargetKind) -> StoredSnapshot {
+        StoredSnapshot {
+            snapshot_id: format!("snapshot-{element}"),
+            target: MacTargetInfo {
+                kind,
+                process_id: 0,
+                process_generation: "fixture".to_string(),
+                application_id: None,
+                application_name: "Fixture".to_string(),
+                title: "Synthetic window".to_string(),
+                bounds: None,
+                focused: false,
+                window_id: None,
+                ax_window: None,
+            },
+            elements: HashMap::new(),
+            notification_keys: vec![(
+                AxIdentity(AxElement::application(element)),
+                kAXValueChangedNotification.to_string(),
+            )],
+        }
+    }
+
+    #[test]
+    fn distinct_ax_proxies_share_notification_identity() {
+        let first = AxIdentity(AxElement::application(1));
+        let second = AxIdentity(AxElement::application(1));
+        assert_ne!(
+            first.0.as_concrete_TypeRef(),
+            second.0.as_concrete_TypeRef()
+        );
+        let keys = HashSet::from([(first, kAXValueChangedNotification.to_string())]);
+        assert!(keys.contains(&(second, kAXValueChangedNotification.to_string())));
+    }
+
+    #[test]
+    fn background_window_change_preserves_unrelated_window_but_not_app_snapshot() {
+        let (mut state, context) = fixture();
+        state
+            .snapshots
+            .insert("foreground".to_string(), snapshot(1, MacTargetKind::Window));
+        state
+            .snapshots
+            .insert("background".to_string(), snapshot(2, MacTargetKind::Window));
+        state.snapshots.insert(
+            "application".to_string(),
+            snapshot(3, MacTargetKind::Application),
+        );
+        context
+            .sender
+            .send((
+                AxIdentity(AxElement::application(2)),
+                kAXValueChangedNotification.to_string(),
+            ))
+            .unwrap();
+        state.pump_notifications();
+        assert_eq!(state.snapshots.len(), 1);
+        assert!(state.snapshots.contains_key("foreground"));
+        // The surviving target still expires as soon as its own state changes.
+        context
+            .sender
+            .send((
+                AxIdentity(AxElement::application(1)),
+                kAXValueChangedNotification.to_string(),
+            ))
+            .unwrap();
+        state.pump_notifications();
+        assert!(state.snapshots.is_empty());
+    }
+
+    #[test]
+    fn unknown_or_shared_notification_sources_fail_closed() {
+        let (mut state, context) = fixture();
+        for key in ["first", "second"] {
+            state
+                .snapshots
+                .insert(key.to_string(), snapshot(1, MacTargetKind::Window));
+        }
+        context
+            .sender
+            .send((
+                AxIdentity(AxElement::application(1)),
+                kAXValueChangedNotification.to_string(),
+            ))
+            .unwrap();
+        state.pump_notifications();
+        assert!(state.snapshots.is_empty());
+        state
+            .snapshots
+            .insert("first".to_string(), snapshot(1, MacTargetKind::Window));
+        context
+            .sender
+            .send((
+                AxIdentity(AxElement::application(9)),
+                kAXLayoutChangedNotification.to_string(),
+            ))
+            .unwrap();
+        state.pump_notifications();
+        assert!(state.snapshots.is_empty());
+    }
+
+    #[test]
+    fn callback_overflow_invalidates_even_an_unrelated_target() {
+        let (mut state, context) = fixture();
+        let element = state.app.as_concrete_TypeRef();
+        state
+            .snapshots
+            .insert("first".to_string(), snapshot(0, MacTargetKind::Window));
+        state
+            .snapshots
+            .insert("other".to_string(), snapshot(1, MacTargetKind::Window));
+        let notification = CFString::new(kAXValueChangedNotification);
+        for _ in 0..=MAX_PENDING_AX_NOTIFICATIONS {
+            unsafe {
+                ax_observer_callback(
+                    core::ptr::null_mut(),
+                    element,
+                    notification.as_concrete_TypeRef(),
+                    core::ptr::from_ref(&context).cast_mut().cast(),
+                );
+            }
+        }
+        assert!(context.overflow.load(Ordering::Relaxed));
+        state.pump_notifications();
+        assert!(state.snapshots.is_empty());
+        assert!(!context.overflow.load(Ordering::Relaxed));
+    }
 }

@@ -101,7 +101,9 @@ int main(int argc, char **argv) {
         struct sigaction action;
         sigset_t mask;
         if (sigaction(SIGCHLD, NULL, &action) || sigprocmask(SIG_SETMASK, NULL, &mask)) return 86;
-        if (action.sa_handler != SIG_DFL || (action.sa_flags & SA_NOCLDWAIT) || sigismember(&mask, SIGCHLD)) return 87;
+        if (action.sa_handler != SIG_DFL || (action.sa_flags & SA_NOCLDWAIT) ||
+            sigismember(&mask, SIGCHLD) || sigismember(&mask, SIGTERM) ||
+            sigismember(&mask, SIGINT)) return 87;
         tick();
         return 19;
     }

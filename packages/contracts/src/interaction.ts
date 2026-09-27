@@ -45,6 +45,13 @@ const opaqueGeneration = z
   .min(1)
   .max(256)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
+// Native bridge generations use unpadded base64url; both - and _ can lead.
+// Keep the bytes unchanged: generation equality fences old connections.
+const attachedBridgeGeneration = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z0-9_-][A-Za-z0-9._:-]*$/u);
 const boundedOpaqueId = z
   .string()
   .min(1)
@@ -314,7 +321,7 @@ export type AttachedBrowserDeviceAnnouncement = z.infer<typeof AttachedBrowserDe
 
 export const AttachedBrowserInventorySnapshot = z
   .object({
-    bridgeGeneration: opaqueGeneration,
+    bridgeGeneration: attachedBridgeGeneration,
     revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     devices: z.array(AttachedBrowserDeviceAnnouncement).max(10_000),
   })
@@ -376,7 +383,7 @@ export const AttachedBrowserBridge = z
   .object({
     enrollmentId: z.string().uuid(),
     state: z.enum(["online", "offline"]),
-    bridgeGeneration: opaqueGeneration,
+    bridgeGeneration: attachedBridgeGeneration,
     inventoryRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     connectedProfileCount: z.number().int().nonnegative().max(10_000),
     lastSeenAt: z.string().datetime({ offset: true }),
@@ -2370,8 +2377,10 @@ export const BrowserActionCommand = z
     expectedFrameId: opaqueGeneration.nullable(),
     actor: InteractionActor,
     /** Human live-control surfaces already receive the resulting pixels. They
-     * may omit the expensive semantic snapshot; agent actions keep it. */
-    observationMode: z.enum(["full", "none"]).optional(),
+     * may omit the expensive semantic snapshot; agent actions keep it. The
+     * negotiated input mode only observes a focused native dropdown after a
+     * pointer click, and otherwise returns no observation. */
+    observationMode: z.enum(["full", "none", "input"]).optional(),
     action: z.union([BrowserAction, BrowserActionBatch]),
   })
   .strict();
@@ -2741,6 +2750,7 @@ export const BrowserSessionAttachment = z
     targetId: boundedOpaqueId,
     stream: BrowserFrameStreamAttachment,
     fencedInputBatches: z.literal(true).optional(),
+    focusedInputObservations: z.literal(true).optional(),
     expiresAt: z.string().datetime({ offset: true }),
   })
   .strict();
@@ -2765,7 +2775,7 @@ export const BrowserActionRequest = z
     expectedTargetGeneration: opaqueGeneration,
     expectedDocumentGeneration: opaqueGeneration.nullable(),
     expectedFrameId: opaqueGeneration.nullable(),
-    observationMode: z.enum(["full", "none"]).default("full"),
+    observationMode: z.enum(["full", "none", "input"]).default("full"),
     action: z.union([BrowserAction, BrowserActionBatch]),
   })
   .strict();

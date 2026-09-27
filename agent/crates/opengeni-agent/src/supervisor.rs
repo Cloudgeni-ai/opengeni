@@ -1276,41 +1276,43 @@ impl<P: Platform + 'static> Supervisor<P> {
             )
             .await;
 
-            loop {
-                let pending = update_drain.snapshot();
-                if pending.is_none_or(|pending| pending.uploads > 0) {
-                    // Transactions survive transport reconnect and have no implicit
-                    // expiry. Defer this update rather than stranding or killing one.
-                    let code = if pending.is_some() {
-                        "update_busy_uploads"
-                    } else {
-                        "update_state_unavailable"
-                    };
-                    publish_agent_update_progress(
-                        &client,
-                        &events_subject,
-                        &agent_id,
-                        &update,
-                        v1::AgentUpdateStage::Failed,
-                        "",
-                        code,
-                        true,
-                        false,
-                    )
-                    .await;
-                    update_drain.release_update(&update.operation_id);
-                    return;
-                }
-                let admission = engine.admission_snapshot();
-                if pending.is_some_and(|pending| pending.routed == 0)
-                    && admission.light_running == 0
-                    && admission.light_queued == 0
-                    && admission.heavy_running == 0
-                    && admission.heavy_queued == 0
+            // Commands may intentionally live forever (development servers, PTYs).
+            // Never fence the whole host waiting for their lifetime to end. The
+            // fence already excludes new routed work; defer this update if any
+            // accepted work remains, preserving its independent lifetime.
+            let pending = update_drain.snapshot();
+            let admission = engine.admission_snapshot();
+            let busy_code = match pending {
+                None => Some("update_state_unavailable"),
+                Some(pending) if pending.uploads > 0 => Some("update_busy_uploads"),
+                Some(pending)
+                    if pending.routed > 0
+                        || admission.light_running > 0
+                        || admission.light_queued > 0
+                        || admission.heavy_running > 0
+                        || admission.heavy_queued > 0 =>
                 {
-                    break;
+                    Some("update_busy_work")
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                Some(_) => None,
+            };
+            if let Some(code) = busy_code {
+                // Reopen admission before publishing the terminal receipt so a
+                // caller observing failure can immediately continue ordinary work.
+                update_drain.release_update(&update.operation_id);
+                publish_agent_update_progress(
+                    &client,
+                    &events_subject,
+                    &agent_id,
+                    &update,
+                    v1::AgentUpdateStage::Failed,
+                    "",
+                    code,
+                    true,
+                    false,
+                )
+                .await;
+                return;
             }
 
             let (phase_tx, mut phase_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2189,6 +2191,120 @@ mod tests {
         assert!(dir.path().join("after-idle").is_dir());
         assert_eq!(supervisor.update_drain.snapshot().unwrap().routed, 0);
         assert!(supervisor.update_drain.reserve_work(None).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::too_many_lines)] // real router, event receipt, and retained lifetime
+    async fn update_defers_busy_work_and_reopens_admission() {
+        use opengeni_agent_platform::NativePlatform;
+        let Some(bin) = it::find_nats_server() else {
+            eprintln!("SKIP update busy transport regression: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let client = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let dir = tempfile::tempdir_in("/dev/shm").unwrap();
+        let definition = SupervisorLink::new(
+            "audit-busy",
+            Arc::new(NativePlatform::with_root(dir.path())),
+            it::test_credentials(&url),
+        );
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let supervisor = Supervisor::new_links(&[definition], "0.0.0");
+        let mut inbound = client.subscribe("audit.busy.in").await.unwrap();
+        let mut replies = client.subscribe("audit.busy.out").await.unwrap();
+        let mut events = client.subscribe(link.events_subject()).await.unwrap();
+        client.flush().await.unwrap();
+        for class in [None, Some(JobClass::Light), Some(JobClass::Heavy)] {
+            // None models routed work not yet polled into engine admission.
+            let routed = class
+                .is_none()
+                .then(|| supervisor.update_drain.reserve_work(None).unwrap());
+            let ticket = if let Some(class) = class {
+                Some(
+                    supervisor
+                        .engine
+                        .admit(&"retained-job".into(), class, "fixture")
+                        .await
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let before = supervisor.engine.admission_snapshot();
+            let operation = uuid::Uuid::new_v4().to_string();
+            let request = ControlRequest {
+                request_id: "update-busy".into(),
+                epoch: 0,
+                resource_policy: None,
+                op: Some(v1::control_request::Op::AgentUpdateApply(
+                    v1::AgentUpdateApplyRequest {
+                        operation_id: operation.clone(),
+                        target_version: "0.1.0".into(),
+                        channel: "stable".into(),
+                        expected_current_version: "0.0.0".into(),
+                        expected_current_sha256: String::new(),
+                        release_base_url: "http://127.0.0.1:1".into(),
+                    },
+                )),
+            };
+            client
+                .publish_with_reply(
+                    "audit.busy.in",
+                    "audit.busy.out",
+                    request.encode_to_vec().into(),
+                )
+                .await
+                .unwrap();
+            let message = tokio::time::timeout(Duration::from_secs(5), inbound.next())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut tasks = JoinSet::new();
+            supervisor
+                .route_message(&link, &client, message, &mut tasks)
+                .await;
+            let reply = tokio::time::timeout(Duration::from_secs(5), replies.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(ControlResponse::decode(reply.payload.as_ref())
+                .unwrap()
+                .error
+                .is_none());
+            assert!(
+                it::wait_for_event(
+                    &mut events,
+                    Duration::from_secs(5),
+                    |event| matches!(&event.event, Some(Event::AgentUpdateProgress(p))
+                    if p.operation_id == operation && p.stage == v1::AgentUpdateStage::Failed as i32
+                        && p.error_code == "update_busy_work" && p.retryable)
+                )
+                .await
+            );
+            assert_eq!(
+                supervisor.engine.admission_snapshot(),
+                before,
+                "accepted work must survive"
+            );
+            assert!(!supervisor.shutdown.is_requested());
+            let next = supervisor
+                .update_drain
+                .reserve_work(None)
+                .expect("failed update releases host");
+            drop(next);
+            drop(ticket);
+            drop(routed);
+            // A later explicitly requested update can reserve the host again.
+            assert_eq!(
+                supervisor.reserve_update_operation("next"),
+                UpdateReservation::Started
+            );
+            supervisor.update_drain.release_update("next");
+        }
     }
 
     #[cfg(target_os = "linux")]

@@ -61,6 +61,7 @@ import {
   reapStaleLeaseHoldersGlobal,
   requestDueSandboxRotationsGlobal,
   readSandboxRotationBacklog,
+  readRecentSandboxRecoveryObservations,
   workspaceArchiveCaptureDeadlineElapsed,
   retainedProcessReconciliationProof,
   retainedProcessSettlementIdentity,
@@ -163,6 +164,8 @@ import {
   type SandboxInventoryProjectionDomain,
   recordSandboxLeaseGauges,
   recordSandboxOrphansTerminated,
+  recordSandboxProviderMissingBeforeCapture,
+  recordSandboxRecoveryObservationGauges,
   recordSandboxRotationBacklogGauges,
   recordTurnsQueuedGauge,
   recordVerifiedSignupTrialDeploymentFlagGauge,
@@ -1298,14 +1301,12 @@ export async function replayConnectedCommandOutput(
   let capturedThrough = 0n;
   while (true) {
     const before = capturedThrough;
-    const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, async (frames) => {
-      await capture(frames);
-      for (const frame of frames) {
-        const sequence = BigInt(frame.sequence);
-        if (sequence > capturedThrough) capturedThrough = sequence;
-      }
-    });
+    const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, capture);
     if (!terminalKnown || replay.status === "completed" || replay.terminal) return;
+    // Quiet jobs can retain many heartbeat frames (or an incomplete UTF-8
+    // chunk). These are real replay progress even when capture receives no
+    // stdout/stderr. Use the reader's verified, contiguous protocol frontier.
+    capturedThrough = BigInt(replay.replaySequence);
     // This is a finite terminal drain, not a poller for a running command.
     // Failed persistence, transport/integrity errors, and no-progress reads
     // return control to normal reconciliation without licensing settlement.
@@ -2350,6 +2351,17 @@ async function refreshQueueLeaseAndCreditGauges(
     ),
     refreshSandboxInventoryGauge(
       observability,
+      "recovery_observations",
+      "recovery-observations",
+      async () => {
+        recordSandboxRecoveryObservationGauges(
+          observability,
+          await readRecentSandboxRecoveryObservations(db),
+        );
+      },
+    ),
+    refreshSandboxInventoryGauge(
+      observability,
       "rotation_backlog",
       "rotation-backlog",
       async () => {
@@ -3180,6 +3192,12 @@ async function terminateDrainableBox(
     providerMissingBeforeCapture: providerMissing,
   });
   if (wentCold) {
+    // Only the exact successful cold commit counts provider loss. A missing
+    // probe, a stale capture, a failed commit, or a retried child is not another
+    // observed loss. Keep this outside the best-effort session event writer.
+    if (providerMissing) {
+      recordSandboxProviderMissingBeforeCapture(observability, backend);
+    }
     // Durable termination record (sandbox-file-persistence observability): who
     // ended this box and whether its /workspace was captured first, appended to
     // every session sharing the group's box. Best-effort: attribution must

@@ -34,12 +34,12 @@ export const MEANINGFUL_SESSION_EVENT_TYPES = [
 ] as const;
 
 /**
- * `0503` is that migration's index predicate. `0524` adds two changes: completed
+ * `0503` is that migration's index predicate. `0527` adds two changes: completed
  * commentary is activity, and a `turn.completed` recording the `reply` a human
  * or API message received before its turn waited for input is an answer even
  * though its `output` is empty.
  */
-function attentionSessionEventSql(alias: string, revision: "0503" | "0524"): SQL {
+function attentionSessionEventSql(alias: string, revision: "0503" | "0527"): SQL {
   const e = sql.identifier(alias);
   const turnResult = sql`coalesce(nullif(${e}.payload -> 'output', 'null'::jsonb), ${e}.payload -> 'result')`;
   // These are code-owned literals, not request values. Literal predicates let
@@ -51,7 +51,7 @@ function attentionSessionEventSql(alias: string, revision: "0503" | "0524"): SQL
     and ${e}.duplicate_of_event_id is null
     and (${e}.turn_association is null or ${e}.turn_association = 'current')
     and (${e}.type <> 'agent.message.completed' or coalesce(${e}.payload ->> 'text', '') <> '')${
-      revision === "0524"
+      revision === "0527"
         ? sql`
     and (${e}.type <> 'agent.message.completed' or coalesce(${e}.payload ->> 'phase', '') <> 'commentary')
     and (${e}.type <> 'turn.completed' or (
@@ -75,10 +75,10 @@ function attentionSessionEventSql(alias: string, revision: "0503" | "0524"): SQL
  * never creates attention on its own; the answer or turn outcome that follows
  * does. A turn that ends waiting for input has no output, but when a human or
  * API message started it, the `reply` it records is that answer. Exactly the
- * migration 0524 partial-index predicate.
+ * migration 0527 partial-index predicate.
  */
 export function meaningfulSessionEventSql(alias: string): SQL {
-  return attentionSessionEventSql(alias, "0524");
+  return attentionSessionEventSql(alias, "0527");
 }
 
 /**

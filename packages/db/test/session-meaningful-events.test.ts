@@ -67,7 +67,7 @@ describe("meaningful event frontier contract", () => {
   });
   test("rolling concurrent index uses exactly the runtime predicate: no commentary, wait replies", async () => {
     const migration = await readFile(
-      new URL("../drizzle/0524_session_attention_excludes_commentary.sql", import.meta.url),
+      new URL("../drizzle/0527_session_attention_excludes_commentary.sql", import.meta.url),
       "utf8",
     );
     const predicate = new PgDialect().sqlToQuery(meaningfulSessionEventSql("meaningful")).sql;
@@ -79,7 +79,7 @@ describe("meaningful event frontier contract", () => {
       ),
     ).toBe(true);
     // The runtime predicate is the 0503 one with exactly two changes, so
-    // pre-0524 API processes keep their own index during the rollout:
+    // pre-0527 API processes keep their own index during the rollout:
     // commentary is excluded, and a turn that ended waiting for input counts
     // when it records the reply a human or API message received.
     const inclusive = normalizePredicate(

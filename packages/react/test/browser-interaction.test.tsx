@@ -1537,6 +1537,134 @@ describe("BrowserViewer", () => {
     await rendered.unmount();
   });
 
+  for (const placement of [
+    { kind: "connected_machine", sandboxId: SANDBOX_GROUP_ID },
+    { kind: "sandbox_group", sandboxGroupId: SANDBOX_GROUP_ID },
+  ] as const) {
+    test(`reconnects the same ${placement.kind} browser after an attachment authority error`, async () => {
+      const current = { ...browserSession(), placement };
+      const currentTarget = target();
+      const attachedDevice = attachedBrowserDevice();
+      const unrelatedLostChrome: BrowserSession = {
+        ...browserSession(PEER_BROWSER_SESSION_ID, PEER_SESSION_ID),
+        lifecycle: "lost",
+        failureCode: "controller_transition_expired",
+        placement: { kind: "attached_device", deviceId: attachedDevice.id },
+      };
+      const attachedIds: string[] = [];
+      let creates = 0;
+      let inputs = 0;
+      const sockets: FakeBrowserSocket[] = [];
+      const client = fakeClient({
+        listBrowserSessions: async () => ({
+          revision: 1,
+          sessions: [current, unrelatedLostChrome],
+        }),
+        getBrowserSession: async () => current,
+        listBrowserTargets: async () => ({
+          browserSessionId: current.id,
+          controllerGeneration: "controller-1",
+          targets: [currentTarget],
+        }),
+        observeBrowserTarget: async () => observation(current.id, currentTarget),
+        attachBrowserSession: async (_workspaceId, id) => {
+          attachedIds.push(id);
+          if (attachedIds.length === 1) {
+            throw new OpenGeniApiError(
+              409,
+              JSON.stringify({ message: "BrowserSession controller authority changed" }),
+            );
+          }
+          return attachment(currentTarget.id);
+        },
+        createBrowserSession: async () => {
+          creates += 1;
+          return mutation();
+        },
+        actInBrowser: async () => {
+          inputs += 1;
+          return receipt(observation());
+        },
+      });
+      const rendered = await renderComponent(
+        <BrowserViewer
+          client={client}
+          workspaceId={WORKSPACE_ID}
+          sessionId={SESSION_ID}
+          webSocketFactory={(url, protocols) => {
+            const socket = new FakeBrowserSocket(url, protocols);
+            sockets.push(socket);
+            return socket as unknown as BrowserFrameWebSocket;
+          }}
+        />,
+      );
+      try {
+        await flush(40);
+        expect(rendered.container.textContent).toContain("Live view disconnected");
+        expect(rendered.container.textContent).not.toContain("Chrome reconnected");
+        const reconnect = [...rendered.container.querySelectorAll("button")].find(
+          (button) => button.textContent === "Reconnect",
+        );
+        expect(reconnect).toBeDefined();
+        await actRun(async () => reconnect!.click());
+        await flush(30);
+        expect(attachedIds).toEqual([current.id, current.id]);
+        expect(sockets).toHaveLength(1);
+        await dispatch(sockets[0]!, "open");
+        expect(rendered.container.textContent).not.toContain("controller authority changed");
+        expect(creates).toBe(0);
+        expect(inputs).toBe(0);
+      } finally {
+        await rendered.unmount();
+      }
+    });
+  }
+
+  test("keeps fresh-browser recovery scoped to the selected attached Chrome", async () => {
+    const device = attachedBrowserDevice();
+    const current = {
+      ...browserSession(),
+      placement: { kind: "attached_device" as const, deviceId: device.id },
+    };
+    const currentTarget = target();
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      listAttachedBrowsers: async () => ({
+        revision: 1,
+        devices: [device],
+        bridges: [attachedBrowserBridge()],
+      }),
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: current.id,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => observation(current.id, currentTarget),
+      attachBrowserSession: async () => {
+        throw new OpenGeniApiError(
+          409,
+          JSON.stringify({ message: "BrowserSession placement instance changed" }),
+        );
+      },
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    try {
+      await flush(40);
+      expect(rendered.container.textContent).toContain("Chrome reconnected");
+      expect(rendered.container.textContent).toContain("Open a fresh Connected Chrome");
+      expect(
+        [...rendered.container.querySelectorAll("button")].some(
+          (button) => button.textContent === "Reconnect",
+        ),
+      ).toBe(false);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("opens actionable runtime and page diagnostics without leaving the browser", async () => {
     const current = browserSession();
     const currentTarget = target();
@@ -2409,11 +2537,30 @@ describe("BrowserViewer", () => {
         keyboardAfterClipboard!.dispatchEvent(
           new InputEvent("input", { bubbles: true, data: "に", isComposing: true }),
         );
+        for (const key of ["ArrowDown", "Backspace", "Escape", "Enter"]) {
+          const candidateKey = new KeyboardEvent("keydown", {
+            key,
+            bubbles: true,
+            cancelable: true,
+            isComposing: true,
+          });
+          keyboardAfterClipboard!.dispatchEvent(candidateKey);
+          expect(candidateKey.defaultPrevented).toBe(false);
+        }
         keyboardAfterClipboard!.value = "日本";
         keyboardAfterClipboard!.dispatchEvent(
           new CompositionEvent("compositionend", { bubbles: true, data: "日本" }),
         );
         keyboardAfterClipboard!.dispatchEvent(new Event("input", { bubbles: true }));
+        // A native composing key must also be ignored outside composition events.
+        const commitKey = new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+          isComposing: true,
+        });
+        keyboardAfterClipboard!.dispatchEvent(commitKey);
+        expect(commitKey.defaultPrevented).toBe(false);
       });
       await flush(20);
 
@@ -2424,6 +2571,14 @@ describe("BrowserViewer", () => {
         { type: "type", text: "日本" },
       ]);
       expect(copied).toEqual(["remote selection"]);
+      await actRun(() => {
+        keyboardAfterClipboard!.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+        );
+      });
+      await flush(20);
+      expect(actionValues.at(-1)).toEqual({ type: "press", key: "Enter" });
+      expect(actions).toHaveLength(4);
     } finally {
       canvasMock.restore();
       if (priorClipboard) Object.defineProperty(navigator, "clipboard", priorClipboard);
@@ -3223,6 +3378,7 @@ async function renderViewerInputFixture(
     current: BrowserObservation,
   ) => Promise<BrowserActionReceipt>,
   fencedInputBatches = false,
+  focusedInputObservations = false,
 ) {
   const current = browserSession();
   let currentTarget = target();
@@ -3246,6 +3402,7 @@ async function renderViewerInputFixture(
     attachBrowserSession: async () => ({
       ...attachment(currentTarget.id),
       ...(fencedInputBatches ? { fencedInputBatches: true as const } : {}),
+      ...(focusedInputObservations ? { focusedInputObservations: true as const } : {}),
     }),
     selectBrowserTarget: async () => {
       currentTarget = { ...secondTarget, selected: true };
@@ -3510,3 +3667,118 @@ for (const switchTarget of [false, true]) {
     }
   });
 }
+
+function nativeSelectObservation(view: BrowserObservation): BrowserObservation {
+  return {
+    ...view,
+    focusedRef: "priority",
+    semantic: {
+      kind: "snapshot",
+      nodeCount: 1,
+      roots: [
+        {
+          ref: "priority",
+          role: "combobox",
+          name: "Priority",
+          states: ["focused"],
+          actions: ["select"],
+          native: {
+            platform: "dom",
+            data: {
+              kind: "native-select",
+              multiple: false,
+              disabled: false,
+              options: [
+                { value: "low", label: "Low", selected: true, disabled: false },
+                { value: "high", label: "High", selected: false, disabled: false },
+              ],
+            },
+          },
+        },
+      ],
+    },
+  };
+}
+
+async function clickFixtureCanvas(fixture: Awaited<ReturnType<typeof renderViewerInputFixture>>) {
+  await actRun(() => {
+    for (const type of ["pointerdown", "pointerup"])
+      fixture.canvas.dispatchEvent(
+        new MouseEvent(type, {
+          bubbles: true,
+          button: 0,
+          clientX: 25,
+          clientY: 25,
+        }),
+      );
+  });
+  await flush();
+}
+
+for (const negotiated of [false, true]) {
+  test(`native popup discovery respects the live controller capability (${negotiated})`, async () => {
+    const canvas = mockBrowserCanvas();
+    const fixture = await renderViewerInputFixture(
+      async (request, view) => ({
+        ...receipt(view, request.operationId),
+        observation: request.observationMode === "input" ? nativeSelectObservation(view) : null,
+      }),
+      false,
+      negotiated,
+    );
+    try {
+      await fixture.frame(1);
+      await clickFixtureCanvas(fixture);
+      expect(fixture.actions[0]?.observationMode).toBe(negotiated ? "input" : "none");
+      const panel = fixture.rendered.container.querySelector(
+        'section[aria-label="Page selection options"]',
+      );
+      expect(Boolean(panel)).toBe(negotiated);
+      if (negotiated) {
+        const high = [...panel!.querySelectorAll("button")].find((b) => b.textContent === "High")!;
+        await actRun(() => high.click());
+        await flush();
+        expect(fixture.actions[1]).toMatchObject({
+          observationMode: "none",
+          action: { type: "select", locator: { kind: "ref", ref: "priority" }, values: ["high"] },
+          expectedFrameId: "frame-document-1",
+        });
+        expect(fixture.rendered.container.querySelector("section")).toBeNull();
+        expect(document.activeElement).toBe(fixture.keyboard);
+      }
+    } finally {
+      await fixture.rendered.unmount();
+      canvas.restore();
+    }
+  });
+}
+
+test("late dropdown metadata cannot reopen after newer canvas input", async () => {
+  const canvas = mockBrowserCanvas();
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const fixture = await renderViewerInputFixture(
+    async (request, view) => {
+      if (request.observationMode === "input") await pending;
+      return { ...receipt(view, request.operationId), observation: nativeSelectObservation(view) };
+    },
+    false,
+    true,
+  );
+  try {
+    await fixture.frame(1);
+    await clickFixtureCanvas(fixture);
+    await actRun(() => fixture.canvas.dispatchEvent(browserWheel(10)));
+    await actRun(() => release());
+    await flush(60);
+    expect(
+      fixture.rendered.container.querySelector('section[aria-label="Page selection options"]'),
+    ).toBeNull();
+  } finally {
+    release();
+    await fixture.rendered.unmount();
+    canvas.restore();
+  }
+});

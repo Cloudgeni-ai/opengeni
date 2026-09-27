@@ -75,6 +75,7 @@ import type { EmbeddedBrowserInteractionClientOverride } from "../session-contex
 import { browserKey, HUMAN_BROWSER_HOME_URL, normalizeBrowserAddress } from "./browser-input";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 import { BrowserSelectControl } from "./browser-select-control";
+import { useViewerMenuDismiss } from "./use-viewer-menu-dismiss";
 
 export type BrowserViewerNotification = {
   kind: "error" | "info";
@@ -202,12 +203,6 @@ export function BrowserViewer({
       });
     }
   }, [enabled, endStaleBrowser, registry.sessions]);
-  const replacementChromeDevice = useMemo(() => {
-    if (!attachedGenerationLoss) return null;
-    return (
-      attached.devices.find((candidate) => candidate.id === attachedGenerationLoss.deviceId) ?? null
-    );
-  }, [attached.devices, attachedGenerationLoss]);
   const relevant = useMemo(
     () => registry.relevantSessions.filter((session) => isLiveBrowser(session)),
     [registry.relevantSessions],
@@ -434,6 +429,18 @@ export function BrowserViewer({
   const supportsLiveFrames =
     (browser.session ?? selectedRegistrySession)?.capabilities.liveFrames === true;
   const connectionError = frames.error ?? browser.error;
+  // A managed controller can reject a stale attachment while the same browser
+  // remains healthy. Only extension-attached Chrome requires a new browser on
+  // connection-generation loss; an unrelated lost Chrome must not poison the
+  // selected managed browser's recovery UI.
+  const selectedPlacement = (browser.session ?? selectedRegistrySession)?.placement;
+  const selectedChromeGenerationLoss =
+    selectedPlacement?.kind === "attached_device" &&
+    isAttachedChromeGenerationLossError(connectionError);
+  const replacementChromeDevice =
+    selectedChromeGenerationLoss && selectedPlacement.kind === "attached_device"
+      ? attached.devices.find((candidate) => candidate.id === selectedPlacement.deviceId)
+      : null;
   const displayConnectionState =
     connectionError && !frameIsLive
       ? "error"
@@ -922,8 +929,23 @@ export function BrowserViewer({
             clipboardEnabled={browser.session?.capabilities.clipboard === true}
             inputBatchAttachment={frames.attachment}
             onAction={async (action, frame) => {
+              const focusedInput =
+                frame &&
+                action.type === "pointer" &&
+                action.action === "click" &&
+                (action.button === undefined || action.button === "left") &&
+                frames.attachment?.focusedInputObservations === true &&
+                frames.attachment.browserSessionId === frame.browserSessionId &&
+                frames.attachment.controllerGeneration === frame.controllerGeneration &&
+                frames.attachment.targetId === frame.targetId &&
+                Date.parse(frames.attachment.expiresAt) > Date.now();
               const receipt = frame
-                ? await browser.actFromFrame(action, frame)
+                ? await browser.actFromFrame(
+                    action,
+                    frame,
+                    undefined,
+                    focusedInput ? "input" : "none",
+                  )
                 : await browser.act(action);
               if (receipt.state !== "completed") {
                 throw new Error(receipt.error?.message ?? "Browser input did not complete.");
@@ -934,7 +956,7 @@ export function BrowserViewer({
             onObserveForInput={browser.observeForInput}
             onSelectFromObservation={browser.actFromObservation}
             onReconnect={
-              attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)
+              selectedChromeGenerationLoss
                 ? () => {
                     if (replacementChromeDevice) {
                       createBrowser({ kind: "attached", device: replacementChromeDevice });
@@ -946,13 +968,12 @@ export function BrowserViewer({
                   }
             }
             reconnectLabel={
-              (attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)) &&
-              replacementChromeDevice
+              selectedChromeGenerationLoss && replacementChromeDevice
                 ? "Open a fresh Connected Chrome"
                 : undefined
             }
             reconnectMessage={
-              attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)
+              selectedChromeGenerationLoss
                 ? "Chrome reconnected—open a fresh browser/desktop."
                 : undefined
             }
@@ -1075,7 +1096,7 @@ function BrowserToolbar(props: {
   onRefresh: () => void;
   setupUrl?: string | undefined;
 }) {
-  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  const detailsRef = useViewerMenuDismiss();
   const selected = props.sessions.find((session) => session.id === props.selectedSessionId);
   const current = props.sessions.filter((session) => props.relevantSessionIds.has(session.id));
   const others = props.sessions.filter((session) => !props.relevantSessionIds.has(session.id));
@@ -1255,7 +1276,7 @@ function BrowserLaunchMenu(props: {
   setupUrl?: string | undefined;
   prominent?: boolean;
 }) {
-  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  const detailsRef = useViewerMenuDismiss();
   const choose = (choice?: BrowserLaunchChoice) => {
     detailsRef.current?.removeAttribute("open");
     props.onCreate(choice);
@@ -1267,7 +1288,7 @@ function BrowserLaunchMenu(props: {
   const activeIdentities = props.identities.filter((identity) => identity.status === "active");
   const archivedIdentities = props.identities.filter((identity) => identity.status === "archived");
   return (
-    <details ref={detailsRef} className={cn("relative", props.prominent && "mt-4 inline-block")}>
+    <details ref={detailsRef} className={cn(props.prominent && "mt-4 inline-block")}>
       <summary
         onClick={(event) => {
           if (busy) event.preventDefault();
@@ -1291,8 +1312,8 @@ function BrowserLaunchMenu(props: {
       </summary>
       <div
         className={cn(
-          "absolute z-40 w-72 overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 text-left shadow-xl",
-          props.prominent ? "left-1/2 top-10 -translate-x-1/2" : "right-0 top-8",
+          "absolute z-40 max-h-[calc(100%-3rem)] w-72 max-w-[calc(100%-1rem)] overflow-y-auto rounded-og-md border border-og-border bg-og-surface-1 p-1 text-left shadow-xl",
+          props.prominent ? "left-1/2 top-2 -translate-x-1/2" : "right-2 top-10",
         )}
       >
         {props.attachedDevices.length > 0 || props.attachedBridges.length > 0 ? (
@@ -1440,7 +1461,7 @@ function BrowserProfileMenu(props: {
   ) => Promise<boolean>;
   onOpenVersion: (identityId: string, baseRevisionId: string) => void;
 }) {
-  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  const detailsRef = useViewerMenuDismiss();
   const nameInputId = useId();
   const [name, setName] = useState("");
   const attached = props.session?.placement.kind === "attached_device";
@@ -1471,7 +1492,7 @@ function BrowserProfileMenu(props: {
           : "unsaved"
       : "temporary";
   return (
-    <details ref={detailsRef} className="relative min-w-0">
+    <details ref={detailsRef} className="min-w-0">
       <summary className="flex h-7 max-w-40 cursor-pointer list-none items-center gap-1.5 rounded-og-sm px-2 text-og-xs text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg [&::-webkit-details-marker]:hidden">
         {props.saving ? (
           <LoaderCircleIcon className="size-3 animate-spin" />
@@ -1488,7 +1509,7 @@ function BrowserProfileMenu(props: {
         ) : null}
         <ChevronDownIcon className="size-3 shrink-0 text-og-subtle" />
       </summary>
-      <div className="absolute right-0 top-8 z-40 w-72 rounded-og-md border border-og-border bg-og-surface-1 p-3 shadow-xl">
+      <div className="absolute right-2 top-10 z-40 max-h-[calc(100%-3rem)] w-72 max-w-[calc(100%-1rem)] overflow-y-auto rounded-og-md border border-og-border bg-og-surface-1 p-3 shadow-xl">
         <div className="flex items-start gap-2">
           <span className="grid size-7 shrink-0 place-items-center rounded-og-sm bg-og-surface-2 text-og-muted">
             {attached ? (
@@ -1901,6 +1922,15 @@ function BrowserViewport(props: {
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const [selectPopup, setSelectPopup] = useState<{
+    observation: BrowserObservation | null;
+    anchor: { x: number; y: number } | null;
+  } | null>(null);
+  const inputSequenceRef = useRef(0);
+  const dismissSelectPopup = useCallback(() => {
+    inputSequenceRef.current += 1;
+    setSelectPopup({ observation: null, anchor: null });
+  }, []);
   const composingRef = useRef(false);
   const pointerStartRef = useRef<PointerStart | null>(null);
   const lastClickRef = useRef<{
@@ -1943,6 +1973,7 @@ function BrowserViewport(props: {
   errorRef.current = props.onError;
 
   const clearBufferedInput = useCallback(() => {
+    dismissSelectPopup();
     if (wheelRef.current?.timer) clearTimeout(wheelRef.current.timer);
     if (pendingTextRef.current?.timer) clearTimeout(pendingTextRef.current.timer);
     wheelRef.current = null;
@@ -1952,7 +1983,7 @@ function BrowserViewport(props: {
     lastClickRef.current = null;
     composingRef.current = false;
     if (inputRef.current) inputRef.current.value = "";
-  }, []);
+  }, [dismissSelectPopup]);
 
   const paintQueuedFrames = useCallback(() => {
     if (decodingFrameRef.current) return;
@@ -2060,7 +2091,10 @@ function BrowserViewport(props: {
       action: BrowserAction,
       frame: BrowserFrameInputFence | null,
       after?: (receipt: BrowserActionReceipt) => Promise<void>,
+      selectAnchor?: { x: number; y: number },
     ) => {
+      const inputSequence = ++inputSequenceRef.current;
+      setSelectPopup({ observation: null, anchor: null });
       // Detach image bytes even when the caller supplied a complete painted frame.
       frame = frame
         ? {
@@ -2112,6 +2146,9 @@ function BrowserViewport(props: {
           // frame from that render even when its input fence contains no bytes.
           const receipt = await actionRef.current(dispatchedAction, frame);
           if (!mountedRef.current || epoch !== actionQueueEpochRef.current) return;
+          if (selectAnchor && receipt.observation && inputSequence === inputSequenceRef.current) {
+            setSelectPopup({ observation: receipt.observation, anchor: selectAnchor });
+          }
           await after?.(receipt);
         })
         .catch((cause) => {
@@ -2169,6 +2206,7 @@ function BrowserViewport(props: {
     // default, Chrome immediately moves focus back to the document and all
     // subsequent typing/paste is silently lost.
     event.preventDefault();
+    dismissSelectPopup();
     flushPendingWheel();
     flushPendingText();
     pointerStartRef.current = {
@@ -2219,7 +2257,15 @@ function BrowserViewport(props: {
       return;
     }
     lastClickRef.current = { at: now, x: to.x, y: to.y, frame: start.frame };
-    enqueue({ type: "pointer", action: "click", x: to.x, y: to.y }, start.frame);
+    const viewportBounds = canvasRef.current?.parentElement?.getBoundingClientRect();
+    enqueue(
+      { type: "pointer", action: "click", x: to.x, y: to.y },
+      start.frame,
+      undefined,
+      viewportBounds
+        ? { x: event.clientX - viewportBounds.left, y: event.clientY - viewportBounds.top + 8 }
+        : undefined,
+    );
   };
 
   const contextMenu = (event: MouseEvent<HTMLCanvasElement>) => {
@@ -2234,6 +2280,7 @@ function BrowserViewport(props: {
   };
 
   const wheel = (event: WheelEvent<HTMLCanvasElement>) => {
+    dismissSelectPopup();
     const frame = paintedFrameRef.current;
     if (!frame) return;
     const at = point(frame, event.clientX, event.clientY);
@@ -2262,6 +2309,17 @@ function BrowserViewport(props: {
   };
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    // Candidate selection/editing belongs to the local IME. Forward only the
+    // committed text; Enter must not submit the remote page during composition.
+    // Safari can end composition before keydown while retaining keyCode 229.
+    if (
+      composingRef.current ||
+      event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229
+    ) {
+      return;
+    }
+    dismissSelectPopup();
     flushPendingWheel();
     const command = event.metaKey || event.ctrlKey;
     if (
@@ -2316,6 +2374,7 @@ function BrowserViewport(props: {
   };
 
   const input = (value: string, nativeComposing = false) => {
+    dismissSelectPopup();
     if (composingRef.current || nativeComposing) return;
     if (!value) return;
     flushPendingWheel();
@@ -2395,6 +2454,8 @@ function BrowserViewport(props: {
       ) : null}
       {showCanvas ? (
         <BrowserSelectControl
+          activation={selectPopup}
+          onDismiss={() => inputRef.current?.focus({ preventScroll: true })}
           observe={async () => {
             flushPendingText();
             flushPendingWheel();
@@ -2425,8 +2486,7 @@ function SemanticBrowserFallback(props: {
   reconnectMessage?: string | undefined;
 }) {
   const controlFailure = interactionControlFailureFromError(props.error);
-  const generationLoss =
-    Boolean(props.reconnectMessage) || isAttachedChromeGenerationLossError(props.error);
+  const generationLoss = Boolean(props.reconnectMessage);
   const nodes = semanticNodes(
     props.observation?.semantic?.kind === "snapshot" ? props.observation.semantic.roots : [],
   );

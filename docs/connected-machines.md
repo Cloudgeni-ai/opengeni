@@ -146,6 +146,13 @@ to another window or screen. `macos_autorelease` exercises the actual helper wit
 Objective-C missing-pool diagnostics enabled; run this ignored test explicitly
 in an unlocked local GUI session.
 
+Accessibility notifications invalidate the snapshots that registered the changed
+element, so one observed window's value changes do not discard an unrelated
+window's observation. Application-wide focus/layout events, unrecognized event
+sources, and overflow of the bounded 64-notification queue still invalidate all
+snapshots for that process. Every semantic action continues to verify the target,
+element identity and observed state immediately before dispatch.
+
 Native window and screen pointer input uses the exact painted frame's encoded
 dimensions. Continuous capture retains superseded frame metadata for at most
 two seconds, bounded to 32 frames per target and 512 per adapter, so a newer
@@ -171,6 +178,15 @@ origin. Older agent releases that only accept the development origin cannot
 connect the store-installed extension; updating the extension alone cannot fix
 that host-side restriction. Store uploads omit the development-only manifest
 `key` field.
+
+The bridge generation is an opaque unpadded-base64url token: leading `-` and
+`_` are valid and retained verbatim in inventory and discovery. Rejecting either
+prefix strands a healthy bridge until its next generation. Rolling migration
+`0525_attached_browser_opaque_generations.sql` aligns the database bridge-generation
+check with this contract; API validation alone does not restore discovery.
+Extension handshake
+timeouts and rejected readiness fences clear the exact failed port and reconnect
+with bounded backoff; late events from that port cannot invalidate a successor.
 
 Attached Chrome profiles are a separate physical placement. Inventory reports a
 `connectionGeneration` that becomes the BrowserSession/ComputerSession
@@ -377,9 +393,12 @@ machine is at capacity. Runtime errors preserve its typed cause: `agent_update`
 means a verified self-update is draining accepted work; `queue_breaker` and
 `wait_breaker` identify abnormal admission backlogs. Missing or unrecognized
 detail remains an unspecified admission refusal. The same distinction survives
-retry exhaustion and structured tool-error rendering. Update drains should be
-allowed to finish without interrupting accepted work; persistent refusals need
-admission/update-state diagnosis, not an inferred concurrency-limit increase.
+retry exhaustion and structured tool-error rendering. A self-update on a busy host now ends with retryable `update_busy_work` (or
+`update_busy_uploads`) and immediately reopens admission. It does not wait for
+long-lived servers, cancel accepted work, or restart the host. Request an update
+again at a safe idle point. Older runners can remain draining indefinitely;
+inspect their accepted operations and coordinate a safe stop/restart with their
+owners instead of killing useful work or increasing concurrency limits.
 
 Machine liveness is independent of accepted host operations. The supervisor
 answers `ping` and publishes heartbeats outside command execution. Production
@@ -558,6 +577,21 @@ oversized-reply wall does not apply on this path; output is instead bounded by
 the runner's retention quotas, and exceeding them fails typed with exact
 counters, never silently truncated.
 
+After process exit and pipe drain, the native runner releases both transport-sized
+read buffers before waiting for result collection. Retained output and the terminal
+record remain replayable until their normal acknowledgement/retention boundary;
+completed commands do not need idle pipe buffers to preserve that guarantee.
+
+Retained frames also share a runner-wide memory ledger: one sixteenth of measured
+available RAM, with a 64 MiB floor. Starting a command reserves nothing. Appending
+past either its per-command limit or the shared limit spills its retained frames
+to the existing disk spool; sequence numbers, replay and acknowledgement remain
+unchanged. Acknowledgement, successful spill and log disposal release memory
+charges. Lower capacity samples affect future reservations without discarding
+existing output. This bounds memory-backed record costs, not total runner RSS:
+spool indexes, transport/replay buffers and other subsystems use memory separately.
+Disk exhaustion remains an explicit retention failure.
+
 When an exec yields as background work, `session_background_commands` becomes
 the durable lifecycle authority before the tool returns. It stores only a
 bounded command preview plus the immutable launch locator; no later active
@@ -572,7 +606,12 @@ death; a successor connection is never queried on the predecessor's behalf.
 Completed operations may need multiple retained-output batches. Reconciliation
 keeps one reader and its integrity checkpoint while captured sequence progress
 continues, and settles only after the terminal output frontier is verified.
-Empty or repeated batches defer recovery; they never license a success result.
+Terminal replay measures progress by the verified contiguous frame sequence,
+including heartbeat frames and undecoded UTF-8 prefixes. A quiet command can
+therefore drain successive retained batches without restarting from frame zero
+merely because a batch contains no printable stdout or stderr. Failed output
+persistence or a stalled frame frontier still prevents settlement.
+Stalled or repeated frame frontiers defer recovery; they never license a success result.
 Adoption takes the canonical workspace-control and exact turn-attempt fence, so
 it has a total order with Steer, Pause, terminal Cancel, and session deletion.
 Before that transaction starts, the op-stream yield path takes exact
@@ -761,6 +800,12 @@ available only to account administrators. Machines and Sandbox Environments disp
 resulting scope in their list cards so wider publication is never implicit.
 
 ## Transactional file edits
+
+Native ranged file reads retain only the selected bytes, rather than allocating
+the entire file before slicing it. They still consume the full stream to report
+the actual `total_size`, including virtual files whose stat size is zero; this
+reduces memory use without promising less disk I/O. A zero length continues to
+mean the remainder of the file, and an offset beyond EOF returns empty content.
 
 The editor uses transactional transfers for text creation and in-place updates,
 including small files, when the exact live agent advertises

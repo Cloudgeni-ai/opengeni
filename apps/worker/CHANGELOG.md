@@ -1,5 +1,38 @@
 # @opengeni/worker-bundle
 
+## 2.1.1
+
+### Patch Changes
+
+- 2563950: Add a database runtime kill switch for the one-time verified signup trial credit (rolling migration 0521). A grant now needs both `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED` and the newest row of the append-only `opengeni_private.verified_signup_trial_switch_revisions` table, which starts enabled. Operators flip it with the owner-only audited `set_verified_signup_trial_credits_enabled(enabled, operator, reason)` function. The change applies to the next setup transaction on every API replica, with no deploy or restart. Runtime roles can only read the switch. `readVerifiedSignupTrialSwitch` exposes the switch state, and the control worker publishes it as `opengeni_verified_signup_trial_credits_runtime_enabled`, next to `opengeni_verified_signup_trial_credits_deployment_enabled` for the master opt-in.
+- Updated dependencies [74e0dfb]
+- Updated dependencies [1fa1216]
+- Updated dependencies [1842911]
+- Updated dependencies [d83d5d0]
+- Updated dependencies [9d0c1bb]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [a63a029]
+- Updated dependencies [b9482ea]
+- Updated dependencies [4124c7c]
+- Updated dependencies [82fa577]
+- Updated dependencies [3aab8f9]
+- Updated dependencies [2563950]
+  - @opengeni/config@3.1.0
+  - @opengeni/runtime@4.2.0
+  - @opengeni/contracts@5.3.0
+  - @opengeni/sdk@7.3.0
+  - @opengeni/db@6.1.1
+  - @opengeni/observability@0.8.34
+  - @opengeni/core@4.0.5
+  - @opengeni/documents@0.8.36
+  - @opengeni/github@0.7.18
+  - @opengeni/storage@0.2.135
+  - @opengeni/codemode@0.6.4
+  - @opengeni/codex@0.2.28
+  - @opengeni/events@0.4.34
+  - @opengeni/tool-gateway@0.1.15
+
 ## 2.1.0
 
 ### Minor Changes

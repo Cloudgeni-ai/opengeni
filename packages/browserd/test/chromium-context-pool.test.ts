@@ -7,7 +7,7 @@ import {
   type CdpEvent,
 } from "../src";
 
-function fixture(terminate?: () => Promise<void>) {
+function fixture(terminate?: () => Promise<void>, onTerminal?: () => void) {
   const calls: Array<{ method: string; params: Readonly<Record<string, unknown>> }> = [];
   const connections: Array<{ emit: (method: string, params: Record<string, unknown>) => void }> =
     [];
@@ -18,6 +18,7 @@ function fixture(terminate?: () => Promise<void>) {
   const pool = new EphemeralChromiumContextPool({
     authorityKey: "trusted-owner-and-egress",
     maxContexts: 2,
+    ...(onTerminal ? { onTerminal } : {}),
     launch: async () => {
       launches++;
       return {
@@ -226,10 +227,16 @@ test.each([false, true])(
   async (reject) => {
     const started = Promise.withResolvers<void>();
     const completion = Promise.withResolvers<void>();
-    const f = fixture(async () => {
-      started.resolve();
-      await completion.promise;
-    });
+    let notifications = 0;
+    const f = fixture(
+      async () => {
+        started.resolve();
+        await completion.promise;
+      },
+      () => {
+        notifications++;
+      },
+    );
     const driver = await f.pool.createDriver("trusted-owner-and-egress", f.options());
     await driver.listTargets();
     f.fail("Target.getTargets");
@@ -259,6 +266,7 @@ test.each([false, true])(
     expect(poolSettled).toBe(false);
     expect(driverSettled).toBe(false);
     expect(f.counts().stops).toBe(0);
+    expect(notifications).toBe(0);
     const failure = new Error("termination failed");
     if (reject) completion.reject(failure);
     else completion.resolve();
@@ -266,10 +274,12 @@ test.each([false, true])(
     if (reject) {
       expect(results).toEqual([failure, failure, failure]);
       await expect(f.pool.close()).rejects.toThrow("termination failed");
+      expect(notifications).toBe(0);
     } else {
       expect(results[0]).toBeInstanceOf(CdpTransportError);
       expect(results.slice(1)).toEqual([undefined, undefined]);
       expect(f.counts().stops).toBe(1);
+      expect(notifications).toBe(1);
     }
   },
 );
