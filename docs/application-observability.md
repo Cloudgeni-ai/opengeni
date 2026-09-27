@@ -73,6 +73,21 @@ never durable execution truth or proof an admission did not happen.
 
 ## Bounded export
 
+OTLP trace and protected-diagnostic resources share `service.name`,
+`deployment.environment`, `opengeni.component`, and an opaque UUID
+`service.instance.id`. The instance ID is generated once when the observability
+module loads, reused by observers in that runtime, and regenerated in a new
+process. It contains no host, pod, user, session, or workspace identity and is
+not a metric label. Call-site span attributes cannot override resource identity.
+
+When configured and nonempty, `opengeni.deployment_revision` carries the existing
+deployment revision setting on both resources. It is a bounded operator-supplied
+label, not independently attested binary provenance or `service.version`.
+Missing or empty revisions are omitted rather than invented by the exporter.
+Consumers must retain resource attributes to distinguish rollouts and runtime
+instances; the Collector must not stamp old queued spans with the current
+deployment's revision.
+
 Public traces use OTLP HTTP JSON at the existing endpoint plus `/v1/traces`.
 Each observer batches up to 32 spans, with eight queued batches and one active
 request; one additional partial batch can be held. Excess batches are dropped.
