@@ -943,7 +943,10 @@ Attached Chrome is an explicit user-profile choice, never an automatic fallback
 for an unavailable managed browser. A new attached BrowserSession creates a new
 background tab rather than navigating an existing personal tab. Startup waits
 for that exact target to appear in the bridge inventory; a missing target fails
-without borrowing another tab, including an existing blank tab. Reuse honors
+without borrowing another tab, including an existing blank tab. Attached startup
+uses an empty, network-free data document because the installed extension excludes
+`about:` pages from discovery and debugger control; browser-owned page restrictions
+remain enforced. Reuse honors
 explicit placement, identity, revision, network route and linked desktop choices.
 Debugger continuation pages are drained without treating a full page as lost
 history; actual sequence gaps still terminate the connection.
