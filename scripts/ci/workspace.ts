@@ -81,6 +81,8 @@ export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
     "requires real history-search API and responsive browser evidence and is owned by the curated interaction gate",
   "test/e2e/slack-oauth.browser.e2e.ts":
     "requires dedicated Slack OAuth acceptance outside default CI",
+  "test/e2e/timeline-exchange-fold.browser.e2e.ts":
+    "requires dedicated exchange-fold interaction acceptance and is owned by the curated browser-acceptance gate",
   "test/e2e/timeline-scroll.browser.e2e.ts":
     "requires dedicated timeline interaction acceptance and is owned by the curated browser-acceptance gate",
   "test/e2e/timeline-tip-follow.browser.e2e.ts":

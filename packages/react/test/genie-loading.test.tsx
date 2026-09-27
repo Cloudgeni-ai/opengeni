@@ -295,20 +295,26 @@ test("rolling steps start closed and preserve explicit expansion", async () => {
   const r = await renderComponent(
     <MessageTimeline items={[item]} turnSummary={{ rolling: true }} />,
   );
-  expect(r.container.querySelector(".og-rolling-status")).toBeNull();
+  // The first step already lives in the one status row.
+  const trigger = r.container.querySelector("button[aria-expanded]") as HTMLButtonElement;
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(trigger.textContent).toContain("Working");
+  expect(trigger.textContent).toContain("1 step");
+  expect(r.container.querySelector(".og-rolling-status")).not.toBeNull();
+  expect(r.container.textContent).not.toContain("secret detail");
   await r.rerender(
     <MessageTimeline
       items={[item, { ...item, id: "tool2", callId: "call2", arguments: { cmd: "bun run build" } }]}
       turnSummary={{ rolling: true }}
     />,
   );
-  const trigger = r.container.querySelector("button[aria-expanded]") as HTMLButtonElement;
   expect(trigger.getAttribute("aria-expanded")).toBe("false");
-  expect(r.container.querySelector(".og-rolling-status")).not.toBeNull();
-  expect(r.container.textContent).toContain("+1 earlier");
+  expect(trigger.textContent).toContain("2 steps");
+  // The status line counts steps; the reel does not repeat the count.
+  expect(r.container.textContent).not.toContain("+1 earlier");
   expect(r.container.textContent).toContain("bun test");
   expect(r.container.textContent).toContain("bun run build");
-  // Both faces exist during the first standalone-to-reel transition.
+  // Both faces exist while the reel rolls to the new step.
   expect(r.container.querySelectorAll(".og-rolling-face").length).toBe(2);
   await act(async () => trigger.click());
   expect(trigger.getAttribute("aria-expanded")).toBe("true");
