@@ -1,0 +1,5 @@
+---
+"@opengeni/db": patch
+---
+
+A person's message no longer retires a held `wait_for_input`. A finished turn that a person started (`source` `user` or `api`, or an operator's manual compaction) that does not call `wait_for_input` itself now leaves the session wait held, with its declaring turn, reason, and deadline unchanged. Previously, a status question answered while a child ran retired the wait, so the child's later result stayed pending with nothing to wake a goalless parent. Goal, system, scheduled, and other machine-input turns still supersede the wait, and its own deadline still bounds it. One shared predicate now decides the wait for worker peek and settlement, wake and claim admission, public `inputWait`, and waiting-descendant counts. No schema, prompt, or tool change.
