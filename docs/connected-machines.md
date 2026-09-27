@@ -783,6 +783,12 @@ resulting scope in their list cards so wider publication is never implicit.
 
 ## Transactional file edits
 
+Native ranged file reads retain only the selected bytes, rather than allocating
+the entire file before slicing it. They still consume the full stream to report
+the actual `total_size`, including virtual files whose stat size is zero; this
+reduces memory use without promising less disk I/O. A zero length continues to
+mean the remainder of the file, and an offset beyond EOF returns empty content.
+
 The editor uses transactional transfers for text creation and in-place updates,
 including small files, when the exact live agent advertises
 `transactional_fs_write`. Small in-place updates must not bypass staging: a
