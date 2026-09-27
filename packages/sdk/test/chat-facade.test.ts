@@ -344,6 +344,175 @@ describe("Chat.stream", () => {
     });
   }
 
+  test("commentary is activity: tools stream, the reply is only the answer", async () => {
+    const server = fakeServer({
+      reply: () => [
+        {
+          type: "agent.message.delta",
+          payload: { text: "Checking the ", messageId: "msg_note", phase: "commentary" },
+        },
+        {
+          type: "agent.message.delta",
+          payload: { text: "logs.", messageId: "msg_note", phase: "commentary" },
+        },
+        {
+          type: "agent.message.completed",
+          payload: { text: "Checking the logs.", messageId: "msg_note", phase: "commentary" },
+        },
+        { type: "agent.toolCall.created", payload: { id: "call_logs", name: "search" } },
+        { type: "agent.toolCall.output", payload: { id: "call_logs", output: "ok" } },
+        {
+          type: "agent.message.delta",
+          payload: { text: "All ", messageId: "msg_answer", phase: "final_answer" },
+        },
+        {
+          type: "agent.message.delta",
+          payload: { text: "clear.", messageId: "msg_answer", phase: "final_answer" },
+        },
+        {
+          type: "agent.message.completed",
+          payload: { text: "All clear.", messageId: "msg_answer", phase: "final_answer" },
+        },
+        { type: "turn.completed", payload: { output: "All clear." } },
+      ],
+    });
+    const chat = await server.og.chat({ tenant: "acme", conversation: "commentary" });
+    const chunks = await collect(chat.stream("hello"));
+    expect(chunks.slice(0, -1)).toEqual([
+      { type: "tool", name: "search", status: "started", callId: "call_logs" },
+      { type: "tool", name: "search", status: "completed", callId: "call_logs" },
+      { type: "text", text: "All " },
+      { type: "text", text: "clear." },
+    ]);
+    expect(chunks.at(-1)).toMatchObject({ type: "done", reply: { text: "All clear." } });
+    expect((await chat.history()).map((message) => [message.role, message.text])).toEqual([
+      ["user", "hello"],
+      ["assistant", "All clear."],
+    ]);
+  });
+
+  // Providers that report messages only after their whole response (the Agents
+  // SDK run-item order) complete a note after the answer already streamed.
+  test("a note completed after its answer streamed never repeats the answer", async () => {
+    const server = fakeServer({
+      reply: () => [
+        {
+          type: "agent.message.delta",
+          payload: { text: "Checking.", messageId: "msg_note", phase: "commentary" },
+        },
+        {
+          type: "agent.message.delta",
+          payload: { text: "It is ", messageId: "msg_answer", phase: "final_answer" },
+        },
+        {
+          type: "agent.message.delta",
+          payload: { text: "healthy.", messageId: "msg_answer", phase: "final_answer" },
+        },
+        {
+          type: "agent.message.completed",
+          payload: { text: "Checking.", messageId: "msg_note", phase: "commentary" },
+        },
+        {
+          type: "agent.message.completed",
+          payload: { text: "It is healthy.", messageId: "msg_answer", phase: "final_answer" },
+        },
+        { type: "turn.completed", payload: { output: "It is healthy." } },
+      ],
+    });
+    const chat = await server.og.chat({ tenant: "acme", conversation: "late-note" });
+    const chunks = await collect(chat.stream("hello"));
+    expect(chunks.filter((chunk) => chunk.type === "text")).toEqual([
+      { type: "text", text: "It is " },
+      { type: "text", text: "healthy." },
+    ]);
+    expect(chunks.at(-1)).toMatchObject({ type: "done", reply: { text: "It is healthy." } });
+  });
+
+  test("undeclared messages of one response stay separate and complete by identity", async () => {
+    const server = fakeServer({
+      reply: () => [
+        { type: "agent.message.delta", payload: { text: "Summary: ok.", messageId: "msg_1" } },
+        { type: "agent.message.delta", payload: { text: "Details: ", messageId: "msg_2" } },
+        { type: "agent.message.delta", payload: { text: "fine.", messageId: "msg_2" } },
+        {
+          type: "agent.message.completed",
+          payload: { text: "Summary: ok.", messageId: "msg_1", phase: "commentary" },
+        },
+        {
+          type: "agent.message.completed",
+          payload: { text: "Details: fine.", messageId: "msg_2", phase: "final_answer" },
+        },
+        // An older worker's phase-less settlement copy of the same answer.
+        { type: "agent.message.completed", payload: { text: "Details: fine." } },
+        { type: "turn.completed", payload: { output: "Details: fine." } },
+      ],
+    });
+    const chat = await server.og.chat({ tenant: "acme", conversation: "two-messages" });
+    const chunks = await collect(chat.stream("hello"));
+    const streamed = chunks
+      .filter((chunk) => chunk.type === "text")
+      .map((chunk) => chunk.text)
+      .join("");
+    expect(streamed).toBe("Summary: ok.\n\nDetails: fine.");
+    expect(chunks.at(-1)).toMatchObject({ type: "done", reply: { text: streamed } });
+  });
+
+  test("undeclared deltas later classified as commentary keep the reply equal to the stream", async () => {
+    const server = fakeServer({
+      reply: () => [
+        { type: "agent.message.delta", payload: { text: "Looking it up.", messageId: "msg_1" } },
+        {
+          type: "agent.message.completed",
+          payload: { text: "Looking it up.", messageId: "msg_1", phase: "commentary" },
+        },
+        { type: "agent.toolCall.created", payload: { id: "call_1", name: "search" } },
+        { type: "agent.toolCall.output", payload: { id: "call_1", output: "ok" } },
+        { type: "agent.message.delta", payload: { text: "Found it.", messageId: "msg_2" } },
+        { type: "agent.message.completed", payload: { text: "Found it.", messageId: "msg_2" } },
+        { type: "turn.completed", payload: { output: "Found it." } },
+      ],
+    });
+    const chat = await server.og.chat({ tenant: "acme", conversation: "undeclared" });
+    const chunks = await collect(chat.stream("hello"));
+    const streamed = chunks
+      .filter((chunk) => chunk.type === "text")
+      .map((chunk) => chunk.text)
+      .join("");
+    expect(streamed).toBe("Looking it up.\n\nFound it.");
+    expect(chunks.at(-1)).toMatchObject({ type: "done", reply: { text: streamed } });
+  });
+
+  test("a turn that settles with only commentary replies with its latest note", async () => {
+    const server = fakeServer({
+      reply: () => [
+        {
+          type: "agent.message.completed",
+          payload: { text: "Starting two workers.", messageId: "msg_1", phase: "commentary" },
+        },
+        { type: "agent.toolCall.created", payload: { id: "call_spawn", name: "session_create" } },
+        { type: "agent.toolCall.output", payload: { id: "call_spawn", output: "ok" } },
+        {
+          type: "agent.message.completed",
+          payload: {
+            text: "Both workers are running; I will report back.",
+            messageId: "msg_2",
+            phase: "commentary",
+          },
+        },
+        { type: "turn.completed", payload: { output: "" } },
+      ],
+    });
+    const chat = await server.og.chat({ tenant: "acme", conversation: "commentary-only" });
+    const chunks = await collect(chat.stream("hello"));
+    const note = "Both workers are running; I will report back.";
+    expect(chunks.filter((chunk) => chunk.type === "text")).toEqual([{ type: "text", text: note }]);
+    expect(chunks.at(-1)).toMatchObject({ type: "done", reply: { text: note } });
+    expect((await chat.history()).map((message) => [message.role, message.text])).toEqual([
+      ["user", "hello"],
+      ["assistant", note],
+    ]);
+  });
+
   test("yields tool and text chunks in order and ends with done", async () => {
     const server = fakeServer({
       reply: () => [

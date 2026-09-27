@@ -53,6 +53,12 @@ test("generic and custom application-RLS plans bound cleanup tails and oversized
       case when n <= 2000 then 'turn.completed' else 'sandbox.box.terminated' end,
       case when n <= 2000 then jsonb_build_object('output',repeat('oversized answer ',1024)) else '{}'::jsonb end
     from generate_series(1,12000) n`;
+  // A long live turn narrates progress. Commentary never creates attention, so
+  // the probe must not have to filter its way past these rows either.
+  await shared.admin`insert into session_events(account_id,workspace_id,session_id,sequence,type,payload)
+    select ${grant.accountId},${grant.workspaceId},${target.id},n,'agent.message.completed',
+      jsonb_build_object('text','Still checking the next file.','messageId','msg_' || n,'phase','commentary')
+    from generate_series(12001,12600) n`;
   for (let i = 0; i < 8; i++) {
     const sibling = await createSession(client.db, defaults);
     await shared.admin`insert into session_events(account_id,workspace_id,session_id,sequence,type,payload)
@@ -137,7 +143,7 @@ test("generic and custom application-RLS plans bound cleanup tails and oversized
           walk(plan);
           expect(eventNodes).toHaveLength(1);
           const node = eventNodes[0]!;
-          expect(node["Index Name"]).toBe("session_events_meaningful_attention_idx");
+          expect(node["Index Name"]).toBe("session_events_meaningful_attention_v2_idx");
           expect(node["Actual Rows"]).toBe(maximumRows);
           expect(Number(node["Rows Removed by Filter"] ?? 0)).toBe(0);
           expect(

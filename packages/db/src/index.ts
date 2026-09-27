@@ -38148,6 +38148,26 @@ function excludeUnclaimedHumanPromptEventFilter(workspaceId: string): SQL {
 }
 
 /**
+ * SQL twin of `isStreamedAssistantMessageCompletion` in `@opengeni/contracts`.
+ * Every branch is coalesced: a missing key must keep the row, never make the
+ * negated predicate unknown.
+ */
+function excludeStreamedAssistantMessageEventFilter(): SQL {
+  const event = schema.sessionEvents;
+  return sql`not (
+    ${event.type} = 'agent.message.completed'
+    and (
+      coalesce(${event.payload} ->> 'phase', '') in ('commentary', 'final_answer')
+      or coalesce(
+        jsonb_typeof(${event.payload} -> 'messageId') = 'string'
+          and ${event.payload} ->> 'messageId' <> '',
+        false
+      )
+    )
+  )`;
+}
+
+/**
  * Compact-by-construction discovery projection for the first-party
  * `sessions_list` MCP tool. It never selects instructions, resources, tools,
  * MCP metadata, repositories, settings, or full event/history bodies.
@@ -38914,6 +38934,13 @@ export type ListSessionEventsOptions = {
    * exact.
    */
   excludeUnclaimedHumanPrompts?: boolean;
+  /**
+   * Omit per-message assistant completions (they carry a provider `messageId`
+   * or a `phase`). The settling `turn.completed` carries the answer, so a
+   * reader of settled changes excludes them in SQL: a long run of progress
+   * notes can then neither wake it nor fill its page ahead of the outcome.
+   */
+  excludeStreamedAssistantMessages?: boolean;
   payloadMode?: SessionEventPayloadMode;
   /**
    * Internal exclusive-latest selector. Eligible legacy rows with a null
@@ -39043,10 +39070,15 @@ export async function listSessionEventPage(
       if (options.excludeUnclaimedHumanPrompts) {
         filters.push(excludeUnclaimedHumanPromptEventFilter(workspaceId));
       }
+      if (options.excludeStreamedAssistantMessages) {
+        filters.push(excludeStreamedAssistantMessageEventFilter());
+      }
       if (options.authoritativeLatest) {
         // Historical rows predate association stamping and intentionally carry
         // null. They remain eligible; explicitly stale/duplicate rows and rows
-        // carrying a duplicate reference cannot compete with current truth.
+        // carrying a duplicate reference cannot compete with current truth. A
+        // completed progress note is not a result, so it cannot be the latest
+        // terminal event while a turn is still working.
         filters.push(
           and(
             or(
@@ -39054,6 +39086,8 @@ export async function listSessionEventPage(
               eq(schema.sessionEvents.turnAssociation, "current"),
             )!,
             isNull(schema.sessionEvents.duplicateOfEventId),
+            sql`not (${schema.sessionEvents.type} = 'agent.message.completed'
+              and coalesce(${schema.sessionEvents.payload} ->> 'phase', '') = 'commentary')`,
           )!,
         );
       }

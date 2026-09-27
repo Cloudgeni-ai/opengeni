@@ -7,9 +7,27 @@ import { sessionEventCursors } from "../src/schema";
 import {
   MEANINGFUL_SESSION_EVENT_TYPES,
   childLifecycleEvidenceCandidatesSql,
+  commentaryInclusiveMeaningfulSessionEventSql,
   meaningfulSessionEventSql,
   meaningfulSessionSequenceSql,
 } from "../src/session-meaningful-events";
+
+const normalizePredicate = (value: string) =>
+  value
+    .replaceAll('"meaningful".', "")
+    .replaceAll(/\s+/g, " ")
+    .replaceAll(/\(\s+/g, "(")
+    .replaceAll(/\s+\)/g, ")")
+    .trim()
+    .toLowerCase();
+
+function indexPredicate(migration: string): string {
+  const migrated = migration.split("WHERE type IN (")[1]!.split(";")[0]!;
+  expect([...migrated.split(")")[0]!.matchAll(/'([^']+)'/g)].map((match) => match[1])).toEqual([
+    ...MEANINGFUL_SESSION_EVENT_TYPES,
+  ]);
+  return normalizePredicate(`type IN (${migrated.replace(/;\s*$/, "")}`);
+}
 
 describe("meaningful event frontier contract", () => {
   test("single-table projection preserves outer cursor correlation inside the subquery", () => {
@@ -28,25 +46,15 @@ describe("meaningful event frontier contract", () => {
       expect(query.params).toEqual([]);
     }
   });
-  test("maintenance migration index uses exactly the runtime predicate", async () => {
+  test("maintenance migration index keeps the commentary-inclusive rollout predicate", async () => {
     const migration = await readFile(
       new URL("../drizzle/0503_session_meaningful_attention.sql", import.meta.url),
       "utf8",
     );
-    const predicate = new PgDialect().sqlToQuery(meaningfulSessionEventSql("meaningful")).sql;
-    const normalize = (value: string) =>
-      value
-        .replaceAll('"meaningful".', "")
-        .replaceAll(/\s+/g, " ")
-        .replaceAll(/\(\s+/g, "(")
-        .replaceAll(/\s+\)/g, ")")
-        .trim()
-        .toLowerCase();
-    const migrated = migration.split("WHERE type IN (")[1]!.split(";")[0]!;
-    expect([...migrated.split(")")[0]!.matchAll(/'([^']+)'/g)].map((match) => match[1])).toEqual([
-      ...MEANINGFUL_SESSION_EVENT_TYPES,
-    ]);
-    expect(normalize(`type IN (${migrated.replace(/;\s*$/, "")}`)).toBe(normalize(predicate));
+    const predicate = new PgDialect().sqlToQuery(
+      commentaryInclusiveMeaningfulSessionEventSql("meaningful"),
+    ).sql;
+    expect(indexPredicate(migration)).toBe(normalizePredicate(predicate));
     expect(migration.startsWith("-- deployment-mode: maintenance")).toBe(true);
     expect(migration).toContain("personal.attention_version > 0");
     expect(migration).toContain("SET manually_unread_through = cursor.last_sequence");
@@ -56,6 +64,31 @@ describe("meaningful event frontier contract", () => {
       expect(migration).toContain(`ALTER TABLE ${table} NO FORCE ROW LEVEL SECURITY`);
       expect(migration).toContain(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
     }
+  });
+  test("rolling concurrent index uses exactly the runtime predicate, without commentary", async () => {
+    const migration = await readFile(
+      new URL("../drizzle/0522_session_attention_excludes_commentary.sql", import.meta.url),
+      "utf8",
+    );
+    const predicate = new PgDialect().sqlToQuery(meaningfulSessionEventSql("meaningful")).sql;
+    expect(indexPredicate(migration)).toBe(normalizePredicate(predicate));
+    expect(predicate).toContain(`payload ->> 'phase', '') <> 'commentary'`);
+    expect(
+      migration.startsWith(
+        "-- deployment-mode: rolling\n-- opengeni:concurrent-index lock-timeout=5s\n",
+      ),
+    ).toBe(true);
+    // The runtime predicate is the 0503 one plus the commentary exclusion, so
+    // pre-0522 API processes keep their own index during the rollout.
+    const inclusive = normalizePredicate(
+      new PgDialect().sqlToQuery(commentaryInclusiveMeaningfulSessionEventSql("meaningful")).sql,
+    );
+    expect(
+      normalizePredicate(predicate).replace(
+        " and (type <> 'agent.message.completed' or coalesce(payload ->> 'phase', '') <> 'commentary')",
+        "",
+      ),
+    ).toBe(inclusive);
   });
   test("lifecycle evidence bounds indexed candidates before inspecting oversized payloads", () => {
     const query = new PgDialect().sqlToQuery(

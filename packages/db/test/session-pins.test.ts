@@ -2188,6 +2188,49 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     ).rejects.toBeInstanceOf(SessionAttentionVersionConflictError);
   });
 
+  test("completed commentary never marks a read session unread; the next answer does", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const target = await session({ ...workspace, message: "commentary target" });
+    const subject = "user:commentary-reader";
+    await grantMember(workspace, subject);
+    const message = (text: string, messageId: string, phase: "commentary" | "final_answer") => ({
+      type: "agent.message.completed" as const,
+      payload: { text, messageId, phase },
+    });
+
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      message("First answer.", "msg_first", "final_answer"),
+    ]);
+    expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
+      { unread: true },
+    );
+    const read = await setSessionAttention(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: subject,
+      sessionId: target.id,
+      unread: false,
+      expectedVersion: 0,
+    });
+    expect(read).toMatchObject({ unread: false });
+
+    // The next turn narrates its progress: activity, not something to read.
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      message("Checking the deploy logs.", "msg_progress_1", "commentary"),
+      message("Still checking the last region.", "msg_progress_2", "commentary"),
+    ]);
+    expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
+      { unread: false },
+    );
+
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      message("Second answer.", "msg_second", "final_answer"),
+    ]);
+    expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
+      { unread: true },
+    );
+  });
+
   test("archives a root chat personally, hides its tree, and restores it", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

@@ -33,7 +33,8 @@ export const MEANINGFUL_SESSION_EVENT_TYPES = [
   "session.event.envelope_omitted",
 ] as const;
 
-export function meaningfulSessionEventSql(alias: string): SQL {
+/** `include` is the migration 0503 index predicate; `exclude` is migration 0522's. */
+function attentionSessionEventSql(alias: string, commentary: "include" | "exclude"): SQL {
   const e = sql.identifier(alias);
   // These are code-owned literals, not request values. Literal predicates let
   // PostgreSQL use the matching partial index even with a generic cached plan.
@@ -43,12 +44,34 @@ export function meaningfulSessionEventSql(alias: string): SQL {
   )})
     and ${e}.duplicate_of_event_id is null
     and (${e}.turn_association is null or ${e}.turn_association = 'current')
-    and (${e}.type <> 'agent.message.completed' or coalesce(${e}.payload ->> 'text', '') <> '')
+    and (${e}.type <> 'agent.message.completed' or coalesce(${e}.payload ->> 'text', '') <> '')${
+      commentary === "exclude"
+        ? sql`
+    and (${e}.type <> 'agent.message.completed' or coalesce(${e}.payload ->> 'phase', '') <> 'commentary')`
+        : sql``
+    }
     and (${e}.type <> 'turn.completed' or (
       not (${e}.payload ?| array['maintenance', 'segmentLimit'])
       and coalesce(nullif(${e}.payload -> 'output', 'null'::jsonb), ${e}.payload -> 'result') is not null
       and coalesce(nullif(${e}.payload -> 'output', 'null'::jsonb), ${e}.payload -> 'result') not in ('null'::jsonb, '""'::jsonb)
     ))`;
+}
+
+/**
+ * Completed commentary is progress narrating the work, not an answer, so it
+ * never creates attention on its own; the answer or turn outcome that follows
+ * does. Exactly the migration 0522 partial-index predicate.
+ */
+export function meaningfulSessionEventSql(alias: string): SQL {
+  return attentionSessionEventSql(alias, "exclude");
+}
+
+/**
+ * The migration 0503 index predicate. Older API processes still probe with it
+ * during a rolling deploy; nothing current queries it.
+ */
+export function commentaryInclusiveMeaningfulSessionEventSql(alias: string): SQL {
+  return attentionSessionEventSql(alias, "include");
 }
 
 /** A stored audit preview can still need attention, but cannot stand in for
