@@ -1975,6 +1975,14 @@ export type BuildAgentOptions = {
   latencyMode?: LatencyMode;
   /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
   serviceTier?: "fast" | "priority";
+  /**
+   * Responses `text.verbosity`, set only for routes and models that accept it.
+   * Hosts must keep it constant for a session: like reasoning effort, a
+   * provider may treat it as part of the cached prompt prefix, so a
+   * per-message value could defeat prompt caching.
+   * Omitted sends no `text` settings, byte-identical to earlier requests.
+   */
+  textVerbosity?: "low" | "medium" | "high";
   // Per-turn gating overrides for the multi-provider path. Each defaults to
   // today's settings-derived behaviour when omitted, so the legacy
   // global-client callers (no model resolution) are byte-for-byte unchanged.
@@ -2840,6 +2848,7 @@ export function buildOpenGeniAgent(
         effort: options.reasoningEffort ?? settings.openaiReasoningEffort,
         summary: "detailed",
       },
+      ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {}),
       // Round-trip the encrypted reasoning payload with every call so chains
       // of thought survive without provider-side response storage (which is
       // what stripped provider item ids opt us out of — see

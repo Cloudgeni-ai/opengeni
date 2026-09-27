@@ -97,7 +97,10 @@ describe("session-only entry", () => {
     // Keep the session-only closure explicit: adding a source requires reviewing
     // whether it belongs to this provider-neutral public subpath.
     expect(reactSources.some((id) => id.endsWith("/src/conversation-timeline.ts"))).toBe(true);
-    expect(reactSources.length).toBe(22);
+    // The exchange fold keeps presented images visible; its pure, React-free
+    // predicate is part of the projection.
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/presented-image.ts"))).toBe(true);
+    expect(reactSources.length).toBe(23);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

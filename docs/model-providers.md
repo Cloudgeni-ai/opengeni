@@ -1109,6 +1109,22 @@ Portable compaction is provider-independent conversation lifecycle, not a
 model capability. The summarizer uses the same resolved provider and wire API
 as the turn while the durable replacement algorithm remains shared.
 
+Agent turns send `text.verbosity: "low"`, the Codex CLI default for these
+models, only on the Codex subscription route, direct OpenAI Responses, and the
+Azure OpenAI Responses wire (built-in or registered `wireProfile:
+"azure-openai"`), and only for GPT-5-family and later models other than
+`-codex` and `-chat` variants (`textVerbosityForTurn` in
+`apps/worker/src/activities/agent-turn/tool-policy.ts`). Azure is included
+because the parallel session-title request has always sent the same field with
+the turn's own model on every Responses route, and Azure sessions receive
+generated titles. AI Gateway, OpenRouter, SuperGrok, other OpenAI-compatible
+endpoints, and chat wires keep their provider default until each is verified.
+The value depends only on the route and model, never on the message: like
+reasoning effort, a provider may treat it as part of the cached prompt prefix.
+A compaction request built from the turn's prepared request carries the same
+model settings, so the portable checkpoint summary is also requested at low
+verbosity. `reasoning.summary` stays `detailed`.
+
 Pricing is keyed by product model ID. A tiered schedule selects the greatest
 `minimumInputTokens` threshold not exceeding the current input count. Billing
 classification comes from the accepted policy: `external` usage must not spend

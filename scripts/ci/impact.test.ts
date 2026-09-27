@@ -47,6 +47,7 @@ const SITE_CONVERSATIONS_E2E = "test/e2e/site-conversations.browser.e2e.ts";
 const SETUP_ACCOUNT_TOKEN_E2E = "test/e2e/setup-account-token.browser.e2e.ts";
 const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
 const TIMELINE_TIP_FOLLOW_BROWSER_E2E = "test/e2e/timeline-tip-follow.browser.e2e.ts";
+const TIMELINE_EXCHANGE_FOLD_BROWSER_E2E = "test/e2e/timeline-exchange-fold.browser.e2e.ts";
 const RESTORED_ATTACHMENT_PREVIEW_E2E = "test/e2e/restored-attachment-preview.browser.e2e.ts";
 const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
 const PREVIEW_LOADING_E2E = "test/e2e/preview-loading.browser.e2e.ts";
@@ -458,12 +459,14 @@ describe("fail-closed change impact", () => {
       "packages/react/demo/timeline-collapsed-history-test-harness.tsx",
       TIMELINE_SCROLL_BROWSER_E2E,
       TIMELINE_TIP_FOLLOW_BROWSER_E2E,
+      TIMELINE_EXCHANGE_FOLD_BROWSER_E2E,
     ]) {
       const plan = createImpactPlan([path]);
       expect(plan.mode).toBe("focused");
       expect(plan.browserAcceptanceLanes).toContain("interaction");
       expect(plan.e2eTests).not.toContain(TIMELINE_SCROLL_BROWSER_E2E);
       expect(plan.e2eTests).not.toContain(TIMELINE_TIP_FOLLOW_BROWSER_E2E);
+      expect(plan.e2eTests).not.toContain(TIMELINE_EXCHANGE_FOLD_BROWSER_E2E);
     }
   });
 
@@ -711,6 +714,8 @@ describe("fail-closed change impact", () => {
     expect(OPT_IN_TESTS[TIMELINE_SCROLL_BROWSER_E2E]).toContain("browser-acceptance");
     expect(tests.e2e).not.toContain(TIMELINE_TIP_FOLLOW_BROWSER_E2E);
     expect(OPT_IN_TESTS[TIMELINE_TIP_FOLLOW_BROWSER_E2E]).toContain("browser-acceptance");
+    expect(tests.e2e).not.toContain(TIMELINE_EXCHANGE_FOLD_BROWSER_E2E);
+    expect(OPT_IN_TESTS[TIMELINE_EXCHANGE_FOLD_BROWSER_E2E]).toContain("browser-acceptance");
     expect(tests.e2e).not.toContain("test/e2e/organization-onboarding-acceptance.e2e.ts");
     expect(OPT_IN_TESTS["test/e2e/organization-onboarding-acceptance.e2e.ts"]).toContain(
       "onboarding",

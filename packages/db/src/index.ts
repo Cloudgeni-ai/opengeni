@@ -636,6 +636,7 @@ export * from "./governed-learning-evaluator";
 export * from "./slack-task-policy";
 export * from "./preference-registry";
 export * from "./skills";
+export * from "./session-tool-results";
 export type { SkillSourceReleaseReceipt } from "./skill-source-release";
 export { SkillSourceRemovalAuthorityError } from "./skill-source-release";
 export * from "./memory-governance";
@@ -6960,6 +6961,7 @@ export function durableUserHistoryItem(
   annotations: readonly TimelineAnnotation[] = [],
   modelContext?: string | null,
   goalSnapshot?: SessionGoalSnapshot,
+  sentAt?: Date | null,
 ): Record<string, unknown> {
   const attachmentRefs = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
@@ -6967,7 +6969,13 @@ export function durableUserHistoryItem(
   return {
     type: "message",
     role: "user",
-    content: renderUserMessageContentForModel(prompt, annotations, modelContext, goalSnapshot),
+    content: renderUserMessageContentForModel(
+      prompt,
+      annotations,
+      modelContext,
+      goalSnapshot,
+      sentAt,
+    ),
     ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
     ...(annotations.length > 0
       ? {
@@ -68156,6 +68164,8 @@ export async function claimSessionWorkForAttempt(
           triggerEventId: string | null;
           historyItemId: string | null;
           historyItem: Record<string, unknown> | null;
+          /** Durable delivery time written to every delivered member. */
+          deliveredAt: Date;
           updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>;
           /** Deduped children the delivered batch reports on, in delivery order. */
           childSessionIds: ConsumedChildEvidence[];
@@ -68272,6 +68282,7 @@ export async function claimSessionWorkForAttempt(
               triggerEventId: null,
               historyItemId: null,
               historyItem: null,
+              deliveredAt: occurredAt,
               updates: [],
               childSessionIds: [],
               events: [],
@@ -68612,6 +68623,7 @@ export async function claimSessionWorkForAttempt(
               triggerEventId: null,
               historyItemId: null,
               historyItem: null,
+              deliveredAt: occurredAt,
               updates: [],
               childSessionIds: [],
               events: cancellationEvents,
@@ -68630,6 +68642,8 @@ export async function claimSessionWorkForAttempt(
           const historyItemId = crypto.randomUUID();
           const historyItem = sessionSystemUpdateBatchHistoryItem(
             modelOrdered.map((update) => mapSessionSystemUpdate(update)),
+            undefined,
+            { deliveredAt: occurredAt },
           ) as Record<string, unknown>;
           await tx
             .update(schema.sessionSystemUpdates)
@@ -68790,6 +68804,7 @@ export async function claimSessionWorkForAttempt(
             triggerEventId: eventId,
             historyItemId,
             historyItem,
+            deliveredAt: occurredAt,
             updates: deliverable,
             childSessionIds: consumedChildLifecycleSessionIds(deliverable, parsedPayloadsById),
             events,
@@ -68836,6 +68851,7 @@ export async function claimSessionWorkForAttempt(
                       ? sessionSystemUpdateBatchHistoryItem(
                           delivered.updates.map((update) => mapSessionSystemUpdate(update)),
                           goalSnapshot,
+                          { deliveredAt: delivered.deliveredAt },
                         )
                       : delivered.historyItem),
                 ),
@@ -70271,9 +70287,12 @@ export async function claimSessionWorkForAttempt(
               [],
               [],
               contextualUpdates.length > 0
-                ? renderSessionSystemUpdateBatch(contextualUpdates)
+                ? renderSessionSystemUpdateBatch(contextualUpdates, {
+                    deliveredAt: delivered.deliveredAt,
+                  })
                 : undefined,
               frozenGoalSnapshot,
+              internalTurn.createdAt,
             );
           }
           const scheduledOccurrenceHistoryItem =
@@ -70283,7 +70302,7 @@ export async function claimSessionWorkForAttempt(
               ? sessionSystemUpdateBatchHistoryItem(
                   delivered.updates.map((update) => mapSessionSystemUpdate(update)),
                   frozenGoalSnapshot,
-                  { promoteScheduledOccurrenceToUser: true },
+                  { promoteScheduledOccurrenceToUser: true, deliveredAt: delivered.deliveredAt },
                 )
               : undefined;
           await persistDeliveredUpdateBatch(
@@ -70432,6 +70451,9 @@ export async function claimSessionWorkForAttempt(
                   TimelineAnnotations.parse(row.annotations),
                   row.modelContext,
                   SessionGoalSnapshot.parse(row.goalSnapshot),
+                  // Acceptance time, not claim time: a queued message keeps the
+                  // moment the user sent it.
+                  row.createdAt,
                 ),
               ),
             },
