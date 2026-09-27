@@ -1,4 +1,5 @@
 import { pollDeviceAuthorization } from "@opengeni/connect";
+import { labelReasoningEffort } from "@opengeni/react";
 import type { CodexConnectPoll } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { ArrowUpRightIcon, ChevronRightIcon, Loader2Icon } from "lucide-react";
@@ -10,13 +11,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
-import { validTopupAmount } from "@/lib/format";
+import { formatMoneyMicros, validTopupAmount } from "@/lib/format";
 import {
   applyConnectedModelToNewSessionDraft,
   creditCheckoutSuccessUrl,
   creditsModelForCheckout,
   type ConnectedModelFamily,
 } from "@/lib/model-access-onboarding";
+import type { StartingCreditsOnboarding } from "@/lib/onboarding-starting-credits";
 import {
   isRetryableDevicePollError,
   pollSuperGrokDeviceLogin,
@@ -74,12 +76,23 @@ type DevicePending = {
 
 export type IncludedOnboardingModel = { id: string; label: string; free: boolean };
 
+/** "GPT-6 Luna with extra high reasoning", or just the label when there is no effort to name. */
+function describeCreditsModel(model: StartingCreditsOnboarding["model"]): string {
+  if (model.reasoningEffort === "none") return model.label;
+  return `${model.label} with ${labelReasoningEffort(model.reasoningEffort).toLowerCase()} reasoning`;
+}
+
 /**
  * First-sign-in product step after the durable organization-name lifecycle.
- * When the deployment includes a default model, starting to chat with it is the
- * primary path and every connection or purchase is an optional upgrade.
- * Connecting a model updates the actor-private new-chat draft so the next chat
- * preselects that model. Leaving remains available; this does not change the 0348 API.
+ * When the organization already holds OpenGeni credits (for example the
+ * verified-signup trial grant) and new chats default to a credits model,
+ * starting to chat on those credits is the primary path: the step shows the
+ * balance and the resolved default, and names the free model as what applies
+ * once the credits run out. Otherwise, when the deployment includes a default
+ * model, starting to chat with it is the primary path. Every connection or
+ * purchase is an optional upgrade. Connecting a model updates the
+ * actor-private new-chat draft so the next chat preselects that model. Leaving
+ * remains available; this does not change the 0348 API.
  */
 export function ModelAccessOnboardingPanel({
   client,
@@ -89,6 +102,7 @@ export function ModelAccessOnboardingPanel({
   codexEnabled = false,
   supergrokEnabled = false,
   includedModel = null,
+  startingCredits = null,
   onComplete,
 }: {
   client?: OpenGeniBrowserClient;
@@ -98,6 +112,7 @@ export function ModelAccessOnboardingPanel({
   codexEnabled?: boolean;
   supergrokEnabled?: boolean;
   includedModel?: IncludedOnboardingModel | null;
+  startingCredits?: StartingCreditsOnboarding | null;
   onComplete: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -483,16 +498,21 @@ export function ModelAccessOnboardingPanel({
     </div>
   ) : null;
 
-  const CreditsHeading = includedModel ? "h3" : "h2";
+  const secondaryCredits = Boolean(includedModel || startingCredits);
+  const CreditsHeading = secondaryCredits ? "h3" : "h2";
   const credits =
     billingMode === "stripe" ? (
       <div className="mt-6 grid gap-4 border-t border-border pt-6">
         <div>
-          <CreditsHeading className="text-sm font-medium">Use OpenGeni credits</CreditsHeading>
+          <CreditsHeading className="text-sm font-medium">
+            {startingCredits ? "Buy more OpenGeni credits" : "Use OpenGeni credits"}
+          </CreditsHeading>
           <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-            {includedModel
-              ? "Pay as you go for more capable hosted models."
-              : "Pay for hosted models as you go."}{" "}
+            {startingCredits
+              ? "Top up anytime to keep chatting on OpenGeni credits."
+              : includedModel
+                ? "Pay as you go for more capable hosted models."
+                : "Pay for hosted models as you go."}{" "}
             No provider account needed.
           </p>
         </div>
@@ -503,7 +523,7 @@ export function ModelAccessOnboardingPanel({
         />
         <Button
           type="button"
-          variant={includedModel ? "secondary" : "default"}
+          variant={secondaryCredits ? "secondary" : "default"}
           className="h-10 w-full"
           disabled={!client || busy || !!pending || !validAmount}
           onClick={() => void buyCredits()}
@@ -519,6 +539,50 @@ export function ModelAccessOnboardingPanel({
         </p>
       </div>
     ) : null;
+
+  if (startingCredits) {
+    const freeAfterCredits = includedModel?.free ? includedModel : null;
+    return (
+      <section className="flex min-h-0 flex-1 overflow-y-auto px-4 py-8">
+        <div className="m-auto w-full max-w-lg rounded-xl border border-border bg-surface p-6 shadow-sm sm:p-8">
+          <h1 className="text-xl font-semibold tracking-tight">
+            Start chatting with OpenGeni credits
+          </h1>
+          <p className="mt-2 text-sm leading-relaxed text-fg-muted">
+            {startingCredits.balance
+              ? `${formatMoneyMicros(startingCredits.balance.balanceMicros, startingCredits.balance.currency)} of OpenGeni credits included.`
+              : "OpenGeni credits are included with your account."}{" "}
+            New chats use {describeCreditsModel(startingCredits.model)}. No card or API key needed.
+          </p>
+          {freeAfterCredits ? (
+            <p className="mt-2 text-xs leading-relaxed text-fg-muted">
+              When your credits run out, new chats use {freeAfterCredits.label}, which is free.
+            </p>
+          ) : null}
+          <Button
+            type="button"
+            className="mt-6 h-10 w-full"
+            disabled={busy}
+            onClick={leaveOnboarding}
+          >
+            Start chatting
+          </Button>
+
+          <div className="mt-8 border-t border-border pt-6">
+            <h2 className="text-sm font-medium">Prefer your own subscription or key? (optional)</h2>
+            <p className="mt-1 text-xs leading-relaxed text-fg-muted">
+              Connect a subscription or API key you already have
+              {billingMode === "stripe" ? ", or buy more OpenGeni credits" : ""}. You can also do
+              this later.
+            </p>
+            <div className="mt-3">{connectOptions}</div>
+            {selectionRetryNotice}
+            {credits}
+          </div>
+        </div>
+      </section>
+    );
+  }
 
   if (includedModel) {
     return (

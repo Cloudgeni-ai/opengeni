@@ -514,6 +514,11 @@ impl Pump {
             }
         }
 
+        // Collection can linger for the registry TTL. Replay reads retention,
+        // never these transport-sized scratch buffers: release them before
+        // publishing completion, not after the eventual final acknowledgement.
+        drop(stdout_buf);
+        drop(stderr_buf);
         self.finish().await
     }
 

@@ -126,7 +126,10 @@ import {
   recordModelUsageAndDebitCredits,
   recordAuthoritativeModelCallFact,
 } from "./model-usage";
-import { startParallelSessionTitleGeneration } from "./session-title";
+import {
+  sessionTitleGenerationOptions,
+  startParallelSessionTitleGeneration,
+} from "./session-title";
 import {
   assertAgentStreamNotCancelled,
   assertSuccessfulAgentStreamCompletion,
@@ -1786,18 +1789,16 @@ export async function runTurnStreamAttempt(
       signal: runtimeCancellationSignal,
       generate: async (signal) =>
         await withSessionTitleProviderRequestContext(() =>
-          runtime.generateSessionTitle!(runSettings, sessionTitlePrompt, {
-            ...(resolvedModel
-              ? {
-                  client: resolvedModel.client,
-                  provider: resolvedModel.provider,
-                  model: resolvedModel.model,
-                }
-              : {}),
-            modelName: turnExecutionPolicy.upstreamModelId,
-            ...(serviceTier ? { serviceTier } : {}),
-            signal,
-          }),
+          runtime.generateSessionTitle!(
+            runSettings,
+            sessionTitlePrompt,
+            sessionTitleGenerationOptions({
+              resolvedModel,
+              modelName: turnExecutionPolicy.upstreamModelId,
+              serviceTier,
+              signal,
+            }),
+          ),
         ),
       onError: (error) => {
         observability.warn("parallel session title generation failed", {

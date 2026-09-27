@@ -116,6 +116,7 @@ import {
 } from "../connection-ownership";
 import {
   integrationBaseUrl,
+  oauthStateFailureReturn,
   oauthStateTtlMs,
   requireIntegrationsStateSecret,
 } from "./oauth-client";
@@ -400,7 +401,7 @@ export async function completeGoogleDriveOAuthCallback(
       now: new Date(),
     });
     if (!consumed) {
-      throw new HTTPException(400, { message: "Google Drive OAuth state has already been used" });
+      throw new GoogleDriveCallbackError("state_replayed");
     }
     if (operation && (input.error || !input.code)) {
       await finishConnectOperation(deps.db, state, {
@@ -629,12 +630,15 @@ export async function completeGoogleDriveOAuthCallback(
     };
   } catch (error) {
     if (exactReturnUrl) return { redirectTo: exactReturnUrl, exactReturn: true };
+    // Reading the state is the first step, so no state means the link itself
+    // was unusable: say whether it expired rather than blame configuration.
+    const failure = state ? null : oauthStateFailureReturn(deps.settings, input.state);
     return {
       redirectTo: googleDriveReturnUrl(
         returnBaseUrl,
-        state?.returnPath ?? "/integrations",
+        state?.returnPath ?? failure!.returnPath,
         "error",
-        googleDriveErrorReason(error),
+        failure?.reason ?? googleDriveErrorReason(error),
       ),
     };
   }

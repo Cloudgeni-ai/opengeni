@@ -556,7 +556,11 @@ every call and must not trust a model-supplied tenant id.
 
 Use `settings.sessionDefaults` for a workspace's default model and reasoning,
 and `model` / `reasoningEffort` on session or message requests for deliberate
-overrides. Workspace model access policy is the hard allowlist. Model ids and
+overrides. A session or scheduled task created without `model` gets the
+server-resolved default: the saved workspace default, then a usable connected
+subscription, then the configured credits model while the organization holds
+OpenGeni credits, then the deployment default. `GET
+/v1/workspaces/:workspaceId/model-catalog` reports it as `defaultSelection`. Workspace model access policy is the hard allowlist. Model ids and
 availability are live deployment facts; do not hard-code a remembered catalog.
 
 OpenGeni credits are held at the organization account. All of that

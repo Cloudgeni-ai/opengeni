@@ -339,6 +339,14 @@ describe("wireAttachedBrowserInventoryToContract", () => {
     });
   });
 
+  test("accepts native base64url generation prefixes without rewriting the fence", () => {
+    for (const bridgeGeneration of ["_native-generation", "-native-generation"]) {
+      expect(
+        wireAttachedBrowserInventoryToContract(inventory({ bridgeGeneration })).bridgeGeneration,
+      ).toBe(bridgeGeneration);
+    }
+  });
+
   test("rejects an unsafe uint64 before an authoritative snapshot can disconnect peers", () => {
     expect(() =>
       wireAttachedBrowserInventoryToContract(

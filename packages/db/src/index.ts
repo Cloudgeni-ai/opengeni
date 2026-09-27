@@ -45,6 +45,13 @@ export const retryFailedSessionInTransaction = createRetryFailedSessionInTransac
 );
 import { unresolvedCodexCredentialFailures } from "./codex-failure-eligibility";
 import {
+  mergeCodexPlanEntitlementExclusion,
+  readCodexPlanEntitlementExclusion,
+  serializeCodexPlanEntitlementExclusion,
+  type CodexPlanEntitlementExclusion,
+} from "./codex-plan-entitlement";
+export * from "./codex-plan-entitlement";
+import {
   CODEX_CAPACITY_RECOVERY_KEY,
   CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT,
   readCodexCapacityRecovery,
@@ -418,6 +425,7 @@ import { SandboxTransitionWaitBudget } from "./sandbox-transition-wait";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import {
   canonicalizePersistedHistoryItem,
+  codexPlanKey,
   omitOutputOnlyHistoryItemFields,
   isCodexBilledModel,
   refreshCodexToken,
@@ -571,6 +579,11 @@ import {
   childWaitingCapacityDedupeKey,
   childWaitingCapacitySummary,
 } from "./child-lifecycle-notices";
+import { codeSearchDeploymentPolicyForCreate } from "./code-search-policy";
+import {
+  resolveSessionCodeSearchEnabled,
+  type CodeSearchDeploymentPolicy,
+} from "@opengeni/contracts/code-search";
 import {
   autoResumeGoalPausedByCapInTransaction,
   SESSION_GOAL_CAP_PAUSED_REASON,
@@ -607,6 +620,7 @@ import {
 
 export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
+export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
 export * from "./session-control";
 export * from "./session-queue-commands";
 export * from "./session-realtime";
@@ -635,6 +649,7 @@ export * from "./task-notes";
 export * from "./work-claims";
 export * from "./managed-human-provisioning";
 export * from "./managed-user-setup";
+export * from "./verified-signup-trial-switch";
 export * from "./organization-membership-backfill";
 export * from "./connection-tenancy-backfill";
 export * from "./generated-images";
@@ -763,6 +778,7 @@ import {
   buildCodexTokenResolver as buildCodexTokenResolverCore,
   fetchCodexRateLimitResetCreditsForAccount as fetchCodexRateLimitResetCreditsForAccountCore,
   fetchCodexUsageForAccount as fetchCodexUsageForAccountCore,
+  recheckCodexCredentialPlan as recheckCodexCredentialPlanCore,
   type CodexAccountUsageSnapshot,
   type CodexAuthDeps,
   type CodexCredentialCooldownKind,
@@ -5532,6 +5548,16 @@ export async function getBillingBalance(db: Database, accountId: string): Promis
       updatedAt: new Date().toISOString(),
     };
   });
+}
+
+/**
+ * Whether the organization holds a positive OpenGeni credit balance, whatever
+ * its source: a purchase, an operator grant, a test credit, or the one-time
+ * verified-signup trial grant. It turns false again once usage brings the
+ * balance to zero or below. Read-only; it never gates credit admission.
+ */
+export async function organizationHoldsCredits(db: Database, accountId: string): Promise<boolean> {
+  return (await getBillingBalance(db, accountId)).balanceMicros > 0;
 }
 
 export async function countScheduledTasksForWorkspace(
@@ -23081,6 +23107,9 @@ export async function upsertCodexSubscriptionCredential(
           chatgptAccountId: input.chatgptAccountId,
           scopes: input.scopes,
           planType: input.planType,
+          // Connecting reads the plan from the fresh id_token.
+          planCheckedAt: input.planType === null ? null : now,
+          planEntitlementExclusion: null,
           isFedramp: input.isFedramp,
           expiresAt: input.expiresAt,
           lastRefreshAt: input.lastRefreshAt,
@@ -23108,6 +23137,12 @@ export async function upsertCodexSubscriptionCredential(
             credentialEncrypted: input.credentialEncrypted,
             scopes: input.scopes,
             planType: input.planType,
+            // A reconnect is a fresh plan observation; earlier model refusals
+            // belonged to the replaced token family, but a plan change it
+            // reveals stays recorded as evidence.
+            planCheckedAt: input.planType === null ? null : now,
+            ...(input.planType === null ? {} : codexPlanChangeRecordSet(input.planType, now)),
+            planEntitlementExclusion: null,
             isFedramp: input.isFedramp,
             expiresAt: input.expiresAt,
             lastRefreshAt: input.lastRefreshAt,
@@ -23239,6 +23274,8 @@ export async function upsertOrganizationCodexSubscriptionCredential(
         chatgptAccountId: input.chatgptAccountId,
         scopes: input.scopes,
         planType: input.planType,
+        planCheckedAt: input.planType === null ? null : now,
+        planEntitlementExclusion: null,
         isFedramp: input.isFedramp,
         expiresAt: input.expiresAt,
         lastRefreshAt: input.lastRefreshAt,
@@ -23258,6 +23295,9 @@ export async function upsertOrganizationCodexSubscriptionCredential(
           credentialEncrypted: input.credentialEncrypted,
           scopes: input.scopes,
           planType: input.planType,
+          planCheckedAt: input.planType === null ? null : now,
+          ...(input.planType === null ? {} : codexPlanChangeRecordSet(input.planType, now)),
+          planEntitlementExclusion: null,
           isFedramp: input.isFedramp,
           expiresAt: input.expiresAt,
           lastRefreshAt: input.lastRefreshAt,
@@ -24015,6 +24055,9 @@ export async function loadCodexCredentialForRun(
       chatgptAccountId: row.chatgptAccountId,
       scopes: row.scopes,
       planType: row.planType,
+      planPreviousType: row.planPreviousType,
+      planChangedAt: row.planChangedAt,
+      planEntitlementExclusion: readCodexPlanEntitlementExclusion(row.planEntitlementExclusion),
       isFedramp: row.isFedramp,
       expiresAt: row.expiresAt,
       lastRefreshAt: row.lastRefreshAt,
@@ -24028,6 +24071,47 @@ export async function loadCodexCredentialForRun(
       exhaustedRevision: row.exhaustedRevision,
     };
   });
+}
+
+/**
+ * Column updates for one provider plan observation. The plan entitlement
+ * exclusion names the plan it was observed under; a different plan retires it
+ * in the same statement.
+ */
+function codexPlanObservationSet(planType: string, observedAt: Date) {
+  return {
+    planType,
+    planCheckedAt: observedAt,
+    ...codexPlanChangeRecordSet(planType, observedAt),
+    planEntitlementExclusion: sql`case
+      when lower(${schema.codexSubscriptionCredentials.planType}) is distinct from lower(${planType})
+        then null
+      else ${schema.codexSubscriptionCredentials.planEntitlementExclusion}
+    end`,
+  };
+}
+
+/**
+ * Record a plan change (the plan before it, and when it was observed) only
+ * when a known plan moves to a different one. An observation of the same plan
+ * keeps the earlier record, so whichever writer notices a downgrade first
+ * (usage read, token refresh, reconnect, or a failing turn's re-check) leaves
+ * the evidence for the next ambiguous refusal. UPDATE expressions read the old
+ * row, so `plan_type` here is the plan before this observation.
+ */
+function codexPlanChangeRecordSet(planType: string, observedAt: Date) {
+  const changed = sql`${schema.codexSubscriptionCredentials.planType} is not null
+      and lower(${schema.codexSubscriptionCredentials.planType}) is distinct from lower(${planType})`;
+  return {
+    planPreviousType: sql`case when ${changed}
+      then left(${schema.codexSubscriptionCredentials.planType}, 128)
+      else ${schema.codexSubscriptionCredentials.planPreviousType}
+    end`,
+    planChangedAt: sql`case when ${changed}
+      then ${observedAt.toISOString()}::timestamptz
+      else ${schema.codexSubscriptionCredentials.planChangedAt}
+    end`,
+  };
 }
 
 /**
@@ -24050,6 +24134,11 @@ export async function recordCodexTokenRefresh(
     credentialEncrypted: string;
     expiresAt: Date | null;
     lastRefreshAt: Date;
+    /**
+     * `chatgpt_plan_type` from the refreshed id_token, when the provider
+     * returned one. A changed plan retires any plan entitlement exclusion.
+     */
+    planType?: string | null | undefined;
     authority?: CodexAcceptedCredentialAuthority | undefined;
   },
 ): Promise<boolean> {
@@ -24066,6 +24155,9 @@ export async function recordCodexTokenRefresh(
         credentialEncrypted: input.credentialEncrypted,
         expiresAt: input.expiresAt,
         lastRefreshAt: input.lastRefreshAt,
+        ...(typeof input.planType === "string" && input.planType.length > 0
+          ? codexPlanObservationSet(input.planType, input.lastRefreshAt)
+          : {}),
         status: "active",
         lastError: null,
         version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
@@ -24463,6 +24555,13 @@ export type CodexAccountStatus = {
   label: string | null;
   accountEmail: string | null;
   planType: string | null;
+  /** Last provider plan observation; absent on pre-plan-tracking fixtures. */
+  planCheckedAt?: Date | null;
+  /** Plan before the most recent observed plan change, and when it was seen. */
+  planPreviousType?: string | null;
+  planChangedAt?: Date | null;
+  /** Models the current plan was proven not to include (see codex-plan-entitlement). */
+  planEntitlementExclusion?: CodexPlanEntitlementExclusion | null;
   status: string; // active | needs_relogin | error
   /** New automatic allocations only; health/refresh and existing turns remain independent. */
   allocatorEnabled: boolean;
@@ -24688,6 +24787,8 @@ type CodexLeaseCandidateRow = {
   label: string | null;
   account_email: string | null;
   plan_type: string | null;
+  plan_checked_at?: Date | string | null;
+  plan_entitlement_exclusion?: unknown;
   status: string;
   allocator_enabled: boolean;
   expires_at: Date | string | null;
@@ -24723,6 +24824,8 @@ function mapCodexLeaseCandidate(
     label: row.label,
     accountEmail: row.account_email,
     planType: row.plan_type,
+    planCheckedAt: codexMetadataDate(row.plan_checked_at),
+    planEntitlementExclusion: readCodexPlanEntitlementExclusion(row.plan_entitlement_exclusion),
     status: row.status,
     allocatorEnabled: row.allocator_enabled,
     isActive: row.id === activeCredentialId,
@@ -24812,6 +24915,9 @@ async function listCodexLeaseCandidatesInTransaction(
       -- additive column exists.
       to_jsonb(c) ->> 'exhausted_kind' as exhausted_kind,
       to_jsonb(c) ->> 'exhausted_revision' as exhausted_revision,
+      -- Plan entitlement columns follow the same compatibility pattern.
+      to_jsonb(c) ->> 'plan_checked_at' as plan_checked_at,
+      to_jsonb(c) -> 'plan_entitlement_exclusion' as plan_entitlement_exclusion,
       c.selection_count,
       c.last_selected_at,
       ${
@@ -25004,8 +25110,9 @@ export async function acquireCodexCredentialLease<
         active_attempt_id: string | null;
         execution_generation: number;
         metadata: Record<string, unknown> | null;
+        model: string;
       }>`
-        select id, session_id, status, active_attempt_id, execution_generation, metadata
+        select id, session_id, status, active_attempt_id, execution_generation, metadata, model
         from session_turns
         where account_id = ${input.accountId}
           and workspace_id = ${input.workspaceId}
@@ -28106,7 +28213,24 @@ export type CodexCredentialLeaseQuarantine =
       status: "needs_relogin" | "error";
       lastError: string;
     }
-  | { kind: "cooldown"; until: Date; cooldownKind: CodexCredentialCooldownKind };
+  | { kind: "cooldown"; until: Date; cooldownKind: CodexCredentialCooldownKind }
+  | {
+      /**
+       * The re-checked ChatGPT plan does not include `modelId`. The credential
+       * stays connected and healthy for other models; only this (plan, model)
+       * pair leaves allocation until a different plan is observed.
+       */
+      kind: "plan_entitlement";
+      modelId: string;
+      /** Plan the refusal is bound to (freshly observed, or the recorded plan). */
+      planType: string | null;
+      /**
+       * False when the provider did not report a current plan during the
+       * re-check. The turn receipt then names no plan, so no later plan
+       * observation can make this account eligible again for the same turn.
+       */
+      planObserved?: boolean;
+    };
 
 export type CodexCredentialLeaseQuarantineResult =
   | {
@@ -28251,6 +28375,7 @@ export async function quarantineCodexCredentialForLease(
               input.quarantine.kind === "cooldown"
                 ? schema.codexSubscriptionCredentials.exhaustedRevision
                 : sql<number>`0`,
+            planEntitlementExclusion: schema.codexSubscriptionCredentials.planEntitlementExclusion,
           })
           .from(schema.codexSubscriptionCredentials)
           .where(
@@ -28277,6 +28402,10 @@ export async function quarantineCodexCredentialForLease(
             currentCredentialVersion: credential.version,
           } as const;
         }
+        const planKey =
+          input.quarantine.kind === "plan_entitlement"
+            ? codexPlanKey(input.quarantine.planType)
+            : null;
         const updated = await tx
           .update(schema.codexSubscriptionCredentials)
           .set(
@@ -28286,11 +28415,23 @@ export async function quarantineCodexCredentialForLease(
                   lastError: input.quarantine.lastError,
                   updatedAt: new Date(),
                 }
-              : {
-                  exhaustedUntil: input.quarantine.until,
-                  exhaustedKind: input.quarantine.cooldownKind,
-                  exhaustedRevision: sql`${schema.codexSubscriptionCredentials.exhaustedRevision} + 1`,
-                },
+              : input.quarantine.kind === "plan_entitlement"
+                ? {
+                    planEntitlementExclusion: serializeCodexPlanEntitlementExclusion(
+                      mergeCodexPlanEntitlementExclusion(
+                        readCodexPlanEntitlementExclusion(credential.planEntitlementExclusion),
+                        input.quarantine.planType,
+                        input.quarantine.modelId,
+                        new Date(),
+                      ),
+                    ),
+                    updatedAt: new Date(),
+                  }
+                : {
+                    exhaustedUntil: input.quarantine.until,
+                    exhaustedKind: input.quarantine.cooldownKind,
+                    exhaustedRevision: sql`${schema.codexSubscriptionCredentials.exhaustedRevision} + 1`,
+                  },
           )
           .where(
             and(
@@ -28337,10 +28478,16 @@ export async function quarantineCodexCredentialForLease(
                 [input.credentialId]:
                   input.quarantine.kind === "status"
                     ? { kind: "status", credentialVersion: credential.version }
-                    : {
-                        kind: input.quarantine.cooldownKind,
-                        cooldownRevision: credential.exhaustedRevision + 1,
-                      },
+                    : input.quarantine.kind === "plan_entitlement"
+                      ? {
+                          kind: "plan",
+                          credentialVersion: credential.version,
+                          planType: input.quarantine.planObserved === false ? null : planKey,
+                        }
+                      : {
+                          kind: input.quarantine.cooldownKind,
+                          cooldownRevision: credential.exhaustedRevision + 1,
+                        },
               },
               codexCredentialFailovers: failoverCount,
               codexCredentialFailoverLimit: maxFailovers,
@@ -28480,6 +28627,10 @@ export async function listCodexAccountStatuses(
         label: schema.codexSubscriptionCredentials.label,
         accountEmail: schema.codexSubscriptionCredentials.accountEmail,
         planType: schema.codexSubscriptionCredentials.planType,
+        planCheckedAt: schema.codexSubscriptionCredentials.planCheckedAt,
+        planPreviousType: schema.codexSubscriptionCredentials.planPreviousType,
+        planChangedAt: schema.codexSubscriptionCredentials.planChangedAt,
+        planEntitlementExclusion: schema.codexSubscriptionCredentials.planEntitlementExclusion,
         status: schema.codexSubscriptionCredentials.status,
         allocatorEnabled: schema.codexSubscriptionCredentials.allocatorEnabled,
         allocatorVersion: schema.codexSubscriptionCredentials.allocatorVersion,
@@ -28511,6 +28662,9 @@ export async function listCodexAccountStatuses(
     return rows.map((row) => ({
       ...row,
       source: accountSource,
+      planCheckedAt: codexMetadataDate(row.planCheckedAt),
+      planChangedAt: codexMetadataDate(row.planChangedAt),
+      planEntitlementExclusion: readCodexPlanEntitlementExclusion(row.planEntitlementExclusion),
       expiresAt: codexMetadataDate(row.expiresAt),
       lastRefreshAt: codexMetadataDate(row.lastRefreshAt),
       allocatorUpdatedAt: codexMetadataDate(row.allocatorUpdatedAt),
@@ -29687,6 +29841,8 @@ async function mutateCodexAccountUsage(
           exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
           exhaustedKind: schema.codexSubscriptionCredentials.exhaustedKind,
           exhaustedRevision: schema.codexSubscriptionCredentials.exhaustedRevision,
+          planType: schema.codexSubscriptionCredentials.planType,
+          planEntitlementExclusion: schema.codexSubscriptionCredentials.planEntitlementExclusion,
         })
         .from(schema.codexSubscriptionCredentials)
         .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), condition))
@@ -29700,9 +29856,25 @@ async function mutateCodexAccountUsage(
         snapshot.clearQuotaCooldownRevision === previous.exhaustedRevision &&
         previous.exhaustedKind === "quota" &&
         previous.exhaustedUntil !== null;
+      // /wham/usage reports the account's current plan independently of its
+      // quota windows (a Free account may return no windows at all).
+      const observedPlanType =
+        typeof snapshot.planType === "string" && snapshot.planType.trim().length > 0
+          ? snapshot.planType.trim()
+          : null;
+      const planExclusionRetired =
+        observedPlanType !== null &&
+        previous.planType?.toLowerCase() !== observedPlanType.toLowerCase() &&
+        readCodexPlanEntitlementExclusion(previous.planEntitlementExclusion) !== null;
       const updated = await tx
         .update(schema.codexSubscriptionCredentials)
         .set({
+          ...(observedPlanType !== null
+            ? codexPlanObservationSet(
+                observedPlanType,
+                snapshot.planCheckedAt ?? snapshot.checkedAt ?? new Date(),
+              )
+            : {}),
           ...(snapshot.checkedAt !== undefined
             ? {
                 primaryUsedPercent: snapshot.primaryUsedPercent ?? null,
@@ -29742,7 +29914,10 @@ async function mutateCodexAccountUsage(
           previous.secondaryUsedPercent !== (snapshot.secondaryUsedPercent ?? null) ||
           timestampChanged(previous.secondaryResetAt, snapshot.secondaryResetAt ?? null) ||
           (clearQuotaCooldown && previous.exhaustedUntil! > snapshot.checkedAt));
-      return { result: rowUpdated, changed: capacityChanged };
+      return {
+        result: rowUpdated,
+        changed: capacityChanged || (rowUpdated && planExclusionRetired),
+      };
     },
   );
 }
@@ -32532,6 +32707,8 @@ export type SessionCreateInput = {
   /** Typed Memory selector (migration 0427); omitted means the workspace layer. */
   memoryScope?: SessionMemoryScope;
   parentSessionId?: string | null;
+  /** Freezes a new root session's code_search decision; omitted uses the boot-installed policy. */
+  codeSearchDeploymentPolicy?: CodeSearchDeploymentPolicy;
   createIdempotencyKey?: string | null;
   /** Exact explicit installed-Skill selection used for keyed-create replay. */
   selectedInstalledSkillIds?: string[];
@@ -32677,6 +32854,21 @@ function mapSessionSpawnDenial(
     idempotencyKey: row.idempotencyKey ?? null,
     createdAt: row.createdAt.toISOString(),
   };
+}
+
+async function parentSessionCodeSearchEnabled(
+  tx: Database,
+  workspaceId: string,
+  parentSessionId: string,
+): Promise<boolean> {
+  const [parent] = await tx
+    .select({ codeSearchEnabled: schema.sessions.codeSearchEnabled })
+    .from(schema.sessions)
+    .where(
+      and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, parentSessionId)),
+    )
+    .limit(1);
+  return parent?.codeSearchEnabled === true;
 }
 
 async function resolveSessionDepthDecision(
@@ -33160,6 +33352,15 @@ async function createSessionInTransaction(
       ? input.createdByActor.turnId
       : null
     : null;
+  // Frozen once (migration 0520). A child keeps its parent's decision, so one
+  // session tree stays in one experiment arm; a root session decides its own.
+  const codeSearchEnabled = input.parentSessionId
+    ? await parentSessionCodeSearchEnabled(tx, input.workspaceId, input.parentSessionId)
+    : resolveSessionCodeSearchEnabled(
+        workspace.settings,
+        input.codeSearchDeploymentPolicy ?? codeSearchDeploymentPolicyForCreate(),
+        id,
+      );
   let insertedRows: (typeof schema.sessions.$inferSelect)[];
   let privateCreateCapabilityId: string | null = null;
   let privateCreateOwnerMembershipId: string | null = null;
@@ -33307,6 +33508,7 @@ async function createSessionInTransaction(
               (isCodexBilledModel(input.model)
                 ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
                 : "portable"),
+            codeSearchEnabled,
             status: "queued",
           },
           "initialMessage",
@@ -36449,7 +36651,10 @@ async function sessionFailureDiagnostics(
     ${sql.join(boundedFields, sql`, `)},
     'providerRecoveryCount', case when jsonb_typeof(${schema.sessionEvents.payload}->'providerRecoveryCount') = 'number'
       and length((${schema.sessionEvents.payload}->'providerRecoveryCount')::text) <= 16
-      then ${schema.sessionEvents.payload}->'providerRecoveryCount' else 'null'::jsonb end)`;
+      then ${schema.sessionEvents.payload}->'providerRecoveryCount' else 'null'::jsonb end,
+    'quotaScope', case when jsonb_typeof(${schema.sessionEvents.payload}->'quotaScope') = 'string'
+      and ${schema.sessionEvents.payload}->>'quotaScope' in ('daily', 'monthly', 'credits', 'quota')
+      then ${schema.sessionEvents.payload}->'quotaScope' else 'null'::jsonb end)`;
   const latest = async (type: string) => {
     const [row] = await db
       .select({
@@ -36465,8 +36670,11 @@ async function sessionFailureDiagnostics(
       .orderBy(desc(schema.sessionEvents.sequence))
       .limit(1);
     if (!row) return null;
+    // The closed exhausted-provider-quota marker is projected only as one of
+    // its four literal values, so it adds no unbounded text.
     const payload: Record<string, unknown> = {
       providerRecoveryCount: row.payload.providerRecoveryCount,
+      ...(typeof row.payload.quotaScope === "string" ? { quotaScope: row.payload.quotaScope } : {}),
     };
     const truncatedFields: string[] = [];
     for (const field of diagnosticFields) {
@@ -41370,7 +41578,7 @@ export async function appendSessionHistoryItems(
           attemptId: input.expectedAttemptId,
         });
         if (!allowed.allowed) return false;
-        await tx
+        const saved = await tx
           .insert(schema.sessionHistoryItems)
           .values(
             withLosslessContentWriteVersion(
@@ -41399,26 +41607,39 @@ export async function appendSessionHistoryItems(
               schema.sessionHistoryItems.sessionId,
               schema.sessionHistoryItems.position,
             ],
-          });
-        // A position conflict is idempotent only when the exact conversation
-        // item is already there. Never acknowledge a different item as saved.
-        const saved = await tx
-          .select({
+          })
+          .returning({
             position: schema.sessionHistoryItems.position,
             turnId: schema.sessionHistoryItems.turnId,
             item: schema.sessionHistoryItems.item,
             itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-          })
-          .from(schema.sessionHistoryItems)
-          .where(
-            and(
-              eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
-              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-              inArray(
-                schema.sessionHistoryItems.position,
-                input.items.map((entry) => entry.position),
-              ),
-            ),
+          });
+        // A position conflict is idempotent only when the exact conversation
+        // item is already there. Never acknowledge a different item as saved.
+        // Fresh inserts already return their durable representation. Re-reading
+        // numeric positions under RLS can scan the session's history while we
+        // hold its write fence, so only fetch rows skipped by ON CONFLICT.
+        const insertedPositions = new Set(saved.map((row) => row.position));
+        const conflictingPositions = input.items
+          .map((entry) => entry.position)
+          .filter((position) => !insertedPositions.has(position));
+        if (conflictingPositions.length > 0)
+          saved.push(
+            ...(await tx
+              .select({
+                position: schema.sessionHistoryItems.position,
+                turnId: schema.sessionHistoryItems.turnId,
+                item: schema.sessionHistoryItems.item,
+                itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+              })
+              .from(schema.sessionHistoryItems)
+              .where(
+                and(
+                  eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+                  eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+                  inArray(schema.sessionHistoryItems.position, conflictingPositions),
+                ),
+              )),
           );
         const byPosition = new Map(saved.map((row) => [row.position, row]));
         for (const entry of input.items) {
@@ -44057,12 +44278,29 @@ export type SandboxRecoveryState = {
   };
 };
 
+export type SandboxProviderCreateAttempt = {
+  version: 1;
+  operationId: string;
+  leaseEpoch: number;
+  providerBindingKey: string;
+  rematerializationId: string | null;
+  selectedRevision: string | null;
+  imageId: string | null;
+  imageRef: string | null;
+  appId: string;
+  providerName: string;
+  requestSha256: string;
+  startedAt: string;
+  instanceId: string | null;
+};
+
 // The snake_case raw shape returned by the raw sql`` lease queries. lease_epoch
 // comes back as a number for an integer column, but we type it number|string
 // and Number()-coerce so the same code is correct regardless of column type.
 // Typed with an index signature so it satisfies db.execute<TRow extends
 // Record<string, unknown>>.
 type LeaseRow = {
+  provider_create_attempt?: SandboxProviderCreateAttempt | null;
   unobservable_command_drain_ids?: string[] | null;
   id: string;
   account_id: string;
@@ -44189,6 +44427,7 @@ export interface LeaseSnapshot {
    * lease liveness and epoch fields above. Legacy envelopes project to
    * conservative unknown/unverified values. */
   recovery: SandboxRecoveryState;
+  providerCreateAttempt?: SandboxProviderCreateAttempt | null;
   /** Conservative provider creation clock. Modal's hard timeout is measured
    * from this instant and cannot be extended by resume. */
   providerCreatedAt: Date | null;
@@ -44874,6 +45113,7 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
     resumeBackendId: row.resume_backend_id,
     resumeState: row.resume_state,
     recovery,
+    providerCreateAttempt: row.provider_create_attempt ?? null,
     providerCreatedAt:
       row.provider_created_at === null
         ? null
@@ -44938,6 +45178,20 @@ function leaseBackendRequiresResumableInstance(row: LeaseRow): boolean {
   // Fail closed for an unknown/new provider until its exact address contract is
   // registered. `none` is intentionally the sole providerless backend today.
   return fields === undefined || fields.length > 0;
+}
+
+function hasRearmableWorkspace(row: LeaseRow): boolean {
+  // Pre-recovery envelopes retain their existing provider-identity checks.
+  // Once readiness is recorded, an address alone cannot override that state:
+  // a creator may have died after attribution but before workspace verification.
+  if (row.resume_state?.opengeniRecovery === undefined) return true;
+  const recovery = recoveryStateFromLeaseRow(row);
+  return (
+    recovery.provider.status === "exists" &&
+    recovery.provider.instanceId === row.instance_id &&
+    recovery.workspace.status === "ready" &&
+    (recovery.restore.status === "not_required" || recovery.restore.status === "ready")
+  );
 }
 
 function archiveCaptureRemainingMs(
@@ -45638,16 +45892,16 @@ async function acquireLeaseOnce(
           };
         }
 
-        // A creator died after publishing an instance id but before publishing
-        // its resumable envelope. The attributed provider may still be live,
-        // but an arrival has no safe SDK state with which to attach. Keep this
+        // A creator died before publishing its resumable envelope or verifying
+        // the workspace. The attributed provider may still be live,
+        // but an arrival has no verified state with which to attach. Keep this
         // exceptional row transiently fenced until the reaper captures/settles
         // it; unlike an ordinary expired drain, re-arming it cannot restore
         // service and would strand an unmanageable provider.
         if (
           liveness === "draining" &&
-          leaseBackendRequiresResumableInstance(row) &&
-          !hasResumableLeaseInstance(row)
+          (!hasRearmableWorkspace(row) ||
+            (leaseBackendRequiresResumableInstance(row) && !hasResumableLeaseInstance(row)))
         ) {
           return {
             role: "fenced" as const,
@@ -47371,6 +47625,7 @@ export async function failSandboxRematerialization(
         const row = rows[0];
         if (
           !row ||
+          row.provider_create_attempt?.instanceId === null ||
           row.liveness !== "warming" ||
           Number(row.lease_epoch) !== input.expectedEpoch ||
           (
@@ -47784,6 +48039,194 @@ export async function commitWarmingToWarm(
   );
 }
 
+/** Persist before provider dispatch. This is deliberately not replayable: a
+ * timeout, absent running-name lookup, or expired lease cannot settle an
+ * unknown create. A later exact provider receipt may attribute the operation. */
+export async function beginModalProviderCreate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    operationId: string;
+    providerBindingKey: string;
+    rematerializationId: string | null;
+    selectedRevision: string | null;
+    imageId: string | null;
+    imageRef: string | null;
+    appId: string;
+    providerName: string;
+    requestSha256: string;
+  },
+): Promise<void> {
+  if (
+    !input.operationId ||
+    !input.providerBindingKey ||
+    !input.appId ||
+    input.providerName !== `opengeni-create-${input.operationId}` ||
+    !/^[a-f0-9]{64}$/u.test(input.requestSha256)
+  ) {
+    throw new Error("Modal create requires operation and provider namespace identities");
+  }
+  await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const rows = await tx.execute<LeaseRow>(sql`
+        select * from sandbox_leases
+        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        for update
+      `);
+      const row = rows[0];
+      if (
+        !row ||
+        row.backend !== "modal" ||
+        row.liveness !== "warming" ||
+        Number(row.lease_epoch) !== input.expectedEpoch ||
+        row.instance_id !== null
+      ) {
+        throw new Error("Modal create lease no longer owns an unbound warming epoch");
+      }
+      const current = recoveryStateFromLeaseRow(row);
+      if (
+        current.restore.rematerializationId !== input.rematerializationId ||
+        current.restore.selectedRevision !== input.selectedRevision
+      ) {
+        throw new Error("Modal create selected recovery revision changed before dispatch");
+      }
+      if (
+        row.provider_create_attempt?.instanceId === null ||
+        row.provider_create_attempt?.leaseEpoch === input.expectedEpoch
+      ) {
+        throw new Error("provider_create_outcome_unknown: provider attempt cannot be replayed");
+      }
+      const attempt: SandboxProviderCreateAttempt = {
+        version: 1,
+        operationId: input.operationId,
+        leaseEpoch: input.expectedEpoch,
+        providerBindingKey: input.providerBindingKey,
+        rematerializationId: input.rematerializationId,
+        selectedRevision: input.selectedRevision,
+        imageId: input.imageId,
+        imageRef: input.imageRef,
+        appId: input.appId,
+        providerName: input.providerName,
+        requestSha256: input.requestSha256,
+        startedAt: new Date().toISOString(),
+        instanceId: null,
+      };
+      await tx.execute(sql`
+        update sandbox_leases set provider_create_attempt = ${JSON.stringify(attempt)}::jsonb,
+          provider_create_recovery_after = null,
+          updated_at = now() where id = ${row.id}
+      `);
+    }),
+  );
+}
+
+export async function listPendingModalProviderCreates(
+  db: Database,
+): Promise<Array<{ workspaceId: string; sandboxGroupId: string }>> {
+  const rows = await rawRows<{ workspace_id: string; sandbox_group_id: string }>(
+    db,
+    sql`select * from opengeni_private.list_pending_modal_provider_creates()`,
+  );
+  return rows.map((row) => ({
+    workspaceId: row.workspace_id,
+    sandboxGroupId: row.sandbox_group_id,
+  }));
+}
+
+/** Throttle positive discovery without extending the warming lease or changing
+ * its create authority. Old unresolved rows rotate behind the next batch. */
+export async function claimModalProviderCreateRecovery(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+  },
+): Promise<SandboxProviderCreateAttempt | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb.execute<{
+      provider_create_attempt: SandboxProviderCreateAttempt;
+    }>(sql`
+      update sandbox_leases set provider_create_recovery_after = now() + interval '30 seconds'
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        and backend = 'modal' and liveness = 'warming' and instance_id is null
+        and provider_create_attempt->'instanceId' = 'null'::jsonb
+        and expires_at < now()
+        and coalesce(provider_create_recovery_after, '-infinity'::timestamptz) <= now()
+      returning provider_create_attempt
+    `);
+    return rows[0]?.provider_create_attempt ?? null;
+  });
+}
+
+/** Attribute a positively identified late receipt, preserving expiry and every
+ * checkpoint. Ordinary holder/epoch-fenced draining owns all physical cleanup. */
+export async function recordRecoveredModalProviderCreate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    attempt: SandboxProviderCreateAttempt;
+    instanceId: string;
+  },
+): Promise<boolean> {
+  if (!input.instanceId.startsWith("sb-") || input.attempt.instanceId !== null)
+    throw new Error("Modal create recovery requires an unresolved operation and exact provider id");
+  return await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const rows = await tx.execute<LeaseRow>(sql`select * from sandbox_leases
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        and backend = 'modal' and liveness = 'warming' and instance_id is null
+        and lease_epoch = ${input.attempt.leaseEpoch}
+        and provider_create_attempt = ${JSON.stringify(input.attempt)}::jsonb
+      for update`);
+      const row = rows[0];
+      if (!row) return false;
+      const current = recoveryStateFromLeaseRow(row);
+      if (
+        current.restore.rematerializationId !== input.attempt.rematerializationId ||
+        current.restore.selectedRevision !== input.attempt.selectedRevision
+      )
+        return false;
+      const recovery: SandboxRecoveryState = {
+        ...current,
+        provider: {
+          status: "creating",
+          instanceId: input.instanceId,
+          observedAt: new Date().toISOString(),
+        },
+        workspace: {
+          ...current.workspace,
+          status: "not_ready",
+          verifiedRevision: null,
+          verifiedAt: null,
+        },
+      };
+      await tx.execute(sql`update sandbox_leases set instance_id = ${input.instanceId},
+      provider_create_attempt = ${JSON.stringify({ ...input.attempt, instanceId: input.instanceId })}::jsonb,
+      resume_state = ${JSON.stringify(
+        resumeStateWithRecovery(
+          {
+            ...(resumeStateWithPreservedArchives(null, row.resume_state) ?? {}),
+            ...(row.resume_state?.opengeniWarmBilling
+              ? { opengeniWarmBilling: row.resume_state.opengeniWarmBilling }
+              : {}),
+          },
+          recovery,
+        ),
+      )}::jsonb,
+      updated_at = now() where id = ${row.id}`);
+      return true;
+    }),
+  );
+}
+
 // §4.2a — leak-proof create attribution. The spawner calls this immediately
 // after the provider create returns, before display/readiness/setup work. It
 // intentionally does NOT bump lease_epoch or mark the lease warm; it only makes
@@ -47796,6 +48239,7 @@ export async function recordWarmingSandboxCreated(
     workspaceId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
+    providerCreateOperationId?: string;
     /** Exact restore attempt elected before provider create. Null for a fresh
      *  archive-less create. Provider attribution is accepted only while the
      *  warming row still carries this same attempt as well as this epoch. */
@@ -47835,6 +48279,18 @@ export async function recordWarmingSandboxCreated(
         }
         const now = new Date().toISOString();
         const current = recoveryStateFromLeaseRow(row);
+        const createAttempt =
+          row.provider_create_attempt?.leaseEpoch === input.expectedEpoch
+            ? row.provider_create_attempt
+            : null;
+        if (
+          createAttempt &&
+          (createAttempt.leaseEpoch !== input.expectedEpoch ||
+            createAttempt.operationId !== input.providerCreateOperationId ||
+            (createAttempt.instanceId !== null && createAttempt.instanceId !== input.instanceId))
+        ) {
+          return { recorded: false, lease: mapLeaseRow(row) };
+        }
         if (current.restore.rematerializationId !== (input.rematerializationId ?? null)) {
           return { recorded: false, lease: mapLeaseRow(row) };
         }
@@ -47902,6 +48358,11 @@ export async function recordWarmingSandboxCreated(
         const updated = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             instance_id       = ${input.instanceId},
+            provider_create_attempt = ${
+              createAttempt
+                ? JSON.stringify({ ...createAttempt, instanceId: input.instanceId })
+                : null
+            }::jsonb,
             resume_backend_id = ${input.resumeBackendId ?? null},
             resume_state      = ${resumeStateJson}::jsonb,
             provider_created_at = ${providerCreatedAt?.toISOString() ?? null}::timestamptz,
@@ -50020,6 +50481,7 @@ export async function failWarmingToCold(
         if (!row || row.liveness !== "warming" || Number(row.lease_epoch) !== input.expectedEpoch) {
           return;
         }
+        if (row.provider_create_attempt?.instanceId === null) return;
         const current = recoveryStateFromLeaseRow(row);
         const hasArchive = current.archive.status !== "none";
         const continuity = input.discardContinuity ? null : continuityRecoveryFromLeaseRow(row);
@@ -50938,6 +51400,9 @@ export async function reapStaleLeaseHolders(
       `);
         let warmingReset = 0;
         for (const row of expiredWarming) {
+          // A lost reply can still name a live provider. Keep the same epoch
+          // available for late attribution; time is not termination proof.
+          if (row.provider_create_attempt?.instanceId === null) continue;
           const current = recoveryStateFromLeaseRow(row);
           const hasArchive = current.archive.status !== "none";
           const resetAt = new Date().toISOString();
@@ -51583,7 +52048,9 @@ export async function reArmDrainingLease(
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
         for update
       `);
-        if (!lease || lease.liveness !== "draining") return { rearmed: false };
+        if (!lease || lease.liveness !== "draining" || !hasRearmableWorkspace(lease)) {
+          return { rearmed: false };
+        }
         const snapshot = warmBillingSnapshot(lease);
         if (lease.resume_state?.opengeniWarmBilling && !snapshot) {
           throw new Error("sandbox warm billing snapshot is invalid");
@@ -59833,6 +60300,8 @@ export async function setEnrollmentDisplayState(
     enrollmentId: string;
     hasDisplay: boolean;
     desktopUnavailableReason: string | null;
+    /** Live snapshots update the desktop bit without rewriting release/update metadata. */
+    runtimeDesktop?: boolean;
     /** When present, fence the update to the exact still-live runner. */
     connectionInstanceId?: string;
   },
@@ -59846,6 +60315,12 @@ export async function setEnrollmentDisplayState(
         .set({
           hasDisplay: input.hasDisplay,
           desktopUnavailableReason: input.desktopUnavailableReason,
+          ...(input.runtimeDesktop !== undefined
+            ? {
+                agentCapabilities: sql`coalesce(${schema.enrollments.agentCapabilities}, '{}'::jsonb)
+                  || jsonb_build_object('desktop', ${input.runtimeDesktop}::boolean)`,
+              }
+            : {}),
           updatedAt: new Date(),
         })
         .where(
@@ -59865,6 +60340,11 @@ export async function setEnrollmentDisplayState(
             or(
               ne(schema.enrollments.hasDisplay, input.hasDisplay),
               sql`${schema.enrollments.desktopUnavailableReason} IS DISTINCT FROM ${input.desktopUnavailableReason}`,
+              ...(input.runtimeDesktop !== undefined
+                ? [
+                    sql`${schema.enrollments.agentCapabilities}->'desktop' IS DISTINCT FROM to_jsonb(${input.runtimeDesktop}::boolean)`,
+                  ]
+                : []),
             ),
           ),
         )
@@ -81135,6 +81615,7 @@ function mapSession(
       row.codexCompactionMode === "remote_v2" || row.codexCompactionMode === "portable"
         ? row.codexCompactionMode
         : "portable",
+    codeSearchEnabled: row.codeSearchEnabled === true,
     ...pin,
     ...attention,
     ...archive,
@@ -82104,6 +82585,29 @@ function shortHash(value: string): string {
   return (hash >>> 0).toString(36).padStart(7, "0").slice(0, 7);
 }
 
+/**
+ * A token refresh observed a different plan and retired a plan exclusion.
+ * Bump the durable capacity-waiter wake revision (delivered by the normal
+ * wake dispatcher) so a wait blocked partly by that exclusion re-evaluates,
+ * exactly as a usage observation that retires one does.
+ */
+async function wakeCodexCapacityAfterPlanChange(
+  db: Database,
+  workspaceId: string,
+  acceptedTurnId: string | undefined,
+): Promise<void> {
+  await withSessionCodexCapacityMutation(
+    db,
+    {
+      workspaceId,
+      reason: "codex_plan_changed",
+      acceptedTurnId,
+      mutationSource: "effective",
+    },
+    async () => ({ result: undefined, changed: true }),
+  );
+}
+
 // The resolver modules are cycle-free orchestration leaves. The root barrel is
 // the composition point that supplies their existing persistence accessors while
 // retaining the historical public builder/fetcher signatures.
@@ -82128,6 +82632,9 @@ function codexAuthDeps(authority?: CodexAcceptedCredentialAuthority): CodexAuthD
           authority,
         )
       ).result,
+    onPlanExclusionRetired: async (db, workspaceId) => {
+      await wakeCodexCapacityAfterPlanChange(db, workspaceId, authority?.turnId);
+    },
   };
 }
 
@@ -82168,6 +82675,8 @@ export function buildCodexTokenResolver(
         recordCodexTokenRefresh(targetDb, { ...input, authority }),
       setStatus: (targetDb, targetWorkspaceId, status, lastError, target) =>
         setCodexCredentialStatus(targetDb, targetWorkspaceId, status, lastError, target, authority),
+      onPlanExclusionRetired: (targetDb, targetWorkspaceId) =>
+        wakeCodexCapacityAfterPlanChange(targetDb, targetWorkspaceId, authority.turnId),
     };
   }
   return buildCodexTokenResolverCore(db, settings, workspaceId, credentialId, deps);
@@ -82189,6 +82698,30 @@ export async function fetchCodexUsageForAccount(
     codexAuthDeps(
       acceptedTurnId ? { turnId: acceptedTurnId, purpose: "capacity_refresh" } : undefined,
     ),
+    fetchImpl,
+  );
+}
+
+/**
+ * Re-check the CURRENT ChatGPT plan of one credential under exact accepted
+ * authority: the live lease holder of a failing attempt, or capacity-refresh
+ * authority for a turn being admitted. Persists the observation; see
+ * codex-token-resolver `recheckCodexCredentialPlan`.
+ */
+export async function recheckCodexCredentialPlan(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  credentialId: string,
+  authority: CodexAcceptedLeaseAuthority | { turnId: string; purpose: "capacity_refresh" },
+  fetchImpl: CodexFetch = fetch,
+): ReturnType<typeof recheckCodexCredentialPlanCore> {
+  return await recheckCodexCredentialPlanCore(
+    db,
+    settings,
+    workspaceId,
+    credentialId,
+    codexAuthDeps(authority),
     fetchImpl,
   );
 }
@@ -82225,6 +82758,7 @@ export {
   type CodexAuthDeps,
   type CodexCredentialCooldownKind,
   type CodexCredentialForRun,
+  type CodexCredentialPlanRecheck,
   type CodexCredentialTokens,
   type CodexRateLimitResetCreditsAccountResult,
   type CodexTokenDeadlineClock,

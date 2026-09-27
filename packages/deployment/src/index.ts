@@ -229,6 +229,17 @@ export const EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_KERNEL_BROWSER_STEALTH",
 ];
 
+/** Jev (TypeSafe) settings for the worker-side `code_search` tool. The key is
+ * a server runtime secret (the worker calls Jev; the API only checks that it is
+ * set); it never reaches a sandbox. Unset keeps the tool off. */
+export const JEV_CODE_SEARCH_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_JEV_API_KEY",
+  "OPENGENI_JEV_BASE_URL",
+  "OPENGENI_JEV_MODEL",
+  "OPENGENI_JEV_REQUEST_TIMEOUT_MS",
+  "OPENGENI_CODE_SEARCH_MODE",
+];
+
 /** Public workspace MCP OAuth rollout settings. The enable switch is
  * deployment-sensitive because OAuth needs a canonical managed/local human
  * session and one stable public issuer origin. */
@@ -1480,6 +1491,8 @@ export function requiredRuntimeEnvVars(
     "OPENGENI_MODEL_CATALOG_SOURCE",
     "OPENGENI_MODEL_COST_POLICY_JSON",
     "OPENGENI_MODEL_NOTES_JSON",
+    "OPENGENI_CREDITS_DEFAULT_MODEL",
+    "OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT",
     "OPENGENI_OPENROUTER_API_KEY",
   ] as const) {
     if (env[key]) vars.push(key);
@@ -2593,6 +2606,7 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY", env.OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY),
     valueEnv("OPENGENI_ANALYTICS_POSTHOG_HOST", env.OPENGENI_ANALYTICS_POSTHOG_HOST),
     valueEnv("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID", env.OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID),
+    valueEnv("OPENGENI_DOCUMENTATION_URL", env.OPENGENI_DOCUMENTATION_URL),
     valueEnv("OPENGENI_INTEGRATIONS_ENABLED", env.OPENGENI_INTEGRATIONS_ENABLED),
     valueEnv("OPENGENI_INTEGRATIONS_STATE_SECRET", env.OPENGENI_INTEGRATIONS_STATE_SECRET),
     valueEnv("OPENGENI_MCP_OAUTH_ENABLED", env.OPENGENI_MCP_OAUTH_ENABLED),
@@ -2780,6 +2794,11 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_MODEL_CATALOG_SOURCE", env.OPENGENI_MODEL_CATALOG_SOURCE),
     valueEnv("OPENGENI_MODEL_COST_POLICY_JSON", env.OPENGENI_MODEL_COST_POLICY_JSON),
     valueEnv("OPENGENI_MODEL_NOTES_JSON", env.OPENGENI_MODEL_NOTES_JSON),
+    valueEnv("OPENGENI_CREDITS_DEFAULT_MODEL", env.OPENGENI_CREDITS_DEFAULT_MODEL),
+    valueEnv(
+      "OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT",
+      env.OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT,
+    ),
     ...(inferredOpenAiProvider(env) === "azure"
       ? [
           env.OPENGENI_AZURE_OPENAI_BASE_URL
@@ -2955,6 +2974,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of JEV_CODE_SEARCH_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 
@@ -3135,6 +3157,7 @@ function addRuntimeConfigHelmValues(
     "OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY",
     "OPENGENI_ANALYTICS_POSTHOG_HOST",
     "OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID",
+    "OPENGENI_DOCUMENTATION_URL",
     "OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS",
     "OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS",
     "OPENGENI_MCP_OAUTH_ENABLED",

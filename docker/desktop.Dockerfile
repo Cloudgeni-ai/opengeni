@@ -48,6 +48,9 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     mkdir -p /out; \
     install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native
 
+RUN cc -O2 -std=c11 -Wall -Wextra -Werror \
+      native/command-supervisor/supervisor.c -o /out/opengeni-command-supervisor
+
 FROM oven/bun:${BUN_VERSION} AS bun-runtime
 
 FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS anydoc-runtime-builder
@@ -104,6 +107,7 @@ COPY packages/documents/package.json packages/documents/package.json
 COPY packages/events/package.json packages/events/package.json
 COPY packages/github/package.json packages/github/package.json
 COPY packages/interaction/package.json packages/interaction/package.json
+COPY packages/jev/package.json packages/jev/package.json
 COPY packages/network/package.json packages/network/package.json
 COPY packages/observability/package.json packages/observability/package.json
 COPY packages/ogtool/package.json packages/ogtool/package.json
@@ -195,6 +199,10 @@ RUN set -eux; \
     } > /out/SHA256SUMS
 
 COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
+COPY --from=computer-native-build /out/opengeni-command-supervisor /out/opengeni-command-supervisor
+RUN printf '%s  %s\n' \
+      "$(sha256sum /out/opengeni-command-supervisor | awk '{print $1}')" \
+      /usr/local/bin/opengeni-command-supervisor >> /out/SHA256SUMS
 RUN printf '%s  %s\n' \
       "$(sha256sum /out/opengeni-computer-native | awk '{print $1}')" \
       /usr/local/lib/opengeni/opengeni-computer-native \
@@ -329,7 +337,7 @@ RUN set -eux; \
         xdotool scrot ffmpeg \
         libgl1-mesa-dri \
         xterm tesseract-ocr \
-        fonts-dejavu fonts-liberation fonts-noto-core fonts-noto-color-emoji \
+        fonts-dejavu fonts-liberation fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
     "; \
     for attempt in 1 2 3; do \
         rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
@@ -579,6 +587,7 @@ COPY --from=browserd-build /out/lightpanda /usr/local/lib/opengeni/lightpanda
 COPY --from=browserd-build /out/lightpanda-LICENSE /usr/local/share/licenses/lightpanda/LICENSE
 COPY --from=browserd-build /out/lightpanda-0.3.5-source.tar.gz /usr/local/share/source/lightpanda-0.3.5.tar.gz
 COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
+COPY --from=browserd-build /out/opengeni-command-supervisor /usr/local/bin/opengeni-command-supervisor
 COPY --from=browserd-build /out/SHA256SUMS /usr/local/share/opengeni/browserd-SHA256SUMS
 COPY docker/browserd-THIRD-PARTY-NOTICES /usr/local/share/opengeni/browserd-THIRD-PARTY-NOTICES
 COPY --from=browserd-build /out/codemode-runtime /opt/opengeni/codemode-runtime
@@ -593,6 +602,7 @@ RUN set -eux; \
                /usr/local/bin/opengeni-record /usr/local/bin/opengeni-git-askpass \
                /usr/local/bin/opengeni-browserd /usr/local/lib/opengeni/agent-browser \
                /usr/local/lib/opengeni/lightpanda \
+               /usr/local/bin/opengeni-command-supervisor \
                /usr/local/lib/opengeni/opengeni-computer-native; \
     chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
     ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \

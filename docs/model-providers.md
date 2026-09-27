@@ -546,7 +546,8 @@ DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
 dispatcher on the Responses wire. Their initial tool block contains the stable
 ordinary `tool_search` and `tool_invoke` schemas, the always-visible base
 runtime tools (`exec_command`, `write_stdin`, `apply_patch`, `view_image`,
-`skill_read`, `request_human_input`, `list_models`), and exact session MCP refs marked
+`skill_read`, `request_human_input`, `list_models`, and `code_search` when enabled),
+and exact session MCP refs marked
 `eager: true`, never the deferred MCP catalogue or Browser/Computer/`generate_image`/
 `generate_video`/`get_video_generation_capabilities` schemas. A search result carries only bounded
 matching definitions. A valid `tool_invoke` call is renamed to the exact real authorized tool and
@@ -793,7 +794,8 @@ Progressive disclosure is selected explicitly per resolved provider:
 
 Classification is origin, not transport. The same first-request set is eager on
 every path: the closed non-MCP allowlist (`exec_command`, `write_stdin`,
-`apply_patch`, `view_image`, `skill_read`, `request_human_input`, `list_models`) plus MCP
+`apply_patch`, `view_image`, `skill_read`, `request_human_input`, `list_models`,
+and `code_search` when enabled) plus MCP
 tools whose session `ToolRef.eager` is true. Every other function tool —
 deferred MCP, Browser/Computer, `generate_image`, `generate_video`,
 `get_video_generation_capabilities`, and later first-party additions — is
@@ -947,6 +949,92 @@ The SDK method is:
 client.getWorkspaceModelCatalog(workspaceId);
 ```
 
+The response also carries `defaultSelection` (the default for new work that
+names no model, see below) and `creditsSelection` (what that default is while
+the organization holds a positive OpenGeni credit balance; `null` when the
+deployment does not bill credits). Both are `{ model, reasoningEffort, source }`
+and are additive: older API instances omit them.
+
+## Default model for new work
+
+The deployment default (for example the free OpenRouter model) stays in the
+catalog, but it is only the last resort for new work that names no model. The
+server resolves the default in `packages/core/src/default-session-model.ts`,
+first match wins:
+
+1. `workspace`: the saved workspace default (`settings.sessionDefaults`), while
+   it is selectable in the workspace. Its saved reasoning is clamped to the
+   highest effort the model supports today at or below it.
+2. `subscription`: the first selectable connected-subscription model in
+   operator catalog order (ChatGPT/Codex, then SuperGrok) with its own default
+   reasoning. A deployment default that is itself a selectable subscription
+   model wins inside this step.
+3. `credits`: while the organization holds a positive OpenGeni credit balance
+   and the deployment bills credits (`OPENGENI_BILLING_MODE=stripe`), the
+   configured credits default. Any source counts: a Stripe purchase, an
+   operator grant, a test credit, or the one-time verified-signup trial grant
+   (`source_type = 'verified_signup_trial'`, migration 0509), so a new user
+   with the trial starts on the credits default. Once usage brings the balance
+   to zero or below, new work falls back to the next step on its own.
+   `OPENGENI_CREDITS_DEFAULT_MODEL` (default `gpt-6-luna`) and
+   `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (default `xhigh`, clamped to the
+   highest effort the model supports at or below it) configure it. An explicit
+   `OPENGENI_CREDITS_DEFAULT_MODEL` must name a credits-billed model in the code
+   catalog or boot fails. The unset built-in value, and any value checked
+   against a database catalog (edited independently of this env value), fall
+   back instead: when the configured model is not selectable, the first
+   selectable credits-billed model in operator catalog order is used at its own
+   default reasoning. This step is skipped when the deployment default is
+   already a selectable credits-billed model, so an operator's paid default is
+   never replaced.
+4. `deployment`: the deployment default with `OPENGENI_OPENAI_REASONING_EFFORT`.
+
+An explicit choice always wins and never passes through this resolver: a
+`model` on a session create or message request, a scheduled task's
+`agentConfig.model`, a child session inheriting its calling turn, or a model
+the person picked in the new-chat composer. Subscription readiness uses the
+same subject authority as the catalog: the authenticated caller for a direct
+create, or a scheduled task's frozen SuperGrok authority snapshot and
+immutable execution owner for an occurrence. It never borrows another member's
+personal subscription. A frozen user-scope SuperGrok snapshot whose pool is
+gone (disconnected, reconnected under a new authority generation, or its owner
+left) only means SuperGrok is not ready: no SuperGrok model is selectable and
+resolution falls through to credits or the deployment default instead of
+failing the occurrence. The ledger is read only when it can change the answer,
+and the resolver does not change billing, pricing, or credit admission.
+
+Where it applies:
+
+- **API, SDK, and Slack creates** without `model` stamp the resolved default
+  on the session (`modelSource: "deployment"` in the turn policy). A keyed
+  retry of a still-uninitialized shell keeps the model that shell persisted.
+- **Scheduled tasks** without `model` resolve at each fresh occurrence, so a
+  daily report created on the free model moves to a later subscription or
+  credits purchase. The accepted occurrence freezes the result; retries and
+  recovery never resolve again, and existing-session runs keep that session's
+  model. A manual trigger's limit pre-check evaluates the same model the
+  occurrence will run (the target session's model, or the resolved default).
+- **New-chat drafts** carry a `modelProvided` marker. `false` follows the
+  default: `GET .../new-session-draft` projects the stored row onto today's
+  resolved default (the row changes only on the next save). `true` is the
+  person's choice and is returned unchanged. A row written before the marker
+  existed counts as following the default only when it holds exactly the
+  deployment default policy (model, reasoning, and standard speed). Slack and
+  other draft-reusing creates copy only a chosen model.
+- **The web console** marks a picker, launch-URL, or onboarding-connect choice
+  as `modelProvided: true`. A credit purchase returns with the credits default
+  and `?modelSource=default`, which applies it at once (before the payment
+  webhook lands) while the draft keeps following the default, so a later
+  subscription connect still replaces it. The draft save response reports the
+  same `modelProvided` marker a read of that row reports. Its fallback for an
+  unselectable model takes the resolved default first. When a new
+  organization starts with a positive balance (for example the trial grant)
+  and its resolved default is a credits-billed model, the post-signup model
+  step shows that balance and the resolved default instead of the free-model
+  copy (see `docs/organization-tenancy.md`). The workspace **Default model** setting shows the
+  resolved default and its source until an admin saves one. New schedules
+  follow the default and are saved without a model until someone picks one.
+
 ## Per-turn execution policy
 
 Admission resolves the effective model and reasoning effort and persists a
@@ -974,7 +1062,8 @@ turn. A present `null`, `undefined`, unknown schema version, extra field, or
 otherwise malformed value fails closed. Parsing errors identify invalid paths
 without reflecting untrusted values.
 
-Create admission uses `deployment` sources for omitted values and `explicit`
+Create admission uses `deployment` sources for omitted values (including a
+resolved subscription, credits, or saved workspace default) and `explicit`
 sources for caller-supplied values. Follow-up admission uses the session's
 durable model and reasoning preference when omitted. An explicit alias records
 the raw requested ID but persists and executes its canonical product ID.

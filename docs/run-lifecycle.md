@@ -19,6 +19,10 @@ checkpoints in both provider input and returned history. The turn history sink
 checks the identities and order of its durable prefix before advancing its append
 cursor; database position conflicts succeed only for the same turn and exact
 canonical item. Provider dispatch and successful settlement require this check.
+Fresh history inserts verify their persisted representation through `RETURNING`;
+only conflicting positions require a separate read. This keeps numeric-position
+RLS scans out of the ordinary append path without weakening retry verification
+or the exact-attempt write fence.
 
 A **turn** is one logical unit of agent work inside a session: a waiting
 human/API prompt, an approval or structured-input response, or one coalesced
@@ -95,10 +99,16 @@ tool and permission policy permits `set_session_title`, the production runtime
 removes that operation from the model-visible catalog for the attempt and starts
 one bounded, tool-less title request beside the ordinary response stream. The
 sidecar uses the same resolved provider and credential authority, receives only
-a bounded conversation opener, and is metered as its own model call. The main
-agent does not wait for a title tool result or make a title follow-up model call.
-When the main stream reaches normal settlement, the worker waits for the
-already-running bounded sidecar and joins it without cancelling. Exceptional or
+a bounded conversation opener, and is metered as its own model call. It requests
+the model's lowest runnable reasoning effort with a 512-token output budget,
+which leaves room for reasoning before the title. A response stopped by that
+limit keeps only whole words; if reasoning still uses the whole budget, no title
+is saved and a later eligible turn retries. Inline `<think>` reasoning before the
+answer is dropped. Every provider route sends one direct request outside the
+agent runner, as the compaction summarizer does. The main agent does not wait
+for a title tool result or make a title follow-up model call. When the main
+stream reaches normal settlement, the worker waits for the already-running
+bounded sidecar and joins it without cancelling. Exceptional or
 cancelled exits abort and join any still-pending sidecar. A completed candidate
 then uses the canonical title mutation, which updates the session row and
 appends `session.title_set`. Generation or persistence failure leaves the safe
@@ -106,11 +116,22 @@ pending marker in place, and a human title remains protected from every later
 automatic write. Historical fallback sessions therefore self-heal on their
 next eligible model turn.
 
+The managed OpenRouter free route sends no title request at all. A turn whose
+resolved provider is the deployment-funded OpenRouter provider serving an
+upstream `:free` variant (`isManagedOpenRouterFreeRoute`) spends one deployment
+key's OpenRouter per-minute and per-day request limits, which every user's
+turns share, so the attempt starts no sidecar, promotes no title tool, and
+keeps `set_session_title` out of its catalog while the pending marker remains.
+Web, SDK, and Slack keep showing the safe prompt preview. The next eligible turn
+on any other route, including a workspace or organization OpenRouter
+connection, titles the session.
+
 `OpenGeniRuntime.generateSessionTitle` is a rolling-compatible optional seam.
 Older or custom runtimes that do not implement it retain the prior attempt-local
 `set_session_title` tool plus one-shot model instruction, so an embedding host
 does not silently lose automatic naming during an upgrade. That compatibility
-path remains serialized; the production runtime takes the parallel path.
+path remains serialized; the production runtime takes the parallel path. Neither
+path runs on the managed OpenRouter free route.
 
 Ordinary Send acknowledges locally before transport completion. The composer
 freezes the exact text, annotations, resources, settings, and one
@@ -672,7 +693,32 @@ therefore starts the next outage at the first backoff step instead of consuming
 a lifetime budget for a long-running turn.
 An explicit provider retry hint is a lower bound. Rate limits use the provider's
 `Retry-After` when present and otherwise wait 60 s; other retryable classes keep
-their existing pacing. Failed session detail includes a bounded `failureDiagnostics` projection through
+their existing pacing.
+An exhausted API-key provider quota is not a rate limit and is never retried:
+a daily or monthly allowance (OpenRouter `free-models-per-day`, requests or
+tokens per day), a used-up quota (`insufficient_quota`, "exceeded your current
+quota", a reached usage limit), an account out of credits (HTTP 402,
+"insufficient balance", `billing_hard_limit_reached`), or a 429 whose own
+provider retry hint exceeds 15 minutes fails the turn at once with
+`provider_quota_exhausted`, `retryable: false`, a `quotaScope` of `daily`,
+`monthly`, `credits` or `quota`, plain-language copy, and the provider text as
+`detail`. Ordinary short limits stay `provider_rate_limited` and retryable: an
+explicit per-minute window (including snake_case metric ids such as Vertex
+`requests_per_minute_per_project`), quota wording whose provider retry hint is at
+most 60 s (Gemini reports per-minute limits with the same "exceeded your current
+quota" sentence), and Google's bare `RESOURCE_EXHAUSTED`, which Google sends
+with every 429 including short dynamic-shared-quota refusals.
+`@opengeni/runtime`'s `provider-quota.ts` is the single classifier and evidence
+reader (`classifyProviderQuotaError`): clients with OpenAI SDK retries enabled
+classify a 429 as the exact `APIError` the SDK will throw and mark an exhausted
+one `x-should-retry: false`, so the SDK veto and the worker never disagree about
+one response. Codex and SuperGrok subscription transports keep their own quota
+semantics (credential rotation and durable capacity waits) and never classify
+here; the loose "429 ... usage limit" Codex cap wording counts as a Codex cap
+only on a Codex transport error or an explicit `usage_limit_reached` type. A
+quota refusal of a compaction request likewise ends as a terminal
+`context_compaction_failed` with active history preserved instead of retrying,
+and carries the same closed `quotaScope` marker. Failed session detail includes a bounded `failureDiagnostics` projection through
 its durable event cursor. The browser uses it independently of retained timeline
 pages; a newer accepted live failure supersedes it while detail refreshes. The
 banner displays `providerRecoveryCount` only as the final consecutive automatic
@@ -1650,7 +1696,7 @@ process-local counters; the reaper rebuilds a fresh, release-scoped alert
 inventory from those receipts if a worker exits after the transaction.
 Every agent reconstruction appends the same checkpoint-specific discontinuity
 warning to session instructions, after the stable workspace prompt prefix.
-Maintenance migration 0520 requires warning protocol v2 at attempt claim for
+Maintenance migration 0526 requires warning protocol v2 at attempt claim for
 every session with an automatic receipt, including after failed restoration or
 lease churn; old workers fail closed. Human-consented recovery keeps its
 independent v1 gate.
@@ -1658,7 +1704,41 @@ independent v1 gate.
 New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected sandbox environment/base
 image instead of replacing the whole machine. Existing serialized sessions keep
-their recorded `snapshot_filesystem` or tar mode and remain recoverable. Warm
+their recorded `snapshot_filesystem` or tar mode and remain recoverable.
+Filesystem snapshot recovery boots the exact selected immutable Image directly,
+attributes that single destination before verification, and rejects a missing
+snapshot without falling back to the base image or an older checkpoint. It does
+not create a temporary box and ask SDK hydration to replace it. Directory and tar
+archives still hydrate the elected destination. This removes the hidden second
+create. Migration 0523 adds a durable Modal creation receipt immediately before
+the physical `SandboxCreate` RPC. The runtime's `modal-create-session.ts` owns
+creation and retains the pinned SDK's public session implementation; its
+`modal-create-boundary.ts` hook runs after image/secret preparation and before
+provider dispatch. The receipt binds the lease epoch, authenticated provider
+namespace, actual app and image IDs, selected archive revision, operation name,
+and request digest. SDK retries are disabled for that mutation. Only the matching creator can
+attribute an exact returned instance. Until then, failure rollback and both
+lease reapers preserve the operation, epoch, and checkpoint; a database trigger
+also rejects erasure by older transition paths. Orphan deletion is postponed
+while any warming Modal lease lacks a provider identity. The operation name and
+tag are created atomically with the provider box; absence from the running-box
+inventory cannot prove that creation never happened. A returned instance is
+attributed before manifest setup, including after cancellation.
+
+This receipt is a fence, not a provider idempotency or replay guarantee. Losing
+the creator and its reply can leave the lease blocked; time, a missing named
+running sandbox, and termination of some other sandbox do not unblock it.
+Logical-image fallback is allowed after a missing-image preparation failure,
+before admission starts, and refused after admission starts. The maintenance
+sweep discovers expired unknown operations in bounded batches, including
+finished provider instances. It requires the same authenticated namespace and
+one exact app, image, operation name and tag match. An atomic tenant/epoch/receipt
+comparison attributes that instance without renewing the lease or publishing
+the workspace; ordinary holder-fenced draining then owns cleanup. Discovery
+absence, ambiguity or provider failure leaves the receipt unresolved. Never
+clear it or silently create another sandbox. Cleanup rechecks the persisted
+provider namespace before interpreting a missing instance or issuing a stop.
+Warm
 checkpoint attempts use the configured interval as a hard minimum even after a
 new mutation generation; an already-complete generation never calls the
 provider again. The zero-holder drain/rotation capture bypasses that interval so
@@ -1722,6 +1802,19 @@ provider-deadline/operator rotation is retained by the DB release operation.
 Every fresh claim gets a new provider request ID; replacement attempts of an
 uninterrupted claim retain its stored ID. A workflow retry after release and
 intervening writes therefore cannot adopt an older snapshot as a newer generation.
+
+Re-arming a draining lease preserves its recorded workspace readiness. A provider
+address published during creation does not prove that workspace setup or restore
+verification completed. Both holder admission and explicit re-arm keep such a
+lease fenced until recovery settles it; they cannot promote recorded `not_ready`
+state to warm. Legacy envelopes without a recovery record retain the existing
+exact-provider-identity checks.
+
+Modal cleanup waits for the provider's terminal exit result. A stop request
+acknowledgement alone cannot settle SDK shutdown, by-ID rescue, or an orphan
+sweep. Failed or unavailable exit confirmation propagates to recovery (and is
+not reported as an orphan termination); borrowed SDK handles still leave their
+provider running. This does not establish the outcome of an unattributed create.
 
 Concurrent routed calls may all discover the same missing provider. Exactly one
 observer wins the lease-loss transition; the others receive typed `superseded`
@@ -1955,8 +2048,8 @@ For scheduled provider-deadline rotation, legacy commands have a separate
 two-minute cancellation grace. A PTY receives one Ctrl-C; non-PTY stdin is not
 a signal, so the worker records cancellation intent without writing Ctrl-C
 bytes. After that grace, exact process holders may be enrolled even without
-exit proof if the owner has an explicit quiescence receipt or is normally
-completed and closed (or its direct request returned),
+exit proof if the owner has a quiescence receipt or is normally completed and
+closed (or its direct request returned),
 and no unrelated holder or mutation admission remains. An outstanding
 reconciliation claim does not grant writer authority or block this deadline
 capture. The provider is terminated only after the current workspace generation
@@ -1967,7 +2060,7 @@ starts its own grace. This path does not apply to idle or operator rotation.
 The same containment path covers an explicitly stopping managed command after
 at least five provider-error observations. Its cancellation request and owner
 quiescence (or normal completion and closed timestamp) must both predate idle
-grace. A failed/interrupted owner without a quiescence receipt stays blocked;
+grace. A failed/interrupted owner without a quiescence receipt remains blocked;
 provider errors alone never enroll a running command.
 All sandbox-group activity, other-holder and child-admission exclusions remain
 in force, and only verified provider termination settles an unknown result as
@@ -2243,14 +2336,26 @@ operation replays before mutable model/billing checks, even after work advances.
 
 The web failure banner is presentation over the stored event, which it never
 rewrites. Uncoded provider failures and `provider_rate_limited` /
-`provider_unavailable` get short plain-language copy (rejected credentials,
-provider billing or access, a used-up daily limit, quota, rate limiting) with the
-exact recorded text behind a Details toggle. A bare leading HTTP status is
+`provider_unavailable` / `provider_quota_exhausted` get short plain-language copy
+(rejected credentials, provider billing or access, a used-up daily limit, quota,
+rate limiting) with the exact recorded text behind a Details toggle. A closed
+`quotaScope` marker, on a quota turn failure or a quota-refused compaction, picks
+the daily, monthly, credits or quota copy directly; the `failureDiagnostics`
+projection carries it only as one of those four literals. Every
+billing, access, limit and quota class points at the model picker ("Choose
+another model below.") while the session still has the failed model selected. A bare leading HTTP status is
 classified only for 401, 402, 403 and 429; any other status keeps its recorded
 wording. Retry stays hidden only for rejected credentials, and only while the
 same model is selected: it stays hidden for that failure on that model even
 after the key is fixed, when a new message re-runs the work. Billing, access,
 daily-limit and quota failures keep Retry, because each condition can clear.
+When the failed turn's model is the deployment's free model (catalog
+`cost: "free"`), the daily-limit copy names the free model instead and lists
+only the remedies the viewer can use: buying OpenGeni credits, connecting a
+model, or picking another model, with matching links. The connect remedy names
+ChatGPT or SuperGrok only when the deployment enables that subscription, and
+otherwise reads "connect a model provider". Every other model keeps the generic
+daily-limit wording.
 Failures with any other worker code keep their authored wording.
 
 A genuinely new `user.message` can still transition failed → queued and start a
@@ -2369,6 +2474,12 @@ audit reads may return it, so it is never a secret boundary.
    `session_attempt_codemode_calls` is unchanged. See
    `packages/runtime/src/tool-result-spill.ts` and
    `apps/worker/src/activities/agent-turn/tool-result-spill.ts`.
+   The same per-caller seam applies model-only projections:
+   a model call to `knowledge_search` or `knowledge_prepare_save` receives a
+   compact copy without bookkeeping or repeated preview text, and its history
+   item and event record that copy, while Codemode receives the exact executor
+   result. See
+   [model-visible discovery results](knowledge.md#model-visible-discovery-results).
    User attachment rows store stable file references, not inline bytes. Active
    messages reconstruct the same authorized receipt and supported image content
    across turns and before compaction. File metadata is batch-authorized once

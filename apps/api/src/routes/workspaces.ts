@@ -42,6 +42,7 @@ import {
   ensureWorkspaceByExternalIdentity,
   findWorkspaceByExternalIdentity,
   getManagedUserProfilesByIds,
+  getWorkspace,
   getWorkspaceModelPolicy,
   grantWorkspaceAccess,
   listWorkspaceMembers,
@@ -95,6 +96,9 @@ import {
   requireWorkspaceSettingsGrant,
   requireFreshAccessGrant,
   resolveWorkspaceCatalogSettings,
+  creditsDefaultSessionModel,
+  resolveDefaultSessionModelForSelections,
+  resolveWorkspaceModelSelection,
 } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -107,7 +111,7 @@ import {
 import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
 import { browserSseDeliveryOptions, sseWorkspaceControlStream } from "../http/sse";
-import { buildWorkspaceModelCatalog } from "../model-catalog";
+import { projectWorkspaceModelCatalog } from "../model-catalog";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
 import {
   AI_GATEWAY_REALTIME_MODELS,
@@ -441,6 +445,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       organizationOpenRouterConnectionActive,
       organizationGatewayCustomModels,
       organizationOpenRouterCustomModels,
+      workspace,
     ] = await Promise.all([
       getWorkspaceConnectionModelRestrictions(deps.db, workspaceId, grant.subjectId),
       deps.resolveCatalogSettings(),
@@ -477,24 +482,42 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         providerKind: "openrouter",
       }),
+      getWorkspace(deps.db, workspaceId),
     ]);
+    const selections = resolveWorkspaceModelSelection({
+      connectionModelRestrictions,
+      settings: resolvedCatalog.settings,
+      policy,
+      codexSubscriptionActive,
+      xaiSubscriptionActive,
+      workspaceGatewayConnectionActive,
+      workspaceGatewayCustomModels,
+      workspaceOpenRouterConnectionActive: openRouterConnectionActive,
+      workspaceOpenRouterCustomModels,
+      organizationGatewayConnectionActive,
+      organizationOpenRouterConnectionActive,
+      organizationGatewayCustomModels,
+      organizationOpenRouterCustomModels,
+    });
+    // The same precedence the server applies when a new chat, API create, or
+    // scheduled occurrence names no model; published so pickers show it.
+    const workspaceSettings = workspace?.settings ?? {};
+    const defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {
+      settings: resolvedCatalog.settings,
+      accountId: grant.accountId,
+      workspaceSettings,
+      selections,
+    });
     c.header("cache-control", "private, no-store");
     return c.json(
       WorkspaceModelCatalogResponse.parse(
-        buildWorkspaceModelCatalog({
-          connectionModelRestrictions,
-          settings: resolvedCatalog.settings,
-          policy,
-          codexSubscriptionActive,
-          xaiSubscriptionActive,
-          workspaceGatewayConnectionActive,
-          workspaceGatewayCustomModels,
-          workspaceOpenRouterConnectionActive: openRouterConnectionActive,
-          workspaceOpenRouterCustomModels,
-          organizationGatewayConnectionActive,
-          organizationOpenRouterConnectionActive,
-          organizationGatewayCustomModels,
-          organizationOpenRouterCustomModels,
+        projectWorkspaceModelCatalog(selections, {
+          defaultSelection,
+          creditsSelection: creditsDefaultSessionModel({
+            settings: resolvedCatalog.settings,
+            selections,
+            workspaceSettings,
+          }),
         }),
       ),
     );

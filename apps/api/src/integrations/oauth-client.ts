@@ -38,7 +38,7 @@ import {
   withDatabaseStatementTimeout,
   type Database,
 } from "@opengeni/db";
-import { createSignedState, readSignedState } from "@opengeni/github";
+import { createSignedState, inspectSignedState, readSignedState } from "@opengeni/github";
 import {
   DestinationPolicyError,
   McpOAuthDiscoveryError,
@@ -86,6 +86,64 @@ import {
 import { canonicalProviderDomain } from "./provider-domain";
 
 export const oauthStateTtlMs = 10 * 60 * 1000;
+
+/**
+ * Workspace-free landing for a callback whose state names no trustworthy
+ * workspace. The web app resolves it to the viewer's current workspace
+ * integrations page and keeps the callback outcome parameters.
+ */
+export const INTEGRATIONS_FALLBACK_PATH = "/integrations";
+
+const WORKSPACE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/** The web integrations page for one workspace (the Plugins surface). */
+export function workspaceIntegrationsPath(workspaceId: string): string {
+  return `/workspaces/${encodeURIComponent(workspaceId)}/plugins`;
+}
+
+/**
+ * The integrations page for a workspace id read from untrusted input (a URL
+ * parameter or an unverified-age state), or null unless it is a workspace UUID.
+ * A link target only: it grants nothing.
+ */
+export function workspaceIntegrationsPathForUntrusted(candidate: unknown): string | null {
+  return typeof candidate === "string" && WORKSPACE_ID_PATTERN.test(candidate)
+    ? workspaceIntegrationsPath(candidate)
+    : null;
+}
+
+/**
+ * Where a callback returns, and why, when its own signed state is unusable.
+ *
+ * A correctly signed state still names its workspace, even when it is too old
+ * or its flow rejected it, so the browser returns to that workspace's
+ * integrations page; an aged one is reported as expired. Anything unsigned,
+ * tampered, or signed with another secret returns to
+ * {@link INTEGRATIONS_FALLBACK_PATH}. Display routing only: nothing here
+ * authorizes, resumes, or replays the callback.
+ */
+export function oauthStateFailureReturn(
+  settings: Settings,
+  rawState: string | undefined,
+  nowMs = Date.now(),
+): { returnPath: string; reason: "state_expired" | "state_invalid" } {
+  let payload: ReturnType<typeof inspectSignedState> = null;
+  try {
+    payload = rawState
+      ? inspectSignedState(rawState, requireIntegrationsStateSecret(settings))
+      : null;
+  } catch {
+    payload = null;
+  }
+  return {
+    returnPath:
+      workspaceIntegrationsPathForUntrusted(payload?.workspaceId) ?? INTEGRATIONS_FALLBACK_PATH,
+    reason:
+      payload !== null && nowMs - payload.iat * 1000 > oauthStateTtlMs
+        ? "state_expired"
+        : "state_invalid",
+  };
+}
 export {
   OFFICIAL_GMAIL_MCP_SCOPES,
   OFFICIAL_GMAIL_MCP_URL,
@@ -469,7 +527,9 @@ async function startMcpOAuthWithinDeadline(
   // Catalog defaults are setup preferences; an explicit ownership always wins.
   const requestedOwnership: ConnectionOwnership =
     context.payload.ownership ?? defaultOwnershipFor(profile);
-  const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");
+  const returnPath = safeReturnPath(
+    context.payload.returnPath ?? workspaceIntegrationsPath(context.workspaceId),
+  );
   const baseUrl = integrationBaseUrl(settings.publicBaseUrl, context.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
   const metadataUrl = `${baseUrl}/v1/integrations/oauth/client-metadata.json`;
@@ -686,6 +746,8 @@ export async function completeMcpOAuthCallback(
   input: {
     code?: string | undefined;
     state?: string | undefined;
+    /** The provider's `error` parameter, for example `access_denied` on Cancel. */
+    error?: string | undefined;
     requestUrl: string;
   },
 ): Promise<OAuthCallbackResult> {
@@ -704,6 +766,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
   input: {
     code?: string | undefined;
     state?: string | undefined;
+    error?: string | undefined;
     requestUrl: string;
   },
   deadline: OAuthCallbackDeadline,
@@ -720,7 +783,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
     );
     logOAuthCallbackFailure(observability, error, state);
     return {
-      redirectTo: callbackReturnPath("/integrations", "error", {
+      redirectTo: callbackReturnPath(INTEGRATIONS_FALLBACK_PATH, "error", {
         stage: error.stage,
         reason: error.reason,
       }),
@@ -776,7 +839,11 @@ async function completeMcpOAuthCallbackWithinDeadline(
         new HTTPException(422, { message: PERSONAL_CONNECTION_PRINCIPAL_MESSAGE }),
       );
     }
-    if (!input.code) {
+    if (input.error || !input.code) {
+      // The provider sends `error` (for example `access_denied` when the user
+      // clicks Cancel) instead of a code. Report that as a refusal, not as an
+      // expired attempt, and never echo the provider's own text.
+      const cancelled = input.error === "access_denied";
       if (connectOperation) {
         await finishConnectOperation(db, state, {
           ...connectOperation,
@@ -785,20 +852,23 @@ async function completeMcpOAuthCallbackWithinDeadline(
           commit: async (_tx, current) => ({
             ...current,
             revision: current.revision + 1,
-            state: "failed",
+            state: cancelled ? "cancelled" : "failed",
             nextAction: { type: "none" },
             error: {
-              code: "missing_code",
+              code: input.error ? "provider_denied" : "missing_code",
               message: "Authorization was not completed. Start a new connection attempt.",
               retryable: false,
             },
           }),
         });
       }
-      return callbackStateResult(state, "error", {
-        stage: "state_verify",
-        reason: "missing_code",
-      });
+      return callbackStateResult(
+        state,
+        "error",
+        input.error
+          ? { stage: "authorize", reason: cancelled ? "access_denied" : "provider_error" }
+          : { stage: "state_verify", reason: "missing_code" },
+      );
     }
     await withOrganizationIntegrationAcquisition(db, state, [integrationKey], async () => {});
     const consumed = await runCallbackDatabaseStage(
@@ -828,6 +898,17 @@ async function completeMcpOAuthCallbackWithinDeadline(
         ? error
         : new OAuthCallbackStageError("state_verify", "state_invalid", error);
     logOAuthCallbackFailure(observability, staged, state);
+    if (!state) {
+      // The state itself could not be resolved, so it carries no return path.
+      // An authentic but aged state still names its workspace and "expired".
+      const failure = oauthStateFailureReturn(settings, input.state);
+      return {
+        redirectTo: callbackReturnPath(failure.returnPath, "error", {
+          stage: staged.stage,
+          reason: staged.reason === "state_invalid" ? failure.reason : staged.reason,
+        }),
+      };
+    }
     return callbackStateResult(state, "error", {
       stage: staged.stage,
       reason: staged.reason,
@@ -1009,7 +1090,13 @@ function callbackStateResult(
 ): OAuthCallbackResult {
   if ((state?.externalContinuation || state?.connectAttemptId) && state.returnUrl)
     return { redirectTo: state.returnUrl, exactReturn: true };
-  return { redirectTo: callbackReturnPath(state?.returnPath ?? "/integrations", status, details) };
+  return {
+    redirectTo: callbackReturnPath(
+      state?.returnPath ?? INTEGRATIONS_FALLBACK_PATH,
+      status,
+      details,
+    ),
+  };
 }
 
 export function integrationBaseUrl(publicBaseUrl: string | undefined, requestUrl: string): string {
@@ -2432,7 +2519,7 @@ function callbackReturnPath(
   // Defense in depth: a `//host` pathname becomes a protocol-relative absolute
   // Location — an open redirect from the unauthenticated callback.
   if (url.pathname.startsWith("//")) {
-    const fallback = new URL("/integrations", "https://opengeni.local");
+    const fallback = new URL(INTEGRATIONS_FALLBACK_PATH, "https://opengeni.local");
     fallback.search = url.search;
     return `${fallback.pathname}${fallback.search}`;
   }

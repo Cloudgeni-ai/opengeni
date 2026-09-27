@@ -1116,6 +1116,40 @@ export function recordCreditBalanceGauges(
   creditBalanceGaugeAccounts.set(observability, current);
 }
 
+/**
+ * The deployment-level runtime switch for the one-time verified signup trial
+ * credit (migration 0521): 1 while it allows grants, 0 when an operator has
+ * disabled it or no revision exists. A grant also needs the API's
+ * OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in, which
+ * {@link recordVerifiedSignupTrialDeploymentFlagGauge} reports separately.
+ */
+export function recordVerifiedSignupTrialSwitchGauge(
+  observability: Observability,
+  grantsEnabled: boolean,
+): void {
+  observability.setGauge({
+    name: "opengeni_verified_signup_trial_credits_runtime_enabled",
+    help: "Whether the runtime switch allows new verified signup trial credit grants (1) or blocks them (0).",
+    value: grantsEnabled ? 1 : 0,
+  });
+}
+
+/**
+ * The OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in as this
+ * worker's configuration sees it. The API reads the same shared setting; new
+ * grants happen only while this gauge and the runtime switch gauge are both 1.
+ */
+export function recordVerifiedSignupTrialDeploymentFlagGauge(
+  observability: Observability,
+  enabled: boolean,
+): void {
+  observability.setGauge({
+    name: "opengeni_verified_signup_trial_credits_deployment_enabled",
+    help: "Whether the OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in is on (1) or off (0) in this deployment's configuration.",
+    value: enabled ? 1 : 0,
+  });
+}
+
 export function recordSandboxOrphansTerminated(observability: Observability, count: number): void {
   if (count <= 0) {
     return;
@@ -2317,4 +2351,52 @@ export function modelCallAccountContext(input: {
     servingAccountHash: stableAccountHash(input.servingCredentialId),
     accountChangedFromPrevCall,
   };
+}
+
+export type CodeSearchCallOutcome =
+  | "completed"
+  | "jev_unavailable"
+  | "jev_rejected"
+  | "workspace_unavailable"
+  | "invalid_arguments"
+  | "breaker_open"
+  | "cancelled"
+  | "failed";
+
+/** One `code_search` tool call: outcome, wall time and the Jev work it used. */
+export function recordCodeSearchCall(
+  observability: Observability,
+  input: {
+    outcome: CodeSearchCallOutcome;
+    durationSeconds: number;
+    jevRequests: number;
+    jevCostUsd: number;
+  },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_code_search_calls_total",
+    help: "Jev-backed code_search tool calls by outcome.",
+    labels: { outcome: input.outcome },
+  });
+  observability.observeHistogram({
+    name: "opengeni_code_search_duration_seconds",
+    help: "Wall time of one code_search tool call.",
+    buckets: [0.5, 1, 2, 4, 8, 15, 30, 60],
+    labels: { outcome: input.outcome },
+    value: Math.max(0, input.durationSeconds),
+  });
+  if (input.jevRequests > 0) {
+    observability.incrementCounter({
+      name: "opengeni_code_search_jev_requests_total",
+      help: "Jev requests made by code_search.",
+      amount: input.jevRequests,
+    });
+  }
+  if (input.jevCostUsd > 0) {
+    observability.incrementCounter({
+      name: "opengeni_code_search_jev_cost_micro_usd_total",
+      help: "Estimated Jev list-price cost of code_search, in micro-USD.",
+      amount: Math.round(input.jevCostUsd * 1_000_000),
+    });
+  }
 }

@@ -163,6 +163,16 @@ export class MultiProviderModelProvider implements ModelProvider {
   constructor(private readonly settings: Settings) {}
 
   async getModel(modelName?: string): Promise<Model> {
+    return this.resolveBinding(modelName).model;
+  }
+
+  /**
+   * The provider, owned client, and upstream model id that `getModel` binds.
+   * Standalone requests outside an agent run (the session-title sidecar) use
+   * this to call the provider directly instead of the runner-facing
+   * `Model.getResponse()`, which requires an active trace.
+   */
+  resolveBinding(modelName?: string): ModelProviderBinding {
     if (modelName) {
       const resolved = resolveTurnModel(
         settingsForRunScopedModelResolution(this.settings, modelName),
@@ -189,7 +199,12 @@ export class MultiProviderModelProvider implements ModelProvider {
         ) {
           throw new XaiSubscriptionUnavailableError(modelName);
         }
-        return resolved.model;
+        return {
+          provider: resolved.provider,
+          client: resolved.client,
+          model: resolved.model,
+          modelId: resolved.configured.upstreamModelId,
+        };
       }
       // A `codex/<slug>` id only resolves when the per-workspace worker overlay
       // (settingsWithCodexCredential) has injected the synthetic codex-subscription
@@ -215,13 +230,24 @@ export class MultiProviderModelProvider implements ModelProvider {
     // JSON parse/stringify transport wrapper on the fallback path.
     const builtin = configuredProviders(this.settings)[0];
     if (!builtin) throw new Error("Built-in model provider is unavailable");
-    return new OpenGeniResponsesModel(
-      buildProviderClient(builtin, this.settings),
-      modelName ?? this.settings.openaiModel,
-      builtin,
-    );
+    const client = buildProviderClient(builtin, this.settings);
+    const modelId = modelName ?? this.settings.openaiModel;
+    return {
+      provider: builtin,
+      client,
+      model: new OpenGeniResponsesModel(client, modelId, builtin),
+      modelId,
+    };
   }
 }
+
+export type ModelProviderBinding = {
+  provider: ResolvedModelProvider;
+  client: OpenAI;
+  model: Model;
+  /** The id sent on the provider wire (the upstream id for a registry model). */
+  modelId: string;
+};
 
 function settingsForRunScopedModelResolution(settings: Settings, modelName: string): Settings {
   if (modelName !== settings.openaiModel) {

@@ -58,6 +58,8 @@ import type { ApiWebSocketConnection } from "./api-websocket";
 import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
 import { apiRequestBindingsForTransportPeer } from "./http/request-source";
 import { startApiMetricsListener } from "./http/metrics-listener";
+import { createLocalBrowserBoundary } from "./http/local-browser-boundary";
+import { dispatchApiWebSocketUpgrade } from "./http/websocket-upgrade-dispatch";
 import {
   createStandaloneEditableArtifactApplication,
   type StandaloneEditableArtifactApplication,
@@ -450,17 +452,25 @@ export async function startApi(
   const interactionFrameProxies = new InteractionFrameProxyTransport(
     resolveFirstPartyDelegationSecret(settings),
   );
+  // WebSocket upgrades bypass the Hono app, so the local-mode browser boundary
+  // (http/local-browser-boundary.ts) is applied to them in the dispatcher;
+  // every other request meets it in the Hono middleware.
+  const localBrowserBoundary = createLocalBrowserBoundary(settings, {
+    warn: (message, attributes) => observability.warn(message, attributes),
+  });
+  const webSocketUpgrades = [interactionFrameProxies, artifactWebSockets];
   const server = Bun.serve<ApiWebSocketConnection>({
     hostname: settings.apiHost,
     port: settings.apiPort,
     idleTimeout: 255,
     fetch: (request, bunServer) => {
-      if (interactionFrameProxies.handles(request)) {
-        return interactionFrameProxies.upgrade(request, bunServer);
-      }
-      if (artifactWebSockets.handles(request)) {
-        return artifactWebSockets.upgrade(request, bunServer);
-      }
+      const upgrade = dispatchApiWebSocketUpgrade(
+        request,
+        bunServer,
+        webSocketUpgrades,
+        localBrowserBoundary,
+      );
+      if (upgrade.handled) return upgrade.response;
       return app.fetch(
         request,
         apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),

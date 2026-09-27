@@ -1,5 +1,4 @@
 import {
-  connectionModelAllowed,
   armCodexCapacityWait,
   fetchCodexUsageForAccount,
   getCodexCapacityWaitForSession,
@@ -17,6 +16,7 @@ import { refreshExhaustedXaiQuota } from "./xai-quota";
 import {
   authoritativeCodexCapacityResetAt,
   codexAccountNeedsLiveCapacityRefresh,
+  codexAccountServesModel,
   isCodexCredentialEligible,
   isCodexCredentialHealthy,
   selectCodexCredentialLeaseForTurn,
@@ -96,8 +96,7 @@ export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnost
   context = {
     ...context,
     accounts: context.accounts.filter(
-      (account) =>
-        !context.modelId || connectionModelAllowed(account.allowedModelIds, context.modelId),
+      (account) => !context.modelId || codexAccountServesModel(account, context.modelId, now),
     ),
   };
   const selected = selectCodexCredentialLeaseForTurn({

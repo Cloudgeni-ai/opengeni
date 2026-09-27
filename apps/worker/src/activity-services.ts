@@ -1,5 +1,14 @@
-import { dbSearchPath, getSettings, resolveNatsControlPlaneAuth } from "@opengeni/config";
-import { configureChildLifecycleNotices, createDb } from "@opengeni/db";
+import {
+  codeSearchDeploymentPolicy,
+  dbSearchPath,
+  getSettings,
+  resolveNatsControlPlaneAuth,
+} from "@opengeni/config";
+import {
+  configureChildLifecycleNotices,
+  configureCodeSearchDeploymentPolicy,
+  createDb,
+} from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import { resolveCatalogSettings } from "@opengeni/core";
@@ -40,6 +49,9 @@ export function createSharedActivityServices(
       // Child lifecycle notice producers are process-global in @opengeni/db;
       // install the boot-validated rollout flag once for this worker.
       configureChildLifecycleNotices({ enabled: settings.childLifecycleNoticesEnabled });
+      // Child, scheduled and automation sessions created here freeze their
+      // code_search decision from the same deployment policy as the API.
+      configureCodeSearchDeploymentPolicy(codeSearchDeploymentPolicy(settings));
       return {
         settings: resolvedSettings,
         catalogSourceSettings: settings,

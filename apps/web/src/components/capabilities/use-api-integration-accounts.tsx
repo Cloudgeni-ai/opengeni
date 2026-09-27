@@ -21,6 +21,7 @@ import type {
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ConnectionOwnershipDialog } from "./connection-ownership-selector";
 import { useAppContext } from "@/context";
+import { oauthCallbackReasonMessage } from "@/lib/oauth-callback-messages";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import type {
   ApiIntegrationInstallationSummary,
@@ -56,6 +57,22 @@ const CALLBACK_KEYS = [
   "connectionId",
   "reason",
 ] as const;
+
+/** Provider-definition callback reasons, in words (never the raw code). */
+export function apiIntegrationOAuthFailureMessage(reason: string | null): string {
+  const shared = oauthCallbackReasonMessage(reason);
+  if (shared) return shared;
+  switch (reason) {
+    case "scope_not_granted":
+      return "The provider didn't grant every permission OpenGeni needs. Connect again and approve all requested access.";
+    case "account_mismatch":
+      return "You signed in to a different account than the one being reconnected. Connect again with the same account.";
+    case "client_unavailable":
+      return "This provider isn't configured on this deployment yet. Ask an administrator to set it up.";
+    default:
+      return "The provider did not return a usable account. Select Connect to try again.";
+  }
+}
 
 export type PendingApiIntegrationOAuth = {
   definitionId: string;
@@ -168,7 +185,7 @@ export function useApiIntegrationOAuthCallback({
     window.history.replaceState(null, "", `${cleaned.pathname}${cleaned.search}${cleaned.hash}`);
     if (pending.outcome !== "success" || !pending.connectionId) {
       toast.error("Connection wasn't completed", {
-        description: pending.reason ?? "The provider did not return a usable account.",
+        description: apiIntegrationOAuthFailureMessage(pending.reason),
       });
       return;
     }

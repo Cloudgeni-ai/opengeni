@@ -25,6 +25,33 @@ describe("automatic session titles", () => {
     ).toBe("investigate OAuth callback failures");
   });
 
+  test("removes the closing quote or markdown mark of a wrapped title", () => {
+    expect(normalizeAutomaticSessionTitle('"Kubernetes Pod Crash Debugging"')).toBe(
+      "Kubernetes Pod Crash Debugging",
+    );
+    expect(normalizeAutomaticSessionTitle('Title: "Kubernetes Pod Crash Debugging".')).toBe(
+      "Kubernetes Pod Crash Debugging",
+    );
+    expect(normalizeAutomaticSessionTitle("**Kubernetes Pod Crash Debugging**")).toBe(
+      "Kubernetes Pod Crash Debugging",
+    );
+    expect(normalizeAutomaticSessionTitle("`Pod Crash Debugging`")).toBe("Pod Crash Debugging");
+    expect(normalizeAutomaticSessionTitle("“Pod Crash Debugging”")).toBe("Pod Crash Debugging");
+    expect(normalizeAutomaticSessionTitle("'Pod Crash Debugging'")).toBe("Pod Crash Debugging");
+  });
+
+  test("keeps a trailing quote or markdown mark that pairs with one inside the title", () => {
+    expect(normalizeAutomaticSessionTitle('Rename the flag to "beta"')).toBe(
+      'Rename the flag to "beta"',
+    );
+    expect(normalizeAutomaticSessionTitle("Refactor `useSession`")).toBe("Refactor `useSession`");
+    expect(normalizeAutomaticSessionTitle("Explain **retry budgets**")).toBe(
+      "Explain **retry budgets**",
+    );
+    expect(normalizeAutomaticSessionTitle("Review the “draft”")).toBe("Review the “draft”");
+    expect(normalizeAutomaticSessionTitle("Learning C#")).toBe("Learning C#");
+  });
+
   test("rejects credentials, token-shaped values, URLs, and opaque identifiers", () => {
     expect(normalizeAutomaticSessionTitle("Debug token sk-proj-abc123456789XYZ")).toBeNull();
     expect(normalizeAutomaticSessionTitle("Password=hunter2 database repair")).toBeNull();

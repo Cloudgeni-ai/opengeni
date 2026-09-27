@@ -15,6 +15,7 @@ import { toast } from "sonner";
 import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import { Link } from "@tanstack/react-router";
 import { AppearanceMenu } from "@/components/appearance-menu";
+import { HelpMenu } from "@/components/help-menu";
 import {
   accountMenuAriaLabel,
   OrganizationInvitationCountBadge,
@@ -179,6 +180,11 @@ export function RailFooter() {
                     Analytics preferences
                   </DropdownMenuItem>
                 ) : null}
+                <HelpMenu
+                  documentationUrl={context.clientConfig.documentationUrl}
+                  itemClassName="min-h-11"
+                  leadingSeparator={managed || showAnalyticsPreferences}
+                />
                 {managed ? (
                   <DropdownMenuItem
                     variant="destructive"

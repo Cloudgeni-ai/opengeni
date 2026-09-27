@@ -2,7 +2,8 @@
 //!
 //! Parses [`RelayConfig`] from env/CLI, wires structured `tracing`, and serves the
 //! wss listener + health/metrics endpoints until SIGINT/SIGTERM, draining
-//! gracefully. See the crate docs (`lib.rs`) for the relay-dial protocol it
+//! gracefully. `OPENGENI_RELAY_METRICS_BIND` moves `/metrics` to a dedicated
+//! internal listener. See the crate docs (`lib.rs`) for the relay-dial protocol it
 //! implements.
 
 use clap::Parser as _;
@@ -12,7 +13,11 @@ use opengeni_relay::{serve, RelayConfig, RelayMetrics};
 async fn main() -> std::process::ExitCode {
     init_tracing();
     let config = RelayConfig::parse();
-    tracing::info!(bind = %config.bind, "starting opengeni-relay");
+    tracing::info!(
+        bind = %config.bind,
+        metrics_bind = ?config.metrics_listener_bind(),
+        "starting opengeni-relay"
+    );
     if config.stream_token_secret.is_empty() {
         tracing::warn!(
             "OPENGENI_STREAM_TOKEN_SECRET is empty — viewer connections will be rejected until configured"

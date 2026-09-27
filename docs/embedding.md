@@ -577,7 +577,11 @@ environment delta. The runtime stores each token at
 `OPENGENI_GIT_CREDENTIALS_DIR/<sha256(binding-id)>-token`, installs a Git
 credential helper that selects by protocol + host + path with
 `credential.useHttpPath`, and resets broader helpers so an unbound remote cannot
-fall through to a sibling credential. Provider aliases (including
+fall through to a sibling credential. Because that setup rewrites the executing
+user's `$HOME/.opengeni` and global Git configuration, the generated scripts exit
+without writing anything unless the runtime's sandbox lifecycle hook marks the
+command with `OPENGENI_GIT_PROVISIONING_TARGET=sandbox`; running an exported
+script builder directly on a host fails closed. Provider aliases (including
 `OPENGENI_GIT_TOKEN_FILE`) are written only while that provider has exactly one
 binding; they are removed when a second appears. `gh`, `glab`, and `az` select
 an explicit `OPENGENI_GIT_BINDING`, then the current repository's `origin`, then

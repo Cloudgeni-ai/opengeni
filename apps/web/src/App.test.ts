@@ -1673,6 +1673,25 @@ describe("summarizeSessionFailure", () => {
     });
     expect(diagnostics.recordedDetail).toBe("Model provider rate limit hit.\n429 Slow down");
     expect(diagnostics.failureCode).toBe("provider_rate_limited");
+    expect(diagnostics.quotaScope).toBeUndefined();
+    // The closed quota marker survives both the timeline and the detail projection.
+    const quotaPayload = {
+      error: "compaction summarization failed: quota",
+      code: "context_compaction_failed",
+      quotaScope: "daily",
+    };
+    expect(
+      summarizeSessionFailure([event(1, "turn.failed", quotaPayload)], "failed").quotaScope,
+    ).toBe("daily");
+    expect(
+      summarizeSessionFailure([], "failed", {
+        eventId: "event-10",
+        turnId: "turn-10",
+        sequence: 10,
+        occurredAt: "2026-09-20T08:00:00.000Z",
+        payload: quotaPayload,
+      }).quotaScope,
+    ).toBe("daily");
   });
 
   test("preserves provider-internal failure reasons like the timeline does", () => {

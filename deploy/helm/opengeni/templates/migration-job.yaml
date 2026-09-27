@@ -25,6 +25,7 @@ spec:
       priorityClassName: {{ $priorityClassName | quote }}
       {{- end }}
       serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      enableServiceLinks: false
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:

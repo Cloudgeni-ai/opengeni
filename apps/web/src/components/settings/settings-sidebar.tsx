@@ -14,12 +14,12 @@ import { cn } from "@/lib/utils";
 
 export const SETTINGS_SHELL_CLASS =
   "grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1";
-export const SETTINGS_NAV_CLASS = "mt-1 flex flex-col gap-1";
+export const SETTINGS_NAV_CLASS = "mt-2 flex flex-col gap-1";
 export function settingsNavItemClass(selected: boolean) {
   return cn(
-    "flex h-9 min-w-0 items-center gap-2 rounded-md px-2.5 text-sm transition-colors lg:w-full",
+    "flex min-h-10 min-w-0 items-center gap-2.5 rounded-md px-2.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand lg:w-full",
     selected
-      ? "bg-surface-3 font-medium text-fg"
+      ? "bg-surface-2 font-medium text-fg"
       : "text-fg-muted hover:bg-surface-2 hover:text-fg",
   );
 }

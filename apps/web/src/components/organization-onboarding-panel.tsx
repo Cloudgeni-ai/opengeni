@@ -25,7 +25,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { confirmIncludedModel, includedDefaultModel } from "@/lib/model-access-onboarding";
+import { includedDefaultModel } from "@/lib/model-access-onboarding";
+import {
+  loadModelAccessOnboarding,
+  type StartingCreditsOnboarding,
+} from "@/lib/onboarding-starting-credits";
 import {
   clearOrganizationInvitationContinuation,
   storeOrganizationInvitationContinuation,
@@ -40,6 +44,7 @@ export function OrganizationOnboardingPanel({
   codexEnabled = false,
   supergrokEnabled = false,
   includedModel,
+  startingCredits,
   modelDefaults = null,
   previewState,
   activeEmail = null,
@@ -54,6 +59,11 @@ export function OrganizationOnboardingPanel({
   codexEnabled?: boolean;
   supergrokEnabled?: boolean;
   includedModel?: IncludedOnboardingModel | null;
+  /**
+   * Credits the organization already holds; read from the new workspace's
+   * catalog and balance when not given.
+   */
+  startingCredits?: StartingCreditsOnboarding | null;
   /** Client-config model defaults; the included model is derived from them when not given. */
   modelDefaults?: { defaultModel: string; models: readonly ClientModel[] } | null;
   previewState?: SelfServiceOrganizationOnboardingState;
@@ -85,21 +95,29 @@ export function OrganizationOnboardingPanel({
   } | null>(null);
   const operationId = useRef(crypto.randomUUID());
   const invitationOperationIds = useRef(new Map<string, string>());
-  // An explicit `includedModel` (previews, embedders) is authoritative. The
-  // client-config candidate is only a hint until the new Personal workspace's
-  // catalog confirms that model is selectable there.
+  // An explicit `includedModel` or `startingCredits` (previews, embedders) is
+  // authoritative. The client-config candidate is only a hint until the new
+  // Personal workspace's catalog confirms that model is selectable there, and
+  // on a deployment that bills credits the same catalog read tells whether new
+  // chats already default to a credits model the organization can pay for.
   const includedCandidate =
     includedModel !== undefined
       ? null
       : modelDefaults
         ? includedDefaultModel({ ...modelDefaults, billingMode })
         : null;
-  const candidateKey = includedCandidate ? JSON.stringify(includedCandidate) : null;
-  const [confirmedIncluded, setConfirmedIncluded] = useState<{
+  const checkStartingCredits = billingMode === "stripe" && startingCredits === undefined;
+  const liveCheckKey =
+    includedCandidate || checkStartingCredits
+      ? JSON.stringify({ includedCandidate, checkStartingCredits })
+      : null;
+  const [liveModelAccess, setLiveModelAccess] = useState<{
     key: string;
     workspaceId: string;
-    model: IncludedOnboardingModel | null;
+    includedModel: IncludedOnboardingModel | null;
+    startingCredits: StartingCreditsOnboarding | null;
   } | null>(null);
+  const confirmingOrganizationId = createdSetup?.organizationId ?? null;
   const confirmingWorkspaceId = createdSetup?.personalWorkspaceId ?? null;
 
   useEffect(() => {
@@ -126,26 +144,33 @@ export function OrganizationOnboardingPanel({
   }, [createdSetup, previewState, onComplete, statusRequest]);
 
   useEffect(() => {
-    if (!candidateKey || !confirmingWorkspaceId) return;
+    if (!liveCheckKey || !confirmingOrganizationId || !confirmingWorkspaceId) return;
+    const unconfirmed = { includedModel: null, startingCredits: null };
     if (!client) {
-      setConfirmedIncluded({ key: candidateKey, workspaceId: confirmingWorkspaceId, model: null });
+      setLiveModelAccess({ key: liveCheckKey, workspaceId: confirmingWorkspaceId, ...unconfirmed });
       return;
     }
     let active = true;
-    const candidate = JSON.parse(candidateKey) as IncludedOnboardingModel;
-    void client
-      .getWorkspaceModelCatalog(confirmingWorkspaceId)
-      .then((catalog) => confirmIncludedModel(candidate, catalog.models))
+    const check = JSON.parse(liveCheckKey) as {
+      includedCandidate: IncludedOnboardingModel | null;
+      checkStartingCredits: boolean;
+    };
+    void loadModelAccessOnboarding(client, {
+      organizationId: confirmingOrganizationId,
+      workspaceId: confirmingWorkspaceId,
+      billingMode: check.checkStartingCredits ? "stripe" : "disabled",
+      includedCandidate: check.includedCandidate,
+    })
       // Unverifiable is not included: fall back to the ordinary choice screen.
-      .catch(() => null)
-      .then((model) => {
+      .catch(() => unconfirmed)
+      .then((result) => {
         if (active)
-          setConfirmedIncluded({ key: candidateKey, workspaceId: confirmingWorkspaceId, model });
+          setLiveModelAccess({ key: liveCheckKey, workspaceId: confirmingWorkspaceId, ...result });
       });
     return () => {
       active = false;
     };
-  }, [candidateKey, client, confirmingWorkspaceId]);
+  }, [client, confirmingOrganizationId, confirmingWorkspaceId, liveCheckKey]);
 
   useEffect(() => {
     if ((state !== "invitation_pending" && !invitation) || !client) return;
@@ -393,21 +418,22 @@ export function OrganizationOnboardingPanel({
   }
 
   if (createdSetup) {
-    let effectiveIncludedModel: IncludedOnboardingModel | null;
-    if (includedModel !== undefined) effectiveIncludedModel = includedModel;
-    else if (!includedCandidate) effectiveIncludedModel = null;
-    else if (
-      confirmedIncluded?.key === candidateKey &&
-      confirmedIncluded.workspaceId === createdSetup.personalWorkspaceId
-    )
-      effectiveIncludedModel = confirmedIncluded.model;
-    else
+    const live =
+      liveModelAccess?.key === liveCheckKey &&
+      liveModelAccess.workspaceId === createdSetup.personalWorkspaceId
+        ? liveModelAccess
+        : null;
+    if (liveCheckKey && !live)
       return frame(
         <section className="flex flex-1 items-center justify-center" role="status">
           <Loader2Icon className="size-5 animate-spin text-fg-subtle" />
           <span className="sr-only">Checking your models</span>
         </section>,
       );
+    const effectiveIncludedModel =
+      includedModel !== undefined ? includedModel : (live?.includedModel ?? null);
+    const effectiveStartingCredits =
+      startingCredits !== undefined ? startingCredits : (live?.startingCredits ?? null);
     return frame(
       <ModelAccessOnboardingPanel
         client={client}
@@ -417,6 +443,7 @@ export function OrganizationOnboardingPanel({
         codexEnabled={codexEnabled}
         supergrokEnabled={supergrokEnabled}
         includedModel={effectiveIncludedModel}
+        startingCredits={effectiveStartingCredits}
         onComplete={onComplete}
       />,
     );

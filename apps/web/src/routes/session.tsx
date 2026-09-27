@@ -100,7 +100,7 @@ import { useBackgroundAttentionTitle } from "@/lib/background-attention-title";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { ArtifactLinkBoundary } from "@/components/session/artifact-link-boundary";
-import { SessionVariableSetPicker } from "@/components/session/session-variable-set-picker";
+import { SessionVariableSetPicker } from "@/components/session/session-variable-set-picker-panel";
 import { useSessionVariableSetPickerState } from "@/lib/use-session-variable-set-picker-state";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -131,6 +131,7 @@ import {
   composerLaunchSearchKey,
   type ComposerLaunchSearch,
 } from "@/lib/composer-launch";
+import { connectableSubscriptions, isDeploymentFreeModel } from "@/lib/deployment-free-model";
 import {
   effortOptionsForModel,
   findPickerRow,
@@ -170,6 +171,7 @@ import {
   sessionPolicyPickerIds,
 } from "@/lib/session-tools";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
+import { githubAppConnectRequest } from "@/lib/github-app-connect";
 import {
   useFixedResourceScopes,
   usePersonalResourceAttachment,
@@ -720,9 +722,12 @@ export function SessionRoute({
     window.history.replaceState(null, "", window.location.pathname);
     const capabilityId = params.get("capability_auth");
     if (outcome !== "success") {
-      toast.error("Reconnect failed", {
-        description: params.get("reason") ?? undefined,
-      });
+      // The failure copy loads only on this path, keeping it out of the route.
+      void import("@/lib/oauth-callback-messages").then(({ mcpOAuthCallbackFailureMessage }) =>
+        toast.error("Reconnect failed", {
+          description: mcpOAuthCallbackFailureMessage(params.get("stage"), params.get("reason")),
+        }),
+      );
       return;
     }
     if (!capabilityId) {
@@ -833,6 +838,13 @@ export function SessionRoute({
   // calm inline error on the reconnect card.
   const reconnectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
   const [reconnectRequest, setReconnectRequest] = useState<NativeConnectRequest | null>(null);
+  // Workspace GitHub App setup from the follow-up repository menu uses this
+  // route-level Connect dialog: the menu closes when GitHub's authorization
+  // popup takes focus, which would unmount a dialog hosted inside it.
+  const connectGitHubApp = useCallback(
+    () => setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport)),
+    [reconnectTransport, workspaceId],
+  );
   const onReconnect = useCallback(
     async (item: AuthNeededItem) => {
       if (item.authoritySource === "host") {
@@ -1095,6 +1107,7 @@ export function SessionRoute({
       onApprove={(approvalId) => approve(approvalId, "approve")}
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
+      onConnectGitHubApp={connectGitHubApp}
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
       onOpenSandboxFile={openSandboxFile}
@@ -1112,6 +1125,11 @@ export function SessionRoute({
             onClose={() => setReconnectRequest(null)}
             onComplete={() => {
               setReconnectRequest(null);
+              if (reconnectRequest.providerId === "github-app") {
+                toast.success("GitHub connected");
+                void context.refreshGitHub(workspaceId, undefined, { sync: true });
+                return;
+              }
               toast.success("Connection updated", {
                 description: "New tool calls can use the updated connection.",
               });
@@ -1485,6 +1503,8 @@ function SessionChatPane(props: {
   onApprove: (approvalId: string) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
+  /** Opens workspace GitHub App setup in the route-level Connect dialog. */
+  onConnectGitHubApp: () => void;
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
   onOpenSandboxFile: (path: string, line?: number) => void;
@@ -1708,7 +1728,7 @@ function SessionChatPane(props: {
         ? "personal"
         : "workspace",
   });
-  const repositories = useFollowUpRepositories(props.session);
+  const repositories = useFollowUpRepositories(props.session, props.onConnectGitHubApp);
   const firstPartyToolOptions = firstPartySessionToolOptionsFor(
     clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
   );
@@ -2096,6 +2116,9 @@ function SessionChatPane(props: {
   const modelPickerDisabled =
     composer.sending || composer.draftLoading || !hasComposerPolicy || Boolean(pendingRetryInput);
   const canChooseRecoveryModel = !modelPickerDisabled;
+  // Shown while the banner chunk loads or if it fails. On the free model the
+  // generic daily-limit line then gives way to the free-model copy; that brief
+  // text change keeps the free-model copy out of the direct session bundle.
   const failureFallback = props.failure ? (
     <div role="alert" className="mx-auto my-2 w-full max-w-3xl px-4 text-sm text-fg-muted sm:px-6">
       {
@@ -2416,6 +2439,9 @@ function SessionChatPane(props: {
             key={props.session.id}
             failure={props.failure}
             canChooseModel={canChooseRecoveryModel}
+            hasModelPicker={hasComposerPolicy}
+            freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}
+            subscriptions={connectableSubscriptions(context.clientConfig.models)}
             modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
             creditExhausted={props.creditExhausted}
             workspaceId={props.session.workspaceId}

@@ -39,7 +39,15 @@ mock.module("@/components/composer-mobile-plus", () => ({
     return null;
   },
 }));
-mock.module("sonner", () => ({ toast: { error: () => {}, success: () => {} } }));
+const toastErrors: string[] = [];
+mock.module("sonner", () => ({
+  toast: {
+    error: (message: string) => {
+      toastErrors.push(message);
+    },
+    success: () => {},
+  },
+}));
 
 const { WorkspaceComposerPlus } = await import("./workspace-composer-plus");
 
@@ -631,4 +639,39 @@ test("a pending OAuth start cannot redirect after a connection 403, even after a
     await act(async () => root.unmount());
     container.remove();
   }
+});
+
+test("a failed connector OAuth return explains an expired link and strips the callback", async () => {
+  const { oauthCallbackReasonMessage } = await import("@/lib/oauth-callback-messages");
+  (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL(
+    "http://127.0.0.1:3000/workspaces/workspace-a/sessions?keep=1&composer_connector=slack&integration_oauth=error&stage=state_verify&reason=state_expired",
+  );
+  toastErrors.length = 0;
+  context.client = {
+    listCapabilities: async () => ({ items: [] }),
+    listConnections: async () => [],
+    catalogAssetUrl: () => null,
+  } as unknown as OpenGeniBrowserClient;
+  const props = {
+    workspaceId: "workspace-a",
+    servers: [],
+    firstPartyTools: [],
+    fileUploadsEnabled: false,
+    onToolSelectionChange: () => {},
+  } as unknown as ComponentProps<typeof WorkspaceComposerPlus>;
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+  // The failure copy is loaded on demand, only when a callback failed.
+  await act(async () => {
+    for (let tick = 0; tick < 5; tick += 1) await Bun.sleep(0);
+  });
+  expect(window.location.search).toBe("?keep=1");
+  const expired = oauthCallbackReasonMessage("state_expired")!;
+  expect(expired).toContain("expired");
+  expect(toastErrors).toEqual([expired]);
+  expect(composer!.connectorActions?.error).toBe(expired);
+  await act(async () => root.unmount());
+  container.remove();
 });

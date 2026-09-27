@@ -69,6 +69,12 @@ export type ScheduledTaskFormState = {
   prompt: string;
   model: string;
   reasoningEffort: ReasoningEffort;
+  /**
+   * True while the model and reasoning shown are only the workspace's resolved
+   * default. The task is then saved without a model, so every run uses the
+   * default at that time (a later subscription or credit purchase included).
+   */
+  modelFollowsDefault?: boolean;
   scheduleType: "once" | "interval" | "calendar";
   runAt: string;
   intervalMinutes: number;
@@ -136,6 +142,8 @@ export function newScheduledTaskFormState(
   defaults: {
     model?: string;
     reasoningEffort?: ReasoningEffort;
+    /** The model/reasoning above are the resolved default, not a choice. */
+    modelFollowsDefault?: boolean;
     defaultSandboxBackend?: SandboxBackend;
     defaultMachineSandboxId?: string;
   } = {},
@@ -147,6 +155,7 @@ export function newScheduledTaskFormState(
     prompt: "",
     model: defaults.model ?? "",
     reasoningEffort: defaults.reasoningEffort ?? "high",
+    ...(defaults.modelFollowsDefault ? { modelFollowsDefault: true } : {}),
     scheduleType: "once",
     runAt: localDateTimeValue(new Date(Date.now() + 60 * 60 * 1000)),
     intervalMinutes: 60,
@@ -177,6 +186,7 @@ export function recurringSessionTaskFormState(
   defaults: {
     model?: string;
     reasoningEffort?: ReasoningEffort;
+    modelFollowsDefault?: boolean;
     defaultSandboxBackend?: SandboxBackend;
     defaultMachineSandboxId?: string;
   } = {},
@@ -198,6 +208,7 @@ export function formStateFromScheduledTask(
   defaults: {
     model?: string;
     reasoningEffort?: ReasoningEffort;
+    modelFollowsDefault?: boolean;
     defaultSandboxBackend?: SandboxBackend;
     defaultMachineSandboxId?: string;
   } = {},
@@ -236,6 +247,12 @@ export function formStateFromScheduledTask(
     prompt: task.agentConfig.prompt,
     model: task.agentConfig.model ?? defaults.model ?? "",
     reasoningEffort: task.agentConfig.reasoningEffort ?? defaults.reasoningEffort ?? "high",
+    // A task saved without any model policy keeps following the default; one
+    // that names a model or reasoning keeps that choice.
+    modelFollowsDefault:
+      !task.agentConfig.model &&
+      !task.agentConfig.reasoningEffort &&
+      defaults.modelFollowsDefault === true,
     runMode: task.runMode,
     targetSessionId: task.targetSessionId ?? "",
     executionTarget:
@@ -367,8 +384,12 @@ export function agentConfigFromFormState(
     tools,
     metadata: existingTask?.agentConfig.metadata ?? {},
     ...(form.slackBotConnectionId ? { slackBotConnectionId: form.slackBotConnectionId } : {}),
-    ...(form.model ? { model: form.model } : {}),
-    reasoningEffort: form.reasoningEffort,
+    ...(form.modelFollowsDefault
+      ? {}
+      : {
+          ...(form.model ? { model: form.model } : {}),
+          reasoningEffort: form.reasoningEffort,
+        }),
     ...(form.runMode !== "existing_session" &&
     form.executionTarget === "machine" &&
     form.machineSandboxId

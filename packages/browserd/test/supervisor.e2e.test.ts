@@ -7,6 +7,7 @@ import type {
   BrowserObservation,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
+import { resolvePinnedHeadlessShell } from "../src/headless-shell";
 import { AgentBrowserDriver, AgentBrowserJsonRunner, BrowserSupervisor } from "../src";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
@@ -14,7 +15,11 @@ const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 e2e("runs multiple real browser sessions through one placement supervisor", async () => {
   const directory = await mkdtemp("/tmp/ogb-supervisor-e2e-");
   const socketDirectory = await mkdtemp("/tmp/ogs-");
+  const headlessShell = process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY
+    ? await resolvePinnedHeadlessShell(process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY)
+    : undefined;
   const supervisor = await BrowserSupervisor.open({
+    ...(headlessShell ? { headlessShell } : {}),
     rootDirectory: join(directory, "state"),
     socketRootDirectory: socketDirectory,
   });

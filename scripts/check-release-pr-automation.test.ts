@@ -4368,6 +4368,8 @@ describe("workflow contracts", () => {
           "/tmp/opengeni-onboarding-evidence/onboarding-owner-desktop-1440.png",
           "/tmp/opengeni-onboarding-evidence/onboarding-setup-mobile-390.png",
           "/tmp/opengeni-onboarding-evidence/onboarding-registered-mobile-320.png",
+          "/tmp/opengeni-onboarding-evidence/contrast-failure.json",
+          "/tmp/opengeni-onboarding-evidence/contrast-failure.png",
         ],
       },
     } as const;

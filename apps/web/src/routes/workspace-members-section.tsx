@@ -1,4 +1,5 @@
 import { Link } from "@tanstack/react-router";
+import { SettingsSection } from "@/components/settings/settings-layout";
 import {
   ArrowUpRightIcon,
   Loader2Icon,
@@ -333,220 +334,221 @@ function MembersSectionContent({
   }
 
   return (
-    <section className="grid gap-2">
-      <div className="flex items-baseline justify-between gap-3">
-        <h2 className="flex items-center gap-1.5 text-sm font-medium">
-          <UsersIcon className="size-3.5 text-brand" />
-          People with access
-        </h2>
-        {canManage ? (
+    <SettingsSection
+      id="workspace-members-heading"
+      title="People with access"
+      action={
+        canManage ? (
           <Button type="button" size="sm" onClick={openAddMemberDialog}>
             <PlusIcon className="size-3.5" />
             Add member
           </Button>
+        ) : null
+      }
+    >
+      <div className="grid gap-3">
+        <Notice title="Workspace access is managed from the organization">
+          This workspace is permanently owned by its organization. Granting or revoking access here
+          changes named roles only within this organization. Cross-organization transfer and
+          Personal workspace transfer remain unsupported.
+          <Button asChild type="button" variant="secondary" size="sm" className="mt-2">
+            <Link
+              to="/workspaces/$workspaceId/organization"
+              params={{ workspaceId }}
+              search={{ section: "overview" }}
+            >
+              Open organization settings
+              <ArrowUpRightIcon className="size-3.5" />
+            </Link>
+          </Button>
+        </Notice>
+
+        {!membersLoaded ? (
+          <div className="grid gap-2">
+            <Skeleton className="h-16 rounded-lg" />
+            <Skeleton className="h-16 rounded-lg" />
+          </div>
         ) : null}
-      </div>
 
-      <Notice title="Workspace access is managed from the organization">
-        This workspace is permanently owned by its organization. Granting or revoking access here
-        changes named roles only within this organization. Cross-organization transfer and Personal
-        workspace transfer remain unsupported.
-        <Button asChild type="button" variant="secondary" size="sm" className="mt-2">
-          <Link
-            to="/workspaces/$workspaceId/organization"
-            params={{ workspaceId }}
-            search={{ section: "overview" }}
-          >
-            Open organization settings
-            <ArrowUpRightIcon className="size-3.5" />
-          </Link>
-        </Button>
-      </Notice>
+        {membersLoaded && members.length === 0 && !membersError ? (
+          <EmptyState
+            icon={<UsersIcon className="size-4" />}
+            title="No members yet"
+            description="Add someone to start collaborating in this workspace."
+          />
+        ) : null}
 
-      {!membersLoaded ? (
-        <div className="grid gap-2">
-          <Skeleton className="h-16 rounded-lg" />
-          <Skeleton className="h-16 rounded-lg" />
-        </div>
-      ) : null}
-
-      {membersLoaded && members.length === 0 && !membersError ? (
-        <EmptyState
-          icon={<UsersIcon className="size-4" />}
-          title="No members yet"
-          description="Add someone to start collaborating in this workspace."
-        />
-      ) : null}
-
-      {members.length > 0 ? (
-        <div className="divide-y divide-border/70 rounded-lg border border-border bg-surface/40">
-          {members.map((member) => {
-            const label = memberLabel(member);
-            const currentLevel = workspaceAccessLevels.find(
-              (level) =>
-                level.role === member.role &&
-                new Set(level.permissions).size === new Set(member.permissions).size &&
-                level.permissions.every((permission) => member.permissions.includes(permission)),
-            );
-            const roleValue = currentLevel?.role ?? "custom";
-            const isSelf = member.subjectId === context.accessContext.subjectId;
-            return (
-              <div
-                key={member.subjectId}
-                className="grid gap-3 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(12rem,auto)_auto] sm:items-center"
-              >
-                <div className="flex min-w-0 items-center gap-3">
-                  <div className="flex size-9 shrink-0 items-center justify-center rounded-full border border-brand/25 bg-brand/10 text-xs font-semibold text-brand">
-                    {label.slice(0, 1).toUpperCase()}
+        {members.length > 0 ? (
+          <div className="divide-y divide-border/70">
+            {members.map((member) => {
+              const label = memberLabel(member);
+              const currentLevel = workspaceAccessLevels.find(
+                (level) =>
+                  level.role === member.role &&
+                  new Set(level.permissions).size === new Set(member.permissions).size &&
+                  level.permissions.every((permission) => member.permissions.includes(permission)),
+              );
+              const roleValue = currentLevel?.role ?? "custom";
+              const isSelf = member.subjectId === context.accessContext.subjectId;
+              return (
+                <div
+                  key={member.subjectId}
+                  className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(12rem,auto)_auto] sm:items-center"
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <div className="flex size-9 shrink-0 items-center justify-center rounded-full border border-brand/25 bg-brand/10 text-xs font-semibold text-brand">
+                      {label.slice(0, 1).toUpperCase()}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-fg">
+                        {label}{" "}
+                        {isSelf ? (
+                          <span className="text-xs font-normal text-fg-subtle">(you)</span>
+                        ) : null}
+                      </p>
+                      <p className="truncate text-xs text-fg-muted">
+                        {roleValue === "custom"
+                          ? "Custom access"
+                          : workspaceAccessLevels.find((level) => level.role === roleValue)
+                              ?.description}
+                      </p>
+                    </div>
                   </div>
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-fg">
-                      {label}{" "}
-                      {isSelf ? (
-                        <span className="text-xs font-normal text-fg-subtle">(you)</span>
-                      ) : null}
-                    </p>
-                    <p className="truncate text-xs text-fg-muted">
+                  {canManage && !isSelf ? (
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <Select
+                        aria-label={`Workspace access for ${label}`}
+                        value={roleValue}
+                        disabled={busy}
+                        onChange={(event) =>
+                          void changeMemberRole(member, event.target.value as WorkspaceAccessLevel)
+                        }
+                      >
+                        {roleValue === "custom" ? (
+                          <option value="custom" disabled>
+                            Custom access
+                          </option>
+                        ) : null}
+                        {workspaceAccessLevels.map((level) => (
+                          <option key={level.role} value={level.role}>
+                            {level.label}
+                          </option>
+                        ))}
+                      </Select>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={busy}
+                        onClick={() =>
+                          setCustomEditor({
+                            member,
+                            permissions: new Set(member.permissions),
+                          })
+                        }
+                      >
+                        <SlidersHorizontalIcon className="size-3.5" />
+                        Fine-tune
+                      </Button>
+                    </div>
+                  ) : (
+                    <span className="text-sm text-fg-muted">
                       {roleValue === "custom"
                         ? "Custom access"
-                        : workspaceAccessLevels.find((level) => level.role === roleValue)
-                            ?.description}
-                    </p>
+                        : workspaceAccessLevels.find((level) => level.role === roleValue)?.label}
+                    </span>
+                  )}
+                  <div className="flex justify-end">
+                    {canManage && !isSelf ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={busy}
+                        onClick={() => setRemoveTarget(member)}
+                      >
+                        Remove
+                      </Button>
+                    ) : null}
                   </div>
                 </div>
-                {canManage && !isSelf ? (
-                  <div className="flex min-w-0 flex-wrap items-center gap-2">
-                    <Select
-                      aria-label={`Workspace access for ${label}`}
-                      value={roleValue}
-                      disabled={busy}
-                      onChange={(event) =>
-                        void changeMemberRole(member, event.target.value as WorkspaceAccessLevel)
-                      }
-                    >
-                      {roleValue === "custom" ? (
-                        <option value="custom" disabled>
-                          Custom access
-                        </option>
-                      ) : null}
-                      {workspaceAccessLevels.map((level) => (
-                        <option key={level.role} value={level.role}>
-                          {level.label}
-                        </option>
-                      ))}
-                    </Select>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() =>
-                        setCustomEditor({
-                          member,
-                          permissions: new Set(member.permissions),
-                        })
-                      }
-                    >
-                      <SlidersHorizontalIcon className="size-3.5" />
-                      Fine-tune
-                    </Button>
-                  </div>
-                ) : (
-                  <span className="text-sm text-fg-muted">
-                    {roleValue === "custom"
-                      ? "Custom access"
-                      : workspaceAccessLevels.find((level) => level.role === roleValue)?.label}
-                  </span>
-                )}
-                <div className="flex justify-end">
-                  {canManage && !isSelf ? (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => setRemoveTarget(member)}
-                    >
-                      Remove
-                    </Button>
-                  ) : null}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      ) : null}
-
-      {membersError ? (
-        <Notice
-          title="Workspace members unavailable"
-          action={
-            <Button type="button" size="sm" variant="ghost" onClick={() => void refresh()}>
-              Retry
-            </Button>
-          }
-        >
-          {membersError.message}
-        </Notice>
-      ) : null}
-
-      {canManage && slackAccessRequests.length > 0 ? (
-        <div className="grid gap-2 rounded-lg border border-border bg-surface-2/35 p-3">
-          <div>
-            <p className="text-xs font-medium text-fg">Pending Slack access requests</p>
-            <p className="mt-0.5 text-2xs text-fg-subtle">
-              Approval grants the standard member permissions and completes Slack identity linking.
-            </p>
+              );
+            })}
           </div>
-          {slackAccessRequests.map((request) => (
-            <div
-              key={request.id}
-              className="flex flex-col gap-2 rounded-md border border-border/70 bg-surface px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
-            >
-              <div className="min-w-0">
-                <p className="truncate text-xs font-medium text-fg">
-                  {request.subjectLabel ?? "Signed-in OpenGeni user"}
-                </p>
-                <p className="text-2xs text-fg-subtle">
-                  Expires {new Date(request.expiresAt).toLocaleString()}
-                </p>
-              </div>
-              <div className="flex shrink-0 gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => void approveSlackAccess(request)}
-                >
-                  Approve
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  disabled={busy}
-                  onClick={() => void denySlackAccess(request)}
-                >
-                  Deny
-                </Button>
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : null}
+        ) : null}
 
-      {canManage && slackAccessRequestsError ? (
-        <Notice
-          title="Pending Slack access requests unavailable"
-          action={
-            <Button type="button" size="sm" variant="ghost" onClick={() => void refresh()}>
-              Retry
-            </Button>
-          }
-        >
-          {slackAccessRequestsError.message}
-        </Notice>
-      ) : null}
+        {membersError ? (
+          <Notice
+            title="Workspace members unavailable"
+            action={
+              <Button type="button" size="sm" variant="ghost" onClick={() => void refresh()}>
+                Retry
+              </Button>
+            }
+          >
+            {membersError.message}
+          </Notice>
+        ) : null}
+
+        {canManage && slackAccessRequests.length > 0 ? (
+          <div className="grid gap-2 rounded-lg border border-border bg-surface-2/35 p-3">
+            <div>
+              <p className="text-xs font-medium text-fg">Pending Slack access requests</p>
+              <p className="mt-0.5 text-2xs text-fg-subtle">
+                Approval grants the standard member permissions and completes Slack identity
+                linking.
+              </p>
+            </div>
+            {slackAccessRequests.map((request) => (
+              <div
+                key={request.id}
+                className="flex flex-col gap-2 rounded-md border border-border/70 bg-surface px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-medium text-fg">
+                    {request.subjectLabel ?? "Signed-in OpenGeni user"}
+                  </p>
+                  <p className="text-2xs text-fg-subtle">
+                    Expires {new Date(request.expiresAt).toLocaleString()}
+                  </p>
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => void approveSlackAccess(request)}
+                  >
+                    Approve
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={() => void denySlackAccess(request)}
+                  >
+                    Deny
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {canManage && slackAccessRequestsError ? (
+          <Notice
+            title="Pending Slack access requests unavailable"
+            action={
+              <Button type="button" size="sm" variant="ghost" onClick={() => void refresh()}>
+                Retry
+              </Button>
+            }
+          >
+            {slackAccessRequestsError.message}
+          </Notice>
+        ) : null}
+      </div>
 
       <Dialog
         open={addMemberOpen}
@@ -802,6 +804,6 @@ function MembersSectionContent({
         confirmLabel="Remove access"
         onConfirm={removeMember}
       />
-    </section>
+    </SettingsSection>
   );
 }

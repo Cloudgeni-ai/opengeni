@@ -10,6 +10,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   BrowserSupervisor,
+  SqliteBrowserOperationJournal,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
   restoreEncryptedBrowserProfile,
   type BrowserStateUploadAuthority,
@@ -158,50 +159,83 @@ describe("BrowserSupervisor", () => {
     );
   });
 
-  test("repairs a lost managed browser without replaying an ambiguous action", async () => {
-    let firstDriverLost = false;
-    let factoryCalls = 0;
-    let dispatches = 0;
+  test.each(["chromium", "lightpanda"] as const)(
+    "repairs a lost managed %s browser without replaying an ambiguous action",
+    async (engine) => {
+      let firstDriverLost = false;
+      let factoryCalls = 0;
+      let dispatches = 0;
+      await withSupervisor(
+        async ({ supervisor }) => {
+          const session = reference(11);
+          const created = await supervisor.createSession({
+            ...session,
+            headed: false,
+            initialUrl: "https://recovery.test/",
+            transport: { kind: "managed", engine },
+          });
+          const operationId = randomUUID();
+          const receipt = await supervisor.action(command(created.observation, operationId));
+          expect(receipt.state).toBe("outcome_unknown");
+          expect(receipt.error?.code).toBe("controller_lost");
+          expect(dispatches).toBe(1);
+          expect(factoryCalls).toBe(2);
+
+          const recovered = await supervisor.listTargets(session);
+          expect(recovered).toHaveLength(1);
+          expect(recovered[0]!.id).not.toBe(created.observation.target.id);
+          expect(recovered[0]!.url).toBe("https://recovery.test/");
+
+          expect(await supervisor.action(command(created.observation, operationId))).toEqual(
+            receipt,
+          );
+          expect(dispatches).toBe(1);
+          const stale = await supervisor.action(command(created.observation));
+          expect(stale.state).toBe("failed");
+          expect(stale.error?.code).toBe("target_not_found");
+        },
+        {
+          onFactory: () => {
+            factoryCalls += 1;
+          },
+          driverHooks: {
+            available: (instance) => instance > 1 || !firstDriverLost,
+            async dispatch(instance) {
+              dispatches += 1;
+              if (instance === 1) {
+                firstDriverLost = true;
+                throw new Error("fixture browser transport disappeared after dispatch");
+              }
+            },
+          },
+        },
+      );
+    },
+  );
+
+  test("refuses implicit headless-shell recovery that would discard uncaptured session authentication", async () => {
+    let available = true;
+    let factories = 0;
     await withSupervisor(
       async ({ supervisor }) => {
         const session = reference(11);
-        const created = await supervisor.createSession({
-          ...session,
-          headed: false,
-          initialUrl: "https://recovery.test/",
+        await supervisor.createSession({ ...session, headed: false });
+        available = false;
+        await expect(supervisor.listTargets(session)).rejects.toMatchObject({
+          code: "resource_unavailable",
         });
-        const operationId = randomUUID();
-        const receipt = await supervisor.action(command(created.observation, operationId));
-        expect(receipt.state).toBe("outcome_unknown");
-        expect(receipt.error?.code).toBe("controller_lost");
-        expect(dispatches).toBe(1);
-        expect(factoryCalls).toBe(2);
-
-        const recovered = await supervisor.listTargets(session);
-        expect(recovered).toHaveLength(1);
-        expect(recovered[0]!.id).not.toBe(created.observation.target.id);
-        expect(recovered[0]!.url).toBe("https://recovery.test/");
-
-        expect(await supervisor.action(command(created.observation, operationId))).toEqual(receipt);
-        expect(dispatches).toBe(1);
-        const stale = await supervisor.action(command(created.observation));
-        expect(stale.state).toBe("failed");
-        expect(stale.error?.code).toBe("target_not_found");
+        await expect(supervisor.listTargets(session)).rejects.toThrow(
+          "restore saved browser state",
+        );
+        expect(factories).toBe(1);
+        await supervisor.endSession(session, { removeState: true });
+        expect(supervisor.listSessions()).toEqual([]);
       },
       {
         onFactory: () => {
-          factoryCalls += 1;
+          factories += 1;
         },
-        driverHooks: {
-          available: (instance) => instance > 1 || !firstDriverLost,
-          async dispatch(instance) {
-            dispatches += 1;
-            if (instance === 1) {
-              firstDriverLost = true;
-              throw new Error("fixture browser transport disappeared after dispatch");
-            }
-          },
-        },
+        driverHooks: { available: () => available, requiresExplicitProfileRestore: true },
       },
     );
   });
@@ -328,6 +362,139 @@ describe("BrowserSupervisor", () => {
         ).toBe(second.browserSessionId);
       },
       { maxSessions: 1 },
+    );
+  });
+
+  test("retires lost ephemeral sessions before admission while preserving peers and generation fences", async () => {
+    const terminal = new Set<number>();
+    const closed: number[] = [];
+    await withSupervisor(
+      async ({ supervisor, contexts }) => {
+        const ephemeral = (i: number) => ({
+          ...reference(i),
+          headed: false,
+          transport: { kind: "managed" as const, ephemeralPartition: "a".repeat(64) },
+        });
+        const peer = await supervisor.createSession(ephemeral(1));
+        for (let i = 2; i <= 5; i++) {
+          const created = await supervisor.createSession(ephemeral(i));
+          const receipt = await supervisor.action(command(created.observation));
+          terminal.add(i);
+          expect(supervisor.listSessions()).toHaveLength(1);
+          // Retrying the lost generation triggers retirement, never a fresh identity.
+          await expect(supervisor.createSession(ephemeral(i))).rejects.toThrow(
+            "generation already issued",
+          );
+          expect(closed).toContain(i);
+          const journalPath = join(
+            contexts.get(reference(i).browserSessionId)!.sessionDirectory,
+            "operations.sqlite",
+          );
+          if (await exists(journalPath + "-wal"))
+            expect((await stat(journalPath + "-wal")).size).toBe(0);
+          const journal = await SqliteBrowserOperationJournal.open({
+            path: journalPath,
+            ...reference(i),
+          });
+          try {
+            expect(journal.read(receipt.operationId)?.receipt).toEqual(receipt);
+          } finally {
+            journal.close();
+          }
+          expect(
+            (await supervisor.observe(reference(1), peer.observation.target.id)).target.id,
+          ).toBe(peer.observation.target.id);
+        }
+        expect(closed).not.toContain(1);
+      },
+      {
+        maxSessions: 2,
+        ephemeralContextPoolEnabled: true,
+        driverHooks: {
+          isTerminal: (i) => terminal.has(i),
+          close: (i) => {
+            closed.push(i);
+          },
+        },
+      },
+    );
+  });
+
+  test("terminal retirement waits for dispatched receipt persistence before closing journals", async () => {
+    const dispatched = deferred(),
+      release = deferred();
+    let terminal = false,
+      closed = false;
+    await withSupervisor(
+      async ({ supervisor, contexts }) => {
+        const original = await supervisor.createSession({ ...reference(1), headed: false });
+        const operation = supervisor.action(command(original.observation));
+        await dispatched.promise;
+        terminal = true;
+        const replacement = supervisor.createSession({ ...reference(2), headed: false });
+        await Bun.sleep(0);
+        expect(closed).toBe(false);
+        release.resolve();
+        const receipt = await operation;
+        await replacement;
+        expect(closed).toBe(true);
+        const journal = await SqliteBrowserOperationJournal.open({
+          path: join(
+            contexts.get(reference(1).browserSessionId)!.sessionDirectory,
+            "operations.sqlite",
+          ),
+          ...reference(1),
+        });
+        try {
+          expect(journal.read(receipt.operationId)?.receipt).toEqual(receipt);
+        } finally {
+          journal.close();
+        }
+      },
+      {
+        maxSessions: 1,
+        driverHooks: {
+          isTerminal: (i) => i === 1 && terminal,
+          dispatch: async () => {
+            dispatched.resolve();
+            await release.promise;
+          },
+          close: (i) => {
+            if (i === 1) closed = true;
+          },
+        },
+      },
+    );
+  });
+
+  test("does not reclaim a terminal session when process cleanup fails", async () => {
+    let terminal = false,
+      permitClose = false,
+      factories = 0;
+    await withSupervisor(
+      async ({ supervisor }) => {
+        await supervisor.createSession({ ...reference(1), headed: false });
+        terminal = true;
+        await expect(supervisor.createSession({ ...reference(2), headed: false })).rejects.toThrow(
+          "cleanup did not complete cleanly",
+        );
+        expect(factories).toBe(1);
+        permitClose = true;
+        await supervisor.createSession({ ...reference(2), headed: false });
+        expect(factories).toBe(2);
+      },
+      {
+        maxSessions: 1,
+        onFactory: () => {
+          factories++;
+        },
+        driverHooks: {
+          isTerminal: (i) => i === 1 && terminal,
+          close: (i) => {
+            if (i === 1 && !permitClose) throw new Error("owned process cleanup failed");
+          },
+        },
+      },
     );
   });
 
@@ -776,6 +943,7 @@ async function withSupervisor(
   }) => Promise<void>,
   options: {
     maxSessions?: number;
+    ephemeralContextPoolEnabled?: boolean;
     onFactory?: () => void;
     driverHooks?: {
       start?: (instance: number) => void;
@@ -788,6 +956,9 @@ async function withSupervisor(
       ) => ReturnType<NonNullable<BrowserSupervisorDriver["externalAuth"]>>;
       engineVersion?: () => string;
       available?: (instance: number) => boolean;
+      isTerminal?: (instance: number) => boolean;
+      close?: (instance: number) => void;
+      requiresExplicitProfileRestore?: boolean;
     };
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
   } = {},
@@ -799,6 +970,7 @@ async function withSupervisor(
     rootDirectory: join(directory, "state"),
     socketRootDirectory: join(directory, "sockets"),
     ...(options.maxSessions ? { maxSessions: options.maxSessions } : {}),
+    ephemeralContextPoolEnabled: options.ephemeralContextPoolEnabled ?? false,
     createDriver: async (context) => {
       options.onFactory?.();
       contexts.set(context.browserSessionId, context);
@@ -828,6 +1000,9 @@ function fakeDriver(
     ) => ReturnType<NonNullable<BrowserSupervisorDriver["externalAuth"]>>;
     engineVersion?: () => string;
     available?: (instance: number) => boolean;
+    isTerminal?: (instance: number) => boolean;
+    close?: (instance: number) => void;
+    requiresExplicitProfileRestore?: boolean;
   } = {},
   instance = 1,
 ): BrowserSupervisorDriver {
@@ -869,6 +1044,7 @@ function fakeDriver(
     if (hooks.available && !hooks.available(instance)) throw new Error("driver unavailable");
   };
   return {
+    ...(hooks.requiresExplicitProfileRestore ? { requiresExplicitProfileRestore: true } : {}),
     async start(url) {
       requireOpen();
       hooks.start?.(instance);
@@ -1004,7 +1180,9 @@ function fakeDriver(
     async isAvailable() {
       return !closed && (hooks.available?.(instance) ?? true);
     },
+    isTerminal: () => hooks.isTerminal?.(instance) ?? false,
     async close() {
+      hooks.close?.(instance);
       closed = true;
     },
   };

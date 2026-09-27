@@ -5,6 +5,7 @@ import {
   contractForProfile,
   deploymentProfiles,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
+  JEV_CODE_SEARCH_PASSTHROUGH_ENV,
   generateRuntimeArtifacts,
   MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
   MODEL_CATALOG_MAINTENANCE_CUTOVER,
@@ -367,6 +368,20 @@ describe("deployment contract", () => {
     expect(missingOrigin.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_ENABLED=true");
     expect(missingOrigin.runtimeEnv).toContain("OPENGENI_PUBLIC_BASE_URL=");
     expect(missingOrigin.missingEnvVars).toContain("OPENGENI_PUBLIC_BASE_URL");
+  });
+
+  test("passes an operator documentation link through only when configured", () => {
+    const configured = generateRuntimeArtifacts(
+      deploymentProfiles["local-kubernetes"],
+      {},
+      { OPENGENI_DOCUMENTATION_URL: "none" },
+    );
+    expect(configured.runtimeEnv).toContain("OPENGENI_DOCUMENTATION_URL=none");
+    expect(configured.helmValuesYaml).toContain('OPENGENI_DOCUMENTATION_URL: "none"');
+
+    const unset = generateRuntimeArtifacts(deploymentProfiles["local-kubernetes"], {}, {});
+    expect(unset.runtimeEnv).not.toContain("OPENGENI_DOCUMENTATION_URL");
+    expect(unset.helmValuesYaml).not.toContain("OPENGENI_DOCUMENTATION_URL");
   });
 
   test("refuses the retired MCP-only trusted proxy hop setting", () => {
@@ -1806,6 +1821,42 @@ describe("deployment contract", () => {
       {},
     );
     for (const key of EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV) {
+      expect(absent.runtimeEnv).not.toContain(`${key}=`);
+      expect(absent.missingEnvVars).not.toContain(key);
+    }
+  });
+
+  test("passes Jev code search settings through only when configured", () => {
+    expect(JEV_CODE_SEARCH_PASSTHROUGH_ENV).toEqual([
+      "OPENGENI_JEV_API_KEY",
+      "OPENGENI_JEV_BASE_URL",
+      "OPENGENI_JEV_MODEL",
+      "OPENGENI_JEV_REQUEST_TIMEOUT_MS",
+      "OPENGENI_CODE_SEARCH_MODE",
+    ]);
+    const configured = generateRuntimeArtifacts(
+      withSandboxBackend("docker"),
+      {
+        temporal_host: { value: "host:7233" },
+        object_storage_bucket: { value: "opengeni-files" },
+        object_storage_azure_connection_string: { value: "x", sensitive: true },
+        helm_set_values: { value: {} },
+      },
+      { OPENGENI_JEV_API_KEY: "jev-key", OPENGENI_CODE_SEARCH_MODE: "opt_in" },
+    );
+    expect(configured.runtimeEnv).toContain("OPENGENI_JEV_API_KEY=jev-key");
+    expect(configured.runtimeEnv).toContain("OPENGENI_CODE_SEARCH_MODE=opt_in");
+    const absent = generateRuntimeArtifacts(
+      withSandboxBackend("docker"),
+      {
+        temporal_host: { value: "host:7233" },
+        object_storage_bucket: { value: "opengeni-files" },
+        object_storage_azure_connection_string: { value: "x", sensitive: true },
+        helm_set_values: { value: {} },
+      },
+      {},
+    );
+    for (const key of JEV_CODE_SEARCH_PASSTHROUGH_ENV) {
       expect(absent.runtimeEnv).not.toContain(`${key}=`);
       expect(absent.missingEnvVars).not.toContain(key);
     }

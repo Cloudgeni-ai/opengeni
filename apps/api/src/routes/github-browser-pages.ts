@@ -79,6 +79,66 @@ export function githubSetupPendingHtml(): string {
   );
 }
 
+/**
+ * Why a GitHub browser step could not continue. Browser navigation (a stale
+ * page-load link, GitHub's Cancel button, a non-owner) must land on a readable
+ * page with a way back, never on a raw JSON error body.
+ */
+export type GitHubConnectFailure =
+  | "expired"
+  | "cancelled"
+  | "not_owner"
+  | "forbidden"
+  | "policy_denied"
+  | "signed_out"
+  | "failed";
+
+const GITHUB_CONNECT_FAILURE_COPY: Record<GitHubConnectFailure, { title: string; body: string }> = {
+  expired: {
+    title: "This GitHub link expired",
+    body: "GitHub connection links stay valid for 10 minutes, and each one works once. Go back to OpenGeni and select Connect again to get a fresh link.",
+  },
+  cancelled: {
+    title: "GitHub connection cancelled",
+    body: "You cancelled on GitHub, so nothing was connected. Go back to OpenGeni and select Connect when you are ready.",
+  },
+  not_owner: {
+    title: "An owner needs to connect this account",
+    body: "Only the owner of the GitHub account, or an owner of the GitHub organization, can connect it to OpenGeni. Ask an owner to connect it, or install the app on an account you own.",
+  },
+  forbidden: {
+    title: "You can't manage GitHub here",
+    body: "Your OpenGeni access doesn't allow connecting GitHub for this workspace. Ask a workspace admin to connect it.",
+  },
+  policy_denied: {
+    title: "GitHub is turned off for your organization",
+    body: "Your organization's integration policy doesn't allow connecting GitHub. Ask an organization admin to allow it, then select Connect again.",
+  },
+  signed_out: {
+    title: "Sign in to continue",
+    body: "Your OpenGeni sign-in wasn't available when GitHub sent you back. Sign in to OpenGeni and select Connect again.",
+  },
+  failed: {
+    title: "GitHub couldn't finish connecting",
+    body: "Nothing was connected. Go back to OpenGeni and select Connect to try again.",
+  },
+};
+
+export function githubConnectFailureHtml(
+  failure: GitHubConnectFailure,
+  returnUrl: string,
+  detail?: string | null,
+): string {
+  const copy = GITHUB_CONNECT_FAILURE_COPY[failure];
+  const note = detail?.trim()
+    ? `<p class="note">Details: ${escapeHtml(detail.trim().slice(0, 300))}</p>`
+    : "";
+  return page(
+    copy.title,
+    `<h1>${escapeHtml(copy.title)}</h1><p class="intro">${escapeHtml(copy.body)}</p><a class="button" href="${escapeHtml(returnUrl)}">Back to OpenGeni</a>${note}`,
+  );
+}
+
 export function githubSuccessHtml(envLines: string[]): string {
   const escaped = escapeHtml(envLines.join("\n"));
   return page(

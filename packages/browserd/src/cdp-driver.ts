@@ -1,3 +1,7 @@
+import {
+  navigateBrowserMetadataDocument,
+  navigateToInterceptedMetadataDocument,
+} from "./browser-metadata";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
 import {
@@ -31,8 +35,10 @@ import {
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
   type BrowserProtectedAuthObservation as BrowserProtectedAuthObservationValue,
   type BrowserTarget as BrowserTargetValue,
+  type InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import {
+  InteractionControllerError,
   InteractionDefiniteDriverError,
   InteractionOutcomeUnknownDriverError,
   type BrowserInteractionDriver,
@@ -44,7 +50,13 @@ import {
   type CdpAccessibilitySnapshot,
   type CdpAxNode,
 } from "./cdp-accessibility";
-import { CdpConnection, CdpProtocolError, CdpTransportError, type CdpEvent } from "./cdp";
+import {
+  CdpCommandTimeoutError,
+  CdpConnection,
+  CdpProtocolError,
+  CdpTransportError,
+  type CdpEvent,
+} from "./cdp";
 import {
   LatestBrowserFrameSubscription,
   assertImageDimensions,
@@ -64,6 +76,12 @@ import type {
   BrowserDownloadProgressResult,
 } from "./downloads";
 import type { AgentBrowserJsonCommand } from "./runner";
+import {
+  captureHeadlessSessionCookies,
+  restoreHeadlessSessionCookies,
+  validateHeadlessSessionCookies,
+  type HeadlessSessionCookies,
+} from "./headless-session-cookies";
 
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 const BROWSER_START_TIMEOUT_MS = 30_000;
@@ -73,6 +91,9 @@ const TARGET_CREATION_SETTLE_TIMEOUT_MS = 5_000;
 // background target never produces screencast events.
 const FRAME_FALLBACK_INTERVAL_MS = 100;
 const FRAME_CAPTURE_TIMEOUT_MS = 2_000;
+// Still captures share the target/input queue. Bound the whole read phase so
+// a renderer that stops producing pixels cannot hold it for successive CDP deadlines.
+const SCREENSHOT_CAPTURE_TIMEOUT_MS = 10_000;
 const FRAME_CAPTURE_FAILURE_LIMIT = 3;
 const MAX_FRAME_PROFILES_PER_TARGET = 4;
 const MAX_FRAME_SUBSCRIPTIONS_PER_TARGET = 32;
@@ -130,6 +151,7 @@ export type BrowserExternalAuthDispatchResult = {
 };
 
 export type BrowserCdpConnection = {
+  onDisconnect?: (listener: () => void) => () => void;
   send<T = Record<string, unknown>>(
     method: string,
     params?: Readonly<Record<string, unknown>>,
@@ -149,6 +171,7 @@ export type BrowserCdpConnection = {
 };
 
 type TargetInfo = {
+  browserContextId: string | null;
   targetId: string;
   type: string;
   title: string;
@@ -180,7 +203,7 @@ type TargetScreencast = {
   options: NormalizedBrowserFrameStreamOptions;
   sequence: number;
   lastFrameAt: number;
-  captureDeviceScaleFactor: number | null;
+  captureScale: { width: number; height: number; scale: number } | null;
   fallbackAbort: AbortController;
   capturePromise: Promise<void> | null;
   subscriptions: Map<string, LatestBrowserFrameSubscription>;
@@ -261,6 +284,14 @@ export type AgentBrowserDriverOptions = {
   frameStreaming?: boolean;
   emulation?: BrowserSessionEmulation;
   permissionControl?: boolean;
+  /** Experimental ephemeral context lease. Never a durable browser profile. */
+  browserContextId?: string;
+  /** Headless shell has no chrome://version page. Read its real Client Hints
+   * from a controller-intercepted secure-origin document instead. */
+  userAgentMetadataSource?: "chrome_internal" | "intercepted_local";
+  /** Set only by the verified, dedicated managed headless-shell launcher. */
+  preserveHeadlessSessionCookies?: boolean;
+  headlessSessionCookies?: HeadlessSessionCookies;
 };
 
 export type BrowserSessionEmulation = {
@@ -306,6 +337,10 @@ function hasBrowserEmulation(
  * connection and keeps an independent causal queue for every target.
  */
 export class AgentBrowserDriver implements BrowserInteractionDriver {
+  readonly fencedInputBatches = true;
+  get focusedInputObservations(): boolean {
+    return this.engine !== "lightpanda";
+  }
   private readonly browserSessionId: string;
   private readonly controllerGeneration: string;
   private readonly runner: BrowserCommandRunner;
@@ -322,6 +357,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly frameStreaming: boolean;
   private readonly emulation: BrowserSessionEmulation | null;
   private readonly permissionControl: boolean;
+  private readonly browserContextId: string | undefined;
+  private readonly ownedDownloads = new Set<string>();
+  private readonly userAgentMetadataSource: "chrome_internal" | "intercepted_local";
   private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
   private readonly resolveWorkspaceFiles:
     | ((operationId: string, workspaceFileIds: readonly string[]) => Promise<readonly string[]>)
@@ -348,8 +386,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     { digest: string; result: BrowserExternalAuthResultValue }
   >();
   private started = false;
+  private readonly preserveHeadlessSessionCookies: boolean;
+  private headlessSessionCookies: HeadlessSessionCookies | null;
 
   constructor(options: AgentBrowserDriverOptions) {
+    if (
+      options.browserContextId !== undefined &&
+      (!options.browserContextId ||
+        options.targetLifecycle !== "cdp" ||
+        options.foregroundManagedTabs ||
+        options.runner.externalAuth ||
+        (options.engine !== undefined && options.engine !== "chromium"))
+    ) {
+      throw new Error(
+        "ephemeral contexts require Chromium CDP lifecycle without foreground or external auth",
+      );
+    }
+    this.browserContextId = options.browserContextId;
     this.browserSessionId = options.browserSessionId;
     this.controllerGeneration = options.controllerGeneration;
     this.runner = options.runner;
@@ -357,12 +410,25 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.createId = options.createId ?? randomUUID;
     this.physicalGeneration = randomUUID();
     this.engine = options.engine ?? "chromium";
+    this.preserveHeadlessSessionCookies = options.preserveHeadlessSessionCookies ?? false;
+    if (
+      (this.preserveHeadlessSessionCookies || options.headlessSessionCookies) &&
+      (this.engine !== "chromium" || (options.targetLifecycle ?? "runner") !== "runner")
+    ) {
+      throw new Error("Headless cookie state requires its dedicated managed launcher");
+    }
+    if (options.headlessSessionCookies && !this.preserveHeadlessSessionCookies)
+      throw new Error("Headless cookie state requires its verified shell launcher");
+    this.headlessSessionCookies = options.headlessSessionCookies
+      ? validateHeadlessSessionCookies(options.headlessSessionCookies)
+      : null;
     this.targetLifecycle = options.targetLifecycle ?? "runner";
     this.tabControl = options.tabControl ?? true;
     this.foregroundManagedTabs = options.foregroundManagedTabs ?? false;
     this.frameStreaming = options.frameStreaming ?? true;
     this.emulation = hasBrowserEmulation(options.emulation) ? options.emulation : null;
     this.permissionControl = options.permissionControl ?? true;
+    this.userAgentMetadataSource = options.userAgentMetadataSource ?? "chrome_internal";
     this.resolveWorkspaceFiles = options.resolveWorkspaceFiles;
     this.downloadDirectory = options.downloadDirectory
       ? resolvePath(options.downloadDirectory)
@@ -387,7 +453,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection = await this.ensureConnection();
       const created = await connection.send<{ targetId?: unknown }>(
         "Target.createTarget",
-        { url: "about:blank", background: true },
+        { url: "about:blank", background: true, ...this.contextScope() },
         { timeoutMs: BROWSER_START_TIMEOUT_MS },
       );
       launched = {
@@ -396,11 +462,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       };
     } else {
       connection = await this.ensureConnection();
+      if (this.headlessSessionCookies) {
+        await restoreHeadlessSessionCookies(connection, this.headlessSessionCookies);
+        this.headlessSessionCookies = null;
+      }
       let page = visiblePageTargets(await this.targetInfos(connection))[0];
       if (!page) {
         const created = await connection.send<{ targetId?: unknown }>(
           "Target.createTarget",
-          { url: "about:blank", background: true },
+          { url: "about:blank", background: true, ...this.contextScope() },
           { timeoutMs: BROWSER_START_TIMEOUT_MS },
         );
         if (typeof created.targetId !== "string") {
@@ -428,23 +498,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return await this.observe(target.targetId);
   }
 
-  /** Bounded liveness probe for the supervisor's recovery path. It never
-   * starts or repairs the browser, preserving one recovery authority. */
+  /** Bounded browser liveness probe for the supervisor's recovery path.
+   * Renderer stalls and command deadlines do not prove browser loss: replacing
+   * a live browser would discard document state that URL restoration cannot recover. */
   async isAvailable(): Promise<boolean> {
     if (!this.started || !this.connection) return false;
     try {
       await this.connection.send("Browser.getVersion", {}, { timeoutMs: 2_000 });
-      const selected = this.selectedTargetId ? this.states.get(this.selectedTargetId) : null;
-      if (selected) {
-        await this.connection.send(
-          "Page.getFrameTree",
-          {},
-          { sessionId: selected.sessionId, timeoutMs: 2_000 },
-        );
-      }
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      return error instanceof CdpCommandTimeoutError || !(error instanceof CdpTransportError);
     }
   }
 
@@ -465,8 +528,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     const connection = await this.ensureConnection();
-    const deferNavigation = this.emulation !== null && url !== "about:blank";
+    // Establish the blank document and target policies before remote navigation.
+    // A slow response must use the navigation budget, not the target-creation deadline.
+    const deferNavigation = url !== "about:blank";
     const result = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
+      ...this.contextScope(),
       url: deferNavigation ? "about:blank" : url,
       background: true,
     });
@@ -509,6 +575,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     for (const unsubscribe of this.browserUnsubscribe.splice(0)) unsubscribe();
     for (const targetId of [...this.states.keys()]) this.removeState(targetId);
     this.firstSeenAt.clear();
+    this.ownedDownloads.clear();
     const connection = this.connection;
     this.connection = null;
     this.connectionPromise = null;
@@ -552,6 +619,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async runtimeSnapshot(): Promise<BrowserRuntimeSnapshot> {
+    if (this.browserContextId) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        "ephemeral browser contexts cannot capture or restore durable profiles",
+      );
+    }
     const targets = await this.listTargets();
     const tabs = targets
       .filter((target) => target.kind === "page" || target.kind === "popup")
@@ -561,6 +634,22 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const engineVersion =
       rawVersion.length > 0 && Buffer.byteLength(rawVersion) <= 256 ? rawVersion : null;
     return { engine: this.engine, engineVersion, tabs };
+  }
+
+  /** Supervisor-only read after both action controllers have quiesced. Never
+   * exposed through the public browser observation/tool surface. */
+  async captureSessionCookies(): Promise<HeadlessSessionCookies | null> {
+    if (!this.preserveHeadlessSessionCookies) return null;
+    if (!this.started || !this.connection)
+      throw new Error("Headless cookie capture requires its active physical browser");
+    return await captureHeadlessSessionCookies(this.connection, {
+      browserSessionId: this.browserSessionId,
+      controllerGeneration: this.controllerGeneration,
+    });
+  }
+
+  get requiresExplicitProfileRestore(): boolean {
+    return this.preserveHeadlessSessionCookies;
   }
 
   async target(targetId: string): Promise<BrowserTargetValue | null> {
@@ -762,6 +851,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     targetId: string,
     options: BrowserScreenshotOptions = {},
   ): Promise<BrowserImageFrame> {
+    // Lightpanda 0.3.5 implements this CDP method with an embedded static PNG,
+    // not pixels from the current page. Never publish it as visual evidence.
+    if (this.engine === "lightpanda") {
+      throw new InteractionControllerError(
+        "unsupported",
+        "Lightpanda does not render page screenshots; use semantic observation",
+      );
+    }
     const normalized = normalizeScreenshotOptions(options);
     return await this.withTarget(
       targetId,
@@ -772,8 +869,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "browser screenshot is unavailable during protected authentication",
           );
         }
-        await this.refreshFrame(state);
-        const metrics = await this.layoutMetrics(state);
+        const deadline = Date.now() + SCREENSHOT_CAPTURE_TIMEOUT_MS;
+        await this.screenshotRead(
+          "Page.getFrameTree",
+          deadline,
+          async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
+        );
+        const metrics = await this.screenshotRead(
+          "Page.getLayoutMetrics",
+          deadline,
+          async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+        );
         const capture: Record<string, unknown> = {
           format: normalized.format,
           fromSurface: true,
@@ -798,10 +904,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             scale: 1,
           };
         }
-        const response = await this.sendTarget<{ data?: unknown }>(
-          state,
+        const response = await this.screenshotRead(
           "Page.captureScreenshot",
-          capture,
+          deadline,
+          async (timeoutMs) =>
+            await this.sendTarget<{ data?: unknown }>(state, "Page.captureScreenshot", capture, {
+              timeoutMs,
+            }),
         );
         const data = decodeBoundedBase64Image(response.data);
         if (this.protectedAuthQuiet(state)) {
@@ -835,7 +944,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       browserSessionId: this.browserSessionId,
       targetId,
     });
-    if (!this.frameStreaming) {
+    if (this.engine === "lightpanda" || !this.frameStreaming) {
       throw new InteractionDefiniteDriverError(
         "unsupported",
         "this browser engine does not support live frame streaming",
@@ -855,7 +964,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           options: normalized,
           sequence: 0,
           lastFrameAt: 0,
-          captureDeviceScaleFactor: null,
+          captureScale: null,
           fallbackAbort: new AbortController(),
           capturePromise: null,
           subscriptions: new Map(),
@@ -922,6 +1031,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     commandInput: BrowserActionCommandValue & { observationMode: "none" },
   ): Promise<null>;
   async dispatch(
+    commandInput: BrowserActionCommandValue & { observationMode: "input" },
+  ): Promise<BrowserObservationValue | null>;
+  async dispatch(
     commandInput: BrowserActionCommandValue & { observationMode?: "full" },
   ): Promise<BrowserObservationValue>;
   async dispatch(commandInput: BrowserActionCommandValue): Promise<BrowserObservationValue>;
@@ -942,6 +1054,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         let completedActions = 0;
         for (const action of actions) {
           try {
+            if (
+              completedActions > 0 &&
+              command.action.type === "batch" &&
+              command.action.fenceEachAction
+            ) {
+              await this.refreshFrame(state);
+              this.assertExpectedGenerations(command, state);
+            }
             await this.dispatchAction(state, action, command.operationId);
             completedActions += 1;
             if (state.dialog) {
@@ -971,6 +1091,48 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           }
         }
         if (command.observationMode === "none") return null;
+        if (command.observationMode === "input") {
+          // A live viewer already has pixels. Only native dropdowns need the
+          // semantic options that Chromium's page stream cannot paint. Keep
+          // ordinary clicks off the full accessibility/snapshot path.
+          if (
+            command.action.type !== "pointer" ||
+            command.action.action !== "click" ||
+            (command.action.button !== undefined && command.action.button !== "left") ||
+            state.dialog ||
+            this.protectedAuthQuiet(state) ||
+            !this.focusedInputObservations
+          )
+            return null;
+          try {
+            if (!(await this.mayHaveFocusedNativeSelect(state))) return null;
+            const currentInfo = await this.requireTargetInfo(
+              await this.ensureConnection(),
+              info.targetId,
+            );
+            const observed = await this.observeUnlocked(state, currentInfo);
+            // A focused iframe is a hint only. The authoritative AX focus and
+            // redacted DOM metadata must actually identify a native select.
+            const pending = [
+              ...(observed.semantic?.kind === "snapshot" ? observed.semantic.roots : []),
+            ];
+            while (pending.length) {
+              const node = pending.pop()!;
+              if (node.children) pending.push(...node.children);
+              if (
+                node.ref === observed.focusedRef &&
+                node.native?.platform === "dom" &&
+                isRecord(node.native.data) &&
+                node.native.data.kind === "native-select"
+              )
+                return observed;
+            }
+          } catch {
+            // The click already completed. An optional focus read must never
+            // turn it into a failed mutation or invite a duplicate click.
+          }
+          return null;
+        }
         const currentInfo = await this.requireTargetInfo(
           await this.ensureConnection(),
           info.targetId,
@@ -1066,7 +1228,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           this.assertProtectedAuthGenerations(command, state);
           for (const field of resolvedFields) {
             await this.focusNode(state, field.backendDOMNodeId);
-            await this.selectAllAndDelete(state);
+            await this.selectAllAndDelete(state, field.backendDOMNodeId);
             await this.sendActionTarget(state, "Input.insertText", {
               text: field.value,
             });
@@ -1191,6 +1353,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       this.userAgent = typeof version.userAgent === "string" ? version.userAgent : "";
       if (this.downloadDirectory) {
         await connection.send("Browser.setDownloadBehavior", {
+          ...this.contextScope(),
           behavior: "allowAndName",
           downloadPath: this.downloadDirectory,
           eventsEnabled: true,
@@ -1198,6 +1361,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       if (this.emulation?.geolocation) {
         await connection.send("Browser.grantPermissions", {
+          ...this.contextScope(),
           permissions: ["geolocation"],
         });
       }
@@ -1211,8 +1375,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           const state = [...this.states.values()].find(
             (candidate) => candidate.frame.id === frameId,
           );
+          // Browser download events are process-wide. Unknown frames must not
+          // become downloads belonging to another context.
+          if (this.browserContextId && !state) return;
           if (this.downloadEvents) {
             const guid = typeof event.params.guid === "string" ? event.params.guid : "";
+            if (this.browserContextId) this.ownedDownloads.add(guid);
             const suggestedFilename =
               typeof event.params.suggestedFilename === "string"
                 ? event.params.suggestedFilename
@@ -1241,6 +1409,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         connection.on("Browser.downloadProgress", (event) => {
           if (!this.downloadEvents) return;
           const guid = typeof event.params.guid === "string" ? event.params.guid : "";
+          if (this.browserContextId && !this.ownedDownloads.has(guid)) return;
           const state = event.params.state;
           if (state !== "inProgress" && state !== "completed" && state !== "canceled") return;
           const receivedBytes = event.params.receivedBytes;
@@ -1260,8 +1429,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               totalBytes: typeof totalBytes === "number" ? totalBytes : null,
             })
             .then(async ({ cancelReason }) => {
+              if (state !== "inProgress") this.ownedDownloads.delete(guid);
               if (!cancelReason) return;
-              await connection.send("Browser.cancelDownload", { guid }).catch(() => undefined);
+              await connection
+                .send("Browser.cancelDownload", { guid, ...this.contextScope() })
+                .catch(() => undefined);
               await this.downloadEvents?.reject(guid, cancelReason);
             })
             .catch(() => undefined);
@@ -1297,6 +1469,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     let targets = visiblePageTargets(await this.targetInfos(connection));
     if (targets.length === 0) {
       const created = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
+        ...this.contextScope(),
         url: "about:blank",
         background: true,
       });
@@ -1693,6 +1866,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     connection: BrowserCdpConnection,
   ): Promise<BrowserUserAgentMetadata> {
     const created = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
+      ...this.contextScope(),
       url: "about:blank",
       hidden: true,
     });
@@ -1713,7 +1887,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         connection.send("Page.enable", {}, { sessionId: attached.sessionId }),
         connection.send("Runtime.enable", {}, { sessionId: attached.sessionId }),
       ]);
-      await this.navigateForUserAgentMetadata(connection, attached.sessionId, "chrome://version/");
+      if (this.userAgentMetadataSource === "intercepted_local") {
+        await navigateToInterceptedMetadataDocument(connection, attached.sessionId);
+      } else {
+        await navigateBrowserMetadataDocument(connection, attached.sessionId, "chrome://version/");
+      }
       const evaluated = await connection.send<{
         result?: unknown;
         exceptionDetails?: unknown;
@@ -1756,29 +1934,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return metadata;
   }
 
-  private async navigateForUserAgentMetadata(
-    connection: BrowserCdpConnection,
-    sessionId: string,
-    url: string,
-  ): Promise<void> {
-    const loaded = connection.waitForEvent("Page.loadEventFired", {
-      sessionId,
-      timeoutMs: 5_000,
-    });
-    let navigation: { errorText?: unknown };
-    try {
-      navigation = await connection.send("Page.navigate", { url }, { sessionId });
-    } catch (error) {
-      await loaded.catch(() => undefined);
-      throw error;
-    }
-    if (typeof navigation.errorText === "string" && navigation.errorText) {
-      await loaded.catch(() => undefined);
-      throw new Error(`browser metadata navigation failed: ${navigation.errorText}`);
-    }
-    await loaded;
-  }
-
   private async observeUnlocked(
     state: TargetState,
     info: TargetInfo,
@@ -1791,6 +1946,52 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         : state.dialog
           ? emptyAccessibilitySnapshot()
           : await this.refreshAccessibility(state);
+    const focused = accessibility.focusedRef
+      ? accessibility.entriesByRef.get(accessibility.focusedRef)
+      : null;
+    if (!state.dialog && focused?.actions.includes("select") && focused.frameId) {
+      // Native popup windows are absent from page screenshots. Expose only the
+      // focused control, through the same isolated-world redaction and budget
+      // as focused DOM reads; never alter the page to draw a fake popup.
+      let read: unknown = null;
+      try {
+        read = await this.callOnNode(
+          state,
+          focused.backendDOMNodeId,
+          DOM_READ_FUNCTION,
+          [{ value: 16_384 }, { value: [] }, { value: true }],
+          { isolatedFrameId: focused.frameId },
+        );
+      } catch (error) {
+        // This optional projection may lose its node after the AX snapshot.
+        // Omit choices in that case; transport/context failures still propagate.
+        const disappeared =
+          (error instanceof CdpProtocolError &&
+            error.method === "DOM.resolveNode" &&
+            error.code === -32000 &&
+            error.message === "No node with given id found") ||
+          (error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found");
+        if (!disappeared) throw error;
+      }
+      if (
+        isRecord(read) &&
+        read.redacted === null &&
+        read.truncated === false &&
+        isRecord(read.select)
+      ) {
+        const visit = (nodes: typeof accessibility.roots): void => {
+          for (const node of nodes) {
+            if (node.ref === focused.ref)
+              node.native = {
+                platform: "dom",
+                data: read.select as NonNullable<InteractionSemanticNodeValue["native"]>["data"],
+              };
+            if (node.children) visit(node.children);
+          }
+        };
+        visit(accessibility.roots);
+      }
+    }
     return BrowserObservation.parse({
       protocolVersion: INTERACTION_PROTOCOL_VERSION,
       observationId: `observation-${this.createId()}`,
@@ -1810,6 +2011,32 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       dialog: state.dialog,
       observedAt: this.timestamp(),
     });
+  }
+
+  private async mayHaveFocusedNativeSelect(state: TargetState): Promise<boolean> {
+    const world = await this.sendTarget<{ executionContextId?: number }>(
+      state,
+      "Page.createIsolatedWorld",
+      { frameId: state.frame.id, worldName: "opengeni-dom-read" },
+      { timeoutMs: 500 },
+    );
+    if (!Number.isSafeInteger(world.executionContextId)) return false;
+    const result = await this.sendTarget<{ result?: { value?: unknown } }>(
+      state,
+      "Runtime.evaluate",
+      {
+        contextId: world.executionContextId,
+        expression: `(() => {
+          let element = document.activeElement;
+          for (let depth = 0; depth < 32 && element?.shadowRoot?.activeElement; depth++)
+            element = element.shadowRoot.activeElement;
+          return ["SELECT", "IFRAME", "FRAME"].includes(element?.tagName);
+        })()`,
+        returnByValue: true,
+      },
+      { timeoutMs: 500 },
+    );
+    return result.result?.value === true;
   }
 
   private async refreshAccessibility(state: TargetState): Promise<CdpAccessibilitySnapshot> {
@@ -1880,8 +2107,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     );
   }
 
-  private async refreshFrame(state: TargetState): Promise<void> {
-    const frame = await this.mainFrame(state.sessionId);
+  private async refreshFrame(state: TargetState, timeoutMs?: number): Promise<void> {
+    const frame = await this.mainFrame(state.sessionId, timeoutMs);
     if (frame.loaderId !== state.frame.loaderId || frame.id !== state.frame.id) {
       state.frame = frame;
       state.documentGeneration = documentGeneration(
@@ -1902,21 +2129,49 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
-  private async mainFrame(sessionId: string): Promise<MainFrame> {
-    return (await this.frameTree(sessionId)).frame;
+  private async mainFrame(sessionId: string, timeoutMs?: number): Promise<MainFrame> {
+    return (await this.frameTree(sessionId, timeoutMs)).frame;
   }
 
-  private async frameTree(sessionId: string): Promise<PageFrameTree> {
+  private async frameTree(sessionId: string, timeoutMs?: number): Promise<PageFrameTree> {
     const connection = await this.ensureConnection();
     const response = await connection.send<{ frameTree?: unknown }>(
       "Page.getFrameTree",
       {},
-      { sessionId },
+      { sessionId, ...(timeoutMs ? { timeoutMs } : {}) },
     );
     if (!isRecord(response.frameTree) || !isRecord(response.frameTree.frame)) {
       throw new Error("CDP returned an invalid frame tree");
     }
     return parseFrameTree(response.frameTree);
+  }
+
+  private async screenshotRead<T>(
+    stage: string,
+    deadline: number,
+    read: (timeoutMs: number) => Promise<T>,
+  ): Promise<T> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new InteractionControllerError(
+        "timeout",
+        `browser screenshot timed out during ${stage}`,
+        true,
+      );
+    }
+    try {
+      return await read(remaining);
+    } catch (error) {
+      if (!(error instanceof CdpTransportError)) throw error;
+      const timeout = error instanceof CdpCommandTimeoutError;
+      const failure = new InteractionControllerError(
+        timeout ? "timeout" : "resource_unavailable",
+        `browser screenshot ${timeout ? "timed out" : "unavailable"} during ${stage}`,
+        true,
+      );
+      failure.cause = error;
+      throw failure;
+    }
   }
 
   private async layoutMetrics(
@@ -1949,22 +2204,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (result.exceptionDetails || !isRecord(value)) {
       return null;
     }
-    const { width, height, visualWidth, visualHeight, deviceScaleFactor, maxTouchPoints } = value;
-    if (
-      ![width, height, visualWidth, visualHeight, deviceScaleFactor, maxTouchPoints].every(
-        (part) => typeof part === "number" && Number.isFinite(part),
-      )
-    ) {
-      return null;
-    }
-    return {
-      width: Number(width),
-      height: Number(height),
-      visualWidth: Number(visualWidth),
-      visualHeight: Number(visualHeight),
-      deviceScaleFactor: Number(deviceScaleFactor),
-      maxTouchPoints: Number(maxTouchPoints),
-    };
+    // A newly mapped headed window may report zero dimensions before layout.
+    // Keep the semantic observation usable without inventing viewport geometry.
+    const viewport = BrowserObservation.shape.viewport.safeParse(value);
+    return viewport.success ? (viewport.data ?? null) : null;
   }
 
   private imageFrame(options: {
@@ -2011,12 +2254,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       const metrics = await this.layoutMetrics(state, FRAME_CAPTURE_TIMEOUT_MS);
       const viewport = metrics.viewport;
-      const estimatedDeviceScaleFactor = expected.captureDeviceScaleFactor ?? 1;
-      let scale = Math.min(
-        1,
-        expected.options.maxWidth / (viewport.width * estimatedDeviceScaleFactor),
-        expected.options.maxHeight / (viewport.height * estimatedDeviceScaleFactor),
-      );
+      // Reuse the accepted clip scale for this viewport. Inferring a new device
+      // scale from rounded image pixels feeds quantization back into every frame
+      // and makes an unchanged mobile viewport oscillate in size.
+      const previous = expected.captureScale;
+      let scale =
+        previous?.width === viewport.width && previous.height === viewport.height
+          ? previous.scale
+          : Math.min(
+              1,
+              expected.options.maxWidth / viewport.width,
+              expected.options.maxHeight / viewport.height,
+            );
       let data: Uint8Array<ArrayBufferLike> = new Uint8Array();
       let dimensions = { width: 0, height: 0 };
       for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -2059,7 +2308,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       if (state.screencasts.get(expected.key) !== expected || this.protectedAuthQuiet(state))
         return;
-      expected.captureDeviceScaleFactor = finiteScale(dimensions.width / (viewport.width * scale));
+      expected.captureScale = { width: viewport.width, height: viewport.height, scale };
       const frame = this.imageFrame({
         state,
         sequence: ++expected.sequence,
@@ -2387,6 +2636,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         });
         return;
       case "viewport":
+        for (const stream of state.screencasts.values()) stream.captureScale = null;
         if (this.engine === "lightpanda") {
           throw new InteractionDefiniteDriverError(
             "unsupported",
@@ -2429,8 +2679,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "fill": {
         const node = await this.resolveLocator(state, action.locator);
         await this.focusNode(state, node.backendDOMNodeId);
-        await this.selectAllAndDelete(state);
-        if (action.value)
+        await this.selectAllAndDelete(state, node.backendDOMNodeId);
+        if (action.value || this.engine === "lightpanda")
           await this.sendActionTarget(state, "Input.insertText", {
             text: action.value,
           });
@@ -2452,6 +2702,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (action.locator) {
           const node = await this.resolveLocator(state, action.locator);
           await this.focusNode(state, node.backendDOMNodeId);
+        }
+        if (
+          action.text &&
+          this.engine === "lightpanda" &&
+          (await this.evaluate(state, LIGHTPANDA_TYPING_TARGET_EXPRESSION)) !== true
+        ) {
+          // Lightpanda 0.3.5 acknowledges insertText on contenteditable without
+          // inserting anything. Refuse before dispatch rather than certify it.
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            "Lightpanda typing requires an editable text input or textarea; use Chromium for rich-text editors",
+          );
         }
         if (action.text)
           await this.sendActionTarget(state, "Input.insertText", {
@@ -2618,6 +2880,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await (
         await this.ensureConnection()
       ).send("Browser.setPermission", {
+        ...this.contextScope(),
         permission: { name: CDP_PERMISSION_NAMES[action.permission] },
         setting: action.setting,
         origin,
@@ -2723,6 +2986,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       const backendDOMNodeId = await this.uniqueDomMatch(state, selector);
       return syntheticEntry(backendDOMNodeId);
     }
+    // A reference already identifies one concrete node. Revalidate that node
+    // against Chromium instead of reading every unrelated node before input.
+    // Frame/engine cases without this exact proof retain full-tree resolution.
+    if (locator.kind === "ref" && this.engine === "chromium") {
+      const cached = state.accessibility?.entriesByRef.get(locator.ref);
+      if (cached?.backendDOMNodeId != null && cached.frameId === state.frame.id) {
+        const partial = await this.resolveMainFrameReference(state, cached);
+        if (partial) return partial;
+      }
+    }
     const accessibility = await this.refreshAccessibility(state);
     if (locator.kind === "ref") {
       const entry = accessibility.entriesByRef.get(locator.ref);
@@ -2770,6 +3043,50 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     return unique;
+  }
+
+  private async resolveMainFrameReference(
+    state: TargetState,
+    previous: CdpAccessibilityEntry,
+  ): Promise<CdpAccessibilityEntry | null> {
+    const frame = state.frame;
+    let response: { nodes?: unknown };
+    try {
+      response = await this.sendTarget(state, "Accessibility.getPartialAXTree", {
+        backendNodeId: previous.backendDOMNodeId,
+        fetchRelatives: false,
+      });
+    } catch (error) {
+      // Older CDP implementations and disappeared nodes can reject this read.
+      // Full-tree resolution remains authoritative; no input has been sent.
+      if (error instanceof CdpProtocolError) return null;
+      throw error;
+    }
+    if (!Array.isArray(response.nodes)) return null;
+    await this.refreshFrame(state);
+    if (frame.id !== state.frame.id || frame.loaderId !== state.frame.loaderId) {
+      throw new InteractionDefiniteDriverError(
+        "document_stale",
+        "browser document changed while resolving the element reference",
+      );
+    }
+    const current = normalizeCdpAccessibilityTree({
+      nodes: namespaceCdpAccessibilityFrame(
+        frame.id,
+        response.nodes as CdpAxNode[],
+        `${frame.id}\0${frame.loaderId}`,
+      ),
+      controllerGeneration: this.controllerGeneration,
+      targetId: state.targetId,
+      documentGeneration: state.documentGeneration,
+    }).entriesByRef.get(previous.ref);
+    if (!current || current.backendDOMNodeId !== previous.backendDOMNodeId) {
+      throw new InteractionDefiniteDriverError(
+        "locator_not_found",
+        "browser element reference is stale or unavailable",
+      );
+    }
+    return current;
   }
 
   private async uniqueDomMatch(state: TargetState, selector: string): Promise<number> {
@@ -2926,7 +3243,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
   }
 
-  private async selectAllAndDelete(state: TargetState): Promise<void> {
+  private async selectAllAndDelete(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+  ): Promise<void> {
+    if (this.engine === "lightpanda") {
+      // Pinned Lightpanda ignores rawKeyDown and has no select-all/backspace
+      // editing defaults. Clear through the native setter, then let insertText
+      // emit the native input event (also for an empty replacement). Bypassing
+      // framework-owned setters preserves controlled-input change tracking.
+      const cleared = await this.callOnNode(
+        state,
+        backendDOMNodeId,
+        LIGHTPANDA_CLEAR_EDITABLE_FUNCTION,
+        [],
+      );
+      if (cleared !== true) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "Lightpanda fill requires an editable text input or textarea",
+        );
+      }
+      return;
+    }
     const meta = /Macintosh|Mac OS/u.test(this.userAgent);
     const modifiers = meta ? 4 : 2;
     await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
@@ -3170,6 +3509,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async navigateHistory(state: TargetState, direction: "back" | "forward"): Promise<void> {
+    if (this.engine === "lightpanda") {
+      // Pinned Lightpanda mixes subframe loads into its session-wide history
+      // and traverses every entry in the main frame. The CDP entries omit
+      // frame identity, so filtering URLs cannot recover safe target history.
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "Lightpanda does not support safe Back/Forward history; navigate to an explicit URL",
+      );
+    }
     const history = await this.sendActionTarget<{
       currentIndex?: unknown;
       entries?: unknown;
@@ -3448,11 +3796,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     );
   }
 
+  private contextScope(): { browserContextId?: string } {
+    return this.browserContextId ? { browserContextId: this.browserContextId } : {};
+  }
+
   private async targetInfos(connection: BrowserCdpConnection): Promise<TargetInfo[]> {
     const response = await connection.send<{ targetInfos?: unknown }>("Target.getTargets");
     if (!Array.isArray(response.targetInfos))
       throw new Error("CDP returned an invalid target list");
-    return response.targetInfos.map(normalizeTargetInfo);
+    return response.targetInfos
+      .map(normalizeTargetInfo)
+      .filter(
+        (target) =>
+          this.browserContextId === undefined || target.browserContextId === this.browserContextId,
+      );
   }
 
   private async requireTargetInfo(
@@ -3616,6 +3973,7 @@ function normalizeTargetInfo(value: unknown): TargetInfo {
     throw new Error("CDP returned an invalid target");
   }
   return {
+    browserContextId: typeof value.browserContextId === "string" ? value.browserContextId : null,
     targetId: value.targetId,
     type: value.type,
     title: typeof value.title === "string" ? value.title : "",
@@ -3813,8 +4171,11 @@ const CHECKED_FUNCTION = `function() {
 }`;
 
 const SELECT_OPTIONS_FUNCTION = `function(values) {
-  if (!(this instanceof HTMLSelectElement)) return false;
+  if (!(this instanceof HTMLSelectElement) || this.matches(":disabled")) return false;
   const selected = new Set(values.map(String));
+  const choices = Array.from(this.options).filter(option => selected.has(option.value) || selected.has(option.label));
+  if (values.some(value => !choices.some(option => option.value === String(value) || option.label === String(value)))) return false;
+  if ((!this.multiple && choices.length > 1) || choices.some(option => !option.selected && (option.disabled || option.closest("optgroup[disabled]")))) return false;
   for (const option of this.options) option.selected = selected.has(option.value) || selected.has(option.label);
   this.dispatchEvent(new Event("input", { bubbles: true }));
   this.dispatchEvent(new Event("change", { bubbles: true }));
@@ -3828,7 +4189,7 @@ const SCROLL_FUNCTION = `function(deltaX, deltaY) {
 
 /** Fixed browser-side projection. Every field shares one character budget, so
  * a huge page cannot turn a focused query into an unbounded CDP payload. */
-const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes) {
+const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect) {
   const element = this && this.nodeType === 1 ? this : this?.parentElement;
   if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false };
   const privateSelector = "[data-private], [data-sensitive], [data-opengeni-private]";
@@ -3873,7 +4234,15 @@ const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes) {
   for (const attribute of requestedAttributes) {
     if (allowed.has(attribute)) attributes[attribute] = bounded(element.getAttribute(attribute));
   }
-  return { ok: true, text, value, attributes, redacted: null, truncated };
+  let select = null;
+  if (includeSelect && element instanceof HTMLSelectElement && element.options.length <= 200) {
+    select = { kind: "native-select", multiple: element.multiple, disabled: element.matches(":disabled"),
+      options: Array.from(element.options, (option) => ({
+        value: bounded(option.value), label: bounded(option.label), selected: option.selected,
+        disabled: option.disabled || Boolean(option.closest("optgroup[disabled]"))
+      })) };
+  }
+  return { ok: true, text, value, attributes, redacted: null, truncated, select };
 }`;
 
 /** Attribute and pseudo selectors would turn count/not-found into a secret-value oracle. */
@@ -3985,6 +4354,26 @@ const CLEAR_PROTECTED_VALUE_FUNCTION = `function() {
   if (tag === "input" || tag === "textarea") this.value = "";
   else if (this.isContentEditable === true) this.textContent = "";
   else return false;
+  return true;
+}`;
+
+const LIGHTPANDA_TYPING_TARGET_EXPRESSION = `(() => {
+  const element = document.activeElement;
+  if (!(element instanceof Element) || !element.isConnected || element.disabled || element.readOnly) return false;
+  const tag = String(element.tagName || "").toLowerCase();
+  return tag === "textarea" || (tag === "input" && ["text", "search", "url", "tel", "password", "email", "number"].includes(element.type));
+})()`;
+
+const LIGHTPANDA_CLEAR_EDITABLE_FUNCTION = `function() {
+  if (!(this instanceof Element) || !this.isConnected || document.activeElement !== this) return false;
+  const tag = String(this.tagName || "").toLowerCase();
+  if (tag !== "input" && tag !== "textarea") return false;
+  if (this.disabled || this.readOnly) return false;
+  if (tag === "input" && !["text", "search", "url", "tel", "password", "email", "number"].includes(this.type)) return false;
+  const prototype = tag === "textarea" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+  if (typeof setter !== "function") return false;
+  setter.call(this, "");
   return true;
 }`;
 

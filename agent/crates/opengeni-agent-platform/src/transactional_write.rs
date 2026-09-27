@@ -27,15 +27,15 @@ pub fn begin(
     path: &Path,
     request: &v1::FsWriteBegin,
 ) -> PlatformResult<Box<dyn TransactionalWrite>> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        linux::begin(path, request)
+        unix::begin(path, request)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (path, request);
         Err(PlatformError::Unsupported(
-            "transactional fs write requires Linux".into(),
+            "transactional fs write requires Linux or macOS".into(),
         ))
     }
 }
@@ -49,8 +49,8 @@ pub fn failure(code: &str, message: &str) -> PlatformError {
     }
 }
 
-#[cfg(target_os = "linux")]
-mod linux {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix {
     use super::{failure, v1, Path, PlatformError, PlatformResult, TransactionalWrite};
     use rustix::fs::{self, AtFlags, Mode, OFlags, RenameFlags};
     use std::ffi::OsString;
@@ -67,6 +67,12 @@ mod linux {
 
     fn unsupported(message: &str) -> PlatformError {
         PlatformError::Unsupported(message.into())
+    }
+
+    // mode_t is u16 on Darwin and u32 on Linux; the wire mode is u32.
+    #[allow(clippy::useless_conversion)]
+    fn ordinary_mode(bits: u32) -> PlatformResult<Mode> {
+        Ok(Mode::from_raw_mode(u16::try_from(bits).map_err(io)?.into()))
     }
 
     fn open_dir(parent: &File, name: &std::ffi::OsStr) -> PlatformResult<File> {
@@ -115,15 +121,7 @@ mod linux {
                 }
             }
         }
-        // Linux local filesystems with atomic rename/no-replace semantics. Do
-        // not silently assume network/FUSE filesystems provide the same contract.
-        let kind = fs::fstatfs(&dir).map_err(io)?.f_type;
-        if !matches!(
-            kind,
-            0xef53 | 0x5846_5342 | 0x9123_683e | 0x0102_1994 | 0x794c_7630
-        ) {
-            return Err(unsupported("transactional write filesystem is not supported (requires ext4, XFS, Btrfs, tmpfs, or overlayfs)"));
-        }
+        supported_filesystem(&dir)?;
         if dir.metadata().map_err(io)?.mode() & 0o2000 != 0 {
             return Err(unsupported("setgid parent directories are not supported"));
         }
@@ -131,10 +129,70 @@ mod linux {
         Ok((dir, name))
     }
 
+    #[cfg(target_os = "linux")]
+    fn supported_filesystem(dir: &File) -> PlatformResult<()> {
+        // Linux local filesystems with atomic rename/no-replace semantics. Do
+        // not silently assume network/FUSE filesystems provide the same contract.
+        let kind = fs::fstatfs(dir).map_err(io)?.f_type;
+        if !matches!(
+            kind,
+            0xef53 | 0x5846_5342 | 0x9123_683e | 0x0102_1994 | 0x794c_7630
+        ) {
+            return Err(unsupported("transactional write filesystem is not supported (requires ext4, XFS, Btrfs, tmpfs, or overlayfs)"));
+        }
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn supported_filesystem(dir: &File) -> PlatformResult<()> {
+        let stat = fs::fstatfs(dir).map_err(io)?;
+        let kind: Vec<u8> = stat
+            .f_fstypename
+            .iter()
+            .map(|byte| byte.to_ne_bytes()[0])
+            .take_while(|byte| *byte != 0)
+            .collect();
+        if kind != b"apfs" {
+            return Err(unsupported("transactional writes on macOS require APFS"));
+        }
+        Ok(())
+    }
+
     fn no_xattrs(file: &File) -> PlatformResult<()> {
-        if file.list_xattr().map_err(io)?.next().is_some() {
+        let mut attributes = file.list_xattr().map_err(io)?;
+        // macOS automatically adds this kernel-owned attribute to files and
+        // directories. Replacement also requires identical bytes on both inodes.
+        #[cfg(target_os = "macos")]
+        let unsupported_attributes = attributes.any(|name| name != "com.apple.provenance");
+        #[cfg(target_os = "linux")]
+        let unsupported_attributes = attributes.next().is_some();
+        if unsupported_attributes {
             return Err(unsupported(
                 "extended attributes/ACLs are not supported by transactional replacement",
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::macos::fs::MetadataExt as _;
+            if file.metadata().map_err(io)?.st_flags() != 0
+                || opengeni_agent_files_ffi::has_extended_acl(file).map_err(io)?
+            {
+                return Err(unsupported(
+                    "macOS extended ACLs and inode flags are not supported",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn preserve_provenance(base: &File, staged: &File) -> PlatformResult<()> {
+        if base.get_xattr("com.apple.provenance").map_err(io)?
+            != staged.get_xattr("com.apple.provenance").map_err(io)?
+        {
+            return Err(unsupported(
+                "replacement cannot preserve macOS provenance metadata",
             ));
         }
         Ok(())
@@ -146,6 +204,7 @@ mod linux {
             return Err(unsupported("transactional destination must be a single-link regular file without special mode bits"));
         }
         no_xattrs(file)?;
+        #[cfg(target_os = "linux")]
         match fs::ioctl_getflags(file) {
             // EXTENTS (0x80000) is a storage representation, not user metadata.
             Ok(flags) if flags.bits() & !0x0008_0000 == 0 => {}
@@ -286,7 +345,7 @@ mod linux {
             &stage_dir,
             "content",
             OFlags::CREATE | OFlags::EXCL | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(mode),
+            ordinary_mode(mode)?,
         ) {
             Ok(fd) => File::from(fd),
             Err(error) => {
@@ -307,13 +366,16 @@ mod linux {
             published: false,
         };
         let new_meta = regular(&staged.content)?;
-        if let Some((_, meta)) = &staged.base {
+        if let Some(base) = &staged.base {
+            let meta = &base.1;
             if meta.uid() != new_meta.uid() || meta.gid() != new_meta.gid() {
                 return Err(unsupported(
                     "replacement cannot preserve destination ownership",
                 ));
             }
-            fs::fchmod(&staged.content, Mode::from_raw_mode(meta.mode() & 0o777)).map_err(io)?;
+            fs::fchmod(&staged.content, ordinary_mode(meta.mode() & 0o777)?).map_err(io)?;
+            #[cfg(target_os = "macos")]
+            preserve_provenance(&base.0, &staged.content)?;
         }
         Ok(Box::new(staged))
     }
@@ -357,6 +419,8 @@ mod linux {
                 return Err(failure("WRITE_CONFLICT", "destination parent changed"));
             }
             if let Some((base, initial)) = &mut self.base {
+                #[cfg(target_os = "macos")]
+                preserve_provenance(base, &self.content)?;
                 let current = fs::openat(
                     &self.parent,
                     &self.name,
@@ -378,7 +442,9 @@ mod linux {
                 }
                 let named = fs::statat(&self.parent, &self.name, AtFlags::SYMLINK_NOFOLLOW)
                     .map_err(|_| failure("WRITE_CONFLICT", "destination name changed"))?;
-                if named.st_ino != initial.ino() || named.st_dev != initial.dev() {
+                if named.st_ino != initial.ino()
+                    || i128::from(named.st_dev) != i128::from(initial.dev())
+                {
                     return Err(failure("WRITE_CONFLICT", "destination name changed"));
                 }
             }
@@ -410,9 +476,15 @@ mod linux {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
+
+    fn tempdir() -> tempfile::TempDir {
+        // macOS's /var temp path is a symlink; exercise the physical directory
+        // without relaxing production traversal rules.
+        tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
+    }
 
     fn request(bytes: &[u8], base: Option<&[u8]>) -> v1::FsWriteBegin {
         v1::FsWriteBegin {
@@ -428,7 +500,7 @@ mod tests {
 
     #[test]
     fn transactional_write_stages_before_verified_atomic_commit() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let path = dir.path().join("document");
         std::fs::write(&path, b"old").unwrap();
         let mut write = begin(&path, &request(b"new content", Some(b"old"))).unwrap();
@@ -440,13 +512,100 @@ mod tests {
     }
 
     #[test]
+    fn transactional_write_large_binary_replacement_preserves_attributes() {
+        use xattr::FileExt as _;
+        let dir = tempdir();
+        let path = dir.path().join("large.bin");
+        std::fs::write(&path, b"old").unwrap();
+        let attrs = |path: &Path| {
+            let file = std::fs::File::open(path).unwrap();
+            file.list_xattr()
+                .unwrap()
+                .map(|key| {
+                    let value = file.get_xattr(&key).unwrap();
+                    (key, value)
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let before = attrs(&path);
+        let bytes: Vec<u8> = (0_u8..=250).cycle().take(2_150_000).collect();
+        let mut write = begin(&path, &request(&bytes, Some(b"old"))).unwrap();
+        for chunk in bytes.chunks(64 * 1024) {
+            write.append(chunk).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        }
+        write.commit(&|| true).unwrap();
+        drop(write);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(attrs(&path), before);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn transactional_write_rejects_mac_acl_and_flags_without_removing_them() {
+        let dir = tempdir();
+        let path = dir.path().join("document");
+        std::fs::write(&path, b"old").unwrap();
+        let mut write = begin(&path, &request(b"new", Some(b"old"))).unwrap();
+        write.append(b"new").unwrap();
+        assert!(std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow read"])
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(write.commit(&|| true).is_err());
+        drop(write);
+        assert!(begin(&path, &request(b"new", Some(b"old"))).is_err());
+        assert!(
+            opengeni_agent_files_ffi::has_extended_acl(&std::fs::File::open(&path).unwrap())
+                .unwrap()
+        );
+        assert!(std::process::Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("/usr/bin/chflags")
+            .arg("hidden")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(begin(&path, &request(b"new", Some(b"old"))).is_err());
+        assert!(std::process::Command::new("/usr/bin/chflags")
+            .arg("nohidden")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow read"])
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(begin(&path, &request(b"new", Some(b"old"))).is_err());
+        assert!(std::process::Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
     fn digest_size_and_authority_failures_leave_target_unchanged() {
         for (body, authority) in [
             (b"bad".as_slice(), true),
             (b"ne".as_slice(), true),
             (b"new".as_slice(), false),
         ] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempdir();
             let path = dir.path().join("document");
             std::fs::write(&path, b"old").unwrap();
             let mut write = begin(&path, &request(b"new", Some(b"old"))).unwrap();
@@ -460,7 +619,7 @@ mod tests {
 
     #[test]
     fn creation_is_atomic_no_clobber_and_abort_removes_private_stage() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let path = dir.path().join("document");
         let mut write = begin(&path, &request(b"new", None)).unwrap();
         write.append(b"new").unwrap();
@@ -475,7 +634,7 @@ mod tests {
     #[test]
     fn base_content_inode_and_parent_changes_are_conflicts() {
         for mutation in 0..3 {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempdir();
             let parent = dir.path().join("parent");
             std::fs::create_dir(&parent).unwrap();
             let path = parent.join("document");
@@ -503,7 +662,7 @@ mod tests {
     #[test]
     fn private_stage_preserves_regular_modes_and_rejects_unsupported_metadata() {
         use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let path = dir.path().join("document");
         std::fs::write(&path, b"old").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o751)).unwrap();
@@ -536,7 +695,7 @@ mod tests {
 
     #[test]
     fn empty_file_creation_and_existing_file_base_validation() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let path = dir.path().join("empty");
         let mut write = begin(&path, &request(b"", None)).unwrap();
         write.commit(&|| true).unwrap();
@@ -547,7 +706,7 @@ mod tests {
     #[test]
     fn directory_spelling_symlink_parent_and_missing_parent_fail_closed() {
         use std::os::unix::fs::symlink;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let path = dir.path().join("document");
         std::fs::write(&path, b"old").unwrap();
         for suffix in ["/", "/."] {
@@ -568,7 +727,7 @@ mod tests {
 
     #[test]
     fn incomplete_or_ambiguous_contract_cannot_create_staging() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let path = dir.path().join("document");
         for case in 0..5 {
             let mut req = request(b"", None);

@@ -36,8 +36,10 @@ import { ApiHttpError } from "../http/api-error";
 import { requireConnectOwnerAuthority } from "./connect-authority";
 import {
   integrationBaseUrl,
+  oauthStateFailureReturn,
   oauthStateTtlMs,
   requireIntegrationsStateSecret,
+  workspaceIntegrationsPath,
 } from "./oauth-client";
 
 // Reddit requires a descriptive, stable User-Agent on every request (token
@@ -200,7 +202,9 @@ export async function startSocialOAuth(
   await withOrganizationIntegrationAcquisition(deps.db, context, [provider.id], async () => {});
   const client = socialOAuthClientFor(settings, provider.id);
   const redirectUri = socialOAuthRedirectUri(settings, context.requestUrl);
-  const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");
+  const returnPath = safeReturnPath(
+    context.payload.returnPath ?? workspaceIntegrationsPath(context.workspaceId),
+  );
   const scopes = uniqueScopes(context.payload.scopes) ?? provider.defaultScopes;
   const verifier = provider.pkce ? randomBytes(32).toString("base64url") : null;
   // Require the encryption key for every provider (not just PKCE ones) so a
@@ -260,8 +264,9 @@ export async function completeSocialOAuthCallback(
     state = readSocialOAuthState(input.state, settings);
   } catch (error) {
     logSocialOAuthFailure(observability, "state_verify", state, error);
+    const failure = oauthStateFailureReturn(settings, input.state);
     return {
-      redirectTo: callbackReturnPath("/integrations", "error", { reason: "state_invalid" }),
+      redirectTo: callbackReturnPath(failure.returnPath, "error", { reason: failure.reason }),
     };
   }
   if (state.connectAttemptId) return completeSocialConnect(deps, state, input);

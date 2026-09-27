@@ -2321,6 +2321,9 @@ export const WorkspaceSettingsSchema = z
     // Whether agents may expose and invoke the built-in structured human-input
     // tool. Absent preserves the historical enabled behavior.
     agentHumanInputEnabled: z.boolean().optional(),
+    // Whether agents get the Jev-backed `code_search` tool. Absent or null
+    // follows the deployment default; the deployment can always keep it off.
+    codeSearchEnabled: z.boolean().nullable().optional(),
     // Optional Slack reaction invocation. Absent/invalid fails closed to the
     // disabled default via resolveWorkspaceSlackReactionSummonSettings.
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
@@ -2471,6 +2474,8 @@ export const UpdateWorkspaceSettingsRequest = z
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
     codexCompactionDefault: CodexCompactionMode.optional(),
     agentHumanInputEnabled: z.boolean().optional(),
+    // null returns the workspace to the deployment default.
+    codeSearchEnabled: z.boolean().nullable().optional(),
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
     slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
   })
@@ -7719,6 +7724,14 @@ export const NewSessionDraft = z.object({
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   latencyMode: LatencyMode,
+  /**
+   * True when the person chose this model policy (model, reasoning, latency).
+   * False means it follows the resolved default for new chats, so a later
+   * subscription or credit purchase can replace it. Absent on a save from an
+   * older client; the server then treats a draft that names the deployment
+   * default as following the default and any other model as chosen.
+   */
+  modelProvided: z.boolean().optional(),
   /** Absent on legacy drafts; null is explicit provenance for the Default project. */
   selectedProjectChannelId: z.string().uuid().nullable().optional(),
   options: NewSessionDraftOptions,
@@ -7735,6 +7748,7 @@ export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
   model: true,
   reasoningEffort: true,
   latencyMode: true,
+  modelProvided: true,
   selectedProjectChannelId: true,
   options: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
@@ -12317,6 +12331,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // model admission for the life of the session; portable ⇒ plaintext compaction
     // and free mid-session provider switching (today's behavior).
     codexCompactionMode: CodexCompactionMode,
+    /**
+     * The `code_search` decision frozen at create. A turn gets the tool only when
+     * this is true, the deployment still offers it, the workspace is not Off, and
+     * the turn has POSIX compute.
+     */
+    codeSearchEnabled: z.boolean().default(false),
     /** Personal (authenticated subject) workspace pin state, never workspace-global. */
     pinned: z.boolean().default(false),
     /** Stable pin ordering key; null when this subject has not pinned the session. */
@@ -16123,6 +16143,7 @@ export const MachineRuntime = z.object({
   updateChannel: z.enum(["stable", "beta"]).nullable(),
   desiredVersion: z.string().nullable(),
   versionState: z.enum(["unknown", "current", "outdated", "ahead", "updating", "update_failed"]),
+  updateBlockedReason: z.string().nullable().optional(),
   capabilities: MachineRuntimeCapabilities,
   update: MachineUpdateState.nullable(),
 });
@@ -16805,10 +16826,38 @@ export const WorkspaceModelCatalogModel =
   );
 export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogModel>;
 
+/**
+ * Why a new chat or scheduled task without an explicit model gets its default:
+ * a saved workspace default, the first usable connected subscription model, the
+ * configured OpenGeni credits model while the organization holds a credit
+ * balance, or the deployment default.
+ */
+export const DefaultModelSelectionSource = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["workspace", "subscription", "credits", "deployment"]),
+);
+export type DefaultModelSelectionSource = z.infer<typeof DefaultModelSelectionSource>;
+
+export const DefaultModelSelection = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    model: z.string().min(1),
+    reasoningEffort: ReasoningEffort,
+    source: DefaultModelSelectionSource,
+  }),
+);
+export type DefaultModelSelection = z.infer<typeof DefaultModelSelection>;
+
 export const WorkspaceModelCatalogResponse =
   /* @__PURE__ */ defineModelContractSchema(() =>
     z.object({
       models: z.array(WorkspaceModelCatalogModel),
+      /** Default for new chats and scheduled tasks that name no model. */
+      defaultSelection: DefaultModelSelection.optional(),
+      /**
+       * The default this workspace would use once its organization holds an
+       * OpenGeni credit balance. Null when this deployment does not bill
+       * credits.
+       */
+      creditsSelection: DefaultModelSelection.nullable().optional(),
     }),
   );
 export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalogResponse>;
@@ -16825,6 +16874,9 @@ export const OPENGENI_API_CONTRACT_REVISION = "2026-09-plugins-and-skills-v1" as
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
+
+/** Public OpenGeni documentation linked from the web console's Help menu by default. */
+export const DEFAULT_OPENGENI_DOCUMENTATION_URL = "https://docs.opengeni.ai" as const;
 
 export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({
@@ -16873,12 +16925,26 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       maxSizeBytes: VOICE_INPUT_MAX_SIZE_BYTES,
       acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
     }),
+    // Whether this deployment offers the Jev-backed code_search agent tool and
+    // whether workspaces without their own setting get it.
+    codeSearch: z
+      .object({ available: z.boolean(), workspaceDefault: z.enum(["off", "on", "split"]) })
+      .default({ available: false, workspaceDefault: "off" }),
     productAccessMode: ProductAccessMode,
     billingMode: BillingMode.default("disabled"),
     // Safe rollout discriminator: the browser only mounts the optional
     // @opengeni/sdk/accounts controller when this is dual or broker.
     managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
     auth: ClientAuthConfig.default({ mode: "none" }),
+    // Product documentation the console links from its Help menu. The API
+    // always sends it: DEFAULT_OPENGENI_DOCUMENTATION_URL unless operators
+    // point it elsewhere or hide it (null) with OPENGENI_DOCUMENTATION_URL.
+    // Parsing adds no default, so an absent field still means a server that
+    // predates it and clients show no link rather than guessing.
+    documentationUrl: z
+      .url({ protocol: /^https?$/u })
+      .nullable()
+      .optional(),
     analytics: z
       .object({
         consentRequired: z.boolean(),
@@ -17029,5 +17095,6 @@ export type { PluginDiscoveryItem, PluginDiscoveryPage } from "./plugin-discover
 export { mcpEndpointIdentity } from "./mcp-endpoint";
 export { pluginMcpUnavailableReason } from "./mcp-endpoint";
 export * from "./connector-tool-permissions";
+export * from "./mcp-catalog-limits";
 export * from "./skill-catalog-context";
 export * from "./sandbox-recovery";

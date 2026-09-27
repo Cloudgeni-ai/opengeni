@@ -91,7 +91,20 @@ uncaptured clicks cannot be reconstructed. For sign-up volume, verification,
 sign-in, organization setup, and acquisition source, use the consent-independent
 server counters (`opengeni_auth_events_total`, `opengeni_organization_setup_total`,
 `opengeni_signup_acquisition_total`, see `docs/deployment.md`) and treat
-PostHog funnels as the consented subset. `login_completed` currently covers the
+PostHog funnels as the consented subset. The server funnel reads
+`sign_up` -> `email_verified` -> `sign_in` -> organization setup `created`: in
+the default `legacy` session-set mode the first successful verification click
+also signs the new user in and counts as their first `sign_in` (a reused link
+counts neither again), so verified email users reach `sign_in` without a
+separate password sign-in. `sign_in` counts sessions, returning sign-ins
+included, not unique users. A mail link scanner that follows the verification
+link first (for example a safe-links prefetcher) takes that automatic sign-in:
+its unused session counts `email_verified` and `sign_in`, and the person's later
+password sign-in counts another `sign_in`. In PostHog, the verification landing
+(`email_verified` plus `signup_completed`) is the sign-in step for email
+sign-ups and reports no `login_completed`, so an `email_verified` ->
+`login_completed` funnel shows drop-off that the server `sign_in` counter does
+not. `login_completed` currently covers the
 legacy managed sign-in UI, not broker account-slot additions. Never count agent
 continuations, session creation, or recent page events as successful logins or
 current online users. Always state the product, environment, time zone, interval,

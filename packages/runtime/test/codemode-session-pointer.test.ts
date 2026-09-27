@@ -21,25 +21,7 @@ import {
   withCodemodeTokenClient,
   withCodemodeTokenSession,
 } from "../src/index";
-
-function shellSession(home: string) {
-  return {
-    exec: async (args: { cmd: string }) => {
-      const proc = Bun.spawn(["sh", "-lc", args.cmd], {
-        cwd: home,
-        env: { ...process.env, HOME: home },
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
-      ]);
-      return { exitCode, stdout, stderr };
-    },
-  };
-}
+import { hostShellSession } from "./isolated-git-home-fixture";
 
 describe("session-specific Codemode token pointers", () => {
   test("the sandbox-group-global ttyd process cannot inherit a session bearer pointer", () => {
@@ -138,7 +120,7 @@ describe("session-specific Codemode token pointers", () => {
       const manifestFile = join(tokenDir, "codemode-token");
       const firstFile = codemodeTokenFileForSession(manifestFile, "session-a");
       const secondFile = codemodeTokenFileForSession(manifestFile, "session-b");
-      const session = shellSession(home);
+      const session = hostShellSession(home);
       mkdirSync(tokenDir, { recursive: true });
       writeFileSync(manifestFile, "ogd_legacy", { mode: 0o600 });
 
@@ -187,7 +169,7 @@ describe("session-specific Codemode token pointers", () => {
     const home = mkdtempSync(join(tmpdir(), "opengeni-codemode-equal-pointer-"));
     try {
       const tokenFile = join(home, ".opengeni", "codemode-token");
-      await runCodemodeTokenSeedHook(shellSession(home) as never, {
+      await runCodemodeTokenSeedHook(hostShellSession(home) as never, {
         environment: { HOME: home, OPENGENI_CODEMODE_TOKEN_FILE: tokenFile },
         codemodeTokenSeed: "ogd_same_pointer",
         codemodeTokenFile: tokenFile,

@@ -10,6 +10,7 @@ import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@openg
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
   canonicalizeConfiguredModelId,
+  codeSearchDeploymentPolicy,
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   configuredModels,
@@ -49,6 +50,7 @@ import {
   ConnectAttemptConflictError,
   ConnectAttemptNotFoundError,
   configureChildLifecycleNotices,
+  configureCodeSearchDeploymentPolicy,
   configureWorkspaceControlRequestLockTimeoutMs,
   dbSql,
   getManagedAuthSessionSetSnapshot,
@@ -159,6 +161,11 @@ import {
   registerPrometheusMetricsRoute,
 } from "./http/metrics-listener";
 import { allowedCorsOrigin } from "./http/cors";
+import {
+  createLocalBrowserBoundary,
+  localBrowserRequestHost,
+  markLocalInternalDispatch,
+} from "./http/local-browser-boundary";
 import { withAccessGrantSessionRlsContext } from "./access-grant-rls";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
@@ -308,6 +315,9 @@ export function createAppComposition(deps: AppDependencies): {
   // Pause) run inside API-originated db commands; install the boot-validated
   // rollout flag once for this process.
   configureChildLifecycleNotices({ enabled: deps.settings.childLifecycleNoticesEnabled });
+  // Sessions created by this process freeze their code_search decision from
+  // the boot-parsed deployment policy.
+  configureCodeSearchDeploymentPolicy(codeSearchDeploymentPolicy(deps.settings));
   const managedEmailTransport =
     deps.managedEmailTransport ?? createManagedEmailTransport(deps.settings);
   assertManagedEmailTransportMetadata(managedEmailTransport);
@@ -450,6 +460,30 @@ export function createAppComposition(deps: AppDependencies): {
     await next();
   });
 
+  // Unauthenticated local mode: admit only requests addressed to this computer
+  // and, when a browser sent them, from this stack's web app (see
+  // http/local-browser-boundary.ts). Runs before CORS so a refused preflight
+  // carries no CORS grant, and logs each distinct refused Host or Origin once
+  // because the browser shows only a generic CORS error. Null outside local
+  // development.
+  const localBrowserBoundary = createLocalBrowserBoundary(deps.settings, {
+    warn: (message, attributes) => observability.warn(message, attributes),
+  });
+  if (localBrowserBoundary) {
+    app.use("*", async (c, next) => {
+      const rejection = localBrowserBoundary.rejection(c.req.raw);
+      if (rejection) {
+        throw new ApiHttpError(rejection.status, {
+          code: "forbidden",
+          message: rejection.message,
+          retryable: false,
+          details: { code: rejection.code },
+        });
+      }
+      await next();
+    });
+  }
+
   // Better Auth keys its rate limits and session addresses on a request
   // header. Drop any caller-supplied copy everywhere and stamp the trusted
   // source address on managed-auth routes before any route derives a Better
@@ -522,8 +556,25 @@ export function createAppComposition(deps: AppDependencies): {
       allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin) ? origin : null,
   });
 
+  const localCors = localBrowserBoundary
+    ? cors({
+        ...corsHeaders,
+        credentials: true,
+        origin: (origin, c) =>
+          localBrowserBoundary.originAllowed(origin, localBrowserRequestHost(c.req.raw))
+            ? origin
+            : null,
+      })
+    : null;
+
   app.use("*", (c, next) => {
     const origin = c.req.header("origin");
+    if (localCors) {
+      // The boundary above already refused every other origin. Local mode
+      // never answers with wildcard CORS: a request without credentials acts
+      // as the local user, so any site could otherwise read its responses.
+      return origin ? localCors(c, next) : next();
+    }
     const middleware =
       origin && allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin)
         ? credentialedCors
@@ -965,6 +1016,7 @@ export function createAppComposition(deps: AppDependencies): {
           name: server.name ?? server.id,
         })),
         firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
+        codeSearch: codeSearchDeploymentPolicy(deps.settings),
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
@@ -1000,6 +1052,7 @@ export function createAppComposition(deps: AppDependencies): {
         billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(deps.settings),
+        documentationUrl: deps.settings.documentationUrl,
         analytics: clientAnalyticsConfig(deps.settings),
         // Channel-A structured services (P4.4) ride exec/readFile/createEditor,
         // available on every real backend; `none` has no box so they are all off.
@@ -1263,7 +1316,9 @@ export function createAppComposition(deps: AppDependencies): {
     } catch (error) {
       throw codemodeHttpError(error);
     }
-    return app.fetch(forwarded);
+    // The forwarded request drops the caller's Host and names a non-sandbox
+    // path; the request it was built from already passed the local boundary.
+    return app.fetch(markLocalInternalDispatch(forwarded));
   });
 
   app.get("/v1/workspaces/:workspaceId/codemode/catalog", async (c) => {

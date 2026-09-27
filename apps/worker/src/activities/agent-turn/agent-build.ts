@@ -131,6 +131,8 @@ export type BuildTurnAgentDeps = {
   connectorActionPolicy: ConnectorActionPolicyHooks;
   trigger: ClaimTurnOk["trigger"];
   preparationIndependentToolNames: readonly string[];
+  /** The attempt's tool catalog includes the Jev-backed code_search tool. */
+  codeSearchAvailable: boolean;
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
@@ -189,6 +191,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     connectorActionPolicy,
     trigger,
     preparationIndependentToolNames,
+    codeSearchAvailable,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
     groupBoxBackend,
@@ -676,6 +679,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           ? { gitTokenSeed: sandboxGitToken }
           : {}),
         ...(sandboxCodemodeToken ? { codemodeAvailable: true } : {}),
+        ...(codeSearchAvailable ? { codeSearchAvailable: true } : {}),
         // Managed boxes receive the bearer through their protected per-session
         // token file. Connected Machines use transient per-exec delivery above,
         // so they must not run the file-seeding lifecycle hook.

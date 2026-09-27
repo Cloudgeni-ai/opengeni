@@ -339,6 +339,10 @@ describe("organization billing StrictMode ownership", () => {
     expect(getBillingEntitlements.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(container.textContent).toContain("$25.00 available");
     expect(container.textContent).toContain("seats");
+    expect(container.querySelector('section[aria-label="Credits and payments"]')).not.toBeNull();
+    expect(
+      container.querySelector('input[name="credit-amount"]')?.closest("label")?.textContent,
+    ).toContain("Amount to add (USD)");
     expect(getOrganizationUsageSummary.mock.calls.at(-1)?.[0]).toEqual({
       accountId,
       period: "month",
@@ -484,6 +488,15 @@ describe("organization billing StrictMode ownership", () => {
     await flush();
 
     expect(getCompanyProfileAgentPolicy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(
+      container.querySelector('section[aria-labelledby="organization-identity-heading"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('section[aria-labelledby="organization-documents-heading"]'),
+    ).not.toBeNull();
+    expect(
+      Array.from(container.querySelectorAll("h2")).map((heading) => heading.textContent?.trim()),
+    ).toEqual(expect.arrayContaining(["Organization identity", "Organization documents"]));
     expect(container.textContent).toContain("Agent-managed organization identity");
     expect(container.textContent).toContain("Require approval");
     expect(container.textContent).not.toContain("Review first");
@@ -618,6 +631,31 @@ describe("organization billing StrictMode ownership", () => {
       expect(container.textContent).toContain("Agent-managed organization identity is owner-only");
     } finally {
       accountRole = "owner";
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("keeps model connections unavailable outside an organization administrator session", async () => {
+    const priorMode = context.clientConfig.auth.mode;
+    context.clientConfig.auth.mode = "apiKey";
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () =>
+        root.render(<OrgSettingsRoute workspaceId={workspaceId} section="models" />),
+      );
+      expect(container.textContent).toContain(
+        "Organization model subscriptions can be managed only by organization owners and admins",
+      );
+      expect(container.querySelector("#organization-model-connections-heading")).toBeNull();
+      expect(
+        container.querySelector('nav[aria-label="Organization settings"] a[aria-current="page"]'),
+      ).toBeNull();
+    } finally {
+      context.clientConfig.auth.mode = priorMode;
       await act(async () => root.unmount());
       container.remove();
     }

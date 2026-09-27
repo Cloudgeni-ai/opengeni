@@ -143,6 +143,95 @@ test("provider rate limits separate daily limits and quota from transient thrott
   });
 });
 
+test("an exhausted provider quota is terminal copy that points at the model picker", () => {
+  // The worker's turn.failed payload: authored copy in `error`, provider text in `detail`.
+  const exhausted = (error: string, detail: string, quotaScope: string) => ({
+    ...summary,
+    reason: `${error} ${detail}`,
+    recordedDetail: `${error}\n${detail}`,
+    failureCode: "provider_quota_exhausted",
+    quotaScope,
+  });
+  const daily = exhausted(
+    "This model's daily limit at the model provider has been reached, so automatic retries stopped. Choose another model, or try again after the limit resets.",
+    "429 Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day",
+    "daily",
+  );
+  expect(failedSessionCopy(daily, false, false, true)).toEqual({
+    reason: "This model's daily limit has been reached. Choose another model below.",
+    unavailableModel: false,
+    retryUnhelpful: false,
+    detail: daily.recordedDetail,
+    dailyLimit: true,
+  });
+  // Once another model is chosen the hint is dropped; Retry stays available.
+  expect(failedSessionCopy(daily, false, true, true)).toMatchObject({
+    reason: "This model's daily limit has been reached.",
+    retryUnhelpful: false,
+  });
+
+  const monthly = exhausted(
+    "This model's monthly limit at the model provider has been reached, so automatic retries stopped. Choose another model, or try again after the limit resets.",
+    "429 Quota exceeded: requests per month limit reached for this API key.",
+    "monthly",
+  );
+  expect(failedSessionCopy(monthly, false, false, true).reason).toBe(
+    "This model's monthly limit has been reached. Choose another model below.",
+  );
+  // Only a daily allowance lets the banner name the deployment's free model.
+  expect(failedSessionCopy(monthly, false, false, true).dailyLimit).toBeUndefined();
+  expect(failedSessionCopy(daily, true, false, true).dailyLimit).toBeUndefined();
+
+  const credits = exhausted(
+    "The model provider account for this model is out of credits, so automatic retries stopped. Choose another model, or add credits with the provider and try again.",
+    "429 Your team has either used all available credits or reached its monthly spending limit.",
+    "credits",
+  );
+  expect(failedSessionCopy(credits, false, false, true)).toMatchObject({
+    reason:
+      "The model provider account for this model is out of credits. Choose another model below.",
+    retryUnhelpful: false,
+  });
+
+  const quota = exhausted(
+    "The model provider's usage quota for this model is used up, so automatic retries stopped. Choose another model, or try again after the quota resets.",
+    "429 You exceeded your current quota, please check your plan and billing details.",
+    "quota",
+  );
+  expect(failedSessionCopy(quota, false, false, true).reason).toBe(
+    "The model provider's usage quota for this model is used up. Choose another model below.",
+  );
+
+  // A failure recorded without the marker still gets the quota copy.
+  const { quotaScope: _unmarked, ...legacy } = quota;
+  expect(failedSessionCopy(legacy, false, false, true).reason).toBe(
+    "The model provider's usage quota for this model is used up. Choose another model below.",
+  );
+
+  // A quota refusal of a compaction request carries the same marker, so it
+  // gets the same short copy instead of the truncated compaction text.
+  const compactionError =
+    "compaction summarization failed: This model's daily limit at the model provider has been reached, so automatic retries stopped. Choose another model, or try again after the limit resets. Active history was preserved.";
+  const compaction = {
+    ...summary,
+    reason: compactionError,
+    recordedDetail: compactionError,
+    failureCode: "context_compaction_failed",
+    quotaScope: "daily",
+  };
+  expect(failedSessionCopy(compaction, false, false, true)).toEqual({
+    reason: "This model's daily limit has been reached. Choose another model below.",
+    unavailableModel: false,
+    retryUnhelpful: false,
+    detail: compactionError,
+    dailyLimit: true,
+  });
+  // An unknown marker value is ignored rather than trusted.
+  expect(
+    failedSessionCopy({ ...compaction, quotaScope: "constructor" }, false, false, true).reason,
+  ).toBe(`${compactionError.slice(0, 157)}…`);
+});
+
 test("authored worker copy and OpenGeni credit failures keep their own wording", () => {
   const codex = "Your ChatGPT/Codex subscription usage limit has been reached. Access resets soon.";
   expect(
@@ -165,4 +254,35 @@ test("authored worker copy and OpenGeni credit failures keep their own wording",
       recordedDetail: "Connection interrupted.",
     }),
   ).toEqual({ reason: "Connection interrupted.", unavailableModel: false });
+});
+
+test("Codex plan copy stays whole, keeps Retry, and keeps the recorded detail", () => {
+  const plan =
+    'The ChatGPT account "Work Pro" is now on the Free plan, which doesn\'t include GPT-6 Sol. ' +
+    "Upgrade it, use another connected account, or choose another model.";
+  expect(
+    failedSessionCopy(
+      {
+        ...summary,
+        reason: plan,
+        recordedDetail: `${plan}\nThe Codex backend answered HTTP 400 with no error body.`,
+        failureCode: "codex_plan_entitlement",
+      },
+      false,
+      false,
+      true,
+    ),
+  ).toEqual({
+    reason: plan,
+    unavailableModel: false,
+    detail: `${plan}\nThe Codex backend answered HTTP 400 with no error body.`,
+  });
+  const rejected =
+    "The Codex backend rejected this request (HTTP 400) without an error message. " +
+    'The ChatGPT account "Work Pro" still reports the Pro plan, so OpenGeni did not switch accounts. ' +
+    "Try again, or choose another model if it keeps failing.";
+  expect(rejected.length).toBeGreaterThan(160);
+  expect(
+    failedSessionCopy({ ...summary, reason: rejected, failureCode: "codex_request_rejected" }),
+  ).toEqual({ reason: rejected, unavailableModel: false });
 });

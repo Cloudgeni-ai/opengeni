@@ -1505,6 +1505,12 @@ export type Session = {
    * admission; `portable` ⇒ plaintext compaction and free provider switching.
    */
   codexCompactionMode: "remote_v2" | "portable";
+  /**
+   * The `code_search` decision frozen at create. A turn gets the tool only when
+   * this is true, the deployment still offers it, the workspace is not Off, and
+   * the turn has POSIX compute.
+   */
+  codeSearchEnabled?: boolean;
   /** Personal (authenticated subject) workspace pin state, never workspace-global. */
   pinned?: boolean;
   /** Stable pin ordering key; null when this subject has not pinned the session. */
@@ -3437,8 +3443,24 @@ export type WorkspaceModelCatalogModel = ClientModel & {
   availability: ModelAvailabilityV1;
 };
 
+/** Why a new chat or scheduled task without an explicit model gets its default. */
+export type DefaultModelSelectionSource = "workspace" | "subscription" | "credits" | "deployment";
+
+export type DefaultModelSelection = {
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  source: DefaultModelSelectionSource;
+};
+
 export type WorkspaceModelCatalogResponse = {
   models: WorkspaceModelCatalogModel[];
+  /** Default for new chats and scheduled tasks that name no model. */
+  defaultSelection?: DefaultModelSelection | undefined;
+  /**
+   * The default this workspace would use once its organization holds an
+   * OpenGeni credit balance. Null when the deployment does not bill credits.
+   */
+  creditsSelection?: DefaultModelSelection | null | undefined;
 };
 
 export type WorkspaceGatewayCustomModel = {
@@ -3608,6 +3630,16 @@ export type CodexUsagePayload = {
   };
 };
 
+/** One model a Codex account's current ChatGPT plan was proven not to include. */
+export type CodexPlanExcludedModel = {
+  /** Product model id, for example `codex/gpt-6-sol`. */
+  model: string;
+  /** Display name, for example "GPT-6 Sol". */
+  label: string;
+  excludedAt: string;
+  retryAfter: string;
+};
+
 /** One connected Codex (ChatGPT) account in a workspace (multi-account P1). Metadata only. */
 export type CodexAccount = {
   id: string;
@@ -3616,6 +3648,17 @@ export type CodexAccount = {
   label?: string | null;
   email?: string | null;
   plan?: string | null;
+  /** When the provider last confirmed `plan` (connect, token refresh, or usage read). */
+  planCheckedAt?: string | null;
+  /** Plan before the most recent observed plan change, and when that change was seen. */
+  planChangedFrom?: string | null;
+  planChangedAt?: string | null;
+  /**
+   * Models the current plan was proven not to include. Each is skipped by
+   * automatic selection until `retryAfter` (one request then re-checks it), or
+   * until a different plan is observed, for example after refreshing usage.
+   */
+  planExcludedModels?: CodexPlanExcludedModel[];
   status: "active" | "needs_relogin" | "error";
   active: boolean;
   expiresAt?: string | null;
@@ -3928,11 +3971,21 @@ export type ClientConfig = {
   fileUploads: { enabled: boolean; maxSizeBytes: number };
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
+  /**
+   * Whether the deployment offers the Jev-backed code_search agent tool and
+   * what workspaces without their own setting get (`split` = half of sessions).
+   */
+  codeSearch?: { available: boolean; workspaceDefault: "off" | "on" | "split" } | undefined;
   productAccessMode: ProductAccessMode;
   /** Client-safe hint for whether the console should offer Stripe checkout. */
   billingMode?: BillingMode | undefined;
   managedAuthSessionSetMode: "legacy" | "dual" | "broker";
   auth: ClientAuthConfig;
+  /**
+   * Product documentation for a console Help link. `null` means the deployment
+   * hides the link; absent means a server that predates the field.
+   */
+  documentationUrl?: string | null | undefined;
   analytics: {
     consentRequired: boolean;
     providers: {
@@ -4563,6 +4616,8 @@ export type WorkspaceSettings = {
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   /** Whether agents may invoke the built-in structured human-input tool. */
   agentHumanInputEnabled?: boolean | undefined;
+  /** Whether agents get the Jev-backed code_search tool; absent or null follows the deployment. */
+  codeSearchEnabled?: boolean | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   /** Slack orchestration notices; both default off when absent or invalid. */
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
@@ -4654,6 +4709,7 @@ export type UpdateWorkspaceSettingsRequest = {
   maxNestedAgentDepth?: number | null | undefined;
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   agentHumanInputEnabled?: boolean | undefined;
+  codeSearchEnabled?: boolean | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   [key: string]: unknown;
@@ -5114,6 +5170,11 @@ export type NewSessionDraft = {
   model: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
+  /**
+   * True when the person chose this model policy; false follows the resolved
+   * default for new chats. Absent from older servers.
+   */
+  modelProvided?: boolean | undefined;
   /** Absent on legacy drafts; null records an explicit Default-project selection. */
   selectedProjectChannelId?: string | null | undefined;
   options: NewSessionDraftOptions;
@@ -7874,6 +7935,8 @@ export type MachineRuntime = {
   updateChannel: "stable" | "beta" | null;
   desiredVersion: string | null;
   versionState: "unknown" | "current" | "outdated" | "ahead" | "updating" | "update_failed";
+  /** Required installer bootstrap when a legacy updater cannot safely replace the install. */
+  updateBlockedReason?: string | null | undefined;
   capabilities: MachineRuntimeCapabilities;
   update: MachineUpdateState | null;
 };

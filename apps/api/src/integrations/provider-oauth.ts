@@ -54,8 +54,10 @@ import {
 } from "../connection-ownership";
 import {
   integrationBaseUrl,
+  oauthStateFailureReturn,
   oauthStateTtlMs,
   requireIntegrationsStateSecret,
+  workspaceIntegrationsPath,
 } from "./oauth-client";
 
 const PROVIDER_OAUTH_CALLBACK_PATH = "/v1/integrations/provider-oauth/callback";
@@ -109,6 +111,7 @@ type ProviderIdentity = {
 
 type ProviderOAuthFailureReason =
   | "state_invalid"
+  | "state_expired"
   | "state_replayed"
   | "provider_denied"
   | "missing_code"
@@ -202,7 +205,7 @@ export async function startApiIntegrationProviderOAuth(
   const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
   const redirectUri = `${baseUrl}${providerOAuthCallbackPath(definition)}`;
   const returnPath = safeReturnPath(
-    input.payload.returnPath ?? `/workspaces/${input.workspaceId}/capabilities`,
+    input.payload.returnPath ?? workspaceIntegrationsPath(input.workspaceId),
   );
   const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
     accountId: input.accountId,
@@ -517,14 +520,18 @@ export async function completeApiIntegrationProviderOAuth(
     };
   } catch (error) {
     if (exactReturnUrl !== undefined) return { redirectTo: exactReturnUrl, exactReturn: true };
+    const reason = providerOAuthFailureReason(error);
+    // An unreadable state carries no return path; an authentic but aged one
+    // still names its workspace and is reported as expired.
+    const failure = state ? null : oauthStateFailureReturn(deps.settings, input.state);
     return {
       redirectTo: providerOAuthReturnUrl(
         returnBaseUrl,
-        state?.returnPath ?? "/integrations",
+        state?.returnPath ?? failure!.returnPath,
         "error",
         {
           ...(state?.definitionId ? { definitionId: state.definitionId } : {}),
-          reason: providerOAuthFailureReason(error),
+          reason: failure && reason === "state_invalid" ? failure.reason : reason,
         },
       ),
     };

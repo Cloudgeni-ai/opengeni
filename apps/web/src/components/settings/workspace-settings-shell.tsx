@@ -11,6 +11,7 @@ export {
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BarChart3Icon,
+  BrainCircuitIcon,
   BotIcon,
   BoxIcon,
   BoxesIcon,
@@ -35,7 +36,9 @@ import {
 import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
 import { SETTINGS_SWITCHER_CLASS } from "@/components/ui/scope-switcher-trigger";
 import { ContentPage } from "@/components/ui/content-layout";
+import { SettingsPageHeader } from "./settings-layout";
 import { useAppContext } from "@/context";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 
 type SettingsItem = {
@@ -99,6 +102,11 @@ const WORKSPACE_PAGE_GROUPS = [
         label: "Insights",
         icon: BarChart3Icon,
       },
+      {
+        to: "/workspaces/$workspaceId/memory" as const,
+        label: "Memory",
+        icon: BrainCircuitIcon,
+      },
     ],
   },
   {
@@ -142,6 +150,11 @@ export function WorkspaceManagementShell({
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
+  const canReadInsights = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "workspace:admin",
+  );
   const settingsItems = organizationManagementOnly
     ? SETTINGS_ITEMS.filter(
         (item) => item.id === "general" || item.id === "members" || item.id === "danger",
@@ -254,22 +267,26 @@ export function WorkspaceManagementShell({
                   {group.label}
                 </p>
                 <nav aria-label={group.label} className={SETTINGS_NAV_CLASS}>
-                  {group.items.map((item) => {
-                    const Icon = item.icon;
-                    const selected = location.kind === "page" && item.to === location.target;
-                    return (
-                      <Link
-                        key={item.to}
-                        to={item.to}
-                        params={{ workspaceId }}
-                        aria-current={selected ? "page" : undefined}
-                        className={cn(settingsNavItemClass(selected))}
-                      >
-                        <Icon className="size-4 shrink-0" />
-                        <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                      </Link>
-                    );
-                  })}
+                  {group.items
+                    .filter(
+                      (item) => item.to !== "/workspaces/$workspaceId/insights" || canReadInsights,
+                    )
+                    .map((item) => {
+                      const Icon = item.icon;
+                      const selected = location.kind === "page" && item.to === location.target;
+                      return (
+                        <Link
+                          key={item.to}
+                          to={item.to}
+                          params={{ workspaceId }}
+                          aria-current={selected ? "page" : undefined}
+                          className={cn(settingsNavItemClass(selected))}
+                        >
+                          <Icon className="size-4 shrink-0" />
+                          <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                        </Link>
+                      );
+                    })}
                 </nav>
               </div>
             ))
@@ -314,11 +331,8 @@ export function WorkspaceSettingsContent({
   const copy = SECTION_COPY[section];
   return (
     <ContentPage width="standard">
-      <header className="border-b border-border pb-5">
-        <h1 className="text-2xl font-semibold tracking-tight">{copy.title}</h1>
-        <p className="mt-1.5 text-sm text-fg-muted">{copy.description}</p>
-      </header>
-      <div className="py-6">{children}</div>
+      <SettingsPageHeader title={copy.title} description={copy.description} />
+      <div className="py-7">{children}</div>
     </ContentPage>
   );
 }

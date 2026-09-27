@@ -39,6 +39,8 @@ The local stack runs in `local` access mode: a bootstrap account and workspace w
 
 By default the agent runs commands directly on your machine through the `local` sandbox, so the API, web app and infrastructure ports listen only on `127.0.0.1`. Set `OPENGENI_SANDBOX_BACKEND=docker` to run the agent in an isolated local container instead. Set `OPENGENI_DEV_BIND_HOST=0.0.0.0` only if other devices must reach the stack; anyone who can reach it can run commands as you.
 
+Because the local API has no login, it also refuses browser requests from other websites and answers only requests addressed to this computer, so a web page you visit cannot drive it. If you serve your own front end on another local port, list its origin in `OPENGENI_LOCAL_ALLOWED_ORIGINS` (for example `http://127.0.0.1:5173`). On Linux, Docker sandboxes get a narrow route to the API on the Docker network, so `OPENGENI_SANDBOX_BACKEND=docker` works without exposing the stack.
+
 <Note>
   Ports are chosen per checkout. If a default port is busy, the launcher picks a nearby free one and
   prints the URLs it actually used.

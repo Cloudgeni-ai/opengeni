@@ -882,7 +882,7 @@ impl Platform for NativePlatform {
     }
 
     fn transactional_fs_write_supported(&self) -> bool {
-        cfg!(target_os = "linux")
+        cfg!(any(target_os = "linux", target_os = "macos"))
     }
 
     fn fs_write_begin(

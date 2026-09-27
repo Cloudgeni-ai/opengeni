@@ -178,6 +178,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           model: remote.model,
           reasoningEffort: remote.reasoningEffort,
           latencyMode: remote.latencyMode ?? "standard",
+          ...(remote.modelProvided !== undefined ? { modelProvided: remote.modelProvided } : {}),
           ...(Object.hasOwn(remote, "selectedProjectChannelId")
             ? { selectedProjectChannelId: remote.selectedProjectChannelId }
             : {}),

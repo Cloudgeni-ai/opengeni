@@ -42,6 +42,13 @@ export class CdpTransportError extends Error {
   }
 }
 
+export class CdpCommandTimeoutError extends CdpTransportError {
+  constructor(readonly method: string) {
+    super(`CDP ${method} timed out`);
+    this.name = "CdpCommandTimeoutError";
+  }
+}
+
 type PendingCommand = {
   method: string;
   resolve: (value: unknown) => void;
@@ -59,6 +66,7 @@ export class CdpConnection {
   private readonly listeners = new Map<string, Set<EventListener>>();
   private messageTail: Promise<void> = Promise.resolve();
   private failure: CdpTransportError | null = null;
+  private readonly disconnectListeners = new Set<() => void>();
 
   private constructor(private readonly socket: WebSocket) {
     socket.binaryType = "arraybuffer";
@@ -150,7 +158,7 @@ export class CdpConnection {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.settlePending(id);
-        reject(new CdpTransportError(`CDP ${method} timed out`));
+        reject(new CdpCommandTimeoutError(method));
       }, timeoutMs);
       timer.unref?.();
       const abort = options.signal
@@ -225,6 +233,17 @@ export class CdpConnection {
       };
       options.signal?.addEventListener("abort", abort, { once: true });
     });
+  }
+
+  onDisconnect(listener: () => void): () => void {
+    if (this.failure) {
+      listener();
+      return () => undefined;
+    }
+    this.disconnectListeners.add(listener);
+    return () => {
+      this.disconnectListeners.delete(listener);
+    };
   }
 
   close(): void {
@@ -305,6 +324,14 @@ export class CdpConnection {
       pending.reject(error);
     }
     this.listeners.clear();
+    for (const listener of this.disconnectListeners) {
+      try {
+        listener();
+      } catch {
+        /* failure notification must not strand pending commands */
+      }
+    }
+    this.disconnectListeners.clear();
   }
 }
 

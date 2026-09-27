@@ -207,14 +207,18 @@ export async function requireSessionAuthorization(
 ): Promise<ResolvedSessionAuthorization | null> {
   const port = deps.sessionAuthorization;
   const isAgentAttempt = grantHasAgentAttemptAuthority(grant);
-  const [slackAccess, authority] = await Promise.all([
-    getSlackInteractionSessionAccessForSession(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: input.sessionId,
-    }),
-    getSessionAuthorityProjection(deps.db, grant.workspaceId, input.sessionId),
-  ]);
+  // Callers can supply a transaction handle. Both reads open nested RLS
+  // savepoints, which must not race on the same PostgreSQL connection.
+  const slackAccess = await getSlackInteractionSessionAccessForSession(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId: input.sessionId,
+  });
+  const authority = await getSessionAuthorityProjection(
+    deps.db,
+    grant.workspaceId,
+    input.sessionId,
+  );
 
   // Preserve the standalone workspace-shared path. Private sessions continue
   // through the durable actor and ownership checks even without a host port.
@@ -228,10 +232,8 @@ export async function requireSessionAuthorization(
   }
   if (!authority) throw new SessionAuthorizationDeniedError("not_found");
 
-  const [resolvedActor, resolvedTarget] = await Promise.all([
-    resolveSessionAuthorizationActor(deps.db, grant),
-    resolveSessionAuthorizationTarget(deps.db, grant, input.sessionId),
-  ]);
+  const resolvedActor = await resolveSessionAuthorizationActor(deps.db, grant);
+  const resolvedTarget = await resolveSessionAuthorizationTarget(deps.db, grant, input.sessionId);
   const actor = resolvedActor.actor;
   const target = resolvedTarget.target;
   const agentRelatedSessionAccess =
@@ -414,10 +416,9 @@ async function resolveSessionAuthorizationActor(
   ) {
     throw new SessionAuthorizationDeniedError("caller_stale");
   }
-  const [callerSession, turn] = await Promise.all([
-    getSession(db, grant.workspaceId, callerSessionId),
-    getSessionTurnForAttempt(db, grant.workspaceId, callerSessionId, attemptId),
-  ]);
+  // These scoped reads can also open nested savepoints on a transaction handle.
+  const callerSession = await getSession(db, grant.workspaceId, callerSessionId);
+  const turn = await getSessionTurnForAttempt(db, grant.workspaceId, callerSessionId, attemptId);
   if (
     !callerSession ||
     callerSession.accountId !== grant.accountId ||

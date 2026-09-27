@@ -1,7 +1,14 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import type { ClientModel, WorkspaceModelCatalogModel } from "@opengeni/sdk";
+import type {
+  ClientModel,
+  DefaultModelSelection,
+  ReasoningEffort,
+  WorkspaceModelCatalogModel,
+  WorkspaceModelCatalogResponse,
+} from "@opengeni/sdk";
 import {
   defaultEffortForModel,
+  findPickerRow,
   projectPickerRows,
   sortPickerRows,
   type PickerModelRow,
@@ -60,10 +67,12 @@ function rowMatchesFamily(row: PickerModelRow, family: ConnectedModelFamily): bo
  * With a `family`, only that family's selectable models qualify, in the
  * operator-configured catalog order; `null` means the connection is not usable
  * yet (the caller offers a retry instead of silently picking something else).
- * Without a family (the new-chat composer fallback when the selected model is
- * no longer selectable), a selectable Codex, SuperGrok, or workspace provider
- * wins over the free deployment model; an organization-paid provider ranks
- * after the free model, and OpenGeni-credit models are never chosen implicitly.
+ * Without a family (the new-chat composer fallback when both the selected
+ * model and the server-resolved default are unavailable), a selectable Codex,
+ * SuperGrok, or workspace provider wins over the free deployment model; an
+ * organization-paid provider ranks after the free model, and OpenGeni-credit
+ * models are never chosen implicitly here. The resolved default is what moves
+ * a workspace with credits onto the credits model.
  */
 export function preferredConnectedModelId(
   models: readonly WorkspaceModelCatalogModel[],
@@ -78,6 +87,29 @@ export function preferredConnectedModelId(
     sorted.find((row) => row.billingClass === "organization_byok")?.id ??
     null
   );
+}
+
+/**
+ * Replacement when the composer's model is no longer selectable. The
+ * server-resolved default (saved workspace default, connected subscription,
+ * credits model while the organization has credits, deployment default) wins
+ * when it is selectable; otherwise the client ranking above applies.
+ */
+export function composerFallbackModel(input: {
+  models: readonly WorkspaceModelCatalogModel[];
+  rows: readonly PickerModelRow[];
+  defaultSelection: DefaultModelSelection | null;
+}): { id: string; effort: ReasoningEffort } | null {
+  const resolved = input.defaultSelection;
+  if (resolved) {
+    const row = findPickerRow([...input.rows], resolved.model);
+    if (row?.selectable) return { id: row.id, effort: resolved.reasoningEffort };
+  }
+  const id =
+    preferredConnectedModelId(input.models) ?? input.rows.find((row) => row.selectable)?.id ?? null;
+  if (!id) return null;
+  const model = input.models.find((candidate) => candidate.id === id);
+  return { id, effort: model ? defaultEffortForModel(model) : "low" };
 }
 
 /** Select the connected model in the actor-private draft without workspace administration. */
@@ -99,6 +131,8 @@ export async function applyConnectedModelToNewSessionDraft(
     model: modelId,
     reasoningEffort: model ? defaultEffortForModel(model) : "low",
     latencyMode: draft.latencyMode,
+    // Connecting a service is a deliberate choice of that service's model.
+    modelProvided: true,
     ...(draft.selectedProjectChannelId !== undefined
       ? { selectedProjectChannelId: draft.selectedProjectChannelId }
       : {}),
@@ -111,7 +145,10 @@ export async function applyConnectedModelToNewSessionDraft(
 /**
  * Stripe success return for an onboarding credit purchase. It reuses the
  * sessions composer launch contract (`?model=&effort=`), so the next chat uses
- * the purchased credits instead of the free default model.
+ * the purchased credits instead of the free default model even before the
+ * payment webhook lands. `modelSource=default` marks that policy as the
+ * resolved default rather than the person's choice, so the draft keeps
+ * following the default and a later subscription connect still replaces it.
  */
 export function creditCheckoutSuccessUrl(
   origin: string,
@@ -122,6 +159,7 @@ export function creditCheckoutSuccessUrl(
   if (model) {
     url.searchParams.set("model", model.id);
     url.searchParams.set("effort", model.effort);
+    url.searchParams.set("modelSource", "default");
   }
   return url.toString();
 }
@@ -132,13 +170,32 @@ export async function creditsModelForCheckout(
   workspaceId: string,
 ): Promise<{ id: string; effort: string } | null> {
   try {
-    const catalog = await client.getWorkspaceModelCatalog(workspaceId);
-    const modelId = preferredConnectedModelId(catalog.models, "credits");
-    const model = modelId ? catalog.models.find((candidate) => candidate.id === modelId) : null;
-    return model ? { id: model.id, effort: defaultEffortForModel(model) } : null;
+    return creditsCheckoutModel(await client.getWorkspaceModelCatalog(workspaceId));
   } catch {
     return null;
   }
+}
+
+/**
+ * The model a credit purchase should land on: the server's credits default
+ * (the configured credits model at its configured reasoning, for example GPT-6
+ * Luna at extra high). Null when a connected subscription or saved workspace
+ * default would still win after the purchase, so the composer keeps that
+ * default instead. Older servers publish no resolved default; the first
+ * selectable credits model is used there.
+ */
+export function creditsCheckoutModel(
+  catalog: Pick<WorkspaceModelCatalogResponse, "models" | "creditsSelection">,
+): { id: string; effort: string } | null {
+  if (catalog.creditsSelection !== undefined) {
+    const selection = catalog.creditsSelection;
+    return selection?.source === "credits"
+      ? { id: selection.model, effort: selection.reasoningEffort }
+      : null;
+  }
+  const modelId = preferredConnectedModelId(catalog.models, "credits");
+  const model = modelId ? catalog.models.find((candidate) => candidate.id === modelId) : null;
+  return model ? { id: model.id, effort: defaultEffortForModel(model) } : null;
 }
 
 /**
