@@ -250,17 +250,22 @@ The locked decision applies these rules:
    them cannot be missed. See [`durable-agent-inputs.md`](durable-agent-inputs.md)
    for the wake classes.
 3. Before the goal materializer runs, `peekSessionWork` evaluates a current
-   session-level `wait_for_input`. It is current only while the declaring turn
-   remains the newest finished turn and the database deadline is ahead. While
+   session-level `wait_for_input`. It is current only while no newer finished
+   turn has retired it (a turn a person did not start, or a person's turn that
+   consumed immediate machine input) and the database deadline is ahead. While
    held, the workflow re-arms `session_input_wait_deadline` in the durable wake
    outbox and closes without consuming a goal revision. Immediate machine input
    or a queued human/API turn wins and runs normally; deferred child notices
-   remain parked. A newer finished turn clears the wait with
+   remain parked. A human or API turn that neither waits again nor consumes
+   immediate machine input leaves the wait held, so it neither triggers a
+   continuation that only rediscovers the wait nor strands a later child
+   result. A newer finished goal, system, or other machine-input turn, or a
+   person's turn that consumed the awaited input, clears the wait with
    `session.wait.finished{outcome:"input"}`. An unchanged expired deadline
    atomically clears it and queues `session_wait_timeout` input. The active-goal
    projection may report this independent session wait as `blocked` /
-   `held_for_input`, with `nextAttemptAt` and `holdReason`, but goal mutations do
-   not own or clear it.
+   `held_for_input`, with `nextAttemptAt` and `holdReason`, but goal mutations
+   do not own or clear it.
 4. Consecutive no-input continuations are paced, not capped. `auto_continuations`
    counts only consecutive synthesized continuations whose claimed batch
    contained no other machine input and that no human/API/Steer turn

@@ -2281,6 +2281,16 @@ from the committed pointer and binds one exact root for its lifetime. There is
 no new user message, per-turn machine cwd query, silent fallback, path
 reinterpretation, or blind replay of an ambiguous operation.
 
+A sandboxless attempt uses a plain Agent whose native capabilities cannot be
+added in place. If an authorized attachment commits an active machine pointer,
+the next provider-dispatch barrier first persists the complete preceding tool
+batch, then emits `native_capabilities_changed_this_attempt`. The same route
+recovery boundary rebuilds the agent from the committed route in a fresh attempt
+of the existing logical turn. Completed attachment and peer-tool receipts are
+not replayed; normal attempt authority and machine establishment checks still
+apply. Native-capable attempts and deployments with routing disabled do not
+perform this additional pointer check.
+
 Approval-gated MCP execution has an additional provider-side-effect fence.
 Connection-backed actions and legacy per-session MCP servers configured with
 `requireApproval` both create a durable action request keyed by the logical turn

@@ -45,21 +45,36 @@ The wait belongs to the session, not its goal: it persists the exact declaring
 turn, reason, set time, and absolute PostgreSQL deadline. An `immediate` update
 (a child terminal/action notice, Agent message or Steer, schedule, media result,
 or background-command result) makes the session runnable. The next claim
-delivers the batch, and the newer finished turn retires the wait with
+delivers the batch, and that newer finished turn retires the wait with
 `session.wait.finished{outcome:"input"}`. `deferred` child notices remain
 pending without ending a current wait; they are delivered when the wait times
 out, is superseded, or immediate input arrives. When the database deadline
 passes unchanged, settlement clears the wait and atomically queues one typed
 `session_wait_timeout` input plus its workflow wake.
 
-Any newer finished turn supersedes the wait, including one that only answers a
-human question. Without an active goal or a held wait, a later child result or
-command result does not wake the session; with an active goal, ending the answer
-turn starts a continuation that only rediscovers the same wait. The operational
-instructions therefore tell the agent to answer and then call `wait_for_input`
-again while the awaited work is still in flight, whether or not a goal is
-active, reusing the earlier reason and only the time left before the earlier
-deadline, because each turn's wait sets a fresh deadline from its timeout.
+The wait is retired only by a newer finished turn that a person did not start,
+by a person's turn that consumed immediate machine input, or by its own timeout.
+A person's turn (`source` `user` or `api`, or an operator's manual `/compact`)
+still runs immediately, but unless that turn calls `wait_for_input` again, the
+wait keeps its declaring turn, reason, and deadline. The exception is a queued
+person's turn that claims pending `immediate` machine input as coalesced
+context, for example a child result that arrived just before the question ran:
+it consumed what the wait was for, so it retires the wait like the system turn
+it replaced. Coalesced `deferred` notices alone do not retire it.
+This is what lets a status question asked while a child runs get its answer and
+still leave the child's later result able to wake a goalless parent; without
+it, the answer turn retired the wait and the result stayed pending with nothing
+to wake it. Goal, system, scheduled, and other machine-input turns still
+supersede the wait. If the person's message replaced the task and the agent
+neither waits again nor stops the child, the child's result or the deadline
+wakes the agent once more; the deadline bounds that cost.
+`sessionInputWaitDecidingTurnSql` in `packages/db/src/index.ts` is the single
+predicate for this rule. Worker peek and settlement, wake and claim admission,
+public `inputWait`, and waiting-descendant counts all read it.
+The operational instructions still tell the agent to answer and then call
+`wait_for_input` again while the awaited work is still in flight, reusing the
+earlier reason and only the time left before the earlier deadline, because
+each turn's wait sets a fresh deadline from its timeout.
 
 A successful Temporal signal is transport delivery, not input admission. The
 current workflow-wake revision stays retryable while an eligible immediate input
@@ -80,11 +95,11 @@ explicit control remain authoritative; deferred notices and late child results
 without ongoing intent do not create new work.
 
 Public session reads expose `inputWait` only for an idle, active-control session
-whose newest finished turn is the declaring turn. Queued/running, paused,
-terminal, or superseded waits project as null. The deadline stays visible after
-it passes until settlement: the web header and rail say “recheck due”, not
-“running”. Waiting descendants contribute to working aggregates independently
-of personal unread state. SSE wait, status, and pending-input events refresh the
+whose newest finished turn that can decide the wait is the declaring turn.
+Queued/running, paused, terminal, or superseded waits project as null. The
+deadline stays visible after it passes until settlement: the web header and
+rail say “recheck due”, not “running”. Waiting descendants contribute to
+working aggregates independently of personal unread state. SSE wait, status, and pending-input events refresh the
 detail projection; an older status event cannot override a newer detail read.
 
 ## Wake classes and child lifecycle notices

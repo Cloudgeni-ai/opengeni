@@ -1,4 +1,5 @@
-import { getSessionAuthorityProjection } from "@opengeni/db";
+import { getSessionAuthorityProjection, readActiveSandbox } from "@opengeni/db";
+import { routingEnabled } from "../../sandbox-routing";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
   assertModelConnectionAllowsTurn,
@@ -367,6 +368,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getModelRunSettings: () => eventing.modelRunSettings,
       getExecutionGeneration: () => attempt.executionGeneration,
     });
+    const checkpointBeforeProviderDispatch = () =>
+      checkpointHistoryBeforeProviderDispatch(historySink, {
+        effectiveSandboxBackend: eventing.modelRunSettings.sandboxBackend,
+        routingEnabled: routingEnabled(settings),
+        readActiveSandbox: () => readActiveSandbox(db, input.workspaceId, input.sessionId),
+      });
 
     try {
       const claimed = await claimTurnAttempt({
@@ -692,7 +699,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         );
                       }
                       if (event.phase === "started") {
-                        await checkpointHistoryBeforeProviderDispatch(historySink);
+                        await checkpointBeforeProviderDispatch();
                       }
                       const shouldRecordStartedAudit =
                         event.phase === "started" && !firstModelRequestAuditRecorded;
@@ -845,7 +852,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   throw new Error("SuperGrok model request started before the turn event producer");
                 }
                 if (event.phase === "started") {
-                  await checkpointHistoryBeforeProviderDispatch(historySink);
+                  await checkpointBeforeProviderDispatch();
                 }
                 const shouldRecordStartedAudit =
                   event.phase === "started" && !firstModelRequestAuditRecorded;
@@ -1637,6 +1644,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             providerTurn,
             leases,
             historySink,
+            checkpointBeforeProviderDispatch,
             media,
             toolResultSpill,
             claimedResult,
