@@ -14,6 +14,9 @@ import {
   adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
   beginModalProviderCreate,
+  listPendingModalProviderCreates,
+  claimModalProviderCreateRecovery,
+  recordRecoveredModalProviderCreate,
   claimTemporalScheduleCleanups,
   claimWorkspaceArchiveCapture,
   commitWarmingToWarm,
@@ -898,6 +901,104 @@ describe("archive object publication binding and disposition", () => {
 });
 
 describe("Modal create outcome fencing", () => {
+  test("owner-death discovery binds one exact receipt without renewing or publishing the workspace", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const identity = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    };
+    const acquired = await acquireLease(db, {
+      ...identity,
+      kind: "turn",
+      holderId: "dead-create-owner",
+      backend: "modal",
+      leaseTtlMs: 45000,
+    });
+    const operationId = crypto.randomUUID();
+    await beginModalProviderCreate(db, {
+      ...identity,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      operationId,
+      providerBindingKey: "fixture-provider",
+      rematerializationId: null,
+      selectedRevision: null,
+      imageId: "im-fixture",
+      imageRef: null,
+      appId: "ap-fixture",
+      providerName: `opengeni-create-${operationId}`,
+      requestSha256: "b".repeat(64),
+    });
+    expect(await claimModalProviderCreateRecovery(db, identity)).toBeNull();
+    await admin`update sandbox_leases set expires_at=now()-interval '1 second', updated_at=now()-interval '1 minute'
+      where workspace_id=${ids.workspaceId} and sandbox_group_id=${ids.groupId}`;
+    expect(await listPendingModalProviderCreates(db)).toContainEqual({
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    });
+    const before = (await readLease(db, ids.workspaceId, ids.groupId))!;
+    const claims = await Promise.all(
+      Array.from({ length: 4 }, () => claimModalProviderCreateRecovery(db, identity)),
+    );
+    const attempt = claims.find(Boolean)!;
+    expect(claims.filter(Boolean)).toHaveLength(1);
+    expect(await listPendingModalProviderCreates(db)).not.toContainEqual({
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    });
+    const other = await freshWorkspace();
+    expect(
+      await recordRecoveredModalProviderCreate(db, {
+        ...identity,
+        workspaceId: other.workspaceId,
+        attempt,
+        instanceId: "sb-wrong-tenant",
+      }),
+    ).toBe(false);
+    expect(
+      await recordRecoveredModalProviderCreate(db, {
+        ...identity,
+        attempt: { ...attempt, providerBindingKey: "wrong" },
+        instanceId: "sb-wrong-binding",
+      }),
+    ).toBe(false);
+    expect(
+      await recordRecoveredModalProviderCreate(db, {
+        ...identity,
+        attempt: { ...attempt, leaseEpoch: attempt.leaseEpoch + 1 },
+        instanceId: "sb-wrong-epoch",
+      }),
+    ).toBe(false);
+    const results = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        recordRecoveredModalProviderCreate(db, {
+          ...identity,
+          attempt,
+          instanceId: "sb-recovered-exact",
+        }),
+      ),
+    );
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const after = (await readLease(db, ids.workspaceId, ids.groupId))!;
+    expect(after.instanceId).toBe("sb-recovered-exact");
+    expect(after.providerCreateAttempt).toEqual({ ...attempt, instanceId: "sb-recovered-exact" });
+    expect(after.expiresAt).toEqual(before.expiresAt);
+    expect(after.leaseEpoch).toBe(before.leaseEpoch);
+    expect(after.liveness).toBe("warming");
+    expect(after.recovery.workspace.status).toBe("not_ready");
+    expect(after.recovery.provider.instanceId).toBe("sb-recovered-exact");
+    expect(after.currentCheckpointArtifactId).toBe(before.currentCheckpointArtifactId);
+    // Discovery never terminates. The ordinary expired-holder sweep can now
+    // dispatch exact-instance cleanup instead of resetting an unknown create.
+    await reapStaleLeaseHoldersGlobal(db, {
+      viewerHolderTtlMs: 0,
+      turnHolderTtlMs: 0,
+      idleGraceMs: 0,
+    });
+    expect((await readLease(db, ids.workspaceId, ids.groupId))!.liveness).toBe("draining");
+  }, 60_000);
+
   test("unknown reply survives rollback, global expiry and competing dispatch; late exact receipt unlocks cleanup", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
@@ -914,15 +1015,19 @@ describe("Modal create outcome fencing", () => {
       leaseTtlMs: 45_000,
     });
     const expectedEpoch = acquired.lease.leaseEpoch;
+    const operationId = crypto.randomUUID();
     const intent = {
       ...identity,
       expectedEpoch,
-      operationId: crypto.randomUUID(),
+      operationId,
       providerBindingKey: "synthetic-modal-workspace/app/environment",
       rematerializationId: null,
       selectedRevision: null,
       imageId: "im-synthetic",
       imageRef: null,
+      appId: "ap-fixture",
+      providerName: `opengeni-create-${operationId}`,
+      requestSha256: "a".repeat(64),
     };
     await beginModalProviderCreate(db, intent);
     const receipt = (await readLease(db, ids.workspaceId, ids.groupId))!.providerCreateAttempt;
@@ -945,9 +1050,14 @@ describe("Modal create outcome fencing", () => {
     expect(held.leaseEpoch).toBe(expectedEpoch);
     expect(held.providerCreateAttempt).toEqual(receipt);
     const attempts = await Promise.allSettled(
-      Array.from({ length: 8 }, () =>
-        beginModalProviderCreate(db, { ...intent, operationId: crypto.randomUUID() }),
-      ),
+      Array.from({ length: 8 }, () => {
+        const competingOperation = crypto.randomUUID();
+        return beginModalProviderCreate(db, {
+          ...intent,
+          operationId: competingOperation,
+          providerName: `opengeni-create-${competingOperation}`,
+        });
+      }),
     );
     expect(attempts.every((result) => result.status === "rejected")).toBe(true);
     await expect(

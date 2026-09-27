@@ -1675,22 +1675,34 @@ attributes that single destination before verification, and rejects a missing
 snapshot without falling back to the base image or an older checkpoint. It does
 not create a temporary box and ask SDK hydration to replace it. Directory and tar
 archives still hydrate the elected destination. This removes the hidden second
-create. Migration 0523 adds a durable Modal creation receipt before the runtime
-calls provider create. The receipt binds the lease epoch, provider namespace,
-selected archive revision, and image selectors. Only the matching creator can
+create. Migration 0523 adds a durable Modal creation receipt immediately before
+the physical `SandboxCreate` RPC. The runtime's `modal-create-session.ts` owns
+creation and retains the pinned SDK's public session implementation; its
+`modal-create-boundary.ts` hook runs after image/secret preparation and before
+provider dispatch. The receipt binds the lease epoch, authenticated provider
+namespace, actual app and image IDs, selected archive revision, operation name,
+and request digest. SDK retries are disabled for that mutation. Only the matching creator can
 attribute an exact returned instance. Until then, failure rollback and both
 lease reapers preserve the operation, epoch, and checkpoint; a database trigger
 also rejects erasure by older transition paths. Orphan deletion is postponed
-while any warming Modal lease lacks a provider identity, because tags are
-applied after creation and cannot identify an unreturned instance reliably.
+while any warming Modal lease lacks a provider identity. The operation name and
+tag are created atomically with the provider box; absence from the running-box
+inventory cannot prove that creation never happened. A returned instance is
+attributed before manifest setup, including after cancellation.
 
 This receipt is a fence, not a provider idempotency or replay guarantee. Losing
 the creator and its reply can leave the lease blocked; time, a missing named
 running sandbox, and termination of some other sandbox do not unblock it.
-Automatic logical-image fallback is also rejected once an unresolved create
-attempt has been recorded. Provider receipt reconciliation and proof of
-pre-dispatch failure are required before this can provide automatic recovery
-for those cases; do not clear the receipt or silently create another sandbox.
+Logical-image fallback is allowed after a missing-image preparation failure,
+before admission starts, and refused after admission starts. The maintenance
+sweep discovers expired unknown operations in bounded batches, including
+finished provider instances. It requires the same authenticated namespace and
+one exact app, image, operation name and tag match. An atomic tenant/epoch/receipt
+comparison attributes that instance without renewing the lease or publishing
+the workspace; ordinary holder-fenced draining then owns cleanup. Discovery
+absence, ambiguity or provider failure leaves the receipt unresolved. Never
+clear it or silently create another sandbox. Cleanup rechecks the persisted
+provider namespace before interpreting a missing instance or issuing a stop.
 Warm
 checkpoint attempts use the configured interval as a hard minimum even after a
 new mutation generation; an already-complete generation never calls the

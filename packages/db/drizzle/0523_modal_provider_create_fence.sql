@@ -2,6 +2,7 @@
 -- A missing create reply is not evidence that no provider was created. Keep
 -- this receipt outside resume_state, which archive/rollback code may replace.
 ALTER TABLE sandbox_leases ADD COLUMN provider_create_attempt jsonb;
+ALTER TABLE sandbox_leases ADD COLUMN provider_create_recovery_after timestamptz;
 
 ALTER TABLE sandbox_leases ADD CONSTRAINT sandbox_provider_create_attempt_shape CHECK (
   provider_create_attempt IS NULL OR (
@@ -9,6 +10,9 @@ ALTER TABLE sandbox_leases ADD CONSTRAINT sandbox_provider_create_attempt_shape 
     AND provider_create_attempt->>'version' = '1'
     AND length(provider_create_attempt->>'operationId') > 0
     AND length(provider_create_attempt->>'providerBindingKey') > 0
+    AND length(provider_create_attempt->>'appId') > 0
+    AND provider_create_attempt->>'providerName' = 'opengeni-create-' || (provider_create_attempt->>'operationId')
+    AND provider_create_attempt->>'requestSha256' ~ '^[a-f0-9]{64}$'
     AND jsonb_typeof(provider_create_attempt->'leaseEpoch') = 'number'
     AND provider_create_attempt ? 'instanceId'
     AND (provider_create_attempt->'instanceId' = 'null'::jsonb
@@ -72,3 +76,60 @@ BEGIN
   EXECUTE replace(definition, anchor, anchor || E'\n        AND (lease.provider_create_attempt IS NULL OR lease.provider_create_attempt->>''instanceId'' IS NOT NULL)');
 END;
 $patch_reaper$;
+
+-- Reuse the narrowly-scoped owner SELECT capability installed by 0497. This
+-- inventory cannot change leases; receipt attribution still uses tenant RLS.
+DO $create_inventory$
+DECLARE data_schema text := pg_catalog.current_schema(); role_name text;
+BEGIN
+  EXECUTE pg_catalog.format($ddl$
+    CREATE FUNCTION opengeni_private.list_pending_modal_provider_creates()
+    RETURNS TABLE (workspace_id uuid, sandbox_group_id uuid)
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $body$
+    DECLARE opened integer;
+    BEGIN
+      INSERT INTO opengeni_private.modal_inventory_read_capabilities
+        (backend_pid, transaction_id, data_schema)
+      VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), %2$L)
+      ON CONFLICT DO NOTHING;
+      GET DIAGNOSTICS opened = ROW_COUNT;
+      RETURN QUERY SELECT lease.workspace_id, lease.sandbox_group_id
+        FROM %1$I.sandbox_leases lease
+        WHERE lease.backend = 'modal' AND lease.liveness = 'warming'
+          AND lease.instance_id IS NULL
+          AND lease.provider_create_attempt->'instanceId' = 'null'::jsonb
+          AND lease.expires_at < now()
+          AND coalesce(lease.provider_create_recovery_after, '-infinity'::timestamptz) <= now()
+        ORDER BY coalesce(lease.provider_create_recovery_after, '-infinity'::timestamptz), lease.id LIMIT 32;
+      IF opened = 1 THEN
+        DELETE FROM opengeni_private.modal_inventory_read_capabilities capability
+        WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+          AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+          AND capability.data_schema = %2$L;
+      END IF;
+    END
+    $body$;
+  $ddl$, data_schema, data_schema);
+  REVOKE ALL ON FUNCTION opengeni_private.list_pending_modal_provider_creates() FROM PUBLIC;
+  FOR role_name IN
+    SELECT DISTINCT role.rolname FROM pg_catalog.pg_proc proc
+    CROSS JOIN LATERAL pg_catalog.aclexplode(coalesce(proc.proacl, pg_catalog.acldefault('f', proc.proowner))) acl
+    JOIN pg_catalog.pg_roles role ON role.oid = acl.grantee
+    WHERE proc.oid = 'opengeni_private.list_pending_modal_provider_creates()'::regprocedure
+      AND acl.grantee <> proc.proowner
+  LOOP
+    EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION opengeni_private.list_pending_modal_provider_creates() FROM %I', role_name);
+  END LOOP;
+  -- Mirror the existing approved inventory callers, including custom runtime
+  -- roles. No new public cross-workspace capability is introduced.
+  FOR role_name IN
+    SELECT DISTINCT role.rolname FROM pg_catalog.pg_proc proc
+    CROSS JOIN LATERAL pg_catalog.aclexplode(coalesce(proc.proacl, pg_catalog.acldefault('f', proc.proowner))) acl
+    JOIN pg_catalog.pg_roles role ON role.oid = acl.grantee
+    WHERE proc.oid = 'opengeni_private.list_live_modal_sandbox_leases()'::regprocedure
+      AND acl.privilege_type = 'EXECUTE' AND acl.grantee <> proc.proowner
+  LOOP
+    EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION opengeni_private.list_pending_modal_provider_creates() TO %I', role_name);
+  END LOOP;
+END;
+$create_inventory$;

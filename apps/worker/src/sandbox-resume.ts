@@ -75,7 +75,6 @@ import {
   renewSandboxProviderExpiration,
   modalSessionMatchesCheckpointProviderBinding,
   resolveModalCheckpointProviderBindingForSession,
-  resolveModalCheckpointProviderBinding,
   serializeReplacementSandboxEnvelope,
   tagModalSandbox,
   terminateUnpublishedSandboxSession,
@@ -1704,11 +1703,16 @@ async function resumeBoxForTurnOnce(
         ...(services.logicalFallbackSettings
           ? { logicalFallbackSettings: services.logicalFallbackSettings }
           : {}),
-        onBeforeSandboxCreate: async (createSettings) => {
+        onBeforeSandboxCreate: async (createSettings, intent, providerContext) => {
           if (ids.backend !== "modal") return;
+          if (!intent || !providerContext)
+            throw new Error("Modal create requires the provider dispatch boundary");
           throwIfReleasedOrCancelled();
-          const binding = await resolveModalCheckpointProviderBinding(createSettings);
-          const operationId = crypto.randomUUID();
+          const binding = await resolveModalCheckpointProviderBindingForSession(
+            createSettings,
+            providerContext,
+          );
+          const operationId = intent.operationId;
           await beginModalProviderCreate(db, {
             accountId: ids.accountId,
             workspaceId: ids.workspaceId,
@@ -1718,8 +1722,11 @@ async function resumeBoxForTurnOnce(
             providerBindingKey: binding.key,
             rematerializationId: rematerialization?.id ?? null,
             selectedRevision: rematerialization?.selectedRevision ?? null,
-            imageId: createSettings.modalImageId ?? null,
+            imageId: intent.imageId,
             imageRef: createSettings.modalImageRef ?? null,
+            appId: intent.appId,
+            providerName: intent.name,
+            requestSha256: intent.requestSha256,
           });
           providerCreateOperationId = operationId;
           providerCreateBindingKey = binding.key;
@@ -1731,7 +1738,6 @@ async function resumeBoxForTurnOnce(
             instanceId: created.instanceId,
           };
           providerRenewedAtMs = Date.now();
-          throwIfReleasedOrCancelled();
           if (
             providerCreateBindingKey &&
             !(await modalSessionMatchesCheckpointProviderBinding(

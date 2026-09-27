@@ -55,6 +55,7 @@ import type {
 import { serializeManifestRecord } from "@openai/agents-core/sandbox/internal";
 import { isProviderApiThrottleError, PROVIDER_REGISTRY } from "./providers";
 import { ensureModalRegistryImage } from "./providers/modal";
+import type { ModalCreateIntent } from "./providers/modal-create-boundary";
 import type { ProviderRegistration } from "./providers/types";
 import { sandboxBackendForSdkBackendId } from "./select";
 import {
@@ -180,6 +181,7 @@ export {
   modalSandboxAttributionEnvironment,
   modalSandboxAttributionTags,
   resolveModalCheckpointProviderBinding,
+  findModalProviderCreateReceipt,
   resolveModalCheckpointProviderBindingForLiveSandbox,
   resolveModalCheckpointProviderBindingForSession,
   sweepModalOrphanSandboxes,
@@ -1386,6 +1388,13 @@ type ResumeCapableClient = {
    * or prove it unavailable without creating anything. */
   resumeExact?: (state: unknown) => Promise<unknown>;
   create?: (manifest?: unknown, options?: unknown) => Promise<unknown>;
+  createWithLifecycle?: (
+    args: { manifest: unknown },
+    lifecycle: {
+      beforeDispatch: (intent: ModalCreateIntent, providerContext: unknown) => Promise<void>;
+      onCreated: (session: unknown, intent: ModalCreateIntent) => Promise<void>;
+    },
+  ) => Promise<unknown>;
 };
 
 /**
@@ -1784,7 +1793,11 @@ export async function establishSandboxSessionFromEnvelope(
      * Called for each physical attempt, including logical-image fallback. A
      * rejected hook prevents dispatch; a lost create reply is never permission
      * to invoke the fallback under the same unresolved operation. */
-    onBeforeSandboxCreate?: (settings: Settings) => Promise<void>;
+    onBeforeSandboxCreate?: (
+      settings: Settings,
+      intent?: ModalCreateIntent,
+      providerContext?: unknown,
+    ) => Promise<void>;
     /** Called after archive hydration but immediately before the exact workspace
      * fingerprint probe. Lease-aware callers persist `verifying` here so a box
      * is never observable as ready while verification is in flight. */
@@ -1964,11 +1977,44 @@ export async function establishSandboxSessionFromEnvelope(
         );
       }
       let createdClient = restoreClient;
+      let attributedDuringCreate = false;
+      let providerDispatchAttempted = false;
+      const createWithAttribution = async (
+        candidate: ResumeCapableClient,
+        createSettings: Settings,
+      ) => {
+        if (candidate.createWithLifecycle && opts.onBeforeSandboxCreate) {
+          return await candidate.createWithLifecycle(
+            { manifest: createManifest },
+            {
+              beforeDispatch: async (intent, providerContext) => {
+                providerDispatchAttempted = true;
+                await opts.onBeforeSandboxCreate!(createSettings, intent, providerContext);
+              },
+              onCreated: async (session) => {
+                const instanceId = readInstanceId(backend, session);
+                if (!instanceId) throw new Error("Modal provider receipt has no physical identity");
+                await opts.onSandboxCreated?.({
+                  client: candidate,
+                  session,
+                  sessionState: (session as { state?: unknown }).state ?? resumeFallbackState,
+                  instanceId,
+                  backendId: candidate.backendId,
+                });
+                attributedDuringCreate = true;
+              },
+            },
+          );
+        }
+        // Non-Modal providers and isolated client-factory fixtures retain their
+        // ordinary admission hook. Production Modal requires the wire intent.
+        await opts.onBeforeSandboxCreate?.(createSettings);
+        return await candidate.create!({ manifest: createManifest });
+      };
       const createStarted = Date.now();
       let restored: Awaited<ReturnType<NonNullable<typeof restoreClient.create>>>;
       try {
-        await opts.onBeforeSandboxCreate?.(restoreSettings);
-        restored = await restoreClient.create({ manifest: createManifest });
+        restored = await createWithAttribution(restoreClient, restoreSettings);
         recordSandboxCreateMetric(
           opts.metrics,
           restoreClient.backendId,
@@ -1990,6 +2036,11 @@ export async function establishSandboxSessionFromEnvelope(
           "create",
           error,
         );
+        if (providerDispatchAttempted) {
+          // Preserve the actual failure (including a known cleanup/setup
+          // failure); the durable receipt decides whether outcome is unknown.
+          throw error;
+        }
         if (
           createdFromFilesystemSnapshot ||
           createImageSource !== "provider_immutable" ||
@@ -2026,8 +2077,7 @@ export async function establishSandboxSessionFromEnvelope(
         }
         const fallbackStarted = Date.now();
         try {
-          await opts.onBeforeSandboxCreate?.(fallbackSettings);
-          restored = await fallbackClient.create({ manifest: createManifest });
+          restored = await createWithAttribution(fallbackClient, fallbackSettings);
           recordSandboxCreateMetric(
             opts.metrics,
             fallbackClient.backendId,
@@ -2069,7 +2119,7 @@ export async function establishSandboxSessionFromEnvelope(
         instanceId: restoredInstanceId,
         backendId: createdClient.backendId,
       };
-      if (opts.onSandboxCreated) {
+      if (opts.onSandboxCreated && !attributedDuringCreate) {
         try {
           await opts.onSandboxCreated(established);
         } catch (createCallbackError) {

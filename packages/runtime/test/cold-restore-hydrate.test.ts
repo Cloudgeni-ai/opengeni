@@ -16,6 +16,7 @@ import {
   SandboxProviderContinuityUnavailableError,
 } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
+import type { ModalCreateIntent } from "../src/sandbox/providers/modal-create-boundary";
 
 const hydrateCalls: Uint8Array[] = [];
 const createArgs: Array<{ manifest?: unknown; snapshot?: unknown }> = [];
@@ -241,6 +242,105 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     ).rejects.toThrow("provider_create_outcome_unknown");
     expect(creates).toBe(1);
     expect(attempts).toBe(2);
+  });
+
+  test("Modal preparation failure can choose the logical image before claiming; receipt is attributed once", async () => {
+    const events: string[] = [];
+    const result = await establishRuntimeSandboxSessionFromEnvelope(
+      modalSettings({ modalImageId: "im-selected" }),
+      null,
+      {
+        sessionId: "prepare-before-fence",
+        recovery: "create-or-restore",
+        environment: {},
+        logicalFallbackSettings: modalSettings({ modalImageId: "im-logical" }),
+        onBeforeSandboxCreate: async (_settings, intent) => {
+          expect(intent?.imageId).toBe("im-logical");
+          events.push("claim");
+        },
+        onSandboxCreated: async (created) => {
+          expect(created.instanceId).toBe("sb-fresh");
+          events.push("receipt");
+        },
+        clientFactory: (_backend, settings) => ({
+          backendId: "modal",
+          create: async () => {
+            throw new Error("unfenced create must not run");
+          },
+          createWithLifecycle: async (
+            args: any,
+            hooks: {
+              beforeDispatch: (intent: ModalCreateIntent) => Promise<void>;
+              onCreated: (session: unknown, intent: ModalCreateIntent) => Promise<void>;
+            },
+          ) => {
+            events.push(settings.modalImageId!);
+            if (settings.modalImageId === "im-selected") throw { status: 404 };
+            const intent = {
+              operationId: "11111111-1111-4111-8111-111111111111",
+              name: "opengeni-create-11111111-1111-4111-8111-111111111111",
+              appId: "ap-test",
+              imageId: "im-logical",
+              requestSha256: "a".repeat(64),
+            };
+            await hooks.beforeDispatch(intent);
+            const session = await new FakeModalSandboxClient({
+              workspacePersistence: "tar",
+              imageId: "im-logical",
+            }).create(args);
+            await hooks.onCreated(session, intent);
+            events.push("manifest");
+            return session;
+          },
+        }),
+      },
+    );
+    expect(result.instanceId).toBe("sb-fresh");
+    expect(events).toEqual(["im-selected", "im-logical", "claim", "receipt", "manifest"]);
+  });
+
+  test("a dispatched Modal 404 never enters logical-image fallback", async () => {
+    let claims = 0;
+    let factories = 0;
+    await expect(
+      establishRuntimeSandboxSessionFromEnvelope(
+        modalSettings({ modalImageId: "im-selected" }),
+        null,
+        {
+          sessionId: "dispatch-before-failure",
+          recovery: "create-or-restore",
+          environment: {},
+          logicalFallbackSettings: modalSettings({ modalImageId: "im-logical" }),
+          onBeforeSandboxCreate: async () => {
+            claims++;
+          },
+          clientFactory: () => {
+            factories++;
+            return {
+              backendId: "modal",
+              create: async () => {
+                throw new Error("unfenced create");
+              },
+              createWithLifecycle: async (
+                _args: unknown,
+                hooks: { beforeDispatch: (intent: ModalCreateIntent) => Promise<void> },
+              ) => {
+                await hooks.beforeDispatch({
+                  operationId: "11111111-1111-4111-8111-111111111111",
+                  name: "opengeni-create-11111111-1111-4111-8111-111111111111",
+                  appId: "ap-test",
+                  imageId: "im-selected",
+                  requestSha256: "a".repeat(64),
+                });
+                throw { status: 404 };
+              },
+            };
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ status: 404 });
+    expect(claims).toBe(1);
+    expect(factories).toBe(1);
   });
 
   test("readWorkspaceArchiveFromEnvelopeSessionState round-trips base64 → exact bytes", () => {

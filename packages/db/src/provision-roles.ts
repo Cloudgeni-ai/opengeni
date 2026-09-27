@@ -2105,6 +2105,9 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.modal_inventory_read_capabilities FROM PUBLIC;
       REVOKE ALL (backend_pid, transaction_id, data_schema) ON TABLE opengeni_private.modal_inventory_read_capabilities FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.list_live_modal_sandbox_leases() FROM PUBLIC;
+      IF to_regprocedure('opengeni_private.list_pending_modal_provider_creates()') IS NOT NULL THEN
+        REVOKE ALL ON FUNCTION opengeni_private.list_pending_modal_provider_creates() FROM PUBLIC;
+      END IF;
     END IF;
     IF to_regclass('opengeni_private.sandbox_recovery_rollout') IS NOT NULL THEN
       -- Migration may precede this role's creation. Converge only read access;

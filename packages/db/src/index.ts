@@ -44115,6 +44115,9 @@ export type SandboxProviderCreateAttempt = {
   selectedRevision: string | null;
   imageId: string | null;
   imageRef: string | null;
+  appId: string;
+  providerName: string;
+  requestSha256: string;
   startedAt: string;
   instanceId: string | null;
 };
@@ -47463,9 +47466,18 @@ export async function beginModalProviderCreate(
     selectedRevision: string | null;
     imageId: string | null;
     imageRef: string | null;
+    appId: string;
+    providerName: string;
+    requestSha256: string;
   },
 ): Promise<void> {
-  if (!input.operationId || !input.providerBindingKey) {
+  if (
+    !input.operationId ||
+    !input.providerBindingKey ||
+    !input.appId ||
+    input.providerName !== `opengeni-create-${input.operationId}` ||
+    !/^[a-f0-9]{64}$/u.test(input.requestSha256)
+  ) {
     throw new Error("Modal create requires operation and provider namespace identities");
   }
   await withRlsContext(db, input, async (scopedDb) =>
@@ -47508,13 +47520,120 @@ export async function beginModalProviderCreate(
         selectedRevision: input.selectedRevision,
         imageId: input.imageId,
         imageRef: input.imageRef,
+        appId: input.appId,
+        providerName: input.providerName,
+        requestSha256: input.requestSha256,
         startedAt: new Date().toISOString(),
         instanceId: null,
       };
       await tx.execute(sql`
         update sandbox_leases set provider_create_attempt = ${JSON.stringify(attempt)}::jsonb,
+          provider_create_recovery_after = null,
           updated_at = now() where id = ${row.id}
       `);
+    }),
+  );
+}
+
+export async function listPendingModalProviderCreates(
+  db: Database,
+): Promise<Array<{ workspaceId: string; sandboxGroupId: string }>> {
+  const rows = await rawRows<{ workspace_id: string; sandbox_group_id: string }>(
+    db,
+    sql`select * from opengeni_private.list_pending_modal_provider_creates()`,
+  );
+  return rows.map((row) => ({
+    workspaceId: row.workspace_id,
+    sandboxGroupId: row.sandbox_group_id,
+  }));
+}
+
+/** Throttle positive discovery without extending the warming lease or changing
+ * its create authority. Old unresolved rows rotate behind the next batch. */
+export async function claimModalProviderCreateRecovery(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+  },
+): Promise<SandboxProviderCreateAttempt | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb.execute<{
+      provider_create_attempt: SandboxProviderCreateAttempt;
+    }>(sql`
+      update sandbox_leases set provider_create_recovery_after = now() + interval '30 seconds'
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        and backend = 'modal' and liveness = 'warming' and instance_id is null
+        and provider_create_attempt->'instanceId' = 'null'::jsonb
+        and expires_at < now()
+        and coalesce(provider_create_recovery_after, '-infinity'::timestamptz) <= now()
+      returning provider_create_attempt
+    `);
+    return rows[0]?.provider_create_attempt ?? null;
+  });
+}
+
+/** Attribute a positively identified late receipt, preserving expiry and every
+ * checkpoint. Ordinary holder/epoch-fenced draining owns all physical cleanup. */
+export async function recordRecoveredModalProviderCreate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    attempt: SandboxProviderCreateAttempt;
+    instanceId: string;
+  },
+): Promise<boolean> {
+  if (!input.instanceId.startsWith("sb-") || input.attempt.instanceId !== null)
+    throw new Error("Modal create recovery requires an unresolved operation and exact provider id");
+  return await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const rows = await tx.execute<LeaseRow>(sql`select * from sandbox_leases
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        and backend = 'modal' and liveness = 'warming' and instance_id is null
+        and lease_epoch = ${input.attempt.leaseEpoch}
+        and provider_create_attempt = ${JSON.stringify(input.attempt)}::jsonb
+      for update`);
+      const row = rows[0];
+      if (!row) return false;
+      const current = recoveryStateFromLeaseRow(row);
+      if (
+        current.restore.rematerializationId !== input.attempt.rematerializationId ||
+        current.restore.selectedRevision !== input.attempt.selectedRevision
+      )
+        return false;
+      const recovery: SandboxRecoveryState = {
+        ...current,
+        provider: {
+          status: "creating",
+          instanceId: input.instanceId,
+          observedAt: new Date().toISOString(),
+        },
+        workspace: {
+          ...current.workspace,
+          status: "not_ready",
+          verifiedRevision: null,
+          verifiedAt: null,
+        },
+      };
+      await tx.execute(sql`update sandbox_leases set instance_id = ${input.instanceId},
+      provider_create_attempt = ${JSON.stringify({ ...input.attempt, instanceId: input.instanceId })}::jsonb,
+      resume_state = ${JSON.stringify(
+        resumeStateWithRecovery(
+          {
+            ...(resumeStateWithPreservedArchives(null, row.resume_state) ?? {}),
+            ...(row.resume_state?.opengeniWarmBilling
+              ? { opengeniWarmBilling: row.resume_state.opengeniWarmBilling }
+              : {}),
+          },
+          recovery,
+        ),
+      )}::jsonb,
+      updated_at = now() where id = ${row.id}`);
+      return true;
     }),
   );
 }
