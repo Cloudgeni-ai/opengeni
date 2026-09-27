@@ -2085,7 +2085,15 @@ before waiting again on work in flight. That answer shares its model response
 with the `wait_for_input` call, so it streams as commentary; the recorded reply
 makes it unread-worthy and lets Slack post it without relabelling the stored
 history item or its provider-declared `phase`. A reply is not a result: child
-result joins still read `output`. Turns that machine input started record none.
+result joins still read `output`. The source alone does not decide it, because
+every session's first turn is `user`. Turns that machine input started record
+none, and neither does a turn whose initiator context carries agent provenance
+(`via`: a child an agent spawned, or an agent's API call) or the first turn of
+a session a worker-owned producer created (the `scheduler`, an
+`automation:<trigger>` or `site-auth-maintenance` service). The message the
+settling activity completed last is the reply; an activity that resumed the
+turn after an approval, a human-input answer or a recovery and completed none
+reads the turn's newest current durable `agent.message.completed` instead.
 
 Teardown preserves that authority. Session-tree deletion locks and refuses any
 `running` or `stopping` command before cascading session-owned rows. Workspace

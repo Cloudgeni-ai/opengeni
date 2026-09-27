@@ -10,9 +10,9 @@ answer or outcome that follows does. A turn that a human or API message started
 and that ended waiting for input (`wait_for_input`) has no output, but the
 `reply` its `turn.completed` records answers that message, so it does create a
 dot. Migration 0522 indexes exactly that predicate; the 0503 index only serves
-older API processes during the rollout. A `session_wait` summary of such a
-`turn.completed` shows only the empty output, so it never counts as consuming
-the reply.
+older API processes during the rollout. A `session_wait` summary or a compact
+`session_events` `latest: "terminal"` result of such a `turn.completed` shows
+only the empty output, so neither counts as consuming the reply.
 Raw deltas, status snapshots,
 `sandbox.box.terminated`, `workspace.revision.captured`, rejected late events,
 duplicates and maintenance/continuation completion markers do not create dots.

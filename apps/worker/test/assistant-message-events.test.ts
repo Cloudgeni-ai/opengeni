@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   bootstrapWorkspace,
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
   initializeSessionStartAtomically,
@@ -19,6 +20,7 @@ import {
 } from "@opengeni/testing";
 import OpenAI from "openai";
 import { createActivityTestHarness } from "../src/activities";
+import { latestDurableTurnMessageText } from "../src/activities/agent-turn/input-wait-reply";
 
 /** One Responses API stream: each message is announced, streamed, then done. */
 function responsesStream(
@@ -92,9 +94,10 @@ describe("assistant message events from a real agent turn", () => {
   async function runTurn(
     model: Model,
     api: "chat" | "responses",
-    options: { waitForInputTool?: boolean } = {},
+    options: { waitForInputTool?: boolean; createdBy?: "human" | "agent" } = {},
   ) {
     const suffix = crypto.randomUUID();
+    const human = `subject-${suffix}`;
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
       accountExternalId: `account-${suffix}`,
@@ -102,20 +105,56 @@ describe("assistant message events from a real agent turn", () => {
       workspaceExternalSource: "test",
       workspaceExternalId: `workspace-${suffix}`,
       workspaceName: "Assistant message events",
-      subjectId: `subject-${suffix}`,
+      subjectId: human,
     });
     const grant = access.workspaceGrants[0]!;
-    const session = await createSession(client.db, {
+    const sessionDefaults = {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       initialMessage: "Is the deploy healthy?",
       resources: [],
       metadata: {},
+      createdBy: { kind: "subject" as const, subjectId: human },
       model: "scripted-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-    });
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none" as const,
+    };
+    let session = await createSession(client.db, sessionDefaults);
+    if (options.createdBy === "agent") {
+      // The human's session is running a turn whose agent spawns a child: the
+      // child's first turn is the agent's task prompt, not a human message.
+      await initializeSessionStartAtomically(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        reasoningEffortFallback: "medium",
+        createdEventPayload: {},
+        goal: null,
+      });
+      const parentAttemptId = crypto.randomUUID();
+      const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: parentAttemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claimed.action !== "claimed") throw new Error("parent turn was not claimed");
+      session = await createSession(client.db, {
+        ...sessionDefaults,
+        initialMessage: "Report the deploy status, then wait for the rollout.",
+        parentSessionId: session.id,
+        createdByActor: {
+          type: "agent_attempt",
+          sessionId: session.id,
+          turnId: claimed.turn.id,
+          attemptId: parentAttemptId,
+          executionGeneration: claimed.turn.executionGeneration,
+        },
+      });
+    }
     await initializeSessionStartAtomically(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -263,6 +302,43 @@ describe("assistant message events from a real agent turn", () => {
     expect(events.find((event) => event.type === "turn.completed")?.payload).toEqual({
       output: "",
       reply: status,
+    });
+    // An activity that later resumes this turn without a message of its own
+    // (after an approval or a recovery) reads the same answer back.
+    const completed = events.find((event) => event.type === "turn.completed")!;
+    const scope = { workspaceId: completed.workspaceId, sessionId: completed.sessionId };
+    expect(
+      await latestDurableTurnMessageText(client.db, { ...scope, turnId: completed.turnId! }),
+    ).toBe(status);
+    expect(
+      await latestDurableTurnMessageText(client.db, { ...scope, turnId: crypto.randomUUID() }),
+    ).toBeNull();
+  }, 60_000);
+
+  test("an agent-spawned child's first turn that waits for input records no reply", async () => {
+    const status = "The rollout is at 40 percent; waiting for it to finish.";
+    const events = await runTurn(
+      new ScriptedModel([
+        {
+          output: [
+            { ...assistantMessage(status, "msg_status"), phase: "commentary" },
+            functionCall("wait_for_input", {}, "call_wait"),
+          ] as never,
+        },
+        { error: new Error("a yielded wait must not reach another inference") },
+      ]),
+      "chat",
+      { waitForInputTool: true, createdBy: "agent" },
+    );
+    // The turn's source is still `user`, but no human asked: the note stays
+    // activity and the wait records only its empty output.
+    expect(
+      events
+        .filter((event) => event.type === "agent.message.completed")
+        .map((event) => event.payload),
+    ).toEqual([{ text: status, messageId: "msg_status", phase: "commentary" }]);
+    expect(events.find((event) => event.type === "turn.completed")?.payload).toEqual({
+      output: "",
     });
   }, 60_000);
 

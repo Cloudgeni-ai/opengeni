@@ -85,6 +85,7 @@ import {
   resolveWorkspaceAgentHumanInputEnabled,
   type RetainedArtifactMetadata,
   type SessionEvent,
+  type SessionTurn,
 } from "@opengeni/contracts";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 
@@ -136,7 +137,7 @@ import {
   assertSuccessfulAgentStreamCompletion,
   requireAgentStreamFinalOutput,
 } from "./quiescence";
-import { inputWaitReply } from "./input-wait-reply";
+import { inputWaitReply, latestDurableTurnMessageText } from "./input-wait-reply";
 import { waitForTurnOperation } from "./sandbox-provision";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 
@@ -231,7 +232,12 @@ export type TurnStreamAttemptDeps = {
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
   turnExecutionPolicy: TurnExecutionPolicyV1;
-  turn: { executionGeneration: number; model: string; source?: string };
+  turn: Pick<SessionTurn, "initiator" | "initiatorContext"> & {
+    id: string;
+    executionGeneration: number;
+    model: string;
+    source?: string;
+  };
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>;
   humanInputResume: Awaited<ReturnType<typeof getHumanInputResumeForEvent>>;
   attachPendingUpdatesAfterOpenSuffix: () => Promise<boolean>;
@@ -1724,10 +1730,16 @@ export async function runTurnStreamAttempt(
     const finalOutputAlreadyCompleted = latestStreamedAssistantText === finalOutput;
     // A wait ends the turn with empty output; a human's message still gets
     // its answer recorded for unread attention and Slack.
-    const reply = inputWaitReply({
+    const reply = await inputWaitReply({
       inputWaitYielded,
-      turnSource: turn.source,
+      turn,
       latestAssistantMessageText,
+      readLatestDurableTurnMessage: async () =>
+        await latestDurableTurnMessageText(db, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+        }),
     });
     await historySink.reconcileConversationTruth({ requireDurable: true });
     // Op-stream durability fence: the tool outputs are now durably in the

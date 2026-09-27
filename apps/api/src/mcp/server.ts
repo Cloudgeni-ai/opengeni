@@ -37,6 +37,7 @@ import {
   SessionEventType,
   stableJson,
   compactSessionEventResult,
+  turnCompletedReply,
   sessionEventLatestClassToSemanticClass,
   SessionMcpCredentialUpdateInput,
   ToolAuthNeededPayload,
@@ -4762,9 +4763,14 @@ function registerWorkspaceOrchestrationTools(
                 ),
               )
             : null;
+          // The compact text of a turn that ended waiting for input is its
+          // empty output, never the reply its human's message received, so
+          // returning it is not proof of reading that reply.
           if (
             result &&
+            event &&
             ["turn.completed", "agent.message.completed"].includes(result.type) &&
+            turnCompletedReply(event.payload) === null &&
             !result.truncation.truncated &&
             dbPage.fullPayloadsExact
           ) {
