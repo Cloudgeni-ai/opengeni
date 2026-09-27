@@ -21,6 +21,7 @@ Recovery scans receipts with bounded keyset reads inside one atomic transaction,
 avoiding simultaneous raw-row and duplicate observation collections. Corruption
 in a later receipt rolls back earlier recovery changes; validation, ordering,
 retention limits and the on-disk format remain unchanged.
+
 Settled interaction receipts use the same authority-scoped SQLite journal for
 on-demand replay. Controllers retain a content digest rather than a second full
 receipt in memory after successful terminal persistence. Replay validates the
