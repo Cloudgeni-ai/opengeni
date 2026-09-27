@@ -16,7 +16,9 @@ import {
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
   markSessionSystemUpdateOutboxDeliveredInTransaction,
+  materializeGoalContinuation,
   sessionSystemUpdateOutboxKindPayload,
+  setSessionGoalStatus,
   settleSessionIdleWithParentOutbox,
   supersedeConsumedChildTerminalResults,
   type DbClient,
@@ -100,7 +102,12 @@ async function workspace(): Promise<Workspace> {
   };
 }
 
-async function start(ws: Workspace, message: string, parent?: Attempt): Promise<Attempt> {
+async function start(
+  ws: Workspace,
+  message: string,
+  parent?: Attempt,
+  goal?: string,
+): Promise<Attempt> {
   const session = await createSession(client.db, {
     accountId: ws.accountId,
     workspaceId: ws.workspaceId,
@@ -133,7 +140,7 @@ async function start(ws: Workspace, message: string, parent?: Attempt): Promise<
     clientEventId: `initial:${session.id}`,
     reasoningEffortFallback: "low",
     createdEventPayload: {},
-    goal: null,
+    goal: goal ? { text: goal, mutationPolicy: "preserve_intent" } : null,
   });
   const attemptId = crypto.randomUUID();
   const claimed = await claimSessionWorkForAttempt(client.db, ws.workspaceId, {
@@ -212,6 +219,11 @@ async function nextChildTask(ws: Workspace, child: Attempt, prompt: string): Pro
 
 /** The child's claimed turn answers, and its idle result reaches the parent. */
 async function answerAndDeliver(ws: Workspace, child: Attempt, answer: string): Promise<void> {
+  await settleChildAnswer(ws, child, answer);
+  await deliverIdleResult(ws, child);
+}
+
+async function settleChildAnswer(ws: Workspace, child: Attempt, answer: string): Promise<void> {
   const settled = await applySessionTurnSettlement(client.db, ws.workspaceId, {
     sessionId: child.sessionId,
     turnId: child.turnId,
@@ -223,6 +235,68 @@ async function answerAndDeliver(ws: Workspace, child: Attempt, answer: string): 
     events: [{ type: "turn.completed" as const, payload: { output: answer } }],
   });
   expect(settled.action).toBe("settled");
+}
+
+/** A goal-owned child answers, then a turn that only continued its goal
+ * completes the goal with a remark. Returns both answer sequences. */
+async function answerThenCompleteGoal(
+  ws: Workspace,
+  child: Attempt,
+  answer: string,
+  remark: string,
+): Promise<{ answer: number; remark: number }> {
+  await settleChildAnswer(ws, child, answer);
+  const materialized = await materializeGoalContinuation(client.db, {
+    accountId: ws.accountId,
+    workspaceId: ws.workspaceId,
+    sessionId: child.sessionId,
+    workflowId: `session-${child.sessionId}`,
+    defaultMaxAutoContinuations: null,
+    budgetBlocked: null,
+    policy: {
+      model: "scripted-model",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      tools: [],
+      sandboxBackend: "none",
+    },
+    prompt: (goal, count) => `continue ${goal.text} (${count})`,
+  });
+  expect(materialized.action).toBe("continue");
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(client.db, ws.workspaceId, {
+    sessionId: child.sessionId,
+    workflowId: `session-${child.sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: `dispatch-${crypto.randomUUID()}`,
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") throw new Error("goal continuation was not claimed");
+  expect(claimed.turn.source).toBe("goal");
+  await setSessionGoalStatus(client.db, ws.workspaceId, child.sessionId, {
+    status: "completed",
+    evidence: "The answer was delivered.",
+  });
+  await settleChildAnswer(
+    ws,
+    {
+      sessionId: child.sessionId,
+      turnId: claimed.turn.id,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+      triggerEventId: claimed.turn.triggerEventId,
+    },
+    remark,
+  );
+  const answers = await shared.admin<Array<{ sequence: number }>>`
+    select sequence from session_events
+    where session_id = ${child.sessionId} and type = 'turn.completed' order by sequence`;
+  return { answer: answers[0]!.sequence, remark: answers[1]!.sequence };
+}
+
+/** The child's idle boundary commits its result and delivers it to the parent. */
+async function deliverIdleResult(ws: Workspace, child: Attempt): Promise<void> {
   await settleSessionIdleWithParentOutbox(client.db, ws.workspaceId, child.sessionId);
   for (const row of await claimPendingSessionSystemUpdateOutbox(client.db, 1_000)) {
     if (row.sourceSessionId !== child.sessionId) continue;
@@ -449,5 +523,52 @@ describe("a parent read that returns a child's whole answer consumes its pending
       { sequence: first!.sequence, state: "pending" },
       { sequence: second!.sequence, state: "superseded" },
     ]);
+  });
+
+  test("a result with goal-continuation output is consumed only when every part was read", async () => {
+    const ws = await workspace();
+    const parent = await start(ws, "Count the users.");
+    const child = await start(ws, "Count them.", parent, "Count the users");
+    const sequences = await answerThenCompleteGoal(
+      ws,
+      child,
+      "28 distinct users in the window.",
+      "The goal is complete. A fresh check confirmed 28 users.",
+    );
+    await deliverIdleResult(ws, child);
+    const [pending] = await listOutstandingSessionSystemUpdates(
+      client.db,
+      ws.workspaceId,
+      parent.sessionId,
+    );
+    expect(pending?.payload).toMatchObject({
+      finalAnswer: {
+        sequence: sequences.answer,
+        goalContinuations: [{ sequence: sequences.remark }],
+      },
+    });
+    const input = {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sessionId: parent.sessionId,
+      turnId: parent.turnId,
+      attemptId: parent.attemptId,
+      executionGeneration: parent.executionGeneration,
+    };
+
+    // The parent read the answer but not the later continuation output.
+    const partial = await supersedeConsumedChildTerminalResults(client.db, {
+      ...input,
+      children: [{ sessionId: child.sessionId, sequences: [sequences.answer] }],
+    });
+    expect(partial.supersededUpdateIds).toEqual([]);
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
+
+    const whole = await supersedeConsumedChildTerminalResults(client.db, {
+      ...input,
+      children: [{ sessionId: child.sessionId, sequences: [sequences.answer, sequences.remark] }],
+    });
+    expect(whole.supersededUpdateIds).toHaveLength(1);
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
   });
 });

@@ -7,7 +7,7 @@ export {
 } from "./session-file-attachments";
 import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
-  childTerminalResultFinalAnswer,
+  childTerminalResultFinalAnswerWithGoalContinuations,
   type ChildTerminalResultFinalAnswer,
   SKILL_CATALOG_CONTEXT_PREFIX,
   SandboxRecoverySelection,
@@ -27,7 +27,7 @@ import {
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 import {
-  childLatestTurnOutcomeSql,
+  childRecentTurnOutcomesSql,
   childLifecycleEvidenceCandidatesSql,
   completeMeaningfulSessionEventSql,
   meaningfulSessionEventSql,
@@ -66771,22 +66771,21 @@ function consumedChildLifecycleSessionIds(
     // The row's kind and its payload discriminator are written together; narrow
     // on the discriminator so the shared field access is typed rather than cast.
     if (!payload || !isChildLifecycleSystemUpdatePayload(payload)) continue;
-    // An untruncated final answer is exact content of the child's answer event;
-    // claim still verifies it against that retained event before acknowledging.
+    // An untruncated final answer, and each goal continuation after it, is
+    // exact content of one child answer event; claim still verifies every part
+    // against its retained event before acknowledging.
     if (payload.type === "child_terminal_result") {
       const answer = payload.finalAnswer;
-      if (
-        answer &&
-        answer.truncated === false &&
-        answer.sequence > 0 &&
-        answer.sequence <= POSTGRES_INT_MAX
-      ) {
-        children.push({
-          sessionId: payload.childSessionId,
-          sequence: answer.sequence,
-          type: "turn.completed",
-          payload: { output: answer.text },
-        });
+      if (answer && answer.truncated === false) {
+        for (const part of [answer, ...(answer.goalContinuations ?? [])]) {
+          if (part.sequence <= 0 || part.sequence > POSTGRES_INT_MAX) continue;
+          children.push({
+            sessionId: payload.childSessionId,
+            sequence: part.sequence,
+            type: "turn.completed",
+            payload: { output: part.text },
+          });
+        }
       }
     }
     const evidence = payload.childEventEvidence;
@@ -67085,6 +67084,10 @@ export async function supersedeConsumedChildTerminalResults(
               );
             const consumed = answers.map((answer) => Number(answer.sequence));
             if (consumed.length === 0) continue;
+            const consumedList = sql.join(
+              consumed.map((sequence) => sql`${sequence}`),
+              sql`, `,
+            );
             const rows = await tx
               .update(schema.sessionSystemUpdates)
               .set({ state: "superseded" })
@@ -67098,10 +67101,19 @@ export async function supersedeConsumedChildTerminalResults(
                   eq(schema.sessionSystemUpdates.classification, "success"),
                   sql`${schema.sessionSystemUpdates.payload} ->> 'status' = 'idle'`,
                   sql`jsonb_typeof(${schema.sessionSystemUpdates.payload} -> 'finalAnswer' -> 'sequence') = 'number'`,
-                  sql`(${schema.sessionSystemUpdates.payload} -> 'finalAnswer' ->> 'sequence')::numeric in (${sql.join(
-                    consumed.map((sequence) => sql`${sequence}`),
-                    sql`, `,
-                  )})`,
+                  sql`(${schema.sessionSystemUpdates.payload} -> 'finalAnswer' ->> 'sequence')::numeric in (${consumedList})`,
+                  // A result that also carries goal-continuation output was
+                  // consumed only when every continuation was returned too.
+                  sql`not exists (
+                    select 1 from jsonb_array_elements(
+                      case when jsonb_typeof(${schema.sessionSystemUpdates.payload} -> 'finalAnswer' -> 'goalContinuations') = 'array'
+                        then ${schema.sessionSystemUpdates.payload} -> 'finalAnswer' -> 'goalContinuations'
+                        else '[]'::jsonb end
+                    ) as part
+                    where case when jsonb_typeof(part -> 'sequence') = 'number'
+                      then (part ->> 'sequence')::numeric not in (${consumedList})
+                      else true end
+                  )`,
                 ),
               )
               .returning({ id: schema.sessionSystemUpdates.id });
@@ -73309,37 +73321,83 @@ export async function settleSessionIdleWithParentOutbox(
   });
 }
 
+/** How many of the child's newest turn outcomes the final answer may walk
+ * back through past goal-continuation turns before giving up. */
+const CHILD_FINAL_ANSWER_OUTCOME_WINDOW = 16;
+
 /**
  * The child's current final answer for its idle terminal result. Null when its
  * newest turn ended without an answer (including one that stopped at a segment
- * limit), when it has no answer text, or when the stored answer row is itself
+ * limit), when it has no answer text, or when a stored answer row is itself
  * only a retained preview: the parent then reads the child's events instead of
  * receiving an older answer or a partial copy presented as the result.
+ *
+ * A turn claimed only to continue the child's goal (typically to confirm and
+ * complete it after the answer) does not replace the answer. The walk goes
+ * back past such turns to the newest outcome that had any other input and
+ * reports that answer, followed by the continuation output. The combined copy
+ * must fit the bound whole, or nothing is copied.
  */
 async function childFinalAnswerTx(
   tx: Database,
   workspaceId: string,
   childSessionId: string,
 ): Promise<ChildTerminalResultFinalAnswer | null> {
-  const [outcome] = await rawRows<{
+  const outcomes = await rawRows<{
     sequence: number;
     type: string;
     payload: unknown;
     payloadCodecVersion: number | null;
-  }>(tx, childLatestTurnOutcomeSql(sql`${workspaceId}::uuid`, sql`${childSessionId}::uuid`));
-  if (!outcome || outcome.type !== "turn.completed") return null;
+    goalContinuationOnly: boolean;
+  }>(
+    tx,
+    childRecentTurnOutcomesSql(
+      sql`${workspaceId}::uuid`,
+      sql`${childSessionId}::uuid`,
+      CHILD_FINAL_ANSWER_OUTCOME_WINDOW,
+    ),
+  );
+  // Newest first; collected continuation output is reversed to oldest first.
+  const continuations: { sequence: number; output: string }[] = [];
+  for (const outcome of outcomes) {
+    const output = outcome.type === "turn.completed" ? completedTurnAnswerOutput(outcome) : null;
+    if (output === null) return null;
+    if (!outcome.goalContinuationOnly) {
+      const parts = [
+        ...(output.length > 0 ? [{ sequence: Number(outcome.sequence), output }] : []),
+        ...continuations.reverse(),
+      ];
+      const [answer, ...goalContinuations] = parts;
+      if (!answer) return null;
+      return childTerminalResultFinalAnswerWithGoalContinuations({
+        childSessionId,
+        sequence: answer.sequence,
+        output: answer.output,
+        goalContinuations,
+      });
+    }
+    if (output.length > 0) continuations.push({ sequence: Number(outcome.sequence), output });
+  }
+  // Only goal continuations inside the window: no answer is proven here.
+  return null;
+}
+
+/** The whole answer a `turn.completed` carries ("" when it has none), or null
+ * when the stored row cannot stand in for that turn's result: a retained
+ * preview, or a turn that stopped at a segment limit. */
+function completedTurnAnswerOutput(outcome: {
+  payload: unknown;
+  payloadCodecVersion: number | null;
+}): string | null {
   const payload = logicalChildReadEvent(outcome).payload;
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
   const record = payload as Record<string, unknown>;
   const truncation = record.truncation as { truncated?: unknown } | null | undefined;
   if (truncation?.truncated === true || record.sourceOmitted === true) return null;
   if (Object.hasOwn(record, "segmentLimit")) return null;
-  if (typeof record.output !== "string" || record.output.length === 0) return null;
-  return childTerminalResultFinalAnswer({
-    childSessionId,
-    sequence: Number(outcome.sequence),
-    output: record.output,
-  });
+  if (typeof record.output === "string") return record.output;
+  // No output at all is "no answer"; any other shape is not a readable copy.
+  return (record.output ?? null) === null && (record.result ?? null) === null ? "" : null;
 }
 
 export async function setTemporalWorkflowId(

@@ -16,6 +16,8 @@ import {
   getSessionSystemUpdateOutboxByDedupeKey,
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
+  materializeGoalContinuation,
+  setSessionGoalStatus,
   settleSessionIdleWithParentOutbox,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
@@ -75,7 +77,7 @@ async function claim(grant: Grant, sessionId: string) {
 
 async function startSession(
   grant: Grant,
-  input: { message: string; parent?: Awaited<ReturnType<typeof startSession>> },
+  input: { message: string; parent?: Awaited<ReturnType<typeof startSession>>; goal?: string },
 ) {
   const session = await createSession(client.db, {
     accountId: grant.accountId,
@@ -109,7 +111,7 @@ async function startSession(
     clientEventId: `initial:${session.id}`,
     reasoningEffortFallback: "low",
     createdEventPayload: {},
-    goal: null,
+    goal: input.goal ? { text: input.goal, mutationPolicy: "preserve_intent" } : null,
   });
   return { session, ...(await claim(grant, session.id)) };
 }
@@ -164,6 +166,49 @@ async function nextTurn(grant: Grant, started: Started, prompt: string): Promise
     initiator: { kind: "subject", subjectId: grant.subjectId },
   });
   return { session: started.session, ...(await claim(grant, started.session.id)) };
+}
+
+/** What the workflow does after a goal-owned child's turn settles while its
+ * goal is still active: materialize the continuation and claim it as the
+ * child's next turn, which ran only to continue the goal. */
+async function goalContinuationTurn(grant: Grant, started: Started): Promise<Started> {
+  const materialized = await materializeGoalContinuation(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId: started.session.id,
+    workflowId: `session-${started.session.id}`,
+    defaultMaxAutoContinuations: null,
+    budgetBlocked: null,
+    policy: {
+      model: "scripted-model",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      tools: [],
+      sandboxBackend: "none",
+    },
+    prompt: (goal, count) => `continue ${goal.text} (${count})`,
+  });
+  expect(materialized.action).toBe("continue");
+  const next = { session: started.session, ...(await claim(grant, started.session.id)) };
+  expect(next.turn.source).toBe("goal");
+  return next;
+}
+
+/** The continuation confirms the goal (goal_complete) and ends with a remark. */
+async function completeGoalInContinuation(
+  grant: Grant,
+  continuation: Started,
+  remark: string,
+): Promise<void> {
+  await setSessionGoalStatus(client.db, grant.workspaceId, continuation.session.id, {
+    status: "completed",
+    evidence: "The answer was delivered in the previous response.",
+  });
+  if (remark.length === 0) {
+    await settleTurn(grant, continuation, [{ type: "turn.completed", payload: { output: "" } }]);
+  } else {
+    await completeTurn(grant, continuation, remark);
+  }
 }
 
 function notifyServices(): NotifyServices {
@@ -393,5 +438,106 @@ describe("child_terminal_result carries the child's final answer", () => {
       finalAnswer: { text: answer, truncated: false },
       goal: { status: "complete" },
     });
+  });
+
+  test("a goal continuation that only confirms the goal keeps the child's answer", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "Count the active users." });
+    const child = await startSession(grant, {
+      message: "Report the active users from the replica.",
+      parent,
+      goal: "Report the active users from the replica",
+    });
+    const answer = "28 distinct users submitted work in the 48-hour window (source: replica).";
+    await completeTurn(grant, child, answer);
+    const answerSequence = await childAnswerSequence(child.session.id);
+    const continuation = await goalContinuationTurn(grant, child);
+    const remark = "The goal is complete. A fresh read-only check confirmed the 28 users.";
+    await completeGoalInContinuation(grant, continuation, remark);
+    const remarkSequence = await childAnswerSequence(child.session.id);
+    expect(remarkSequence).toBeGreaterThan(answerSequence);
+
+    await markChildIdle(grant, child);
+
+    const [pending] = await listOutstandingSessionSystemUpdates(
+      client.db,
+      grant.workspaceId,
+      parent.session.id,
+    );
+    expect(pending?.kind).toBe("child_terminal_result");
+    // The answer stays the result; the goal-continuation remark follows it.
+    expect((pending?.payload as Record<string, unknown> | undefined)?.finalAnswer).toEqual({
+      sequence: answerSequence,
+      text: answer,
+      truncated: false,
+      totalBytes: Buffer.byteLength(answer),
+      goalContinuations: [{ sequence: remarkSequence, text: remark }],
+    });
+
+    const update = await claimedParentBatch(grant, parent, child.session.id);
+    expect(update.payload.finalAnswer).toMatchObject({
+      sequence: answerSequence,
+      text: answer,
+      goalContinuations: [{ sequence: remarkSequence, text: remark }],
+    });
+    // Both parts are exact child content, so the parent consumed the whole result.
+    expect(await acknowledgedSequence(grant.subjectId, child.session.id)).toBeGreaterThanOrEqual(
+      remarkSequence,
+    );
+  });
+
+  test("a goal continuation without output reports the answer alone", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "Find the owner." });
+    const child = await startSession(grant, {
+      message: "Look up the owner.",
+      parent,
+      goal: "Look up the owner",
+    });
+    const answer = "The owner is the platform team.";
+    await completeTurn(grant, child, answer);
+    const answerSequence = await childAnswerSequence(child.session.id);
+    await completeGoalInContinuation(grant, await goalContinuationTurn(grant, child), "");
+
+    await markChildIdle(grant, child);
+
+    const [pending] = await listOutstandingSessionSystemUpdates(
+      client.db,
+      grant.workspaceId,
+      parent.session.id,
+    );
+    expect((pending?.payload as Record<string, unknown> | undefined)?.finalAnswer).toEqual({
+      sequence: answerSequence,
+      text: answer,
+      truncated: false,
+      totalBytes: Buffer.byteLength(answer),
+    });
+  });
+
+  test("an answer and continuation remark that together exceed the bound are not copied", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "Write the audit." });
+    const child = await startSession(grant, {
+      message: "Audit every module.",
+      parent,
+      goal: "Audit every module",
+    });
+    // Each part fits alone; together they do not, and neither is cut.
+    await completeTurn(grant, child, `Audit: ${"all controls pass. ".repeat(300)}`);
+    await completeGoalInContinuation(
+      grant,
+      await goalContinuationTurn(grant, child),
+      `The goal is complete. ${"A fresh check confirmed it. ".repeat(100)}`,
+    );
+
+    await markChildIdle(grant, child);
+
+    const [pending] = await listOutstandingSessionSystemUpdates(
+      client.db,
+      grant.workspaceId,
+      parent.session.id,
+    );
+    expect(pending?.kind).toBe("child_terminal_result");
+    expect(pending?.payload).not.toHaveProperty("finalAnswer");
   });
 });

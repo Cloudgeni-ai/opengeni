@@ -3,6 +3,7 @@ import {
   CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES,
   SessionSystemUpdatePayload,
   childTerminalResultFinalAnswer,
+  childTerminalResultFinalAnswerWithGoalContinuations,
   sessionSystemUpdateBatchHistoryItem,
 } from "../src/index";
 
@@ -76,5 +77,71 @@ describe("childTerminalResultFinalAnswer", () => {
     ]);
     const rendered = JSON.parse(history.content.slice(history.content.indexOf("{")));
     expect(rendered.updates[0].payload.finalAnswer).toEqual(finalAnswer);
+  });
+});
+
+describe("childTerminalResultFinalAnswerWithGoalContinuations", () => {
+  const answer = "28 distinct users submitted work in the window.";
+  const remark = "The goal is complete. A fresh check confirmed the 28 users.";
+
+  test("keeps the answer and appends each continuation whole, oldest first", () => {
+    const result = childTerminalResultFinalAnswerWithGoalContinuations({
+      childSessionId,
+      sequence: 7,
+      output: answer,
+      goalContinuations: [
+        { sequence: 9, output: remark },
+        { sequence: 11, output: "" },
+        { sequence: 13, output: "Still complete." },
+      ],
+    });
+    expect(result).toEqual({
+      sequence: 7,
+      text: answer,
+      truncated: false,
+      totalBytes: bytes(answer),
+      goalContinuations: [
+        { sequence: 9, text: remark },
+        { sequence: 13, text: "Still complete." },
+      ],
+    });
+    const payload = SessionSystemUpdatePayload.parse({
+      type: "child_terminal_result",
+      childSessionId,
+      status: "idle",
+      finalAnswer: result,
+    });
+    expect(payload).toMatchObject({ finalAnswer: result });
+  });
+
+  test("without continuation output it is the ordinary bounded answer", () => {
+    const output = "a".repeat(CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES + 1);
+    expect(
+      childTerminalResultFinalAnswerWithGoalContinuations({
+        childSessionId,
+        sequence: 7,
+        output,
+        goalContinuations: [{ sequence: 9, output: "" }],
+      }),
+    ).toEqual(childTerminalResultFinalAnswer({ childSessionId, sequence: 7, output }));
+  });
+
+  test("copies nothing when the parts together exceed the bound", () => {
+    const half = CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES / 2;
+    const fits = childTerminalResultFinalAnswerWithGoalContinuations({
+      childSessionId,
+      sequence: 7,
+      output: "a".repeat(half),
+      goalContinuations: [{ sequence: 9, output: "b".repeat(half) }],
+    });
+    expect(fits?.truncated).toBe(false);
+    expect(
+      childTerminalResultFinalAnswerWithGoalContinuations({
+        childSessionId,
+        sequence: 7,
+        output: "a".repeat(half),
+        goalContinuations: [{ sequence: 9, output: "é".repeat(half / 2 + 1) }],
+      }),
+    ).toBeNull();
   });
 });

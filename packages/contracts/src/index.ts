@@ -8184,6 +8184,12 @@ export const CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES = 8 * 1024;
  * terminal result. `sequence` is the child's result-bearing `turn.completed`
  * event. A truncated copy keeps the head and the tail around an explicit
  * marker, and `nextAction` reads the complete answer.
+ *
+ * `goalContinuations` holds the output of each goal-continuation turn that
+ * ran after that answer, oldest first. Such a turn only continued the child's
+ * goal (for example to confirm and complete it), so it never replaces the
+ * answer. Each entry is the exact output of its `turn.completed` event, and
+ * the answer and every continuation are copied whole or not at all.
  */
 export const ChildTerminalResultFinalAnswer = z
   .object({
@@ -8191,6 +8197,17 @@ export const ChildTerminalResultFinalAnswer = z
     text: z.string(),
     truncated: z.boolean(),
     totalBytes: z.number().int().nonnegative(),
+    goalContinuations: z
+      .array(
+        z
+          .object({
+            sequence: z.number().int().positive(),
+            text: z.string().min(1),
+          })
+          .passthrough(),
+      )
+      .min(1)
+      .optional(),
     nextAction: z
       .object({
         tool: z.literal("session_events"),
@@ -8234,6 +8251,44 @@ export function childTerminalResultFinalAnswer(input: {
       tool: "session_events",
       arguments: { sessionId: input.childSessionId, view: "results", after: input.sequence - 1 },
     },
+  };
+}
+
+/**
+ * The child's answer followed by the output of each goal-continuation turn
+ * that ran after it, oldest first. Without continuation output this is
+ * `childTerminalResultFinalAnswer`. With it, the answer and every
+ * continuation are copied whole only when together they fit the bound, and
+ * otherwise nothing is copied (null): the parent then reads the child's
+ * results instead of receiving a cut answer or a dropped continuation.
+ */
+export function childTerminalResultFinalAnswerWithGoalContinuations(input: {
+  childSessionId: string;
+  sequence: number;
+  output: string;
+  goalContinuations: readonly { sequence: number; output: string }[];
+}): ChildTerminalResultFinalAnswer | null {
+  const goalContinuations = input.goalContinuations.filter(
+    (continuation) => continuation.output.length > 0,
+  );
+  if (goalContinuations.length === 0) {
+    return childTerminalResultFinalAnswer(input);
+  }
+  const totalBytes = utf8Bytes(input.output);
+  const combinedBytes = goalContinuations.reduce(
+    (sum, continuation) => sum + utf8Bytes(continuation.output),
+    totalBytes,
+  );
+  if (combinedBytes > CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES) return null;
+  return {
+    sequence: input.sequence,
+    text: input.output,
+    truncated: false,
+    totalBytes,
+    goalContinuations: goalContinuations.map((continuation) => ({
+      sequence: continuation.sequence,
+      text: continuation.output,
+    })),
   };
 }
 

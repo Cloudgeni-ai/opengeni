@@ -75,15 +75,25 @@ export function meaningfulSessionSequenceSql(
     ), 0)`;
 }
 
-/** The child's newest ordinary turn outcome. Only a result-bearing
- * `turn.completed` here is the child's current answer: an older answer behind a
- * newer failed, cancelled, superseded, or segment-limited turn is never
- * reported as the result. A segment-limit completion (`max_turns`,
+/** The child's newest ordinary turn outcomes, newest first. Only a
+ * result-bearing `turn.completed` here is the child's current answer: an older
+ * answer behind a newer failed, cancelled, superseded, or segment-limited turn
+ * is never reported as the result. A segment-limit completion (`max_turns`,
  * `budget_exhausted`) is the outcome of the turn that stopped there, and its
  * empty output means "no answer". Only standalone maintenance is not an
- * outcome. Each type probe walks the (workspace, session, type, sequence) index
- * backwards, and only the one selected row's payload is returned. */
-export function childLatestTurnOutcomeSql(workspaceId: SQLWrapper, sessionId: SQLWrapper): SQL {
+ * outcome.
+ *
+ * `goalContinuationOnly` marks a turn claimed only to continue the child's
+ * goal: a goal-routed turn to which no other input (a message, a Steer, a
+ * child or command result) was ever delivered. Such a turn follows an answer
+ * rather than producing the task's result, so the caller walks back past it.
+ * Each outcome probe walks the (workspace, session, type, sequence) index
+ * backwards within `limit`, and only the selected rows' payloads are read. */
+export function childRecentTurnOutcomesSql(
+  workspaceId: SQLWrapper,
+  sessionId: SQLWrapper,
+  limit: number,
+): SQL {
   return sql`with latest as (
     select outcome.sequence from session_events outcome
     where outcome.workspace_id = ${workspaceId} and outcome.session_id = ${sessionId}
@@ -91,14 +101,23 @@ export function childLatestTurnOutcomeSql(workspaceId: SQLWrapper, sessionId: SQ
       and outcome.duplicate_of_event_id is null
       and (outcome.turn_association is null or outcome.turn_association = 'current')
       and (outcome.type <> 'turn.completed' or not (outcome.payload ? 'maintenance'))
-    order by outcome.sequence desc limit 1
+    order by outcome.sequence desc limit ${limit}
   )
   select outcome.sequence, outcome.type, outcome.payload,
-    outcome.payload_codec_version as "payloadCodecVersion"
+    outcome.payload_codec_version as "payloadCodecVersion",
+    case when turn.source = 'goal' then not exists (
+      select 1 from session_system_updates input
+      where input.workspace_id = ${workspaceId} and input.session_id = ${sessionId}
+        and input.delivered_turn_id = turn.id and input.kind <> 'goal_continuation'
+    ) else false end as "goalContinuationOnly"
   from latest
   join session_events outcome
     on outcome.workspace_id = ${workspaceId} and outcome.session_id = ${sessionId}
-      and outcome.sequence = latest.sequence`;
+      and outcome.sequence = latest.sequence
+  left join session_turns turn
+    on turn.workspace_id = ${workspaceId} and turn.session_id = ${sessionId}
+      and turn.id = outcome.turn_id
+  order by outcome.sequence desc`;
 }
 
 /** Bound indexed candidate rows BEFORE testing payload size/completeness. Without

@@ -21,8 +21,9 @@ have their own independent versions; null-version legacy marker text stays liter
 It never advances to the child's current cursor. A legacy terminal status notice
 without answer content is not proof that the parent consumed an answer. An idle
 terminal result that carries the child's untruncated `finalAnswer` needs no
-separate evidence: claim verifies that answer against the child's retained
-`turn.completed` event instead. A truncated answer acknowledges nothing until a
+separate evidence: claim verifies that answer, and each
+`finalAnswer.goalContinuations` entry, against the child's retained
+`turn.completed` events instead. A truncated answer acknowledges nothing until a
 complete read (see [`durable-agent-inputs.md`](durable-agent-inputs.md)).
 
 For a live exact parent attempt, `session_events` and `session_wait` also

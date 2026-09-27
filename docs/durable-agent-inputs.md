@@ -155,13 +155,23 @@ The complete answer stays only in the child's own durable event. No answer is
 copied when the child's newest turn ended failed, cancelled, superseded, or at a
 segment limit (`max_turns`, `budget_exhausted`), or its answer row is itself a
 retained preview: an older answer is never presented as the newest task's
-result. Only standalone maintenance turns are skipped. The worker's goal
+result. Only standalone maintenance turns are skipped. A turn claimed only to
+continue the child's goal (a goal-routed turn that received no other input,
+typically one that confirms and completes the goal after the answer) does not
+replace the answer: the settlement walks back past such turns, within the
+child's 16 newest turn outcomes, to the newest outcome that had other input,
+reports that answer, and lists each continuation's output after it as
+`finalAnswer.goalContinuations` (`sequence`, `text`, oldest first). The answer
+and every continuation are copied whole only when together they fit the 8 KiB
+bound; otherwise no answer is copied and the parent reads the child's results.
+A failed, cancelled, superseded, or segment-limited turn anywhere in that walk
+still means no answer. The worker's goal
 enrichment upsert keeps the committed `finalAnswer` and `childEventEvidence`
 under the row lock rather than replacing them, so an immediately delivered row
 and a reaper-delivered row carry the same answer. The field is optional, so older
-rows and older workers keep working. An untruncated `finalAnswer` is itself
-the consumption evidence for the parent claim's human acknowledgment, so such a
-row carries no separate `childEventEvidence`; other lifecycle notices and
+rows and older workers keep working. An untruncated `finalAnswer` (with each goal
+continuation) is itself the consumption evidence for the parent claim's human
+acknowledgment, so such a row carries no separate `childEventEvidence`; other lifecycle notices and
 answerless terminal results keep the bounded evidence.
 
 A parent's exact live attempt that receives a direct child's complete final
@@ -171,8 +181,9 @@ transaction under the canonical event-write prefix (the shared control wait is
 bounded like other request writers; a busy prefix skips it), it re-proves that
 the attempt is the session's current one and that each returned sequence is the
 child's result-bearing `turn.completed`, then marks any still-pending idle
-`child_terminal_result` whose `finalAnswer.sequence` is one of those exact
-sequences `superseded` and appends `system.update.cancelled` with
+`child_terminal_result` whose `finalAnswer.sequence`, and every
+`goalContinuations` sequence, is one of those exact sequences `superseded` and
+appends `system.update.cancelled` with
 `reason: consumed_by_parent_read`. A pending result for an answer the parent
 did not receive, such as an older one skipped by a later cursor, stays pending. `session_wait` then reports the remaining
 own pending input, so the parent is not told to end its turn only to receive
