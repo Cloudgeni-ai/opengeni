@@ -409,6 +409,7 @@ export class ComputerSupervisor {
         driver,
         initialJournal,
         onJournalRecord: (record) => journal.write(record),
+        loadJournalRecord: (operationId) => journal.read(operationId),
         authority: {
           authorizeDispatch: async (command) => {
             if (runtime?.lifecycle !== "active") {

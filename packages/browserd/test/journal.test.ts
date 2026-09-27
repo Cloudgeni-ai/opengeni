@@ -16,6 +16,42 @@ const controllerGeneration = "controller-1";
 const settledAt = "2026-08-09T12:00:00.000Z";
 
 describe("SqliteBrowserOperationJournal", () => {
+  test("replays exact durable receipts and isolates readers by controller authority", async () => {
+    await withJournal(async ({ path, journal }) => {
+      let dispatches = 0;
+      const controller = new BrowserInteractionController({
+        browserSessionId,
+        controllerGeneration,
+        onJournalRecord: (next) => journal.write(next),
+        loadJournalRecord: (operation) => journal.read(operation),
+        driver: fixtureDriver(() => {
+          dispatches++;
+        }),
+      });
+      const completedReceipt = await controller.run(command(id(1)));
+      await controller.waitForIdle();
+      expect(journal.read(id(1))?.receipt).toEqual(completedReceipt);
+      expect(controller.receipt(id(1))).toEqual(completedReceipt);
+      expect(await controller.run(command(id(1)))).toEqual(completedReceipt);
+      const other = await SqliteBrowserOperationJournal.open({
+        path,
+        browserSessionId,
+        controllerGeneration: "other-controller",
+      });
+      try {
+        expect(other.read(id(1))).toBeNull();
+      } finally {
+        other.close();
+      }
+      expect(journal.read(id(2))).toBeNull();
+      expect(dispatches).toBe(1);
+      journal.close();
+      expect(() => controller.receipt(id(1))).toThrow("closed");
+      expect(() => controller.run(command(id(1)))).toThrow("closed");
+      expect(dispatches).toBe(1);
+    });
+  });
+
   test("recovers dispatched work as outcome unknown and never replays it", async () => {
     await withJournal(async ({ path, journal }) => {
       const operationId = id(1);

@@ -22,6 +22,12 @@ avoiding simultaneous raw-row and duplicate observation collections. Corruption
 in a later receipt rolls back earlier recovery changes; validation, ordering,
 retention limits and the on-disk format remain unchanged.
 
+Settled interaction receipts use the same authority-scoped SQLite journal for
+on-demand replay. Controllers retain a content digest rather than a second full
+receipt in memory after successful terminal persistence. Replay validates the
+full stored receipt; a missing/corrupt record cannot trigger repeated input.
+Failed persistence preserves the existing controller-lifetime RAM fallback.
+
 During profile restoration, saved `blob:` previews and `chrome-error:` documents
 become inert explanatory tabs: their old process-local contents cannot be reopened.
 They retain separate tabs and selection instead of failing the entire restore.

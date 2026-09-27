@@ -63,6 +63,8 @@ export type BrowserInteractionControllerOptions = {
   now?: () => Date;
   initialJournal?: readonly BrowserOperationJournalRecord[];
   onJournalRecord?: (record: BrowserOperationJournalRecord) => Promise<void> | void;
+  /** Reads the same durable authority as onJournalRecord and initialJournal. */
+  loadJournalRecord?: (operationId: string) => BrowserOperationJournalRecord | null;
 };
 
 /** Placement-resident BrowserSession mutation authority. */
@@ -85,6 +87,7 @@ export class BrowserInteractionController {
       ...(options.now ? { now: options.now } : {}),
       ...(options.initialJournal ? { initialJournal: options.initialJournal } : {}),
       ...(options.onJournalRecord ? { onJournalRecord: options.onJournalRecord } : {}),
+      ...(options.loadJournalRecord ? { loadJournalRecord: options.loadJournalRecord } : {}),
       adapter: {
         resourceLabel: "browser",
         parseCommand: (value) => BrowserActionCommand.parse(value),
@@ -238,6 +241,8 @@ export type BrowserProtectedAuthControllerOptions = {
   now?: () => Date;
   initialJournal?: readonly BrowserProtectedAuthOperationJournalRecord[];
   onJournalRecord?: (record: BrowserProtectedAuthOperationJournalRecord) => Promise<void> | void;
+  /** Reads the same durable authority as onJournalRecord and initialJournal. */
+  loadJournalRecord?: (operationId: string) => BrowserProtectedAuthOperationJournalRecord | null;
 };
 
 /** Secret-bearing commands are admitted only through this controller-private
@@ -262,6 +267,7 @@ export class BrowserProtectedAuthController {
       ...(options.now ? { now: options.now } : {}),
       ...(options.initialJournal ? { initialJournal: options.initialJournal } : {}),
       ...(options.onJournalRecord ? { onJournalRecord: options.onJournalRecord } : {}),
+      ...(options.loadJournalRecord ? { loadJournalRecord: options.loadJournalRecord } : {}),
       commandDigest: protectedAuthCommandDigest,
       adapter: {
         resourceLabel: "browser protected fill",
@@ -434,6 +440,8 @@ export type ComputerInteractionControllerOptions = {
   now?: () => Date;
   initialJournal?: readonly ComputerOperationJournalRecord[];
   onJournalRecord?: (record: ComputerOperationJournalRecord) => Promise<void> | void;
+  /** Reads the same durable authority as onJournalRecord and initialJournal. */
+  loadJournalRecord?: (operationId: string) => ComputerOperationJournalRecord | null;
 };
 
 /** Placement-resident ComputerSession mutation authority. Linux AT-SPI/X11,
@@ -457,6 +465,7 @@ export class ComputerInteractionController {
       ...(options.now ? { now: options.now } : {}),
       ...(options.initialJournal ? { initialJournal: options.initialJournal } : {}),
       ...(options.onJournalRecord ? { onJournalRecord: options.onJournalRecord } : {}),
+      ...(options.loadJournalRecord ? { loadJournalRecord: options.loadJournalRecord } : {}),
       adapter: {
         resourceLabel: "computer",
         parseCommand: (value) => ComputerActionCommand.parse(value),
