@@ -53,6 +53,9 @@ read-only fields and other unsupported focused targets before sending text:
 Lightpanda otherwise acknowledges `Input.insertText` without editing them.
 Choose Chromium for contenteditable workflows; browserd never replaces page
 text or synthesizes an input event to disguise unsupported native editing.
+Back/Forward history is also refused for Lightpanda: its pinned implementation
+mixes iframe URLs into main-page history. Navigate to an explicit URL or use
+Chromium for history-dependent workflows. Refusal leaves the current page intact.
 
 Live-view grants advertise `focusedInputObservations` only when the driver
 supports the optional `observationMode: "input"`. A left pointer click then uses

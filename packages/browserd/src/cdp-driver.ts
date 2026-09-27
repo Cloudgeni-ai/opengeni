@@ -3509,6 +3509,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async navigateHistory(state: TargetState, direction: "back" | "forward"): Promise<void> {
+    if (this.engine === "lightpanda") {
+      // Pinned Lightpanda mixes subframe loads into its session-wide history
+      // and traverses every entry in the main frame. The CDP entries omit
+      // frame identity, so filtering URLs cannot recover safe target history.
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "Lightpanda does not support safe Back/Forward history; navigate to an explicit URL",
+      );
+    }
     const history = await this.sendActionTarget<{
       currentIndex?: unknown;
       entries?: unknown;
