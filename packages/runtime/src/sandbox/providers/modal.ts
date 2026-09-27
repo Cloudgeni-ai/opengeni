@@ -90,6 +90,7 @@ export function modalSandboxAttributionTags(
 }
 
 type MutableModalSnapshotSandbox = {
+  terminate?: (options?: { wait?: boolean }) => Promise<unknown>;
   detach?: () => void;
   snapshotFilesystem?: (...args: unknown[]) => Promise<unknown>;
   snapshotDirectory?: (...args: unknown[]) => Promise<unknown>;
@@ -100,6 +101,7 @@ type ModalWorkspaceCaptureOptions = {
 };
 
 type MutableModalSandboxSession = {
+  close?: () => Promise<void>;
   // Pinned Agents Extensions 0.14.3 uses this synchronous adapter-local map.
   activeProcesses?: unknown;
   modal?: {
@@ -133,6 +135,7 @@ type MutableModalSandboxSession = {
 };
 
 const modalRetentionWrappedSessions = new WeakSet<object>();
+const modalTerminationWrappedSandboxes = new WeakSet<object>();
 const modalFilesystemRetentionWrappedSandboxes = new WeakSet<object>();
 const modalDirectoryRetentionWrappedSandboxes = new WeakSet<object>();
 const modalSnapshotRequestIds = new WeakMap<object, string>();
@@ -331,6 +334,37 @@ function assertPinnedModalSdk(session: MutableModalSandboxSession): void {
         `the active session reported ${actualVersion ?? "no version"}`,
     );
   }
+}
+
+async function confirmModalTermination(
+  terminate: (options: { wait: true }) => Promise<unknown>,
+): Promise<number> {
+  // Modal 0.9 resolves terminate() once the stop request is accepted. Only
+  // wait:true observes the provider's terminal result before releasing a lease.
+  const exitCode = await terminate({ wait: true });
+  if (typeof exitCode !== "number" || !Number.isInteger(exitCode)) {
+    throw new Error("Modal termination did not confirm a terminal exit");
+  }
+  return exitCode;
+}
+
+function installModalTerminationConfirmation(session: MutableModalSandboxSession): void {
+  if (typeof session.close !== "function") return;
+  const close = session.close.bind(session);
+  session.close = async () => {
+    // Hydration/cancellation may replace this handle. Install at close time,
+    // retaining the SDK's ownsSandbox check and process/hook cleanup ordering.
+    const sandbox = session.sandbox;
+    if (!sandbox || typeof sandbox.terminate !== "function") {
+      throw new Error("Modal session does not expose provider termination");
+    }
+    if (!modalTerminationWrappedSandboxes.has(sandbox)) {
+      const terminate = sandbox.terminate.bind(sandbox);
+      sandbox.terminate = async () => confirmModalTermination(terminate);
+      modalTerminationWrappedSandboxes.add(sandbox);
+    }
+    await close();
+  };
 }
 
 function installModalNativeSnapshotRetention(session: MutableModalSandboxSession): void {
@@ -533,6 +567,7 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
     throw new Error("Modal session does not expose workspace persistence");
   }
   assertPinnedModalSdk(mutable);
+  installModalTerminationConfirmation(mutable);
   installModalListDirCompatibility(mutable);
   installModalNativeSnapshotRetention(mutable);
   installModalExecCompletionRecovery(mutable);
@@ -1185,14 +1220,15 @@ export async function tagModalSandbox(
 export async function terminateModalSandboxById(
   settings: Settings,
   sandboxId: string,
+  createClient: (settings: Settings) => Promise<ModalClientLike> = createModalClient,
 ): Promise<boolean> {
   if (!sandboxId) {
     return true;
   }
-  const modal = await createModalClient(settings);
+  const modal = await createClient(settings);
   try {
     const sandbox = await modal.sandboxes.fromId(sandboxId);
-    await sandbox.terminate();
+    await confirmModalTermination(sandbox.terminate.bind(sandbox));
     return true;
   } finally {
     modal.close();
@@ -1390,7 +1426,7 @@ export async function sweepModalOrphanSandboxes(
           }
         }
         try {
-          await sandbox.terminate();
+          await confirmModalTermination(sandbox.terminate.bind(sandbox));
           terminated.push(candidate);
         } catch {
           skipped += 1;
