@@ -317,6 +317,7 @@ RUN set -eux; \
         ripgrep \
         unzip \
         util-linux \
+        tini \
         wget \
         xvfb \
         x11vnc \

@@ -80,6 +80,12 @@ The runtime starts the service idempotently under a placement lock, authenticate
 readiness using the file-only admin credential, refuses a foreign listener, and
 stops only the exact recorded executable/PID.
 
+Sandbox startup places the service below a dedicated `tini -s` subreaper.
+Provider exec processes may bypass the image's entrypoint init; the local
+subreaper collects detached browser descendants after crashes and normal close.
+The PID file continues to identify browserd itself, preserving authenticated
+readiness and exact-process shutdown checks.
+
 `bun run --cwd packages/browserd test:e2e` includes the opt-in context pool's
 real Chromium acceptance tests. They fill all six slots, verify same-origin
 cookie/localStorage/IndexedDB and target isolation, reject a seventh context

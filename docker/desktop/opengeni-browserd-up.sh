@@ -11,6 +11,7 @@ ROOT="${OPENGENI_BROWSERD_ROOT:-${RUN}/state}"
 PID_FILE="${RUN}/browserd.pid"
 LOG_FILE="${RUN}/browserd.log"
 BIN=/usr/local/bin/opengeni-browserd
+REAPER=/usr/bin/tini
 BROWSER_EXECUTABLE="${OPENGENI_BROWSERD_BROWSER_EXECUTABLE:-}"
 COMPUTER_NATIVE_BINARY="${OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY:-}"
 STARTUP_TIMEOUT_SECONDS="${OPENGENI_BROWSERD_STARTUP_TIMEOUT_SECONDS:-30}"
@@ -38,6 +39,10 @@ if [ -n "$COMPUTER_NATIVE_BINARY" ] && [ ! -x "$COMPUTER_NATIVE_BINARY" ]; then
 fi
 if [ ! -x "$BROWSER_EXECUTABLE" ]; then
   echo "browser controller has no supported Chromium engine" >&2
+  exit 16
+fi
+if [ ! -x "$REAPER" ]; then
+  echo "browser controller child reaper is not installed" >&2
   exit 16
 fi
 
@@ -92,7 +97,10 @@ if curl --disable --noproxy '*' --fail --silent "http://127.0.0.1:${PORT}/health
   exit 15
 fi
 
-setsid env \
+# Provider exec processes need not descend from the image entrypoint's init.
+# Keep a subreaper directly above this service so detached browser descendants
+# are reaped after normal close or a crash, even with a non-reaping provider PID1.
+setsid "$REAPER" -s -- env \
   OPENGENI_BROWSERD_ROOT="$ROOT" \
   OPENGENI_BROWSERD_ADMIN_TOKEN_FILE="$TOKEN_FILE" \
   OPENGENI_BROWSERD_HOSTNAME="0.0.0.0" \
@@ -103,10 +111,27 @@ setsid env \
   OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY="$COMPUTER_NATIVE_BINARY" \
   OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE="${OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE:-isolated_linux}" \
   OPENGENI_BROWSERD_ALLOWED_ORIGINS="${OPENGENI_BROWSERD_ALLOWED_ORIGINS:-}" \
-  "$BIN" >"$LOG_FILE" 2>&1 </dev/null &
-PID=$!
-printf '%s\n' "$PID" >"${PID_FILE}.new"
-mv -f "${PID_FILE}.new" "$PID_FILE"
+  bash -c '
+    pid_file=$1
+    shift
+    printf "%s\n" "$$" >"${pid_file}.new"
+    mv -f "${pid_file}.new" "$pid_file"
+    exec "$@"
+  ' browserd-launch "$PID_FILE" "$BIN" >"$LOG_FILE" 2>&1 </dev/null &
+REAPER_PID=$!
+for _ in $(seq 1 "$STARTUP_ATTEMPTS"); do
+  [ -s "$PID_FILE" ] && break
+  kill -0 "$REAPER_PID" 2>/dev/null || break
+  sleep 0.1
+done
+PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+if ! [[ "$PID" =~ ^[1-9][0-9]*$ ]]; then
+  kill -TERM "$REAPER_PID" 2>/dev/null || true
+  rm -f "$PID_FILE"
+  echo "browser controller did not publish its process identity" >&2
+  print_startup_log
+  exit 14
+fi
 
 for _ in $(seq 1 "$STARTUP_ATTEMPTS"); do
   if ! kill -0 "$PID" 2>/dev/null; then
@@ -115,8 +140,8 @@ for _ in $(seq 1 "$STARTUP_ATTEMPTS"); do
     print_startup_log
     exit 14
   fi
-  # setsid launches `env`, which then execs browserd. On a cold or remote
-  # placement /proc/$PID/exe can briefly still name env even though the exact
+  # The launch shell publishes its PID before execing browserd. On a cold or remote
+  # placement /proc/$PID/exe can briefly still name bash even though the exact
   # child is healthy and transitioning. Wait for that exec boundary; only a
   # physically absent PID is an early exit.
   if ! same_process "$PID"; then
