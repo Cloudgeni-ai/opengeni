@@ -202,12 +202,6 @@ export function BrowserViewer({
       });
     }
   }, [enabled, endStaleBrowser, registry.sessions]);
-  const replacementChromeDevice = useMemo(() => {
-    if (!attachedGenerationLoss) return null;
-    return (
-      attached.devices.find((candidate) => candidate.id === attachedGenerationLoss.deviceId) ?? null
-    );
-  }, [attached.devices, attachedGenerationLoss]);
   const relevant = useMemo(
     () => registry.relevantSessions.filter((session) => isLiveBrowser(session)),
     [registry.relevantSessions],
@@ -434,6 +428,18 @@ export function BrowserViewer({
   const supportsLiveFrames =
     (browser.session ?? selectedRegistrySession)?.capabilities.liveFrames === true;
   const connectionError = frames.error ?? browser.error;
+  // A managed controller can reject a stale attachment while the same browser
+  // remains healthy. Only extension-attached Chrome requires a new browser on
+  // connection-generation loss; an unrelated lost Chrome must not poison the
+  // selected managed browser's recovery UI.
+  const selectedPlacement = (browser.session ?? selectedRegistrySession)?.placement;
+  const selectedChromeGenerationLoss =
+    selectedPlacement?.kind === "attached_device" &&
+    isAttachedChromeGenerationLossError(connectionError);
+  const replacementChromeDevice =
+    selectedChromeGenerationLoss && selectedPlacement.kind === "attached_device"
+      ? attached.devices.find((candidate) => candidate.id === selectedPlacement.deviceId)
+      : null;
   const displayConnectionState =
     connectionError && !frameIsLive
       ? "error"
@@ -934,7 +940,7 @@ export function BrowserViewer({
             onObserveForInput={browser.observeForInput}
             onSelectFromObservation={browser.actFromObservation}
             onReconnect={
-              attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)
+              selectedChromeGenerationLoss
                 ? () => {
                     if (replacementChromeDevice) {
                       createBrowser({ kind: "attached", device: replacementChromeDevice });
@@ -946,13 +952,12 @@ export function BrowserViewer({
                   }
             }
             reconnectLabel={
-              (attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)) &&
-              replacementChromeDevice
+              selectedChromeGenerationLoss && replacementChromeDevice
                 ? "Open a fresh Connected Chrome"
                 : undefined
             }
             reconnectMessage={
-              attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)
+              selectedChromeGenerationLoss
                 ? "Chrome reconnected—open a fresh browser/desktop."
                 : undefined
             }
@@ -2425,8 +2430,7 @@ function SemanticBrowserFallback(props: {
   reconnectMessage?: string | undefined;
 }) {
   const controlFailure = interactionControlFailureFromError(props.error);
-  const generationLoss =
-    Boolean(props.reconnectMessage) || isAttachedChromeGenerationLossError(props.error);
+  const generationLoss = Boolean(props.reconnectMessage);
   const nodes = semanticNodes(
     props.observation?.semantic?.kind === "snapshot" ? props.observation.semantic.roots : [],
   );
