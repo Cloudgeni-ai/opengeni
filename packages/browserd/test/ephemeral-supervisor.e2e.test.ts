@@ -24,8 +24,8 @@ e2e(
         engine: "chromium" as const,
         ephemeralPartition: partition.repeat(64),
       },
-      ...(process.env.OPENGENI_TEST_CHROME_PATH
-        ? { browserExecutablePath: process.env.OPENGENI_TEST_CHROME_PATH }
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
       initialUrl: "data:text/html,<h1>Fixture</h1>",
     });
