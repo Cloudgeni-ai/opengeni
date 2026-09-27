@@ -2308,6 +2308,16 @@ function BrowserViewport(props: {
   };
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    // Candidate selection/editing belongs to the local IME. Forward only the
+    // committed text; Enter must not submit the remote page during composition.
+    // Safari can end composition before keydown while retaining keyCode 229.
+    if (
+      composingRef.current ||
+      event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229
+    ) {
+      return;
+    }
     dismissSelectPopup();
     flushPendingWheel();
     const command = event.metaKey || event.ctrlKey;
